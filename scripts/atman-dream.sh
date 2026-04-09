@@ -102,6 +102,85 @@ done
 
 echo ""
 
+# ─── Phase 1b: Scan for flagged AGENTS ───────────────────────────────
+echo "Phase 1b: Scanning for flagged agents..."
+
+AGENT_PATCHES_DIR="${VAJRA_DIR}/patches/agents"
+mkdir -p "$AGENT_PATCHES_DIR"
+
+for flag_file in "${FLAGS_DIR}"/agent-*.json; do
+  [ -f "$flag_file" ] || continue
+  [ "$PATCH_COUNT" -ge "$MAX_PATCHES" ] && { echo "  Max patches (${MAX_PATCHES}) reached."; break; }
+
+  AGENT_NAME="$(jq -r '.agent // empty' "$flag_file" 2>/dev/null)"
+  FAIL_COUNT="$(jq -r '.failCount // 0' "$flag_file" 2>/dev/null)"
+  [ -z "$AGENT_NAME" ] && continue
+
+  echo "  [FLAGGED AGENT] ${AGENT_NAME} — ${FAIL_COUNT} failures"
+
+  if [ -f "${AGENT_PATCHES_DIR}/${AGENT_NAME}.patch.md" ]; then
+    echo "    Agent patch already pending. Skipping."
+    continue
+  fi
+
+  # Extract failure traces for this agent
+  TRACES="$(grep "\"agent\":\"${AGENT_NAME}\"" "$PRACTICE_LOG" 2>/dev/null | grep '"outcome":"failure"' | tail -5)"
+  TRACE_COUNT="$(echo "$TRACES" | grep -c '.' 2>/dev/null || echo 0)"
+
+  if [ "$TRACE_COUNT" -lt 2 ]; then
+    echo "    Not enough failure traces (${TRACE_COUNT} < 2). Skipping."
+    continue
+  fi
+
+  # Find the agent's persona file
+  AGENT_FILE=""
+  for candidate in "${HOME}/.claude/agents/${AGENT_NAME}.md" "${SKILL_DIR}/vajra/bundled-agents/${AGENT_NAME}.md"; do
+    if [ -f "$candidate" ]; then
+      AGENT_FILE="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$AGENT_FILE" ]; then
+    echo "    Could not find persona for '${AGENT_NAME}'. Skipping."
+    continue
+  fi
+
+  echo "    Generating agent self-review patch..."
+  PATCH_COUNT=$((PATCH_COUNT + 1))
+
+  cat > "${AGENT_PATCHES_DIR}/${AGENT_NAME}.patch.md" <<PATCH
+---
+patch_id: ap-$(date +%s)
+target_agent: ${AGENT_NAME}
+target_file: ${AGENT_FILE}
+trigger_traces: ${TRACE_COUNT} failures in last 7 days
+failure_count: ${FAIL_COUNT}
+created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+status: pending-peer-review
+type: agent
+---
+
+## Failure Traces
+$(echo "$TRACES" | head -5)
+
+## Analysis
+Agent ${AGENT_NAME} has failed ${FAIL_COUNT} times in the past 7 days.
+Review the persona at ${AGENT_FILE} for:
+- Missing escalation paths
+- Incorrect tool restrictions
+- Domain knowledge gaps
+- Decision boundary issues
+
+## Recommended Action
+Run: /vajra atman review
+PATCH
+
+  echo "    Agent patch written: ${AGENT_PATCHES_DIR}/${AGENT_NAME}.patch.md"
+done
+
+echo ""
+
 # ─── Phase 2: Peer review pending patches ─────────────────────────────
 echo "Phase 2: Checking for patches pending peer review..."
 
@@ -116,8 +195,19 @@ for patch_file in "${PATCHES_DIR}"/*.patch.md; do
   fi
 done
 
+# Also check agent patches
+for patch_file in "${AGENT_PATCHES_DIR}"/*.patch.md; do
+  [ -f "$patch_file" ] || continue
+  STATUS="$(grep '^status:' "$patch_file" | head -1 | sed 's/status: *//')"
+  if [ "$STATUS" = "pending-peer-review" ] || [ "$STATUS" = "pending" ]; then
+    AGENT_NAME="$(basename "$patch_file" .patch.md)"
+    echo "  [PENDING AGENT] ${AGENT_NAME} — needs review via /vajra atman review"
+    PENDING_PATCHES=$((PENDING_PATCHES + 1))
+  fi
+done
+
 if [ "$PENDING_PATCHES" -eq 0 ]; then
-  echo "  No patches pending review."
+  echo "  No patches pending review (skills or agents)."
 fi
 
 echo ""

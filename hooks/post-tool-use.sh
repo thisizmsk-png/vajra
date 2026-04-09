@@ -36,13 +36,21 @@ if [ "$HAS_ERROR" = "true" ]; then
   OUTCOME="failure"
 fi
 
+# Check if a Cortex agent is active
+ACTIVE_AGENT=""
+ACTIVE_AGENT_FILE="${VAJRA_DIR}/.active-agent"
+if [ -f "$ACTIVE_AGENT_FILE" ]; then
+  ACTIVE_AGENT="$(cat "$ACTIVE_AGENT_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
+
 # Build the practice log entry
 ENTRY="$(jq -nc \
   --arg ts "$TIMESTAMP" \
   --arg skill "$TOOL_NAME" \
   --arg outcome "$OUTCOME" \
   --arg hasError "$HAS_ERROR" \
-  '{ts: $ts, skill: $skill, outcome: $outcome, hasError: ($hasError == "true")}')"
+  --arg agent "$ACTIVE_AGENT" \
+  '{ts: $ts, skill: $skill, outcome: $outcome, hasError: ($hasError == "true")} + (if $agent != "" then {agent: $agent} else {} end)')"
 
 # HMAC sign the entry if key exists
 if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
@@ -65,9 +73,22 @@ if [ "$OUTCOME" = "failure" ]; then
     done | wc -l)"
 
     if [ "$FAIL_COUNT" -ge 2 ]; then
-      # Flag for self-review
+      # Flag skill for self-review
       mkdir -p "${VAJRA_DIR}/flags"
-      echo "{\"skill\":\"${TOOL_NAME}\",\"failCount\":${FAIL_COUNT},\"flagged\":\"${TIMESTAMP}\"}" > "${VAJRA_DIR}/flags/${TOOL_NAME}.json"
+      echo "{\"skill\":\"${TOOL_NAME}\",\"failCount\":${FAIL_COUNT},\"flagged\":\"${TIMESTAMP}\",\"type\":\"skill\"}" > "${VAJRA_DIR}/flags/${TOOL_NAME}.json"
+    fi
+
+    # Also check agent-level failures if an agent was active
+    if [ -n "$ACTIVE_AGENT" ]; then
+      AGENT_FAIL_COUNT="$(grep "\"agent\":\"${ACTIVE_AGENT}\"" "$PRACTICE_LOG" | grep '"outcome":"failure"' | while IFS= read -r aline; do
+        ats="$(echo "$aline" | jq -r '.ts // empty' 2>/dev/null)"
+        if [[ "$ats" > "$WEEK_AGO" ]]; then echo "1"; fi
+      done | wc -l)"
+
+      if [ "$AGENT_FAIL_COUNT" -ge 2 ]; then
+        mkdir -p "${VAJRA_DIR}/flags"
+        echo "{\"agent\":\"${ACTIVE_AGENT}\",\"failCount\":${AGENT_FAIL_COUNT},\"flagged\":\"${TIMESTAMP}\",\"type\":\"agent\"}" > "${VAJRA_DIR}/flags/agent-${ACTIVE_AGENT}.json"
+      fi
     fi
   fi
 fi
