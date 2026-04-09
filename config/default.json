@@ -1,0 +1,112 @@
+{
+  "$schema": "vajra-config-v1",
+  "schemaVersion": 1,
+
+  "routing": {
+    "tier1Patterns": [
+      { "pattern": "^/test\\b", "skill": "testing", "description": "Route test commands to testing skill" },
+      { "pattern": "^/review\\b", "skill": "code-review", "description": "Route review commands to code-review" },
+      { "pattern": "^/debug\\b", "skill": "systematic-debugging", "description": "Route debug to systematic-debugging" },
+      { "pattern": "^/security\\b", "skill": "sentry-security-review", "description": "Route security to security review" },
+      { "pattern": "^/spec\\b", "skill": "spec", "description": "Route spec to specification skill" },
+      { "pattern": "^/plan\\b", "skill": "writing-plans", "description": "Route plan to writing-plans" },
+      { "pattern": "^fix\\s+#\\d+", "skill": "systematic-debugging", "description": "Route 'fix #123' to debugging" },
+      { "pattern": "^refactor\\b", "skill": "sentry-code-simplifier", "description": "Route refactor to simplifier" }
+    ],
+    "tier3Keywords": {
+      "test": "testing",
+      "review": "code-review",
+      "debug": "systematic-debugging",
+      "security": "sentry-security-review",
+      "spec": "spec",
+      "plan": "writing-plans",
+      "deploy": "ci-cd",
+      "monitor": "observability",
+      "design": "frontend-design",
+      "architecture": "hld",
+      "database": "database-design",
+      "api": "api-design",
+      "performance": "performance-profiler",
+      "accessibility": "audit",
+      "brand": "brand",
+      "slides": "slides",
+      "diagram": "architecture-diagrams",
+      "threat": "threat-modeling",
+      "compliance": "compliance-checklist",
+      "release": "release-engineering"
+    },
+    "regexEngine": "re2",
+    "regexMaxLength": 1000,
+    "regexTimeoutMs": 100
+  },
+
+  "campaigns": {
+    "stateDir": "~/.claude/vajra/campaigns",
+    "dbPath": "~/.claude/vajra/vajra.db",
+    "maxCheckpoints": 20,
+    "autoCheckpointInterval": 5
+  },
+
+  "memory": {
+    "indexMaxLines": 200,
+    "indexPath": "~/.claude/vajra/memory/index.md",
+    "topicsDir": "~/.claude/vajra/memory/topics",
+    "archiveDir": "~/.claude/vajra/memory/archive",
+    "dreamConsolidation": {
+      "enabled": true,
+      "autoTriggerOnIndexOverflow": true
+    }
+  },
+
+  "cost": {
+    "alertThreshold": null,
+    "currency": "USD",
+    "trackPerOperation": true,
+    "ratesPer1MTokens": {
+      "opus-input": 15.0,
+      "opus-output": 75.0,
+      "sonnet-input": 3.0,
+      "sonnet-output": 15.0,
+      "haiku-input": 0.25,
+      "haiku-output": 1.25
+    }
+  },
+
+  "security": {
+    "encryption": {
+      "enabled": true,
+      "algorithm": "aes-256-gcm",
+      "scope": ["security-reports", "campaign-state"]
+    },
+    "filePermissions": "0600",
+    "hmacAlgorithm": "sha256",
+    "sanitization": {
+      "stripPatterns": [
+        "ignore previous instructions",
+        "ignore all previous",
+        "you are now",
+        "system prompt",
+        "\\[INST\\]",
+        "\\[/INST\\]",
+        "<\\|im_start\\|>",
+        "<\\|im_end\\|>",
+        "Human:",
+        "Assistant:"
+      ],
+      "wrapInTags": true,
+      "tagName": "untrusted-data"
+    }
+  },
+
+  "fleet": {
+    "maxAgents": 6,
+    "defaultToolAllowlist": ["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
+    "discoveryRelayDir": "~/.claude/vajra/relay"
+  },
+
+  "limits": {
+    "toolCallsPerAgent": 100,
+    "toolCallsLimitedAgent": 20,
+    "loopDetectionThreshold": 5
+  }
+}

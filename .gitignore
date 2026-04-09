@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.hmac-key
+*.key
+*.pem
+
+# Runtime data (lives in ~/.claude/vajra/, not in skill dir)
+campaigns/
+relay/
+worktrees/
+audit.log
+
+# Memory runtime (index/topics/archive are in ~/.claude/vajra/memory/)
+memory/archive/
+
+# OS files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Build artifacts
+dist/
+build/
+*.js.map
+
+# Red-team reports (may contain sensitive findings)
+reports/
+*.sarif
+
+# Environment
+.env
+.env.*
