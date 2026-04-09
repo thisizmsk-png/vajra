@@ -86,7 +86,13 @@ function getHmacKey(): Buffer {
   if (fs.existsSync(HMAC_KEY_PATH)) {
     // Read as UTF-8 hex string (compatible with shell scripts that store hex)
     const hexKey = fs.readFileSync(HMAC_KEY_PATH, "utf-8").trim();
-    _hmacKey = Buffer.from(hexKey, "hex");
+    if (hexKey.length < 64) {
+      // Key too short or empty — regenerate
+      _hmacKey = crypto.randomBytes(32);
+      secureWrite(HMAC_KEY_PATH, _hmacKey.toString("hex"));
+    } else {
+      _hmacKey = Buffer.from(hexKey, "hex");
+    }
   } else {
     // Generate and store as hex string for cross-component compatibility
     _hmacKey = crypto.randomBytes(32);
@@ -111,7 +117,9 @@ function computeHmac(payload: string): string {
  */
 function verifyHmac(payload: string, expected: string): void {
   const actual = computeHmac(payload);
-  if (!crypto.timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"))) {
+  const actualBuf = Buffer.from(actual, "hex");
+  const expectedBuf = Buffer.from(expected, "hex");
+  if (actualBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(actualBuf, expectedBuf)) {
     throw new Error(
       "HMAC verification failed — campaign state may have been tampered with. " +
         "Refusing to load. Please investigate or rollback to a known-good checkpoint.",
@@ -196,6 +204,7 @@ export function closeDb(): void {
     _db.close();
     _db = null;
   }
+  _hmacKey = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +358,15 @@ export function createCheckpoint(campaignId: string): string {
     `INSERT INTO checkpoints (id, campaign_id, created, node_id, state_json, hmac)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(checkpointId, campaignId, now, row.current_node, row.state_json, hmac);
+
+  // Enforce maxCheckpoints limit (default 20) — prune oldest
+  const MAX_CHECKPOINTS = 20;
+  db.prepare(
+    `DELETE FROM checkpoints
+     WHERE campaign_id = ? AND id NOT IN (
+       SELECT id FROM checkpoints WHERE campaign_id = ? ORDER BY created DESC LIMIT ?
+     )`,
+  ).run(campaignId, campaignId, MAX_CHECKPOINTS);
 
   return checkpointId;
 }

@@ -59,9 +59,17 @@ read_config_value() {
 }
 
 ensure_hmac_key() {
-    if [[ ! -f "$HMAC_KEY_FILE" ]]; then
+    if [[ ! -f "$HMAC_KEY_FILE" ]] || [[ ! -s "$HMAC_KEY_FILE" ]]; then
         log_info "Generating HMAC key at ${HMAC_KEY_FILE}"
         mkdir -p "$(dirname "$HMAC_KEY_FILE")"
+        head -c 32 /dev/urandom | xxd -p | tr -d '\n' > "$HMAC_KEY_FILE"
+        chmod 600 "$HMAC_KEY_FILE"
+    fi
+    # Validate key is at least 64 hex chars (32 bytes)
+    local key_len
+    key_len="$(wc -c < "$HMAC_KEY_FILE" | tr -d ' ')"
+    if [[ "$key_len" -lt 64 ]]; then
+        log_error "HMAC key too short (${key_len} chars, need >=64). Regenerating."
         head -c 32 /dev/urandom | xxd -p | tr -d '\n' > "$HMAC_KEY_FILE"
         chmod 600 "$HMAC_KEY_FILE"
     fi
@@ -69,21 +77,26 @@ ensure_hmac_key() {
 
 compute_hmac() {
     local payload="$1"
-    local key
-    key="$(cat "$HMAC_KEY_FILE")"
-    printf '%s' "$payload" | openssl dgst -sha256 -hmac "$key" -hex 2>/dev/null | awk '{print $NF}'
+    local key_hex
+    key_hex="$(cat "$HMAC_KEY_FILE")"
+    # Use -macopt hexkey to decode hex key to binary (matches engine.ts Buffer.from(hex))
+    printf '%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key_hex}" -hex 2>/dev/null | awk '{print $NF}'
 }
 
 verify_hmac() {
     local payload="$1" expected_hmac="$2"
     local actual_hmac
     actual_hmac="$(compute_hmac "$payload")"
-    # Timing-safe comparison via openssl (constant-time at the crypto layer)
-    # Compare by computing HMAC of both values and checking equality
-    local check_a check_b
-    check_a="$(printf '%s' "$actual_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
-    check_b="$(printf '%s' "$expected_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
-    [[ "$check_a" == "$check_b" ]]
+    # Use Python for constant-time comparison (bash == is not timing-safe)
+    if command -v python3 &>/dev/null; then
+        python3 -c "import hmac,sys; sys.exit(0 if hmac.compare_digest(sys.argv[1],sys.argv[2]) else 1)" "$actual_hmac" "$expected_hmac"
+    else
+        # Fallback: double-hash comparison (not truly timing-safe but obscures values)
+        local check_a check_b
+        check_a="$(printf '%s' "$actual_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+        check_b="$(printf '%s' "$expected_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+        [[ "$check_a" == "$check_b" ]]
+    fi
 }
 
 # --- Cleanup ---
@@ -345,7 +358,8 @@ main() {
 
             if ! kill -0 "$pid" 2>/dev/null; then
                 # Process finished — retrieve exit code
-                wait "$pid" 2>/dev/null && local ec=0 || local ec=$?
+                local ec
+                wait "$pid" 2>/dev/null && ec=0 || ec=$?
                 AGENT_EXIT_CODES[$i]="$ec"
                 completed[$i]=1
                 ((remaining--)) || true
@@ -364,6 +378,24 @@ main() {
             sleep 3
         fi
     done
+
+    # Sign relay files on behalf of agents (agents write unsigned, coordinator signs)
+    log_info "--- Signing Agent Discoveries ---"
+    if command -v jq &>/dev/null; then
+        for relay_file in "${RELAY_DIR}"/*.json; do
+            [[ -f "$relay_file" ]] || continue
+            # Skip if already signed
+            if jq -e '.hmac' "$relay_file" &>/dev/null; then
+                continue
+            fi
+            local payload
+            payload="$(jq -c '.' "$relay_file" 2>/dev/null)" || continue
+            local hmac_val
+            hmac_val="$(compute_hmac "$payload")"
+            jq --arg h "$hmac_val" '. + {hmac: $h}' "$relay_file" > "${relay_file}.tmp" && mv "${relay_file}.tmp" "$relay_file"
+            log_info "Signed discovery: $(basename "$relay_file")"
+        done
+    fi
 
     # Collect discoveries
     log_info "--- Discovery Relay Collection ---"

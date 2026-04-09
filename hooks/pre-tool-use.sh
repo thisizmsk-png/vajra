@@ -18,8 +18,10 @@ if command -v jq &>/dev/null; then
   TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // empty' 2>/dev/null || echo "")"
   INPUT_RAW="$(echo "$PAYLOAD" | jq -r '.input // empty' 2>/dev/null || echo "")"
 else
-  TOOL_NAME="$(echo "$PAYLOAD" | grep -o '"tool"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
-  INPUT_RAW="$(echo "$PAYLOAD" | grep -o '"input"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
+  # No jq — fail-closed: block and warn
+  echo "${TIMESTAMP} BLOCK unknown-tool reason=\"jq not installed — fail-closed\"" >> "$AUDIT_LOG"
+  echo "Vajra hook: jq is required for safe tool validation. Install jq or allow in settings." >&2
+  exit 1
 fi
 
 # FAIL-CLOSED: if we can't parse the tool name, block the operation
@@ -81,6 +83,36 @@ fi
 if [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\bmkfs\b' 2>/dev/null; then
   BLOCKED=true
   REASON="filesystem format command via Bash"
+fi
+
+# 7. --no-preserve-root (strong signal of destructive intent)
+if echo "$CHECK_STRING" | grep -qE '\b--no-preserve-root\b' 2>/dev/null; then
+  BLOCKED=true
+  REASON="--no-preserve-root flag detected"
+fi
+
+# 8. Pipe to shell (command injection vector)
+if echo "$CHECK_STRING" | grep -qE '\|\s*(ba)?sh\b' 2>/dev/null; then
+  BLOCKED=true
+  REASON="pipe to shell detected"
+fi
+
+# 9. eval execution
+if [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\beval\s+' 2>/dev/null; then
+  BLOCKED=true
+  REASON="eval execution detected"
+fi
+
+# 10. find -delete (recursive file deletion)
+if echo "$CHECK_STRING" | grep -qE 'find\s.*-delete\b' 2>/dev/null; then
+  BLOCKED=true
+  REASON="find -delete detected"
+fi
+
+# 11. chmod on sensitive dotfiles
+if echo "$CHECK_STRING" | grep -qE 'chmod\s+777\s+~/\.' 2>/dev/null; then
+  BLOCKED=true
+  REASON="chmod 777 on sensitive dotfiles"
 fi
 
 # --- Log and decide ---

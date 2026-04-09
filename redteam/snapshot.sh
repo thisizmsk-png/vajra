@@ -12,8 +12,11 @@ set -euo pipefail
 
 VAJRA_SOURCE="${HOME}/.claude/vajra"
 SNAPSHOT_DIR=""
+CLEANUP_DONE=false
 
 cleanup() {
+    if [[ "$CLEANUP_DONE" == "true" ]]; then return; fi
+    CLEANUP_DONE=true
     if [[ -n "${SNAPSHOT_DIR}" && -d "${SNAPSHOT_DIR}" ]]; then
         # Restore write permissions so rm can delete
         chmod -R u+w "${SNAPSHOT_DIR}" 2>/dev/null || true
@@ -21,10 +24,8 @@ cleanup() {
     fi
 }
 
-# Register cleanup on exit and common signals
+# Register cleanup on exit only (EXIT trap runs for signals too)
 trap cleanup EXIT
-trap cleanup SIGINT
-trap cleanup SIGTERM
 
 create_snapshot() {
     # Verify source exists

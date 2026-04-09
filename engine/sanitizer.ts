@@ -73,11 +73,20 @@ export function sanitize(content: string, source: string): string {
 
   let sanitized = content;
 
+  // --- 0. Normalize unicode to prevent pattern evasion ---------------------
+  // Strip zero-width characters that break regex matching
+  sanitized = sanitized.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, "");
+  // Collapse multiple whitespace to single space (preserving newlines)
+  sanitized = sanitized.replace(/[^\S\n]+/g, " ");
+
   // --- 1. Strip known injection patterns -----------------------------------
   for (const pattern of stripPatterns) {
     const regex = new RegExp(pattern, "gi");
     sanitized = sanitized.replace(regex, "");
   }
+
+  // --- 1b. Strip wrapper tag from content to prevent tag breakout ----------
+  sanitized = sanitized.replace(/<\/?untrusted-data[^>]*>/gi, "");
 
   // --- 2. Escape control characters ----------------------------------------
   if (escapeControlChars) {
@@ -99,7 +108,11 @@ export function sanitize(content: string, source: string): string {
   }
 
   // --- 4. Wrap in untrusted-data tags --------------------------------------
-  const escapedSource = source.replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  const escapedSource = source
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 
   return `<untrusted-data source="${escapedSource}">\n${sanitized}\n</untrusted-data>`;
 }
