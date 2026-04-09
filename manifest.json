@@ -1,10 +1,11 @@
 {
-  "generated": "2026-04-09T08:16:07Z",
+  "generated": "2026-04-09T08:29:48Z",
   "version": "0.2.0",
   "files": {
-    "config/default.json": "da4dec6ea3d5e8fd05d567a10a3168a08f8e99f2677aa372de0a9c8560844df4",
+    "config/default.json": "23358c9eb8b989275c8ab408c5015d706cb3c884d437726284fef108b9f17650",
     "config/security-contracts.json": "76c2ad40d2f7b8b5cd8b5b9f1bb4608a437a195bd5d8048e6cb9ff61aab31456",
     "engine/checkpoint.md": "9c9f12536bb5573f954b20d7e43c73ba89f5716d13388d62b1694b37379ff5a6",
+    "engine/cortex-bridge.md": "a43c4a9cd7e6c1df2d54f268ab953a25fb937670e76441cb565552298701b577",
     "engine/engine.ts": "7e2409ecc98f8336860d5f8859a8ab9b6e725a8e53af149677606e8ee7bf6904",
     "engine/explore-plan-act.md": "6cf4ef24ea5492b3add8301cba2296f86d7fc53a7617ecf9e72b312b2df37cc5",
     "engine/router.md": "0c6c94f3de4f244fa0a0bc367439b2f61e2ceaf696f567ce7c1f7a1e2aeacc2f",
@@ -12,6 +13,7 @@
     "fleet/coordinator.md": "fcc167175692f2b7943d1d2845fc582b126c5e4f0a0a190b685bd1af0a106034",
     "fleet/discovery-relay.md": "3b799c234c398a0af0c37b2ac33589aca7dee05c626fff230cf891973bb9197f",
     "fleet/fleet-coordinator.sh": "5fd85286d542ebf142234d6a70d8ae3b18be17d5420ed9e7477666ff016f6978",
+    ".gitignore": "9a151151fb2c4e4697ad1aa8e4408be74394e4228df483ab9d36ab1170ccb615",
     "hooks/pre-tool-use.sh": "5d1a0db9c55d5e43de33ef764b44175aae3327952766cf33761c36be6993be36",
     "hooks/session-start.sh": "a0e79262d7dd86a18816105ff4fbad02a4142732d23d162a0f87b22785e1e910",
     "memory/dream-consolidation.md": "b7b0a77a852a06bad1805de8916e67a0a4eb441a064d96e38c973619e0d09373",
@@ -32,6 +34,6 @@
     "scripts/install.sh": "5c32a7f9562685d81dd7e5d9f8797ddc5fece64a7034bffb38eae81e7e30c879",
     "scripts/report-template.html": "25b781282fce28b48a03659376bb3fc4bf5dc90fd85281b8598a8ac2280f4ec5",
     "scripts/sarif-convert.js": "cff14359568a3f192e80d52b608d95cea4b1b5a725412057e90dd6f6bc39dbfa",
-    "SKILL.md": "49d1a4c7c4bbd1b617dc0054bed08d3198334b05ea093fba2f53b4bdb9219474"
+    "SKILL.md": "2f37a674be3678a963c54ea22a1a920ee5eadd28013deadf720683784069e3c7"
   }
 }

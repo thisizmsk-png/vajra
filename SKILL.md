@@ -24,8 +24,12 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra rollback <id>` | Restore campaign to a specific checkpoint ID |
 | `/vajra memory <query>` | Search tiered memory (L1 index first, then L2 topics) |
 | `/vajra dream` | Run memory consolidation: deduplicate, prune contradictions, compact index to ≤200 lines |
-| `/vajra fleet <tasks...>` | Spawn parallel agents in isolated git worktrees (Wave 2) |
-| `/vajra redteam <target>` | Run security tests against a skill/agent (Wave 3) |
+| `/vajra fleet <tasks...>` | Spawn parallel agents in isolated git worktrees |
+| `/vajra fleet security-audit` | Deploy Cortex crew: Bhishma (lead) + Duryodhana + Shakuni + Vidura |
+| `/vajra fleet feature-build` | Deploy Cortex crew: Arjuna (lead) + Bhima + Nakula + Vidura |
+| `/vajra fleet incident-response` | Deploy Cortex crew: Ashwatthama (lead) + Hanuman + Bhima |
+| `/vajra fleet architecture-review` | Deploy Cortex crew: Yudhishthira (lead) + Arjuna + Bhishma + Draupadi |
+| `/vajra redteam <target>` | Run security tests against a skill/agent |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
 
@@ -49,6 +53,9 @@ If tiers 1-3 fail, analyze the input to determine:
 - Complexity assessment (simple/medium/complex)
 
 Route to the identified skill. Log the routing decision for future tier 1/3 learning.
+
+**Cortex Agent Assignment (Tier 4 bonus):**
+After determining the domain, check `config.cortex.agentRouting` for a matching Cortex agent. If found, load the agent persona from `~/.claude/agents/{agent}.md` and adopt that role for this task. See `engine/cortex-bridge.md` for full protocol.
 
 ### Authorization Gate
 

@@ -108,5 +108,50 @@
     "toolCallsPerAgent": 100,
     "toolCallsLimitedAgent": 20,
     "loopDetectionThreshold": 5
+  },
+
+  "cortex": {
+    "enabled": true,
+    "agentsDir": "~/.claude/agents",
+    "agentRouting": {
+      "backend": { "agent": "bhima", "model": "opus", "skills": ["api-design", "database-design", "performance-profiler"] },
+      "frontend": { "agent": "nakula", "model": "opus", "skills": ["frontend-design", "ui-styling", "react-best-practices"] },
+      "security": { "agent": "bhishma", "model": "opus", "skills": ["threat-modeling", "sentry-security-review", "sentry-find-bugs"] },
+      "redteam": { "agent": "duryodhana", "model": "opus", "skills": ["sentry-security-review", "entry-point-analyzer"] },
+      "pentest": { "agent": "shakuni", "model": "sonnet", "skills": ["sentry-security-review", "sentry-gha-security-review"] },
+      "testing": { "agent": "vidura", "model": "sonnet", "skills": ["testing", "property-based-testing", "webapp-testing"] },
+      "devops": { "agent": "hanuman", "model": "sonnet", "skills": ["ci-cd", "observability", "release-engineering"] },
+      "incident": { "agent": "ashwatthama", "model": "sonnet", "skills": ["incident-response", "systematic-debugging"] },
+      "product": { "agent": "draupadi", "model": "opus", "skills": ["product-spec", "prd-to-issues", "brainstorming"] },
+      "architecture": { "agent": "yudhishthira", "model": "opus", "skills": ["hld", "lld", "architecture-diagrams"] },
+      "code": { "agent": "arjuna", "model": "opus", "skills": ["code-review", "sentry-code-simplifier", "improve-codebase-architecture"] },
+      "data": { "agent": "sahadeva", "model": "opus", "skills": ["data-analysis", "backtest-validation", "database-design"] },
+      "quant": { "agent": "karna", "model": "opus", "skills": ["data-analysis", "backtest-validation"] },
+      "junior": { "agent": "abhimanyu", "model": "sonnet", "skills": ["testing", "docs-validator"] },
+      "strategy": { "agent": "krishna", "model": "opus", "skills": ["spec", "research", "decision-journal"] },
+      "program": { "agent": "dhrishtadyumna", "model": "sonnet", "skills": ["prd-to-issues", "writing-plans", "executing-plans"] }
+    },
+    "fleetCrews": {
+      "security-audit": {
+        "lead": "bhishma",
+        "agents": ["duryodhana", "shakuni", "vidura"],
+        "description": "Full security audit: threat model + red team + pentest + QA validation"
+      },
+      "feature-build": {
+        "lead": "arjuna",
+        "agents": ["bhima", "nakula", "vidura"],
+        "description": "Full-stack feature: principal leads, backend + frontend + QA in parallel"
+      },
+      "incident-response": {
+        "lead": "ashwatthama",
+        "agents": ["hanuman", "bhima"],
+        "description": "Incident triage: SRE lead + DevOps + backend debug"
+      },
+      "architecture-review": {
+        "lead": "yudhishthira",
+        "agents": ["arjuna", "bhishma", "draupadi"],
+        "description": "Architecture review: CTO leads, code + security + product perspectives"
+      }
+    }
   }
 }
