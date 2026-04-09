@@ -33,6 +33,9 @@ Thumbs.db
 .idea/
 *.code-workspace
 
+# Graphify temp files
+graphify-out/
+
 # Build artifacts
 dist/
 build/
