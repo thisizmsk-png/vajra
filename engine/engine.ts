@@ -84,10 +84,13 @@ function getHmacKey(): Buffer {
   ensureDir(VAJRA_DIR);
 
   if (fs.existsSync(HMAC_KEY_PATH)) {
-    _hmacKey = fs.readFileSync(HMAC_KEY_PATH);
+    // Read as UTF-8 hex string (compatible with shell scripts that store hex)
+    const hexKey = fs.readFileSync(HMAC_KEY_PATH, "utf-8").trim();
+    _hmacKey = Buffer.from(hexKey, "hex");
   } else {
+    // Generate and store as hex string for cross-component compatibility
     _hmacKey = crypto.randomBytes(32);
-    secureWrite(HMAC_KEY_PATH, _hmacKey);
+    secureWrite(HMAC_KEY_PATH, _hmacKey.toString("hex"));
   }
 
   return _hmacKey;

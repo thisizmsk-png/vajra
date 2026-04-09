@@ -7,7 +7,7 @@ set -euo pipefail
 readonly VAJRA_DIR="${HOME}/.claude/vajra"
 readonly WORKTREE_DIR="${VAJRA_DIR}/worktrees"
 readonly RELAY_DIR="${VAJRA_DIR}/relay"
-readonly CONFIG_FILE="${VAJRA_DIR}/config.json"
+readonly CONFIG_FILE="${HOME}/.claude/skills/vajra/config/default.json"
 readonly HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
 readonly LOG_FILE="${VAJRA_DIR}/fleet-$(date +%Y%m%d-%H%M%S).log"
 readonly DEFAULT_MAX_AGENTS=6
@@ -78,7 +78,12 @@ verify_hmac() {
     local payload="$1" expected_hmac="$2"
     local actual_hmac
     actual_hmac="$(compute_hmac "$payload")"
-    [[ "$actual_hmac" == "$expected_hmac" ]]
+    # Timing-safe comparison via openssl (constant-time at the crypto layer)
+    # Compare by computing HMAC of both values and checking equality
+    local check_a check_b
+    check_a="$(printf '%s' "$actual_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+    check_b="$(printf '%s' "$expected_hmac" | openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}')"
+    [[ "$check_a" == "$check_b" ]]
 }
 
 # --- Cleanup ---
@@ -197,11 +202,13 @@ Use this exact JSON format:
   "relevantFiles": ["<file paths>"]
 }
 
-Then sign the file by appending an "hmac" field. Compute HMAC-SHA256 of the JSON content
-(without the hmac field) using the key in ${HMAC_KEY_FILE}.
+After writing the discovery JSON, the fleet coordinator will sign it on your behalf.
+Do NOT attempt to read or access any HMAC keys.
 
 ## Constraints
 - Stay within the worktree: ${worktree_path}
+- Do NOT access files outside the worktree
+- Do NOT read ~/.claude/vajra/.hmac-key or any key files
 - Complete the task, then exit
 PROMPT
 

@@ -7,6 +7,7 @@
 
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,22 +19,34 @@ interface SanitizationConfig {
       stripPatterns: string[];
       maxContentLength: number;
       escapeControlChars: boolean;
+      wrapInTags: boolean;
+      tagName: string;
     };
   };
 }
 
 // ---------------------------------------------------------------------------
-// Config loader
+// Config loader (cached)
 // ---------------------------------------------------------------------------
+
+let _cachedConfig: SanitizationConfig | null = null;
 
 /**
  * Load the default security/sanitization configuration from
  * `config/default.json` (resolved relative to this file's directory).
+ * Result is cached after first load.
  */
 export function loadConfig(): SanitizationConfig {
-  const configPath = resolve(dirname(__filename), "..", "config", "default.json");
+  if (_cachedConfig) return _cachedConfig;
+
+  // ESM-compatible __dirname equivalent
+  const __filename_compat = typeof __filename !== "undefined"
+    ? __filename
+    : fileURLToPath(import.meta.url);
+  const configPath = resolve(dirname(__filename_compat), "..", "config", "default.json");
   const raw = readFileSync(configPath, "utf-8");
-  return JSON.parse(raw) as SanitizationConfig;
+  _cachedConfig = JSON.parse(raw) as SanitizationConfig;
+  return _cachedConfig;
 }
 
 // ---------------------------------------------------------------------------

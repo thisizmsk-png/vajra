@@ -84,15 +84,29 @@
       "stripPatterns": [
         "ignore previous instructions",
         "ignore all previous",
+        "disregard all prior",
         "you are now",
+        "from now on you",
         "system prompt",
+        "IMPORTANT:",
         "\\[INST\\]",
         "\\[/INST\\]",
         "<\\|im_start\\|>",
         "<\\|im_end\\|>",
+        "<\\|endoftext\\|>",
+        "<system>",
+        "</system>",
+        "\\[SYSTEM\\]",
+        "<instructions>",
+        "</instructions>",
         "Human:",
-        "Assistant:"
+        "Assistant:",
+        "###\\s*(System|User|Assistant)",
+        "\\bBEGIN INJECTION\\b",
+        "\\bEND INJECTION\\b"
       ],
+      "maxContentLength": 50000,
+      "escapeControlChars": true,
       "wrapInTags": true,
       "tagName": "untrusted-data"
     }

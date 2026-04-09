@@ -34,7 +34,8 @@ create_snapshot() {
     fi
 
     # Create temp directory for snapshot
-    SNAPSHOT_DIR="$(mktemp -d /tmp/vajra-snapshot-XXXXXXXX)"
+    SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vajra-snapshot-XXXXXXXX")"
+    chmod 700 "$SNAPSHOT_DIR"
 
     # Copy all state to snapshot
     cp -a "${VAJRA_SOURCE}/." "${SNAPSHOT_DIR}/"

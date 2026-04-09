@@ -13,13 +13,20 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 # Read the hook payload from stdin
 PAYLOAD="$(cat)"
 
-TOOL_NAME="$(echo "$PAYLOAD" | grep -o '"tool"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
-INPUT_RAW="$(echo "$PAYLOAD" | grep -o '"input"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
+# Parse JSON — prefer jq, fall back to grep, FAIL-CLOSED on parse failure
+if command -v jq &>/dev/null; then
+  TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // empty' 2>/dev/null || echo "")"
+  INPUT_RAW="$(echo "$PAYLOAD" | jq -r '.input // empty' 2>/dev/null || echo "")"
+else
+  TOOL_NAME="$(echo "$PAYLOAD" | grep -o '"tool"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
+  INPUT_RAW="$(echo "$PAYLOAD" | grep -o '"input"\s*:\s*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/' || echo "")"
+fi
 
-# If we couldn't parse tool name, allow by default (fail-open for usability)
+# FAIL-CLOSED: if we can't parse the tool name, block the operation
 if [ -z "$TOOL_NAME" ]; then
-  echo "${TIMESTAMP} ALLOW unknown-tool (parse failure)" >> "$AUDIT_LOG"
-  exit 0
+  echo "${TIMESTAMP} BLOCK unknown-tool reason=\"parse failure — fail-closed\"" >> "$AUDIT_LOG"
+  echo "Vajra hook: blocked unknown tool (could not parse payload)" >&2
+  exit 1
 fi
 
 # Combine tool + input for pattern matching
@@ -70,16 +77,18 @@ if echo "$CHECK_STRING" | grep -qE 'dd\s+.*of=/dev/(sd|hd|nvme|vd)' 2>/dev/null;
   REASON="dd write to block device"
 fi
 
-# 6. mkfs on mounted devices
-if echo "$CHECK_STRING" | grep -qE 'mkfs' 2>/dev/null; then
+# 6. mkfs on devices (only block when Bash tool is invoking it)
+if [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\bmkfs\b' 2>/dev/null; then
   BLOCKED=true
-  REASON="filesystem format command"
+  REASON="filesystem format command via Bash"
 fi
 
 # --- Log and decide ---
 
 if [ "$BLOCKED" = true ]; then
-  echo "${TIMESTAMP} BLOCK ${TOOL_NAME} reason=\"${REASON}\"" >> "$AUDIT_LOG"
+  # Sanitize reason for log injection (strip newlines, control chars)
+  SAFE_REASON="$(echo "$REASON" | tr -d '\n\r' | tr -cd '[:print:]')"
+  echo "${TIMESTAMP} BLOCK ${TOOL_NAME} reason=\"${SAFE_REASON}\"" >> "$AUDIT_LOG"
   # Print message for user visibility
   echo "Vajra hook blocked dangerous operation: ${REASON}" >&2
   exit 1
