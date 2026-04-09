@@ -11,7 +11,7 @@ git clone https://github.com/thisizmsk-png/vajra.git ~/.claude/skills/vajra
 # Run the install script
 bash ~/.claude/skills/vajra/scripts/install.sh
 
-# (Optional) Install bundled skills — copies 87 skills to ~/.claude/skills/
+# (Optional) Install bundled skills + 17 Cortex agents
 bash ~/.claude/skills/vajra/scripts/install-skills.sh
 ```
 
