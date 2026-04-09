@@ -1,7 +1,12 @@
 {
-  "generated": "2026-04-09T08:47:01Z",
+  "generated": "2026-04-09T09:01:57Z",
   "version": "0.2.0",
   "files": {
+    "atman/ATMAN.md": "115a10409a4af2db1dee06235b4bacf7c9551864ccabb9552813cffc3e8e016d",
+    "atman/muscle-memory.md": "a5cfa0090df23d25a5d6aca4c4dfe45e550df87ab226e73d8505e274634b768a",
+    "atman/peer-review-pairs.md": "81760e24ef02d8a3875700330177d6cccd7990b7dc3138ad66a29190cae1dab7",
+    "atman/practice-observer.md": "8b6d7384774c27a2ceb12ef88b0310a97e0098f61132deae41c85ba48d48f9f6",
+    "atman/self-review.md": "7ff4fe599de069f03a1349769cdaf13d61c4a24fe267c5ceb72aadbca224ff17",
     "bundled-agents/abhimanyu.md": "1677d1cb5b4384fe6c8b5d71b14096262f87d495a193f418bcba0115adf2f6ac",
     "bundled-agents/arjuna.md": "dbffe3b0bc5a92a2b61d7101121d53d43d93113674ab24cf9255f3effe51588a",
     "bundled-agents/ashwatthama.md": "4e2790ce54ebe6df6284a13e6aa7bbf4b106a202d3a15b851ef1f5fc3c48246b",
@@ -667,6 +672,6 @@
     "scripts/install-skills.sh": "b67a3a06297d02485bebfe92b6160f276311d684d8bbf93a50739ff2c5c04f3d",
     "scripts/report-template.html": "25b781282fce28b48a03659376bb3fc4bf5dc90fd85281b8598a8ac2280f4ec5",
     "scripts/sarif-convert.js": "cff14359568a3f192e80d52b608d95cea4b1b5a725412057e90dd6f6bc39dbfa",
-    "SKILL.md": "2f37a674be3678a963c54ea22a1a920ee5eadd28013deadf720683784069e3c7"
+    "SKILL.md": "1a35f0feadace839b4ee806e976ba459d6b089b7f49b58045053b7014942e71f"
   }
 }

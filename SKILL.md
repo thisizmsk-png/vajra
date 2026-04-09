@@ -32,6 +32,11 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra redteam <target>` | Run security tests against a skill/agent |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
+| `/vajra atman status` | Show practice stats: patches pending, skills improved, routing learned |
+| `/vajra atman review` | Show pending skill patches for user approval |
+| `/vajra atman log` | Evolution audit trail — what changed, when, why |
+| `/vajra atman rollback <id>` | Revert a specific skill patch |
+| `/vajra atman pause` | Pause self-improvement (keeps observing) |
 
 ### Smart Routing (4-Tier Cascade)
 
@@ -132,5 +137,16 @@ Commands:
   /vajra redteam <tgt>  Security testing (Wave 3)
   /vajra config         Edit settings
   /vajra verify         Check file integrity
+  /vajra atman status   Practice stats + improvement metrics
+  /vajra atman review   Approve/reject pending skill patches
+  /vajra atman log      What changed, when, why
   /vajra help           This message
 ```
+
+## Atman — The Practice Loop (Self-Improvement)
+
+Vajra gets better through practice. See `atman/ATMAN.md` for full protocol.
+
+After every task, silently observe: which skill ran, outcome, tool calls, errors.
+When a skill fails ≥2 times on similar tasks, trigger self-review → generate patch → peer review → promote.
+During `/vajra dream`, also apply approved patches and learn routing shortcuts.
