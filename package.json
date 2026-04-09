@@ -1,0 +1,20 @@
+{
+  "name": "vajra-harness",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ts": "vitest run --reporter=verbose",
+    "test:bats": "bats tests/hooks/pre-tool-use.bats",
+    "test:hmac-contract": "bash tests/hmac-contract.sh",
+    "test:all": "npm run test:ts && npm run test:bats && npm run test:hmac-contract"
+  },
+  "devDependencies": {
+    "vitest": "^3.1.1",
+    "better-sqlite3": "^11.7.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "typescript": "^5.7.0"
+  }
+}

@@ -95,7 +95,8 @@ function buildResult(behavior) {
         behavior.mitigations.map((m) => `- ${m}`).join("\n")
       : "";
 
-  const messageText = `[${behavior.verdict.toUpperCase()}] ${behavior.name} (${behavior.score}/100)\n\n${behavior.reasoning || ""}${mitigationText}\n\nEvidence:\n${evidenceText}`;
+  const verdictStr = (behavior.verdict || "unknown").toUpperCase();
+  const messageText = `[${verdictStr}] ${behavior.name} (${behavior.score || 0}/100)\n\n${behavior.reasoning || ""}${mitigationText}\n\nEvidence:\n${evidenceText}`;
 
   const result = {
     ruleId,

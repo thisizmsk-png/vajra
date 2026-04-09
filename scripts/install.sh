@@ -62,8 +62,11 @@ fi
 # 5. Install npm dependencies (if package.json exists)
 echo "[5/6] Checking npm dependencies..."
 if [ -f "${VAJRA_SKILL}/package.json" ]; then
-  cd "${VAJRA_SKILL}" && npm install --production 2>/dev/null
-  echo "  Dependencies installed"
+  if cd "${VAJRA_SKILL}" && npm install --production 2>&1 | tail -3; then
+    echo "  Dependencies installed"
+  else
+    echo "  WARNING: npm install failed — some features may not work" >&2
+  fi
 else
   echo "  No package.json yet — skipping npm install"
 fi

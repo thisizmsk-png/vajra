@@ -38,8 +38,9 @@ create_snapshot() {
     SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vajra-snapshot-XXXXXXXX")"
     chmod 700 "$SNAPSHOT_DIR"
 
-    # Copy all state to snapshot
+    # Copy all state to snapshot (exclude HMAC key for security)
     cp -a "${VAJRA_SOURCE}/." "${SNAPSHOT_DIR}/"
+    rm -f "${SNAPSHOT_DIR}/.hmac-key" 2>/dev/null || true
 
     # Make everything read-only
     chmod -R a-w "${SNAPSHOT_DIR}"

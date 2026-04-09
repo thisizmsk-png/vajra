@@ -87,7 +87,9 @@ When `cortex.enabled = true`, Vajra's routing takes priority over Cortex's `skil
 When loading a Cortex agent persona into context:
 
 1. Read `~/.claude/agents/{agent}.md`
-2. Pass through Vajra's sanitizer (wrap in `<untrusted-data>` tags)
+2. Verify the file exists under `~/.claude/agents/` (operator-controlled path — do NOT sanitize these files). Agent personas are authored by the operator and intentionally contain identity statements like "You are Bhima". Sanitizing them would strip the persona directives and break agent role adoption.
 3. Extract frontmatter: name, role, model, allowed-tools
 4. Inject persona into the subagent's system context
 5. Log agent assignment in campaign audit trail
+
+**Important:** Only user-supplied content (memory files, user messages, discovery relay content) goes through the sanitizer. Operator-controlled files under `~/.claude/agents/` are trusted and loaded verbatim.

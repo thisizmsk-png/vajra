@@ -37,6 +37,33 @@ CHECK_STRING="${TOOL_NAME} ${INPUT_RAW} ${PAYLOAD}"
 BLOCKED=false
 REASON=""
 
+# --- Phase enforcement (explore-plan-act) ---
+PHASE_FILE="${HOME}/.claude/vajra/.phase"
+if [ -f "$PHASE_FILE" ]; then
+  CURRENT_PHASE="$(cat "$PHASE_FILE" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$CURRENT_PHASE" = "explore" ] || [ "$CURRENT_PHASE" = "plan" ]; then
+    # Block write operations during EXPLORE and PLAN phases
+    case "$TOOL_NAME" in
+      Write|Edit|NotebookEdit)
+        BLOCKED=true
+        REASON="blocked by ${CURRENT_PHASE} phase — read-only until /vajra act"
+        ;;
+      Bash)
+        # Block destructive bash commands during explore/plan
+        if echo "$INPUT_RAW" | grep -qE '(mkdir|touch|cp |mv |rm |chmod|chown|tee |sed -i|git add|git commit|git push|git checkout|git reset|npm install|pip install|cargo add)' 2>/dev/null; then
+          BLOCKED=true
+          REASON="blocked by ${CURRENT_PHASE} phase — no mutations until /vajra act"
+        fi
+        # Block output redirects
+        if echo "$INPUT_RAW" | grep -qE '(>>|>[^&])' 2>/dev/null; then
+          BLOCKED=true
+          REASON="blocked by ${CURRENT_PHASE} phase — no file writes until /vajra act"
+        fi
+        ;;
+    esac
+  fi
+fi
+
 # --- Dangerous pattern checks ---
 
 # 1. rm -rf / (root filesystem wipe)
