@@ -42,14 +42,17 @@ EV_OUTCOME="success"
 [ "$(echo "$PAYLOAD" | jq -r 'if .error then "true" else "false" end' 2>/dev/null)" = "true" ] && EV_OUTCOME="failure"
 EV_INPUT="$(echo "$PAYLOAD" | jq -c '.input // .tool_input // {}' 2>/dev/null || echo '{}')"
 EV_ARGS_HASH="$(sha256_hex "$EV_INPUT")"
+# Repo HEAD at emit time — turns the log into a CAUSAL trace: "which tool call,
+# against which tree state, produced this regression" becomes a join.
+EV_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo '')"
 EV_SEQ=0; EV_PREV="genesis"
 if [ -f "$EV_LOG" ] && [ -s "$EV_LOG" ]; then
   EV_PREV="$(tail -n 1 "$EV_LOG" | jq -r '.hmac // "genesis"' 2>/dev/null || echo genesis)"
   EV_SEQ="$(tail -n 1 "$EV_LOG" | jq -r '.seq // 0' 2>/dev/null || echo 0)"; EV_SEQ=$((EV_SEQ+1))
 fi
 EV_ENTRY="$(jq -nc --arg ts "$EV_TS" --arg tool "$TOOL_NAME" --arg outcome "$EV_OUTCOME" \
-  --argjson seq "$EV_SEQ" --arg ah "$EV_ARGS_HASH" --arg prev "$EV_PREV" \
-  '{seq:$seq, ts:$ts, tool:$tool, outcome:$outcome, argsHash:$ah, prevHmac:$prev}')"
+  --argjson seq "$EV_SEQ" --arg ah "$EV_ARGS_HASH" --arg prev "$EV_PREV" --arg gs "$EV_GIT_SHA" \
+  '{seq:$seq, ts:$ts, tool:$tool, outcome:$outcome, argsHash:$ah, gitSha:$gs, prevHmac:$prev}')"
 if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
   EV_KEY="$(cat "$HMAC_KEY_FILE")"
   EV_HMAC="$(printf '%s' "$EV_ENTRY" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${EV_KEY}" -hex 2>/dev/null | awk '{print $NF}')"

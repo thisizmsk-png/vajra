@@ -23,6 +23,7 @@ for t in \
   tests/hooks/run-phase-mode.sh \
   tests/run-verify-work.sh \
   tests/run-event-log.sh \
+  tests/run-compaction.sh \
   tests/fleet/run-relay-auth.sh \
 ; do
   section "$t"

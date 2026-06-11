@@ -34,6 +34,13 @@ After any skill completes, record:
 
 Store in `~/.claude/vajra/practice-log.jsonl` (append-only, one JSON per line).
 
+### 1b. ORACLE ESCALATION (vertical — before the run dies)
+
+When a skill/agent fails ≥2 times (the flag below) OR a step is high-stakes,
+summon the **Oracle** — a stronger-model second opinion — *before* looping
+blindly. Peer review is horizontal (skills review each other); the Oracle is
+vertical escalation. See `atman/oracle.md`.
+
 ### 2. SELF-REVIEW (triggered when a skill fails ≥2 times)
 
 When the practice log shows a skill failing on similar tasks ≥2 times:
