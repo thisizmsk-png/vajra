@@ -26,6 +26,7 @@ for t in \
   tests/run-compaction.sh \
   tests/run-cost.sh \
   tests/run-ralph.sh \
+  tests/run-repomap.sh \
   tests/fleet/run-relay-auth.sh \
 ; do
   section "$t"
