@@ -110,6 +110,11 @@ vajra/
 │   ├── reporting.md          ← HTML/JSON/SARIF output
 │   └── scenarios/            ← 6 files × 4 attacks = 24 scenarios
 │
+├── steering/                 ← Machine-checkable engineering rules (AutoSDE-style)
+│   ├── review-pipeline.md    ← 5-pass review (generate→dedup→confidence→guideline→refine)
+│   └── rules/                ← principles, security(blocking), testing, lambda,
+│                              aws-cdk, typescript, python, java, general
+│
 ├── atman/                    ← Self-improvement loop
 │   ├── ATMAN.md              ← Practice loop overview
 │   ├── practice-observer.md  ← Log every skill execution
@@ -169,6 +174,7 @@ If you use [Claude Cortex](https://github.com/thisizmsk-png/claude-cortex), Vajr
 /vajra dream               Consolidate memory + apply approved patches
 /vajra fleet <tasks>       Parallel agents in worktrees
 /vajra redteam <tgt>       Security test a skill/agent
+/vajra review [tgt]        Steering-rule code review (5-pass, confidence-gated)
 /vajra config              Edit settings
 /vajra verify              Check file integrity
 /vajra atman status        Practice stats + improvement metrics

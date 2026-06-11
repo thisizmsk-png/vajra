@@ -30,6 +30,7 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra fleet incident-response` | Deploy Cortex crew: Ashwatthama (lead) + Hanuman + Bhima |
 | `/vajra fleet architecture-review` | Deploy Cortex crew: Yudhishthira (lead) + Arjuna + Bhishma + Draupadi |
 | `/vajra redteam <target>` | Run security tests against a skill/agent |
+| `/vajra review [target]` | Steering-rule code review via the 5-pass pipeline (confidence-gated, blocking-aware). Defaults to the current diff. |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
 | `/vajra atman status` | Show practice stats: patches pending, skills improved, routing learned |
@@ -142,6 +143,30 @@ Commands:
   /vajra atman log      What changed, when, why
   /vajra help           This message
 ```
+
+## Steering — Machine-Checkable Review (`/vajra review`)
+
+Vajra enforces concrete engineering rules through a **steering** layer modeled on
+the AutoSDE/CodingAgent rule-pack engine. See `steering/README.md`.
+
+On `/vajra review [target]` (defaults to the current git diff):
+1. Select the rule files in `config/steering.json` whose `filePatterns` match the
+   changed files (e.g. a `lib/**/*.ts` change pulls aws-cdk + typescript +
+   security + principles).
+2. Run `steering/review-pipeline.md`: **generate → deduplicate →
+   confidence-gate (≥ 8) → guideline/category suppression → refine**, capped at
+   5 high-impact comments.
+3. Emit findings as **[BLOCKING]** (violations of `blocking: true` rules —
+   security, lambda, aws-cdk) or **[advisory]**, each quoting the rule and the
+   smallest fix. If everything passes: `Approve — N rules checked, 0 findings`.
+
+Discipline (from the rule-pack doctrine): only concrete, observable issues — no
+speculation, no nitpicks, no praising already-correct code; respect category
+suppressions (no input-validation/error-handling nags on CDK or test code).
+
+Cortex agents each enforce their own slice of the rules (`agentSteering` in
+`config/steering.json`) — so a Vidura review pulls testing rules, a Bhishma
+review pulls security+cdk+lambda. See `engine/cortex-bridge.md`.
 
 ## Atman — The Practice Loop (Self-Improvement)
 
