@@ -75,6 +75,8 @@ run BLOCK "echo > hook"       "{\"tool\":\"Bash\",\"input\":\"echo 'exit 0' > $H
 run BLOCK "rm hook"           "{\"tool\":\"Bash\",\"input\":\"rm $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
 run BLOCK "Write settings"    "{\"tool\":\"Write\",\"input\":{\"file_path\":\"$H/.claude/settings.json\",\"content\":\"{}\"}}"
 run BLOCK "chmod -x hook"     "{\"tool\":\"Bash\",\"input\":\"chmod -x $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "Read hmac-key"     "{\"tool\":\"Read\",\"input\":{\"file_path\":\"$H/.claude/vajra/.hmac-key\"}}"
+run BLOCK "cat hmac-key bash" "{\"tool\":\"Bash\",\"input\":\"cat $H/.claude/vajra/.hmac-key\"}"
 
 # --- Fail-closed ---
 run BLOCK "empty payload"           ''

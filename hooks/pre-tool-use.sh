@@ -112,6 +112,18 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
   fi
 fi
 
+# 0c. The HMAC signing key is never a legitimate read target for the agent.
+#     Blocking reads keeps the campaign/relay/practice-log MAC meaningful and
+#     stops a fleet agent from exfiltrating the key (VJR-04, VJR-08).
+HMAC_KEY_RE="${HOME}/\.claude/vajra/\.hmac-key"
+if [ "$BLOCKED" = false ]; then
+  if [ -n "$TARGET_EXP" ] && echo "$TARGET_EXP" | grep -qE "$HMAC_KEY_RE" 2>/dev/null; then
+    block "access to the Vajra HMAC signing key"
+  elif [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ] && echo "$CMD_EXP" | grep -qE "$HMAC_KEY_RE" 2>/dev/null; then
+    block "access to the Vajra HMAC signing key"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Integrity tamper flag (set by session-start.sh on manifest mismatch, VJR-06).
 # While a violation is unresolved, allow read-only tools but block mutations so
