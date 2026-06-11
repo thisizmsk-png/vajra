@@ -102,14 +102,26 @@ case "$TOOL_NAME" in
     ;;
 esac
 
-# 0b. Bash mutation/redirection aimed at a protected path.
+# 0b. Bash touching a protected path — DEFAULT-DENY unless it is a pure read.
+#     This INVERTS the old deny-known-mutators logic (F-1): enumerating write
+#     tools is a losing race — rsync, shred, gawk -i inplace, sponge, csplit,
+#     install, dd, interpreters and editors all mutate, and the next tool always
+#     evades a denylist. Instead: if a protected path appears in a Bash command,
+#     block it unless the command is a simple invocation of a known read-only
+#     tool with no redirect, pipe, chaining, or command substitution. Legitimate
+#     reads of harness files should use the Read/Grep tools, not Bash.
 if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; then
   if echo "$CMD_EXP" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
-    # Block if the command looks like it writes/deletes/changes perms — OR uses
-    # an interpreter/editor that can open the file for writing (NEW-01). Pure
-    # reads (cat/grep/head/...) are not in this indicator set and pass.
-    if echo "$CMD_EXP" | grep -qE '(>|>>|\b(rm|mv|cp|tee|truncate|ln|install|dd|python|python3|ruby|node|perl|php|awk|ed|ex|vim|vi|nano|emacs|patch)\b|sed -i|chmod|chown|chflags|xattr|git (checkout|restore|reset|clean))' 2>/dev/null; then
-      block "Bash mutation of Vajra immutable core"
+    if echo "$CMD_EXP" | grep -qE '(>|>>|\||;|&&|`|\$\()' 2>/dev/null; then
+      # Redirect / pipe / chaining / substitution near a protected path is never
+      # a trivial read.
+      block "Bash touching Vajra immutable core (non-trivial command)"
+    else
+      # Leading command word, skipping any VAR=value env-prefix tokens.
+      FIRST_WORD="$(echo "$CMD_EXP" | awk '{for(i=1;i<=NF;i++){if($i ~ /=/ && $i !~ /^-/)continue; print $i; exit}}')"
+      if ! echo "$FIRST_WORD" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|sha256sum|shasum|md5|md5sum|cut|sort|uniq|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
+        block "Bash mutation of Vajra immutable core (non-reader command)"
+      fi
     fi
   fi
 fi
@@ -244,10 +256,14 @@ if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '(base64( |.*)(-d|-
   fi
 fi
 
-# 9c. Interpreter inline-code that shells out or decodes-and-executes (NEW-02).
-#     e.g. python3 -c "os.system(base64.b64decode('...'))", node -e "...execSync".
-if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\b(python[23]?|ruby|perl|node|php)\b[^|;]*[[:space:]]-(c|e)\b' 2>/dev/null; then
-  if echo "$CHECK_STRING" | grep -qE '(os\.system|subprocess|system\(|[^a-z]exec\(|execSync|child_process|popen|spawn|Runtime\.getRuntime|b64decode|base64|fromhex|unhexlify|codecs\.decode)' 2>/dev/null; then
+# 9c. Interpreter inline-code that shells out or decodes-and-executes (NEW-02,
+#     F-2). Covers python/ruby/perl/node -c/-e AND php -r. The sink list is a
+#     denylist and therefore not exhaustive — a free-form interpreter can always
+#     express RCE; the durable boundary is the OS sandbox (see header). This
+#     closes the demonstrated evasions (os.exec*, __import__, passthru/shell_exec,
+#     Open3, getattr-built names) on top of the obvious sinks.
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\b(python[23]?|ruby|perl|node|php)\b[^|;]*[[:space:]]-(c|e|r)\b' 2>/dev/null; then
+  if echo "$CHECK_STRING" | grep -qE '(os\.(system|exec|popen|spawn)|subprocess|system\(|[^a-z]exec[a-z]*\(|execSync|child_process|popen|spawn|passthru|shell_exec|proc_open|Open3|Runtime\.getRuntime|__import__|getattr|b64decode|base64|fromhex|unhexlify|codecs\.decode)' 2>/dev/null; then
     block "interpreter inline-code shelling out or decoding-and-executing"
   fi
 fi

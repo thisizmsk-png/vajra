@@ -96,6 +96,24 @@ run BLOCK "git -C clean"      '{"tool":"Bash","input":"git -C /repo clean -fdx"}
 run ALLOW "py normal script"  '{"tool":"Bash","input":"python3 scripts/build.py --out dist"}'
 run ALLOW "node run app"      '{"tool":"Bash","input":"node server.js"}'
 run ALLOW "py read hook (cat-like, non-protected)" '{"tool":"Bash","input":"python3 -c \"print(1+1)\""}'
+# F-1: immutable core default-deny — any non-reader touching a protected path
+run BLOCK "rsync onto hook"   "{\"tool\":\"Bash\",\"input\":\"rsync /tmp/evil $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "shred hook"        "{\"tool\":\"Bash\",\"input\":\"shred $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "gawk -i inplace"   "{\"tool\":\"Bash\",\"input\":\"gawk -i inplace '{print}' $H/.claude/skills/vajra/config/default.json\"}"
+run BLOCK "sponge hook"       "{\"tool\":\"Bash\",\"input\":\"sponge $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "csplit hook"       "{\"tool\":\"Bash\",\"input\":\"csplit -f x $H/.claude/skills/vajra/hooks/pre-tool-use.sh 1\"}"
+run BLOCK "sudo cat>protected" "{\"tool\":\"Bash\",\"input\":\"cat /tmp/x > $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "cpio to protected" "{\"tool\":\"Bash\",\"input\":\"cpio -o $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "steering rule write" "{\"tool\":\"Write\",\"input\":{\"file_path\":\"$H/.claude/skills/vajra/steering/rules/security.md\",\"content\":\"x\"}}"
+# F-1: legitimate pure reads of protected files via Bash MUST still pass
+run ALLOW "cat SKILL.md"      "{\"tool\":\"Bash\",\"input\":\"cat $H/.claude/skills/vajra/SKILL.md\"}"
+run ALLOW "grep config"       "{\"tool\":\"Bash\",\"input\":\"grep routing $H/.claude/skills/vajra/config/default.json\"}"
+run ALLOW "head hook"         "{\"tool\":\"Bash\",\"input\":\"head -5 $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+# F-2: php -r and obfuscated interpreter exec
+run BLOCK "php -r passthru"   '{"tool":"Bash","input":"php -r \"passthru('rm -rf /')\""}'
+run BLOCK "py os.execv"       '{"tool":"Bash","input":"python3 -c \"import os;os.execv('/bin/sh',['sh','-c','rm -rf /'])\""}'
+run BLOCK "py __import__"     '{"tool":"Bash","input":"python3 -c \"__import__('os').system('rm -rf /')\""}'
+run BLOCK "ruby Open3"        '{"tool":"Bash","input":"ruby -ropen3 -e \"Open3.capture2('rm -rf /')\""}'
 
 # --- Fail-closed ---
 run BLOCK "empty payload"           ''

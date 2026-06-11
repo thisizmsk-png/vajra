@@ -71,6 +71,17 @@ if [ -f "$MANIFEST" ]; then
       "scripts/generate-manifest.sh"
       "scripts/atman-observe.sh"
       "scripts/atman-dream.sh"
+      "config/steering.json"
+      "steering/review-pipeline.md"
+      "steering/rules/principles.md"
+      "steering/rules/general.md"
+      "steering/rules/security.md"
+      "steering/rules/testing.md"
+      "steering/rules/lambda.md"
+      "steering/rules/aws-cdk.md"
+      "steering/rules/typescript.md"
+      "steering/rules/python.md"
+      "steering/rules/java.md"
     )
 
     VIOLATIONS=""
