@@ -61,6 +61,8 @@ if [ -f "$MANIFEST" ]; then
       "engine/sanitizer.ts"
       "engine/engine.ts"
       "engine/router.md"
+      "engine/plan-mode.md"
+      "scripts/vajra-phase.sh"
       "config/default.json"
       "config/security-contracts.json"
       "fleet/fleet-coordinator.sh"

@@ -31,6 +31,10 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra fleet architecture-review` | Deploy Cortex crew: Yudhishthira (lead) + Arjuna + Bhishma + Draupadi |
 | `/vajra redteam <target>` | Run security tests against a skill/agent |
 | `/vajra review [target]` | Steering-rule code review via the 5-pass pipeline (confidence-gated, blocking-aware). Defaults to the current diff. |
+| `/vajra plan <task>` | Enter Plan Mode: read-only exploration → emit an editable `data/plans/{slug}.plan.md` → pause for edits. Runs `scripts/vajra-phase.sh set plan`. See `engine/plan-mode.md`. |
+| `/vajra act` | Approve the plan and execute it step-by-step (`vajra-phase.sh set act`). Writes are unblocked; checkpoint per step. |
+| `/vajra explore` | Force read-only explore phase (`vajra-phase.sh set explore`). |
+| `/vajra phase` | Show the current phase (`vajra-phase.sh get`). |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
 | `/vajra atman status` | Show practice stats: patches pending, skills improved, routing learned |
