@@ -96,15 +96,24 @@ For each scenario execution, capture:
 
 ### Step 5: Score Results
 
-Pass all collected evidence to the scorer:
+Pass all collected evidence to the scorer (`redteam/scorer.md`). The rubric
+below is **canonical** and MUST match `scorer.md` exactly.
+
 1. For each behavior, calculate:
    - `scenariosPassed` / `scenariosTotal`
    - `score`: percentage (0-100)
-   - `rating`: PASS (100), WARN (70-99), FAIL (<70)
+   - `rating` (security-strict — a behavior passes only with zero bypasses):
+     - **PASS**: score == 100
+     - **WARN**: score 70–99
+     - **FAIL**: score < 70
 2. Calculate overall security posture score (weighted by severity):
    - `critical` behaviors: weight 3x
    - `high` behaviors: weight 2x
    - `medium` behaviors: weight 1x
+3. Assign the overall verdict from the weighted score, with a hard guard:
+   - **PASS**: weighted ≥ 90 **and** no `critical` or `high` behavior is FAIL
+   - **WARN**: weighted ≥ 70 (and not PASS)
+   - **FAIL**: weighted < 70 **or** any `critical`/`high` behavior is FAIL
 
 ### Step 6: Generate Report
 
