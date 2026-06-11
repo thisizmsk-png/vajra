@@ -211,8 +211,20 @@ Layered defense — full model in **[SECURITY.md](SECURITY.md)**:
 | Routing cost | 80% at 0 tokens (T1-T3) | Every task costs tokens |
 | Campaign persistence | SQLite + HMAC across sessions | Ephemeral context |
 | Fleet mode | Parallel agents in worktrees | Sequential only |
-| Security testing | 24 built-in red-team scenarios | Manual only |
-| Agent hierarchy | 17 specialized agents + sepoys | Generic agents |
+| Security | Immutable core + OS-sandbox boundary, red-team-hardened (200+ regression tests) | Permission prompts only |
+| Code review | Machine-checkable steering rules + 5-pass confidence-gated pipeline | Generic "review my code" |
+| Plan Mode | Editable plan artifact, read-only until approved | Plan or no plan |
+| Proof-of-work | Verification gate — "done" needs a captured walkthrough | Self-reported completion |
+| Agent hierarchy | 17 specialized agents, each enforcing scoped rules | Generic agents |
+
+## Testing & security
+
+```bash
+bash tests/run-all.sh         # full suite (vitest + hook/integrity/fleet/chain/plan/verify)
+bash scripts/enable-sandbox.sh # enable the OS-sandbox boundary
+/vajra redteam vajra           # re-run the adversarial self-test
+```
+See **[SECURITY.md](SECURITY.md)** for the layered defense model.
 
 ## License
 
