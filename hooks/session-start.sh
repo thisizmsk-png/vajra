@@ -68,10 +68,30 @@ if [ -f "$MANIFEST" ]; then
       "redteam/orchestrator.md"
       "redteam/scorer.md"
       "scripts/install.sh"
+      "scripts/generate-manifest.sh"
+      "scripts/atman-observe.sh"
+      "scripts/atman-dream.sh"
     )
 
     VIOLATIONS=""
     MISSING=""
+
+    # Verify the manifest's own HMAC signature first (NEW-04). The key shares
+    # the harness trust boundary, so this is defense-in-depth — but the manifest
+    # is ALSO write-protected from inside the harness by the immutable-core hook,
+    # so tampering requires breaking both. A bad signature is itself a violation.
+    MANIFEST_SIG="${MANIFEST}.sig"
+    HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
+    if [ -f "$MANIFEST_SIG" ] && [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ] && command -v openssl &>/dev/null; then
+      m_hash="$(sha256_of "$MANIFEST")"
+      key_hex="$(cat "$HMAC_KEY_FILE")"
+      expect_sig="$(tr -d '[:space:]' < "$MANIFEST_SIG")"
+      actual_sig="$(printf '%s' "$m_hash" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key_hex}" -hex 2>/dev/null | awk '{print $NF}')"
+      if [ -n "$expect_sig" ] && [ "$actual_sig" != "$expect_sig" ]; then
+        VIOLATIONS="${VIOLATIONS}manifest.json(bad-signature) "
+      fi
+    fi
+
     for rel_path in "${CRITICAL_FILES[@]}"; do
       full_path="${SKILL_DIR}/${rel_path}"
       expected_hash="$(jq -r ".files[\"${rel_path}\"] // empty" "$MANIFEST" 2>/dev/null)"

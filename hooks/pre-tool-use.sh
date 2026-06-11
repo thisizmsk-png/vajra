@@ -105,8 +105,10 @@ esac
 # 0b. Bash mutation/redirection aimed at a protected path.
 if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; then
   if echo "$CMD_EXP" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
-    # Only block if the command looks like it writes/deletes/changes perms.
-    if echo "$CMD_EXP" | grep -qE '(>|>>|\b(rm|mv|cp|tee|truncate|ln|install|dd)\b|sed -i|chmod|chown|chflags|xattr|git (checkout|restore|reset|clean))' 2>/dev/null; then
+    # Block if the command looks like it writes/deletes/changes perms — OR uses
+    # an interpreter/editor that can open the file for writing (NEW-01). Pure
+    # reads (cat/grep/head/...) are not in this indicator set and pass.
+    if echo "$CMD_EXP" | grep -qE '(>|>>|\b(rm|mv|cp|tee|truncate|ln|install|dd|python|python3|ruby|node|perl|php|awk|ed|ex|vim|vi|nano|emacs|patch)\b|sed -i|chmod|chown|chflags|xattr|git (checkout|restore|reset|clean))' 2>/dev/null; then
       block "Bash mutation of Vajra immutable core"
     fi
   fi
@@ -183,18 +185,19 @@ if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\brm\b[^|;&]*-[a-z
   fi
 fi
 
-# 2. git push --force (any form) including +refspec force
-if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git push( |.*)(--force|--force-with-lease|-f\b|[^a-zA-Z]\+[a-zA-Z._/-]+:?)' 2>/dev/null; then
+# 2. git push --force (any form) including +refspec force. The `git\b[^|;&]*`
+#    prefix tolerates global options like `git -C <path>` / `--git-dir=` (NEW-03).
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git\b[^|;&]*\bpush\b[^|;&]*(--force|--force-with-lease|-f\b|[^a-zA-Z]\+[a-zA-Z._/*-]+:?)' 2>/dev/null; then
   block "git push --force / +refspec force-push"
 fi
 
 # 3. git reset --hard (unconditional — destroys uncommitted work)
-if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git reset --hard' 2>/dev/null; then
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git\b[^|;&]*\breset\b[^|;&]*--hard' 2>/dev/null; then
   block "git reset --hard"
 fi
 
 # 3b. git clean -fdx (wipes untracked)
-if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git clean( |.*)-[a-zA-Z]*f' 2>/dev/null; then
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git\b[^|;&]*\bclean\b[^|;&]*-[a-zA-Z]*f' 2>/dev/null; then
   block "git clean -f (deletes untracked files)"
 fi
 
@@ -238,6 +241,14 @@ fi
 if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '(base64( |.*)(-d|--decode|-D)|xxd -r|openssl( |.*)(enc|base64).*-d)' 2>/dev/null; then
   if echo "$CHECK_STRING" | grep -qE '(\|( )*(ba|z)?sh|bash -c|\beval\b|\$\(|`)' 2>/dev/null; then
     block "decode-and-execute (obfuscated payload)"
+  fi
+fi
+
+# 9c. Interpreter inline-code that shells out or decodes-and-executes (NEW-02).
+#     e.g. python3 -c "os.system(base64.b64decode('...'))", node -e "...execSync".
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\b(python[23]?|ruby|perl|node|php)\b[^|;]*[[:space:]]-(c|e)\b' 2>/dev/null; then
+  if echo "$CHECK_STRING" | grep -qE '(os\.system|subprocess|system\(|[^a-z]exec\(|execSync|child_process|popen|spawn|Runtime\.getRuntime|b64decode|base64|fromhex|unhexlify|codecs\.decode)' 2>/dev/null; then
+    block "interpreter inline-code shelling out or decoding-and-executing"
   fi
 fi
 

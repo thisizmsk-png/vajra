@@ -77,6 +77,25 @@ run BLOCK "Write settings"    "{\"tool\":\"Write\",\"input\":{\"file_path\":\"$H
 run BLOCK "chmod -x hook"     "{\"tool\":\"Bash\",\"input\":\"chmod -x $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
 run BLOCK "Read hmac-key"     "{\"tool\":\"Read\",\"input\":{\"file_path\":\"$H/.claude/vajra/.hmac-key\"}}"
 run BLOCK "cat hmac-key bash" "{\"tool\":\"Bash\",\"input\":\"cat $H/.claude/vajra/.hmac-key\"}"
+# NEW-01: interpreter/editor writes to the immutable core
+run BLOCK "python write hook" "{\"tool\":\"Bash\",\"input\":\"python3 -c \\\"open('$H/.claude/skills/vajra/hooks/pre-tool-use.sh','w').write('exit 0')\\\"\"}"
+run BLOCK "ruby write config" "{\"tool\":\"Bash\",\"input\":\"ruby -e \\\"File.write('$H/.claude/skills/vajra/config/default.json','{}')\\\"\"}"
+run BLOCK "node write hook"   "{\"tool\":\"Bash\",\"input\":\"node -e \\\"require('fs').writeFileSync('$H/.claude/skills/vajra/hooks/pre-tool-use.sh','x')\\\"\"}"
+run BLOCK "ed edit hook"      "{\"tool\":\"Bash\",\"input\":\"ed -s $H/.claude/skills/vajra/hooks/pre-tool-use.sh\"}"
+run BLOCK "patch hook"        "{\"tool\":\"Bash\",\"input\":\"patch $H/.claude/skills/vajra/hooks/pre-tool-use.sh < /tmp/p.diff\"}"
+# NEW-02: interpreter decode-and-execute
+run BLOCK "py decode-exec"    '{"tool":"Bash","input":"python3 -c \"import base64,os;os.system(base64.b64decode('cm0gLXJmIC8='))\""}'
+run BLOCK "node execSync b64" '{"tool":"Bash","input":"node -e \"require('child_process').execSync(Buffer.from('cm0=','base64'))\""}'
+run BLOCK "py subprocess"     '{"tool":"Bash","input":"python3 -c \"import subprocess;subprocess.run(['rm','-rf','/'])\""}'
+# NEW-03: git global-option prefix evasion
+run BLOCK "git -C reset"      '{"tool":"Bash","input":"git -C /repo reset --hard HEAD~5"}'
+run BLOCK "git -C push force" '{"tool":"Bash","input":"git -C /repo push --force origin main"}'
+run BLOCK "git -C push +main" '{"tool":"Bash","input":"git -C /repo push origin +main:main"}'
+run BLOCK "git -C clean"      '{"tool":"Bash","input":"git -C /repo clean -fdx"}'
+# Must still ALLOW: legitimate interpreter use NOT touching protected paths
+run ALLOW "py normal script"  '{"tool":"Bash","input":"python3 scripts/build.py --out dist"}'
+run ALLOW "node run app"      '{"tool":"Bash","input":"node server.js"}'
+run ALLOW "py read hook (cat-like, non-protected)" '{"tool":"Bash","input":"python3 -c \"print(1+1)\""}'
 
 # --- Fail-closed ---
 run BLOCK "empty payload"           ''
