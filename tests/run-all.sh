@@ -25,6 +25,7 @@ for t in \
   tests/run-event-log.sh \
   tests/run-compaction.sh \
   tests/run-cost.sh \
+  tests/run-ralph.sh \
   tests/fleet/run-relay-auth.sh \
 ; do
   section "$t"

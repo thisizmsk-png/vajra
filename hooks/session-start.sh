@@ -65,6 +65,8 @@ if [ -f "$MANIFEST" ]; then
       "engine/plan-mode.md"
       "engine/verification.md"
       "engine/compaction.md"
+      "engine/ralph-loop.md"
+      "scripts/vajra-ralph.sh"
       "atman/oracle.md"
       "scripts/vajra-phase.sh"
       "scripts/vajra-verify-work.sh"
