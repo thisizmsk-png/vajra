@@ -35,6 +35,7 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra act` | Approve the plan and execute it step-by-step (`vajra-phase.sh set act`). Writes are unblocked; checkpoint per step. |
 | `/vajra explore` | Force read-only explore phase (`vajra-phase.sh set explore`). |
 | `/vajra phase` | Show the current phase (`vajra-phase.sh get`). |
+| `/vajra verify-work <slug> "<cmd>"...` | Proof-of-work gate: run the verification commands, capture output + diff into a walkthrough, exit non-zero on any failure. "Done" requires a green walkthrough. See `engine/verification.md`. |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
 | `/vajra atman status` | Show practice stats: patches pending, skills improved, routing learned |
