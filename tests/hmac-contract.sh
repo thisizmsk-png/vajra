@@ -15,10 +15,10 @@ report() {
   local label="$1" status="$2"
   if [ "$status" = "PASS" ]; then
     printf '  \033[32mPASS\033[0m  %s\n' "$label"
-    ((PASS++))
+    PASS=$((PASS+1))
   else
     printf '  \033[31mFAIL\033[0m  %s\n' "$label"
-    ((FAIL++))
+    FAIL=$((FAIL+1))
   fi
 }
 
