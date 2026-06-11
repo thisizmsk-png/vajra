@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T05:08:25Z",
+  "generated": "2026-06-11T05:16:54Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "0c758997bedecb12a756b82763480eb9510405af360a742d923de28edf69f8e1",
@@ -661,7 +661,7 @@
     "fleet/discovery-relay.md": "f36242939c51ac85f4cc6dc6ae3006d7aea4840305f7fe713d2ca5d8bff82742",
     "fleet/fleet-coordinator.sh": "f9bb4aafe2cebfacc05ab379d32a2a01becc83d59e638104ea8b4e79c7a41e90",
     "hooks/post-tool-use.sh": "ea31ba0ac50bdfa545456285b656a5126b41efdc5dc52c40c19e2aecf40db220",
-    "hooks/pre-tool-use.sh": "ff74191ffd6777f3a7a473512dc29f389a50d3cd0032e4729abab565fd22d1ec",
+    "hooks/pre-tool-use.sh": "9ad58e8b89e94e9cd890278da2b0bc4d40d79c07c5da5ab02c5dd90a91eb2142",
     "hooks/session-start.sh": "7d136311ba8c64c62ac3e8d2cc55d987e2cb30e0c5b92453973687674b487d51",
     "memory/dream-consolidation.md": "b7b0a77a852a06bad1805de8916e67a0a4eb441a064d96e38c973619e0d09373",
     "memory/tiered-memory.md": "e251b0d3454d8e199471759d182e3043bf2786217f024fe84697b912ebddf5e2",
@@ -702,7 +702,7 @@
     "tests/hmac-contract.sh": "4193c08cf74c6a9c2af665c0d1ab07cfb4c82679d5723f44d98fd92c77ca24a0",
     "tests/hooks/pre-tool-use.bats": "b793f4b6f673b69f27fdf5cfd4cc2b227385dfeb82ad351a0643f31b86666253",
     "tests/hooks/run-post-tool-use.sh": "83b3d6f0d3f08d198460a1183b70de9f2d0d4e386e9eb7babd7b772dae8a65b2",
-    "tests/hooks/run-pre-tool-use.sh": "2ff52416ab9c64217d687a559aecf0e7e9a2760901671a9620d7d8a218eab3d4",
+    "tests/hooks/run-pre-tool-use.sh": "fafb8199990022ca1a0546dd1ace2a34ff8ff84016d9faa7a4af527977be2d99",
     "tests/hooks/run-session-start.sh": "1e650a66b0f3d21a23be6d2aa4c8656317326b1c98c59a463d41394632d4d13b",
     "tests/run-all.sh": "67a97125f420548fe0703470849ce9ad8765302f992ab70df4e3b609a1f77220",
     "tests/sanitizer.test.ts": "94f5a9fa547499a0955e5f3107eff823dbcc9da2718cfa310deeece698db88ab",

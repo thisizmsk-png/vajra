@@ -94,7 +94,10 @@ block() { BLOCKED=true; REASON="$1"; }
 # Match the protected path SUFFIX anywhere in the string (not HOME-anchored), so
 # a relative path like `../../.claude/skills/vajra/hooks/...` is caught too (F-1
 # follow-up: the old HOME-anchored regex missed relative targets).
-PROTECTED_RE='\.claude/skills/vajra/|\.claude/vajra/\.hmac-key|\.claude/settings(\.local)?\.json|\.claude/hooks/|(^|/)skills/vajra/|(^|/)vajra/(hooks|config|engine|steering|redteam|fleet|atman|scripts)/'
+# Core nodes are matched even when they TERMINATE the token (no trailing slash),
+# so `mv ~/.claude/skills/vajra /tmp` and `ln -sfn x ~/.claude/skills/vajra`
+# (relocating/repointing the whole core) are caught, not just `.../vajra/file`.
+PROTECTED_RE='\.claude/skills/vajra($|[/"'"'"' ])|\.claude/vajra/\.hmac-key|\.claude/settings(\.local)?\.json|\.claude/hooks($|[/"'"'"' ])|(^|/)skills/vajra($|[/"'"'"' ])|(^|/)vajra/(hooks|config|engine|steering|redteam|fleet|atman|scripts)($|[/"'"'"' ])'
 # The core's UNPROTECTED ancestors. A recursive/archive writer aimed at one of
 # these (e.g. `rsync -a src ~/.claude/`, `tar -xf e -C ~/.claude/skills`) lands
 # inside the core without the protected substring ever appearing in the command.
@@ -133,14 +136,22 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
   fi
 fi
 
-# 0d. Recursive / archive / bulk writers aimed at an ANCESTOR of the core
-#     (~/.claude or ~/.claude/skills) overwrite or delete the immutable core in
-#     one command without naming a protected path. Block them on an ancestor
-#     match. (RED finding: `rsync -a /tmp/p/ ~/.claude/` replaced every hook.)
+# 0d. Any non-reader Bash command targeting a core ANCESTOR directory
+#     (~/.claude or ~/.claude/skills, as a terminal directory) is blocked —
+#     DEFAULT-DENY, the same inversion as 0b. A recursive/archive writer aimed
+#     at an ancestor lands inside the core without naming a protected path
+#     (`rsync -a /tmp/p/ ~/.claude/`), and enumerating writer binaries
+#     (rsync/tar/7z/unar/ln/find -execdir/...) is a losing race. Pure reads of
+#     the ancestor dir (ls/du/cat) still pass.
 if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; then
   if echo "$CMD_EXP" | grep -qE "$CORE_ANCESTOR_RE" 2>/dev/null; then
-    if echo "$CMD_EXP" | grep -qE '\b(rsync|tar|gtar|bsdtar|cpio|pax|ditto|unzip|scp|sftp|rclone|shred)\b|\bcp\b[^|;]*-[a-zA-Z]*[rRa]|\bmv\b|>|>>' 2>/dev/null; then
-      block "bulk/recursive/archive write into a Vajra core ancestor (~/.claude)"
+    if echo "$CMD_EXP" | grep -qE '(>|>>|\||;|&&|`|\$\()' 2>/dev/null; then
+      block "Bash touching a Vajra core ancestor (non-trivial command)"
+    else
+      ANC_FW="$(echo "$CMD_EXP" | awk '{for(i=1;i<=NF;i++){if($i ~ /=/ && $i !~ /^-/)continue; print $i; exit}}')"
+      if ! echo "$ANC_FW" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|du|tree|sha256sum|shasum|md5|md5sum|cut|sort|uniq|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
+        block "Bash mutation of a Vajra core ancestor (non-reader command)"
+      fi
     fi
   fi
 fi
