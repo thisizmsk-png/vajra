@@ -54,6 +54,21 @@ status: draft        # draft → approved → executing → done
 <how we'll know it worked: tests/commands to run after, expected output>
 ```
 
+## How the phase is set
+
+The phase lives in `~/.claude/vajra/.phase`. The harness transitions it by
+**writing that file** (the pre-tool hook carves out `.phase` so the transition
+works even from inside plan — otherwise plan would be a dead-end). The
+`scripts/vajra-phase.sh` helper (`set explore|plan|act`) is a convenience for
+your own terminal.
+
+> **Scope note (honest):** Plan Mode is a **workflow-discipline** feature — it
+> gives you a cheap read-only planning pass and an editable plan, and it keeps a
+> cooperative agent from jumping ahead. It is **not** a hard security boundary:
+> the hard boundaries against a compromised agent are the immutable core and the
+> OS sandbox (see [SECURITY.md](../SECURITY.md)). Don't rely on the phase gate to
+> contain a malicious agent; rely on it to structure normal work.
+
 ## Rules
 
 1. **Plan is read-only to produce.** While in `plan` phase the hook blocks

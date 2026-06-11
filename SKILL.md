@@ -31,10 +31,10 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra fleet architecture-review` | Deploy Cortex crew: Yudhishthira (lead) + Arjuna + Bhishma + Draupadi |
 | `/vajra redteam <target>` | Run security tests against a skill/agent |
 | `/vajra review [target]` | Steering-rule code review via the 5-pass pipeline (confidence-gated, blocking-aware). Defaults to the current diff. |
-| `/vajra plan <task>` | Enter Plan Mode: read-only exploration → emit an editable `data/plans/{slug}.plan.md` → pause for edits. Runs `scripts/vajra-phase.sh set plan`. See `engine/plan-mode.md`. |
-| `/vajra act` | Approve the plan and execute it step-by-step (`vajra-phase.sh set act`). Writes are unblocked; checkpoint per step. |
-| `/vajra explore` | Force read-only explore phase (`vajra-phase.sh set explore`). |
-| `/vajra phase` | Show the current phase (`vajra-phase.sh get`). |
+| `/vajra plan <task>` | Enter Plan Mode: set phase by writing `plan` to `~/.claude/vajra/.phase` → read-only exploration → emit an editable `data/plans/{slug}.plan.md` → pause for edits. See `engine/plan-mode.md`. |
+| `/vajra act` | Approve the plan and execute it step-by-step: write `act` to `~/.claude/vajra/.phase` (the hook carves out `.phase` so this transition works), then execute with per-step checkpoints. |
+| `/vajra explore` | Force read-only explore phase (write `explore` to `~/.claude/vajra/.phase`). |
+| `/vajra phase` | Show the current phase (read `~/.claude/vajra/.phase`; absent = unrestricted). |
 | `/vajra verify-work <slug> "<cmd>"...` | Proof-of-work gate: run the verification commands, capture output + diff into a walkthrough, exit non-zero on any failure. "Done" requires a green walkthrough. See `engine/verification.md`. |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |

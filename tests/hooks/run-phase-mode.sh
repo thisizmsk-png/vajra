@@ -34,6 +34,10 @@ hook '{"tool":"Bash","input":"mkdir /tmp/newdir"}'; [ $? -eq 1 ]; check "plan: m
 hook '{"tool":"Bash","input":"echo hi > /tmp/x"}'; [ $? -eq 1 ]; check "plan: redirect Bash blocked" $?
 hook '{"tool":"Read","input":"/tmp/x"}'; [ $? -eq 0 ]; check "plan: Read allowed" $?
 hook '{"tool":"Bash","input":"ls -la /tmp"}'; [ $? -eq 0 ]; check "plan: read-only Bash allowed" $?
+# transition channel: writing the .phase control file is allowed even in plan
+hook "{\"tool\":\"Write\",\"input\":{\"file_path\":\"$HOME/.claude/vajra/.phase\",\"content\":\"act\"}}"; [ $? -eq 0 ]; check "plan: Write to .phase allowed (transition channel)" $?
+# but NOT to other files in ~/.claude/vajra
+hook "{\"tool\":\"Write\",\"input\":{\"file_path\":\"$HOME/.claude/vajra/evil.txt\",\"content\":\"x\"}}"; [ $? -eq 1 ]; check "plan: Write to non-.phase still blocked" $?
 
 # --- set act ---
 bash "$PHASE" set act >/dev/null

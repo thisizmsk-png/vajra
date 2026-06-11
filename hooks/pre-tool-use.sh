@@ -201,6 +201,18 @@ fi
 PHASE_FILE="${HOME}/.claude/vajra/.phase"
 if [ "$BLOCKED" = false ] && [ -f "$PHASE_FILE" ]; then
   CURRENT_PHASE="$(cat "$PHASE_FILE" 2>/dev/null | tr -d '[:space:]')"
+  # Carve-out: writing the .phase control file itself is the transition channel
+  # (/vajra act|explore). Without this the gate is a dead-end — you could enter
+  # plan but never leave it. NOTE: Plan Mode is a workflow-discipline feature,
+  # not a hard security boundary — a compromised agent flipping its own phase is
+  # contained by the immutable core + OS sandbox, not by this gate.
+  IS_PHASE_CONTROL=false
+  if echo "$TARGET_EXP" | grep -qE '\.claude/vajra/\.phase$' 2>/dev/null; then
+    IS_PHASE_CONTROL=true
+  fi
+  if [ "$CURRENT_PHASE" = "explore" ] || [ "$CURRENT_PHASE" = "plan" ]; then
+    [ "$IS_PHASE_CONTROL" = true ] && CURRENT_PHASE="__phase_control__"
+  fi
   if [ "$CURRENT_PHASE" = "explore" ] || [ "$CURRENT_PHASE" = "plan" ]; then
     case "$TOOL_NAME" in
       Write|Edit|NotebookEdit|MultiEdit)
