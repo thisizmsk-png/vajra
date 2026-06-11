@@ -1,0 +1,17 @@
+{
+  "$schema": "vajra-pricing-v1",
+  "schemaVersion": 1,
+  "description": "Per-model USD rates per 1M tokens, used by scripts/vajra-cost.sh. Cache-write is the base input rate × cacheWriteMult (5-min cache); cache-read is × cacheReadMult. Models absent here are reported by token count only (cost shown as '?') — we never fabricate a rate. Edit to add a model or correct a rate.",
+  "cacheWriteMult": 1.25,
+  "cacheReadMult": 0.1,
+  "models": {
+    "opus":   { "match": "opus",   "input": 15.0, "output": 75.0 },
+    "sonnet": { "match": "sonnet", "input": 3.0,  "output": 15.0 },
+    "haiku":  { "match": "haiku",  "input": 0.25, "output": 1.25 }
+  },
+  "notes": [
+    "match is a substring tested against the model id (e.g. 'claude-opus-4-8' matches 'opus').",
+    "First matching entry wins; order from most-specific to least if adding overlapping matches.",
+    "Token totals and cache-hit-rate are always accurate regardless of whether a rate is known."
+  ]
+}

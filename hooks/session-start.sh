@@ -80,6 +80,8 @@ if [ -f "$MANIFEST" ]; then
       "scripts/atman-observe.sh"
       "scripts/atman-dream.sh"
       "config/steering.json"
+      "config/pricing.json"
+      "scripts/vajra-cost.sh"
       "config/sandbox.json"
       "scripts/enable-sandbox.sh"
       "SECURITY.md"
