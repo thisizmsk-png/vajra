@@ -58,9 +58,13 @@ TARGET="$(echo "$PAYLOAD" | jq -r '(.input // .tool_input) as $i | if ($i|type)=
 # ---------------------------------------------------------------------------
 normalize() {
   # shellcheck disable=SC2001
+  # Newlines/CR become `;` so a multi-line command is seen as chained (the
+  # chain detector then fires) — defeats "reader on line 1, mutation on line 2"
+  # where a line-oriented first-word check would otherwise be fooled.
   printf '%s' "$1" \
     | tr -d '"'"'"'\\' \
     | tr '\t' ' ' \
+    | tr '\n\r' ';;' \
     | tr -s ' '
 }
 
@@ -68,8 +72,12 @@ HOME_ESC="$(printf '%s' "$HOME" | sed 's/[.[\*^$/]/\\&/g')"
 
 # Expand ~ and $HOME / ${HOME} to the literal home so path checks are uniform.
 expand_home() {
+  # Also canonicalize `/./` and runs of `/` so `~/.claude/./skills/` and
+  # `~/.claude//skills/` resolve to the plain ancestor form before matching
+  # (otherwise they slip past the terminator-anchored ancestor regex).
   printf '%s' "$1" \
-    | sed "s#\\\${HOME}#${HOME}#g; s#\\\$HOME#${HOME}#g; s#~/#${HOME}/#g; s#\"~\"#${HOME}#g"
+    | sed "s#\\\${HOME}#${HOME}#g; s#\\\$HOME#${HOME}#g; s#~/#${HOME}/#g; s#\"~\"#${HOME}#g" \
+    | sed "s#/\./#/#g; s#//*#/#g"
 }
 
 NORM_CMD="$(normalize "$CMD")"
@@ -129,7 +137,7 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
     else
       # Leading command word, skipping any VAR=value env-prefix tokens.
       FIRST_WORD="$(echo "$CMD_EXP" | awk '{for(i=1;i<=NF;i++){if($i ~ /=/ && $i !~ /^-/)continue; print $i; exit}}')"
-      if ! echo "$FIRST_WORD" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|sha256sum|shasum|md5|md5sum|cut|sort|uniq|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
+      if ! echo "$FIRST_WORD" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|sha256sum|shasum|md5|md5sum|cut|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
         block "Bash mutation of Vajra immutable core (non-reader command)"
       fi
     fi
@@ -149,7 +157,7 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
       block "Bash touching a Vajra core ancestor (non-trivial command)"
     else
       ANC_FW="$(echo "$CMD_EXP" | awk '{for(i=1;i<=NF;i++){if($i ~ /=/ && $i !~ /^-/)continue; print $i; exit}}')"
-      if ! echo "$ANC_FW" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|du|tree|sha256sum|shasum|md5|md5sum|cut|sort|uniq|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
+      if ! echo "$ANC_FW" | grep -qE '^(cat|less|more|head|tail|grep|egrep|fgrep|rg|wc|diff|cmp|file|stat|ls|du|tree|sha256sum|shasum|md5|md5sum|cut|nl|od|hexdump|xxd|strings|column|bat|view|realpath|readlink|dirname|basename|echo|test|true)$' 2>/dev/null; then
         block "Bash mutation of a Vajra core ancestor (non-reader command)"
       fi
     fi
