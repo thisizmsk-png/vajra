@@ -7,6 +7,18 @@ VAJRA_HOME="${HOME}/.claude/vajra"
 MANIFEST="${VAJRA_SKILL}/manifest.json"
 HMAC_KEY_FILE="${VAJRA_HOME}/.hmac-key"
 
+# Portable SHA-256 (macOS: shasum; Linux: sha256sum)
+sha256_of() {
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    echo "ERROR: no sha256 tool (install coreutils or shasum)" >&2
+    exit 1
+  fi
+}
+
 echo "Generating manifest..."
 
 # Find all files excluding .git, node_modules, manifest itself, graphify temp
@@ -26,7 +38,7 @@ if command -v jq &>/dev/null; then
   ENTRIES="{"
   FIRST=true
   while IFS= read -r file; do
-    HASH=$(sha256sum "$file" | cut -d' ' -f1)
+    HASH=$(sha256_of "$file")
     REL_PATH="${file#${VAJRA_SKILL}/}"
     if [ "$FIRST" = true ]; then
       FIRST=false
@@ -53,7 +65,7 @@ else
 
   FIRST=true
   while IFS= read -r file; do
-    HASH=$(sha256sum "$file" | cut -d' ' -f1)
+    HASH=$(sha256_of "$file")
     REL_PATH="${file#${VAJRA_SKILL}/}"
     if [ "$FIRST" = true ]; then
       FIRST=false
@@ -73,7 +85,7 @@ echo "Files checksummed: $(echo "$FILES" | wc -l)"
 
 # Sign the manifest with HMAC if key exists
 if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
-  MANIFEST_HASH=$(sha256sum "${MANIFEST}" | cut -d' ' -f1)
+  MANIFEST_HASH=$(sha256_of "${MANIFEST}")
   KEY_HEX="$(cat "$HMAC_KEY_FILE")"
   MANIFEST_SIG=$(printf '%s' "$MANIFEST_HASH" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${KEY_HEX}" -hex 2>/dev/null | awk '{print $NF}')
   echo "$MANIFEST_SIG" > "${MANIFEST}.sig"

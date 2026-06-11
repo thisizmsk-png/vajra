@@ -113,6 +113,25 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
 fi
 
 # ---------------------------------------------------------------------------
+# Integrity tamper flag (set by session-start.sh on manifest mismatch, VJR-06).
+# While a violation is unresolved, allow read-only tools but block mutations so
+# the operator can investigate without the (possibly compromised) harness acting.
+# ---------------------------------------------------------------------------
+TAMPER_FLAG="${HOME}/.claude/vajra/.integrity-violation"
+if [ "$BLOCKED" = false ] && [ -f "$TAMPER_FLAG" ]; then
+  case "$TOOL_NAME" in
+    Write|Edit|NotebookEdit|MultiEdit)
+      block "integrity violation unresolved — mutations blocked (see /vajra verify)"
+      ;;
+    Bash)
+      if echo "$NORM_CMD" | grep -qE '(>|>>|\b(rm|mv|cp|tee|truncate|install|dd|git)\b|sed -i|chmod|chown|npm i|pip install|cargo add|curl|wget)' 2>/dev/null; then
+        block "integrity violation unresolved — mutating/network Bash blocked (see /vajra verify)"
+      fi
+      ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # Phase enforcement (explore-plan-act) — read-only during explore/plan.
 # ---------------------------------------------------------------------------
 PHASE_FILE="${HOME}/.claude/vajra/.phase"
