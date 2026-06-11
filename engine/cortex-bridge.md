@@ -82,7 +82,7 @@ When `/vajra fleet` is invoked, check if a pre-defined crew matches the task typ
 
 Each Cortex agent carries a set of **steering rules** (see `steering/README.md`)
 — concrete, scoped, blocking-aware engineering standards distilled from the
-AutoSDE/CodingAgent rule packs. This is what makes an agent's review consistent
+production code-review rule packs. This is what makes an agent's review consistent
 and actionable instead of vibes-based.
 
 1. **Resolve the agent's rules** from `config/steering.json` → `agentSteering`:

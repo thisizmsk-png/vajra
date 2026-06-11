@@ -1,6 +1,6 @@
 # Vajra Steering — Machine-Checkable Engineering Rules
 
-Steering brings the **AutoSDE / CodingAgent rule-pack model** into Vajra: a set
+Steering brings the **machine-checkable rule-pack model** into Vajra: a set
 of scoped, blocking-aware engineering rules plus a confidence-gated review
 pipeline that Cortex agents enforce. It is how Vajra turns "review my code" from
 a vibe into a checklist of concrete, quotable rules.

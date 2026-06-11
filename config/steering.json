@@ -1,7 +1,7 @@
 {
   "$schema": "vajra-steering-v1",
   "schemaVersion": 1,
-  "description": "Machine-checkable engineering rules (steering) + the review pipeline that enforces them. Inspired by the AutoSDE/CodingAgent rule-pack model: scoped, blocking-aware, confidence-gated review.",
+  "description": "Machine-checkable engineering rules (steering) + the review pipeline that enforces them. Inspired by the machine-checkable rule-pack model: scoped, blocking-aware, confidence-gated review.",
   "review": {
     "confidenceThreshold": 8,
     "comment": "1-10. Comments scored below this are discarded. Higher = fewer, higher-quality comments.",

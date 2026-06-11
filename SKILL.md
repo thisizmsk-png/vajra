@@ -147,7 +147,7 @@ Commands:
 ## Steering — Machine-Checkable Review (`/vajra review`)
 
 Vajra enforces concrete engineering rules through a **steering** layer modeled on
-the AutoSDE/CodingAgent rule-pack engine. See `steering/README.md`.
+a machine-checkable rule-pack engine. See `steering/README.md`.
 
 On `/vajra review [target]` (defaults to the current git diff):
 1. Select the rule files in `config/steering.json` whose `filePatterns` match the

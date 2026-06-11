@@ -5,7 +5,7 @@
 - blocking: false
 - file-patterns: ["**/*"]
 
-Distilled from the AutoSDE/CodingAgent rule packs and their SKILL.md companions
+Distilled from the production code-review rule packs and their SKILL.md companions
 (Effective Java/Python, Clean Code, PEP 8/484, Lambda Powertools, production
 incident learnings). Optimize for correctness and maintainability first. Never
 over-engineer.

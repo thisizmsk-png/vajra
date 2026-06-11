@@ -110,7 +110,7 @@ vajra/
 │   ├── reporting.md          ← HTML/JSON/SARIF output
 │   └── scenarios/            ← 6 files × 4 attacks = 24 scenarios
 │
-├── steering/                 ← Machine-checkable engineering rules (AutoSDE-style)
+├── steering/                 ← Machine-checkable engineering rules (rule-pack style)
 │   ├── review-pipeline.md    ← 5-pass review (generate→dedup→confidence→guideline→refine)
 │   └── rules/                ← principles, security(blocking), testing, lambda,
 │                              aws-cdk, typescript, python, java, general

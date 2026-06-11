@@ -1,6 +1,6 @@
 # Vajra Steering Review Pipeline
 
-A high-signal code-review protocol, modeled on the AutoSDE/CodingAgent 5-pass
+A high-signal code-review protocol, modeled on a proven 5-pass
 engine. Used by `/vajra review <target>`, by Cortex review agents (Arjuna,
 Vidura, Bhishma), and inside the red-team's findings pass.
 
