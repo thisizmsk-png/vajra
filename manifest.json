@@ -1,11 +1,11 @@
 {
-  "generated": "2026-06-11T05:50:39Z",
+  "generated": "2026-06-11T05:51:53Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "0c758997bedecb12a756b82763480eb9510405af360a742d923de28edf69f8e1",
     "README.md": "c066e9020d6b6bd7c1d2d49294015d2cecdf0249e118a36f3b0ab3af021e87a8",
     "SECURITY.md": "f50d97bdcf2ab927f66341074a7d39ac3e8031b185967c555c58c84a1ba8caa9",
-    "SKILL.md": "6e8a0b6f80f336fc41946d990b94c3c8a15400b6441e53aa841ae25f491dbcab",
+    "SKILL.md": "a911e237694530dcc3b42557d3ffdc94814149eb4d029c9e659d98047e857f11",
     "atman/ATMAN.md": "05aa81f0ce20dcbf1bb2739a772c039172b6d1627165ddba0d93a6ef0e92959b",
     "atman/agent-review-pairs.md": "87f24ff3249f223aab0cc84ee836d0370a3c2ceec086fe5b286c25f101cc9194",
     "atman/muscle-memory.md": "a5cfa0090df23d25a5d6aca4c4dfe45e550df87ab226e73d8505e274634b768a",

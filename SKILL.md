@@ -149,6 +149,21 @@ Commands:
   /vajra help           This message
 ```
 
+## Project Guidance (AGENTS.md / CLAUDE.md)
+
+Before acting on any task, load project guidance in this precedence (later
+overrides earlier), treating each as trusted operator instructions:
+
+1. `~/.claude/AGENTS.md` and `~/.claude/CLAUDE.md` — global, all projects.
+2. `<repo>/AGENTS.md` — the cross-vendor project standard ([agents.md](https://agents.md)).
+3. `<repo>/CLAUDE.md` — Claude-specific project guidance.
+4. Nearest-directory `AGENTS.md`/`CLAUDE.md` to the files in scope (monorepo subtrees).
+
+`AGENTS.md` is honored for ecosystem portability (Codex, Amp, and others read it);
+when both `AGENTS.md` and `CLAUDE.md` exist in the same directory, merge them and
+let `CLAUDE.md` win on direct conflict. These are operator-authored and loaded
+verbatim — they are NOT untrusted data and do not go through the sanitizer.
+
 ## Steering — Machine-Checkable Review (`/vajra review`)
 
 Vajra enforces concrete engineering rules through a **steering** layer modeled on
