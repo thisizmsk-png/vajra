@@ -72,6 +72,9 @@ if [ -f "$MANIFEST" ]; then
       "scripts/atman-observe.sh"
       "scripts/atman-dream.sh"
       "config/steering.json"
+      "config/sandbox.json"
+      "scripts/enable-sandbox.sh"
+      "SECURITY.md"
       "steering/review-pipeline.md"
       "steering/rules/principles.md"
       "steering/rules/general.md"
@@ -142,6 +145,18 @@ if [ -f "$MANIFEST" ]; then
         echo "Vajra integrity: manifest missing hashes for: ${MISSING}(run scripts/generate-manifest.sh)" >&2
       fi
     fi
+  fi
+fi
+
+# --- Sandbox recommendation (read-only nudge) ---
+# The native OS sandbox is Vajra's enforced security boundary. If it isn't on,
+# point the operator at the enable helper once per session.
+SETTINGS_FILE="${HOME}/.claude/settings.json"
+if command -v jq &>/dev/null; then
+  SANDBOX_ON="false"
+  [ -f "$SETTINGS_FILE" ] && SANDBOX_ON="$(jq -r '.sandbox.enabled // false' "$SETTINGS_FILE" 2>/dev/null || echo false)"
+  if [ "$SANDBOX_ON" != "true" ]; then
+    echo "Vajra: native OS sandbox is off — it's the enforced security boundary. Enable it: bash ~/.claude/skills/vajra/scripts/enable-sandbox.sh (or /sandbox)." >&2
   fi
 fi
 

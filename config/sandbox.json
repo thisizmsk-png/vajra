@@ -1,0 +1,57 @@
+{
+  "$schema": "vajra-sandbox-recommendation-v1",
+  "schemaVersion": 1,
+  "description": "Recommended Claude Code native-sandbox configuration. This is the DURABLE security boundary for Vajra — the pre-tool hook is defense-in-depth, the OS sandbox (macOS Seatbelt / Linux bubblewrap) is enforced at the syscall level and holds regardless of what command the model emits. Merge `settings` into ~/.claude/settings.json (or apply per-project in .claude/settings.json). NOTE: this file is a REFERENCE — Vajra never auto-writes settings.json (it is both the immutable core and a system-settings change). Run scripts/enable-sandbox.sh to print platform-checked apply instructions.",
+  "why": [
+    "The native sandbox OS-denies writes to settings.json at every scope AND to a worktree's hooks/ and config — the enforced version of Vajra's immutable-core hook (VJR-01) and fleet confinement (VJR-04).",
+    "denyRead on credential dirs closes the secret-exfiltration leg of the lethal trifecta that a regex hook cannot reliably catch.",
+    "allowedDomains breaks egress so an injected agent cannot phone home — the boundary holds even if a command obfuscates past the hook denylist."
+  ],
+  "settings": {
+    "sandbox": {
+      "enabled": true,
+      "failIfUnavailable": false,
+      "allowUnsandboxedCommands": false,
+      "filesystem": {
+        "denyRead": [
+          "~/.aws",
+          "~/.ssh",
+          "~/.gnupg",
+          "~/.netrc",
+          "~/.npmrc",
+          "~/.pgpass",
+          "~/.config/gh",
+          "~/.docker/config.json",
+          "~/.kube",
+          "~/.claude/vajra/.hmac-key"
+        ],
+        "denyWrite": [
+          "~/.claude/skills/vajra",
+          "~/.claude/hooks"
+        ]
+      },
+      "network": {
+        "allowedDomains": [
+          "registry.npmjs.org",
+          "pypi.org",
+          "files.pythonhosted.org",
+          "github.com",
+          "api.github.com",
+          "objects.githubusercontent.com"
+        ]
+      }
+    }
+  },
+  "env": {
+    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"
+  },
+  "notes": [
+    "failIfUnavailable: set to true for unattended / managed deployments so a missing sandbox is a hard failure, not a silent fallback to unsandboxed execution.",
+    "allowUnsandboxedCommands:false = Strict mode — the dangerouslyDisableSandbox escape hatch is ignored.",
+    "Default read policy still ALLOWS ~/.aws and ~/.ssh — the denyRead list above is required, not optional.",
+    "allowedDomains is a conservative dev default (package registries + GitHub). Tailor to your pipeline's exact hosts; the proxy matches hostname only and does NOT inspect TLS, so a broad domain like github.com can be domain-fronted — for high assurance use a TLS-terminating custom proxy (sandbox.network.httpProxyPort).",
+    "Linux/WSL2 require: bubblewrap + socat (apt/dnf install), and `npm i -g @anthropic-ai/sandbox-runtime` for the seccomp Unix-socket filter. macOS needs nothing (Seatbelt is built in).",
+    "Enable interactively any time with the /sandbox command; managed-settings lockdown (allowManagedDomainsOnly, allowManagedReadPathsOnly) enforces it org-wide.",
+    "Never add a Unix socket like /var/run/docker.sock to allowUnixSockets — it grants host access and defeats the sandbox."
+  ]
+}

@@ -186,14 +186,16 @@ If you use [Claude Cortex](https://github.com/thisizmsk-png/claude-cortex), Vajr
 
 ## Security
 
-Six defense layers — see [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md#security-architecture) for details:
+Layered defense — full model in **[SECURITY.md](SECURITY.md)**:
 
-1. **Input sanitization** — 22 injection patterns stripped, control chars escaped, `<untrusted-data>` wrapping
-2. **Tool authorization** — Pre-tool hook (fail-closed), per-agent allowlists, authorization gate
-3. **State integrity** — HMAC-SHA256 on campaigns, discoveries, practice log. Timing-safe comparison.
-4. **Isolation** — Fleet in git worktrees, red-team on read-only snapshots, explore phase read-only
-5. **Observability** — Audit trail, cost tracking, practice log
-6. **Supply chain** — SHA-256 manifest on all files, `/vajra verify`
+0. **OS sandbox (enforced boundary)** — macOS Seatbelt / Linux bubblewrap isolates filesystem + network at the syscall level; OS-denies writes to settings + worktree hooks/config. Enable: `bash scripts/enable-sandbox.sh` or `/sandbox`. See [config/sandbox.json](config/sandbox.json).
+1. **Immutable core** — pre-tool hook default-denies any Bash/Write that would mutate the harness's own policy surface (119-case regression suite).
+2. **Egress / lethal-trifecta control** — credential-exfil + DNS-tunnel blocks, reinforced by sandbox `denyRead` + `allowedDomains`.
+3. **Prompt-injection sanitizer** — fixed-point strip (no reassembly) + NFKC/invisible-Unicode/ASCII-smuggling removal + `<untrusted-data>` wrapping.
+4. **Supply chain** — full-enforcement-set SHA-256 + manifest-signature verify → tamper flag that blocks mutations; `/vajra verify`.
+5. **State integrity** — HMAC-SHA256 (timing-safe), per-run nonce + provisioned-agent binding, hash-chained practice log.
+
+> The OS sandbox is the **enforced** boundary; the hook is hardened **defense-in-depth**. A denylist over free-form shell can't be a complete control on its own — turn the sandbox on.
 
 ## Requirements
 
