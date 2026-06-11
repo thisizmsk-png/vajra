@@ -1,233 +1,208 @@
-# Vajra — Agent Harness for Claude Code
+# Vajra — an agent harness for Claude Code
 
-Smart routing, campaign persistence, fleet mode, red-team testing, self-improvement, and 87 bundled skills for Claude Code.
+**Vajra makes Claude Code safer, cheaper, more capable, and harder to fool.** It
+wraps your normal Claude Code sessions with the things a serious workflow needs
+but the base tool leaves to you: a hard safety boundary, a plan-before-you-act
+gate, code review against real engineering rules, proof that work actually got
+done, a memory that survives across sessions, and visibility into what happened
+and what it cost.
 
-## Quick Install
+You keep using Claude Code the way you already do. Vajra runs underneath and
+gives you `/vajra …` commands when you want more control.
+
+---
+
+## What you get
+
+- 🛡️ **It won't wreck your machine or leak your secrets.** A built-in safety layer
+  blocks dangerous commands, stops the agent from editing its own guardrails, and
+  pairs with the OS sandbox so file/network access is enforced by the operating
+  system — not by hoping the model behaves.
+- 📝 **Plan before it touches code.** Ask for a plan and Vajra explores read-only,
+  writes an **editable plan file** you can trim, then executes exactly what you
+  approved. No more "it confidently did the wrong thing."
+- ✅ **"Done" means proven, not claimed.** A verification step runs your tests/build
+  and captures the output into a walkthrough. If the checks fail, it isn't done.
+- 🔍 **Real code review.** `/vajra review` checks your diff against a concrete
+  rule-set (security, testing, language best-practices) and reports only the few
+  findings that matter — quoting the rule and the smallest fix.
+- 💰 **See what it costs.** A per-model cost ledger with the **cache-hit-rate** —
+  the number that actually tells you if you're spending efficiently.
+- 🧠 **It remembers and it improves.** Multi-step work persists across sessions;
+  routing learns your shortcuts; skills get better through use.
+- 👁️ **See what happened.** Every tool call is logged to a tamper-evident, replayable
+  trace — so you can reconstruct exactly what the agent did.
+- 🤖 **A team, not a generalist.** 17 specialized agents (backend, frontend, security,
+  QA, SRE…) each enforce the rules for their domain.
+
+---
+
+## Install (2 minutes)
 
 ```bash
 git clone https://github.com/thisizmsk-png/vajra.git ~/.claude/skills/vajra
 bash ~/.claude/skills/vajra/scripts/install.sh
 
-# (Optional) Install bundled skills + 17 Cortex agents
+# optional: install the 87 bundled skills + 17 specialized agents
 bash ~/.claude/skills/vajra/scripts/install-skills.sh
+
+# strongly recommended: turn on the OS security boundary
+bash ~/.claude/skills/vajra/scripts/enable-sandbox.sh   # prints the steps; or run /sandbox
 ```
 
-## How It Works
+**Needs:** Claude Code CLI, Git, Node.js 18+. macOS or Linux/WSL2.
 
+That's it — start a Claude Code session and Vajra is active. Type `/vajra help`
+any time.
+
+---
+
+## Your first day with Vajra
+
+Think in terms of **what you want to do**, not which command to memorize.
+
+**"Do this multi-step thing, but show me the plan first."**
 ```
-User Input → 4-Tier Router → Skill Execution → Atman Observation
-                 │                   │                  │
-            T1: regex (0 tok)   Cortex agent       Log outcome
-            T2: campaign (0)    assigned per        Check for
-            T3: keyword (0)     domain              failure
-            T4: LLM (~500)                          patterns
-                 │                   │                  │
-            Authorization       Phase enforced     Routing learns
-            Gate                (explore→plan→act)  shortcuts
-```
-
-### The Routing Cascade
-
-Every user input goes through 4 tiers, stopping at the first match:
-
-| Tier | Method | Cost | Example |
-|------|--------|------|---------|
-| T1 | Regex pattern match (RE2) | 0 tokens | `/test auth` → testing |
-| T2 | Active campaign resume | 0 tokens | continues where you left off |
-| T3 | Keyword lookup | 0 tokens | "deploy staging" → ci-cd |
-| T4 | LLM classification | ~500 tokens | complex/ambiguous tasks |
-
-**Target: 80% of tasks route at T1-T3 (zero tokens).** Atman's muscle memory continuously moves T4 routes down to T3/T1.
-
-### The Campaign Lifecycle
-
-Multi-step tasks persist across sessions:
-
-```
-/vajra "migrate database to PostgreSQL"
-  → Creates campaign (SQLite + HMAC-SHA256)
-  → Step 1: Explore schema ──── checkpoint ✓
-  → Step 2: Write migration ─── checkpoint ✓
-  → [session ends]
-
-/vajra continue
-  → Verifies HMAC integrity
-  → Resumes at Step 3: Test migration
-  → Step 4: Apply ──────────── checkpoint ✓
-  → Campaign complete
+/vajra plan "migrate the user table to PostgreSQL"
+   → it explores (read-only), writes data/plans/migrate-user-table.plan.md
+   → you open that file, delete the step you don't want, save
+/vajra act
+   → it does exactly the remaining steps, checkpointing as it goes
 ```
 
-### The Atman Practice Loop
-
-Skills improve through use — like a basketball player practicing daily:
-
+**"Review my changes properly."**
 ```
-Every shot tracked     →  practice-log.jsonl (HMAC-signed, append-only)
-Review game tape       →  Self-review on ≥2 failures of same skill
-Teammates review       →  Peer review by domain-paired skills
-Muscle memory builds   →  Routing learns shortcuts from repetition
-Bad patterns corrected →  Auto-rollback if patched skill regresses
+/vajra review
+   → checks the current diff against the rule-set; reports BLOCKING vs advisory
+     findings, each with the rule it breaks and the smallest fix
 ```
 
-## Architecture
-
-Full architecture doc with data flow diagrams, module reference, security layers, and agent hierarchy:
-**[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)**
-
-Interactive knowledge graph (168 nodes, 229 edges, 16 communities):
-**[docs/architecture/graph.html](docs/architecture/graph.html)** — open in browser
-
-Graph analysis report:
-**[docs/architecture/GRAPH_REPORT.md](docs/architecture/GRAPH_REPORT.md)**
-
-### Directory Structure
-
+**"Prove the fix actually works."**
 ```
-vajra/
-├── SKILL.md                  ← Entry point (Claude Code loads this)
-├── config/default.json       ← All config: routing, security, fleet, cortex
-│
-├── engine/                   ← Core systems
-│   ├── engine.ts             ← SQLite state machine + HMAC integrity
-│   ├── router.md             ← 4-tier routing cascade
-│   ├── sanitizer.ts          ← Prompt injection defense (22 patterns)
-│   ├── checkpoint.md         ← Save/resume across sessions
-│   ├── explore-plan-act.md   ← Phase enforcement (read-only → discuss → execute)
-│   └── cortex-bridge.md      ← Maps 16 domains → Cortex agents
-│
-├── fleet/                    ← Parallel agent orchestration
-│   ├── fleet-coordinator.sh  ← Process supervisor (worktrees, PID tracking)
-│   ├── coordinator.md        ← Fleet protocol
-│   └── discovery-relay.md    ← HMAC-signed inter-agent messaging
-│
-├── memory/                   ← Tiered knowledge persistence
-│   ├── tiered-memory.md      ← L1 index → L2 topics → L3 archive
-│   └── dream-consolidation.md ← Memory compaction protocol
-│
-├── redteam/                  ← Security self-testing
-│   ├── orchestrator.md       ← Test coordinator (read-only snapshots)
-│   ├── scorer.md             ← Promptfoo-compatible scoring
-│   ├── reporting.md          ← HTML/JSON/SARIF output
-│   └── scenarios/            ← 6 files × 4 attacks = 24 scenarios
-│
-├── steering/                 ← Machine-checkable engineering rules (rule-pack style)
-│   ├── review-pipeline.md    ← 5-pass review (generate→dedup→confidence→guideline→refine)
-│   └── rules/                ← principles, security(blocking), testing, lambda,
-│                              aws-cdk, typescript, python, java, general
-│
-├── atman/                    ← Self-improvement loop
-│   ├── ATMAN.md              ← Practice loop overview
-│   ├── practice-observer.md  ← Log every skill execution
-│   ├── self-review.md        ← Analyze failure patterns
-│   ├── peer-review-pairs.md  ← 20+ cross-skill review pairs
-│   └── muscle-memory.md      ← Routing learns from repetition
-│
-├── hooks/                    ← Claude Code lifecycle hooks
-│   ├── pre-tool-use.sh       ← Block dangerous commands (fail-closed)
-│   └── session-start.sh      ← Auto-resume campaigns
-│
-├── observatory/              ← Monitoring
-│   ├── cost-tracker.md       ← Token accounting + spend alerts
-│   └── audit-trail.md        ← Event logging
-│
-├── bundled-agents/           ← 17 Mahabharat-themed agents + sepoys
-├── bundled-skills/           ← 87 skills (design, security, testing, etc.)
-├── scripts/                  ← Install scripts, manifest generator
-├── docs/architecture/        ← Architecture docs + graphify outputs
-└── manifest.json             ← SHA-256 supply chain checksums
+/vajra verify-work my-fix "npm test" "npm run build"
+   → runs both, captures output + the diff into a walkthrough; fails loudly if
+     any check fails. No green walkthrough = not done.
 ```
 
-## Cortex Integration
-
-If you use [Claude Cortex](https://github.com/thisizmsk-png/claude-cortex), Vajra auto-routes tasks to the right Mahabharat agent:
-
+**"What did this cost / where's my money going?"**
 ```
-                    Krishna (CEO)
-                   /      |       \
-          Yudhishthira  Draupadi  Duryodhana
-          (CTO)         (PM)      (Red Team)
-         /    |    \      |
-     Arjuna Bhishma Hanuman  Drona
-     (SDE)  (Sec)   (SRE)   (PO)
-     / | \    |
-  Bhima Nakula Vidura  Shakuni
-  (BE)  (FE)   (QA)   (Pentest)
+/vajra cost
+   → per-model tokens + USD + cache-hit-rate (low hit-rate = you're paying to
+     re-read the same context; fix the prompt prefix)
 ```
 
-**Pre-built fleet crews:**
+**"Is this safe? Hammer on it."**
 ```
-/vajra fleet security-audit       # Bhishma + Duryodhana + Shakuni + Vidura
-/vajra fleet feature-build        # Arjuna + Bhima + Nakula + Vidura
-/vajra fleet incident-response    # Ashwatthama + Hanuman + Bhima
-/vajra fleet architecture-review  # Yudhishthira + Arjuna + Bhishma + Draupadi
+/vajra redteam vajra        # run the adversarial self-test
+bash tests/run-all.sh       # run the full regression suite
 ```
 
-## Commands
-
+**"Resume what I was doing yesterday."**
 ```
-/vajra [task]              Smart-routed task execution
-/vajra continue            Resume last campaign
-/vajra status              Campaign status + cost
-/vajra checkpoint          Save current state
-/vajra rollback <id>       Restore to checkpoint
-/vajra memory <query>      Search tiered memory
-/vajra dream               Consolidate memory + apply approved patches
-/vajra fleet <tasks>       Parallel agents in worktrees
-/vajra redteam <tgt>       Security test a skill/agent
-/vajra review [tgt]        Steering-rule code review (5-pass, confidence-gated)
-/vajra config              Edit settings
-/vajra verify              Check file integrity
-/vajra atman status        Practice stats + improvement metrics
-/vajra atman review        Approve/reject pending skill patches
-/vajra atman log           Evolution audit trail
-/vajra atman rollback <id> Revert a specific skill patch
-/vajra help                Command reference
+/vajra continue             # picks up the last campaign at its last checkpoint
 ```
 
-## Security
+**"Spin up a whole crew."**
+```
+/vajra fleet security-audit         # security + red-team + pentest + QA, in parallel
+/vajra fleet feature-build          # principal + backend + frontend + QA
+```
 
-Layered defense — full model in **[SECURITY.md](SECURITY.md)**:
+**"Run a long job overnight without it drifting."**
+```
+/vajra ralph progress.md            # fresh agent each iteration, durable progress file
+```
 
-0. **OS sandbox (enforced boundary)** — macOS Seatbelt / Linux bubblewrap isolates filesystem + network at the syscall level; OS-denies writes to settings + worktree hooks/config. Enable: `bash scripts/enable-sandbox.sh` or `/sandbox`. See [config/sandbox.json](config/sandbox.json).
-1. **Immutable core** — pre-tool hook default-denies any Bash/Write that would mutate the harness's own policy surface (119-case regression suite).
-2. **Egress / lethal-trifecta control** — credential-exfil + DNS-tunnel blocks, reinforced by sandbox `denyRead` + `allowedDomains`.
-3. **Prompt-injection sanitizer** — fixed-point strip (no reassembly) + NFKC/invisible-Unicode/ASCII-smuggling removal + `<untrusted-data>` wrapping.
-4. **Supply chain** — full-enforcement-set SHA-256 + manifest-signature verify → tamper flag that blocks mutations; `/vajra verify`.
-5. **State integrity** — HMAC-SHA256 (timing-safe), per-run nonce + provisioned-agent binding, hash-chained practice log.
+---
 
-> The OS sandbox is the **enforced** boundary; the hook is hardened **defense-in-depth**. A denylist over free-form shell can't be a complete control on its own — turn the sandbox on.
+## Everyday commands
 
-## Requirements
+| You want to… | Command |
+|---|---|
+| Run a task (auto-routed to the right skill/agent) | `/vajra <task>` |
+| Plan first, then execute the edited plan | `/vajra plan <task>` → `/vajra act` |
+| Force read-only / check the current phase | `/vajra explore` · `/vajra phase` |
+| Review the current diff against the rules | `/vajra review` |
+| Prove work is done (run + capture checks) | `/vajra verify-work <name> "<cmd>"…` |
+| See per-model cost + cache-hit-rate | `/vajra cost` |
+| Replay/verify what the agent did | `/vajra replay [session]` |
+| Get a relevance-ranked map of the codebase | `/vajra repomap` |
+| Resume / inspect a multi-step job | `/vajra continue` · `/vajra status` |
+| Save / restore a checkpoint | `/vajra checkpoint` · `/vajra rollback <id>` |
+| Run agents in parallel | `/vajra fleet <tasks…>` (or a named crew) |
+| Security-test a skill or agent | `/vajra redteam <target>` |
+| Long autonomous loop (drift-resistant) | `/vajra ralph <progress.md>` |
+| Search / consolidate memory | `/vajra memory <query>` · `/vajra dream` |
+| Check the harness hasn't been tampered with | `/vajra verify` |
+| See how skills are self-improving | `/vajra atman status` · `/vajra atman review` |
+| Full reference | `/vajra help` |
 
-- Claude Code CLI v2.1+
-- Git
-- Node.js 18+
+You rarely need most of these — just talk to Claude Code normally and reach for a
+`/vajra` command when you want a plan, a review, proof, or a cost check.
 
-## What Makes Vajra Different
+---
 
-| Feature | Vajra | Other Harnesses |
-|---------|-------|-----------------|
-| Self-improvement | Atman practice loop (skills evolve) | Static instructions |
-| Routing cost | 80% at 0 tokens (T1-T3) | Every task costs tokens |
-| Campaign persistence | SQLite + HMAC across sessions | Ephemeral context |
-| Fleet mode | Parallel agents in worktrees | Sequential only |
-| Security | Immutable core + OS-sandbox boundary, red-team-hardened (200+ regression tests) | Permission prompts only |
-| Code review | Machine-checkable steering rules + 5-pass confidence-gated pipeline | Generic "review my code" |
-| Plan Mode | Editable plan artifact, read-only until approved | Plan or no plan |
-| Proof-of-work | Verification gate — "done" needs a captured walkthrough | Self-reported completion |
-| Observability | HMAC-chained event log + replay, per-task cost ledger (cache-hit KPI) | Opaque / session-total only |
-| Context engineering | JIT repo-map (PageRank), compaction-with-checkpoint, Ralph hard-reset loop | Grow context until it breaks |
-| Reliability | Oracle second-opinion escalation on stuck/high-stakes steps | Dig deeper alone |
-| Agent hierarchy | 17 specialized agents, each enforcing scoped rules | Generic agents |
+## Is it safe? (yes, and here's the honest version)
 
-## Testing & security
+Security is layered, and **[SECURITY.md](SECURITY.md)** has the full model. The
+short version:
+
+- The **OS sandbox** (macOS Seatbelt / Linux bubblewrap) is the real boundary —
+  it enforces what files and network a command can touch at the operating-system
+  level. **Turn it on** (`scripts/enable-sandbox.sh`).
+- On top of that, a hardened hook blocks dangerous commands, stops the agent from
+  rewriting its own guardrails, and blocks secret exfiltration. It's been through
+  five rounds of red-teaming with a regression test for every bypass found.
+- Untrusted content (memory, web data) is sanitized against prompt injection;
+  harness files are integrity-checked every session and changes trip a tamper flag.
+
+We're deliberately honest about the limits: a command-denylist can't be a complete
+control by itself, which is exactly why the OS sandbox is the enforced boundary.
+Don't skip enabling it.
+
+---
+
+## How it works (under the hood)
+
+**Smart routing — most tasks cost zero extra tokens.** Every input passes through
+a 4-tier cascade, stopping at the first match:
+
+| Tier | Method | Cost |
+|------|--------|------|
+| T1 | Regex pattern match | 0 tokens |
+| T2 | Resume an active campaign | 0 tokens |
+| T3 | Keyword lookup | 0 tokens |
+| T4 | LLM classification (only when needed) | ~500 tokens |
+
+The self-improvement loop ("Atman") learns shortcuts so more tasks route at T1–T3
+over time.
+
+**Campaigns persist.** Multi-step work is saved to SQLite with HMAC integrity and
+checkpoints, so `/vajra continue` resumes exactly where you left off — even in a
+new session.
+
+**Specialized agents.** When a task has a clear domain, Vajra adopts the right
+persona (backend, frontend, security, QA, SRE, …), and that agent enforces the
+**steering rules** for its domain during review and while writing code.
+
+**Context engineering for long runs.** A just-in-time repo map (relevance-ranked,
+no heavy dependencies), compaction-with-git-checkpoint, and a "Ralph" hard-reset
+loop keep long jobs from drifting or blowing the context window.
+
+---
+
+## For contributors / the curious
+
+- **[SECURITY.md](SECURITY.md)** — the layered defense model.
+- **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — data flow, modules, agent hierarchy.
+- **`engine/`** — routing, campaign engine (SQLite + HMAC), plan-mode, compaction, repo-map, verification, sanitizer.
+- **`steering/rules/`** — the machine-checkable engineering rules agents enforce.
+- **`hooks/`** — the lifecycle hooks (pre-tool safety, session-start integrity, pre-compact checkpoint, post-tool event log).
+- **`tests/run-all.sh`** — the full suite (~280 cases across TypeScript + shell suites). Run it before trusting a change.
 
 ```bash
-bash tests/run-all.sh         # full suite (vitest + hook/integrity/fleet/chain/plan/verify)
-bash scripts/enable-sandbox.sh # enable the OS-sandbox boundary
-/vajra redteam vajra           # re-run the adversarial self-test
+bash tests/run-all.sh     # everything green before you ship
 ```
-See **[SECURITY.md](SECURITY.md)** for the layered defense model.
 
 ## License
 

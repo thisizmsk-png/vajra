@@ -1,9 +1,9 @@
 {
-  "generated": "2026-06-11T06:12:27Z",
+  "generated": "2026-06-11T06:17:34Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "0c758997bedecb12a756b82763480eb9510405af360a742d923de28edf69f8e1",
-    "README.md": "76de442831083fb9ad2b7c98b359c0237a6715146f80be5c0ddf2a622242e761",
+    "README.md": "7a941daf0aaa351c200bafc310e35a268108c152451a3dae9abd7b82dfffa362",
     "SECURITY.md": "f50d97bdcf2ab927f66341074a7d39ac3e8031b185967c555c58c84a1ba8caa9",
     "SKILL.md": "b1b259d1098bfe72dc315d8f23278145fcbe284c4195170bf903275faab231ea",
     "atman/ATMAN.md": "4dce42cb3458d71d7afe9782f2511c626b837cbffacff4a96d2a6a6286072839",
