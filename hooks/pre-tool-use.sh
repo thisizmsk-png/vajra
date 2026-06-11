@@ -91,9 +91,16 @@ block() { BLOCKED=true; REASON="$1"; }
 #    (VJR-01) Protect: vajra skill dir, vajra state hmac key, Claude settings,
 #    and the Claude hooks dir. Resolved against $HOME.
 # ---------------------------------------------------------------------------
-PROTECTED_RE="${HOME}/\.claude/skills/vajra/|${HOME}/\.claude/vajra/\.hmac-key|${HOME}/\.claude/settings(\.local)?\.json|${HOME}/\.claude/hooks/"
+# Match the protected path SUFFIX anywhere in the string (not HOME-anchored), so
+# a relative path like `../../.claude/skills/vajra/hooks/...` is caught too (F-1
+# follow-up: the old HOME-anchored regex missed relative targets).
+PROTECTED_RE='\.claude/skills/vajra/|\.claude/vajra/\.hmac-key|\.claude/settings(\.local)?\.json|\.claude/hooks/|(^|/)skills/vajra/|(^|/)vajra/(hooks|config|engine|steering|redteam|fleet|atman|scripts)/'
+# The core's UNPROTECTED ancestors. A recursive/archive writer aimed at one of
+# these (e.g. `rsync -a src ~/.claude/`, `tar -xf e -C ~/.claude/skills`) lands
+# inside the core without the protected substring ever appearing in the command.
+CORE_ANCESTOR_RE='\.claude(/skills)?/?(["'"'"' ]|$)'
 
-# 0a. Write/Edit/NotebookEdit directly targeting a protected path.
+# 0a. Write/Edit/NotebookEdit directly targeting a protected path (absolute or relative).
 case "$TOOL_NAME" in
   Write|Edit|NotebookEdit|MultiEdit)
     if [ -n "$TARGET_EXP" ] && echo "$TARGET_EXP" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
@@ -126,10 +133,22 @@ if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; the
   fi
 fi
 
+# 0d. Recursive / archive / bulk writers aimed at an ANCESTOR of the core
+#     (~/.claude or ~/.claude/skills) overwrite or delete the immutable core in
+#     one command without naming a protected path. Block them on an ancestor
+#     match. (RED finding: `rsync -a /tmp/p/ ~/.claude/` replaced every hook.)
+if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; then
+  if echo "$CMD_EXP" | grep -qE "$CORE_ANCESTOR_RE" 2>/dev/null; then
+    if echo "$CMD_EXP" | grep -qE '\b(rsync|tar|gtar|bsdtar|cpio|pax|ditto|unzip|scp|sftp|rclone|shred)\b|\bcp\b[^|;]*-[a-zA-Z]*[rRa]|\bmv\b|>|>>' 2>/dev/null; then
+      block "bulk/recursive/archive write into a Vajra core ancestor (~/.claude)"
+    fi
+  fi
+fi
+
 # 0c. The HMAC signing key is never a legitimate read target for the agent.
 #     Blocking reads keeps the campaign/relay/practice-log MAC meaningful and
 #     stops a fleet agent from exfiltrating the key (VJR-04, VJR-08).
-HMAC_KEY_RE="${HOME}/\.claude/vajra/\.hmac-key"
+HMAC_KEY_RE='\.claude/vajra/\.hmac-key'
 if [ "$BLOCKED" = false ]; then
   if [ -n "$TARGET_EXP" ] && echo "$TARGET_EXP" | grep -qE "$HMAC_KEY_RE" 2>/dev/null; then
     block "access to the Vajra HMAC signing key"

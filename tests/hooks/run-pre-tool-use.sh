@@ -114,6 +114,21 @@ run BLOCK "php -r passthru"   '{"tool":"Bash","input":"php -r \"passthru('rm -rf
 run BLOCK "py os.execv"       '{"tool":"Bash","input":"python3 -c \"import os;os.execv('/bin/sh',['sh','-c','rm -rf /'])\""}'
 run BLOCK "py __import__"     '{"tool":"Bash","input":"python3 -c \"__import__('os').system('rm -rf /')\""}'
 run BLOCK "ruby Open3"        '{"tool":"Bash","input":"ruby -ropen3 -e \"Open3.capture2('rm -rf /')\""}'
+# RED: recursive/archive/bulk writers aimed at the core's UNPROTECTED ancestors
+run BLOCK "rsync -> .claude"        "{\"tool\":\"Bash\",\"input\":\"rsync -a /tmp/p/ $H/.claude/\"}"
+run BLOCK "rsync -> skills"         "{\"tool\":\"Bash\",\"input\":\"rsync -a /tmp/p/ $H/.claude/skills/\"}"
+run BLOCK "rsync --delete wipe"     "{\"tool\":\"Bash\",\"input\":\"rsync -a --delete /tmp/empty/ $H/.claude/skills/\"}"
+run BLOCK "tar -C .claude"          "{\"tool\":\"Bash\",\"input\":\"tar -xf /tmp/evil.tar -C $H/.claude\"}"
+run BLOCK "tar -C skills"           "{\"tool\":\"Bash\",\"input\":\"tar -xf /tmp/evil.tar -C $H/.claude/skills\"}"
+run BLOCK "cpio -D skills"          "{\"tool\":\"Bash\",\"input\":\"cpio -idmv -D $H/.claude/skills < /tmp/e.cpio\"}"
+run BLOCK "cp -r -> skills"         "{\"tool\":\"Bash\",\"input\":\"cp -r /tmp/vajra $H/.claude/skills/\"}"
+# RED: relative-path Write/Edit into the core (HOME-anchored regex used to miss these)
+run BLOCK "rel Write hook"          '{"tool":"Write","input":{"file_path":"../../../.claude/skills/vajra/hooks/pre-tool-use.sh","content":"x"}}'
+run BLOCK "rel Edit config"         '{"tool":"Edit","input":{"file_path":"../../skills/vajra/config/default.json"}}'
+# Must still ALLOW: bulk writers NOT targeting the core ancestor
+run ALLOW "rsync to project"        '{"tool":"Bash","input":"rsync -a dist/ /tmp/deploy/"}'
+run ALLOW "tar normal"              '{"tool":"Bash","input":"tar -xf release.tar -C /tmp/build"}'
+run ALLOW "cp -r project"           '{"tool":"Bash","input":"cp -r src /tmp/backup/"}'
 
 # --- Fail-closed ---
 run BLOCK "empty payload"           ''
