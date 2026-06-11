@@ -21,10 +21,12 @@ if [ "${1:-}" = "--list" ]; then
   exit 0
 fi
 
-SESSION="${1:-}"
-if [ -z "$SESSION" ]; then
+RAW_SESSION="${1:-}"
+if [ -z "$RAW_SESSION" ]; then
   LOG="$(ls -1t "$EV_DIR"/*.jsonl 2>/dev/null | head -1)"
 else
+  # Sanitize to a single safe path segment — no traversal into other dirs.
+  SESSION="$(printf '%s' "$RAW_SESSION" | tr -cd '[:alnum:]._-' | sed 's/^[.-]*//' | cut -c1-64)"
   LOG="${EV_DIR}/${SESSION}.jsonl"
 fi
 [ -n "${LOG:-}" ] && [ -f "$LOG" ] || { echo "No event log found (${SESSION:-latest}). Try --list." >&2; exit 1; }
