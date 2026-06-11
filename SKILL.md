@@ -36,6 +36,7 @@ Parse the user's input and route to the appropriate handler:
 | `/vajra explore` | Force read-only explore phase (write `explore` to `~/.claude/vajra/.phase`). |
 | `/vajra phase` | Show the current phase (read `~/.claude/vajra/.phase`; absent = unrestricted). |
 | `/vajra verify-work <slug> "<cmd>"...` | Proof-of-work gate: run the verification commands, capture output + diff into a walkthrough, exit non-zero on any failure. "Done" requires a green walkthrough. See `engine/verification.md`. |
+| `/vajra replay [session]` | Replay + integrity-verify a session's event log (every tool call, HMAC-chained). `--list` for available sessions. Runs `scripts/vajra-replay.sh`. |
 | `/vajra config` | Show or edit routing rules, spend limits, and alerts |
 | `/vajra verify` | Verify supply chain manifest integrity |
 | `/vajra atman status` | Show practice stats: patches pending, skills improved, routing learned |

@@ -22,6 +22,7 @@ for t in \
   tests/hooks/run-post-tool-use.sh \
   tests/hooks/run-phase-mode.sh \
   tests/run-verify-work.sh \
+  tests/run-event-log.sh \
   tests/fleet/run-relay-auth.sh \
 ; do
   section "$t"

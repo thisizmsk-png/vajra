@@ -19,10 +19,45 @@ PAYLOAD="$(cat)"
 # Only process if jq is available (need structured JSON parsing)
 command -v jq &>/dev/null || exit 0
 
-TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // empty' 2>/dev/null || echo "")"
+TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // .tool_name // empty' 2>/dev/null || echo "")"
 [ -z "$TOOL_NAME" ] && exit 0
 
-# Skip internal tools — only log skill-level invocations
+# --- Event log: causal trace of EVERY tool call, HMAC-chained ---------------
+# Append-only event stream for replay/debugging (OpenHands-style). Captures ALL
+# tools, including the internal ones the practice log below skips. We store a
+# hash of the args (what happened) rather than the raw args (size/secrets), and
+# chain each entry to the previous so deletion/reorder is detectable.
+sha256_hex() {
+  if command -v sha256sum &>/dev/null; then printf '%s' "$1" | sha256sum | cut -d' ' -f1
+  elif command -v shasum &>/dev/null; then printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
+  else printf '%s' "$1" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}'; fi
+}
+EV_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SESSION="$(echo "$PAYLOAD" | jq -r '.session_id // .sessionId // "session"' 2>/dev/null | tr -cd '[:alnum:]._-' | cut -c1-64)"
+[ -z "$SESSION" ] && SESSION="session"
+EV_DIR="${VAJRA_DIR}/events"
+mkdir -p "$EV_DIR"
+EV_LOG="${EV_DIR}/${SESSION}.jsonl"
+EV_OUTCOME="success"
+[ "$(echo "$PAYLOAD" | jq -r 'if .error then "true" else "false" end' 2>/dev/null)" = "true" ] && EV_OUTCOME="failure"
+EV_INPUT="$(echo "$PAYLOAD" | jq -c '.input // .tool_input // {}' 2>/dev/null || echo '{}')"
+EV_ARGS_HASH="$(sha256_hex "$EV_INPUT")"
+EV_SEQ=0; EV_PREV="genesis"
+if [ -f "$EV_LOG" ] && [ -s "$EV_LOG" ]; then
+  EV_PREV="$(tail -n 1 "$EV_LOG" | jq -r '.hmac // "genesis"' 2>/dev/null || echo genesis)"
+  EV_SEQ="$(tail -n 1 "$EV_LOG" | jq -r '.seq // 0' 2>/dev/null || echo 0)"; EV_SEQ=$((EV_SEQ+1))
+fi
+EV_ENTRY="$(jq -nc --arg ts "$EV_TS" --arg tool "$TOOL_NAME" --arg outcome "$EV_OUTCOME" \
+  --argjson seq "$EV_SEQ" --arg ah "$EV_ARGS_HASH" --arg prev "$EV_PREV" \
+  '{seq:$seq, ts:$ts, tool:$tool, outcome:$outcome, argsHash:$ah, prevHmac:$prev}')"
+if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
+  EV_KEY="$(cat "$HMAC_KEY_FILE")"
+  EV_HMAC="$(printf '%s' "$EV_ENTRY" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${EV_KEY}" -hex 2>/dev/null | awk '{print $NF}')"
+  EV_ENTRY="$(echo "$EV_ENTRY" | jq -c --arg h "$EV_HMAC" '. + {hmac:$h}')"
+fi
+echo "$EV_ENTRY" >> "$EV_LOG"
+
+# Skip internal tools for the practice log — only skill-level invocations
 case "$TOOL_NAME" in
   Read|Write|Edit|Glob|Grep|Bash|Agent|NotebookEdit) exit 0 ;;
 esac

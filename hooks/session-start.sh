@@ -65,6 +65,7 @@ if [ -f "$MANIFEST" ]; then
       "engine/verification.md"
       "scripts/vajra-phase.sh"
       "scripts/vajra-verify-work.sh"
+      "scripts/vajra-replay.sh"
       "config/default.json"
       "config/security-contracts.json"
       "fleet/fleet-coordinator.sh"
