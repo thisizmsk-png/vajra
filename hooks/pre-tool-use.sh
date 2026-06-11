@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 # Vajra PreToolUse hook — blocks dangerous tool invocations.
-# Claude Code pipes JSON with { tool, input } on stdin.
+# Claude Code pipes JSON with { tool, input } (or { tool_name, tool_input }) on stdin.
 # Exit 0 = allow, Exit 1 = block.
+#
+# Defense model (see redteam findings VJR-01, VJR-02):
+#   1. IMMUTABLE CORE  — the harness may not modify its own policy surface
+#                        (hooks, config, engine, .hmac-key, Claude settings).
+#   2. DENYLIST+NORMALIZE — dangerous commands are matched against a copy of the
+#                        command that has quotes/backslashes stripped and
+#                        whitespace collapsed, defeating quote/space evasion.
+#   3. EXFIL HEURISTICS — outbound network + credential material is blocked.
+#
+# A denylist on free-form shell is NOT a complete control. For real isolation,
+# run Claude Code's native sandbox (Seatbelt/bubblewrap) with an egress
+# allowlist. This hook is defense-in-depth, not the only line.
 
 set -euo pipefail
 
@@ -13,16 +25,15 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 # Read the hook payload from stdin
 PAYLOAD="$(cat)"
 
-# Parse JSON — prefer jq, fall back to grep, FAIL-CLOSED on parse failure
-if command -v jq &>/dev/null; then
-  TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // empty' 2>/dev/null || echo "")"
-  INPUT_RAW="$(echo "$PAYLOAD" | jq -r '.input // empty' 2>/dev/null || echo "")"
-else
-  # No jq — fail-closed: block and warn
+# Parse JSON — require jq, FAIL-CLOSED on parse failure
+if ! command -v jq &>/dev/null; then
   echo "${TIMESTAMP} BLOCK unknown-tool reason=\"jq not installed — fail-closed\"" >> "$AUDIT_LOG"
   echo "Vajra hook: jq is required for safe tool validation. Install jq or allow in settings." >&2
   exit 1
 fi
+
+# Support both legacy {tool,input} and current {tool_name,tool_input} schemas.
+TOOL_NAME="$(echo "$PAYLOAD" | jq -r '.tool // .tool_name // empty' 2>/dev/null || echo "")"
 
 # FAIL-CLOSED: if we can't parse the tool name, block the operation
 if [ -z "$TOOL_NAME" ]; then
@@ -31,124 +42,235 @@ if [ -z "$TOOL_NAME" ]; then
   exit 1
 fi
 
-# Combine tool + input for pattern matching
-CHECK_STRING="${TOOL_NAME} ${INPUT_RAW} ${PAYLOAD}"
+# Raw input can be a string (legacy) or an object. Extract:
+#   INPUT_RAW  — the whole input serialized (string or compact JSON)
+#   CMD        — the Bash command string, if any
+#   TARGET     — the file path being written/edited, if any
+INPUT_RAW="$(echo "$PAYLOAD" | jq -r 'if (.input // .tool_input) == null then "" elif ((.input // .tool_input)|type) == "string" then (.input // .tool_input) else ((.input // .tool_input)|tojson) end' 2>/dev/null || echo "")"
+CMD="$(echo "$PAYLOAD" | jq -r '(.input // .tool_input) as $i | if ($i|type)=="object" then ($i.command // "") elif ($i|type)=="string" then $i else "" end' 2>/dev/null || echo "")"
+TARGET="$(echo "$PAYLOAD" | jq -r '(.input // .tool_input) as $i | if ($i|type)=="object" then ($i.file_path // $i.path // $i.notebook_path // "") else "" end' 2>/dev/null || echo "")"
+
+# ---------------------------------------------------------------------------
+# Normalization — build a matching copy that defeats common evasion.
+# Removing quotes/backslashes and collapsing whitespace cannot change what the
+# real shell will execute (we never execute anything), but it removes the
+# `rm -r''f`, `rm  -rf  /`, and `"rm" -rf /` style splits from the matcher.
+# ---------------------------------------------------------------------------
+normalize() {
+  # shellcheck disable=SC2001
+  printf '%s' "$1" \
+    | tr -d '"'"'"'\\' \
+    | tr '\t' ' ' \
+    | tr -s ' '
+}
+
+HOME_ESC="$(printf '%s' "$HOME" | sed 's/[.[\*^$/]/\\&/g')"
+
+# Expand ~ and $HOME / ${HOME} to the literal home so path checks are uniform.
+expand_home() {
+  printf '%s' "$1" \
+    | sed "s#\\\${HOME}#${HOME}#g; s#\\\$HOME#${HOME}#g; s#~/#${HOME}/#g; s#\"~\"#${HOME}#g"
+}
+
+NORM_CMD="$(normalize "$CMD")"
+NORM_INPUT="$(normalize "$INPUT_RAW")"
+NORM_PAYLOAD="$(normalize "$PAYLOAD")"
+# Combined haystack for command-style checks (normalized).
+CHECK_STRING="$(expand_home "${TOOL_NAME} ${NORM_CMD} ${NORM_INPUT} ${NORM_PAYLOAD}")"
+# Expanded, normalized target path for write checks.
+TARGET_EXP="$(expand_home "$(normalize "$TARGET")")"
+CMD_EXP="$(expand_home "$NORM_CMD")"
 
 BLOCKED=false
 REASON=""
 
-# --- Phase enforcement (explore-plan-act) ---
+block() { BLOCKED=true; REASON="$1"; }
+
+# ---------------------------------------------------------------------------
+# 0. IMMUTABLE CORE — the harness may not modify its own policy surface.
+#    (VJR-01) Protect: vajra skill dir, vajra state hmac key, Claude settings,
+#    and the Claude hooks dir. Resolved against $HOME.
+# ---------------------------------------------------------------------------
+PROTECTED_RE="${HOME}/\.claude/skills/vajra/|${HOME}/\.claude/vajra/\.hmac-key|${HOME}/\.claude/settings(\.local)?\.json|${HOME}/\.claude/hooks/"
+
+# 0a. Write/Edit/NotebookEdit directly targeting a protected path.
+case "$TOOL_NAME" in
+  Write|Edit|NotebookEdit|MultiEdit)
+    if [ -n "$TARGET_EXP" ] && echo "$TARGET_EXP" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
+      block "write to Vajra immutable core (${TOOL_NAME})"
+    fi
+    ;;
+esac
+
+# 0b. Bash mutation/redirection aimed at a protected path.
+if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && [ -n "$CMD_EXP" ]; then
+  if echo "$CMD_EXP" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
+    # Only block if the command looks like it writes/deletes/changes perms.
+    if echo "$CMD_EXP" | grep -qE '(>|>>|\b(rm|mv|cp|tee|truncate|ln|install|dd)\b|sed -i|chmod|chown|chflags|xattr|git (checkout|restore|reset|clean))' 2>/dev/null; then
+      block "Bash mutation of Vajra immutable core"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Phase enforcement (explore-plan-act) — read-only during explore/plan.
+# ---------------------------------------------------------------------------
 PHASE_FILE="${HOME}/.claude/vajra/.phase"
-if [ -f "$PHASE_FILE" ]; then
+if [ "$BLOCKED" = false ] && [ -f "$PHASE_FILE" ]; then
   CURRENT_PHASE="$(cat "$PHASE_FILE" 2>/dev/null | tr -d '[:space:]')"
   if [ "$CURRENT_PHASE" = "explore" ] || [ "$CURRENT_PHASE" = "plan" ]; then
-    # Block write operations during EXPLORE and PLAN phases
     case "$TOOL_NAME" in
-      Write|Edit|NotebookEdit)
-        BLOCKED=true
-        REASON="blocked by ${CURRENT_PHASE} phase — read-only until /vajra act"
+      Write|Edit|NotebookEdit|MultiEdit)
+        block "blocked by ${CURRENT_PHASE} phase — read-only until /vajra act"
         ;;
       Bash)
-        # Block destructive bash commands during explore/plan
-        if echo "$INPUT_RAW" | grep -qE '(mkdir|touch|cp |mv |rm |chmod|chown|tee |sed -i|git add|git commit|git push|git checkout|git reset|npm install|pip install|cargo add)' 2>/dev/null; then
-          BLOCKED=true
-          REASON="blocked by ${CURRENT_PHASE} phase — no mutations until /vajra act"
+        if echo "$NORM_CMD" | grep -qE '(mkdir|touch|cp |mv |rm |chmod|chown|tee |sed -i|git add|git commit|git push|git checkout|git reset|npm install|pip install|cargo add)' 2>/dev/null; then
+          block "blocked by ${CURRENT_PHASE} phase — no mutations until /vajra act"
         fi
-        # Block output redirects
-        if echo "$INPUT_RAW" | grep -qE '(>>|>[^&])' 2>/dev/null; then
-          BLOCKED=true
-          REASON="blocked by ${CURRENT_PHASE} phase — no file writes until /vajra act"
+        if echo "$NORM_CMD" | grep -qE '(>>|>[^&])' 2>/dev/null; then
+          block "blocked by ${CURRENT_PHASE} phase — no file writes until /vajra act"
         fi
         ;;
     esac
   fi
 fi
 
-# --- Dangerous pattern checks ---
+# ---------------------------------------------------------------------------
+# 1. Destructive filesystem operations
+# ---------------------------------------------------------------------------
 
-# 1. rm -rf / (root filesystem wipe)
-if echo "$CHECK_STRING" | grep -qE 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--recursive\s+--force|-[a-zA-Z]*f[a-zA-Z]*r)\s+/[^a-zA-Z]' 2>/dev/null; then
-  BLOCKED=true
-  REASON="rm -rf on root filesystem"
+# 1a. recursive-force flags pointing at a dangerous target — independent of the
+#     command name (catches `rm -rf /`, `$R -rf /`, `rm -fr ~`, alias indirection).
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive --force|--force --recursive)( |=)+('"${HOME_ESC}"'|/|~|\*|\.|/(etc|usr|var|bin|sbin|lib|boot|dev|sys|opt|root|home|System|Library|Applications|private)( |/|$))' 2>/dev/null; then
+  block "recursive-force delete of a sensitive path"
 fi
 
-if echo "$CHECK_STRING" | grep -qE 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--recursive\s+--force|-[a-zA-Z]*f[a-zA-Z]*r)\s+/$' 2>/dev/null; then
-  BLOCKED=true
-  REASON="rm -rf on root filesystem"
+# 1b. explicit rm -rf of home / root / important roots even without the flag-order trick
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\brm\b[^|;&]*-[a-zA-Z]*[rf]'"" 2>/dev/null; then
+  if echo "$CHECK_STRING" | grep -qE '\brm\b[^|;&]*( |=)('"${HOME_ESC}"'( |/|$)|/( |$)|~( |/|$)|\$HOME|/(etc|usr|var|bin|sbin|lib|boot|System|Library)( |/|$))' 2>/dev/null; then
+    block "rm -rf of home/root/system path"
+  fi
 fi
 
-# 2. git push --force (to any branch)
-if echo "$CHECK_STRING" | grep -qE 'git\s+push\s+.*--force' 2>/dev/null; then
-  BLOCKED=true
-  REASON="git push --force"
+# 2. git push --force (any form) including +refspec force
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git push( |.*)(--force|--force-with-lease|-f\b|[^a-zA-Z]\+[a-zA-Z._/-]+:?)' 2>/dev/null; then
+  block "git push --force / +refspec force-push"
 fi
 
-if echo "$CHECK_STRING" | grep -qE 'git\s+push\s+-f\b' 2>/dev/null; then
-  BLOCKED=true
-  REASON="git push --force (-f shorthand)"
+# 3. git reset --hard (unconditional — destroys uncommitted work)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git reset --hard' 2>/dev/null; then
+  block "git reset --hard"
 fi
 
-# 3. git reset --hard on main/master
-if echo "$CHECK_STRING" | grep -qE 'git\s+reset\s+--hard.*(main|master)' 2>/dev/null; then
-  BLOCKED=true
-  REASON="git reset --hard on main/master"
+# 3b. git clean -fdx (wipes untracked)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'git clean( |.*)-[a-zA-Z]*f' 2>/dev/null; then
+  block "git clean -f (deletes untracked files)"
 fi
 
-# 4. chmod 777 on sensitive paths
-if echo "$CHECK_STRING" | grep -qE 'chmod\s+777\s+/' 2>/dev/null; then
-  BLOCKED=true
-  REASON="chmod 777 on root path"
+# 4. chmod / chown dangerous: 777, or recursive on root/home/system
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'chmod( |.*)(-[a-zA-Z]* )*(777|a\+rwx|=rwx)' 2>/dev/null; then
+  block "world-writable chmod (777)"
+fi
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'ch(mod|own)( |.*)-[a-zA-Z]*R[a-zA-Z]*( |=)+('"${HOME_ESC}"'|/( |$)|~|/(etc|usr|var|System|Library))' 2>/dev/null; then
+  block "recursive chmod/chown on sensitive path"
 fi
 
-# 5. dd writing to block devices
-if echo "$CHECK_STRING" | grep -qE 'dd\s+.*of=/dev/(sd|hd|nvme|vd)' 2>/dev/null; then
-  BLOCKED=true
-  REASON="dd write to block device"
+# 5. Raw writes to block/disk devices (dd OR shell redirect)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '(of=|>|>>)( )*/dev/(sd|hd|nvme|vd|disk|rdisk|mmcblk|loop)' 2>/dev/null; then
+  block "write to block/disk device"
 fi
 
-# 6. mkfs on devices (only block when Bash tool is invoking it)
-if [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\bmkfs\b' 2>/dev/null; then
-  BLOCKED=true
-  REASON="filesystem format command via Bash"
+# 6. mkfs on devices (block when Bash is invoking it)
+if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\bmkfs(\.[a-z0-9]+)?\b' 2>/dev/null; then
+  block "filesystem format command via Bash"
 fi
 
-# 7. --no-preserve-root (strong signal of destructive intent)
-if echo "$CHECK_STRING" | grep -qE '\b--no-preserve-root\b' 2>/dev/null; then
-  BLOCKED=true
-  REASON="--no-preserve-root flag detected"
+# 7. --no-preserve-root
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\-\-no-preserve-root\b' 2>/dev/null; then
+  block "--no-preserve-root flag"
 fi
 
-# 8. Pipe to shell (command injection vector)
-if echo "$CHECK_STRING" | grep -qE '\|\s*(ba)?sh\b' 2>/dev/null; then
-  BLOCKED=true
-  REASON="pipe to shell detected"
+# 8. Pipe to a shell OR interpreter (curl|sh, wget|python, etc.), with optional sudo.
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\|( )*(sudo )?(ba|z|k|da|c)?sh\b' 2>/dev/null; then
+  block "pipe to shell"
+fi
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\|( )*(sudo )?(python[23]?|perl|ruby|node|php|lua|Rscript)\b' 2>/dev/null; then
+  block "pipe to interpreter"
 fi
 
-# 9. eval execution
-if [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\beval\s+' 2>/dev/null; then
-  BLOCKED=true
-  REASON="eval execution detected"
+# 9. eval / exec of arbitrary or decoded content
+if [ "$BLOCKED" = false ] && [ "$TOOL_NAME" = "Bash" ] && echo "$CHECK_STRING" | grep -qE '\b(eval|exec)( )' 2>/dev/null; then
+  block "eval/exec execution"
 fi
 
-# 10. find -delete (recursive file deletion)
-if echo "$CHECK_STRING" | grep -qE 'find\s.*-delete\b' 2>/dev/null; then
-  BLOCKED=true
-  REASON="find -delete detected"
+# 9b. decode-then-execute: base64/xxd/openssl piped or substituted into a shell
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '(base64( |.*)(-d|--decode|-D)|xxd -r|openssl( |.*)(enc|base64).*-d)' 2>/dev/null; then
+  if echo "$CHECK_STRING" | grep -qE '(\|( )*(ba|z)?sh|bash -c|\beval\b|\$\(|`)' 2>/dev/null; then
+    block "decode-and-execute (obfuscated payload)"
+  fi
 fi
 
-# 11. chmod on sensitive dotfiles
-if echo "$CHECK_STRING" | grep -qE 'chmod\s+777\s+~/\.' 2>/dev/null; then
-  BLOCKED=true
-  REASON="chmod 777 on sensitive dotfiles"
+# 10. find -delete / find -exec rm|sh
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'find\b[^|]*-delete\b' 2>/dev/null; then
+  block "find -delete"
+fi
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'find\b[^|]*-exec( )+(rm|sh|bash|chmod|chown)\b' 2>/dev/null; then
+  block "find -exec destructive command"
+fi
+
+# 11. Fork bomb signature
+if [ "$BLOCKED" = false ] && echo "$NORM_CMD" | grep -qE ':\(\)( )*\{( )*:( )*\|( )*:( )*&( )*\}( )*;( )*:' 2>/dev/null; then
+  block "fork bomb"
+fi
+if [ "$BLOCKED" = false ] && echo "$NORM_PAYLOAD" | grep -qE ':\(\)\{:\|:&\};:' 2>/dev/null; then
+  block "fork bomb"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. Secret / credential exfiltration (lethal-trifecta egress control)
+# ---------------------------------------------------------------------------
+NET_RE='\b(curl|wget|nc|ncat|netcat|telnet|scp|sftp|rsync|ftp|socat)\b'
+CRED_RE='(\.aws/|\.ssh/|id_rsa|id_ed25519|id_ecdsa|\.netrc|\.npmrc|\.pgpass|\.gnupg|\.kube/|\.docker/config|credentials|secrets?|\.env\b|\benv\b|/etc/shadow|\.config/gh|access[_-]?token|api[_-]?key|private[_-]?key)'
+
+# 12a. network command + credential path in same command
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qiE "$NET_RE" 2>/dev/null \
+   && echo "$CHECK_STRING" | grep -qiE "$CRED_RE" 2>/dev/null; then
+  block "network egress referencing credential material"
+fi
+
+# 12b. curl/wget posting a local file (--data @file, -d @file, --upload-file, -T)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\b(curl|wget)\b[^|;]*((--data(-binary|-raw|-urlencode)?|-d|-F|--form)( |=)*@|--upload-file|(-T )( )*[^ ])' 2>/dev/null; then
+  block "curl/wget uploading a local file (exfil vector)"
+fi
+
+# 12c. DNS-tunnel exfil: dig/nslookup/host with command substitution or base64
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '\b(dig|nslookup|host|drill)\b' 2>/dev/null; then
+  if echo "$CHECK_STRING" | grep -qE '(\$\(|`|base64|xxd|\bcat\b)' 2>/dev/null; then
+    block "DNS exfiltration (lookup of command-substituted data)"
+  fi
+fi
+
+# 12d. piping a secret file into a network sink (cat ~/.ssh/id_rsa | nc ...)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qiE "$CRED_RE" 2>/dev/null \
+   && echo "$CHECK_STRING" | grep -qE '\|( )*'"$NET_RE" 2>/dev/null; then
+  block "credential file piped to a network command"
+fi
+
+# 13. Read of /etc/shadow (auth hashes)
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE '/etc/shadow\b' 2>/dev/null; then
+  block "access to /etc/shadow"
+fi
+
+# 14. Disabling the hook via chmod -x / attribute changes on the policy surface
+if [ "$BLOCKED" = false ] && echo "$CHECK_STRING" | grep -qE 'chmod( |.*)-x' 2>/dev/null \
+   && echo "$CHECK_STRING" | grep -qE "$PROTECTED_RE" 2>/dev/null; then
+  block "attempt to disable Vajra hook (chmod -x on policy surface)"
 fi
 
 # --- Log and decide ---
-
 if [ "$BLOCKED" = true ]; then
-  # Sanitize reason for log injection (strip newlines, control chars)
   SAFE_REASON="$(echo "$REASON" | tr -d '\n\r' | tr -cd '[:print:]')"
   echo "${TIMESTAMP} BLOCK ${TOOL_NAME} reason=\"${SAFE_REASON}\"" >> "$AUDIT_LOG"
-  # Print message for user visibility
   echo "Vajra hook blocked dangerous operation: ${REASON}" >&2
   exit 1
 else
