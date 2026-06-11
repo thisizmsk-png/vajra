@@ -33,6 +33,14 @@ grep -q 'checks FAILED' "$WORK/wt/red/WALKTHROUGH.md"; check "walkthrough marks 
 # --- usage ---
 bash "$SCRIPT" >/dev/null 2>&1; [ $? -eq 2 ]; check "no slug -> usage error" $?
 
+# --- slug path-traversal is neutralized ---
+ESC_PARENT="$(dirname "$WORK")"
+rm -rf "${ESC_PARENT}/pwned" 2>/dev/null
+bash "$SCRIPT" "../../pwned" "true" >/dev/null 2>&1
+[ ! -d "${ESC_PARENT}/pwned" ]; check "traversal slug does NOT escape base dir" $?
+[ -z "$(find "$WORK/wt" -maxdepth 1 -type d -name '*pwned*' 2>/dev/null)" ] || \
+  [ -d "$WORK/wt/pwned" ]; check "traversal slug lands inside base (sanitized)" $?
+
 echo "----------------------------------------"
 echo "verify-work: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

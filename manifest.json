@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T05:55:28Z",
+  "generated": "2026-06-11T05:57:20Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "0c758997bedecb12a756b82763480eb9510405af360a742d923de28edf69f8e1",
@@ -693,7 +693,7 @@
     "scripts/sarif-convert.js": "584a0dbb7b9061446fe81d370a161617a46336920da2f3f84173608ee3592d07",
     "scripts/vajra-phase.sh": "a774450d619568e8fddeccfdfbd259d6c3c83effba7ce4d308f23a68e4f88e79",
     "scripts/vajra-replay.sh": "aaaa6ccf3dbdde34635fc9b4c501b5138297c9e76161f37920cde5cb6ecd333d",
-    "scripts/vajra-verify-work.sh": "b83f5f7a2c64c88a8faf04b6479988eb71f58adcdfa3a4ad2a311b206a591db5",
+    "scripts/vajra-verify-work.sh": "51c14bdfeabce7216436d54eaac13425cbad2ddb3fba99d8c504a6565da8032a",
     "steering/README.md": "116fa083619e15beb563b7b4ab8e06e1ad19952177d5d8d840c08f8527ffdd60",
     "steering/review-pipeline.md": "9dd4fbd767ee1c12c6d1b53547a7ebee5b44b22d96062be168ebff3c254b8a09",
     "steering/rules/aws-cdk.md": "c29c8e70ac0d0ff2951fc4c1f4fb9ac764469bffd0ffabcbb602ebfcc75f8d37",
@@ -715,7 +715,7 @@
     "tests/hooks/run-session-start.sh": "1e650a66b0f3d21a23be6d2aa4c8656317326b1c98c59a463d41394632d4d13b",
     "tests/run-all.sh": "63f84039d02ee0fe27a840e220b6d11657f5c5d6276eb2269178b69e9b615210",
     "tests/run-event-log.sh": "ffc7a655c9c18e62421a958afd3ad21ebd0b52a152d349965ce48c19c7c64ad5",
-    "tests/run-verify-work.sh": "c288c4ac220dd30054c2e5ee5a8fdde0c4756ecde6a6b4d633af81637ae65e75",
+    "tests/run-verify-work.sh": "afad2bc17cd1dd642aa50943f0239740a462b04ae78a06db6c3e7b35cf6455e5",
     "tests/sanitizer.test.ts": "94f5a9fa547499a0955e5f3107eff823dbcc9da2718cfa310deeece698db88ab",
     "vitest.config.ts": "ae1fddd347c3ad362b78ea724de559928359fbefc35dfe7d8c0dcdf7d0a1310d"
   }

@@ -13,9 +13,17 @@
 
 set -uo pipefail
 
-SLUG="${1:-}"
-[ -z "$SLUG" ] && { echo "usage: vajra-verify-work.sh <slug> \"<cmd>\" [\"<cmd>\" ...]" >&2; exit 2; }
+RAW_SLUG="${1:-}"
+[ -z "$RAW_SLUG" ] && { echo "usage: vajra-verify-work.sh <slug> \"<cmd>\" [\"<cmd>\" ...]" >&2; exit 2; }
 shift
+
+# Sanitize the slug to a single safe path segment — no traversal. Strip anything
+# outside [alnum._-], collapse leading dots/dashes, cap length.
+SLUG="$(printf '%s' "$RAW_SLUG" | tr -cd '[:alnum:]._-' | sed 's/^[.-]*//' | cut -c1-80)"
+[ -z "$SLUG" ] && SLUG="walkthrough"
+if [ "$SLUG" != "$RAW_SLUG" ]; then
+  echo "note: slug sanitized to '${SLUG}' (must be a single path segment)" >&2
+fi
 
 BASE="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}"
 DIR="${BASE}/${SLUG}"
