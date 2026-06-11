@@ -12,6 +12,14 @@ readonly HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
 readonly LOG_FILE="${VAJRA_DIR}/fleet-$(date +%Y%m%d-%H%M%S).log"
 readonly DEFAULT_MAX_AGENTS=6
 
+# --- Per-run authenticity material (VJR-03) ---
+# A relay discovery is trusted only if (a) its agentId was provisioned by THIS
+# run and (b) it carries this run's nonce. This prevents the coordinator from
+# acting as a blind signing oracle for arbitrary files dropped into the relay
+# dir, and prevents cross-run replay.
+RUN_NONCE=""
+RUN_START_EPOCH=""
+
 # --- State arrays ---
 declare -a AGENT_PIDS=()
 declare -a AGENT_WORKTREES=()
@@ -19,7 +27,17 @@ declare -a AGENT_BRANCHES=()
 declare -a AGENT_IDS=()
 declare -a AGENT_TASKS=()
 declare -a AGENT_EXIT_CODES=()
+declare -a FLEET_ALLOWED=()
 CLEANUP_DONE=false
+
+# Was this agentId provisioned by the current run?
+is_provisioned() {
+    local id="$1" x
+    for x in "${AGENT_IDS[@]+"${AGENT_IDS[@]}"}"; do
+        [[ "$x" == "$id" ]] && return 0
+    done
+    return 1
+}
 
 # --- Logging ---
 log() {
@@ -225,13 +243,47 @@ Do NOT attempt to read or access any HMAC keys.
 - Complete the task, then exit
 PROMPT
 
-    # Launch Claude Code targeting the worktree
+    # Launch Claude Code targeting the worktree.
+    # VJR-04: enforce the configured tool allowlist and scope the working dir.
+    # `--` terminates option parsing so the positional prompt is never swallowed
+    # by the variadic --allowedTools. NOTE: --allowedTools/--add-dir are the
+    # strongest confinement the CLI offers; true filesystem isolation requires
+    # the OS sandbox (Seatbelt/bubblewrap) — see docs/architecture.
     (
         cd "$worktree_path"
-        claude --print --prompt "$(cat "$prompt_file")" > "${worktree_path}/.vajra-output.log" 2>&1
+        claude --print \
+            --permission-mode default \
+            --add-dir "$worktree_path" \
+            --allowedTools "${FLEET_ALLOWED[@]}" \
+            -- "$(cat "$prompt_file")" > "${worktree_path}/.vajra-output.log" 2>&1
     ) &
 
     echo $!
+}
+
+# --- Discovery signing (VJR-03) ---
+# Sign only discoveries from agents provisioned this run; bind the run nonce +
+# signing time into the signed payload. Non-provisioned files are deleted.
+sign_discoveries() {
+    command -v jq &>/dev/null || return 0
+    local relay_file file_agent bound payload hmac_val
+    for relay_file in "${RELAY_DIR}"/*.json; do
+        [[ -f "$relay_file" ]] || continue
+        if jq -e '.hmac' "$relay_file" &>/dev/null; then
+            continue
+        fi
+        file_agent="$(jq -r '.agentId // empty' "$relay_file" 2>/dev/null)"
+        if [[ -z "$file_agent" ]] || ! is_provisioned "$file_agent"; then
+            log_warn "Refusing to sign relay from non-provisioned agent '${file_agent:-unknown}' ($(basename "$relay_file")) — deleting"
+            rm -f "$relay_file" 2>/dev/null || true
+            continue
+        fi
+        bound="$(jq -c --arg n "$RUN_NONCE" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {runNonce: $n, signedAt: $t}' "$relay_file" 2>/dev/null)" || continue
+        payload="$bound"
+        hmac_val="$(compute_hmac "$payload")"
+        printf '%s' "$bound" | jq --arg h "$hmac_val" '. + {hmac: $h}' > "${relay_file}.tmp" && mv "${relay_file}.tmp" "$relay_file"
+        log_info "Signed discovery: $(basename "$relay_file") [agent ${file_agent}]"
+    done
 }
 
 # --- Result collection ---
@@ -253,12 +305,26 @@ collect_discoveries() {
             continue
         fi
 
-        local agent_id content hmac_value payload
+        local agent_id content hmac_value payload file_nonce
         agent_id="$(jq -r '.agentId // "unknown"' "$relay_file" 2>/dev/null)"
         hmac_value="$(jq -r '.hmac // empty' "$relay_file" 2>/dev/null)"
+        file_nonce="$(jq -r '.runNonce // empty' "$relay_file" 2>/dev/null)"
 
         if [[ -z "$hmac_value" ]]; then
             log_warn "Rejecting unsigned discovery from ${agent_id}"
+            ((rejected++)) || true
+            continue
+        fi
+
+        # VJR-03: reject anything not bound to this run's nonce (replay/foreign)
+        # or from an agent this run did not provision.
+        if [[ "$file_nonce" != "$RUN_NONCE" ]]; then
+            log_warn "Rejecting discovery with stale/foreign run nonce from ${agent_id}"
+            ((rejected++)) || true
+            continue
+        fi
+        if ! is_provisioned "$agent_id"; then
+            log_warn "Rejecting discovery from non-provisioned agent ${agent_id}"
             ((rejected++)) || true
             continue
         fi
@@ -307,6 +373,23 @@ main() {
     # Ensure directories exist
     mkdir -p "$WORKTREE_DIR" "$RELAY_DIR"
     ensure_hmac_key
+
+    # Per-run authenticity nonce (VJR-03)
+    RUN_NONCE="$(head -c 16 /dev/urandom | xxd -p | tr -d '\n')"
+    RUN_START_EPOCH="$(date +%s)"
+
+    # Load the fleet tool allowlist from config (VJR-04). Fail safe to read-only.
+    FLEET_ALLOWED=()
+    if command -v jq &>/dev/null && [[ -f "$CONFIG_FILE" ]]; then
+        while IFS= read -r t; do
+            [[ -n "$t" ]] && FLEET_ALLOWED+=("$t")
+        done < <(jq -r '.fleet.defaultToolAllowlist[]? // empty' "$CONFIG_FILE" 2>/dev/null)
+    fi
+    if [[ ${#FLEET_ALLOWED[@]} -eq 0 ]]; then
+        FLEET_ALLOWED=(Read Glob Grep)
+        log_warn "No fleet.defaultToolAllowlist in config — defaulting to read-only tools"
+    fi
+    log_info "Fleet agent tool allowlist: ${FLEET_ALLOWED[*]}"
 
     local total=$#
     local succeeded=0
@@ -379,23 +462,13 @@ main() {
         fi
     done
 
-    # Sign relay files on behalf of agents (agents write unsigned, coordinator signs)
+    # Sign relay files on behalf of agents (agents write unsigned, coordinator
+    # signs). VJR-03: only sign discoveries from agents WE provisioned this run,
+    # and bind this run's nonce + signing time into the signed payload so the
+    # coordinator is no longer a blind signing oracle and files cannot be
+    # replayed into a later run.
     log_info "--- Signing Agent Discoveries ---"
-    if command -v jq &>/dev/null; then
-        for relay_file in "${RELAY_DIR}"/*.json; do
-            [[ -f "$relay_file" ]] || continue
-            # Skip if already signed
-            if jq -e '.hmac' "$relay_file" &>/dev/null; then
-                continue
-            fi
-            local payload
-            payload="$(jq -c '.' "$relay_file" 2>/dev/null)" || continue
-            local hmac_val
-            hmac_val="$(compute_hmac "$payload")"
-            jq --arg h "$hmac_val" '. + {hmac: $h}' "$relay_file" > "${relay_file}.tmp" && mv "${relay_file}.tmp" "$relay_file"
-            log_info "Signed discovery: $(basename "$relay_file")"
-        done
-    fi
+    sign_discoveries
 
     # Collect discoveries
     log_info "--- Discovery Relay Collection ---"
@@ -422,4 +495,8 @@ main() {
     fi
 }
 
-main "$@"
+# Run main() only when executed directly, not when sourced (enables unit tests
+# of sign_discoveries/collect_discoveries/verify_hmac without spawning agents).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

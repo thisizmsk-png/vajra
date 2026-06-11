@@ -53,10 +53,37 @@ export function loadConfig(): SanitizationConfig {
 // Sanitizer
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Invisible / smuggling character classes
+// ---------------------------------------------------------------------------
+//
+// ASCII smuggling and homoglyph evasion hide live instructions in codepoints
+// that are invisible to humans and to naive regex filters but are still read by
+// the model (see the Unicode Tags block, variation selectors, bidi overrides).
+// These MUST be removed before pattern matching, otherwise an attacker can
+// interleave them through a trigger phrase to slip past the strip list.
+const INVISIBLE_CHARS = new RegExp(
+  "[" +
+    "\\u00AD" + // soft hyphen
+    "\\u200B-\\u200F" + // zero-width space/joiners + LRM/RLM
+    "\\u202A-\\u202E" + // bidi embeddings/overrides
+    "\\u2060-\\u2064" + // word joiner + invisible math operators
+    "\\u2066-\\u2069" + // bidi isolates
+    "\\uFEFF" + // BOM / zero-width no-break space
+    "\\uFFF9-\\uFFFB" + // interlinear annotation anchors
+    "\\uFE00-\\uFE0F" + // variation selectors 1-16
+    "]",
+  "g",
+);
+// Astral-plane smuggling: Unicode Tags block (U+E0000\u2013E007F) and the
+// supplementary variation selectors (U+E0100\u2013E01EF). Matched on codepoints.
+const INVISIBLE_ASTRAL = /[\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+
 /**
  * Sanitize untrusted content before injecting it into prompt context.
  *
- * 1. Strip known injection patterns (from config).
+ * 0. NFKC-normalize and strip invisible/smuggling codepoints.
+ * 1. Strip known injection patterns (from config) to a fixed point.
  * 2. Escape control characters.
  * 3. Truncate to max allowed length.
  * 4. Wrap in <untrusted-data> tags with source attribution.
@@ -74,19 +101,38 @@ export function sanitize(content: string, source: string): string {
   let sanitized = content;
 
   // --- 0. Normalize unicode to prevent pattern evasion ---------------------
-  // Strip zero-width characters that break regex matching
-  sanitized = sanitized.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, "");
-  // Collapse multiple whitespace to single space (preserving newlines)
-  sanitized = sanitized.replace(/[^\S\n]+/g, " ");
-
-  // --- 1. Strip known injection patterns -----------------------------------
-  for (const pattern of stripPatterns) {
-    const regex = new RegExp(pattern, "gi");
-    sanitized = sanitized.replace(regex, "");
+  // NFKC folds compatibility/fullwidth/ligature forms so homoglyph variants of
+  // a trigger phrase normalize to their canonical (matchable) form.
+  try {
+    sanitized = sanitized.normalize("NFKC");
+  } catch {
+    // Malformed surrogate sequences \u2014 fall through with the raw string.
   }
+  // Strip invisible/smuggling characters (BMP + astral).
+  sanitized = sanitized.replace(INVISIBLE_CHARS, "");
+  sanitized = sanitized.replace(INVISIBLE_ASTRAL, "");
+  // Collapse multiple whitespace to single space (preserving newlines)
+  sanitized = sanitized.replace(/[ \t]+/g, " ");
 
-  // --- 1b. Strip wrapper tag from content to prevent tag breakout ----------
-  sanitized = sanitized.replace(/<\/?untrusted-data[^>]*>/gi, "");
+  // --- 1. Strip known injection patterns (to a fixed point) ----------------
+  // A SINGLE pass is unsafe: removing an inner occurrence can reassemble an
+  // outer one (e.g. "ignore previous ignore previous instructions instructions"
+  // -> "ignore previous instructions"). Iterate until stable, then re-collapse
+  // any whitespace the removals left behind. Capped to bound pathological input.
+  const compiled = stripPatterns.map((p) => new RegExp(p, "gi"));
+  const tagRe = /<\/?untrusted-data[^>]*>/gi;
+  const MAX_PASSES = 16;
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    const before = sanitized;
+    for (const regex of compiled) {
+      sanitized = sanitized.replace(regex, "");
+    }
+    // --- 1b. Strip wrapper tag from content to prevent tag breakout --------
+    sanitized = sanitized.replace(tagRe, "");
+    // Re-collapse so reassembly residue ("ignore  previous") cannot survive.
+    sanitized = sanitized.replace(/[ \t]+/g, " ");
+    if (sanitized === before) break;
+  }
 
   // --- 2. Escape control characters ----------------------------------------
   if (escapeControlChars) {

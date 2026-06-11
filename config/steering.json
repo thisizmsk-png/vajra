@@ -1,0 +1,47 @@
+{
+  "$schema": "vajra-steering-v1",
+  "schemaVersion": 1,
+  "description": "Machine-checkable engineering rules (steering) + the review pipeline that enforces them. Inspired by the machine-checkable rule-pack model: scoped, blocking-aware, confidence-gated review.",
+  "review": {
+    "confidenceThreshold": 8,
+    "comment": "1-10. Comments scored below this are discarded. Higher = fewer, higher-quality comments.",
+    "pipeline": "steering/review-pipeline.md",
+    "maxCommentsPerPass": 5,
+    "discardCriteria": [
+      "incorrect or misunderstands the code",
+      "nitpicking / stylistic preference with no correctness, security, or maintenance impact",
+      "speculative ('might exist') without direct evidence in the diff",
+      "praises or explains a change already correctly implemented",
+      "assumes missing code (only the changed portion is visible)"
+    ],
+    "categorySuppressions": {
+      "input-validation": "Do not suggest input validation for declarative IaC (CDK), test code, or input from a trusted internal source with no evidence of invalid values.",
+      "error-handling": "Do not suggest error handling for declarative IaC where execution happens elsewhere, test code, or framework-managed flows."
+    }
+  },
+  "rules": [
+    { "id": "principles",     "file": "steering/rules/principles.md", "domain": "general",    "blocking": false, "filePatterns": ["**/*"] },
+    { "id": "general",        "file": "steering/rules/general.md",    "domain": "general",    "blocking": false, "filePatterns": ["**/*"] },
+    { "id": "security",       "file": "steering/rules/security.md",   "domain": "security",   "blocking": true,  "filePatterns": ["**/*"] },
+    { "id": "testing",        "file": "steering/rules/testing.md",    "domain": "testing",    "blocking": false, "filePatterns": ["**/*test*", "**/*Test*", "test/**", "tests/**"] },
+    { "id": "lambda",         "file": "steering/rules/lambda.md",     "domain": "lambda",     "blocking": true,  "filePatterns": ["**/handlers/**", "**/lambda/**", "**/*Handler*"] },
+    { "id": "aws-cdk",        "file": "steering/rules/aws-cdk.md",    "domain": "aws-cdk",    "blocking": true,  "filePatterns": ["lib/**/*.ts", "**/cdk/**"] },
+    { "id": "typescript",     "file": "steering/rules/typescript.md", "domain": "typescript", "blocking": false, "filePatterns": ["**/*.ts", "**/*.tsx", "!**/*.test.ts"] },
+    { "id": "python",         "file": "steering/rules/python.md",     "domain": "python",     "blocking": false, "filePatterns": ["**/*.py", "!**/*test*.py"] },
+    { "id": "java",           "file": "steering/rules/java.md",       "domain": "java",       "blocking": false, "filePatterns": ["**/*.java"] }
+  ],
+  "agentSteering": {
+    "arjuna":      ["principles", "general", "security", "typescript", "python", "java"],
+    "bhima":       ["principles", "general", "security", "lambda", "aws-cdk", "python", "typescript", "java"],
+    "nakula":      ["principles", "general", "typescript"],
+    "vidura":      ["principles", "testing", "general"],
+    "bhishma":     ["principles", "security", "aws-cdk", "lambda"],
+    "shakuni":     ["security"],
+    "duryodhana":  ["security", "principles"],
+    "yudhishthira":["principles", "general", "aws-cdk"],
+    "hanuman":     ["principles", "aws-cdk", "lambda"],
+    "abhimanyu":   ["principles", "testing", "general"],
+    "sahadeva":    ["principles", "python", "security"],
+    "karna":       ["principles", "python"]
+  }
+}

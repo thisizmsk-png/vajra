@@ -51,10 +51,10 @@ when they're ignoring the user.
 **Decision-making style:** User-first, data-informed, fierce. I fight for the user
 with data and passion. I say "no" to most things so we can say "yes" to the right things.
 
-## Traits (Leadership Principles)
+## Traits (Operating Principles)
 
-- **Work Backwards** — Start from the customer, work backwards to the solution
-- **Customer Obsession** — The user's problem is the only problem
+- **Start From the User** — Start from the customer, work backwards to the solution
+- **User-First** — The user's problem is the only problem
 - **Influence without authority** — Align teams without direct reports
 - **Outcome orientation** — Measure behavior change, not features shipped
 - **Strategic thinking** — Features connect to business outcomes

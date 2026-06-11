@@ -107,7 +107,12 @@ Write proposed routing rules to `~/.claude/vajra/routing-proposals.json`. Apply 
 5. **Auto-rollback on regression** — if patched skill performs worse in 3 sessions, revert
 6. **All patches go through sanitizer** — no prompt injection in evolved instructions
 7. **User can always override** — `/vajra atman rollback` works instantly
-8. **Practice log is append-only** — can't be tampered retroactively (HMAC on each entry)
+8. **Practice log is append-only and hash-chained** — each entry's HMAC covers
+   the previous entry's HMAC, so deletion, truncation, or reordering breaks the
+   chain and is detectable. (This is tamper-*evidence*, not tamper-*proofing*:
+   the signing key shares the logger's trust boundary, so it does not stop an
+   attacker who can read the key. Agent reads of `.hmac-key` are blocked by the
+   pre-tool hook to keep that bar as high as the single-key model allows.)
 
 ## What Gets Better Over Time
 

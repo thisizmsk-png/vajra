@@ -43,16 +43,30 @@ if [ -f "$ACTIVE_AGENT_FILE" ]; then
   ACTIVE_AGENT="$(cat "$ACTIVE_AGENT_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
 
-# Build the practice log entry
+# Hash-chain the practice log (VJR-08): each entry's HMAC covers the previous
+# entry's HMAC, so selective deletion, truncation, or reordering breaks the
+# chain and is detectable at verification time. NOTE: the signing key lives in
+# the same trust boundary as the logger, so this is tamper-EVIDENCE against
+# accidental/external modification and selective edits — not a guarantee
+# against an attacker who can read the key and re-chain the whole file. The
+# pre-tool hook blocks agent reads of .hmac-key to keep that bar as high as the
+# single-key model allows.
+PREV_HMAC="genesis"
+if [ -f "$PRACTICE_LOG" ] && [ -s "$PRACTICE_LOG" ]; then
+  PREV_HMAC="$(tail -n 1 "$PRACTICE_LOG" | jq -r '.hmac // "genesis"' 2>/dev/null || echo "genesis")"
+fi
+
+# Build the practice log entry (prevHmac is part of the signed payload)
 ENTRY="$(jq -nc \
   --arg ts "$TIMESTAMP" \
   --arg skill "$TOOL_NAME" \
   --arg outcome "$OUTCOME" \
   --arg hasError "$HAS_ERROR" \
   --arg agent "$ACTIVE_AGENT" \
-  '{ts: $ts, skill: $skill, outcome: $outcome, hasError: ($hasError == "true")} + (if $agent != "" then {agent: $agent} else {} end)')"
+  --arg prev "$PREV_HMAC" \
+  '{ts: $ts, skill: $skill, outcome: $outcome, hasError: ($hasError == "true"), prevHmac: $prev} + (if $agent != "" then {agent: $agent} else {} end)')"
 
-# HMAC sign the entry if key exists
+# HMAC sign the entry (covering prevHmac) if key exists
 if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
   KEY_HEX="$(cat "$HMAC_KEY_FILE")"
   HMAC="$(printf '%s' "$ENTRY" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${KEY_HEX}" -hex 2>/dev/null | awk '{print $NF}')"

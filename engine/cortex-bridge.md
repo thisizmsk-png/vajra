@@ -15,6 +15,10 @@ When Vajra's Tier 4 (LLM classification) determines a task's domain, it checks `
 3. **Load the agent's persona** from `~/.claude/agents/{agent}.md`
 4. **Adopt the agent's role** for the duration of this task/campaign node
 5. **Restrict available skills** to the agent's designated skill list
+6. **Load the agent's steering rules** — look up the agent in
+   `config/steering.json` → `agentSteering[agent]`, read the listed
+   `steering/rules/*.md` files whose `filePatterns` match the files in scope,
+   and hold them as the rule set this agent enforces (see Steering Rules below).
 
 ### Domain → Agent Map
 
@@ -73,6 +77,34 @@ When `/vajra fleet` is invoked, check if a pre-defined crew matches the task typ
    c. Restrict tools to agent's skill set
 4. Lead agent coordinates — receives discoveries from all agents
 5. Merge results when all complete
+
+## Steering Rules — Agents Enforce Machine-Checkable Standards
+
+Each Cortex agent carries a set of **steering rules** (see `steering/README.md`)
+— concrete, scoped, blocking-aware engineering standards distilled from the
+production code-review rule packs. This is what makes an agent's review consistent
+and actionable instead of vibes-based.
+
+1. **Resolve the agent's rules** from `config/steering.json` → `agentSteering`:
+   - `arjuna` → principles, general, security, typescript, python, java
+   - `bhima` → principles, general, security, lambda, aws-cdk, python, typescript, java
+   - `nakula` → principles, general, typescript
+   - `vidura` → principles, testing, general
+   - `bhishma` → principles, security, aws-cdk, lambda
+   - `shakuni` → security · `duryodhana` → security, principles
+   - (full map in `config/steering.json`)
+2. **Scope by file pattern** — only load a rule file if its `filePatterns` match
+   the files under review (a Python-only diff doesn't pull the Java rules).
+3. **Review via the pipeline** — when the agent reviews code, it runs
+   `steering/review-pipeline.md`: generate → dedup → confidence-gate (≥ 8) →
+   guideline/category suppression → refine. `blocking: true` rule violations
+   (security, lambda, aws-cdk) are merge blockers; others are advisory.
+4. **Build code to the rules** — when an agent *writes* code (not just reviews),
+   it writes the minimum code that satisfies its rule set.
+
+Rule files live under the Vajra immutable core (`steering/rules/*.md`), so they
+are integrity-tracked and cannot be silently rewritten by an injected agent —
+Atman may only *propose* new rules into staging for review.
 
 ## Cortex skill-detect.sh Integration
 

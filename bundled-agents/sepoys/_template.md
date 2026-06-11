@@ -14,7 +14,7 @@ allowed-tools: [Edit, Write, Read, Grep, Glob, Bash]
 ## Inherited
 
 This sepoy inherits ALL of the following from their master:
-- **Role definition** — Responsibilities, traits, leadership principles
+- **Role definition** — Responsibilities, traits, operating principles
 - **Skills** — All skills assigned to the master's role
 - **Guardrails** — All guardrails including Zero Cognitive Bias Protocol
 - **Katha** — Operating within the master's domain and philosophy
