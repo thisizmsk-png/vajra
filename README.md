@@ -215,6 +215,9 @@ Layered defense — full model in **[SECURITY.md](SECURITY.md)**:
 | Code review | Machine-checkable steering rules + 5-pass confidence-gated pipeline | Generic "review my code" |
 | Plan Mode | Editable plan artifact, read-only until approved | Plan or no plan |
 | Proof-of-work | Verification gate — "done" needs a captured walkthrough | Self-reported completion |
+| Observability | HMAC-chained event log + replay, per-task cost ledger (cache-hit KPI) | Opaque / session-total only |
+| Context engineering | JIT repo-map (PageRank), compaction-with-checkpoint, Ralph hard-reset loop | Grow context until it breaks |
+| Reliability | Oracle second-opinion escalation on stuck/high-stakes steps | Dig deeper alone |
 | Agent hierarchy | 17 specialized agents, each enforcing scoped rules | Generic agents |
 
 ## Testing & security

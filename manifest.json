@@ -1,9 +1,9 @@
 {
-  "generated": "2026-06-11T06:11:12Z",
+  "generated": "2026-06-11T06:12:27Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "0c758997bedecb12a756b82763480eb9510405af360a742d923de28edf69f8e1",
-    "README.md": "c066e9020d6b6bd7c1d2d49294015d2cecdf0249e118a36f3b0ab3af021e87a8",
+    "README.md": "76de442831083fb9ad2b7c98b359c0237a6715146f80be5c0ddf2a622242e761",
     "SECURITY.md": "f50d97bdcf2ab927f66341074a7d39ac3e8031b185967c555c58c84a1ba8caa9",
     "SKILL.md": "b1b259d1098bfe72dc315d8f23278145fcbe284c4195170bf903275faab231ea",
     "atman/ATMAN.md": "4dce42cb3458d71d7afe9782f2511c626b837cbffacff4a96d2a6a6286072839",
@@ -678,7 +678,7 @@
     "observatory/audit-trail.md": "33542fa59ac18a0f4ecf62ad91cb31c85b93b8ca89f7104df7dd3e3219a3575c",
     "observatory/cost-tracker.md": "595fcaa6ff4edbc831db356ca4649209b01bf2c5f9b0879f23037b9035f0d7ef",
     "package-lock.json": "4665960cc106a463b030311ee1d0f9c3b7fdcb481b429973d81f789c668051b5",
-    "package.json": "ae88e62c847ad941a1ae34b03d2d075fa8e3a638739b771bdbfe825f03f38303",
+    "package.json": "4a7a3acd1c0337ecbc201f80db88707da22ab9a44c8bf19d24454900ad1f18e1",
     "redteam/orchestrator.md": "72077b298d17904e8bad862b3cd469d48b7018fee04b485262e9f9dbed8dd728",
     "redteam/reporting.md": "3394360e16cef8d0798d065bc70b01d027f681f40255601ce11150cc829b7147",
     "redteam/scenarios/config-drift.json": "4f63bfe7215e04bf26b400c75d5f51729cd09e4443cc537de62b707e6e2613a4",
