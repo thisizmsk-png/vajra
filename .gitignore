@@ -48,3 +48,6 @@ reports/
 # Environment
 .env
 .env.*
+
+# Personal skill, never ship in the public kit
+bundled-skills/humanizer/

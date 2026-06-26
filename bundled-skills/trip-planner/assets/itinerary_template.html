@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trip Itinerary Template</title>
+<!--
+  trip-planner PDF template. Render with headless Chrome:
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu \
+      --run-all-compositor-stages-before-draw --virtual-time-budget=3000 \
+      --print-to-pdf="OUT.pdf" "file:///path/itin.html"
+  Links (<a href>) become tappable in the PDF.
+  Place link:  https://www.google.com/maps/search/?api=1&query=<URL-encoded name>
+  Route link:  https://www.google.com/maps/dir/?api=1&origin=<A>&destination=<B>
+  COLOR VARIANTS: edit only :root.
+    Coral  -> accent #DB4F36, tint #FBEAE4, line #F0C9BE  (no --gold; .rule + .kicker use --accent)
+    Emerald+Gold -> accent #0C6B4E, tint #E4F0EA, line #BBD6CA, add --gold #A8842F;
+                    set .kicker color + .rule background to var(--gold)
+  RULES: one accent only, ZERO em/en dashes anywhere visible, system sans, big day numerals.
+-->
+<style>
+  :root{
+    --ink:#17181B; --gray:#6B6E73; --faint:#9A9C9F; --paper:#FBFAF7;
+    --accent:#DB4F36; --accent-tint:#FBEAE4; --accent-line:#F0C9BE;
+    --hair:#E7E4DD; --row:#F4F2EC;
+    /* Emerald variant: also define --gold:#A8842F and point .kicker/.rule at it */
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ background:var(--paper); color:var(--ink);
+    font-family:"Avenir Next","Helvetica Neue",-apple-system,sans-serif;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  @page{ size:Letter; margin:0; }
+  a{ color:var(--accent); text-decoration:none; }
+  .hero{ padding:18mm 16mm 9mm; background:linear-gradient(180deg,var(--accent-tint) 0%,rgba(0,0,0,0) 92%); }
+  .kicker{ font-size:10.5px; font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:14px; }
+  h1{ font-size:52px; font-weight:700; letter-spacing:-.02em; line-height:.98; }
+  .rule{ width:46px; height:3px; background:var(--accent); border-radius:2px; margin:16px 0 14px; }
+  .lede{ font-size:15.5px; line-height:1.5; max-width:62ch; }
+  .meta{ font-size:12.5px; color:var(--gray); margin-top:9px; font-weight:500; }
+  .route{ display:flex; flex-wrap:wrap; align-items:center; gap:8px 9px; margin-top:18px; }
+  .stop{ font-size:11.5px; font-weight:500; background:#fff; border:1px solid var(--hair); border-radius:999px; padding:5px 12px; }
+  .stop.key{ color:var(--accent); border-color:var(--accent-line); background:var(--accent-tint); }
+  .arr{ color:var(--accent); font-size:12px; font-weight:600; }
+  .base{ margin:16px 16mm 0; padding:12px 15px; background:#fff; border:1px solid var(--hair); border-left:3px solid var(--accent); border-radius:10px; font-size:12.5px; line-height:1.5; }
+  .days{ margin-top:7mm; }
+  .day{ display:grid; grid-template-columns:64px 1fr; gap:18px; padding:13px 16mm 15px; break-inside:avoid; }
+  .day + .day{ border-top:1px solid var(--hair); }
+  .num{ font-size:40px; font-weight:600; line-height:.9; color:var(--accent); letter-spacing:-.02em; }
+  .num small{ display:block; font-size:9.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--faint); margin-top:7px; }
+  .dtitle{ font-size:17px; font-weight:600; }
+  .ddate{ font-size:11.5px; font-weight:500; color:var(--gray); margin:1px 0 9px; }
+  .slot{ display:grid; grid-template-columns:58px 1fr; gap:12px; padding:5px 0; }
+  .slot + .slot{ border-top:1px solid var(--row); }
+  .time{ font-size:11.5px; font-weight:600; color:var(--accent); font-variant-numeric:tabular-nums; padding-top:1px; }
+  .what{ font-size:12.8px; line-height:1.45; }
+  .what .sub{ color:var(--gray); }
+  .map{ font-weight:600; border-bottom:1px solid var(--accent-line); white-space:nowrap; }
+  .pill{ display:inline-block; font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--accent); background:var(--accent-tint); border-radius:6px; padding:1px 7px; margin-left:5px; vertical-align:1px; }
+  .alerts{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:6mm 16mm 0; break-inside:avoid; }
+  .card{ border-radius:12px; padding:14px 16px; }
+  .card h3{ font-size:12.5px; font-weight:700; margin-bottom:9px; }
+  .card ul{ list-style:none; } .card li{ font-size:11.6px; line-height:1.45; padding-left:14px; position:relative; margin-bottom:7px; }
+  .card li:before{ content:""; position:absolute; left:0; top:7px; width:5px; height:5px; border-radius:50%; background:var(--accent); }
+  .lock{ background:var(--accent-tint); border:1px solid var(--accent-line); } .lock h3{ color:var(--accent); }
+  .book{ background:#fff; border:1px solid var(--hair); border-left:3px solid var(--accent); }
+  footer{ margin:7mm 16mm 12mm; padding-top:11px; border-top:1px solid var(--hair); font-size:10.5px; color:var(--gray); line-height:1.5; }
+</style>
+</head>
+<body>
+  <header class="hero">
+    <div class="kicker">Road Trip Itinerary</div>
+    <h1>TRIP NAME</h1>
+    <div class="rule"></div>
+    <p class="lede">One line of human copy. Who, how many, the arc of the trip.</p>
+    <div class="meta">DATES &nbsp;&middot;&nbsp; N travelers &nbsp;&middot;&nbsp; vehicle</div>
+    <div class="route">
+      <span class="stop">Origin</span><span class="arr">&rarr;</span>
+      <span class="stop key">Base: NAME</span><span class="arr">&rarr;</span>
+      <span class="stop">Destination</span>
+    </div>
+  </header>
+
+  <div class="base"><b>The base sets the rhythm.</b> Note where lodging is and the drive-time tax it creates.</div>
+
+  <section class="days">
+    <div class="day">
+      <div class="num">01<small>Wed Jul 1</small></div>
+      <div>
+        <div class="dtitle">Day title</div>
+        <div class="ddate">One-line day summary</div>
+        <div class="slot"><div class="time">10:00a</div><div class="what"><b>Stop name.</b> What you do here. <a class="map" href="https://www.google.com/maps/search/?api=1&query=Stop+Name">Map</a></div></div>
+        <div class="slot"><div class="time">1:00p</div><div class="what">Drive to the next leg. <a class="map" href="https://www.google.com/maps/dir/?api=1&origin=A&destination=B">Route</a></div></div>
+      </div>
+    </div>
+    <!-- repeat .day blocks per day -->
+  </section>
+
+  <section class="alerts">
+    <div class="card lock"><h3>Two things that cannot slip</h3><ul>
+      <li><b>The load-bearing constraint.</b> Name the hard departure / fixed flight.</li>
+      <li><b>The second can't-slip.</b> Pre-pack, sober driver, etc.</li>
+    </ul></div>
+    <div class="card book"><h3>Book before it sells out</h3><ul>
+      <li><b>Perishable booking 1</b> with all-in pricing.</li>
+      <li><b>Perishable booking 2.</b></li>
+    </ul></div>
+  </section>
+
+  <footer>Tap any link to open the spot, or the drive route, in Google Maps. Add a heat / hydration note for hot-season trips.</footer>
+</body>
+</html>

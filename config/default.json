@@ -42,6 +42,11 @@
         "pattern": "^refactor\\b",
         "skill": "sentry-code-simplifier",
         "description": "Route refactor to simplifier"
+      },
+      {
+        "pattern": "^/trip(-planner)?\\b",
+        "skill": "trip-planner",
+        "description": "Route /trip and /trip-planner to trip-planner"
       }
     ],
     "tier3Keywords": {
@@ -65,7 +70,11 @@
       "threat": "threat-modeling",
       "compliance": "compliance-checklist",
       "release": "release-engineering",
-      "brainstorming": "brainstorming"
+      "brainstorming": "brainstorming",
+      "trip": "trip-planner",
+      "travel": "trip-planner",
+      "itinerary": "trip-planner",
+      "vacation": "trip-planner"
     },
     "regexEngine": "re2",
     "regexMaxLength": 1000,
