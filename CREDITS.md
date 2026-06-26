@@ -30,9 +30,6 @@ Keep each skill's `LICENSE.txt` (and any `NOTICE`) intact when shipping.
 ### OWASP, CC BY-SA 4.0 ⚠️ share-alike
 - `sentry-security-review` is based on the **OWASP Cheat Sheet Series** (CC BY-SA 4.0). Share-alike requires attribution **and** that derivative works be released under the same license. Confirm compliance, or replace, before redistributing.
 
-### Wikipedia / WikiProject AI Cleanup, CC BY-SA ⚠️ share-alike
-- `humanizer` is based on Wikipedia's "Signs of AI writing," maintained by WikiProject AI Cleanup. CC BY-SA: attribution + share-alike.
-
 ### Andrej Karpathy
 - `autoresearch` applies Karpathy's autoresearch approach. https://github.com/karpathy/autoresearch
 
@@ -51,7 +48,7 @@ Keep each skill's `LICENSE.txt` (and any `NOTICE`) intact when shipping.
 ## Checklist before publishing
 1. Verify each bundled skill's actual LICENSE + author against its own files (this list is a scan, not a legal review).
 2. Keep every per-skill `LICENSE`/`NOTICE` file inside `bundled-skills/<skill>/`.
-3. CC BY-SA items (`humanizer`, OWASP-derived `sentry-security-review`): comply with attribution + share-alike, or remove/replace.
+3. CC BY-SA items (OWASP-derived `sentry-security-review`): comply with attribution + share-alike, or remove/replace.
 4. Apache-2.0 items (Anthropic skills): preserve LICENSE + NOTICE, state changes if you modified them.
 5. Anything whose redistribution rights you can't confirm: **link, don't bundle.**
 6. Not legal advice. When in doubt, read the original repo's license.
