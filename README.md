@@ -12,10 +12,10 @@ Claude Code is great until you actually have to trust it. It says "done" when th
 [![Red-teamed ×5](https://img.shields.io/badge/red--teamed-%C3%975%20rounds-brightgreen)](SECURITY.md)
 [![GitHub stars](https://img.shields.io/github/stars/thisizmsk-png/vajra?style=social)](https://github.com/thisizmsk-png/vajra)
 
-<!-- HERO GIF, record with vajra-demo.tape. Show plan → act → verify-gate catching a bad run. <5MB, above the fold. -->
-<img src="docs/assets/vajra-demo.gif" alt="Vajra: plan it, trim the plan, run it, prove the tests passed" width="820">
+<!-- HERO GIF: a real Claude Code session sped up, the full loop (spec, plan, act, verify green, cost, replay, fleet). Under 7MB, above the fold. -->
+<img src="docs/assets/vajra-hero.gif" alt="Vajra running a full loop on a real Claude Code session: spec, plan, act, verify green, cost, replay, and a parallel fleet" width="860">
 <br>
-<sub><i>Plan it · trim the plan · run only what you approved · prove the tests actually passed.</i></sub>
+<sub><i>One real session, sped up: a spec, a plan you trim, code, the tests proven green, the cost, the audit trail, and a parallel fleet.</i></sub>
 
 </div>
 
