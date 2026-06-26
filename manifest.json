@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-26T09:29:00Z",
+  "generated": "2026-06-26T09:35:20Z",
   "version": "0.2.0",
   "files": {
     ".gitignore": "329ddf84391eea8be1d0df40bf12caac88750c5ab0a32323b23edd3d212eeec5",
@@ -662,6 +662,7 @@
     "docs/architecture/graph.json": "91b82cc6d9a810734b2d44e0bea706b6b0a4c9ff3ab2812a4d32afeef5506db6",
     "docs/assets/vajra-build-explainer.mp4": "598b361c2568a15d5f12c843e0fe097c89734638a73a3f5ce7554618491996b5",
     "docs/assets/vajra-hero.gif": "396a2e67071da14d5de426a107727e6eceae04849515acacccbcad6b5bf3f287",
+    "docs/assets/vajra-social-preview.png": "dccff4e1aebd5febb518eb1ad613b9e2a76bbb1f3203a715899897ca1c47d942",
     "docs/assets/vajra-tour.gif": "9fcad967e10e1161b450435684eaaf9718996990ef4109d633ec3d5235e357ec",
     "docs/assets/vajra-tour.mp4": "eae026d3671ac48e99c9e3748ce2839a19e6e633d3c8bfd1b02ca4dc6b29734d",
     "docs/reference/x-article-claude-autopilot-14-steps.md": "f1ab08f82fc0809937e62b7c80f6b4dfdc0d1b752914b3de499d5aeee8b4ea5d",
