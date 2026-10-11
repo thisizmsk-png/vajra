@@ -12,6 +12,8 @@
 #                    to detect checks that changed the tree they were verifying
 #   - diff.patch:    diff against HEAD (staged + unstaged) plus every untracked file
 # The walkthrough directory itself is excluded from all of the above.
+# evidence.json carries an "hmac" (HMAC-SHA256 with the Vajra key over its canonical
+# JSON without "hmac"), so the kb and the task graph can tell it was written here.
 #
 # At least one command is required: a verification that runs nothing proves nothing.
 # Exits non-zero if any command failed, so "done" is gated on captured evidence.
@@ -116,6 +118,30 @@ if [ "$have_jq" -eq 1 ]; then
           git: (if $git then {head:($head|nz), worktreeTree:($tree|nz), worktreeTreeAfter:($after|nz), treeStable:$stable,
                 diffBase:"HEAD+untracked", uncommittedChanges:$dirty, untrackedFiles:$untracked} else null end),
           commands:$cmds}' > "${DIR}/evidence.json"
+fi
+
+# Sign the evidence (contract: docs/roadmap/v0.6-review-fixes.md, "Signed evidence"):
+# hmac = HMAC-SHA256(Vajra key, canonical JSON of the object without "hmac":
+# sort_keys, separators (',', ':'), UTF-8). Without a key the file stays unsigned,
+# and vajra_kb.py / vajra_tasks.py do not count it as green.
+KEY_FILE="${HOME}/.claude/vajra/.hmac-key"
+if [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && command -v python3 >/dev/null 2>&1; then
+  python3 -I -c '
+import hashlib, hmac, json, os, re, sys
+path, keyf = sys.argv[1], sys.argv[2]
+k = open(keyf, encoding="utf-8").read().strip()
+if not re.fullmatch(r"[0-9a-fA-F]{32,}", k) or len(k) % 2:
+    sys.exit(0)
+ev = json.load(open(path, encoding="utf-8"))
+ev.pop("hmac", None)
+msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+ev["hmac"] = hmac.new(bytes.fromhex(k), msg, hashlib.sha256).hexdigest()
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(ev, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+' "${DIR}/evidence.json" "$KEY_FILE" || echo "warning: could not sign ${DIR}/evidence.json" >&2
 fi
 
 {

@@ -1,7 +1,7 @@
 export const meta = {
   name: 'vajra-feature-build',
   description: 'Vajra feature-build crew: arjuna designs and splits the work, bhima/nakula/sepoys build in worktrees, vidura verifies every criterion, arjuna and bhishma review; returns one local branch',
-  whenToUse: 'A full-stack feature with a clear goal ("/vajra fleet feature-build ..."). Args: the feature as text, or JSON {"feature": "...", "run_id": "20261011-0930", "max_rounds": 3}',
+  whenToUse: 'A full-stack feature with a clear goal ("/vajra fleet feature-build ..."). Args: the feature as text, or JSON {"feature": "...", "run_id": "20261011-0930", "max_rounds": 3, "maxInFlight": 4, "session_id": "<main session id>"}',
   phases: [
     { title: 'Brief', detail: 'validate the feature request' },
   ],
@@ -41,6 +41,8 @@ const childArgs = {
 }
 if (A.run_id) childArgs.run_id = A.run_id
 if (Number.isInteger(A.max_rounds)) childArgs.max_rounds = A.max_rounds
+if (A.maxInFlight !== undefined) childArgs.maxInFlight = A.maxInFlight   // vajra-deliver validates it
+if (A.session_id !== undefined) childArgs.session_id = A.session_id      // vajra-deliver validates it; kb write-back needs it
 let r
 try {
   r = await workflow('vajra-deliver', childArgs)

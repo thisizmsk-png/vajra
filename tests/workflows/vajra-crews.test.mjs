@@ -15,17 +15,21 @@ const call = (r, l) => r.calls.find((c) => c.label === l)
 {
   const wf = loadWorkflow(join(REPO, 'workflows', 'vajra-feature-build.js'))
   const RUN = 'fb20261011'
-  const ch = (id, p) => ({ status: 'done', branch: branchIn(p), base_commit: HEAD, commit: (id === 't1' ? 'b' : 'c') + '111111', files: id === 't1' ? ['src/a.ts'] : ['test/a.test.ts'], summary: 's', checks_run: ['t'], question: '', protected_actions_skipped: [] })
+  const ch = (id, p) => ({ status: 'done', summary: 's', evidence_cmds: ['t'],
+    artifacts: { branch: branchIn(p), base_commit: HEAD, commit: (id === 't1' ? 'b' : 'c') + '111111', files: id === 't1' ? ['src/a.ts'] : ['test/a.test.ts'], protected_actions_skipped: [] } })
   const base = {
     understand: { restated: 'r', acceptance_criteria: [{ id: 'ac-1', criterion: 'works', check: 'npm test' }], in_scope: [], out_of_scope: [], assumptions: [], blocking_question: '', touches_security: false, deploy_requested: false },
     preflight: { head: HEAD, current_branch: 'main', dirty: false, base: '', campaign_ok: true, campaign_output: '' },
-    'plan.1': { tasks: [{ id: 't1', title: 'impl', owner: 'bhima', files_owned: ['src/a.ts'], depends_on: [], criteria: ['ac-1'], brief: 'b' }, { id: 't2', title: 'tests', owner: 'sepoy-test-1', files_owned: ['test/a.test.ts'], depends_on: ['t1'], criteria: ['ac-1'], brief: 'b' }], protected_actions: [] },
+    'plan.1': { tasks: [{ id: 't1', title: 'impl', owner: 'bhima', files: ['src/a.ts'], deps: [], criteria: ['ac-1'], brief: 'b' }, { id: 't2', title: 'tests', owner: 'sepoy-test-1', files: ['test/a.test.ts'], deps: ['t1'], criteria: ['ac-1'], brief: 'b' }], decisions: [], protected_actions: [] },
     'task.t1': (l, o, p) => ch('t1', p),
     'task.t2': (l, o, p) => ch('t2', p),
     merge: (l, o, p) => ({ status: 'merged', branch: branchIn(p), commit: 'd1111111', merged: ['t1', 't2'], conflicts: [], notes: '' }),
-    verify: { results: [{ criterion_id: 'ac-1', status: 'pass', command: 'npm test', exit_code: 0, evidence: 'ok' }], suite_command: 'npm test', suite_passes: true, regressions: [] },
+    verify: { results: [{ criterion_id: 'ac-1', status: 'pass', command: 'npm test', exit_code: 0, evidence: 'ok' }], suite_command: 'npm test', suite_passes: true, regressions: [], setup_cmds: [] },
     review: { verdict: 'approve', blocking_issues: [], risks: [], rationale: 'ok' },
     campaign: { ok: true, outputs: ['ok'] },
+    'kb.search': { ok: true, lines: [] },
+    tasks: { ok: true, outputs: ['ok'] },
+    writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
   }
   const run = go(wf, base)
   console.log('vajra-feature-build')
@@ -45,6 +49,13 @@ const call = (r, l) => r.calls.find((c) => c.label === l)
   await scenario('bad run_id rejected before delegating', async () => {
     const r = await run({ feature: 'Add a CSV export endpoint', run_id: 'Bad Id' })
     assert.equal(r.result.status, 'error'); assert.equal(r.calls.length, 0)
+  })
+  await scenario('maxInFlight passes through to vajra-deliver (and is validated there)', async () => {
+    const r = await run({ feature: 'Add a CSV export endpoint', run_id: RUN, maxInFlight: 1 })
+    assert.equal(r.result.status, 'done')
+    assert.ok(r.logs.some((l) => l.startsWith('waves (maxInFlight 1)')))
+    const bad = await run({ feature: 'Add a CSV export endpoint', run_id: RUN, maxInFlight: 0 })
+    assert.equal(bad.result.status, 'error'); assert.equal(bad.result.node, 'deliver/input')
   })
 }
 

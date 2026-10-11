@@ -10,6 +10,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-vw-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 export VAJRA_WALKTHROUGH_DIR="$WORK/wt"
+export HOME="$WORK/home"; mkdir -p "$HOME"   # never the real ~/.claude (no key yet)
 
 PASS=0; FAIL=0
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL :: $1"; fi; }
@@ -72,6 +73,25 @@ bash "$SCRIPT" gitcase2 "true" >/dev/null 2>&1
 bash "$SCRIPT" mutate "echo changed > tracked.txt" >/dev/null 2>&1
 [ "$(jq -r '.git.treeStable' "$REPO_T/data/walkthroughs/mutate/evidence.json")" = "false" ]; check "check that edits the tree -> treeStable=false" $?
 cd "$WORK"
+
+# --- signed evidence (hmac over canonical JSON without "hmac") ---
+export VAJRA_WALKTHROUGH_DIR="$WORK/wt"
+[ "$(jq -r 'has("hmac")' "$WORK/wt/green/evidence.json")" = "false" ]; check "no key -> evidence left unsigned" $?
+mkdir -p "$HOME/.claude/vajra"; KEY="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+printf '%s' "$KEY" > "$HOME/.claude/vajra/.hmac-key"
+bash "$SCRIPT" signed "test -d ." "echo 'héllo ✓'" >/dev/null 2>&1
+SEV="$WORK/wt/signed/evidence.json"
+[ "$(jq -r '.hmac | length' "$SEV")" = "64" ]; check "with a key -> evidence carries a 64-hex hmac" $?
+verify_ev() { python3 -I -c '
+import hashlib, hmac, json, sys
+ev = json.load(open(sys.argv[1], encoding="utf-8")); mac = ev.pop("hmac")
+msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+sys.exit(0 if hmac.compare_digest(mac, hmac.new(bytes.fromhex(sys.argv[2]), msg, hashlib.sha256).hexdigest()) else 1)' "$1" "$KEY"; }
+verify_ev "$SEV"; check "hmac verifies over sort_keys, (',', ':'), UTF-8 (non-ASCII command)" $?
+jq '.commandsFailed=0 | .commands[0].cmd="make test"' "$SEV" > "$WORK/t.json"
+! verify_ev "$WORK/t.json"; check "editing evidence breaks the hmac" $?
+bash "$SCRIPT" signedred "false" >/dev/null 2>&1
+verify_ev "$WORK/wt/signedred/evidence.json"; check "failing runs are signed too (green is decided by the reader)" $?
 
 echo "----------------------------------------"
 echo "verify-work: ${PASS} passed, ${FAIL} failed"

@@ -22,13 +22,21 @@ Vajra, an agent harness for Claude Code
   /vajra repomap                    relevance-ranked map of the repo
   /vajra redteam [target]           red-team scenarios against a skill
   /vajra atman status|review|...    learning proposals (you approve each one)
+  /vajra remember <text>            save a project fact to the knowledge ledger
+  /vajra kb search|show|pending|... the knowledge ledger (approve/forget: you only)
   /vajra doctor                     check that hooks and workflows are wired
 ```
 
 Words like help, status, continue, doctor and verify are subcommands only on
 their own. `/vajra status page for our API` is an ask and gets delivered.
+fleet, campaign, cost, ralph, replay, repomap, redteam, atman, kb and
+verify-work are subcommands only with their real arguments:
+`/vajra fleet management dashboard` and `/vajra cost estimate for the
+migration` are asks.
 
-Memory: Vajra uses Claude Code's native auto memory, so there is no
-`/vajra memory` or `/vajra dream`. Routing and spend settings live in
+Memory: Claude Code's native auto memory keeps your preferences, so there is
+no `/vajra memory` or `/vajra dream`. Project facts, decisions, lessons and
+deliveries go to the knowledge ledger (`/vajra remember`, `/vajra kb`); see
+`kb.md`. Routing and spend settings live in
 `~/.claude/skills/vajra/config/`. Edit them by hand; they are protected from
 agent writes.

@@ -3,10 +3,12 @@
 #
 #   atman.sh status              integrity, recent failures, flagged skills/agents, counts
 #   atman.sh propose             turn verified signals into proposals (proposals/ only)
-#   atman.sh review              list pending proposals with their evidence
+#   atman.sh review              list pending proposals with their evidence, and
+#                                proposed knowledge records (scripts/vajra_kb.py pending)
 #   atman.sh approve <id>        human only: route -> learned-routes.json,
-#                                skill/agent change -> patches/<id>.patch (you apply it)
-#   atman.sh reject <id> [why]   human only
+#                                skill/agent change -> patches/<id>.patch (you apply it),
+#                                kb-<id> -> delegated to vajra_kb.py approve (into the kb)
+#   atman.sh reject <id> [why]   human only (kb-<id> -> vajra_kb.py reject)
 #   atman.sh log                 approval / rejection history
 #   atman.sh pause | resume      stop / restart proposing (observing continues)
 #   atman.sh observe | dream | verify

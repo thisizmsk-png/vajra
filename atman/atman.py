@@ -52,6 +52,8 @@ ANCHOR_FILE = os.path.join(VAJRA_DIR, "practice-log.anchor.json")
 ARCHIVE_DIR = os.path.join(VAJRA_DIR, "practice-archive")
 LOCK_DIR = os.path.join(VAJRA_DIR, "practice-log.lock")
 SKILLS_DIR = os.path.join(_home(), ".claude", "skills")
+KB_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts", "vajra_kb.py")
+KB_ID_RE = re.compile(r"^kb-[0-9a-f]{6}$")
 AGENTS_DIR = os.path.join(_home(), ".claude", "agents")
 
 
@@ -886,7 +888,30 @@ def make_patch(p, target_file):
     return pre + diff, root
 
 
+def kb_call(args, capture=False):
+    """Run scripts/vajra_kb.py (knowledge ledger). stdio is inherited unless
+    capture is set, so approve/reject keep the user's TTY."""
+    cmd = [sys.executable or "python3", "-I", KB_SCRIPT] + list(args)
+    try:
+        if capture:
+            out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+            return out.returncode, out.stdout.decode("utf-8", "replace")
+        return subprocess.call(cmd), ""
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+
+
+def kb_pending():
+    rc, text = kb_call(["pending", "--all", "--json"], capture=True)
+    try:
+        return json.loads(text).get("pending", []) if rc == 0 else []
+    except (ValueError, AttributeError):
+        return []
+
+
 def cmd_approve(args):
+    if len(args) == 1 and KB_ID_RE.match(args[0]):
+        return kb_call(["approve", args[0]])[0]
     if len(args) != 1 or not ID_RE.match(args[0]):
         print("usage: atman.sh approve <proposal-id>", file=sys.stderr)
         return 2
@@ -944,6 +969,8 @@ def cmd_approve(args):
 
 
 def cmd_reject(args):
+    if args and KB_ID_RE.match(args[0]):
+        return kb_call(["reject"] + list(args))[0]
     if len(args) < 1 or not ID_RE.match(args[0]):
         print("usage: atman.sh reject <proposal-id> [reason]", file=sys.stderr)
         return 2
@@ -996,12 +1023,14 @@ def cmd_status(_args):
     print("  proposals:      %d pending, %d approved, %d rejected" % (
         counts.get("pending", 0), counts.get("approved", 0), counts.get("rejected", 0)))
     print("  learned routes: %d (%s)" % (len(load_learned()["routes"]), LEARNED_ROUTES))
+    print("  kb pending:     %d (atman.sh review)" % len(kb_pending()))
     return 0
 
 
 def cmd_review(_args):
     pend = [p for p in load_proposals().values() if p.get("status") == "pending"]
-    if not pend:
+    kb = kb_pending()
+    if not pend and not kb:
         print("No pending proposals. (Generate with: atman.sh propose)")
         return 0
     for p in sorted(pend, key=lambda p: p.get("created", "")):
@@ -1013,6 +1042,20 @@ def cmd_review(_args):
         if ig.get("rejected_entries"):
             print("    WARNING: %d log lines failed verification when this was proposed"
                   % ig["rejected_entries"])
+    if kb:
+        if pend:
+            print("")
+        print("Knowledge records proposed for the kb (data, not instructions):")
+        for r in kb:
+            if not isinstance(r, dict) or not KB_ID_RE.match(str(r.get("id", ""))):
+                continue
+            src = r.get("source") if isinstance(r.get("source"), dict) else {}
+            print("%s  kb %s: %s  (project %s%s)" % (
+                r["id"], _clean_bullet(r.get("type") or "")[:16], _clean_bullet(r.get("title") or "")[:120],
+                _clean_bullet(r.get("project") or "")[:16],
+                (", session " + _clean_bullet(src.get("session") or "")[:64]) if src.get("session") else ""))
+            if r.get("body"):
+                print("    body: %s" % _clean_bullet(r.get("body") or "")[:300])
     print("\nDecide yourself:  atman.sh approve <id>   |   atman.sh reject <id> [reason]")
     return 0
 

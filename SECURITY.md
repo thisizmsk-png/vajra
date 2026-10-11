@@ -166,3 +166,86 @@ Or interactively: `/sandbox`. The recommended policy is in `config/sandbox.json`
 Run `bash tests/run-all.sh` and `bash scripts/vajra-doctor.sh` before relying on
 any layer. Report vulnerabilities privately through GitHub security advisories on
 the repository.
+
+## Knowledge ledger (`scripts/vajra_kb.py`)
+
+Vajra's project knowledge lives in `~/.claude/vajra/kb/<project-id>/`
+(details in `docs/commands/kb.md`).
+
+- **Signed source of truth.** `events.jsonl` is append-only and HMAC-chained
+  with the Vajra key, the same scheme as the practice log. Every append is
+  fsynced. Edited, forged, reordered or replayed lines fail verification and
+  are ignored; `doctor` reports them and the script refuses to append onto a
+  broken chain. `doctor --repair` moves the unverified lines to
+  `events.quarantine.jsonl` and leaves the verified chain untouched.
+  `kb.sqlite` and `INDEX.md` are derived and rebuilt from the chain.
+- **Write gate.** Every write is checked before it is stored. Secrets (cloud
+  keys, private keys, GitHub, `sk-` and Slack tokens, JWTs, high-entropy
+  strings), prompt-injection patterns, invisible or control characters, URLs
+  with query strings (except non-credential queries on a local development
+  host) and oversized content are refused with exit 3. A refusal is
+  audit-logged as a sha256 of the input, never the content. The gate is a
+  pattern filter: it lowers the odds of a secret or an instruction being
+  stored, and does not prove that a record is harmless.
+- **Trust tiers.**
+  - `user` records need `--user-token`, HMAC-SHA256(key,
+    `"user\0" + title + "\0" + body`). Only the router mints it, in the
+    UserPromptSubmit hook, for `/vajra remember`.
+  - `verified` records need a green, signed `vajra-verify-work.sh` evidence
+    file and a session id.
+  - Everything else goes to `pending/` with a session id and needs the user.
+    `approve`, `reject` and `forget` require an interactive TTY, the same
+    human gate as Atman (`atman.sh approve kb-<id>` delegates to it).
+    Approval re-runs the gate, and ignores the pending file's `applies`
+    because pending files are not signed.
+  - Proposals and verified writes are refused for sessions that used web or
+    MCP content.
+  - Only user records, or a proposal the user approves with `--always`, may
+    be `applies=always` (shown at every SessionStart).
+  - `retire`, `supersede` and `restore` of a user record need a TTY or a user
+    token over that operation and record id.
+- **Read-back is data.** `prime`, `show`, `search --format full` and the
+  router's hits are wrapped in `<untrusted-data source="vajra-kb">`. Record
+  text cannot open or close that tag (any case or spacing is escaped), and
+  stale facts are not injected. Verified records keep only the evidence
+  sha256 and a sanitized slug, never a path or text from the evidence file.
+- **Forgetting.** Nothing is deleted silently; `forget` (user only) replaces
+  the record's content with a tombstone and re-signs the chain.
+
+What the evidence and token checks guarantee, exactly:
+
+- **Evidence.** A `verified` record (and a task closed by
+  `vajra_tasks.py close`) means all of these were true:
+  - something that could read the Vajra key wrote this exact
+    `evidence.json`, with nothing changed since (the hmac);
+  - the file sits at `<repo>/data/walkthroughs/<slug>/evidence.json`;
+  - every recorded command exited 0, the tree was stable while they ran, and
+    the recorded head is the current HEAD or the commit the caller named;
+  - not every command was trivial;
+  - the file is at most 48 hours old.
+
+  It does not prove that the commands were meaningful tests: `test -f x`
+  passes the trivial-command check. Nor does it prove that the agent did not
+  run `vajra-verify-work.sh` itself. Any process that can run the script can
+  produce signed evidence, so the hmac proves where the file came from, not
+  whose intent it reflects.
+- **User token.** A `user` record means a process that could read
+  `~/.claude/vajra/.hmac-key` approved that exact title and body. In normal
+  operation, that process is the router running `/vajra remember` in the
+  UserPromptSubmit hook. Tokens never appear in the model's context. A token
+  is bound to its text, so it cannot be reused for other text, but it can be
+  replayed for the same text, which only dedupes.
+
+Not guaranteed:
+
+- **The TTY gate is not a boundary on its own.** `approve`, `reject`,
+  `forget`, and the user-record `retire`/`supersede`/`restore` check
+  `isatty()`. A process that can allocate a pseudo-terminal (`script`,
+  `expect`, Python's `pty`) can satisfy that check. Without the OS sandbox
+  (`/sandbox`, `config/sandbox.json`), the gate keeps honest agents from
+  approving by accident. It does not stop a determined one.
+- **The key is the root of both checks.** The guard keeps the agent's own
+  tools from reading `.hmac-key`. An agent that can run arbitrary shell
+  outside the guard and the sandbox can read the key, mint tokens and sign
+  evidence. The guard and the sandbox are the boundary for that, as for
+  every other script.

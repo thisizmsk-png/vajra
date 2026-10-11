@@ -78,6 +78,8 @@ TypeScript tests.
 | Review the diff against the steering rules | `/vajra review` |
 | See what a session cost | `/vajra cost` |
 | Review what Vajra learned | `/vajra atman review`, then `approve <id>` or `reject <id>` |
+| Teach Vajra a project fact | `/vajra remember the API uses cursor pagination` |
+| Look up project knowledge | `/vajra kb search <words>` · `/vajra kb pending` |
 | Check the wiring | `/vajra doctor` |
 | Everything else | `/vajra help` |
 
@@ -88,9 +90,11 @@ Each subcommand has a one-page doc in [`docs/commands/`](docs/commands/).
 | Claim | Where | Test |
 |---|---|---|
 | Routing costs 0 model tokens: a UserPromptSubmit hook adds one context line with suggested crews, agents and skills, and logs the route (no raw prompt) | `scripts/vajra_route.py`, `hooks/user-prompt-submit.sh`, `config/default.json` | `tests/router/run-router.sh` |
+| Project knowledge is a ledger: append-only HMAC-chained events, an FTS index, a write gate that refuses secrets, injection and oversize text, and trust tiers (user only from `/vajra remember`, verified only with green evidence, everything else pending your approval). It is read back at session start and on each `/vajra` ask as `<untrusted-data>` pointers | `scripts/vajra_kb.py`, `hooks/session-start.sh`, `scripts/vajra_route.py` | `tests/kb/`, `tests/router/run-router-kb.sh`, `tests/hooks/run-session-start-kb.sh` |
+| Deliveries plan into a task graph (`tasks.json`, only the script changes a status), run in dependency waves with disjoint files (at most 4 in flight), close a task only on vidura's verdict, and on verified success write the delivery, decisions and lessons back to the ledger | `scripts/vajra_tasks.py`, `workflows/vajra-deliver.js` | `tests/tasks/`, `tests/workflows/` |
 | A bare `/vajra <ask>` runs the deliver workflow: understand, plan, execute in worktrees, verify, fix (at most 3 rounds), deliver | `workflows/vajra-deliver.js` | `tests/workflows/` |
 | Crews are saved workflows with typed outputs, bounded fix loops, read-only reviewers and a vote counted in code | `workflows/vajra-*.js` | `tests/workflows/` |
-| Dangerous or self-modifying tool calls are blocked (exit 2, fail closed); paths are canonicalized; config, settings, agents and Vajra state are protected | `hooks/pre-tool-use.sh` | `tests/hooks/` |
+| Dangerous or self-modifying tool calls are blocked (exit 2, fail closed); paths are canonicalized; config, settings, agents and Vajra state (including the knowledge ledger and task graphs) are protected; only real write targets are judged, not text in heredocs or quoted reader arguments; cost is bounded for large commands | `hooks/pre-tool-use.sh` | `tests/hooks/` |
 | "Done" needs at least one passing command, with output and the diff against `HEAD` (plus untracked files) captured | `scripts/vajra-verify-work.sh` | `tests/run-verify-work.sh` |
 | Campaigns persist across sessions in `features.json` (only `passes` changes) and `progress.md`, with HMAC-signed checkpoints; the key never enters the model context | `scripts/vajra-campaign.sh` | `tests/run-campaign.sh` |
 | The manifest is signed locally with your key and checked at session start | `scripts/generate-manifest.sh`, `hooks/session-start.sh` | `tests/hooks/` |
@@ -100,7 +104,8 @@ Each subcommand has a one-page doc in [`docs/commands/`](docs/commands/).
 Specialists are the 20 mahabharat agents (17 masters, 3 sepoys) in
 `bundled-agents/`. Vajra delegates to them through the Agent tool or a
 workflow's `agentType`, so each agent's own tool allowlist, model and effort
-apply. Memory is Claude Code's native auto memory; Vajra keeps none of its own.
+apply. Claude Code's native auto memory keeps user preferences; project
+knowledge lives in Vajra's ledger, where every record says where it came from.
 
 Not enforced by code: wrapping untrusted content (files, web pages, tool
 output, other agents) in `<untrusted-data>` tags is an instruction in

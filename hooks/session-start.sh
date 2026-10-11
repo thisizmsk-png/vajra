@@ -8,6 +8,8 @@
 #      that pre-tool-use.sh reads to block mutations.
 #   2. Prints the active campaign line (scripts/vajra-campaign.sh active --brief).
 #   3. After a compaction (source=compact), points at the last checkpoint.
+#   4. Knowledge read-back: scripts/vajra_kb.py prime --budget 1500, wrapped
+#      in <untrusted-data source="vajra-kb">.
 #
 # Everything goes to stdout, which Claude Code adds to the session context.
 # The hook never fails the session: it always exits 0.
@@ -147,6 +149,37 @@ if [ "$SOURCE" = "compact" ] && [ -d "${VAJRA_DIR}/compaction" ]; then
   if [ -n "$last" ]; then
     ref="$(sed -n 's/^git ref: \([^ ]*\).*/\1/p' "$last" | head -1)"
     echo "Vajra: context was compacted. Pre-compaction checkpoint: ${last}${ref:+ (pinned at ${ref})}."
+  fi
+fi
+
+# Knowledge read-back: `vajra_kb.py prime` lists the always-apply lessons and
+# recent decisions for this project as one-line pointers. It runs in the
+# session's cwd (the project id comes from its git common dir), is capped at
+# 5 seconds and 8000 characters, and its output is always (re)wrapped in one
+# <untrusted-data source="vajra-kb"> block: it is data, not instructions.
+KB_SH="${SKILL_DIR}/scripts/vajra_kb.py"
+if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && command -v python3 >/dev/null 2>&1; then
+  KB_CWD=""
+  if command -v jq >/dev/null 2>&1 && [ -n "$PAYLOAD" ]; then
+    KB_CWD="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  fi
+  { [ -n "$KB_CWD" ] && [ -d "$KB_CWD" ]; } || KB_CWD="$PWD"
+  KB_TMP="$(mktemp "${TMPDIR:-/tmp}/vajra-prime-XXXXXX" 2>/dev/null)" || KB_TMP=""
+  if [ -n "$KB_TMP" ]; then
+    ( cd "$KB_CWD" 2>/dev/null && exec python3 -I "$KB_SH" prime --budget 1500 ) > "$KB_TMP" 2>/dev/null </dev/null &
+    kb_pid=$!
+    kb_waited=0
+    while kill -0 "$kb_pid" 2>/dev/null && [ "$kb_waited" -lt 50 ]; do sleep 0.1; kb_waited=$((kb_waited + 1)); done
+    if kill -0 "$kb_pid" 2>/dev/null; then
+      kill "$kb_pid" 2>/dev/null; wait "$kb_pid" 2>/dev/null; : > "$KB_TMP"
+    else
+      wait "$kb_pid" 2>/dev/null || : > "$KB_TMP"
+    fi
+    kb_out="$(head -c 8000 "$KB_TMP" | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed -e 's#</*untrusted-data[^>]*>##g' -e '/^[[:space:]]*$/d')"
+    rm -f "$KB_TMP"
+    if [ -n "$kb_out" ]; then
+      printf '<untrusted-data source="vajra-kb">\n%s\n</untrusted-data>\n' "$kb_out"
+    fi
   fi
 fi
 
