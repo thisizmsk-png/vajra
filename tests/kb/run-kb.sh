@@ -3,6 +3,9 @@
 # trust tiers, search, prime, supersede/retire/restore, dedup, forget, gc,
 # atman integration. Runs entirely in a temp HOME. Run: bash tests/kb/run-kb.sh
 set -uo pipefail
+# Fake AWS-shaped fixtures, assembled at runtime so secret scanners don't flag the repo.
+FAKE_AKIA="AK""IA""ABCDEFGHIJKLMNOP"
+FAKE_ASIA="AS""IA""ABCDEFGHIJKLMNOP"
 for c in jq openssl python3 git; do
   command -v "$c" >/dev/null || { echo "SKIP: $c required"; exit 0; }
 done
@@ -120,8 +123,8 @@ gate() { # label, args...
   kbu add --type fact "$@" >/dev/null 2>&1; local rc=$?
   [ "$rc" -eq 3 ]; check "gate refuses: $label (exit 3)" $?
 }
-gate "AWS key"        --title "creds AKIAABCDEFGHIJKLMNOP here"
-gate "ASIA key"       --title "t" --body "ASIAABCDEFGHIJKLMNOP"
+gate "AWS key"        --title "creds ${FAKE_AKIA} here"
+gate "ASIA key"       --title "t" --body "${FAKE_ASIA}"
 gate "private key"    --title "t" --body "-----BEGIN OPENSSH PRIVATE KEY-----"
 gate "ghp_ token"     --title "t" --body "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 gate "gho_ token"     --title "t" --body "gho_abcdefghijklmnopqrstuvwxyz0123456789"
@@ -147,9 +150,9 @@ kbu add --type fact --title "Snake case identifier note" \
 check "gate allows long snake_case identifiers" $?
 [ "$(jq -r 'select(.action=="refused") | .sha256 | length' "$KBD/audit.jsonl" | sort -u)" = "64" ]
 check "refusals audit-logged as a sha256" $?
-! grep -q "AKIAABCDEFGHIJKLMNOP\|ghp_abc\|ignore all previous" "$KBD/audit.jsonl" "$EV"
+! grep -q "${FAKE_AKIA}\|ghp_abc\|ignore all previous" "$KBD/audit.jsonl" "$EV"
 check "refused content never stored" $?
-out="$(kbu add --type fact --title "AKIAABCDEFGHIJKLMNOP" --json 2>/dev/null)"
+out="$(kbu add --type fact --title "${FAKE_AKIA}" --json 2>/dev/null)"
 echo "$out" | jq -e '.result=="refused"' >/dev/null
 check "--json refusal says refused" $?
 kbu add --type nope --title t >/dev/null 2>&1; [ $? -eq 2 ]; check "bad --type exits 2" $?

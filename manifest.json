@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-11T16:26:20Z",
+  "generated": "2026-10-11T16:33:58Z",
   "version": "0.6.0",
   "files": {
     ".github/workflows/ci.yml": "4c1216ce15e80be5fe207aac1a8aba2c4669385ce7efd933c5b8cfb11d93fea1",
@@ -794,8 +794,8 @@
     "tests/hooks/run-session-start-kb.sh": "1704be7a291ab7afd311c400ecd17e2e1de4bd4f5711b2c570bdd81561ab245f",
     "tests/hooks/run-session-start.sh": "b7916d69042f23cbf229cb7f08b8480f054c1b4183866d630b2352fe07643962",
     "tests/hooks/run-user-prompt-submit.sh": "612a11e6acf07032bb9cdd76c29582ad01ac3db48de1552f5cdb2a5ebd5ce6d9",
-    "tests/kb/run-kb.sh": "0f087fd2c86309fd49f8fac999466087ca0e611e34d94cd63a2861f2125bbb40",
-    "tests/router/run-router-kb.sh": "8c777d3bca14dbb06879cf75855288a519db6ae3801635dbcf25c1f63a5c9d61",
+    "tests/kb/run-kb.sh": "3a18d89a3cc784ffe2688dc2e7dde997fcff1dc5d72a7580cdac6602fe2fc4cb",
+    "tests/router/run-router-kb.sh": "083cb003d2895a9959636535d6933fad880a06efa236f8481626bb9d6841c700",
     "tests/router/run-router.sh": "fedf4ad7d111a2a291d3aaa9ca959f677129898446b133c7daeb74f58fad6358",
     "tests/run-all.sh": "e2792b4dd7dcea34fff0b69a2ca246a00388aea3522c448ed1087d6da4e817e6",
     "tests/run-campaign.sh": "5d23d2b92884db62c74a89e9226cb5b6f999d6b265ab1ef3724b405c85a71265",
