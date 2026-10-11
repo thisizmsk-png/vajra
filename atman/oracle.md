@@ -1,52 +1,25 @@
-# Vajra Oracle — Second-Opinion Escalation
+# Oracle: second-opinion escalation
 
-Atman's peer review is *horizontal* (skills review each other). The Oracle is
-*vertical*: when a task is stuck or high-stakes, escalate to a stronger model for
-a focused second opinion **before** the run fails — the pattern Amp's "Oracle"
-and Devin's self-correction use to get outsized debugging/review gains.
+This is guidance for the model, not automation. Atman's deltas fix recurring
+failures slowly; the Oracle helps with the current one.
 
-## When to summon the Oracle
+## When to consult it
 
-Summon automatically on any of:
-1. **Repeated failure** — Atman has flagged a skill/agent with ≥2 failures in the
-   last 7 days (`~/.claude/vajra/flags/*.json`, written by the post-tool hook).
-   Consult the Oracle *before* the next attempt rather than looping blindly.
-2. **High-stakes step** — the step touches a schema/data migration, a security
-   boundary, money/correctness-critical logic, or an irreversible action.
-3. **Genuine uncertainty** — the agent is choosing between approaches with no
-   clear winner and the cost of being wrong is high.
+1. **Repeated failure.** `bash ~/.claude/skills/vajra/scripts/atman.sh status`
+   lists skills and agents with 2 or more failures in the last 7 days. If the
+   current skill or agent is listed, or you have failed the same step twice in
+   this session, consult the Oracle before trying again.
+2. **High-stakes step.** Schema or data migrations, security boundaries,
+   money- or correctness-critical logic, irreversible actions.
+3. **Real uncertainty** between approaches when being wrong is expensive.
 
-Do NOT summon for routine work — the Oracle is expensive (stronger model + more
-reasoning). Most tasks never need it.
+Not for routine work.
 
-## How it works
+## How
 
-The Oracle is a focused consult sub-agent, not a worker:
-
-1. **Brief it tightly** — give it only the failing context: the goal, the diff or
-   the approach under question, the error/trace, and the specific decision. Not
-   the whole repo. (Just-in-time context — it should not need to explore.)
-2. **Stronger config** — run it on the strongest available model with higher
-   reasoning effort. It reasons, it does not edit.
-3. **Ask for a verdict + the smallest fix** — "What's the root cause? What's the
-   minimal change? What did the worker miss?" — same discipline as the review
-   pipeline (concrete, quote the evidence, smallest fix).
-4. **The worker decides** — the Oracle advises; the worker (or user) applies. The
-   Oracle never ships code itself.
-
-## Wiring
-
-- **Atman failure signal** — the post-tool hook already writes a flag at the 2nd
-  failure of a skill/agent. That flag is the trigger: on the next routing to that
-  skill, summon the Oracle first.
-- **Plan Mode** — a step tagged high-risk in `data/plans/{slug}.plan.md` summons
-  the Oracle during planning, before it reaches `act`.
-- **Cortex** — any agent can escalate to the Oracle; it composes with the agent's
-  steering rules (the Oracle checks the work against the same rules).
-
-## Why vertical escalation matters
-
-A worker that fails twice and keeps trying the same shape burns tokens and drifts.
-A worker that *stops, summons a stronger reasoner with the failing context, and
-gets a root-cause* converges. The Oracle is the structural answer to "the agent
-got stuck and dug deeper" — escalate before the run dies, not after.
+1. Brief tightly: the goal, the diff or approach in question, the error, and the
+   decision to make. Not the whole repo.
+2. Use the strongest available model with higher effort, read-only (for example
+   an `arjuna` review, or `bhishma` for security).
+3. Ask for the root cause and the smallest fix.
+4. The worker or the user decides and applies. The Oracle does not edit.

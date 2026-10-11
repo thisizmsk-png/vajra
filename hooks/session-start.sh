@@ -1,176 +1,160 @@
 #!/usr/bin/env bash
-# Vajra SessionStart hook — resume campaigns + verify integrity of the
-# security-critical surface against the SHA-256 manifest.
+# Vajra SessionStart hook.
 #
-# Fixes red-team finding VJR-06: the previous check hashed only 3 doc files
-# (SKILL.md, router.md, sanitizer.ts) and IGNORED every file that actually
-# enforces security — the hooks, the engine, and config/default.json (which
-# holds the sanitizer strip list and command policy). It also only warned.
+#   1. Integrity: verify the manifest signature (~/.claude/vajra/manifest.sig,
+#      written on this machine by install.sh with the user's own HMAC key),
+#      then every file hash in manifest.json, and look for unlisted files in
+#      the directories code runs from. On a mismatch it writes the tamper flag
+#      that pre-tool-use.sh reads to block mutations.
+#   2. Prints the active campaign line (scripts/vajra-campaign.sh active --brief).
+#   3. After a compaction (source=compact), points at the last checkpoint.
 #
-# This version verifies the full enforcement set and, on a verified mismatch,
-# writes a tamper flag that pre-tool-use.sh reads to block mutating operations
-# until `/vajra verify` clears it. The manifest itself is write-protected from
-# inside the harness by the pre-tool immutable-core rule.
+# Everything goes to stdout, which Claude Code adds to the session context.
+# The hook never fails the session: it always exits 0.
+#
+#   session-start.sh --check   integrity only: print problems, write no flag,
+#                              exit 1 if anything is wrong (used by install/doctor)
 
 set -uo pipefail
 
-VAJRA_DIR="${HOME}/.claude/vajra"
-VAJRA_DB="${VAJRA_DIR}/vajra.db"
 SKILL_DIR="${HOME}/.claude/skills/vajra"
+VAJRA_DIR="${HOME}/.claude/vajra"
 MANIFEST="${SKILL_DIR}/manifest.json"
+SIG_FILE="${VAJRA_DIR}/manifest.sig"
+KEY_FILE="${VAJRA_DIR}/.hmac-key"
 TAMPER_FLAG="${VAJRA_DIR}/.integrity-violation"
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-mkdir -p "$VAJRA_DIR"
+PAYLOAD=""
+[ "$CHECK_ONLY" = 1 ] || PAYLOAD="$(cat 2>/dev/null || true)"
 
-# --- Active campaign check (query SQLite directly) ---
-if [ -f "$VAJRA_DB" ] && command -v sqlite3 &>/dev/null; then
-  ACTIVE_CAMPAIGN="$(sqlite3 "$VAJRA_DB" "SELECT name FROM campaigns WHERE status='active' ORDER BY updated DESC LIMIT 1;" 2>/dev/null || echo "")"
-  if [ -n "$ACTIVE_CAMPAIGN" ]; then
-    echo "Active Vajra campaign: ${ACTIVE_CAMPAIGN}. Use /vajra continue to resume."
-  fi
-fi
-
-# --- Portable SHA-256 helper (macOS: shasum; Linux: sha256sum) ---
-sha256_of() {
-  if command -v sha256sum &>/dev/null; then
-    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
-  elif command -v shasum &>/dev/null; then
-    shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+sha256_check() { # stdin: "<hash>  <path>" lines; stdout: failing paths
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c --quiet - 2>/dev/null
   else
-    return 1
-  fi
+    shasum -a 256 -c --quiet - 2>/dev/null
+  fi | sed -n 's/: FAILED$//p'
 }
 
-# --- Manifest integrity check over the FULL enforcement set ---
-if [ -f "$MANIFEST" ]; then
-  # Validate manifest is parseable JSON
-  if ! command -v jq &>/dev/null; then
-    echo "Vajra integrity: jq not available — cannot verify manifest." >&2
-  elif ! jq -e . "$MANIFEST" >/dev/null 2>&1; then
-    echo "Vajra integrity WARNING: manifest.json is not valid JSON." >&2
-  elif ! sha256_of "$MANIFEST" >/dev/null 2>&1; then
-    echo "Vajra integrity: no SHA-256 tool (install coreutils/shasum) — cannot verify." >&2
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+# One line per problem; empty output = clean.
+integrity_problems() {
+  if ! command -v jq >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    echo "cannot verify: jq and openssl are required"
+    return
+  fi
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    echo "cannot verify: no sha256sum/shasum"
+    return
+  fi
+  [ -f "$MANIFEST" ] || { echo "cannot verify: manifest.json is missing"; return; }
+  if ! jq -e '.files | type == "object"' "$MANIFEST" >/dev/null 2>&1; then
+    echo "manifest.json is not valid"
+    return
+  fi
+
+  # Signature: HMAC-SHA256(key, sha256(manifest.json)), made on this machine.
+  if [ ! -s "$KEY_FILE" ]; then
+    echo "not set up: no HMAC key (run scripts/install.sh)"
+  elif [ ! -s "$SIG_FILE" ]; then
+    echo "not set up: manifest is not signed on this machine (run scripts/install.sh)"
   else
-    # Every file whose modification changes security behavior. A mismatch on
-    # ANY of these is treated as tampering (fail-closed via the tamper flag).
-    CRITICAL_FILES=(
-      "SKILL.md"
-      "hooks/pre-tool-use.sh"
-      "hooks/post-tool-use.sh"
-      "hooks/session-start.sh"
-      "hooks/pre-compact.sh"
-      "engine/sanitizer.ts"
-      "engine/engine.ts"
-      "engine/router.md"
-      "engine/plan-mode.md"
-      "engine/verification.md"
-      "engine/compaction.md"
-      "engine/ralph-loop.md"
-      "scripts/vajra-ralph.sh"
-      "engine/repo-map.md"
-      "scripts/vajra_repomap.py"
-      "atman/oracle.md"
-      "scripts/vajra-phase.sh"
-      "scripts/vajra-verify-work.sh"
-      "scripts/vajra-replay.sh"
-      "config/default.json"
-      "config/security-contracts.json"
-      "fleet/fleet-coordinator.sh"
-      "redteam/snapshot.sh"
-      "redteam/orchestrator.md"
-      "redteam/scorer.md"
-      "scripts/install.sh"
-      "scripts/generate-manifest.sh"
-      "scripts/atman-observe.sh"
-      "scripts/atman-dream.sh"
-      "config/steering.json"
-      "config/pricing.json"
-      "scripts/vajra-cost.sh"
-      "config/sandbox.json"
-      "scripts/enable-sandbox.sh"
-      "SECURITY.md"
-      "steering/review-pipeline.md"
-      "steering/rules/principles.md"
-      "steering/rules/general.md"
-      "steering/rules/security.md"
-      "steering/rules/testing.md"
-      "steering/rules/lambda.md"
-      "steering/rules/aws-cdk.md"
-      "steering/rules/typescript.md"
-      "steering/rules/python.md"
-      "steering/rules/java.md"
-    )
-
-    VIOLATIONS=""
-    MISSING=""
-
-    # Verify the manifest's own HMAC signature first (NEW-04). The key shares
-    # the harness trust boundary, so this is defense-in-depth — but the manifest
-    # is ALSO write-protected from inside the harness by the immutable-core hook,
-    # so tampering requires breaking both. A bad signature is itself a violation.
-    MANIFEST_SIG="${MANIFEST}.sig"
-    HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
-    if [ -f "$MANIFEST_SIG" ] && [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ] && command -v openssl &>/dev/null; then
-      m_hash="$(sha256_of "$MANIFEST")"
-      key_hex="$(cat "$HMAC_KEY_FILE")"
-      expect_sig="$(tr -d '[:space:]' < "$MANIFEST_SIG")"
-      actual_sig="$(printf '%s' "$m_hash" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key_hex}" -hex 2>/dev/null | awk '{print $NF}')"
-      if [ -n "$expect_sig" ] && [ "$actual_sig" != "$expect_sig" ]; then
-        VIOLATIONS="${VIOLATIONS}manifest.json(bad-signature) "
-      fi
+    local want got
+    want="$(tr -d '[:space:]' < "$SIG_FILE")"
+    got="$(sha256_of "$MANIFEST" | tr -d '\n' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex 2>/dev/null | awk '{print $NF}')"
+    if [ -z "$got" ] || [ "$got" != "$want" ]; then
+      echo "manifest.json signature does not match (changed after install)"
     fi
+  fi
 
-    for rel_path in "${CRITICAL_FILES[@]}"; do
-      full_path="${SKILL_DIR}/${rel_path}"
-      expected_hash="$(jq -r ".files[\"${rel_path}\"] // empty" "$MANIFEST" 2>/dev/null)"
-      if [ -z "$expected_hash" ]; then
-        # Manifest is missing a hash for a file we consider critical.
-        MISSING="${MISSING}${rel_path} "
-        continue
-      fi
-      if [ ! -f "$full_path" ]; then
-        VIOLATIONS="${VIOLATIONS}${rel_path}(deleted) "
-        continue
-      fi
-      actual_hash="$(sha256_of "$full_path")"
-      if [ "$actual_hash" != "$expected_hash" ]; then
-        VIOLATIONS="${VIOLATIONS}${rel_path} "
-      fi
-    done
+  # File hashes: one sha256 process for the whole list.
+  local bad
+  bad="$(cd "$SKILL_DIR" && jq -r '.files | to_entries[] | "\(.value)  \(.key)"' "$MANIFEST" | sha256_check)"
+  [ -n "$bad" ] && printf '%s\n' "$bad" | sed 's/^/modified or missing: /'
+  # Some sha256sum builds report unreadable files only on stderr; check existence too.
+  local f
+  while IFS= read -r f; do
+    [ -f "$SKILL_DIR/$f" ] || printf 'missing: %s\n' "$f"
+  done < <(jq -r '.files | keys[]' "$MANIFEST")
 
-    if [ -n "$VIOLATIONS" ]; then
-      {
-        echo "{"
-        echo "  \"detected\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
-        echo "  \"files\": \"$(echo "$VIOLATIONS" | tr -d '\n')\""
-        echo "}"
-      } > "$TAMPER_FLAG"
-      chmod 600 "$TAMPER_FLAG" 2>/dev/null || true
-      echo "════════════════════════════════════════════════════════════" >&2
-      echo "Vajra INTEGRITY VIOLATION — security-critical files modified:" >&2
-      echo "  ${VIOLATIONS}" >&2
-      echo "Mutating tool calls are now BLOCKED until you investigate." >&2
-      echo "Run '/vajra verify' to review, then delete ${TAMPER_FLAG} to clear." >&2
-      echo "════════════════════════════════════════════════════════════" >&2
-    else
-      # Clean — clear any stale tamper flag from a prior session.
-      rm -f "$TAMPER_FLAG" 2>/dev/null || true
-      if [ -n "$MISSING" ]; then
-        echo "Vajra integrity: manifest missing hashes for: ${MISSING}(run scripts/generate-manifest.sh)" >&2
-      fi
-    fi
+  # Unlisted files in the directories code runs from.
+  local listed present
+  listed="$(jq -r '.files | keys[]' "$MANIFEST" | LC_ALL=C sort)"
+  present="$(cd "$SKILL_DIR" && find hooks scripts config workflows atman -type f ! -name '*.pyc' ! -path '*/__pycache__/*' ! -name '.DS_Store' 2>/dev/null | LC_ALL=C sort)"
+  LC_ALL=C comm -13 <(printf '%s\n' "$listed") <(printf '%s\n' "$present") | sed '/^$/d; s/^/not in manifest: /'
+}
+
+PROBLEMS="$(integrity_problems)"
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  [ -z "$PROBLEMS" ] && exit 0
+  printf '%s\n' "$PROBLEMS"
+  exit 1
+fi
+
+mkdir -p "$VAJRA_DIR" 2>/dev/null || true
+
+case "$PROBLEMS" in
+  "")
+    rm -f "$TAMPER_FLAG" 2>/dev/null || true
+    ;;
+  "cannot verify:"*|"not set up:"*)
+    # Not installed yet or missing tools: warn, but do not lock the session.
+    echo "Vajra integrity: $(printf '%s' "$PROBLEMS" | head -1)"
+    ;;
+  *)
+    {
+      printf '{"detected":"%s","problems":' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf '%s\n' "$PROBLEMS" | jq -R . | jq -sc .
+      printf '}\n'
+    } > "$TAMPER_FLAG" 2>/dev/null
+    chmod 600 "$TAMPER_FLAG" 2>/dev/null || true
+    echo "Vajra INTEGRITY VIOLATION: security-relevant Vajra files changed since install:"
+    printf '%s\n' "$PROBLEMS" | head -10 | sed 's/^/  - /'
+    echo "Edits and mutating commands are blocked until this is resolved. Tell the user."
+    echo "The user should review the change (git -C ~/.claude/skills/vajra status) and, if it is intended, rebuild and re-sign the manifest by running this in their own terminal: bash ~/.claude/skills/vajra/scripts/generate-manifest.sh"
+    ;;
+esac
+
+# Active campaign (vajra-campaign.sh prints one line or nothing). This hook adds
+# the "Vajra campaign:" prefix exactly once, even if the brief already has it.
+CAMPAIGN_SH="${SKILL_DIR}/scripts/vajra-campaign.sh"
+if [ -f "$CAMPAIGN_SH" ]; then
+  line="$(bash "$CAMPAIGN_SH" active --brief 2>/dev/null | head -1)"
+  while :; do
+    case "$line" in
+      [[:space:]]*) line="${line#?}" ;;
+      "Vajra campaign:"*) line="${line#Vajra campaign:}" ;;
+      "Vajra campaign "*) line="${line#Vajra campaign }" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$line" ] && echo "Vajra campaign: ${line}"
+fi
+
+# After compaction, point at the checkpoint pre-compact.sh pinned.
+SOURCE=""
+if command -v jq >/dev/null 2>&1 && [ -n "$PAYLOAD" ]; then
+  SOURCE="$(printf '%s' "$PAYLOAD" | jq -r '.source // empty' 2>/dev/null || true)"
+fi
+if [ "$SOURCE" = "compact" ] && [ -d "${VAJRA_DIR}/compaction" ]; then
+  last="$(ls -t "${VAJRA_DIR}/compaction/"*.md 2>/dev/null | head -1)"
+  if [ -n "$last" ]; then
+    ref="$(sed -n 's/^git ref: \([^ ]*\).*/\1/p' "$last" | head -1)"
+    echo "Vajra: context was compacted. Pre-compaction checkpoint: ${last}${ref:+ (pinned at ${ref})}."
   fi
 fi
 
-# --- Sandbox recommendation (read-only nudge) ---
-# The native OS sandbox is Vajra's enforced security boundary. If it isn't on,
-# point the operator at the enable helper once per session.
+# Sandbox nudge: the OS sandbox is the enforced boundary.
 SETTINGS_FILE="${HOME}/.claude/settings.json"
-if command -v jq &>/dev/null; then
-  SANDBOX_ON="false"
-  [ -f "$SETTINGS_FILE" ] && SANDBOX_ON="$(jq -r '.sandbox.enabled // false' "$SETTINGS_FILE" 2>/dev/null || echo false)"
-  if [ "$SANDBOX_ON" != "true" ]; then
-    echo "Vajra: native OS sandbox is off — it's the enforced security boundary. Enable it: bash ~/.claude/skills/vajra/scripts/enable-sandbox.sh (or /sandbox)." >&2
+if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS_FILE" ]; then
+  if [ "$(jq -r '.sandbox.enabled // false' "$SETTINGS_FILE" 2>/dev/null)" != "true" ]; then
+    echo "Vajra: the Claude Code OS sandbox is off. It is the enforced boundary; the Vajra guard is defense in depth. Enable with /sandbox (see scripts/enable-sandbox.sh)."
   fi
 fi
 

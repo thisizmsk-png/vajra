@@ -1,73 +1,94 @@
 #!/usr/bin/env bash
-# Vajra PreCompact hook — checkpoint + distillation before context compaction.
+# Vajra PreCompact hook: checkpoint before context compaction.
 #
-# Runs when Claude Code is about to compact the conversation. Compaction is
-# lossy, so we (1) take a NON-DESTRUCTIVE git snapshot and (2) emit a checkpoint
-# event, then (3) hand the model a distillation template so the summary keeps the
-# load-bearing context (decisions, open threads, plan, key files) instead of
-# whatever the generic summarizer would keep.
+# Compaction is lossy, so before it runs we:
+#   1. snapshot the working tree without touching it (`git stash create`, or
+#      HEAD when the tree is clean) and PIN the snapshot with
+#      `git update-ref refs/vajra/compact/<ts>`, so `git gc` cannot collect it;
+#   2. append an HMAC-chained checkpoint event to the session event log;
+#   3. write a compaction record with the restore command and the
+#      distillation template the summary should keep.
 #
-# Compaction + checkpoint must be atomic: a summary without a matching git_sha is
-# dangerous (the agent "remembers" a plan but the tree moved). We snapshot first.
+# session-start.sh (source=compact) points the model at the record afterwards.
+# Never blocks compaction: always exits 0.
 
 set -uo pipefail
 
 VAJRA_DIR="${HOME}/.claude/vajra"
 HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
 COMPACT_DIR="${VAJRA_DIR}/compaction"
-mkdir -p "$COMPACT_DIR"
+mkdir -p "$COMPACT_DIR" 2>/dev/null || exit 0
 
 PAYLOAD="$(cat 2>/dev/null || echo '{}')"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REF_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 SESSION="session"
-if command -v jq &>/dev/null; then
-  SESSION="$(echo "$PAYLOAD" | jq -r '.session_id // .sessionId // "session"' 2>/dev/null | tr -cd '[:alnum:]._-' | cut -c1-64)"
-  [ -z "$SESSION" ] && SESSION="session"
+CWD="$PWD"
+if command -v jq >/dev/null 2>&1; then
+  SESSION="$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "session"' 2>/dev/null | tr -cd '[:alnum:]._-' | cut -c1-64)"
+  [ -n "$SESSION" ] || SESSION="session"
+  c="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null)"
+  [ -n "$c" ] && [ -d "$c" ] && CWD="$c"
 fi
 
-# 1. Non-destructive git snapshot (captures uncommitted changes as a dangling
-#    commit without touching the working tree). Falls back to HEAD.
-SNAP=""
-if git rev-parse --is-inside-work-tree &>/dev/null; then
-  SNAP="$(git stash create 2>/dev/null || true)"
-  [ -z "$SNAP" ] && SNAP="$(git rev-parse --short HEAD 2>/dev/null || echo '')"
+# 1. Snapshot + pin.
+SNAP="" REF="" KIND=""
+if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  SNAP="$(git -C "$CWD" stash create 2>/dev/null || true)"
+  KIND="stash"
+  if [ -z "$SNAP" ]; then
+    SNAP="$(git -C "$CWD" rev-parse HEAD 2>/dev/null || true)"
+    KIND="head"
+  fi
+  if [ -n "$SNAP" ]; then
+    REF="refs/vajra/compact/${REF_TS}-${SESSION}"
+    git -C "$CWD" update-ref -m "vajra pre-compact ${TS}" "$REF" "$SNAP" 2>/dev/null || REF=""
+  fi
 fi
 
-# 2. Emit a checkpoint event into the session event log (HMAC-chained, like the
-#    rest of the event stream).
-if command -v jq &>/dev/null && command -v openssl &>/dev/null; then
+# 2. Checkpoint event (HMAC-chained like the rest of the event stream).
+if command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
   EV_LOG="${VAJRA_DIR}/events/${SESSION}.jsonl"
   mkdir -p "$(dirname "$EV_LOG")"
   prev="genesis"; seq=0
-  if [ -f "$EV_LOG" ] && [ -s "$EV_LOG" ]; then
+  if [ -s "$EV_LOG" ]; then
     prev="$(tail -n 1 "$EV_LOG" | jq -r '.hmac // "genesis"' 2>/dev/null || echo genesis)"
-    seq="$(tail -n 1 "$EV_LOG" | jq -r '.seq // 0' 2>/dev/null || echo 0)"; seq=$((seq+1))
+    seq="$(tail -n 1 "$EV_LOG" | jq -r '.seq // 0' 2>/dev/null || echo 0)"; seq=$((seq + 1))
   fi
-  entry="$(jq -nc --arg ts "$TS" --argjson seq "$seq" --arg gs "$SNAP" --arg prev "$prev" \
-    '{seq:$seq, ts:$ts, tool:"__compaction__", kind:"checkpoint", outcome:"success", gitSha:$gs, prevHmac:$prev}')"
-  if [ -f "$HMAC_KEY_FILE" ] && [ -s "$HMAC_KEY_FILE" ]; then
-    key="$(cat "$HMAC_KEY_FILE")"
+  entry="$(jq -nc --arg ts "$TS" --argjson seq "$seq" --arg gs "$SNAP" --arg ref "$REF" --arg prev "$prev" \
+    '{seq:$seq, ts:$ts, tool:"__compaction__", kind:"checkpoint", outcome:"success", gitSha:$gs, gitRef:$ref, prevHmac:$prev}')"
+  if [ -s "$HMAC_KEY_FILE" ]; then
+    key="$(tr -d '[:space:]' < "$HMAC_KEY_FILE")"
     h="$(printf '%s' "$entry" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key}" -hex 2>/dev/null | awk '{print $NF}')"
-    entry="$(echo "$entry" | jq -c --arg h "$h" '. + {hmac:$h}')"
+    entry="$(printf '%s' "$entry" | jq -c --arg h "$h" '. + {hmac:$h}')"
   fi
-  echo "$entry" >> "$EV_LOG"
+  printf '%s\n' "$entry" >> "$EV_LOG"
 fi
 
-# 3. Record the checkpoint + leave the distillation template for the summary.
-REC="${COMPACT_DIR}/${SESSION}-${TS//[:]/-}.md"
+# 3. Compaction record.
+if [ "$KIND" = "stash" ]; then
+  RESTORE="git stash apply ${REF:-$SNAP}"
+elif [ -n "$SNAP" ]; then
+  RESTORE="tree was clean at ${SNAP}; nothing to restore (git checkout ${SNAP} to return)"
+else
+  RESTORE="no git repository"
+fi
+REC="${COMPACT_DIR}/${SESSION}-${TS//:/-}.md"
 {
-  echo "# Compaction checkpoint — ${SESSION}"
+  echo "# Compaction checkpoint: ${SESSION}"
   echo "at: ${TS}"
-  echo "git snapshot: ${SNAP:-<no repo>}   (restore: git stash apply ${SNAP})"
+  echo "cwd: ${CWD}"
+  echo "git snapshot: ${SNAP:-<no repo>}"
+  echo "git ref: ${REF:-<none>}"
+  echo "restore: ${RESTORE}"
   echo
-  echo "The summary that follows MUST preserve, in this structure:"
-  echo "## Decisions — irreversible choices made + rationale"
-  echo "## Open threads — unresolved bugs / TODO, with file:line"
-  echo "## Plan — remaining steps, ordered"
-  echo "## Key files — ≤5 most-recently-touched, one-line purpose each"
-  echo "## Constraints / gotchas — learned this session"
+  echo "The summary that follows must keep, in this structure:"
+  echo "## Decisions: irreversible choices made, with rationale"
+  echo "## Open threads: unresolved bugs or TODOs, with file:line"
+  echo "## Plan: remaining steps, in order"
+  echo "## Key files: at most 5 recently touched, one-line purpose each"
+  echo "## Constraints / gotchas learned this session"
 } > "$REC"
 
-# 4. Nudge the model (PreCompact hook stdout enters context).
-echo "Vajra: checkpoint ${SNAP:-HEAD} saved before compaction. Distill the summary into Decisions / Open threads / Plan / Key files (≤5) / Constraints — see engine/compaction.md. Restore the tree with: git stash apply ${SNAP}"
+echo "Vajra: checkpoint ${REF:-${SNAP:-none}} saved before compaction (${REC}). Distill the summary into Decisions / Open threads / Plan / Key files (max 5) / Constraints. Restore: ${RESTORE}"
 exit 0

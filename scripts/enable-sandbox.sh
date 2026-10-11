@@ -2,9 +2,9 @@
 # enable-sandbox.sh — print platform-checked instructions to enable Claude Code's
 # native OS sandbox (the durable security boundary for Vajra).
 #
-# This script is PRINT-ONLY by design. It never writes ~/.claude/settings.json:
-# that file is both Vajra's immutable core and a system-settings change, so the
-# operator applies it themselves. Run, read, then apply.
+# This script is PRINT-ONLY by design. It never writes ~/.claude/settings.json.
+# install.sh only merges Vajra's hooks block there; turning the sandbox on is a
+# security-settings change the operator makes themselves. Run, read, then apply.
 
 set -uo pipefail
 
@@ -31,8 +31,8 @@ case "$OS" in
     else
       ok "Linux detected."
     fi
-    for dep in bubblewrap socat; do
-      if command -v "${dep%bubblewrap}" >/dev/null 2>&1 || command -v bwrap >/dev/null 2>&1 && [ "$dep" = bubblewrap ] || command -v "$dep" >/dev/null 2>&1; then
+    for dep in bwrap socat; do
+      if command -v "$dep" >/dev/null 2>&1; then
         ok "$dep present"
       else
         warn "$dep MISSING — install: sudo apt-get install bubblewrap socat   (or dnf)"
@@ -81,7 +81,7 @@ cat <<'EOF'
 
   2. All projects (user scope):
        Merge the "settings" block above into  ~/.claude/settings.json  yourself,
-       then restart Claude Code. (Vajra will not edit settings.json for you.)
+       then restart Claude Code. (Vajra does not turn the sandbox on for you.)
 
   Verify after enabling:
        Run  /sandbox  → Config tab shows the resolved policy.

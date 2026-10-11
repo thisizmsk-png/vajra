@@ -50,19 +50,18 @@ Scored results matching this schema:
 
 ### SARIF Report
 
-1. Pass JSON report through `scripts/sarif-convert.js`:
+1. Pass JSON report through `~/.claude/skills/vajra/scripts/sarif-convert.js`
+   (use the absolute path; the guard allows `node` only on the skill's own scripts):
    ```bash
-   node scripts/sarif-convert.js report.json > report.sarif
+   node ~/.claude/skills/vajra/scripts/sarif-convert.js report.json > report.sarif
    ```
 2. Output is SARIF 2.1.0 compatible with GitHub Code Scanning
 3. Write to `~/.claude/vajra/campaigns/{id}/reports/report.sarif`
 
-## Encryption
+## Storage
 
-Per config (`security.encryption.enabled`):
-- If enabled (default): encrypt report files with AES-256-GCM before writing
-- Security reports are in `security.encryption.scope`, so they are always encrypted when encryption is on
-- Key derived from HMAC key at `~/.claude/vajra/.hmac-key`
+Reports are written as plain files. Vajra does not encrypt them; their
+protection is the file mode below (and full-disk encryption, if you use it).
 
 ## Directory Setup
 

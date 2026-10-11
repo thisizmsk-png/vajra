@@ -1,125 +1,45 @@
 {
-  "$schema": "vajra-config-v1",
-  "schemaVersion": 1,
+  "$schema": "vajra-config-v2",
+  "schemaVersion": 2,
   "routing": {
-    "tier1Patterns": [
-      {
-        "pattern": "^/test\\b",
-        "skill": "testing",
-        "description": "Route test commands to testing skill"
-      },
-      {
-        "pattern": "^/review\\b",
-        "skill": "code-review",
-        "description": "Route review commands to code-review"
-      },
-      {
-        "pattern": "^/debug\\b",
-        "skill": "systematic-debugging",
-        "description": "Route debug to systematic-debugging"
-      },
-      {
-        "pattern": "^/security\\b",
-        "skill": "sentry-security-review",
-        "description": "Route security to security review"
-      },
-      {
-        "pattern": "^/spec\\b",
-        "skill": "spec",
-        "description": "Route spec to specification skill"
-      },
-      {
-        "pattern": "^/plan\\b",
-        "skill": "writing-plans",
-        "description": "Route plan to writing-plans"
-      },
-      {
-        "pattern": "^fix\\s+#\\d+",
-        "skill": "systematic-debugging",
-        "description": "Route 'fix #123' to debugging"
-      },
-      {
-        "pattern": "^refactor\\b",
-        "skill": "sentry-code-simplifier",
-        "description": "Route refactor to simplifier"
-      },
-      {
-        "pattern": "^/trip(-planner)?\\b",
-        "skill": "trip-planner",
-        "description": "Route /trip and /trip-planner to trip-planner"
-      }
-    ],
-    "tier3Keywords": {
-      "test": "testing",
-      "review": "code-review",
-      "debug": "systematic-debugging",
-      "security": "sentry-security-review",
-      "spec": "spec",
-      "plan": "writing-plans",
-      "deploy": "ci-cd",
-      "monitor": "observability",
-      "design": "frontend-design",
-      "architecture": "hld",
-      "database": "database-design",
-      "api": "api-design",
-      "performance": "performance-profiler",
-      "accessibility": "audit",
-      "brand": "brand",
-      "slides": "slides",
-      "diagram": "architecture-diagrams",
-      "threat": "threat-modeling",
-      "compliance": "compliance-checklist",
-      "release": "release-engineering",
-      "brainstorming": "brainstorming",
-      "trip": "trip-planner",
-      "travel": "trip-planner",
-      "itinerary": "trip-planner",
-      "vacation": "trip-planner"
-    },
-    "regexEngine": "re2",
-    "regexMaxLength": 1000,
-    "regexTimeoutMs": 100
-  },
-  "campaigns": {
-    "stateDir": "~/.claude/vajra/campaigns",
-    "dbPath": "~/.claude/vajra/vajra.db",
-    "maxCheckpoints": 20,
-    "autoCheckpointInterval": 5
-  },
-  "memory": {
-    "indexMaxLines": 200,
-    "indexPath": "~/.claude/vajra/memory/index.md",
-    "topicsDir": "~/.claude/vajra/memory/topics",
-    "archiveDir": "~/.claude/vajra/memory/archive",
-    "dreamConsolidation": {
-      "enabled": true,
-      "autoTriggerOnIndexOverflow": true
-    }
-  },
-  "cost": {
-    "alertThreshold": null,
-    "currency": "USD",
-    "trackPerOperation": true,
-    "ratesPer1MTokens": {
-      "opus-input": 15.0,
-      "opus-output": 75.0,
-      "sonnet-input": 3.0,
-      "sonnet-output": 15.0,
-      "haiku-input": 0.25,
-      "haiku-output": 1.25
-    }
+    "comment": "Read by scripts/vajra_route.py (UserPromptSubmit hook). Patterns are Python regexes matched case-insensitively against the ask. Order is specificity: the most specific pattern comes first and the first match is the primary route. Each pattern names a cortex domain; the agent comes from cortex.agentRouting[domain].agent, so every route carries an agent.",
+    "suggestOnAllPrompts": false,
+    "maxSuggestions": 3,
+    "maxPromptChars": 4000,
+    "patterns": [
+      { "id": "backtest",       "regex": "\\b(back-?test(s|ing)?|walk-?forward|overfit(ting)?)\\b",                                      "domain": "quant",        "skill": "backtest-validation" },
+      { "id": "premortem",      "regex": "\\b(pre-?mortem|what could go wrong|failure modes?)\\b",                                         "domain": "premortem",    "skill": null },
+      { "id": "acceptance",     "regex": "\\b(acceptance criteria|user stor(y|ies)|given[ /]when[ /]then)\\b",                           "domain": "acceptance",   "skill": "prd-to-issues" },
+      { "id": "incident",       "regex": "\\b(incident|outage|sev ?[0-3]|(prod|production) (is )?(down|degraded))\\b",                   "domain": "incident",     "skill": "incident-response", "crew": "incident-response" },
+      { "id": "security-audit", "regex": "\\b(security audit|pen-?test(ing)?|penetration test(ing)?)\\b",                                 "domain": "security",     "skill": "sentry-security-review", "crew": "security-audit" },
+      { "id": "threat-model",   "regex": "\\bthreat[- ]?model(s|ing)?\\b",                                                                 "domain": "security",     "skill": "threat-modeling" },
+      { "id": "exploit",        "regex": "\\b(exploit(s|able)?|proof[- ]of[- ]concept attack)\\b",                                         "domain": "pentest",      "skill": "sentry-security-review" },
+      { "id": "security",       "regex": "\\b(security|vulnerab(le|ility|ilities)|xss|csrf|ssrf|sql injection|authz|secrets? leak)\\b",   "domain": "security",     "skill": "sentry-security-review" },
+      { "id": "arch-review",    "regex": "\\b(architecture review|design review)\\b",                                                      "domain": "architecture", "skill": "hld", "crew": "architecture-review" },
+      { "id": "tech-choice",    "regex": "\\b(build (vs\\.?|or) buy|tech(nology)? stack|which (framework|database|library)|should we (use|adopt|pick))\\b", "domain": "decision", "skill": "decision-journal", "crew": "sabha" },
+      { "id": "fix-issue",      "regex": "\\bfix(es)?\\s+#\\d+\\b",                                                                         "domain": "backend",      "skill": "systematic-debugging" },
+      { "id": "debug",          "regex": "\\b(debug(ging)?|stack ?trace|traceback|crash(es|ing)?|regression|flaky)\\b",                    "domain": "backend",      "skill": "systematic-debugging" },
+      { "id": "ci-cd",          "regex": "\\b(ci/?cd|pipeline|github actions|terraform|kubernetes|k8s|dockerfile|deploy(ment|ing|s)?)\\b",  "domain": "devops",       "skill": "ci-cd" },
+      { "id": "observability",  "regex": "\\b(observability|monitoring|slos?|alerting)\\b",                                                "domain": "devops",       "skill": "observability" },
+      { "id": "release",        "regex": "\\b(release (notes|checklist|plan)|changelog|go/no-go)\\b",                                      "domain": "program",      "skill": "release-engineering" },
+      { "id": "experiment",     "regex": "\\b(a/b test|experiment results?|statistical(ly)? significan(t|ce)|metrics analysis)\\b",        "domain": "data",         "skill": "data-analysis" },
+      { "id": "prd",            "regex": "\\b(prd|product requirements|product spec|roadmap)\\b",                                          "domain": "product",      "skill": "product-spec" },
+      { "id": "testing",        "regex": "\\b(unit tests?|integration tests?|e2e tests?|test coverage|write tests|add tests)\\b",           "domain": "testing",      "skill": "testing" },
+      { "id": "code-review",    "regex": "\\breview (my |the |this )?(code|diff|pr|pull request|changes)\\b",                               "domain": "code",         "skill": "code-review" },
+      { "id": "refactor",       "regex": "\\b(refactor(ing)?|simplify|clean ?up)\\b",                                                      "domain": "code",         "skill": "sentry-code-simplifier" },
+      { "id": "architecture",   "regex": "\\b(architecture|system design|hld|lld|adr)\\b",                                                 "domain": "architecture", "skill": "hld" },
+      { "id": "api",            "regex": "\\b(api|endpoints?|rest api|graphql|openapi)\\b",                                                    "domain": "backend",      "skill": "api-design" },
+      { "id": "database",       "regex": "\\b(database|schema|migrations?|postgres(ql)?|mysql|sqlite)\\b",                                 "domain": "backend",      "skill": "database-design" },
+      { "id": "performance",    "regex": "\\b(performance|latency|p99|profil(e|ing)|too slow)\\b",                                         "domain": "backend",      "skill": "performance-profiler" },
+      { "id": "accessibility",  "regex": "\\b(accessibility|a11y|wcag)\\b",                                                                "domain": "frontend",     "skill": "audit" },
+      { "id": "frontend",       "regex": "\\b(ui|frontend|front-end|component|css|react|landing page|web page|(login|signup|settings) (page|form|screen))\\b",                        "domain": "frontend",     "skill": "frontend-design" },
+      { "id": "full-stack",     "regex": "\\b(full-?stack|end-to-end feature)\\b",                                                         "domain": "architecture", "skill": null, "crew": "feature-build" },
+      { "id": "spike",          "regex": "\\b(spike|prototype|quick trial)\\b",                                                            "domain": "junior",       "skill": null },
+      { "id": "trip",           "regex": "\\b(trip|itinerary|vacation|road ?trip)\\b",                                                     "domain": null,           "skill": "trip-planner" }
+    ]
   },
   "security": {
-    "encryption": {
-      "enabled": true,
-      "algorithm": "aes-256-gcm",
-      "scope": [
-        "security-reports",
-        "campaign-state"
-      ]
-    },
-    "filePermissions": "0600",
-    "hmacAlgorithm": "sha256",
+    "comment": "Read by engine/sanitizer.ts, a reference implementation tested in CI that nothing calls at runtime. At runtime, wrapping untrusted content in <untrusted-data> is an instruction the model follows (SKILL.md); stripping patterns is best effort.",
     "sanitization": {
       "stripPatterns": [
         "ignore previous instructions",
@@ -151,203 +71,35 @@
       "tagName": "untrusted-data"
     }
   },
-  "fleet": {
-    "maxAgents": 6,
-    "defaultToolAllowlist": [
-      "Read",
-      "Glob",
-      "Grep",
-      "Bash",
-      "Write",
-      "Edit"
-    ],
-    "discoveryRelayDir": "~/.claude/vajra/relay"
-  },
-  "limits": {
-    "toolCallsPerAgent": 100,
-    "toolCallsLimitedAgent": 20,
-    "loopDetectionThreshold": 5
-  },
   "cortex": {
-    "enabled": true,
+    "comment": "Domain -> agent. Agents run through the Agent tool (subagent_type) or a workflow agentType, so each agent's own tools, model and effort apply. krishna is never a routing target.",
     "agentsDir": "~/.claude/agents",
+    "deliverWorkflow": "vajra-deliver",
     "agentRouting": {
-      "backend": {
-        "agent": "bhima",
-        "model": "opus",
-        "skills": [
-          "api-design",
-          "database-design",
-          "performance-profiler"
-        ]
-      },
-      "frontend": {
-        "agent": "nakula",
-        "model": "opus",
-        "skills": [
-          "frontend-design",
-          "ui-styling",
-          "react-best-practices"
-        ]
-      },
-      "security": {
-        "agent": "bhishma",
-        "model": "opus",
-        "skills": [
-          "threat-modeling",
-          "sentry-security-review",
-          "sentry-find-bugs"
-        ]
-      },
-      "redteam": {
-        "agent": "duryodhana",
-        "model": "opus",
-        "skills": [
-          "sentry-security-review",
-          "entry-point-analyzer"
-        ]
-      },
-      "pentest": {
-        "agent": "shakuni",
-        "model": "opus",
-        "skills": [
-          "sentry-security-review",
-          "sentry-gha-security-review"
-        ]
-      },
-      "testing": {
-        "agent": "vidura",
-        "model": "opus",
-        "skills": [
-          "testing",
-          "property-based-testing",
-          "webapp-testing"
-        ]
-      },
-      "devops": {
-        "agent": "hanuman",
-        "model": "opus",
-        "skills": [
-          "ci-cd",
-          "observability",
-          "release-engineering"
-        ]
-      },
-      "incident": {
-        "agent": "ashwatthama",
-        "model": "opus",
-        "skills": [
-          "incident-response",
-          "systematic-debugging"
-        ]
-      },
-      "product": {
-        "agent": "draupadi",
-        "model": "sonnet",
-        "skills": [
-          "product-spec",
-          "prd-to-issues",
-          "brainstorming"
-        ]
-      },
-      "architecture": {
-        "agent": "arjuna",
-        "model": "opus",
-        "skills": [
-          "hld",
-          "lld",
-          "architecture-diagrams"
-        ]
-      },
-      "code": {
-        "agent": "arjuna",
-        "model": "opus",
-        "skills": [
-          "code-review",
-          "sentry-code-simplifier",
-          "improve-codebase-architecture"
-        ]
-      },
-      "data": {
-        "agent": "sahadeva",
-        "model": "opus",
-        "skills": [
-          "data-analysis",
-          "backtest-validation",
-          "database-design"
-        ]
-      },
-      "quant": {
-        "agent": "karna",
-        "model": "opus",
-        "skills": [
-          "data-analysis",
-          "backtest-validation"
-        ]
-      },
-      "junior": {
-        "agent": "abhimanyu",
-        "model": "sonnet",
-        "skills": [
-          "testing",
-          "docs-validator"
-        ]
-      },
-      "strategy": {
-        "agent": "draupadi",
-        "model": "sonnet",
-        "skills": [
-          "spec",
-          "research",
-          "decision-journal"
-        ]
-      },
-      "program": {
-        "agent": "dhrishtadyumna",
-        "model": "sonnet",
-        "skills": [
-          "prd-to-issues",
-          "writing-plans",
-          "executing-plans"
-        ]
-      }
+      "backend":      { "agent": "bhima",          "skills": ["api-design", "database-design", "performance-profiler", "systematic-debugging"] },
+      "frontend":     { "agent": "nakula",         "skills": ["frontend-design", "ui-styling", "react-best-practices", "audit"] },
+      "security":     { "agent": "bhishma",        "skills": ["threat-modeling", "sentry-security-review", "sentry-find-bugs"] },
+      "pentest":      { "agent": "shakuni",        "skills": ["sentry-security-review", "entry-point-analyzer"] },
+      "premortem":    { "agent": "duryodhana",     "skills": ["decision-journal"] },
+      "testing":      { "agent": "vidura",         "skills": ["testing", "property-based-testing", "webapp-testing"] },
+      "acceptance":   { "agent": "drona",          "skills": ["prd-to-issues", "product-spec"] },
+      "devops":       { "agent": "hanuman",        "skills": ["ci-cd", "observability"] },
+      "incident":     { "agent": "ashwatthama",    "skills": ["incident-response", "systematic-debugging"] },
+      "product":      { "agent": "draupadi",       "skills": ["product-spec", "brainstorming", "research"] },
+      "architecture": { "agent": "arjuna",         "skills": ["hld", "lld", "architecture-diagrams"] },
+      "code":         { "agent": "arjuna",         "skills": ["code-review", "sentry-code-simplifier", "improve-codebase-architecture"] },
+      "decision":     { "agent": "yudhishthira",   "skills": ["decision-journal", "research"] },
+      "data":         { "agent": "sahadeva",       "skills": ["data-analysis"] },
+      "quant":        { "agent": "karna",          "skills": ["backtest-validation", "data-analysis"] },
+      "junior":       { "agent": "abhimanyu",      "skills": ["docs-validator"] },
+      "program":      { "agent": "dhrishtadyumna", "skills": ["release-engineering", "writing-plans", "prd-to-issues"] }
     },
     "fleetCrews": {
-      "security-audit": {
-        "lead": "bhishma",
-        "agents": [
-          "duryodhana",
-          "shakuni",
-          "vidura"
-        ],
-        "description": "Full security audit: threat model + red team + pentest + QA validation"
-      },
-      "feature-build": {
-        "lead": "arjuna",
-        "agents": [
-          "bhima",
-          "nakula",
-          "vidura"
-        ],
-        "description": "Full-stack feature: principal leads, backend + frontend + QA in parallel"
-      },
-      "incident-response": {
-        "lead": "ashwatthama",
-        "agents": [
-          "hanuman",
-          "bhima"
-        ],
-        "description": "Incident triage: SRE lead + DevOps + backend debug"
-      },
-      "architecture-review": {
-        "lead": "yudhishthira",
-        "agents": [
-          "arjuna",
-          "bhishma",
-          "draupadi"
-        ],
-        "description": "Architecture review: CTO leads, code + security + product perspectives"
-      }
+      "feature-build":       { "workflow": "vajra-feature-build",       "lead": "arjuna",       "agents": ["bhima", "nakula", "vidura"],                       "description": "Feature build: design, backend and frontend writers in worktrees, independent verification and review" },
+      "security-audit":      { "workflow": "vajra-security-audit",      "lead": "bhishma",      "agents": ["shakuni", "duryodhana", "vidura"],                 "description": "Security audit: threat model, exploit PoCs as failing tests, verification" },
+      "incident-response":   { "workflow": "vajra-incident-response",   "lead": "ashwatthama",  "agents": ["hanuman", "bhima", "vidura"],                     "description": "Incident: triage, a reversible mitigation plan for approval, root-cause fix" },
+      "architecture-review": { "workflow": "vajra-architecture-review", "lead": "yudhishthira", "agents": ["arjuna", "bhishma", "draupadi"],                  "description": "Architecture review: design, security and product perspectives, then a verdict" },
+      "sabha":               { "workflow": "vajra-sabha",               "lead": "yudhishthira", "agents": ["arjuna", "bhishma", "draupadi", "duryodhana"],    "description": "Debate: positions, adversary pre-mortem, a vote counted in code, synthesis" }
     }
   }
 }

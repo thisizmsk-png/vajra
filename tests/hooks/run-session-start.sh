@@ -1,78 +1,111 @@
 #!/usr/bin/env bash
-# Integration test for hooks/session-start.sh integrity verification (VJR-06)
-# and the pre-tool-use.sh tamper-flag enforcement.
-#
-#   clean tree           -> no tamper flag, mutations allowed
-#   tampered hook        -> tamper flag written naming the file
-#   flag present         -> mutating tool blocked, read-only tool allowed
+# hooks/session-start.sh: local-signature integrity check, campaign line,
+# post-compaction pointer. Output goes to stdout; the hook always exits 0.
 #
 # Run: bash tests/hooks/run-session-start.sh
 
 set -uo pipefail
+for t in jq openssl; do command -v "$t" >/dev/null || { echo "SKIP: $t required"; exit 0; }; done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ss-XXXXXX")"
 trap 'chmod -R u+w "$TEST_HOME" 2>/dev/null; rm -rf "$TEST_HOME"' EXIT
 export HOME="$TEST_HOME"
-
 SKILL="$HOME/.claude/skills/vajra"
-VDIR="$HOME/.claude/vajra"
-mkdir -p "$SKILL/hooks" "$SKILL/engine" "$SKILL/config" "$SKILL/fleet" "$SKILL/redteam" "$SKILL/scripts" "$VDIR"
-
-# Copy the real critical files into the temp skill dir.
-cp "$REPO/hooks/pre-tool-use.sh"   "$SKILL/hooks/"
-cp "$REPO/hooks/post-tool-use.sh"  "$SKILL/hooks/"
-cp "$REPO/hooks/session-start.sh"  "$SKILL/hooks/"
-cp "$REPO/engine/sanitizer.ts"     "$SKILL/engine/"
-cp "$REPO/engine/engine.ts"        "$SKILL/engine/"
-cp "$REPO/engine/router.md"        "$SKILL/engine/"
-cp "$REPO/config/default.json"     "$SKILL/config/"
-cp "$REPO/config/security-contracts.json" "$SKILL/config/"
-cp "$REPO/fleet/fleet-coordinator.sh"     "$SKILL/fleet/"
-cp "$REPO/redteam/snapshot.sh"     "$SKILL/redteam/"
-cp "$REPO/redteam/orchestrator.md" "$SKILL/redteam/"
-cp "$REPO/redteam/scorer.md"       "$SKILL/redteam/"
+VS="$HOME/.claude/vajra"
+FLAG="$VS/.integrity-violation"
+mkdir -p "$SKILL/hooks" "$SKILL/scripts" "$SKILL/config" "$VS"
+cp "$REPO/hooks/session-start.sh" "$REPO/hooks/pre-tool-use.sh" "$SKILL/hooks/"
 cp "$REPO/scripts/generate-manifest.sh" "$SKILL/scripts/"
-cp "$REPO/scripts/install.sh"      "$SKILL/scripts/" 2>/dev/null || echo "#noop" > "$SKILL/scripts/install.sh"
-cp "$REPO/SKILL.md"                "$SKILL/"
-
-# Generate a manifest for the temp tree.
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+echo '{"a":1}' > "$SKILL/config/default.json"
+cat > "$SKILL/scripts/vajra-campaign.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$1 $2" = "active --brief" ] && echo "login-flow: 2/5 features passing"
+SH
+SS="$SKILL/hooks/session-start.sh"
+run_ss() { printf '%s' "${1:-{\"session_id\":\"s\",\"source\":\"startup\"\}}" | bash "$SS"; }
 
 PASS=0; FAIL=0
-check() { # desc cond(0=ok)
-  if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL :: $1"; fi
-}
+check() { if [ "$2" -eq 0 ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL :: $1"; fi; }
 
-# 1. Clean tree: session-start should NOT create the tamper flag.
-bash "$SKILL/hooks/session-start.sh" >/dev/null 2>&1
-[ ! -f "$VDIR/.integrity-violation" ]; check "clean tree -> no tamper flag" $?
+# 1. Not installed (no key, no signature): warn, never lock.
+bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+out="$(run_ss)"; rc=$?
+[ "$rc" -eq 0 ]; check "exit 0 when not set up" $?
+[ ! -f "$FLAG" ]; check "no tamper flag when unsigned" $?
+printf '%s' "$out" | grep -q "not set up"; check "warns that the manifest is unsigned" $?
+printf '%s' "$out" | grep -q "Vajra campaign: login-flow"; check "prints active campaign line" $?
 
-# 2. Tamper a critical enforcement file.
-echo "# malicious change" >> "$SKILL/hooks/pre-tool-use.sh"
-bash "$SKILL/hooks/session-start.sh" >/dev/null 2>&1
-[ -f "$VDIR/.integrity-violation" ]; check "tampered hook -> tamper flag written" $?
-grep -q "pre-tool-use.sh" "$VDIR/.integrity-violation" 2>/dev/null; check "flag names the tampered file" $?
+# 2. Key + local signature, clean tree.
+openssl rand -hex 32 > "$VS/.hmac-key"; chmod 600 "$VS/.hmac-key"
+bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+[ -s "$VS/manifest.sig" ]; check "generate-manifest signs into ~/.claude/vajra/manifest.sig" $?
+[ ! -e "$SKILL/manifest.json.sig" ]; check "no signature shipped next to manifest.json" $?
+out="$(run_ss)"; rc=$?
+[ "$rc" -eq 0 ] && [ ! -f "$FLAG" ]; check "clean signed tree: no flag" $?
+printf '%s' "$out" | grep -q "INTEGRITY"; [ $? -ne 0 ]; check "clean signed tree: no violation text" $?
+bash "$SS" --check; check "--check exits 0 on a clean tree" $?
 
-# 3. With the flag present, pre-tool-use blocks mutations but allows reads.
-ec=0; printf '%s' '{"tool":"Write","input":{"file_path":"/tmp/x","content":"y"}}' \
-  | bash "$SKILL/hooks/pre-tool-use.sh" >/dev/null 2>&1 || ec=1
-[ "$ec" -eq 1 ]; check "flag present -> Write blocked" $?
+# 3. A shipped signature made with someone else's key is ignored.
+echo "deadbeef" > "$SKILL/manifest.json.sig"
+run_ss >/dev/null; [ ! -f "$FLAG" ]; check "foreign manifest.json.sig does not trip the check" $?
+rm -f "$SKILL/manifest.json.sig"
 
-ec=0; printf '%s' '{"tool":"Read","input":"/tmp/x"}' \
-  | bash "$SKILL/hooks/pre-tool-use.sh" >/dev/null 2>&1 || ec=1
-[ "$ec" -eq 0 ]; check "flag present -> Read allowed (investigation)" $?
+# 4. Modified file -> flag naming it; the guard then blocks mutations.
+echo "# change" >> "$SKILL/config/default.json"
+out="$(run_ss)"; rc=$?
+[ "$rc" -eq 0 ]; check "exit 0 even on violation" $?
+[ -f "$FLAG" ] && grep -q "config/default.json" "$FLAG"; check "flag names the modified file" $?
+printf '%s' "$out" | grep -q "INTEGRITY VIOLATION"; check "violation on stdout (model sees it)" $?
+printf '%s' "$out" | grep -q "own terminal: bash ~/.claude/skills/vajra/scripts/generate-manifest.sh"; check "violation points at generate-manifest.sh in the user's terminal" $?
+printf '%s' "$out" | grep -q "scripts/install.sh"; [ $? -ne 0 ]; check "violation does not suggest install.sh (it refuses to sign)" $?
+printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x"},"cwd":"/tmp"}' | bash "$SKILL/hooks/pre-tool-use.sh" 2>/dev/null; rc=$?
+[ "$rc" -eq 2 ]; check "guard blocks Write while flagged" $?
+bash "$SS" --check >/dev/null; [ $? -ne 0 ]; check "--check exits 1 on a modified tree" $?
+bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+run_ss >/dev/null; [ ! -f "$FLAG" ]; check "flag clears after operator re-signs" $?
 
-ec=0; printf '%s' '{"tool":"Bash","input":"rm /tmp/scratch"}' \
-  | bash "$SKILL/hooks/pre-tool-use.sh" >/dev/null 2>&1 || ec=1
-[ "$ec" -eq 1 ]; check "flag present -> mutating Bash blocked" $?
+# 5. Manifest edited to match a tampered file -> signature mismatch.
+echo "# evil" >> "$SKILL/config/default.json"
+h="$(shasum -a 256 "$SKILL/config/default.json" 2>/dev/null | cut -d' ' -f1 || sha256sum "$SKILL/config/default.json" | cut -d' ' -f1)"
+jq --arg h "$h" '.files["config/default.json"] = $h' "$SKILL/manifest.json" > "$SKILL/m.tmp" && mv "$SKILL/m.tmp" "$SKILL/manifest.json"
+run_ss >/dev/null
+[ -f "$FLAG" ] && grep -q "signature" "$FLAG"; check "re-hashed manifest fails the signature" $?
+bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 
-# 4. Clearing the flag + clean re-verify restores normal operation.
-# (restore the file so the tree is clean again)
-cp "$REPO/hooks/pre-tool-use.sh" "$SKILL/hooks/"
-bash "$SKILL/hooks/session-start.sh" >/dev/null 2>&1
-[ ! -f "$VDIR/.integrity-violation" ]; check "restored tree -> flag auto-cleared" $?
+# 6. Unlisted script dropped into scripts/ -> flagged.
+echo 'echo pwned' > "$SKILL/scripts/evil.sh"
+run_ss >/dev/null
+[ -f "$FLAG" ] && grep -q "scripts/evil.sh" "$FLAG"; check "unlisted script flagged" $?
+rm -f "$SKILL/scripts/evil.sh"
+mkdir -p "$SKILL/scripts/__pycache__"; echo x > "$SKILL/scripts/__pycache__/r.pyc"
+run_ss >/dev/null; [ ! -f "$FLAG" ]; check "__pycache__ is ignored" $?
+
+# 7. Deleted file -> flagged.
+mv "$SKILL/config/default.json" "$TEST_HOME/held.json"
+run_ss >/dev/null; [ -f "$FLAG" ] && grep -q "missing: config/default.json" "$FLAG"; check "deleted file flagged" $?
+mv "$TEST_HOME/held.json" "$SKILL/config/default.json"
+run_ss >/dev/null
+
+# 8. After compaction, point at the pinned checkpoint.
+mkdir -p "$VS/compaction"
+printf 'git snapshot: abc\ngit ref: refs/vajra/compact/20261011T000000Z-s\n' > "$VS/compaction/s-x.md"
+out="$(run_ss '{"session_id":"s","source":"compact"}')"
+printf '%s' "$out" | grep -q "refs/vajra/compact/20261011T000000Z-s"; check "compact source points at the checkpoint ref" $?
+
+# 9. Campaign prefix appears exactly once, whatever the brief prints.
+for brief in "login-flow: 2/5 features passing" "Vajra campaign: login-flow: 2/5 features passing" "Vajra campaign login-flow: 2/5 features passing"; do
+  printf '#!/usr/bin/env bash\necho "%s"\n' "$brief" > "$SKILL/scripts/vajra-campaign.sh"
+  out="$(run_ss)"
+  [ "$(printf '%s\n' "$out" | grep -c '^Vajra campaign: login-flow: 2/5 features passing$')" = 1 ] && ! printf '%s' "$out" | grep -q 'Vajra campaign: Vajra campaign'
+  check "one campaign prefix for brief: $brief" $?
+done
+: > "$SKILL/scripts/vajra-campaign.sh"
+out="$(run_ss)"; printf '%s' "$out" | grep -q "Vajra campaign"; [ $? -ne 0 ]; check "no campaign line when the brief is empty" $?
+
+# 10. Garbage stdin never fails the hook.
+printf 'not json' | bash "$SS" >/dev/null 2>&1; check "garbage stdin: exit 0" $?
 
 echo "----------------------------------------"
-echo "session-start integrity: ${PASS} passed, ${FAIL} failed"
+echo "session-start.sh: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

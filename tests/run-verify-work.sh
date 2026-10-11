@@ -41,6 +41,38 @@ bash "$SCRIPT" "../../pwned" "true" >/dev/null 2>&1
 [ -z "$(find "$WORK/wt" -maxdepth 1 -type d -name '*pwned*' 2>/dev/null)" ] || \
   [ -d "$WORK/wt/pwned" ]; check "traversal slug lands inside base (sanitized)" $?
 
+
+# --- at least one command is required ---
+bash "$SCRIPT" nocmds >/dev/null 2>&1; [ $? -eq 2 ]; check "slug with no commands -> usage error" $?
+bash "$SCRIPT" blank "   " >/dev/null 2>&1; [ $? -eq 2 ]; check "blank command -> usage error" $?
+
+# --- git evidence: diff vs HEAD plus untracked files, tied to the tree ---
+REPO_T="$WORK/repo"; mkdir -p "$REPO_T"; cd "$REPO_T"
+git init -q . && git config user.email t@t && git config user.name t
+echo one > tracked.txt; git add tracked.txt; git commit -qm init
+echo two >> tracked.txt            # unstaged change
+echo staged > staged.txt; git add staged.txt
+echo brand-new > untracked.txt     # untracked file
+export VAJRA_WALKTHROUGH_DIR="$REPO_T/data/walkthroughs"   # inside the repo: must be excluded
+bash "$SCRIPT" gitcase "true" >/dev/null 2>&1; ec=$?
+EV="$REPO_T/data/walkthroughs/gitcase/evidence.json"
+[ "$ec" -eq 0 ]; check "git case passes" $?
+[ "$(jq -r '.git.head' "$EV")" = "$(git rev-parse HEAD)" ]; check "evidence records HEAD" $?
+grep -q 'brand-new' "$REPO_T/data/walkthroughs/gitcase/diff.patch"; check "untracked file content in diff.patch" $?
+grep -q '^+two' "$REPO_T/data/walkthroughs/gitcase/diff.patch"; check "unstaged change in diff.patch" $?
+grep -q '^+staged' "$REPO_T/data/walkthroughs/gitcase/diff.patch"; check "staged change in diff.patch (diff vs HEAD)" $?
+! grep -q 'walkthroughs' "$REPO_T/data/walkthroughs/gitcase/untracked.txt"; check "walkthrough dir excluded from untracked list" $?
+[ "$(jq -r '.git.treeStable' "$EV")" = "true" ]; check "tree stable when checks do not edit files" $?
+T1="$(jq -r '.git.worktreeTree' "$EV")"
+[ -n "$T1" ] && [ "$T1" != "null" ]; check "worktree tree id recorded" $?
+git diff --cached --name-only | grep -qx staged.txt && ! git diff --cached --name-only | grep -q untracked.txt
+check "real index untouched" $?
+bash "$SCRIPT" gitcase2 "true" >/dev/null 2>&1
+[ "$(jq -r '.git.worktreeTree' "$REPO_T/data/walkthroughs/gitcase2/evidence.json")" = "$T1" ]; check "same tree -> same tree id (walkthrough output ignored)" $?
+bash "$SCRIPT" mutate "echo changed > tracked.txt" >/dev/null 2>&1
+[ "$(jq -r '.git.treeStable' "$REPO_T/data/walkthroughs/mutate/evidence.json")" = "false" ]; check "check that edits the tree -> treeStable=false" $?
+cd "$WORK"
+
 echo "----------------------------------------"
 echo "verify-work: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

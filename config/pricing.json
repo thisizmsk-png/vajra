@@ -1,17 +1,22 @@
 {
-  "$schema": "vajra-pricing-v1",
-  "schemaVersion": 1,
-  "description": "Per-model USD rates per 1M tokens, used by scripts/vajra-cost.sh. Cache-write is the base input rate × cacheWriteMult (5-min cache); cache-read is × cacheReadMult. Models absent here are reported by token count only (cost shown as '?') — we never fabricate a rate. Edit to add a model or correct a rate.",
+  "$schema": "vajra-pricing-v2",
+  "schemaVersion": 2,
+  "description": "Per-model USD rates per 1M tokens, used by scripts/vajra-cost.sh. Cache write is the input rate x cacheWriteMult (5-minute cache); cache read is the input rate x cacheReadMult. A model with no matching entry is reported by tokens only (cost '?'); a rate is never invented.",
   "cacheWriteMult": 1.25,
   "cacheReadMult": 0.1,
-  "models": {
-    "opus":   { "match": "opus",   "input": 15.0, "output": 75.0 },
-    "sonnet": { "match": "sonnet", "input": 3.0,  "output": 15.0 },
-    "haiku":  { "match": "haiku",  "input": 0.25, "output": 1.25 }
-  },
+  "models": [
+    { "id": "fable-5-1",   "match": "fable-5-1",  "input": 10.0, "output": 50.0 },
+    { "id": "opus-5-5",    "match": "opus-5-5",   "input": 4.0,  "output": 20.0 },
+    { "id": "sonnet-5-5",  "match": "sonnet-5-5", "input": 2.0,  "output": 10.0 },
+    { "id": "haiku-5-5",   "match": "haiku-5-5",  "input": 0.10, "output": 0.50 },
+    { "id": "opus-legacy",   "match": "opus",   "input": 15.0, "output": 75.0, "legacy": true },
+    { "id": "sonnet-legacy", "match": "sonnet", "input": 3.0,  "output": 15.0, "legacy": true },
+    { "id": "haiku-legacy",  "match": "haiku",  "input": 0.25, "output": 1.25, "legacy": true }
+  ],
   "notes": [
-    "match is a substring tested against the model id (e.g. 'claude-opus-4-8' matches 'opus').",
-    "First matching entry wins; order from most-specific to least if adding overlapping matches.",
-    "Token totals and cache-hit-rate are always accurate regardless of whether a rate is known."
+    "match is a substring tested against the model id, e.g. 'claude-opus-5-5' matches 'opus-5-5'.",
+    "The array is ordered from most specific to least; the first match wins.",
+    "Legacy entries price transcripts from older models. Correct them here if your older model's rate differs.",
+    "Token totals and cache-hit rate are exact whether or not a rate is known."
   ]
 }

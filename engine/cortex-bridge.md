@@ -6,12 +6,12 @@ This bridge connects Vajra's orchestration engine with the 20 Mahabharat-named a
 
 ## How Routing Uses Cortex Agents
 
-When Vajra's Tier 4 (LLM classification) determines a task's domain, it checks `config.cortex.agentRouting` to assign the right Cortex agent:
+When the router (`scripts/vajra_route.py`, a 0-token `UserPromptSubmit` hook) or the main session identifies a task's domain, it checks `config.cortex.agentRouting` to assign the right Cortex agent:
 
 ### Agent Assignment Rules
 
-1. **Read the task domain** from Tier 4 classification (backend, frontend, security, testing, etc.)
-2. **Look up `cortex.agentRouting[domain]`** to get the agent name, model, and skill set
+1. **Read the task domain** (backend, frontend, security, testing, etc.)
+2. **Look up `cortex.agentRouting[domain]`** to get the agent name and its skill set. There is no `model` field: each agent's model and effort live in `~/.claude/agents/{agent}.md` and Claude Code applies them when it runs the agent.
 3. **Delegate to the agent** with the Agent tool: `subagent_type: {agent}`. Claude Code then runs it with its own prompt, `tools` allowlist, `model` and `effort` from `~/.claude/agents/{agent}.md`. Do **not** read the file and adopt the persona inline in the main session: the main session keeps its full tool set, so the agent's limits would not apply.
 4. **Pass a self-contained brief**: the task, the files in scope, and what to return. The agent reports back with `STATUS` (done | blocked | needs_decision); relay `needs_decision` to the user.
 5. **Restrict available skills** to the agent's designated skill list (name them in the brief).
@@ -23,60 +23,54 @@ When Vajra's Tier 4 (LLM classification) determines a task's domain, it checks `
 
 ### Domain → Agent Map
 
-| Domain | Agent | Role | Model |
-|--------|-------|------|-------|
-| Backend work | **Bhima** | Senior Backend Engineer | Opus |
-| Frontend work | **Nakula** | Senior Frontend Engineer | Opus |
-| Security review | **Bhishma** | Security Engineer | Opus |
-| Pre-mortem / red team | **Duryodhana** | Red Team Lead | Opus |
-| Offensive security (this repo only) | **Shakuni** | Offensive Security | Opus |
-| Testing/QA | **Vidura** | QA Engineer | Opus |
-| DevOps/CI/CD | **Hanuman** | DevOps/SRE | Opus |
-| Incidents | **Ashwatthama** | SRE Incident Response | Opus |
-| Product spec | **Draupadi** | Product Manager | Sonnet |
-| Architecture | **Arjuna** | Principal SDE | Opus |
-| Code review | **Arjuna** | Principal SDE | Opus |
-| Data/analytics | **Sahadeva** | Data Scientist | Opus |
-| Quant work | **Karna** | Quant Engineer | Opus |
-| Junior tasks / spikes | **Abhimanyu** | Junior Engineer | Sonnet |
-| Strategy | **Draupadi** | Product Manager | Sonnet |
-| Program mgmt | **Dhrishtadyumna** | Program Manager | Sonnet |
+Each agent's model and effort come from `~/.claude/agents/{agent}.md`, not from config.
+
+| Domain | Agent | Role |
+|--------|-------|------|
+| Backend work | **Bhima** | Senior Backend Engineer |
+| Frontend work | **Nakula** | Senior Frontend Engineer |
+| Security review | **Bhishma** | Security Engineer |
+| Pre-mortem / red team | **Duryodhana** | Red Team Lead |
+| Offensive security (this repo only) | **Shakuni** | Offensive Security |
+| Testing/QA | **Vidura** | QA Engineer |
+| DevOps/CI/CD | **Hanuman** | DevOps/SRE |
+| Incidents | **Ashwatthama** | SRE Incident Response |
+| Product spec | **Draupadi** | Product Manager |
+| Architecture | **Arjuna** | Principal SDE |
+| Code review | **Arjuna** | Principal SDE |
+| Data/analytics | **Sahadeva** | Data Scientist |
+| Quant work | **Karna** | Quant Engineer |
+| Junior tasks / spikes | **Abhimanyu** | Junior Engineer |
+| Strategy | **Draupadi** | Product Manager |
+| Program mgmt | **Dhrishtadyumna** | Program Manager |
 
 Tech-choice verdicts go to **Yudhishthira** (CTO). **Krishna** is the orchestrator and runs only as the main session (`claude --agent krishna`); Vajra never routes a task *to* krishna, and no agent approves protected actions — the human owner does.
 
 ## How Fleet Mode Uses Cortex Crews
 
-When `/vajra fleet` is invoked, check if a pre-defined crew matches the task type:
+In v0.5 a fleet crew is a saved Claude Code **dynamic workflow**, not an inline set of
+Agent-tool spawns. `config.cortex.fleetCrews` maps each crew name to its `workflow`
+(and records the `lead`/`agents` for documentation):
 
-### Pre-Built Crews (from `cortex.fleetCrews`)
+| Crew | Workflow |
+|------|----------|
+| `feature-build` | `vajra-feature-build` |
+| `security-audit` | `vajra-security-audit` |
+| `incident-response` | `vajra-incident-response` |
+| `architecture-review` | `vajra-architecture-review` |
+| `sabha` | `vajra-sabha` |
 
-**Security Audit Crew:**
-- Lead: Bhishma (threat model)
-- Agents: Duryodhana (red team), Shakuni (pentest), Vidura (QA validation)
-- Use: `/vajra fleet security-audit`
+When `/vajra fleet <crew> "<task>"` is invoked, the main session launches the mapped
+workflow with the Workflow tool, passing the task as `args`. The workflow script is
+the orchestrator: it calls each Cortex agent through `agent({agentType})`, runs
+independent work in parallel, gives writers `isolation: worktree` and keeps reviewers
+read-only, validates every agent output against a schema, counts votes in code, bounds
+its fix loops, and performs no protected action (see `fleet/coordinator.md` and each
+`workflows/vajra-<crew>.js` header). The retired `fleet-coordinator.sh` and the
+discovery-relay are gone.
 
-**Feature Build Crew:**
-- Lead: Arjuna (principal SDE)
-- Agents: Bhima (backend), Nakula (frontend), Vidura (tests)
-- Use: `/vajra fleet feature-build`
-
-**Incident Response Crew:**
-- Lead: Ashwatthama (SRE)
-- Agents: Hanuman (DevOps), Bhima (backend debug)
-- Use: `/vajra fleet incident-response`
-
-**Architecture Review Crew:**
-- Lead: Yudhishthira (CTO)
-- Agents: Arjuna (code), Bhishma (security), Draupadi (product)
-- Use: `/vajra fleet architecture-review`
-
-### How Crew Execution Works
-
-1. Parse crew name from `/vajra fleet {crew-name}` or auto-detect from task
-2. Load crew definition from `cortex.fleetCrews`
-3. For each agent in the crew, the **main session** spawns it with the Agent tool (`subagent_type: {agent}`); agents that write code get `isolation: worktree`. Claude Code applies each agent's own tools, model and effort.
-4. The lead's job is review and synthesis, not relaying: subagents cannot reliably spawn further subagents, so the main session spawns every crew member and hands the lead their results.
-5. Merge results when all complete
+A bare `/vajra <ask>` launches `vajra-deliver`, the autopilot, which plans its own crew
+from the roster rather than using a fixed one.
 
 ## Steering Rules — Agents Enforce Machine-Checkable Standards
 
@@ -106,13 +100,12 @@ Rule files live under the Vajra immutable core (`steering/rules/*.md`), so they
 are integrity-tracked and cannot be silently rewritten by an injected agent —
 Atman may only *propose* new rules into staging for review.
 
-## Cortex skill-detect.sh Integration
+## Routing and the router hook
 
-When `cortex.enabled = true`, Vajra's routing takes priority over Cortex's `skill-detect.sh` hook:
-
-- If Vajra routes at Tier 1-3 (zero tokens): skip skill-detect.sh, Vajra already knows
-- If Vajra routes at Tier 4 (LLM): Vajra's classification is more accurate than keyword grep
-- skill-detect.sh becomes a **fallback** for prompts that bypass `/vajra` entirely
+Routing is the 0-token `UserPromptSubmit` hook `scripts/vajra_route.py` (owned by the
+routing workstream). It injects a suggested skill/agent for a `/vajra` prompt without
+spending a model call; a bare `/vajra <ask>` launches `vajra-deliver`, which plans its
+own crew. This bridge only documents how a chosen domain maps to a Cortex agent.
 
 ## Agent Persona Loading
 
@@ -124,4 +117,4 @@ When loading a Cortex agent persona into context:
 4. Prefer delegation (Agent tool with `subagent_type`) over injecting the persona, so the agent's tool limits apply.
 5. Log agent assignment in campaign audit trail
 
-**Important:** Only user-supplied content (memory files, user messages, discovery relay content) goes through the sanitizer. Operator-controlled files under `~/.claude/agents/` are trusted and loaded verbatim.
+**Important:** Only user-supplied content (memory files, user messages, and any output a workflow agent returns) goes through the sanitizer — a workflow wraps such values in `<artifact>…</artifact>` data tags before passing them to the next agent. Operator-controlled files under `~/.claude/agents/` are trusted and loaded verbatim.

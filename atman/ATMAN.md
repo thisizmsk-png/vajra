@@ -1,131 +1,120 @@
 ---
 name: atman
-description: Self-improvement loop for Vajra — skills get better through practice, self-review, peer review, and muscle memory.
+description: Vajra's learning loop. Records real tool outcomes, turns repeated patterns into proposals, and changes nothing until a human approves.
 ---
 
-# Vajra Atman — The Practice Loop
+# Atman: the learning loop (v0.5)
 
-You have a continuous improvement system. Like a basketball player who practices daily:
-- Every shot is tracked (hit or miss)
-- You review your own game tape
-- Teammates review each other
-- Good patterns become muscle memory
-- Bad patterns get corrected
+Atman learns from what actually happened, proposes small changes with their
+evidence, and leaves every decision to a human. Code: `atman/atman.py`, run via
+`hooks/post-tool-use.sh` and `scripts/atman.sh`. Tests: `tests/atman/run-*.sh`.
 
-## The Loop
+## 1. Observe (automatic)
 
-Every time a skill executes, this cycle runs:
+`hooks/post-tool-use.sh` runs on `PostToolUse` and `PostToolUseFailure`. It
+appends one line per tool call to `~/.claude/vajra/practice-log.jsonl`:
 
-### 1. OBSERVE (automatic — after every skill use)
-
-After any skill completes, record:
 ```json
-{
-  "skill": "which skill ran",
-  "task": "what was asked",
-  "outcome": "success | failure | partial",
-  "toolCalls": 5,
-  "duration": "30s",
-  "userReaction": "accepted | rejected | corrected",
-  "errors": ["any tool errors"],
-  "timestamp": "ISO8601"
-}
+{"ts":"…","session_id":"…","event":"PostToolUseFailure","tool":"Bash","skill":null,
+ "agent":"vidura","outcome":"failure","error_sha256":"…","seq":41,"prevHmac":"…","hmac":"…"}
 ```
 
-Store in `~/.claude/vajra/practice-log.jsonl` (append-only, one JSON per line).
+- `skill` is `tool_input.skill` for Skill calls; `agent` is the payload's `agent_type`.
+- `outcome` is `failure` for `PostToolUseFailure`, or when `tool_response` reports
+  `is_error`, `success: false` or a non-zero exit code.
+- `error_sha256` hashes the error after collapsing paths, hex strings and numbers,
+  so the same failure clusters. No raw error text, command or prompt is stored.
+- Bash calls of `scripts/vajra-verify-work.sh` add `"signal":"verify-work"`.
+- Names are reduced to `[A-Za-z0-9._:-]` before they are logged or used in a path.
+- Each line's HMAC (key `~/.claude/vajra/.hmac-key`) covers the previous line's
+  HMAC. Appends take a lock, so parallel hooks keep the chain intact.
+- The hook also writes the per-session event log read by `scripts/vajra-replay.sh`.
+- It never blocks and always exits 0.
 
-### 1b. ORACLE ESCALATION (vertical — before the run dies)
+## 2. Verify before learning
 
-When a skill/agent fails ≥2 times (the flag below) OR a step is high-stakes,
-summon the **Oracle** — a stronger-model second opinion — *before* looping
-blindly. Peer review is horizontal (skills review each other); the Oracle is
-vertical escalation. See `atman/oracle.md`.
+Atman learns only from lines whose HMAC verifies **and** that link to the previous
+accepted line. Forged, edited, replayed or reordered lines are skipped and
+counted (`atman.sh status`, `atman.sh verify`). With no valid key it learns
+nothing. This is tamper evidence, not tamper proofing: anyone who can read the
+key can re-sign the log. The pre-tool hook keeps the key and the logs out of the
+model's reach.
 
-### 2. SELF-REVIEW (triggered when a skill fails ≥2 times)
+## 3. Propose (`atman.sh propose`, or `atman.sh dream`)
 
-When the practice log shows a skill failing on similar tasks ≥2 times:
+Signals: tool failures, failing verify-work runs, and the router's
+`~/.claude/vajra/routing-log.jsonl`. At most 5 new proposals per run, written to
+`~/.claude/vajra/proposals/<id>.json`. Nothing else is written.
 
-1. Read the skill's SKILL.md
-2. Read the failed traces
-3. Ask: "What instruction in this skill caused the failure? What's missing?"
-4. Generate a **patch** — a small, targeted fix to the skill's instructions
-5. Write the patch to `~/.claude/vajra/patches/{skill-name}.patch.md`
+- **Route proposals.** A routed prompt is labeled with the first successful
+  Skill call that follows it in the same session (within 30 minutes, before the
+  next routed prompt). A word is proposed for a skill when the router missed that
+  skill at least 3 times and at least 80% of labeled prompts with the word went
+  to it. Stopwords and words already learned are skipped. Evidence: counts,
+  precision and prompt hashes.
+- **Skill and agent deltas.** Each call is attributed to the skill active in its
+  thread and to its agent. A failure cluster (same tool, same error hash) with at
+  least 3 failures across at least 2 sessions yields an `add` proposal: one
+  bullet, with evidence counts. After an `add` is approved, Atman compares the
+  cluster's failure rate over the next 20+ calls: no improvement proposes
+  `retire`; partial improvement with continued failures proposes `modify`.
+- Rejected proposals keep their id, so the same proposal is not raised again.
 
-Patches are NOT applied automatically. They are proposals.
+## 4. Decide (human only)
 
-### 3. PEER REVIEW (during `/vajra dream`)
+```
+bash ~/.claude/skills/vajra/scripts/atman.sh review
+bash ~/.claude/skills/vajra/scripts/atman.sh approve <id>
+bash ~/.claude/skills/vajra/scripts/atman.sh reject <id> [reason]
+```
 
-During dream consolidation, skills review each other:
+`approve` and `reject` need an interactive terminal (or
+`VAJRA_ATMAN_ASSUME_HUMAN=1`, which is meant for tests); from the model's Bash
+tool they exit 3 and print the command for the user to run.
 
-**Review pairs (domain expertise):**
-- `code-review` reviews `testing` patches (does the test strategy make sense?)
-- `sentry-security-review` reviews `api-design` patches (are security implications covered?)
-- `threat-modeling` reviews `sentry-find-bugs` patches (are threat vectors complete?)
-- `hld` reviews `lld` patches (does the low-level match the high-level?)
-- `systematic-debugging` reviews `code-review` patches (does the review catch real bugs?)
+- An approved route goes to `~/.claude/vajra/learned-routes.json`
+  (`{"version":1,"routes":[{"word","skill","agent","precision","support","proposal","approved_at"}]}`),
+  which `scripts/vajra_route.py` reads first.
+- An approved skill or agent delta is written as
+  `~/.claude/vajra/patches/<id>.patch`, a unified diff against the skill's
+  `SKILL.md` or `~/.claude/agents/<name>.md`. Bullets are tagged
+  `<!-- atman:<id> -->` so they can be retired later. You apply it yourself:
+  `git -C <dir> apply <patch>` (the command is in the patch header).
+- Every decision is appended to `~/.claude/vajra/atman-history.jsonl`
+  (`atman.sh log`).
 
-**Review process:**
-1. Load the proposed patch
-2. Load the skill being patched
-3. Ask: "Does this patch improve the skill? Does it introduce contradictions? Does it bloat the instructions?"
-4. Verdict: APPROVE / REJECT / REVISE
-5. If APPROVED: move to promotion queue
-6. If REJECTED: log reason, discard patch
-7. If REVISE: generate revised patch, re-queue
+Atman never writes to `config/`, the Vajra skill core, skills or agents.
 
-### 4. PROMOTE (user confirms or auto-promote after 3 approvals)
+## 5. Maintain
 
-Approved patches can be:
-- **Auto-promoted**: If `atman.autoPromote = true` in config AND patch has ≥2 peer approvals
-- **User-confirmed**: `/vajra atman review` shows pending patches for user to accept/reject
-
-When promoted:
-1. Backup original skill to `~/.claude/vajra/backups/`
-2. Apply patch to the skill's instructions
-3. Log the evolution with before/after hash
-4. If performance degrades in next 3 sessions → auto-rollback
-
-### 5. MUSCLE MEMORY (routing learns from practice)
-
-After every successful task completion:
-1. Check if the routing decision could be a T1 regex or T3 keyword shortcut
-2. If the same task pattern was routed via T4 (LLM) ≥3 times with the same skill → add it as a T3 keyword
-3. If a very specific pattern (like `/deploy staging`) always goes to the same skill → propose a T1 regex rule
-
-Write proposed routing rules to `~/.claude/vajra/routing-proposals.json`. Apply during dream.
+`atman.sh dream` prunes the practice log to the newest 10,000 lines in their
+original order, moves older lines to `~/.claude/vajra/practice-archive/`, and
+writes a signed anchor so the remaining chain still verifies. Then it proposes.
 
 ## Commands
 
-| Command | What it does |
-|---------|-------------|
-| `/vajra atman status` | Show: practice log size, pending patches, approved patches, routing proposals |
-| `/vajra atman review` | Show pending patches for user approval |
-| `/vajra atman log` | Show evolution history (what changed, when, why) |
-| `/vajra atman rollback <id>` | Revert a specific skill patch |
-| `/vajra atman pause` | Stop observing/proposing (keeps practice log) |
-| `/vajra atman resume` | Resume the loop |
+| Command | Effect |
+|---|---|
+| `status` | integrity, last-7-day failures, flagged skills/agents, proposal counts |
+| `propose` | build proposals from verified signals |
+| `review` | pending proposals with evidence |
+| `approve <id>` / `reject <id>` | human decision |
+| `log` | approval and rejection history |
+| `pause` / `resume` | stop or restart proposals; the practice log keeps recording |
+| `observe` | failure clusters per skill/agent (read-only) |
+| `dream` | prune + propose |
+| `verify` | check the practice-log chain (exit 1 on any rejected line) |
 
-## Safety Rules
+## Evals
 
-1. **Never modify bundled-skills/ directly** — patches create new files in evolved-skills/ or modify copies
-2. **Never apply without evidence** — every patch links to ≥2 failure traces
-3. **Max 5 patches per dream cycle** — prevents runaway self-editing
-4. **Peer review is mandatory** — no self-approved patches
-5. **Auto-rollback on regression** — if patched skill performs worse in 3 sessions, revert
-6. **All patches go through sanitizer** — no prompt injection in evolved instructions
-7. **User can always override** — `/vajra atman rollback` works instantly
-8. **Practice log is append-only and hash-chained** — each entry's HMAC covers
-   the previous entry's HMAC, so deletion, truncation, or reordering breaks the
-   chain and is detectable. (This is tamper-*evidence*, not tamper-*proofing*:
-   the signing key shares the logger's trust boundary, so it does not stop an
-   attacker who can read the key. Agent reads of `.hmac-key` are blocked by the
-   pre-tool hook to keep that bar as high as the single-key model allows.)
+`evals/` holds seed cases in `claude plugin eval` format: should-trigger and
+should-not-trigger cases for the vajra skill and routing cases graded by an LLM
+judge. Run them with `claude plugin eval ~/.claude/skills/vajra` (it runs real
+model calls). `tests/atman/run-evals-lint.sh` checks their structure offline.
 
-## What Gets Better Over Time
+## Not built
 
-| Week 1 | Week 4 | Week 12 |
-|--------|--------|---------|
-| All routing via T4 (LLM) | 40% via T1/T3 (free) | 70%+ via T1/T3 |
-| Generic skill instructions | 5-10 patched skills | 20+ refined skills |
-| No memory of past work | Heuristics from 100+ tasks | Pattern library of 500+ |
-| Asks "what framework?" | Knows your stack | Anticipates your patterns |
+No automatic promotion, no peer review between skills, no automatic rollback,
+and no model-written instructions: bullets come from fixed templates filled with
+counts and hashes. Gated, human-approved deltas are the design choice, because
+self-written skill changes show little average gain unless they are gated.

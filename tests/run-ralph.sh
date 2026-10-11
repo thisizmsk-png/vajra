@@ -8,6 +8,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO/scripts/vajra-ralph.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ralph-XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+export HOME="$WORK/home"; mkdir -p "$HOME"   # default log dir lands in a temp HOME
 
 PASS=0; FAIL=0
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL :: $1"; fi; }
@@ -65,6 +66,48 @@ echo "$out4" | grep -q "after 0 iteration"; check "already-done runs 0 iteration
 # 5. usage / missing file
 bash "$SCRIPT" >/dev/null 2>&1; [ $? -eq 2 ]; check "no args -> usage error" $?
 bash "$SCRIPT" "$WORK/nope.md" >/dev/null 2>&1; [ $? -eq 2 ]; check "missing file -> error" $?
+
+
+# 6. stall detection: noop agent never changes the file -> exit 3 after --stall N iterations
+P6="$WORK/p6.md"; mkprog "$P6"
+out6="$(CLAUDE_CMD="$MOCK_NOOP" bash "$SCRIPT" --stall 2 --log-dir "$WORK/logs6" "$P6" 25 2>&1)"; rc6=$?
+[ "$rc6" -eq 3 ]; check "stalled progress -> exit 3" $?
+echo "$out6" | grep -q "stalled"; check "reports the stall" $?
+[ "$(ls "$WORK/logs6" | grep -c '^iter-')" -eq 2 ]; check "stops after exactly --stall iterations" $?
+
+# 7. explicit flags reach the agent, one log per iteration
+MOCK_ARGS="$WORK/mock_args.sh"
+cat > "$MOCK_ARGS" <<'EOF'
+#!/usr/bin/env bash
+shift 2   # drop -p <prompt>
+printf '%s\n' "$@" > "$RALPH_TEST_ARGS"
+awk 'd==0 && /- \[ \]/{sub(/\[ \]/,"[x]"); d=1} {print}' "$RALPH_TEST_PROGRESS" > "$RALPH_TEST_PROGRESS.tmp" \
+  && mv "$RALPH_TEST_PROGRESS.tmp" "$RALPH_TEST_PROGRESS"
+echo "agent output line"
+EOF
+chmod +x "$MOCK_ARGS"
+P7="$WORK/p7.md"; mkprog "$P7"
+CLAUDE_CMD="$MOCK_ARGS" RALPH_TEST_PROGRESS="$P7" RALPH_TEST_ARGS="$WORK/args7" \
+  bash "$SCRIPT" --permission-mode acceptEdits --allowed-tools "Read,Edit,Bash(npm test:*)" --max-turns 7 --log-dir "$WORK/logs7" "$P7" 10 >/dev/null 2>&1; rc7=$?
+[ "$rc7" -eq 0 ]; check "flagged run converges" $?
+tr '\n' ' ' < "$WORK/args7" | grep -qF -- "--permission-mode acceptEdits --allowedTools Read,Edit,Bash(npm test:*) --max-turns 7"
+check "permission mode, allowed tools and max-turns passed to the agent" $?
+[ "$(ls "$WORK/logs7" | grep -c '^iter-')" -eq 3 ]; check "one log per iteration" $?
+grep -q "agent output line" "$WORK/logs7/iter-001.log"; check "iteration log captures agent output" $?
+grep -q "progress changed" "$WORK/logs7/ralph.log"; check "summary log records progress changes" $?
+
+# 8. defaults are explicit too (dontAsk + read/edit tools), default log dir under HOME
+P8="$WORK/p8.md"; mkprog "$P8"
+CLAUDE_CMD="$MOCK_ARGS" RALPH_TEST_PROGRESS="$P8" RALPH_TEST_ARGS="$WORK/args8" bash "$SCRIPT" "$P8" 1 >/dev/null 2>&1
+tr '\n' ' ' < "$WORK/args8" | grep -qF -- "--permission-mode dontAsk --allowedTools Read,Glob,Grep,Edit,Write --max-turns 30"
+check "default flags are explicit" $?
+ls -d "$HOME"/.claude/vajra/ralph/p8.md-* >/dev/null 2>&1; check "default log dir under ~/.claude/vajra/ralph" $?
+
+# 9. unsafe or invalid options are refused
+bash "$SCRIPT" --permission-mode bypassPermissions "$P8" >/dev/null 2>&1; [ $? -eq 2 ]; check "bypassPermissions refused" $?
+bash "$SCRIPT" --permission-mode yolo "$P8" >/dev/null 2>&1; [ $? -eq 2 ]; check "invalid mode refused" $?
+bash "$SCRIPT" --max-turns 0 "$P8" >/dev/null 2>&1; [ $? -eq 2 ]; check "max-turns 0 refused" $?
+bash "$SCRIPT" --allowed-tools "" "$P8" >/dev/null 2>&1; [ $? -eq 2 ]; check "empty allowed tools refused" $?
 
 echo "----------------------------------------"
 echo "ralph: ${PASS} passed, ${FAIL} failed"

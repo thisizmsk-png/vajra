@@ -1,35 +1,33 @@
 # Cost Tracker
 
-## When to Track
+Cost in v0.5 is measured from the session transcript, not estimated during a run. The
+removed `cost.ratesPer1MTokens` and `cost.alertThreshold` config keys no longer exist;
+`scripts/vajra-cost.sh` is the tool, and current per-model prices live in
+`config/pricing.json`.
 
-Track token usage after every operation that consumes tokens:
-- Tier 4 routing classification (~500 tokens)
-- Subagent spawns
-- Tool calls that use LLM (not file reads/writes)
+## How to track
 
-## How to Track
+Run the cost script over a transcript (or `/vajra cost`):
 
-1. Read cost rates from `config/default.json` → `cost.ratesPer1MTokens`
-2. After each LLM operation, estimate tokens consumed (input + output)
-3. Calculate cost: `(tokens / 1_000_000) * rate`
-4. Update campaign state's `cost` field:
-   - Increment `totalTokens`, `inputTokens`, `outputTokens`
-   - Recalculate `estimatedUSD`
+```
+scripts/vajra-cost.sh [transcript.jsonl]
+```
 
-## Spend Alerts
+It reads real token usage from the transcript, dedupes by message id so a resumed or
+replayed turn is not double-counted, matches each message's model to a rate in
+`config/pricing.json` (most specific match first), and prints input/output tokens and
+the USD total.
 
-If `cost.alertThreshold` is set (not null):
-- After each cost update, check if `estimatedUSD >= alertThreshold`
-- If exceeded, pause and ask: "Spend alert: ~$X.XX consumed (threshold: $Y.YY). Continue? [y/n]"
-- Log the alert in campaign state
+## Pricing
 
-## Routing Cost Summary
+`config/pricing.json` holds the current per-1M-token input/output rates (opus-5-5,
+sonnet-5-5, haiku-5-5, fable-5-1, plus legacy entries for older transcripts). Update
+prices there; the script does not hard-code any rate.
 
-| Tier | Typical Cost |
-|------|-------------|
-| T1 (Regex) | 0 tokens |
-| T2 (Campaign) | 0 tokens |
-| T3 (Keyword) | 0 tokens |
-| T4 (LLM) | ~500 tokens |
+## Routing cost
 
-Track which tier was used for each routing decision to demonstrate the cost savings of tiers 1-3.
+The router (`scripts/vajra_route.py`) is a 0-token `UserPromptSubmit` hook: it adds a
+suggestion without a model call. A bare `/vajra <ask>` then launches the `vajra-deliver`
+workflow, whose many agents are where the tokens actually go — watch a large run's spend
+in `/workflows`, which shows each agent's token usage as it progresses, and stop it there
+if needed.

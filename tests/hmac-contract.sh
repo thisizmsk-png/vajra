@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # hmac-contract.sh — Cross-component HMAC contract test
 #
-# Verifies that the shell-based HMAC (openssl, as used by fleet-coordinator.sh)
-# and the Node.js-based HMAC (crypto module, as used by engine.ts) produce
+# Verifies that the shell-based HMAC (openssl, as used by vajra-campaign.sh)
+# and the Node.js crypto HMAC (used in CI and tests) produce
 # identical output for the same key + payload.
 #
 # Exit 0 = pass, Exit 1 = fail.
@@ -58,10 +58,10 @@ for i in "${!PAYLOADS[@]}"; do
   PAYLOAD="${PAYLOADS[$i]}"
   LABEL="payload[$i]: '${PAYLOAD:0:40}...'"
 
-  # --- Shell HMAC (same as fleet-coordinator.sh compute_hmac) ---
+  # --- Shell HMAC (same as vajra-campaign.sh hmac_stdin) ---
   SHELL_HMAC="$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${TEST_KEY_HEX}" -hex 2>/dev/null | awk '{print $NF}')"
 
-  # --- Node.js HMAC (same as engine.ts computeHmac) ---
+  # --- Node.js HMAC (crypto) ---
   NODE_HMAC="$(node -e "
     const crypto = require('crypto');
     const key = Buffer.from('${TEST_KEY_HEX}', 'hex');

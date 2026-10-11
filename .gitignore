@@ -12,6 +12,14 @@ package-lock.json
 *.key
 *.pem
 
+# Integrity signatures are made per install (~/.claude/vajra/manifest.sig), never shipped
+manifest.json.sig
+*.sig
+
+# Python bytecode (the router and Atman run with python3 -I)
+__pycache__/
+*.pyc
+
 # Runtime data (lives in ~/.claude/vajra/, not in skill dir)
 campaigns/
 relay/

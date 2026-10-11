@@ -13,7 +13,10 @@ tests, and report success that isn't real. Vajra closes this with a hard rule:
 ```
 /vajra verify-work <slug> "<cmd1>" "<cmd2>" ...
   → runs scripts/vajra-verify-work.sh
-  → captures: git diff, each command's exit + output, a WALKTHROUGH.md
+  → requires at least one command (a verification that runs nothing proves nothing)
+  → captures: the diff against HEAD *plus every untracked file*, the working-tree id
+    (tracked + untracked), each command's exit + output, and a WALKTHROUGH.md
+  → re-reads the tree afterwards and warns if a command changed what it verified
   → exits NON-ZERO if any command failed
 ```
 

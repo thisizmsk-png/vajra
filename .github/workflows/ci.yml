@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Tools
+        run: |
+          command -v jq || { sudo apt-get update && sudo apt-get install -y jq; }
+          python3 --version
+          openssl version
+          bash --version | head -1
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run all suites (vitest and every tests/**/run-*.sh)
+        env:
+          CI: "true"
+        run: bash tests/run-all.sh

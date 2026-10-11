@@ -1,8 +1,10 @@
 /**
  * Prompt injection sanitizer for Vajra agent harness.
  *
- * All untrusted content (memory files, external data, user-supplied context)
- * MUST pass through sanitize() before being loaded into the prompt context.
+ * Reference implementation, tested in CI (tests/sanitizer.test.ts). Nothing in
+ * Vajra calls it at runtime: wrapping untrusted content (memory files, external
+ * data, tool output) in <untrusted-data> is an instruction in SKILL.md that the
+ * model follows. Use this module when loading untrusted content from code.
  */
 
 import { readFileSync } from "fs";

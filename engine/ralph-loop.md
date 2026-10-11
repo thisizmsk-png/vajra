@@ -13,17 +13,25 @@ iteration and re-derive from durable artifacts.**
 ## The loop (`scripts/vajra-ralph.sh`)
 
 ```
-vajra-ralph.sh <progress-file> [max-iters]
+vajra-ralph.sh [options] <progress-file> [max-iters]
+  options: --permission-mode (default dontAsk; bypassPermissions refused),
+           --allowed-tools, --max-turns (default 30), --stall (default 3), --log-dir
 
-  while not done and iter < max:
-    fresh agent (claude -p) gets ONLY:
+  while not done and iter < max and not stalled:
+    fresh agent (claude -p, with the explicit --permission-mode / --allowedTools /
+      --max-turns above) gets ONLY:
       - the progress file (goal + checklist + decisions)
       - (optionally) the repo map, which it can regenerate
     it does the SINGLE most valuable next unit of work,
     updates progress.md (check off done, add discovered steps),
-    and exits — context gone.
+    and exits — context gone. Each iteration is logged under --log-dir.
   done when: no unchecked `- [ ]` items, or the marker RALPH-COMPLETE appears.
+  stalls (exit 3) when: the progress file is unchanged for --stall iterations.
 ```
+
+The iteration prompt also forbids protected actions (push, PR, deploy, migrations,
+destructive data ops, secrets, spend, external messages): the loop writes such a step
+into the progress file for the human instead of doing it unattended.
 
 ## The progress file is the entire memory
 

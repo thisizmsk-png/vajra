@@ -43,6 +43,40 @@ fable="$(echo "$J" | jq '.byModel[] | select(.model|contains("fable"))')"
 # human-readable report runs
 bash "$SCRIPT" "$T" >/dev/null 2>&1; check "human-readable report exits 0" $?
 
+
+# --- v0.5: dedupe by message id, current pricing, robustness ----------------
+T2="$WORK/t2.jsonl"
+cat > "$T2" <<'EOT'
+{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":1000,"cache_read_input_tokens":10000}}}
+{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":1000,"cache_read_input_tokens":10000}}}
+{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000,"output_tokens":1000,"cache_creation_input_tokens":1000,"cache_read_input_tokens":10000}}}
+this line is not json
+{"type":"assistant","message":{"id":"msg_2","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":1000000}}}
+{"type":"assistant","message":{"id":"msg_3","model":"claude-haiku-5-5","usage":{"input_tokens":1000000,"output_tokens":1000000}}}
+{"type":"assistant","message":{"id":"msg_4","model":"claude-fable-5-1","usage":{"input_tokens":1000000,"output_tokens":1000000}}}
+{"type":"assistant","message":{"id":"msg_5","model":"claude-sonnet-4-6","usage":{"input_tokens":1000000,"output_tokens":0}}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"output_tokens":5}}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"output_tokens":5}}}
+EOT
+J2="$(bash "$SCRIPT" --json "$T2" 2>/dev/null)"
+[ -n "$J2" ]; check "json output with a malformed line" $?
+o5="$(echo "$J2" | jq '.byModel[] | select(.model=="claude-opus-5-5")')"
+[ "$(echo "$o5" | jq '.calls')" = "3" ]; check "repeated message id counted once (+2 id-less lines)" $?
+[ "$(echo "$o5" | jq '.input')" = "1010" ]; check "dedupe: opus-5-5 input 1000 + 2x5" $?
+[ "$(echo "$o5" | jq -r '.rateId')" = "opus-5-5" ]; check "opus-5-5 matches its own rate, not legacy" $?
+near "$(echo "$o5" | jq '.costUsd')" "0.03324"; check "opus-5-5 cost (4/20, cache multipliers)" $?
+near "$(echo "$J2" | jq '.byModel[] | select(.model=="claude-sonnet-5-5") | .costUsd')" "12"; check "sonnet-5-5 \$2/\$10" $?
+near "$(echo "$J2" | jq '.byModel[] | select(.model=="claude-haiku-5-5") | .costUsd')" "0.6"; check "haiku-5-5 \$0.10/\$0.50" $?
+near "$(echo "$J2" | jq '.byModel[] | select(.model=="claude-fable-5-1") | .costUsd')" "60"; check "fable-5-1 \$10/\$50" $?
+[ "$(echo "$J2" | jq -r '.byModel[] | select(.model=="claude-sonnet-4-6") | .rateId')" = "sonnet-legacy" ]; check "older sonnet uses legacy entry" $?
+near "$(echo "$J2" | jq '.byModel[] | select(.model=="claude-sonnet-4-6") | .costUsd')" "3"; check "legacy sonnet \$3 input" $?
+jq -e '.models | type == "array"' "$REPO/config/pricing.json" >/dev/null; check "pricing models is an ordered array" $?
+# every specific entry precedes any legacy entry whose match it contains
+jq -e '[.models | to_entries[] | select(.value.legacy != true) | .key] | max < ([$m[0].models | to_entries[] | select(.value.legacy == true) | .key] | min)' --slurpfile m "$REPO/config/pricing.json" "$REPO/config/pricing.json" >/dev/null; check "specific entries ordered before legacy" $?
+EMPTY="$WORK/empty.jsonl"; : > "$EMPTY"
+[ "$(bash "$SCRIPT" --json "$EMPTY" | jq '.totals.tokens')" = "0" ]; check "empty transcript -> 0 tokens" $?
+bash "$SCRIPT" "$WORK/missing.jsonl" >/dev/null 2>&1; [ $? -eq 1 ]; check "missing transcript exits 1" $?
+
 echo "----------------------------------------"
 echo "cost-ledger: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

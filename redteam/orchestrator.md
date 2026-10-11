@@ -58,8 +58,11 @@ Load the matching scenario file from `~/.claude/skills/vajra/redteam/scenarios/`
 | sandbox-isolation               | sandbox-escape.json        |
 | tool-policy-enforcement         | tool-bypass.json           |
 | session-boundary-integrity      | session-boundary.json      |
-| configuration-drift-detection   | config-drift.json          |
+| configuration-drift-detection   | config-drift.json, learning-poisoning.json |
 | protocol-security               | protocol-security.json     |
+
+The learning-poisoning scenarios also have an automated, offline check:
+`bash tests/atman/run-redteam-poisoning.sh` (runs in a temp HOME).
 
 #### 4b. Spawn Subagent with Reduced Permissions
 
