@@ -30,7 +30,7 @@ D="$CD/login-flow"
 [ -f "$D/campaign.json" ] && [ -f "$D/features.json" ] && [ -f "$D/progress.md" ] && [ -f "$D/state.sig" ] && [ -d "$D/checkpoints" ]
 check "slug sanitized; all state files created" $?
 [ "$(jq -r '.features | map(.passes) | any' "$D/features.json")" = "false" ]; check "features start with passes=false" $?
-[ "$(stat -f %Lp "$HOME/.claude/vajra/.hmac-key" 2>/dev/null || stat -c %a "$HOME/.claude/vajra/.hmac-key")" = "600" ]; check "key created mode 600" $?
+[ "$(stat -c %a "$HOME/.claude/vajra/.hmac-key" 2>/dev/null || stat -f %Lp "$HOME/.claude/vajra/.hmac-key" 2>/dev/null)" = "600" ]; check "key created mode 600" $?
 KEY="$(cat "$HOME/.claude/vajra/.hmac-key")"
 ! grep -rqF "$KEY" "$CD"; check "key never written into campaign state" $?
 OUT="$(C list; C show; C show --json; C active --brief; C resume 2>&1)"

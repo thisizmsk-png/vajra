@@ -41,7 +41,7 @@ mkdir -p "$CD/$C"
 T add t1 --title "flag" --owner bhima --files 'src/export/,test/*.ts' --acceptance ac-1 --branch vajra/r1/t1 >/dev/null; check "add t1" $?
 T add t2 --title "docs" --owner abhimanyu --deps t1 --files README.md --acceptance ac-2 >/dev/null; check "add t2 depending on t1" $?
 T add t3 --title "ci" --owner hanuman --files .github/ >/dev/null; check "add t3" $?
-[ "$(stat -f %Lp "$CD/$C/tasks.json" 2>/dev/null || stat -c %a "$CD/$C/tasks.json")" = "600" ]; check "tasks.json mode 600" $?
+[ "$(stat -c %a "$CD/$C/tasks.json" 2>/dev/null || stat -f %Lp "$CD/$C/tasks.json" 2>/dev/null)" = "600" ]; check "tasks.json mode 600" $?
 [ "$(TJ status t1 | field task.status)" = ready ]; check "t1 without deps is ready" $?
 [ "$(TJ status t2 | field task.status)" = pending ]; check "t2 waits for t1 (pending)" $?
 [ "$(TJ status t1 | field task.files)" = '["src/export/", "test/*.ts"]' ]; check "files globs stored" $?

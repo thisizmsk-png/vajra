@@ -58,7 +58,7 @@ out="$(bash "$SKILL/scripts/install.sh" 2>&1)"; rc=$?
 printf '%s' "$out" | grep -q "WARNING: the workflows need agents that are not in ~/.claude/agents: .*vidura"; check "install warns about missing mahabharat agents" $?
 printf '%s' "$out" | grep -q "install-skills.sh"; check "install warning gives the fix (install-skills.sh)" $?
 tr -d '[:space:]' < "$VS/.hmac-key" | grep -Eq '^[0-9a-f]{64}$'; check "HMAC key is 64 hex chars" $?
-mode="$(stat -f '%Lp' "$VS/.hmac-key" 2>/dev/null || stat -c '%a' "$VS/.hmac-key")"
+mode="$(stat -c %a "$VS/.hmac-key" 2>/dev/null || stat -f %Lp "$VS/.hmac-key" 2>/dev/null)"
 [ "$mode" = 600 ]; check "HMAC key mode 600" $?
 ls "$HOME/.claude/"settings.json.vajra-backup-* >/dev/null 2>&1; check "settings.json backed up" $?
 [ "$(jq -r .model "$SETTINGS")" = opus ]; check "unrelated settings kept" $?

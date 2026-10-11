@@ -17,7 +17,7 @@ LOG="$HOME/.claude/vajra/routing-log.jsonl"
 
 PASS=0; FAIL=0
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL :: $1"; fi; }
-payload() { jq -cn --arg p "$1" '{session_id:"s1",transcript_path:"/x",cwd:"/tmp",hook_event_name:"UserPromptSubmit",prompt:$p}'; }
+payload() { printf '%s' "$1" | jq -cRs '{session_id:"s1",transcript_path:"/x",cwd:"/tmp",hook_event_name:"UserPromptSubmit",prompt:.}'; }
 route() { payload "$1" | python3 -I "$SK/scripts/vajra_route.py"; }
 ctx() { route "$1" | jq -r '.hookSpecificOutput.additionalContext // empty'; }
 
@@ -88,7 +88,7 @@ exp="$(printf '%s' "$p" | shasum -a 256 2>/dev/null | cut -d' ' -f1)"
 [ "$(echo "$L" | jq -r '.prompt_sha256')" = "$exp" ]; check "prompt_sha256 is sha256 of prompt" $?
 ! echo "$L" | grep -q '"prompt"'; check "raw prompt not stored" $?
 [ "$(echo "$L" | jq -r '.session_id')" = "s1" ]; check "session_id recorded" $?
-perm="$(stat -f '%Lp' "$LOG" 2>/dev/null || stat -c '%a' "$LOG")"
+perm="$(stat -c %a "$LOG" 2>/dev/null || stat -f %Lp "$LOG" 2>/dev/null)"
 [ "$perm" = "600" ]; check "routing log mode 600" $?
 
 # 8. Subcommands.

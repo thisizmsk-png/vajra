@@ -87,7 +87,7 @@ fi
 
 # --- HMAC key and signature ---------------------------------------------------------
 if [ -f "$KEY" ]; then
-  mode="$(stat -f '%Lp' "$KEY" 2>/dev/null || stat -c '%a' "$KEY" 2>/dev/null)"
+  mode="$(stat -c %a "$KEY" 2>/dev/null || stat -f %Lp "$KEY" 2>/dev/null)"
   if tr -d '[:space:]' < "$KEY" | grep -Eq '^[0-9a-f]{64}$'; then pass "HMAC key: present, 256-bit"; else fail "HMAC key: empty or malformed (run scripts/install.sh)"; fi
   if [ "$mode" = "600" ] || [ "$mode" = "400" ]; then pass "HMAC key: mode $mode"; else fail "HMAC key: mode $mode, want 600"; fi
 else

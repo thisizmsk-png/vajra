@@ -80,7 +80,7 @@ mac="$(printf '%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$
 [ "$mac" = "$(head -1 "$EV" | jq -r '.hmac')" ]; check "HMAC verifies with openssl over jq -c del(.hmac)" $?
 [ -f "$KBD/kb.sqlite" ] && [ -f "$KBD/INDEX.md" ]; check "kb.sqlite and INDEX.md derived" $?
 grep -q "$r1" "$KBD/INDEX.md"; check "INDEX.md lists the record" $?
-[ "$(stat -f %Lp "$EV" 2>/dev/null || stat -c %a "$EV")" = "600" ]; check "events.jsonl is mode 600" $?
+[ "$(stat -c %a "$EV" 2>/dev/null || stat -f %Lp "$EV" 2>/dev/null)" = "600" ]; check "events.jsonl is mode 600" $?
 
 kbu add --type lesson --title "Run database migrations before integration tests" --applies always \
   --paths "src/**" >/dev/null
