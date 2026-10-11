@@ -1,5 +1,5 @@
 {
-  "generated": "2026-10-11T16:33:58Z",
+  "generated": "2026-10-11T16:35:09Z",
   "version": "0.6.0",
   "files": {
     ".github/workflows/ci.yml": "4c1216ce15e80be5fe207aac1a8aba2c4669385ce7efd933c5b8cfb11d93fea1",
@@ -7,7 +7,7 @@
     "CONTRIBUTING.md": "8771af7362343ea98351b01afe3c751460c0ccc87dc6af9daa2c298df32b2533",
     "CREDITS.md": "8fec39156840194478aeca5c7d836b5e5193417fd5eb43a0bb42c50733976a65",
     "LICENSE": "78d502785dedbd4eb6e4225a81dc728d0bc9a5282d38695131254829768e0c88",
-    "README.md": "3afe831ea2caee9b05ddb5da37b9189f94d039b20e28c6175b65318a7177f238",
+    "README.md": "f548a74da43fe6bee291bccde1656bdda2dca9e7349cdbb9e7a1c470c432e015",
     "SECURITY.md": "6e2d15f73f43062341c3e29baafc7f7fa1e235e4d5f34592c667d58fe4b56d67",
     "SKILL.md": "a303fd1f3b5a145b492194fec1444b33e3399cd8d422b2db6869c64925b92f0a",
     "atman/ATMAN.md": "1a53789e485b812cd214d9d7f9dc888a0b22b687b5f749bb29f524e2ae19f865",

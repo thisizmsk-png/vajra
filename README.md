@@ -23,6 +23,25 @@ Most of Vajra is a small amount of code wired into native Claude Code
 primitives: hooks, saved workflows, subagents and plan mode. Every claim below
 points at the file that does it and the test that checks it.
 
+## How a delivery runs
+
+```
+/vajra add CSV export to the reports page
+  │
+  ├─ route     UserPromptSubmit hook: 0 tokens, suggests crews/agents, adds the top 3 project-knowledge hits
+  ├─ recall    search the knowledge ledger for related decisions, lessons and past deliveries
+  ├─ understand drona writes acceptance criteria; assumptions are recorded, not asked
+  ├─ plan      owner agent per task, files and dependencies → validated task graph
+  ├─ execute   dependency waves, up to 4 tasks in parallel, each writer in its own git worktree
+  ├─ verify    vidura runs a real check per criterion; arjuna (and bhishma for security) review read-only
+  ├─ fix       failing criteria go back to their owning task, at most 3 rounds
+  └─ deliver   one local branch + report with evidence per criterion; the delivery, decisions and
+               fix-round lessons are written back to the ledger
+```
+
+Progress is a campaign on disk, so `/vajra continue` resumes a long delivery in
+a new session. Anything irreversible comes back to you as a plan.
+
 ## Install
 
 Run these in your own terminal, not through Claude Code (once the hooks are
@@ -60,6 +79,15 @@ Optional:
 bash ~/.claude/skills/vajra/scripts/enable-sandbox.sh  # turn on Claude Code's OS sandbox (recommended for unattended runs)
 ```
 
+**Updating:** the guard protects the installed copy from the model, so update
+it yourself, then reinstall (which re-signs the manifest) and check:
+
+```bash
+git -C ~/.claude/skills/vajra pull
+bash ~/.claude/skills/vajra/scripts/install.sh
+bash ~/.claude/skills/vajra/scripts/vajra-doctor.sh
+```
+
 **Needs:** Claude Code with hooks and saved workflows (docs checked against
 2.1.296), git, bash, python3, jq and openssl, on macOS or Linux/WSL2. The
 installer needs jq and openssl, not Node.js; Node.js is only needed to run the
@@ -78,7 +106,7 @@ TypeScript tests.
 | Review the diff against the steering rules | `/vajra review` |
 | See what a session cost | `/vajra cost` |
 | Review what Vajra learned | `/vajra atman review`, then `approve <id>` or `reject <id>` |
-| Teach Vajra a project fact | `/vajra remember the API uses cursor pagination` |
+| Teach Vajra a project fact | `/vajra remember the API uses cursor pagination` (add `--always` to show it at every session start) |
 | Look up project knowledge | `/vajra kb search <words>` · `/vajra kb pending` |
 | Check the wiring | `/vajra doctor` |
 | Everything else | `/vajra help` |
@@ -90,7 +118,7 @@ Each subcommand has a one-page doc in [`docs/commands/`](docs/commands/).
 | Claim | Where | Test |
 |---|---|---|
 | Routing costs 0 model tokens: a UserPromptSubmit hook adds one context line with suggested crews, agents and skills, and logs the route (no raw prompt) | `scripts/vajra_route.py`, `hooks/user-prompt-submit.sh`, `config/default.json` | `tests/router/run-router.sh` |
-| Project knowledge is a ledger: append-only HMAC-chained events, an FTS index, a write gate that refuses secrets, injection and oversize text, and trust tiers (user only from `/vajra remember`, verified only with green evidence, everything else pending your approval). It is read back at session start and on each `/vajra` ask as `<untrusted-data>` pointers | `scripts/vajra_kb.py`, `hooks/session-start.sh`, `scripts/vajra_route.py` | `tests/kb/`, `tests/router/run-router-kb.sh`, `tests/hooks/run-session-start-kb.sh` |
+| Project knowledge is a ledger: append-only HMAC-chained events, an FTS index, a write gate that refuses secrets, injection and oversize text, and trust tiers: user only from `/vajra remember` (the router mints a key-bound token the model can't), verified only with HMAC-signed verify-work evidence for the current commit (trivial checks don't count), everything else pending your approval. Only user-tier or approved records can apply "always". It is read back at session start and on each `/vajra` ask as `<untrusted-data>` pointers | `scripts/vajra_kb.py`, `hooks/session-start.sh`, `scripts/vajra_route.py` | `tests/kb/`, `tests/router/run-router-kb.sh`, `tests/hooks/run-session-start-kb.sh` |
 | Deliveries plan into a task graph (`tasks.json`, only the script changes a status), run in dependency waves with disjoint files (at most 4 in flight), close a task only on vidura's verdict, and on verified success write the delivery, decisions and lessons back to the ledger | `scripts/vajra_tasks.py`, `workflows/vajra-deliver.js` | `tests/tasks/`, `tests/workflows/` |
 | A bare `/vajra <ask>` runs the deliver workflow: understand, plan, execute in worktrees, verify, fix (at most 3 rounds), deliver | `workflows/vajra-deliver.js` | `tests/workflows/` |
 | Crews are saved workflows with typed outputs, bounded fix loops, read-only reviewers and a vote counted in code | `workflows/vajra-*.js` | `tests/workflows/` |
@@ -137,14 +165,27 @@ See [SECURITY.md](SECURITY.md) for the full model.
   not that they are sufficient.
 - Routing suggestions are regex and learned-word matches. The deliver workflow
   makes the final plan.
+- The workflows are tested offline against stub agents (60+ deliver
+  scenarios) and the scripts end to end, but a full `/vajra <ask>` run against
+  a live model is still being validated. Try it on a small task first.
+- Human gates (`approve`, `reject`, `forget`) check for an interactive
+  terminal, which a pseudo-terminal can fake. They are only a hard boundary
+  with the OS sandbox on.
 - A young project, built by one person.
 
 ## Contributing
+
+Develop in a separate clone (for example `~/Development/vajra`): once the hooks
+are installed, the guard blocks edits and test runs inside
+`~/.claude/skills/vajra`.
 
 ```bash
 npm install            # vitest, only for the TypeScript tests
 bash tests/run-all.sh  # vitest plus every tests/**/run-*.sh suite; CI runs the same
 ```
+
+Release notes are in the commit history; plans live in
+[docs/roadmap/](docs/roadmap/).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the architecture notes in
 [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md).
