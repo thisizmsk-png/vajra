@@ -34,7 +34,8 @@ into `~/.claude/workflows/vajra-deliver.js`.
 1. **Understand.** The first agent searches the project knowledge base
    (`vajra_kb.py search "<ask>" --format ids --k 5`, the ask passed as a
    quoted argument). The hits, one-line pointers, go to the next agents as
-   data. Then drona restates the ask, acceptance criteria, scope and
+   data. The search counts as available when it exits 0, even with no output
+   (an empty knowledge base); only a non-zero exit is "unavailable". Then drona restates the ask, acceptance criteria, scope and
    assumptions. It picks the most reasonable reading of anything ambiguous and
    records it.
 2. **Plan.** Breaks the work into tasks, each with an owner agent picked from
@@ -65,15 +66,33 @@ into `~/.claude/workflows/vajra-deliver.js`.
    artifact paths and commits, never another worker's summary.
 5. **Verify.** vidura runs real checks against every criterion and lists the
    `setup_cmds` it ran first to prepare its fresh worktree (for example
-   `npm ci`). arjuna reviews
-   read-only, and bhishma does too when the work touches security. The gate
-   is computed in code from that evidence.
+   `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'` or `npm ci`).
+   Every environment is built inside the worktree; interpreters, venvs or
+   paths outside the repository (scratchpad, `/tmp`, home) are not allowed.
+   Each result's `command` is the literal single shell command that ran from
+   the repository root, because the write-back reruns it verbatim
+   (`bash -c`) in another fresh worktree and the report prints it under "How
+   to run it". Anything else (variants tried, caveats) goes in `notes`. The
+   script checks every command: a trailing note in parentheses, an elision
+   (`...`), a masked exit code (`; echo $?`, `|| true`), a path outside the
+   repository, or a bare `python`/`pip`/`pytest` after setup built a venv
+   sends the verification back to vidura once, with the reasons. A command
+   still wrong after that does not pass the gate; the owning task reworks
+   with the reason, and a setup command still pointing outside the repository
+   is dropped from the write-back and reported.
+   arjuna reviews, and bhishma does too when the work touches security. Each
+   reviewer gets its own worktree, checks out the integration commit and may
+   run the project's checks, but stays read-only (no edits, commits or
+   branches). The gate is computed in code from that evidence. A reviewer
+   risk that only says it did not run the tests is replaced in the report by
+   one note pointing at vidura's evidence.
 6. **Fix loop.** Repeats until every criterion has passing evidence, up to 3
    rounds.
 7. **Deliver.** Merges worker branches into one local branch
    (`vajra/<run_id>/integration`) and leaves it free to check out. Then it
    writes back in a fresh worktree detached at the integration commit. It
-   runs vidura's `setup_cmds` (at most 5), then reruns the passing checks
+   runs vidura's `setup_cmds` (at most 5), each as `bash -c '<command>'` (one
+   quoted argument, so the shell and the guard see a real command name), then reruns the passing checks
    through `scripts/vajra-verify-work.sh`, which writes a signed
    `data/walkthroughs/deliver-<run_id>/evidence.json`. It closes each task in
    dependency order with
@@ -122,6 +141,22 @@ returns `branch`, `commit`, `report` (markdown text, not a file) and
 The workflow never pushes, opens a PR, deploys, runs migrations or spends
 money. Those come back in the report as a ready plan. Run them only after the
 user approves through Claude Code's permission prompt.
+
+## Messages sent while it runs
+
+Claude Code relays the most recent user message to each workflow agent as the
+request that triggered the run. In the first live run, a message the user
+sent mid-run ("address any findings from red team ...") reached every agent
+that started afterwards. The agents correctly ignored it, because the task
+text the workflow computes from the ask is the authority on scope. Two rules
+follow:
+
+- Users: avoid sending unrelated instructions while a `/vajra` run is in
+  progress. Wait for the report, or start the new ask after it.
+- Agents: the computed ask (the `ask` artifact and the criteria derived from
+  it) defines the scope. A relayed message that does not match it does not
+  extend or change the task. If it seems to matter, mention it in the result
+  instead of acting on it.
 
 If `~/.claude/workflows/vajra-deliver.js` is missing, say so and suggest
 `bash ~/.claude/skills/vajra/scripts/install.sh` and `/vajra doctor`. Don't

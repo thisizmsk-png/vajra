@@ -476,8 +476,15 @@ def load_routing_log():
         route = r.get("route") if isinstance(r.get("route"), dict) else {}
         if t is None or not sess:
             continue
+        router_skill = safe_name(route.get("skill"))
+        # Every skill the router suggested (its 2nd and 3rd hints too). Lines
+        # written before `suggested` existed carry only the top skill.
+        sugg = r.get("suggested") if isinstance(r.get("suggested"), list) else []
+        suggested = [x for x in (safe_name(v) for v in sugg[:10]) if x]
+        if router_skill and router_skill not in suggested:
+            suggested.insert(0, router_skill)
         rows.append({"t": t, "session": sess, "words": sorted(set(words)),
-                     "router_skill": safe_name(route.get("skill")),
+                     "router_skill": router_skill, "suggested": suggested,
                      "prompt_sha256": str(r.get("prompt_sha256", ""))[:64]})
     rows.sort(key=lambda r: r["t"])
     return rows
@@ -503,9 +510,9 @@ def route_label(r, calls, next_t):
     """The skill that labels routed prompt `r`: the first main-session Skill
     call within ROUTE_WINDOW_SECONDS, else the first agent-made Skill call
     within AGENT_ROUTE_WINDOW_SECONDS. Both stop at the next routed prompt.
-    An agent call of the router's own suggestion is not a label: the agent
-    may simply have followed the hint, and counting it would let the router
-    reinforce itself."""
+    An agent call of any skill the router suggested (its top skill or a 2nd
+    or 3rd hint) is not a label: the agent may simply have followed the hint,
+    and counting it would let the router reinforce itself."""
     main_end = r["t"] + ROUTE_WINDOW_SECONDS
     agent_end = r["t"] + AGENT_ROUTE_WINDOW_SECONDS
     if next_t is not None:
@@ -516,7 +523,15 @@ def route_label(r, calls, next_t):
     if label:
         return label
     return next((s for (t, s, by_agent) in calls
-                 if by_agent and r["t"] <= t < agent_end and s != r["router_skill"]), None)
+                 if by_agent and r["t"] <= t < agent_end and s not in suggested_of(r)), None)
+
+
+def suggested_of(r):
+    """The skills the router suggested for routed prompt `r` (top skill first)."""
+    s = list(r.get("suggested") or [])
+    if r.get("router_skill") and r["router_skill"] not in s:
+        s.insert(0, r["router_skill"])
+    return s
 
 
 def route_stats(entries, rows):
@@ -540,7 +555,9 @@ def route_stats(entries, rows):
                 total[w] = total.get(w, 0) + 1
                 k = (w, label)
                 hit[k] = hit.get(k, 0) + 1
-                if r["router_skill"] != label:
+                # A skill the router already suggested (at any rank) is not a
+                # miss, so it is never learned as a new route.
+                if label not in suggested_of(r):
                     miss[k] = miss.get(k, 0) + 1
                     samples.setdefault(k, []).append(r["prompt_sha256"])
     return {"total": total, "hit": hit, "miss": miss, "samples": samples,

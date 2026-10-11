@@ -24,10 +24,10 @@ const call = (r, l) => r.calls.find((c) => c.label === l)
     'task.t1': (l, o, p) => ch('t1', p),
     'task.t2': (l, o, p) => ch('t2', p),
     merge: (l, o, p) => ({ status: 'merged', branch: branchIn(p), commit: 'd1111111', merged: ['t1', 't2'], conflicts: [], notes: '' }),
-    verify: { results: [{ criterion_id: 'ac-1', status: 'pass', command: 'npm test', exit_code: 0, evidence: 'ok' }], suite_command: 'npm test', suite_passes: true, regressions: [], setup_cmds: [] },
+    verify: { results: [{ criterion_id: 'ac-1', status: 'pass', command: 'npm test', notes: '', exit_code: 0, evidence: 'ok' }], suite_command: 'npm test', suite_passes: true, regressions: [], setup_cmds: [] },
     review: { verdict: 'approve', blocking_issues: [], risks: [], rationale: 'ok' },
     campaign: { ok: true, outputs: ['ok'] },
-    'kb.search': { ok: true, lines: [] },
+    'kb.search': { exit_code: 0, ok: true, lines: [] },
     tasks: { ok: true, outputs: ['ok'] },
     writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
   }

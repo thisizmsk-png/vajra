@@ -27,8 +27,10 @@ The router is code, not instructions. `hooks/user-prompt-submit.sh` runs
 5. If `scripts/vajra-campaign.sh active --brief` prints a line, the router
    appends it as data.
 6. It appends one line to `~/.claude/vajra/routing-log.jsonl` (mode 600):
-   `{ts, session_id, prompt_sha256, words (up to 20, lowercased), route: {tier, skill, agent, pattern}}`.
-   The raw prompt is not stored. Atman reads this log to propose routes.
+   `{ts, session_id, prompt_sha256, words (up to 20, lowercased), route: {tier, skill, agent, pattern}, suggested: [skills]}`.
+   `route` is the top match; `suggested` is every skill shown (top first, at most
+   `maxSuggestions`). Atman never labels an agent call of a suggested skill and never
+   counts a suggested skill as a router miss. The raw prompt is not stored. Atman reads this log to propose routes.
 
 Skill and agent names from config or learned routes are echoed only when they
 match `^[a-z0-9][a-z0-9_-]{0,63}$`, so a poisoned file can't inject text into

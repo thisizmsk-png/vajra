@@ -82,7 +82,7 @@ await scenario('the CLI agrees with the workflow on a real delivery plan', async
       const wf = loadWorkflow(join(REPO, 'workflows', 'vajra-deliver.js'))
       const plan = { tasks: tasks.map((t) => ({ id: t.id, title: t.id, owner: t.owner, files: t.files, deps: t.deps, criteria: ['ac-1'], brief: 'b' })), decisions: [], protected_actions: [] }
       const r = await wf.run({ ask: 'Build five things in waves please', run_id: 'w20261011', maxInFlight: cap }, responder({
-        'kb.search': { ok: true, lines: [] },
+        'kb.search': { exit_code: 0, ok: true, lines: [] },
         understand: { restated: 'r', acceptance_criteria: [{ id: 'ac-1', criterion: 'works', check: 'npm test' }], in_scope: [], out_of_scope: [], assumptions: [], blocking_question: '', touches_security: false, deploy_requested: false },
         preflight: { head: 'a'.repeat(40), current_branch: 'main', dirty: false, base: '', campaign_ok: true, campaign_output: '' },
         plan, tasks: { ok: true, outputs: [] },

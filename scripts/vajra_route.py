@@ -30,8 +30,11 @@ Behaviour:
     with the ask, and lists the skills, agents and crews the plan should
     consider (learned routes first, then config patterns in specificity order).
   * Appends one line per routed prompt to ~/.claude/vajra/routing-log.jsonl:
-    {ts, session_id, prompt_sha256, words, route: {tier, skill, agent, pattern}}
-    Tiers: 0 = explicit subcommand, 1 = learned route, 2 = config pattern,
+    {ts, session_id, prompt_sha256, words, route: {tier, skill, agent, pattern},
+     suggested: [skills]}
+    route is the top match; suggested lists every skill the router showed (in
+    order, at most maxSuggestions), so atman never learns a route for a skill
+    the router already hinted at 2nd or 3rd. Tiers: 0 = explicit subcommand, 1 = learned route, 2 = config pattern,
     3 = no match (the deliver workflow plans from scratch).
   * Never fails the prompt: every error path exits 0 with no output.
 
@@ -342,7 +345,7 @@ def parse_subcommand(ask, cfg=None):
     return first
 
 
-def log_route(session_id, prompt, ask, route):
+def log_route(session_id, prompt, ask, route, suggested=None):
     try:
         d = state_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -352,6 +355,7 @@ def log_route(session_id, prompt, ask, route):
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest(),
             "words": words_of(ask, 20),
             "route": {k: route.get(k) for k in ("tier", "skill", "agent", "pattern")},
+            "suggested": [x for x in (suggested or []) if isinstance(x, str)][:10],
         }
         path = d / "routing-log.jsonl"
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -554,7 +558,7 @@ def route(payload):
             return
         text = ""
         if matches:
-            log_route(session_id, prompt, ask, matches[0])
+            log_route(session_id, prompt, ask, matches[0], summarize(matches, limit)[0])
             text = ("Vajra router suggestion (0-token hook, advisory only): this prompt may suit "
                     + suggestion_text(cfg, matches, limit) + ". ")
         emit((text + kb_hits_text(hits)).strip())
@@ -577,7 +581,7 @@ def route(payload):
 
     matches = match_routes(cfg, ask)
     top = matches[0] if matches else {"tier": 3, "skill": None, "agent": None, "pattern": None}
-    log_route(session_id, prompt, ask, top)
+    log_route(session_id, prompt, ask, top, summarize(matches, limit)[0])
     sid_arg = ""
     if isinstance(session_id, str) and SESSION_ID_RE.match(session_id):
         sid_arg = "\"session_id\": \"%s\", " % session_id

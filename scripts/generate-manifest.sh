@@ -47,7 +47,7 @@ FILES="$(list_files | LC_ALL=C sort -u | keep_files)"
 [ -n "$FILES" ] || { echo "ERROR: no files found" >&2; exit 1; }
 
 printf '%s\n' "$FILES" | tr '\n' '\0' | xargs -0 "${SHA[@]}" \
-  | jq -R -n --arg gen "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ver "0.6.0" '
+  | jq -R -n --arg gen "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ver "0.6.1" '
       [inputs | capture("^(?<h>[0-9a-f]{64}) [ *](?<p>.+)$")]
       | {generated: $gen, version: $ver, files: (map({(.p): .h}) | add)}' > "${MANIFEST}.tmp"
 mv "${MANIFEST}.tmp" "$MANIFEST"

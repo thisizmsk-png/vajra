@@ -32,15 +32,16 @@ hook() {
 skill_call() { hook "$1" PostToolUse Skill "{\"skill\":\"$2\"}"; }
 bash_fail() { hook "$1" PostToolUseFailure Bash '{"command":"npm test"}' "\"error\":\"$2\"${3:+,\"agent_type\":\"$3\"}"; }
 
-# route_log <session> <router-skill|null> <word>...
+# route_log <session> <router-skill|null> <word>...   (SUGGESTED='["a","b"]' adds the suggested field)
 route_log() {
   local s="$1" rs="$2"; shift 2
-  local words="" w
+  local words="" w sug=""
   for w in "$@"; do words="${words:+$words,}\"$w\""; done
   [ "$rs" = "null" ] || rs="\"$rs\""
-  printf '{"ts":"%s","session_id":"%s","prompt_sha256":"%s","words":[%s],"route":{"tier":1,"skill":%s,"agent":null,"pattern":null}}\n' \
+  [ -n "${SUGGESTED:-}" ] && sug=",\"suggested\":$SUGGESTED"
+  printf '{"ts":"%s","session_id":"%s","prompt_sha256":"%s","words":[%s],"route":{"tier":1,"skill":%s,"agent":null,"pattern":null}%s}\n' \
     "$(date -u -v-2S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '2 seconds ago' +%Y-%m-%dT%H:%M:%SZ)" \
-    "$s" "$(printf '%s' "$s$*" | openssl dgst -sha256 | awk '{print $NF}')" "$words" "$rs" >> "$RLOG"
+    "$s" "$(printf '%s' "$s$*" | openssl dgst -sha256 | awk '{print $NF}')" "$words" "$rs" "$sug" >> "$RLOG"
 }
 proposal_ids() { ls "$VDIR/proposals" 2>/dev/null | sed 's/\.json$//'; }
 prop_field() { jq -r "$2" "$VDIR/proposals/$1.json"; }

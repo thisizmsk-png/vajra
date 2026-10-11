@@ -90,6 +90,15 @@ exp="$(printf '%s' "$p" | shasum -a 256 2>/dev/null | cut -d' ' -f1)"
 [ "$(echo "$L" | jq -r '.session_id')" = "s1" ]; check "session_id recorded" $?
 perm="$(stat -c %a "$LOG" 2>/dev/null || stat -f %Lp "$LOG" 2>/dev/null)"
 [ "$perm" = "600" ]; check "routing log mode 600" $?
+# suggested: every skill the router showed, top skill first (atman never learns a route for one of them).
+: > "$LOG"
+c="$(ctx "/vajra add a login page with oauth and write tests for the REST API")"
+L="$(tail -1 "$LOG")"
+echo "$L" | jq -e '(.suggested | type == "array" and length >= 2) and .suggested[0] == .route.skill' >/dev/null; check "log line lists all suggested skills, top first" $?
+shown="$(echo "$c" | grep -o 'skills: [^.;]*' | sed 's/^skills: //')"
+[ "$(echo "$L" | jq -r '.suggested | join(", ")')" = "$shown" ]; check "suggested matches the skills shown to the model" $?
+route "/vajra fleet security-audit" >/dev/null
+[ "$(tail -1 "$LOG" | jq -c '.suggested')" = "[]" ]; check "subcommand logs suggested: []" $?
 
 # 8. Subcommands.
 c="$(ctx "/vajra fleet security-audit")"

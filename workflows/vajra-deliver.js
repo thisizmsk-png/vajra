@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Understand', detail: 'knowledge search, acceptance criteria, scope, assumptions; campaign record' },
     { title: 'Plan', detail: 'tasks with an owner agent, files and deps each; registered in the task graph' },
     { title: 'Execute', detail: 'writers in worktrees, wave by wave (at most maxInFlight at once), then one integration merge' },
-    { title: 'Verify', detail: 'vidura checks every criterion; arjuna (and bhishma for security) review read-only' },
+    { title: 'Verify', detail: 'vidura checks every criterion with re-runnable commands; arjuna (and bhishma for security) review read-only in their own worktrees' },
     { title: 'Deliver', detail: 'tasks closed on evidence, knowledge write-back, report, plans for any protected action' },
   ],
 }
@@ -123,12 +123,15 @@ const S = {
   // Structured worker report. status "done" is only a claim; the gate below decides.
   WorkerReport: obj({ status: E('progress', 'done', 'blocked', 'question'), summary: STR,
     artifacts: obj({ branch: STR, base_commit: STR, commit: STR, files: STRS, protected_actions_skipped: STRS }), evidence_cmds: STRS }),
-  KbHits: obj({ ok: BOOL, lines: STRS }),
+  // exit_code decides availability: an empty knowledge base exits 0 and prints nothing, which is a valid "no hits".
+  KbHits: obj({ exit_code: INT, ok: BOOL, lines: STRS }),
   Writeback: obj({ verified: BOOL, verify_exit_code: INT, ok: BOOL, proposed_fallbacks: INT, outputs: STRS }),
   Merge: obj({ status: E('merged', 'conflict'), branch: STR, commit: STR, merged: STRS,
     conflicts: arr(obj({ task: STR, files: STRS })), notes: STR }),
+  // command is the literal shell command that ran (re-run verbatim by the write-back and shown under "How to run it");
+  // notes holds everything else (variants tried, which interpreter, caveats). Checked in code by commandProblem().
   Verification: obj({
-    results: arr(obj({ criterion_id: STR, status: E('pass', 'fail', 'not_run'), command: STR, exit_code: INT, evidence: STR })),
+    results: arr(obj({ criterion_id: STR, status: E('pass', 'fail', 'not_run'), command: STR, notes: STR, exit_code: INT, evidence: STR })),
     suite_command: STR, suite_passes: BOOL, regressions: STRS, setup_cmds: STRS,
   }),
   Review: obj({ verdict: E('approve', 'revise', 'reject'), blocking_issues: arr(obj({ task: STR, issue: STR })), risks: STRS, rationale: STR }),
@@ -299,6 +302,47 @@ function resultsByCriterion(results, criteria) {
   return out
 }
 
+// Verifier commands are re-run verbatim (`bash -c`, by verify-work, in a different fresh worktree after setup_cmds)
+// and printed under "How to run it", so each must be one literal shell command that runs from the repository root.
+// The first live run returned prose ("pytest -q  (venv python)", "cli --version; echo $? (also with ...)") and a venv
+// in the session scratchpad: 6 of 7 checks failed on re-run, so no task closed. commandProblem() names the violation;
+// a criterion whose command has one does not pass the gate.
+const OUTSIDE_RE = /(^|[\s=:'"(])(~(?=[/\s'"]|$)|\$\{?(?:HOME|TMPDIR)\b|\/(?:Users|home|root|tmp|private|var\/folders|var\/tmp)\/)/
+const ENV_ABS_RE = /(^|[\s=:'"(])\/[^\s'"]*\/(?:\.?venv|virtualenv|site-packages|node_modules)\//
+const MAKES_VENV = /-m\s+venv\b|\bvirtualenv\b|\buv\s+venv\b/
+function commandProblem(cmd, setup, kind) {
+  const c = oneLine(cmd, 1000)
+  if (!c) return 'no command'
+  const note = c.match(/(^|[^\s&|;(])\s+\(([^()]*)\)\s*$/)
+  if (note && !/&&|\|\||[;|<>$`=]/.test(note[2])) return `ends with a note in parentheses "(${oneLine(note[2], 80)})"; the command must be only what ran, notes go in notes`
+  if (/["']\.\.\.|…/.test(c)) return 'elides part of the command (...); give the literal command that ran'
+  if (OUTSIDE_RE.test(c) || ENV_ABS_RE.test(c)) {
+    return 'uses a path outside the repository (home, temp, scratchpad or an absolute venv/node_modules path); build the environment ' +
+      'inside the worktree with setup_cmds and use repo-relative paths such as .venv/bin/python'
+  }
+  if (kind === 'setup') return null
+  if (/(^|[;&|]\s*)echo\s+[^;&|]*\$\?/.test(c) || /\|\|\s*(true|:)\s*$/.test(c)) return 'masks the exit code (echo $? or || true); the exit code itself is the result'
+  if (setup.some((s) => MAKES_VENV.test(s)) && !/\bactivate\b/.test(c) && /(^|[;&|(]\s*)(python|pip|pytest)(?=\s|$)/.test(c)) {
+    return 'calls a bare python/pip/pytest, but each command runs in a fresh shell with no virtualenv activated; call the one setup_cmds built (.venv/bin/python)'
+  }
+  return null
+}
+// git checkout/switch in setup_cmds is dropped: the write-back checks out the integration commit itself.
+const setupOf = (v) => [...new Set((v.setup_cmds || []).map((c) => oneLine(c, 1000)).filter((c) => c && !/^git\s+(checkout|switch)\b/.test(c)))]
+function verificationProblems(v, criteria) {
+  const setup = setupOf(v), byC = resultsByCriterion(v.results, criteria), out = { criteria: {}, suite: null, setup: [] }
+  for (const c of criteria) {
+    const r = byC[c.id]
+    if (r && r.status === 'pass') { const p = commandProblem(r.command, setup, 'check'); if (p) out.criteria[c.id] = p }
+  }
+  if (v.suite_command.trim()) out.suite = commandProblem(v.suite_command, setup, 'check')
+  for (const s of setup) { const p = commandProblem(s, setup, 'setup'); if (p) out.setup.push({ command: s, problem: p }) }
+  out.any = Object.keys(out.criteria).length > 0 || !!out.suite || out.setup.length > 0
+  return out
+}
+// Reviewer risks that only say "I did not run the tests" are covered once vidura's evidence passed the gate.
+const UNRUN_RE = /\b(did not|didn't|could not|couldn't|was not able to|wasn't able to|unable to|not able to|cannot|can't)\s+(run|execute|re-?run|check out|checkout)\b/i
+
 // ======================================================================
 // 1. Understand
 phase('Understand')
@@ -336,10 +380,15 @@ let kbHits = []
   const r = await step('kb.search', 'abhimanyu',
     'Run exactly this shell command from the repository root, and nothing else. Do not edit any file.\n' +
     commandsBlock([[`${KB_PY} search `, U(ASK, 1000), ' --format ids --k 5']]) +
-    'Put each output line in lines, unchanged. If the command fails or prints nothing, set ok=false and lines=[].\n',
+    'Put each output line in lines, unchanged. exit_code = the command\'s exit code. ok = true when it exited 0, even if it printed ' +
+    'nothing (an empty knowledge base has no hits, which is a valid result); ok = false only when it exited non-zero or could not run, ' +
+    'and then lines = [].\n',
     S.KbHits, 'Understand')
-  if (r.ok && r.out.ok) kbHits = r.out.lines.map((x) => clean(x, 200).replace(/[\t\n\r]/g, ' ')).filter((x) => KB_LINE.test(x)).slice(0, 5)
-  else log('knowledge search unavailable; continuing without it')
+  // Availability is the exit code, not the model's ok: exit 0 with no output is an empty store, not a failure.
+  if (r.ok && r.out.exit_code === 0) {
+    kbHits = r.out.lines.map((x) => clean(x, 200).replace(/[\t\n\r]/g, ' ')).filter((x) => KB_LINE.test(x)).slice(0, 5)
+    if (!kbHits.length) log('knowledge search: no hits')
+  } else log('knowledge search unavailable; continuing without it')
 }
 const KB_DATA = kbHits.length
   ? '\n' + data('project_knowledge', 'Past decisions, lessons and deliveries recorded for this repository (one-line pointers; ' +
@@ -350,7 +399,8 @@ const u0 = await step('understand', 'drona',
   'Turn this ask into a deliverable definition. Read the repository as needed; do not modify any file.\n' +
   '- restated: the ask in one or two sentences.\n' +
   '- acceptance_criteria: 1-12 items with ids ac-1, ac-2, ...; each has a testable criterion and a check: the exact ' +
-  'command (preferred) or observation that proves it.\n' +
+  'command (preferred) or observation that proves it. A command check is one literal shell command, run from the repository root, ' +
+  'whose exit code 0 proves the criterion: no notes or parentheses after it and no `; echo $?` (put expectations in the criterion).\n' +
   '- in_scope, out_of_scope, assumptions. When something is ambiguous, choose the most reasonable reading and record it as an assumption.\n' +
   '- blocking_question: empty unless the ask truly cannot be done without the user (missing credentials, contradictory goals). ' +
   'Ambiguity alone is not blocking.\n' +
@@ -440,6 +490,7 @@ await recordCampaign('tasks.register', 'Plan', [
 // 3-5. Execute, verify, fix (bounded)
 const changes = {}       // task id -> latest valid worker report, flattened: {status, summary, branch, base_commit, commit, files, ...}
 let merge = null, verification = null, reviews = [], feedbackFor = {}, delivered = false
+let reviewNames = [], verificationIssues = null
 const verified = []      // one entry per verified round, for the lessons written back on done
 const reworkedIn = {}    // round -> task ids reworked in it
 let lastGood = recorded && BASE.startsWith(recorded.commit) ? { branch: recorded.branch, commit: recorded.commit } : null
@@ -552,33 +603,60 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   lastGood = { branch: merge.branch, commit: merge.commit }
 
   phase('Verify')
+  // Reviewers get their own worktree so they can check out the integration commit and run checks; they stay
+  // read-only by instruction (no edits, commits or branches). Without one, the live arjuna sat in the user's checkout.
   const reviewPrompt = (lens) =>
-    `Review \`git diff ${ORIGIN}..${merge.commit}\` (${lens}). Use git show, git diff and file reads only; do not modify any file or run anything that writes. ` +
+    `In your worktree run \`git checkout --detach ${merge.commit}\`, then review \`git diff ${ORIGIN}..${merge.commit}\` (${lens}). ` +
+    'This review is read-only: do not modify, stage or commit any tracked file, create branches, or write outside your worktree. ' +
+    'You may run the project\'s tests or linters to confirm a finding (build any environment inside the worktree). ' +
     'Approve only if the change meets the acceptance criteria without unrequested scope. Name the task id (from the plan) for each blocking issue. ' +
-    'Reject only if the approach is wrong in a way more rounds cannot fix.\n' + data('acceptance_criteria', CRITERIA) + '\n' + data('plan', TASKS)
-  const thunks = [
-    () => agent(
-      `Verify the integration commit ${merge.commit} independently. In your worktree run \`git checkout --detach ${merge.commit}\`. ` +
-      'For EVERY acceptance criterion run a real check (its listed check, or a better one), and record the exact command, exit code and ' +
-      'a short excerpt of the output as evidence. Return exactly one result per criterion, with criterion_id set to its id ' +
-      `(${CRITERIA.map((c) => c.id).join(', ')}), not its text. A criterion passes only if you ran a command and saw it pass. ` +
-      'Then run the project test suite and list regressions; suite_command is the exact command you ran. If the project has no test suite, ' +
-      "set suite_command to '' and suite_passes to true. setup_cmds: the commands you ran to prepare the fresh worktree before any check " +
-      "(for example npm ci or pip install -r requirements.txt), in order; [] if none. " +
-      'Do not edit tracked files; never mark a criterion pass without running it. ' + GUARD + '\n' +
-      data('acceptance_criteria', CRITERIA),
-      { agentType: 'vidura', schema: S.Verification, label: `verify.r${round}`, phase: 'Verify', isolation: 'worktree' }),
-    () => agent(reviewPrompt('correctness, design, maintainability'),
-      { agentType: 'arjuna', schema: S.Review, label: `review.arjuna.r${round}`, phase: 'Verify' }),
-  ]
-  if (SECURITY) thunks.push(() => agent(reviewPrompt('security: OWASP Top 10, authz, secrets, injection'),
-    { agentType: 'bhishma', schema: S.Review, label: `review.bhishma.r${round}`, phase: 'Verify' }))
-  const [v, ...rv] = await parallel(thunks)
+    'Reject only if the approach is wrong in a way more rounds cannot fix. A separate verifier runs every acceptance check, so do not list ' +
+    '"tests not run" as a risk.\n' + GUARD + '\n' + data('acceptance_criteria', CRITERIA) + '\n' + data('plan', TASKS)
+  const verifyPrompt = (problems) =>
+    `Verify the integration commit ${merge.commit} independently. In your worktree run \`git checkout --detach ${merge.commit}\`.\n` +
+    '- Environment: build anything the checks need inside this worktree, and list each preparation command in setup_cmds, in order ' +
+    "(for example `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`, or `npm ci`); [] if none. Never use an interpreter, " +
+    'virtualenv, node_modules or any other path outside the repository (no scratchpad, /tmp or home-directory paths): these commands are ' +
+    're-run later in a different fresh worktree, so every path must be repo-relative. Do not list the git checkout in setup_cmds.\n' +
+    '- For EVERY acceptance criterion run a real check (its listed check, or a better one). command = the exact, literal, single shell ' +
+    'command you ran from the repository root: it is re-run verbatim with `bash -c` after setup_cmds in a fresh worktree and shown to the ' +
+    'user under "How to run it". No notes, parentheses or prose after it, no elisions (...), no `; echo $?` or `|| true` (its exit code is ' +
+    'the result). Each command runs in a fresh shell with no virtualenv activated, so call `.venv/bin/python`, not a bare `python`. If you ' +
+    'ran several variants, chain them with && into one command or keep the decisive one. notes = everything else (variants you also tried, ' +
+    'which interpreter, caveats); "" if none. Record exit_code and a short excerpt of the output as evidence. ' +
+    `Return exactly one result per criterion, with criterion_id set to its id (${CRITERIA.map((c) => c.id).join(', ')}), not its text. ` +
+    'A criterion passes only if you ran a command and saw it pass.\n' +
+    '- Then run the project test suite and list regressions; suite_command is the exact command you ran, under the same rules. If the ' +
+    "project has no test suite, set suite_command to '' and suite_passes to true.\n" +
+    'Do not edit tracked files; never mark a criterion pass without running it. ' + GUARD + '\n' +
+    data('acceptance_criteria', CRITERIA) + (problems ? '\n' + data('commands_rejected_because', problems) : '')
+  const verifyOpts = (label) => ({ agentType: 'vidura', schema: S.Verification, label, phase: 'Verify', isolation: 'worktree' })
+  const reviewers = ['arjuna', ...(SECURITY ? ['bhishma'] : [])]
+  const lenses = { arjuna: 'correctness, design, maintainability', bhishma: 'security: OWASP Top 10, authz, secrets, injection' }
+  const thunks = [() => agent(verifyPrompt(''), verifyOpts(`verify.r${round}`)),
+    ...reviewers.map((a) => () => agent(reviewPrompt(lenses[a]), { agentType: a, schema: S.Review, label: `review.${a}.r${round}`, phase: 'Verify', isolation: 'worktree' }))]
+  let [v, ...rv] = await parallel(thunks)
   if (!v || rv.some((x) => !x)) {
     return { status: 'error', node: `verify.r${round}`, error: 'verifier or reviewer returned no valid output', artifacts: { understanding, plan, changes, merge } }
   }
+  // Commands that cannot be re-run as written (prose notes, outside paths, masked exit codes): one verifier redo in this
+  // round, told exactly what was wrong. Whatever is still wrong after it does not pass the gate.
+  let problems = verificationProblems(v, CRITERIA)
+  if (problems.any) {
+    log(`round ${round}: verifier commands not re-runnable (${[...Object.keys(problems.criteria), ...(problems.suite ? ['suite'] : []), ...problems.setup.map(() => 'setup')].join(', ')}); asking vidura to redo them`)
+    const fb = {
+      criteria: Object.entries(problems.criteria).map(([id, problem]) => ({ criterion_id: id, command: oneLine(resultsByCriterion(v.results, CRITERIA)[id].command, 300), problem })),
+      suite: problems.suite ? { command: oneLine(v.suite_command, 300), problem: problems.suite } : null,
+      setup_cmds: problems.setup,
+    }
+    const v2 = await step(`verify.r${round}.commands`, 'vidura', verifyPrompt(fb), S.Verification, 'Verify', { isolation: 'worktree' })
+    if (v2.ok) { v = v2.out; problems = verificationProblems(v, CRITERIA) }
+    else log(`round ${round}: verifier redo failed (${oneLine(v2.error, 120)}); keeping the first result`)
+  }
   verification = v
   reviews = rv
+  reviewNames = reviewers
+  verificationIssues = problems
   const rejected = reviews.find((r) => r.verdict === 'reject')
   if (rejected) {
     await recordCampaign(`campaign.reject.r${round}`, 'Verify',
@@ -588,8 +666,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
 
   // The gate is computed here from evidence; nobody's self-reported "done" counts on its own.
   const byC = resultsByCriterion(verification.results, CRITERIA)
-  const suiteOk = suitePasses(verification)
-  const passing = (c) => { const r = byC[c.id]; return !!r && r.status === 'pass' && r.exit_code === 0 && !!r.command.trim() && !!r.evidence.trim() }
+  const suiteOk = suitePasses(verification) && !problems.suite
+  const passing = (c) => { const r = byC[c.id]; return !!r && r.status === 'pass' && r.exit_code === 0 && !!r.command.trim() && !!r.evidence.trim() && !problems.criteria[c.id] }
   const failing = CRITERIA.filter((c) => !passing(c))
   const blocking = reviews.flatMap((r) => r.blocking_issues)
   const vr = { round, failing: failing.map((c) => c.id), suiteOk, byC }
@@ -601,7 +679,11 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     if (!feedbackFor[id]) feedbackFor[id] = {}
     feedbackFor[id][key] = (feedbackFor[id][key] || []).concat([value])
   }
-  for (const c of failing) for (const t of TASKS.filter((x) => x.criteria.includes(c.id))) add(t.id, 'failing_criteria', { criterion: c, result: byC[c.id] || 'not checked' })
+  for (const c of failing) for (const t of TASKS.filter((x) => x.criteria.includes(c.id))) {
+    add(t.id, 'failing_criteria', Object.assign({ criterion: c, result: byC[c.id] || 'not checked' },
+      problems.criteria[c.id] ? { verifier_command_problem: problems.criteria[c.id] + ' (the check could not be re-run as written; make sure the criterion has a runnable check)' } : {}))
+  }
+  if (problems.suite && !Object.keys(feedbackFor).length) for (const id of ORDER) add(id, 'suite_command_problem', problems.suite)
   const unassigned = []
   for (const b of blocking) if (byId[b.task]) add(b.task, 'blocking_issues', b.issue); else unassigned.push(b.issue)
   if (unassigned.length || (!suiteOk && !Object.keys(feedbackFor).length)) {
@@ -684,7 +766,12 @@ const kbOut = SESSION ? kbRecords : []
 if (!SESSION) campaignNotes.push(`no session_id was passed, so the ${kbRecords.length} knowledge record(s) of this delivery were not written ` +
   '(launch vajra-deliver with args.session_id, the session_id of the hook payload)')
 // Setup commands vidura ran before its checks (npm ci, ...): the fresh write-back worktree needs them too.
-const setupCmds = [...new Set((verification.setup_cmds || []).map((c) => oneLine(c, 1000)).filter((c) => c))].slice(0, 5)
+// A setup command that still uses a path outside the repository after the verifier's redo is dropped (and reported):
+// it would build the environment somewhere the next worktree cannot see.
+const badSetup = new Set(verificationIssues.setup.map((x) => x.command))
+const setupCmds = setupOf(verification).filter((c) => !badSetup.has(c)).slice(0, 5)
+if (badSetup.size) campaignNotes.push(`${badSetup.size} verifier setup command(s) used paths outside the repository and were not re-run: ` +
+  [...badSetup].map((c) => oneLine(c, 120)).join(' | '))
 const wbClose = ORDER.map((id) => [`${TASKS_PY} close ${TID(id)} --evidence ${EV} --head ${merge.commit} --commit ${changes[id].commit} --branch ${changes[id].branch} ` +
   `--base-commit ${BASE} --changed `, U(changes[id].files.join(','), 2000), ` --campaign ${CAMPAIGN}`])
 const wbVerified = [...wbClose, ...kbOut.map((r) => kbAdd(r, 'verified'))]
@@ -709,7 +796,9 @@ const wb = await step('writeback', 'vidura',
   "ok=false if any of them exits non-zero (a refused knowledge write whose twin exited 0 does not count). Put each command's last output line in outputs.\n" + GUARD + '\n' +
   commandsBlock([
     [`git checkout --detach ${merge.commit}`],
-    ...setupCmds.map((c) => [U(c, 1000)]),
+    // Each setup command is one quoted argument to `bash -c`: a bare quoted word would make the shell look for a
+    // program named after the whole string (exit 127), and the guard refuses a computed command name.
+    ...setupCmds.map((c) => ['bash -c ', U(c, 1000)]),
     [`VAJRA_WALKTHROUGH_DIR=data/walkthroughs ${VERIFY_SH} ${EV_SLUG}`, ...evCmds.flatMap((c) => [' ', U(c, 1000)])],
     ...wbVerified, ...wbProposed,
   ]),
@@ -735,8 +824,17 @@ await recordCampaign('campaign.deliver', 'Deliver', [
   [`${CAMPAIGN_SH} close ${CAMPAIGN} --status done`],
 ])
 
+// A reviewer risk that only says it did not run the tests is answered by vidura's evidence (every criterion passed,
+// with a re-runnable command); it is replaced by one note instead of being reported as open.
+const unrun = []
+const reviewRisks = reviews.flatMap((r, i) => r.risks.map((x) => oneLine(x, 300)).filter((x) => {
+  if (UNRUN_RE.test(x) && /\b(tests?|suite|checks?|pytest|npm test|criteria|ac-\d+|commit|integration)\b/i.test(x)) { unrun.push(reviewNames[i] || 'a reviewer'); return false }
+  return true
+}))
 const risks = [
-  ...reviews.flatMap((r) => r.risks).map((x) => oneLine(x, 300)),
+  ...reviewRisks,
+  ...(unrun.length ? [`${[...new Set(unrun)].join(' and ')} noted not running the checks itself; vidura ran every acceptance check` +
+    (noSuite ? '' : ' and the test suite') + ' on the integration commit (evidence above)'] : []),
   ...understanding.assumptions.map((x) => 'assumption: ' + oneLine(x, 300)),
   ...(noSuite ? ['no project test suite was found; only the acceptance checks ran, so regressions elsewhere are untested'] : []),
   ...(pre.out.dirty ? ['your working tree had uncommitted changes; the workers built from HEAD and did not see them'] : []),
@@ -748,7 +846,8 @@ md.push(`Branch \`${merge.branch}\` at \`${merge.commit}\` (based on \`${ORIGIN.
 md.push('## What was built')
 for (const id of ORDER) md.push(`- ${id} (${byId[id].owner}): ${oneLine(changes[id].summary, 300)}`)
 md.push('', '## Evidence per acceptance criterion')
-for (const c of CRITERIA) md.push(`- ${c.id} ${oneLine(c.criterion, 200)}: \`${oneLine(byC[c.id].command, 200)}\` exit 0. ${oneLine(byC[c.id].evidence, 300)}`)
+for (const c of CRITERIA) md.push(`- ${c.id} ${oneLine(c.criterion, 200)}: \`${oneLine(byC[c.id].command, 200)}\` exit 0. ${oneLine(byC[c.id].evidence, 300)}` +
+  (oneLine(byC[c.id].notes, 300) ? ` Notes: ${oneLine(byC[c.id].notes, 300)}` : ''))
 md.push(noSuite ? '- test suite: none found (see open risks)' : `- test suite: \`${oneLine(verification.suite_command, 200)}\` passed`)
 if (knowledge.source !== 'none') {
   const n = (t) => knowledge.records.filter((x) => x === t).length
@@ -757,7 +856,8 @@ if (knowledge.source !== 'none') {
     `. Tasks ${knowledge.tasks_closed ? 'closed' : 'not closed'} in the task graph (\`vajra_tasks.py list --campaign ${CAMPAIGN}\`).`)
 }
 md.push('', '## How to run it', `- \`git checkout ${merge.branch}\``)
-for (const c of CRITERIA) md.push(`- \`${oneLine(byC[c.id].command, 200)}\``)
+for (const c of setupCmds) md.push(`- \`${oneLine(c, 300)}\` (setup)`)
+for (const c of [...new Set(CRITERIA.map((x) => oneLine(byC[x.id].command, 300)))]) md.push(`- \`${c}\``)
 md.push(`- Merge it yourself when satisfied: \`git merge --no-ff ${merge.branch}\` from your branch (\`${oneLine(pre.out.current_branch, 80)}\`).`)
 md.push('', '## Cleanup', `- This run's work branches are \`git branch --list 'vajra/${RUN}/*'\`. After you merge or drop the delivery, delete them with ` +
   `\`git for-each-ref --format='%(refname:short)' 'refs/heads/vajra/${RUN}/' | xargs git branch -D\`.` +

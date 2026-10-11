@@ -100,7 +100,8 @@ export function loadWorkflow(file) {
       assert.notEqual(opts.agentType, 'krishna', 'krishna never runs as a subagent')
       if (opts.phase) assert.ok(phaseTitles.has(opts.phase), `${opts.label}: phase "${opts.phase}" not in meta.phases`)
       if (opts.isolation !== undefined) assert.equal(opts.isolation, 'worktree')
-      if (opts.isolation === 'worktree') assert.ok(!READ_ONLY.has(opts.agentType), `${opts.label}: read-only agent given a worktree`)
+      // Reviewers (label review.*) may get a worktree to check out the commit under review; they stay read-only by instruction.
+      if (opts.isolation === 'worktree' && !/^review\./.test(opts.label)) assert.ok(!READ_ONLY.has(opts.agentType), `${opts.label}: read-only agent given a worktree`)
       if (opts.schema) checkSchemaShape(opts.schema)
       const call = { label: opts.label, agentType: opts.agentType, isolation: opts.isolation, phase: opts.phase, prompt }
       calls.push(call)

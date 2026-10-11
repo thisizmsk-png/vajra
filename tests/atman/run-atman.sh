@@ -149,6 +149,9 @@ for s in sr1 sr2 sr3; do route_log "$s" api-design graphql; agent_skill_call "$s
 for s in mp1 mp2 mp3; do route_log "$s" null pagination; agent_skill_call "$s" api-design bhima; skill_call "$s" database-design; done
 # The vajra skill itself is never a label, from agents either.
 for s in vj1 vj2 vj3; do route_log "$s" null widgetry; agent_skill_call "$s" vajra arjuna; done
+# A skill the router suggested 2nd or 3rd (not its top skill) is never learned, from agents or the main session.
+for s in h1 h2 h3; do SUGGESTED='["testing","api-design"]' route_log "$s" testing orderbook; agent_skill_call "$s" api-design bhima; done
+for s in hm1 hm2 hm3; do SUGGESTED='["testing","frontend-design"]' route_log "$s" testing navbar; skill_call "$s" frontend-design; done
 bash "$ATMAN" propose >/dev/null
 tid="$(word_props tailwind)"
 [ -n "$tid" ] && [ "$(prop_field "$tid" '.skill')" = "frontend-design" ]; check "agent-made Skill calls label the routed prompt" $?
@@ -157,6 +160,8 @@ tid="$(word_props tailwind)"
 pid_="$(word_props pagination)"
 [ -n "$pid_" ] && [ "$(prop_field "$pid_" '.skill')" = "database-design" ]; check "main-session Skill call wins over agent call" $?
 [ -z "$(word_props widgetry)" ]; check "agent vajra calls never label" $?
+[ -z "$(word_props orderbook)" ]; check "agent call of the router's 2nd suggestion is not learned" $?
+[ -z "$(word_props navbar)" ]; check "main-session call of the router's 2nd suggestion is not a miss" $?
 python3 -I - "$REPO/atman" <<'PY'
 import sys; sys.path.insert(0, sys.argv[1]); import atman
 r = {"t": 1000.0, "router_skill": None}
@@ -168,6 +173,10 @@ assert atman.route_label(r, [(1000.0 + atman.ROUTE_WINDOW_SECONDS + 60, "x", Fal
 rs = {"t": 1000.0, "router_skill": "api-design"}
 assert atman.route_label(rs, [(1001.0, "api-design", True)], None) is None   # router's own hint
 assert atman.route_label(rs, [(1001.0, "api-design", False)], None) == "api-design"  # main-session hit
+rh = {"t": 1000.0, "router_skill": "testing", "suggested": ["testing", "api-design", "frontend-design"]}
+assert atman.route_label(rh, [(1001.0, "frontend-design", True)], None) is None   # 3rd hint, agent-made
+assert atman.route_label(rh, [(1001.0, "frontend-design", True), (1002.0, "ci-cd", True)], None) == "ci-cd"
+assert atman.suggested_of({"router_skill": "x"}) == ["x"]                          # pre-`suggested` log lines
 PY
 check "route_label windows and router-suggestion exclusion" $?
 
