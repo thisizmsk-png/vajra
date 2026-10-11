@@ -11,8 +11,8 @@ Based on the Cortex reporting chain — each reviewer has domain overlap with th
 |---------------------|-------------|---------------|
 | Arjuna (Principal SDE) | Yudhishthira (CTO) | CTO validates engineering decisions |
 | Bhishma (Security) | Yudhishthira (CTO) | CTO validates security posture |
-| Draupadi (PM) | Krishna (CEO) | CEO validates product direction |
-| Duryodhana (Red Team) | Krishna (CEO) | CEO validates adversarial scope |
+| Draupadi (PM) | Human owner (CEO) | The owner validates product direction (krishna orchestrates and never approves) |
+| Duryodhana (Red Team) | Human owner (CEO) | The owner validates adversarial scope |
 | Hanuman (DevOps/SRE) | Yudhishthira (CTO) | CTO validates infra decisions |
 
 ### Peer Reviews (cross-domain expertise)

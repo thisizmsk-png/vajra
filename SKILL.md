@@ -70,7 +70,7 @@ If tiers 1-3 fail, analyze the input to determine:
 Route to the identified skill. Log the routing decision for future tier 1/3 learning.
 
 **Cortex Agent Assignment (Tier 4 bonus):**
-After determining the domain, check `config.cortex.agentRouting` for a matching Cortex agent. If found, load the agent persona from `~/.claude/agents/{agent}.md` and adopt that role for this task. See `engine/cortex-bridge.md` for full protocol.
+After determining the domain, check `config.cortex.agentRouting` for a matching Cortex agent. If found, **delegate** the task to it with the Agent tool (`subagent_type: {agent}`) so Claude Code applies that agent's own `tools`, `model` and `effort`. Do not adopt the persona inline in the main session: that keeps the main session's full tool set and skips the agent's limits. See `engine/cortex-bridge.md` for full protocol.
 
 ### Authorization Gate
 

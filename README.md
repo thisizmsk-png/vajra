@@ -59,7 +59,7 @@ Start a Claude Code session and Vajra is active. Keep working the way you alread
 # turn on the real security boundary (do not skip this for unattended runs)
 bash ~/.claude/skills/vajra/scripts/enable-sandbox.sh
 
-# optional: add the 87 bundled skills and 17 specialized agents
+# optional: add the 87 bundled skills and 20 specialized agents (mahabharat-agents v1)
 bash ~/.claude/skills/vajra/scripts/install-skills.sh
 ```
 
