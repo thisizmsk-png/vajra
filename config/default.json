@@ -209,7 +209,7 @@
       },
       "pentest": {
         "agent": "shakuni",
-        "model": "sonnet",
+        "model": "opus",
         "skills": [
           "sentry-security-review",
           "sentry-gha-security-review"
@@ -217,7 +217,7 @@
       },
       "testing": {
         "agent": "vidura",
-        "model": "sonnet",
+        "model": "opus",
         "skills": [
           "testing",
           "property-based-testing",
@@ -226,7 +226,7 @@
       },
       "devops": {
         "agent": "hanuman",
-        "model": "sonnet",
+        "model": "opus",
         "skills": [
           "ci-cd",
           "observability",
@@ -235,7 +235,7 @@
       },
       "incident": {
         "agent": "ashwatthama",
-        "model": "sonnet",
+        "model": "opus",
         "skills": [
           "incident-response",
           "systematic-debugging"
@@ -243,7 +243,7 @@
       },
       "product": {
         "agent": "draupadi",
-        "model": "opus",
+        "model": "sonnet",
         "skills": [
           "product-spec",
           "prd-to-issues",
@@ -251,7 +251,7 @@
         ]
       },
       "architecture": {
-        "agent": "yudhishthira",
+        "agent": "arjuna",
         "model": "opus",
         "skills": [
           "hld",
@@ -294,8 +294,8 @@
         ]
       },
       "strategy": {
-        "agent": "krishna",
-        "model": "opus",
+        "agent": "draupadi",
+        "model": "sonnet",
         "skills": [
           "spec",
           "research",
