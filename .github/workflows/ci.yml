@@ -35,6 +35,13 @@ jobs:
           bash --version | head -1
       - name: Install dev dependencies
         run: npm install --no-audit --no-fund
+      - name: Install gate-web browser
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.64.1 axe-core@4.14.0
+          npx playwright install --with-deps chromium
+      - name: Allow the Chromium sandbox
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run all suites (vitest and every tests/**/run-*.sh)
         env:
           CI: "true"

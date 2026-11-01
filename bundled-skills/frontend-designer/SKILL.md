@@ -36,8 +36,9 @@ the end; this skill does not bundle or copy them.
 The gate is `scripts/gate-web.mjs` in the Vajra repo. It needs Playwright and axe-core in
 the target repo only.
 
-The gate executes the page, scripts included, with network access. Run it only on pages
-you trust, never on third-party URLs or unreviewed HTML.
+The gate executes the page, scripts included, with network access and read access to the
+scripts and stylesheets under the repo. Run it from the repo root, only on pages you
+trust, never on third-party URLs or unreviewed HTML.
 
 1. In the target repo: `npm i -D -E playwright@1.64.1 axe-core@4.14.0`, then
    `npx playwright install chromium`

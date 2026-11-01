@@ -47,5 +47,5 @@ done
 printf '\n========================================\n'
 echo "suites run: $RAN"
 [ -z "$SKIPPED" ] || echo "SKIPPED, not proven:$SKIPPED"
-if [ "$FAILED" -eq 0 ]; then echo "ALL SUITES PASSED"; else echo "FAILED:$FAILED_SUITES"; fi
+if [ "$FAILED" -eq 0 ] && [ -n "$SKIPPED" ]; then echo "PASSED WITH SKIPS"; elif [ "$FAILED" -eq 0 ]; then echo "ALL SUITES PASSED"; else echo "FAILED:$FAILED_SUITES"; fi
 exit "$FAILED"
