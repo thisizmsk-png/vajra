@@ -76,21 +76,27 @@ When building any UI, draw on the patterns these products are known for:
 - **Stripe** — readable complexity, multi-column layouts, trust through design quality
 - **OpenAI** — minimalist dark theme, generous padding, elegant simplicity
 - **Anthropic** — warm dark palette, readable long-form, trust and safety feel
-- **Raycast** — command palette UX, dark glassmorphism, spotlight-style interactions
-- **PostHog** — data-dense dashboards, playful dark theme, bento grid features
+- **Raycast** — command palette UX, spotlight-style interactions
+- **PostHog** — data-dense dashboards, playful dark theme
 - **Framer** — fluid animations, scroll-triggered reveals, micro-interactions
 
 **Anti-patterns (Never Do):**
-- Generic gradient backgrounds without purpose
 - More than 3 font weights per page
 - Cards without clear visual hierarchy
 - Gray-on-gray text below 4.5:1 contrast ratio
 - Decorative elements that don't aid comprehension
 - Stock-photo hero sections
 - More than 2 primary CTAs visible simultaneously
-- Purple gradients everywhere (the #1 AI slop signal)
-- Identical card sizes in grids (use asymmetric bento layouts)
 - Every element with the same shadow depth
+
+**AI slop (blocking, full rule in `steering/rules/anti-slop.md`, only the owner can waive it):**
+- Color and surface: decorative gradients, purple and black, rainbow, neon, basic pastels, pure white backgrounds, liquid glass, drop shadow on everything, soft corner radius on everything, colored accent stripes on cards
+- Layout: three feature cards in a row, bento grids, three pricing tiers, decorative terminal windows
+- Decoration: radial orbs, dot grids, sparkle icons, loose decorative icons, checkmark bullets, emojis
+- Type: Inter, Geist, Space Grotesk
+- Motion: animated arrows, hover animation on everything
+- Copy: em dashes, "It's not X, it's Y", fake testimonials
+- Always ship: real product demos, skeleton loaders, and on public sites a Terms of Service and Privacy Policy
 
 ## Design Toolchain
 
