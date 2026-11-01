@@ -1,7 +1,7 @@
 # Review range for Vidura and Arjuna
 
 Range: `72b8216..HEAD`, plus the uncommitted working tree of the main checkout (listed below, because git cannot see it from this worktree).
-HEAD is the t3-r2 tip: a7b59f0 plus the t1 (7343d78) and t2 (29ec45f) merges, plus the commit that adds this file.
+HEAD is the t3-r2 tip (this file's last commit, on top of a7b59f0 and the t1 7343d78 and t2 29ec45f merges).
 Both reviews must examine the whole range below, not only the `config/steering.json` diff.
 
 ## Commits in range (newest first, before this file's own commit)
@@ -18,7 +18,7 @@ Both reviews must examine the whole range below, not only the `config/steering.j
     1041a84 feat: thin frontend-designer skill (design direction, UX checklist, gate-web)
     d461651 feat(gate-web): add floor-check script and fixtures
 
-## Changed files (`git diff --stat 72b8216..HEAD`: 22 files, 695 insertions, 11 deletions, before this file's own commit; this file adds one more)
+## Changed files (`git diff --stat 72b8216..HEAD`: 22 files, 723 insertions, 11 deletions at the final HEAD)
 
     bundled-agents/nakula.md                        |  16 +-
     bundled-agents/sepoy-frontend-1.md              |   1 +
@@ -26,7 +26,7 @@ Both reviews must examine the whole range below, not only the `config/steering.j
     bundled-skills/frontend-designer/SKILL.md       |  60 +++++++
     config/steering.json                            |  10 +-
     docs/evidence/gate-web-run.md                   |  37 +++++
-    docs/evidence/review-range.md                   |  59 +++++++ (this file)
+    docs/evidence/review-range.md                   |  59 +++++++ (this file, as of a7b59f0)
     scripts/gate-web.mjs                            | 203 ++++++++++++++++++++++++
     steering/README.md                              |   3 +-
     steering/review-pipeline.md                     |   2 +-
