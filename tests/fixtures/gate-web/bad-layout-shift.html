@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gate-web fixture: bad-layout-shift</title>
+<style>
+  html { background: #f7f5f0; color: #1f1f1f; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 1rem; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none; transition: none; } }
+  #banner { height: 300px; }
+  .block { height: 300px; background: #e8e4da; }
+</style>
+</head>
+<body>
+<main>
+<h1>bad-layout-shift</h1>
+<div id="anchor"></div>
+<p>This text is pushed down after first paint.</p>
+<div class="block"></div>
+<script>
+  setTimeout(() => {
+    const banner = document.createElement('div');
+    banner.id = 'banner';
+    document.getElementById('anchor').append(banner);
+  }, 300);
+</script>
+</main>
+</body>
+</html>
