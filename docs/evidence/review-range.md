@@ -1,7 +1,7 @@
 # Review range for Vidura and Arjuna
 
 Range: `72b8216..HEAD`, plus the uncommitted working tree of the main checkout (listed below, because git cannot see it from this worktree).
-HEAD is the t3-r2 tip (this file's last commit, on top of a7b59f0 and the t1 7343d78 and t2 29ec45f merges).
+HEAD is the t3-r3 tip (this file's last commit, on top of d3ae6cd, a7b59f0 and the t1 7343d78 and t2 29ec45f merges).
 Both reviews must examine the whole range below, not only the `config/steering.json` diff.
 
 ## Commits in range (newest first, before this file's own commit)
@@ -26,7 +26,7 @@ Both reviews must examine the whole range below, not only the `config/steering.j
     bundled-skills/frontend-designer/SKILL.md       |  60 +++++++
     config/steering.json                            |  10 +-
     docs/evidence/gate-web-run.md                   |  37 +++++
-    docs/evidence/review-range.md                   |  59 +++++++ (this file, as of a7b59f0)
+    docs/evidence/review-range.md                   |  59 +++++++ (this file, line count grows with each commit)
     scripts/gate-web.mjs                            | 203 ++++++++++++++++++++++++
     steering/README.md                              |   3 +-
     steering/review-pipeline.md                     |   2 +-
@@ -59,7 +59,7 @@ Uncommitted in the main checkout, absent from this branch (path-level `diff -rq`
       scripts/vajra-worktree-clean.sh
       tests/run-worktree-clean.sh
 
-`workflows/vajra-deliver.js` in the main checkout has about 68 lines that this branch lacks (worktree-cleanup code) and 2 lines this branch has that the main copy lacks. Those 68 lines are the uncommitted delta that reviewers must read from the main checkout path directly. This is a path-level diff, not a git diff, so it may also include files the other branch changed (the 2 lines, manifest.json, the files under "Only in" this branch's additions are not listed here).
+`workflows/vajra-deliver.js` in the main checkout has about 68 lines that this branch lacks (worktree-cleanup code) and 2 lines this branch has that the main copy lacks. Those 68 lines are the uncommitted delta that reviewers must read from the main checkout path directly. This is a path-level diff, not a git diff, so it may also include files the other branch changed (the 2 lines, manifest.json, and this branch's own additions may also appear).
 
 ## Named files, coverage status
 
