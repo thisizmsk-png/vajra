@@ -45,7 +45,7 @@ Drop comments that violate `review.categorySuppressions`:
 - **error-handling**: not for declarative IaC, test code, or framework-managed
   flows.
 Respect each rule's `blocking` flag: a violation of a `blocking: true` rule
-(security, lambda, aws-cdk here) is a **merge blocker**; others are advisory.
+(security, lambda, aws-cdk, anti-slop here) is a **merge blocker**; others are advisory.
 
 ### Pass 5 — Refine
 Every surviving comment must have: clear reasoning (WHY, not WHAT), the quoted

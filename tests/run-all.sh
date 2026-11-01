@@ -11,6 +11,7 @@ FILTER="${1:-}"
 
 FAILED=0
 FAILED_SUITES=""
+SKIPPED=""
 RAN=0
 section() { printf '\n=== %s ===\n' "$1"; }
 
@@ -35,10 +36,16 @@ for t in $SUITES; do
   case "$t" in *"$FILTER"*) ;; *) continue ;; esac
   section "$t"
   RAN=$((RAN+1))
-  if bash "$t"; then :; else FAILED=1; FAILED_SUITES="$FAILED_SUITES $t"; fi
+  bash "$t"; rc=$?
+  case "$rc" in
+    0) ;;
+    77) SKIPPED="$SKIPPED $t" ;;
+    *) FAILED=1; FAILED_SUITES="$FAILED_SUITES $t" ;;
+  esac
 done
 
 printf '\n========================================\n'
 echo "suites run: $RAN"
+[ -z "$SKIPPED" ] || echo "SKIPPED, not proven:$SKIPPED"
 if [ "$FAILED" -eq 0 ]; then echo "ALL SUITES PASSED"; else echo "FAILED:$FAILED_SUITES"; fi
 exit "$FAILED"

@@ -6,8 +6,9 @@
 // or a design critique still has to judge that.
 //
 // Usage:    node gate-web.mjs <url-or-file-path>
-// Requires: npm i playwright axe-core   (in the target repo; run from its root)
+// Requires: npm i -D -E playwright@1.64.1 axe-core@4.14.0   (in the target repo; run from its root)
 //           Vajra itself does not depend on either. Copy this one file anywhere.
+// Trust:    this executes the page with network access. Run it only on pages you trust.
 // Exit:     0 clean, 1 at least one check failed, 2 the gate could not run.
 //           One line per failed check, naming its id.
 //
@@ -16,13 +17,14 @@
 //
 // Browser proof, reusing the Chromium cached in ~/Library/Caches/ms-playwright with
 // no browser download. Needs a Playwright release that matches a cached revision
-// (1.59.1 matches chromium-1217). Exits 0:
+// (1.64.1 matches chromium-1248). Exits 0:
 //
 //   node -e "const{chromium}=require('playwright');(async()=>{const b=await chromium.launch();const p=await b.newPage();await p.setContent('<title>ok</title>');if(await p.title()!=='ok')process.exit(1);await b.close()})().catch(()=>process.exit(1))"
 
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const WIDTHS = [375, 768, 1440];
@@ -63,7 +65,7 @@ async function checkAxe(page, axeSource) {
   if (violations.length) return violations.map((v) => `${v.id} (${v.nodes.length})`).join(', ');
 }
 
-async function checkReducedMotion(page, context) {
+async function checkReducedMotion(page, context, url) {
   const found = await page.evaluate(() => {
     const moves = (s) =>
       (s.animationName && s.animationName !== 'none') ||
@@ -92,7 +94,17 @@ async function checkReducedMotion(page, context) {
   });
   if (!found.motion || found.rule) return;
   // Cross-origin sheets hide their rules from the page, so read their text instead.
+  // Every file: page is its own origin, so local sheets land here too. href is
+  // page-controlled, so local reads stay inside the repo or the page's own folder.
   for (const href of found.unreadable) {
+    if (href.startsWith('file:')) {
+      const path = fileURLToPath(href);
+      const roots = [process.cwd(), dirname(fileURLToPath(url))];
+      if (!roots.some((root) => path.startsWith(root + sep))) continue;
+      const text = await readFile(path, 'utf8').catch(() => '');
+      if (/prefers-reduced-motion/i.test(text)) return;
+      continue;
+    }
     const response = await context.request.get(href).catch(() => null);
     if (response && /prefers-reduced-motion/i.test(await response.text())) return;
   }
@@ -121,8 +133,8 @@ async function checkBannedFont(page) {
       const hasText = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
       if (!hasText || !el.getClientRects().length) continue;
       for (const family of getComputedStyle(el).fontFamily.split(',')) {
-        const name = family.trim().replace(/^["']|["']$/g, '');
-        if (banned.test(name)) seen.add(name);
+        const match = family.trim().replace(/^["']|["']$/g, '').match(banned);
+        if (match) seen.add(match[2].toLowerCase()); // Never the page's own string.
       }
     }
     return [...seen];
@@ -143,7 +155,7 @@ async function main() {
   const axeSource = load('axe-core').source;
 
   const browser = await chromium
-    .launch({ args: ['--allow-file-access-from-files'] })
+    .launch({ chromiumSandbox: true })
     .catch((err) => bail(`cannot launch Chromium: ${err.message.split('\n')[0]}`));
   const failures = [];
   const run = async (id, check) => {
@@ -187,7 +199,7 @@ async function main() {
     if (worstCls > CLS_LIMIT) failures.push(`layout-shift: CLS ${worstCls.toFixed(3)} above ${CLS_LIMIT}`);
 
     await run('axe', () => checkAxe(page, axeSource));
-    await run('reduced-motion', () => checkReducedMotion(page, context));
+    await run('reduced-motion', () => checkReducedMotion(page, context, url));
     await run('white-bg', () => checkWhiteBg(page));
     await run('banned-font', () => checkBannedFont(page));
     await run('em-dash', () => checkEmDash(page));
@@ -195,7 +207,8 @@ async function main() {
     await browser.close();
   }
 
-  for (const line of failures) console.log(`FAIL ${line}`);
+  // Page text can reach these lines and an agent reads them, so keep them short and plain.
+  for (const line of failures) console.log(`FAIL ${line.replace(/[^\x20-\x7e]/g, '?').slice(0, 200)}`);
   if (failures.length) process.exit(1);
   console.log('gate-web: floor checks passed (not broken, which is not the same as good)');
 }

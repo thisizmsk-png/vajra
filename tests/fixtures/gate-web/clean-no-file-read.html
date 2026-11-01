@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gate-web fixture: a page must not read local files</title>
+<style>
+  html { background: #f7f5f0; color: #1f1f1f; font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 1rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>no file read</h1>
+<p id="out">The script below turns this page into a failure if a sibling file is readable.</p>
+</main>
+<script>
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', 'clean.html', false);
+    xhr.send();
+    document.getElementById('out').textContent = 'read a local file — the browser is not contained';
+  } catch {}
+</script>
+</body>
+</html>

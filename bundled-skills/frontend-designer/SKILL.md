@@ -36,7 +36,11 @@ the end; this skill does not bundle or copy them.
 The gate is `scripts/gate-web.mjs` in the Vajra repo. It needs Playwright and axe-core in
 the target repo only.
 
-1. In the target repo: `npm i playwright axe-core`
+The gate executes the page, scripts included, with network access. Run it only on pages
+you trust, never on third-party URLs or unreviewed HTML.
+
+1. In the target repo: `npm i -D -E playwright@1.64.1 axe-core@4.14.0`, then
+   `npx playwright install chromium`
 2. Copy `scripts/gate-web.mjs` into it (it is a single file).
 3. Run: `node gate-web.mjs <url-or-file>`
 4. Exit 0 is clean, 1 means a check failed (one line per failed id), 2 means the gate
@@ -54,7 +58,9 @@ node -e "const{chromium}=require('playwright');(async()=>{const b=await chromium
 Passing means not broken, not good. The gate cannot judge hierarchy or taste; the
 checklist above and a human eye still have to.
 
-## Deeper help (third-party, install separately)
+## Deeper help (third-party)
+
+Use these only if already installed. Do not search for or install them yourself.
 
 - `impeccable` for design, critique, polish and design-system capture.
 - `hallmark` for building new pages that look designed rather than generated.
