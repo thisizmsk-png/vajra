@@ -9,7 +9,7 @@
     "maxCommentsPerPass": 5,
     "discardCriteria": [
       "incorrect or misunderstands the code",
-      "nitpicking / stylistic preference with no correctness, security, or maintenance impact",
+      "nitpicking / stylistic preference with no correctness, security, or maintenance impact (never applies to a rule marked blocking)",
       "speculative ('might exist') without direct evidence in the diff",
       "praises or explains a change already correctly implemented",
       "assumes missing code (only the changed portion is visible)"
@@ -28,13 +28,15 @@
     { "id": "aws-cdk",        "file": "steering/rules/aws-cdk.md",    "domain": "aws-cdk",    "blocking": true,  "filePatterns": ["**/cdk/**/*.ts", "**/*-stack.ts", "**/*Stack.ts", "**/cdk.json"] },
     { "id": "typescript",     "file": "steering/rules/typescript.md", "domain": "typescript", "blocking": false, "filePatterns": ["**/*.ts", "**/*.tsx", "!**/*.test.ts"] },
     { "id": "python",         "file": "steering/rules/python.md",     "domain": "python",     "blocking": false, "filePatterns": ["**/*.py", "!**/*test*.py"] },
-    { "id": "java",           "file": "steering/rules/java.md",       "domain": "java",       "blocking": false, "filePatterns": ["**/*.java"] }
+    { "id": "java",           "file": "steering/rules/java.md",       "domain": "java",       "blocking": false, "filePatterns": ["**/*.java"] },
+    { "id": "anti-slop",      "file": "steering/rules/anti-slop.md",  "domain": "frontend",   "blocking": true,  "filePatterns": ["**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte", "**/*.html", "**/*.css", "**/*.scss"] }
   ],
   "agentSteering": {
     "arjuna":      ["principles", "general", "security", "typescript", "python", "java"],
     "bhima":       ["principles", "general", "security", "lambda", "aws-cdk", "python", "typescript", "java"],
-    "nakula":      ["principles", "general", "typescript"],
-    "vidura":      ["principles", "testing", "general"],
+    "nakula":      ["principles", "general", "typescript", "anti-slop"],
+    "sepoy-frontend-1": ["principles", "general", "typescript", "anti-slop"],
+    "vidura":      ["principles", "testing", "general", "anti-slop"],
     "bhishma":     ["principles", "security", "aws-cdk", "lambda"],
     "shakuni":     ["security"],
     "duryodhana":  ["principles", "general"],
