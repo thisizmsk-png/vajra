@@ -51,7 +51,12 @@ function load(name) {
 }
 
 function toUrl(input) {
-  if (/^[a-z][a-z0-9+.-]+:/i.test(input)) return input;
+  if (/^[a-z][a-z0-9+.-]+:/i.test(input)) {
+    // Normalized, because the file: containment below keys on the exact scheme.
+    const parsed = URL.canParse(input) ? new URL(input) : null;
+    if (!parsed || !['http:', 'https:', 'file:'].includes(parsed.protocol)) bail(`unsupported target: ${input}`);
+    return parsed.href;
+  }
   const path = resolve(input);
   if (!existsSync(path)) bail(`no such file: ${input}`);
   return pathToFileURL(path).href;
@@ -85,7 +90,7 @@ async function checkAxe(page, axeSource) {
     }),
   );
   // A page can stub window.axe, so only rule-shaped ids reach the output.
-  const name = (v) => (/^[a-z0-9-]+$/.test(v.id) ? v.id : 'invalid-id');
+  const name = (v) => (/^[a-z0-9-]{1,40}$/.test(v.id) ? v.id : 'invalid-id');
   if (violations.length) return violations.map((v) => `${name(v)} (${Number(v.nodes.length)})`).join(', ');
 }
 
@@ -162,7 +167,8 @@ async function checkBannedFont(page) {
     }
     return [...seen];
   });
-  if (fonts.length) return fonts.join(', ');
+  const known = fonts.filter((font) => /^(inter|geist|space[\s_-]?grotesk)$/.test(font));
+  if (known.length) return known.join(', ');
 }
 
 async function checkEmDash(page) {
@@ -218,8 +224,8 @@ async function main() {
       await page.waitForTimeout(SETTLE_MS);
       await run(`overflow-${width}`, async () => {
         const { scroll, client } = await page.evaluate(() => ({
-          scroll: document.documentElement.scrollWidth,
-          client: document.documentElement.clientWidth,
+          scroll: Number(document.documentElement.scrollWidth),
+          client: Number(document.documentElement.clientWidth),
         }));
         if (scroll > client) return `content is ${scroll}px wide in a ${client}px viewport`;
       });

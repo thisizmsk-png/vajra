@@ -62,5 +62,10 @@ HTML
   [ "$rc" -eq 0 ]; check "local file stays out of reach: $src (got $rc: $out)" $?
 done
 
+out="$(node "$GATE" "FILE://$TMP/page/index.html" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ]; check "containment holds for a FILE:// target (got $rc: $out)" $?
+out="$(node "$GATE" "view-source:file://$TMP/page/index.html" 2>&1)"; rc=$?
+[ "$rc" -eq 2 ]; check "other schemes are refused (got $rc: $out)" $?
+
 echo "gate-web: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
