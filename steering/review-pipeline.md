@@ -33,7 +33,7 @@ Score each comment 1–10 on: correctness, rule-compliance, actionability, impac
 **Discard anything below `confidenceThreshold` (8).** Also discard any comment
 matching `review.discardCriteria`:
 - incorrect / misunderstands the code
-- nitpick / pure style with no correctness-security-maintenance impact
+- nitpick / pure style with no correctness-security-maintenance impact (never applies to a rule marked blocking)
 - speculative ("might…") without direct evidence in the diff
 - praises or explains an already-correct change
 - assumes code is missing (you only see the changed portion)

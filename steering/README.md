@@ -21,7 +21,8 @@ steering/
     ├── aws-cdk.md           ← BLOCKING: no hardcoded ARNs, L2/grants, RETAIN
     ├── typescript.md        ← strict tsconfig, no any, async hygiene
     ├── python.md            ← mypy strict, from-exc chaining, no mutable defaults
-    └── java.md              ← Optional, records/sealed, exceptions, concurrency
+    ├── java.md              ← Optional, records/sealed, exceptions, concurrency
+    └── anti-slop.md         ← BLOCKING: UI patterns that read as AI-generated
 ```
 
 `config/steering.json` is the machine-readable index: which rule file applies to
