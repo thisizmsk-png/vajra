@@ -82,7 +82,8 @@ if [ -d "$BUNDLED_AGENTS" ]; then
         if [ -d "$agent_file" ]; then
           rm -rf "${target}.bak"
           cp -r "$target" "${target}.bak"
-          cp -r "$agent_file/." "$target/"
+          rm -rf "$target"
+          cp -r "$agent_file" "$target"
         else
           cp -p "$target" "${target}.bak"
           cp "$agent_file" "$target"

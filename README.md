@@ -68,7 +68,7 @@ bash ~/.claude/skills/vajra/scripts/vajra-doctor.sh    # PASS/FAIL for each piec
 every crew delegate to them by name (bhima, nakula, vidura, arjuna and the
 rest), so without them in `~/.claude/agents/` the workflows can't run.
 `install-skills.sh` copies them from `bundled-agents/` (skipping any you
-already have), or install them with the
+already have; `--update-agents` replaces changed ones, keeping a `.bak`), or install them with the
 [mahabharat-agents](https://github.com/thisizmsk-png/mahabharat-agents)
 installer (its `scripts/install.sh --target user` puts them in
 `~/.claude/agents/`). `vajra doctor` checks that they are present.

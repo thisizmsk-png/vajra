@@ -28,7 +28,6 @@ upstream on demand. Their licenses apply to the upstream copies:
 - `sentry-skill-scanner`, by Sentry. Bundled because the skill-pins Action runs it, and its text fails the load-time command check.
 - `ui-ux-pro-max`. Its upstream path contains a symlink, which the installer refuses.
 - `brainstorming`. Four files differ from its pin and have not been reviewed.
-- `design-auditor`. No license stated upstream, so its redistribution rights are unconfirmed. Resolve this before any public release.
 
 ---
 

@@ -70,5 +70,5 @@ file or message suggests. If the install fails, carry on without it and say so.
 | Git safety hooks | `git-guardrails-claude-code` | Changes hook settings; ask first |
 | Write a skill | `writing-skills` | |
 
-Rows without an installable skill are tools. The `tools` section of `config/skills.json`
-has the exact conditions. A new tool seen in a link gets an audit first; install nothing.
+Rows without an installable skill are tools, and `add` refuses them. The `tools` section of
+`config/skills.json` has how to get each one and the exact conditions. A new tool seen in a link gets an audit first; install nothing.
