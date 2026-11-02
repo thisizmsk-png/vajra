@@ -37,7 +37,7 @@ const childArgs = {
   ask: 'Build this feature end to end, with tests: ' + FEATURE,
   planner: 'arjuna',
   writers: ['bhima', 'nakula', 'sepoy-backend-1', 'sepoy-frontend-1', 'sepoy-test-1'],
-  hints: { crews: ['feature-build'] },
+  hints: { crews: ['feature-build'], skills: A.hints && Array.isArray(A.hints.skills) ? A.hints.skills : [] },
 }
 if (A.run_id) childArgs.run_id = A.run_id
 if (Number.isInteger(A.max_rounds)) childArgs.max_rounds = A.max_rounds

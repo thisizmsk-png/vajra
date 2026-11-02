@@ -114,9 +114,33 @@ into `~/.claude/workflows/vajra-deliver.js`.
    - If the rerun is not green, no task is closed and every record goes in as
      `--source proposed`, waiting for `atman.sh review`.
    - Write-back failures are open risks, never fatal.
-   Finally it closes the campaign and returns a markdown report: what was
-   built, evidence per criterion, knowledge recorded, how to run it, open
-   risks, cleanup of the `vajra/<run_id>/*` work branches.
+   Then it closes the campaign.
+8. **Clean up worktrees.** Claude Code keeps an agent's worktree when it holds
+   untracked files, and every delivery leaves some (the walkthrough evidence,
+   a `.venv`), so the worktrees used to pile up under `<repo>/.claude/worktrees/`.
+   Once the write-back has recorded the evidence (closed tasks and knowledge
+   records keep its sha and file name), a last agent runs, in your checkout,
+   `scripts/vajra-worktree-clean.sh --commits <this run's commits> --branch-prefix vajra/<run_id>/ --allow <dirs>`.
+   The script considers only worktrees below `.claude/worktrees/` whose HEAD
+   is detached at a commit this run produced (task and integration commits,
+   never the base) or that hold a `vajra/<run_id>/` branch. It never touches
+   the main checkout, the checkout it runs in, or a locked worktree. It removes
+   one (`git worktree remove --force`, then `git worktree prune`) only when
+   `git status --porcelain` shows no tracked change at all and the only
+   untracked files are under the allowed directories: `data/walkthroughs/`
+   (only when the tasks were closed on that evidence), `.venv/`, and the
+   directories `setup_cmds` create (a `python3 -m venv <dir>` target,
+   `node_modules/` for `npm ci`/`npm install`/`yarn`/`pnpm`). Anything else
+   (an edited file, a staged change, a stray untracked file) is kept.
+   Failures are never fatal.
+
+The workflow returns a markdown report: what was built, evidence per
+criterion, knowledge recorded, how to run it, open risks, and cleanup: the
+`vajra/<run_id>/*` work branches to delete once you merge or drop them, how
+many worktrees were removed, and each kept worktree with its reason and the
+`git worktree remove --force '<path>' && git worktree prune` command to run
+when nothing in it is needed. If the cleanup itself failed, the report says so,
+lists it as an open risk and gives the command to rerun.
 
 ## Handling the result
 

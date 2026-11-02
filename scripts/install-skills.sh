@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Vajra — Install Bundled Skills
-# Copies 87 skills from bundled-skills/ to ~/.claude/skills/
+# Copies the skills in bundled-skills/ to ~/.claude/skills/. Third-party skills are
+# not here; scripts/vajra_skills.py installs them from config/skills.json on demand.
 
 VAJRA_SKILL="${HOME}/.claude/skills/vajra"
 SKILLS_DIR="${HOME}/.claude/skills"

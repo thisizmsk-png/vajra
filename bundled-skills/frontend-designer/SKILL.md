@@ -7,7 +7,7 @@ description: Thin frontend design workflow. Use when building or reviewing a web
 
 A short routine: decide the look, build it, ask the review questions, run the gate.
 It is deliberately thin. For deeper design work use the third-party skills named at
-the end; this skill does not bundle or copy them.
+the end; they are pinned in the catalog, not bundled here.
 
 ## 1. Design direction (before building)
 
@@ -19,6 +19,9 @@ the end; this skill does not bundle or copy them.
 - If the repo already has a design system or DESIGN.md, follow it instead.
 
 ## 2. UX checklist (ask these in review)
+
+These are the quick questions. After every UI change, Vidura also walks rules 31 to 47
+in `steering/rules/anti-slop.md`, which block merge.
 
 - Hierarchy: is the one most important thing on screen obvious in two seconds?
 - Action: is there a single clear primary action per view, labelled with a verb?
@@ -61,7 +64,7 @@ checklist above and a human eye still have to.
 
 ## Deeper help (third-party)
 
-Use these only if already installed. Do not search for or install them yourself.
+`skill-catalog` installs these from their pins if they are missing. Do not fetch them any other way.
 
 - `impeccable` for design, critique, polish and design-system capture.
 - `hallmark` for building new pages that look designed rather than generated.

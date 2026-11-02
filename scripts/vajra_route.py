@@ -43,6 +43,7 @@ Run with `python3 -I` (isolated mode). Standard library only.
 
 import datetime
 import hashlib
+import importlib.util
 import hmac
 import json
 import os
@@ -55,6 +56,8 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = SKILL_DIR / "config" / "default.json"
 CAMPAIGN_SCRIPT = SKILL_DIR / "scripts" / "vajra-campaign.sh"
 KB_SCRIPT = SKILL_DIR / "scripts" / "vajra_kb.py"
+SKILLS_SCRIPT = SKILL_DIR / "scripts" / "vajra_skills.py"
+SKILLS_CATALOG = SKILL_DIR / "config" / "skills.json"
 
 # Subcommand -> docs/commands/<doc>.md. Legacy v0.4 names map to their
 # replacement so old muscle memory still lands somewhere real.
@@ -199,6 +202,9 @@ def safe_name(value):
 
 def load_json(path):
     try:
+        # Only regular files: opening a planted FIFO would hang the hook.
+        if not Path(path).is_file():
+            return None
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
@@ -293,6 +299,7 @@ def match_routes(cfg, ask):
             "skill": safe_name(p.get("skill")),
             "agent": agent_for(cfg, p.get("domain")),
             "crew": safe_name(p.get("crew")),
+            "tool": safe_name(p.get("tool")),
         })
     return matches
 
@@ -358,7 +365,8 @@ def log_route(session_id, prompt, ask, route, suggested=None):
             "suggested": [x for x in (suggested or []) if isinstance(x, str)][:10],
         }
         path = d / "routing-log.jsonl"
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        # A planted FIFO must not hang the hook, nor a symlink redirect the log.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
     except Exception:
@@ -516,6 +524,52 @@ def summarize(matches, limit):
     return skills[:limit], agents[:limit], crews[:limit]
 
 
+def pin_differs(target, want):
+    """True when an installed copy is not the pinned one, or that cannot be shown."""
+    try:
+        spec = importlib.util.spec_from_file_location("vajra_skills", SKILLS_SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return target.is_symlink() or mod.tree_hash(mod.read_tree(target)) != want
+    except Exception:
+        return True
+
+
+def skill_notes(catalog, skills):
+    """Conditions and a pinned install line for catalog skills, from config/skills.json."""
+    entries = catalog.get("skills") if isinstance(catalog.get("skills"), dict) else {}
+    notes, missing, changed = [], [], []
+    for s in skills:
+        entry = entries.get(s)
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("conditions"), str):
+            notes.append("%s: %s" % (s, entry["conditions"]))
+        target = Path.home() / ".claude" / "skills" / s
+        if not target.exists() and not target.is_symlink():
+            missing.append(s)
+        elif pin_differs(target, entry.get("sha256")):
+            changed.append(s)
+    if changed:
+        notes.append("Installed copy differs from the pin, so it is unvetted: %s." % ", ".join(changed))
+    if missing:
+        notes.append("Not installed: %s. Install from the pinned catalog with `python3 -I %s add <name>`, "
+                     "then read the SKILL.md it prints." % (", ".join(missing), SKILLS_SCRIPT))
+    return notes
+
+
+def tool_notes(catalog, matches, limit):
+    entries = catalog.get("tools") if isinstance(catalog.get("tools"), dict) else {}
+    notes = []
+    for m in matches:
+        entry = entries.get(m.get("tool"))
+        if isinstance(entry, dict) and isinstance(entry.get("how"), str):
+            note = "%s (%s, not installed by Vajra): %s" % (m["tool"], entry.get("status", "optional"), entry["how"])
+            if note not in notes:
+                notes.append(note)
+    return notes[:limit]
+
+
 def suggestion_text(cfg, matches, limit):
     skills, agents, crews = summarize(matches, limit)
     parts = []
@@ -526,7 +580,10 @@ def suggestion_text(cfg, matches, limit):
         parts.append("agents: " + ", ".join(agents))
     if skills:
         parts.append("skills: " + ", ".join(skills))
-    return "; ".join(parts)
+    catalog = load_json(SKILLS_CATALOG)
+    catalog = catalog if isinstance(catalog, dict) else {}
+    notes = skill_notes(catalog, skills) + tool_notes(catalog, matches, limit)
+    return " ".join(["; ".join(parts) + "." if parts else ""] + notes).strip().rstrip(".")
 
 
 def emit(text):
@@ -575,8 +632,11 @@ def route(payload):
         doc = SUBCOMMANDS[first]
         log_route(session_id, prompt, ask, {"tier": 0, "skill": "vajra", "agent": None,
                                             "pattern": "cmd-" + first})
-        emit("Vajra router (0-token hook): subcommand `%s`. Follow %s/docs/commands/%s.md."
-             % (first, SKILL_DIR, doc))
+        text = "Vajra router (0-token hook): subcommand `%s`. Follow %s/docs/commands/%s.md." % (first, SKILL_DIR, doc)
+        matches = match_routes(cfg, ask) if first == "deliver" else []
+        if matches:
+            text += " Suggestions for its plan to consider (not binding): " + suggestion_text(cfg, matches, limit) + "."
+        emit(text)
         return
 
     matches = match_routes(cfg, ask)

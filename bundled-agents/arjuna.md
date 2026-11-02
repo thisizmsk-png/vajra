@@ -74,7 +74,7 @@ the exact target.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 
 - `hld` — High-Level Design (primary)
 - `lld` — Low-Level Design (primary)

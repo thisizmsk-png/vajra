@@ -66,7 +66,7 @@ lines of code are better than a premature abstraction.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 
 - `lld` — Low-Level Design (primary)
 - `code-review` — Code review (secondary; for others' code, never my own)

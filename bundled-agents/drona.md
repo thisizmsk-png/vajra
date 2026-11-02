@@ -69,7 +69,7 @@ excellence but I am fair in my evaluation. I know the difference between
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 - `product-spec` — Product specification (primary)
 - `spec` — General specification (primary; where it says to get user confirmation, I return
   the draft as `needs_decision` instead of waiting)

@@ -127,6 +127,12 @@ if [ -f "$SKILL/hooks/user-prompt-submit.sh" ]; then
     fail "router hook printed something that is not hookSpecificOutput JSON"
   fi
   [ -f "$SKILL/scripts/vajra_route.py" ] || warn "scripts/vajra_route.py missing (router does nothing)"
+  if [ -f "$SKILL/config/skills.json" ] && [ -f "$SKILL/scripts/vajra_skills.py" ]; then
+    if out="$(python3 -I "$SKILL/scripts/vajra_skills.py" verify 2>&1)"; then pass "catalog skills match their pins"
+    else warn "catalog skills differ from their pins: $(echo "$out" | grep -c DIFFERS). Review with vajra_skills.py verify"; fi
+  else
+    warn "skill catalog missing (config/skills.json or scripts/vajra_skills.py)"
+  fi
 fi
 
 # --- Workflows ----------------------------------------------------------------
@@ -137,7 +143,11 @@ for wf in "$SKILL"/workflows/vajra-*.js; do
   name="$(basename "$wf")"
   if [ ! -f "$WF_DIR/$name" ]; then fail "workflow installed: $name (run scripts/install.sh)"
   elif cmp -s "$wf" "$WF_DIR/$name"; then pass "workflow installed: $name"
-  else warn "workflow $name differs from the shipped copy (re-run scripts/install.sh)"; fi
+  else warn "stale install: workflow $name in ~/.claude/workflows differs from the skill's workflows/ (re-run scripts/install.sh, then restart Claude Code: running sessions keep the old workflow)"; fi
+done
+for wf in "$WF_DIR"/vajra-*.js; do
+  [ -f "$wf" ] || continue
+  [ -f "$SKILL/workflows/$(basename "$wf")" ] || warn "stale install: ~/.claude/workflows/$(basename "$wf") is not shipped by this skill any more (delete it yourself if unused)"
 done
 [ "$found" = 1 ] || warn "no workflows/vajra-*.js in this checkout"
 [ -f "$SKILL/workflows/vajra-deliver.js" ] || warn "workflows/vajra-deliver.js not shipped in this checkout"

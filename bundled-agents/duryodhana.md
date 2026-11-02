@@ -79,7 +79,7 @@ I don't just find problems, I quantify their impact.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 
 - `testing` — Designing stress and failure scenarios and running existing suites (primary); new tests are written by Vidura
 - `research` — its 5-Question Framework on repo evidence for failure analysis; I have no

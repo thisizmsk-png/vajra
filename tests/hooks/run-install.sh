@@ -75,6 +75,10 @@ for wf in "$SKILL"/workflows/vajra-*.js; do
   [ -f "$wf" ] || continue
   cmp -s "$wf" "$HOME/.claude/workflows/$(basename "$wf")"; check "workflow copied: $(basename "$wf")" $?
 done
+printf '%s' "$out" | grep -q "RESTART CLAUDE CODE"; check "install tells the user to restart Claude Code" $?
+printf '%s' "$out" | grep -q "hooks and saved workflows only at session start"; check "restart message names hooks AND workflows" $?
+printf '%s' "$out" | grep -q "Workflows changed in this install:"; check "install lists changed workflows" $?
+printf '%s' "$out" | grep -q "^    vajra-deliver.js (new)$"; check "first install lists vajra-deliver.js as new" $?
 
 # The registered guard command really runs and blocks (shell form, $HOME expanded).
 GUARD_CMD="$(jq -r '[.hooks.PreToolUse[].hooks[] | select(.command | contains("pre-tool-use.sh"))][0].command' "$SETTINGS")"
@@ -83,10 +87,28 @@ printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/tmp
 
 # --- idempotent ---
 before="$(jq -S . "$SETTINGS")"
-bash "$SKILL/scripts/install.sh" >/dev/null 2>&1; rc=$?
+out="$(bash "$SKILL/scripts/install.sh" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ]; check "second install exits 0" $?
 [ "$(jq -S . "$SETTINGS")" = "$before" ]; check "second install changes nothing" $?
+printf '%s' "$out" | grep -q "Workflows: none changed in this install"; check "second install reports no workflow changes" $?
+printf '%s' "$out" | grep -q "RESTART CLAUDE CODE"; check "second install still prints the restart message" $?
 KEY1="$(cat "$VS/.hmac-key")"
+
+# --- stale workflow: doctor warns, reinstall lists it as updated ---
+echo "// old copy" >> "$HOME/.claude/workflows/vajra-deliver.js"
+out="$(bash "$SKILL/scripts/vajra-doctor.sh" 2>&1)"
+printf '%s' "$out" | grep -q "^WARN  stale install: workflow vajra-deliver.js .*restart Claude Code"; check "doctor warns about a stale installed workflow" $?
+echo "// gone" > "$HOME/.claude/workflows/vajra-retired.js"
+out="$(bash "$SKILL/scripts/vajra-doctor.sh" 2>&1)"
+printf '%s' "$out" | grep -q "^WARN  stale install: ~/.claude/workflows/vajra-retired.js is not shipped"; check "doctor warns about an installed workflow the skill no longer ships" $?
+rm -f "$HOME/.claude/workflows/vajra-retired.js"
+out="$(bash "$SKILL/scripts/install.sh" --dry-run 2>&1)"
+printf '%s' "$out" | grep -q "would copy vajra-deliver.js .*(updated)"; check "dry-run names the workflow it would update" $?
+out="$(bash "$SKILL/scripts/install.sh" 2>&1)"
+printf '%s' "$out" | grep -q "^    vajra-deliver.js (updated)$"; check "reinstall lists vajra-deliver.js as updated" $?
+n="$(printf '%s' "$out" | grep -c '^    vajra-.*\.js (')"
+[ "$n" = 1 ]; check "reinstall lists only the workflow that changed" $?
+cmp -s "$SKILL/workflows/vajra-deliver.js" "$HOME/.claude/workflows/vajra-deliver.js"; check "reinstall restores the stale workflow" $?
 
 # --- doctor requires the agents the workflows use ---
 out="$(bash "$SKILL/scripts/vajra-doctor.sh" 2>&1)"; rc=$?

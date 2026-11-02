@@ -76,7 +76,7 @@ build — I make sure builders can build.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 - `spec` — Release planning specifications (where it says to get user confirmation, I return
   the draft as `needs_decision`)
 - `testing` — Release readiness assessment (secondary)

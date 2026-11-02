@@ -79,7 +79,7 @@ that adds spend waits for their approval (the Dronagiri mountain approach).
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 
 - `ci-cd` — CI/CD pipelines, infrastructure as code, deploy and rollback design (primary)
 - `incident-response` — Runbooks and postmortem follow-ups for the platform (secondary; live incidents belong to Ashwatthama)

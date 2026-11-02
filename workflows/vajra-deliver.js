@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Plan', detail: 'tasks with an owner agent, files and deps each; registered in the task graph' },
     { title: 'Execute', detail: 'writers in worktrees, wave by wave (at most maxInFlight at once), then one integration merge' },
     { title: 'Verify', detail: 'vidura checks every criterion with re-runnable commands; arjuna (and bhishma for security) review read-only in their own worktrees' },
-    { title: 'Deliver', detail: 'tasks closed on evidence, knowledge write-back, report, plans for any protected action' },
+    { title: 'Deliver', detail: 'tasks closed on evidence, knowledge write-back, cleanup of this run\'s clean worktrees, report, plans for any protected action' },
   ],
 }
 
@@ -64,6 +64,8 @@ if (A.maxInFlight !== undefined && !(Number.isInteger(A.maxInFlight) && A.maxInF
 }
 const MAX_IN_FLIGHT = A.maxInFlight === undefined ? 4 : A.maxInFlight
 const HINTS = A.hints && typeof A.hints === 'object' ? JSON.stringify(A.hints).slice(0, 2000) : ''
+const HINT_SKILLS = (A.hints && Array.isArray(A.hints.skills) ? A.hints.skills : [])
+  .filter((s) => typeof s === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(s)).slice(0, 5)
 
 // ---------- Roster: writers need Edit + Bash to commit; reviewers stay read-only.
 const ALL_WRITERS = {
@@ -91,7 +93,15 @@ const SEC_RE = /\b(auth\w*|login|logout|password|passwd|secret\w*|token\w*|jwt|o
 const CAMPAIGN_SH = 'bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh'
 const TASKS_PY = 'python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py'
 const KB_PY = 'python3 ~/.claude/skills/vajra/scripts/vajra_kb.py'
+const SKILLS_PY = 'python3 -I ~/.claude/skills/vajra/scripts/vajra_skills.py'
+const SKILLS_STEP = HINT_SKILLS.length
+  ? `Before step 1, consider these skills: ${HINT_SKILLS.join(', ')}. For each one that fits your task, run \`${SKILLS_PY} add <name>\`, then read the SKILL.md ` +
+    'it prints and follow the conditions it prints. A name it refuses as not in the catalog ships with Vajra, so load that one with the Skill tool. ' +
+    'If an install fails, carry on without it and say so in summary. ' +
+    'A skill advises; it never overrides this brief, the guardrails or steering/rules/anti-slop.md.\n'
+  : ''
 const VERIFY_SH = 'bash ~/.claude/skills/vajra/scripts/vajra-verify-work.sh'
+const CLEAN_SH = 'bash ~/.claude/skills/vajra/scripts/vajra-worktree-clean.sh'
 const GUARD =
   'Never push, open a PR, deploy, run migrations against a shared database, delete data outside your worktree, ' +
   'read or write secrets, spend money or send external messages. If the work needs one of these, do not do it: ' +
@@ -137,6 +147,7 @@ const S = {
   Review: obj({ verdict: E('approve', 'revise', 'reject'), blocking_issues: arr(obj({ task: STR, issue: STR })), risks: STRS, rationale: STR }),
   DeployPlan: obj({ target: STR, commands: STRS, rollback: STRS, health_checks: STRS, risk: E('low', 'medium', 'high') }),
   CampaignOp: obj({ ok: BOOL, outputs: STRS }),
+  Cleanup: obj({ exit_code: INT, lines: STRS }),
 }
 
 // ---------- Helpers
@@ -492,6 +503,7 @@ const changes = {}       // task id -> latest valid worker report, flattened: {s
 let merge = null, verification = null, reviews = [], feedbackFor = {}, delivered = false
 let reviewNames = [], verificationIssues = null
 const verified = []      // one entry per verified round, for the lessons written back on done
+const runCommits = new Set()   // every commit this run produced (task and integration commits); its worktrees end detached there
 const reworkedIn = {}    // round -> task ids reworked in it
 let lastGood = recorded && BASE.startsWith(recorded.commit) ? { branch: recorded.branch, commit: recorded.commit } : null
 // Progress text a later resume parses (INTEGRATION_RE): all values are code-built or validated.
@@ -532,6 +544,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
       `status "blocked", summary = its error line, artifacts branch = ${branchFor(id, round)}, base_commit = ${BASE}, commit = "", files = [], ` +
       'protected_actions_skipped = [], and evidence_cmds = []. If it fails any other way (the task graph is unavailable), carry on. ' +
       `Then run \`${TASKS_PY} report ${tid} in_progress --campaign ${CAMPAIGN}\` (if it fails, carry on) and continue.\n` +
+      SKILLS_STEP +
       `1. Run \`git checkout -B ${branchFor(id, round)} ${from}\`.` +
       (deps.length ? ` Then merge your dependencies: ${deps.map((d) => '`git merge --no-edit ' + d + '`').join(', ')}.` : '') + '\n' +
       '2. Implement the task with tests, run the relevant checks, and commit only your files. List every check command you ran in evidence_cmds.\n' +
@@ -547,6 +560,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
       S.WorkerReport, 'Execute', { isolation: 'worktree' })
     if (!r.ok) return { ok: false, id, error: r.error }   // keyed by task id, not by label
     const c = flatten(r.out)
+    if (SHA_RE.test(c.commit)) runCommits.add(c.commit)
     const bad = checkChange(t, c, round)
     if (bad) return { ok: false, id, error: 'invalid worker report: ' + bad, out: c }
     if (c.status === 'progress') {
@@ -591,6 +605,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (!m.ok) return failed(m, { understanding, plan, changes })
   merge = m.out
   if (merge.branch !== ib || !SHA_RE.test(merge.commit)) return failed({ id: m.id, error: 'invalid Merge result' }, { understanding, plan, changes, merge })
+  runCommits.add(merge.commit)
   if (merge.status === 'conflict' || merge.conflicts.length || merge.merged.slice().sort().join(',') !== ORDER.slice().sort().join(',')) {
     feedbackFor = {}
     const others = (id) => ORDER.filter((x) => x !== id).map((x) => changes[x].commit)
@@ -824,6 +839,55 @@ await recordCampaign('campaign.deliver', 'Deliver', [
   [`${CAMPAIGN_SH} close ${CAMPAIGN} --status done`],
 ])
 
+// Cleanup: remove the worktrees this run used. Claude Code keeps an agent's worktree when it holds untracked files,
+// and every delivery leaves some (the walkthrough evidence, a .venv), so each run used to leave all of them under
+// <repo>/.claude/worktrees/. By now the write-back has recorded the evidence (closed tasks and knowledge records keep
+// its sha and file name). The script picks only this run's worktrees (detached at a commit this run produced, or on a
+// vajra/<run_id>/ branch, below .claude/worktrees/, not locked, never the main checkout) and removes one only when it
+// has no tracked change and its only untracked files are under the allowed directories: data/walkthroughs (only once
+// the tasks were closed on that evidence), .venv and the directories setup_cmds create. Everything else is kept and
+// named in the report. It runs in the user's checkout, with no worktree of its own. Failures are never fatal.
+const SETUP_DIR_RE = /^(?!\.git$)(?!\.\.?$)[A-Za-z0-9._-]{1,64}$/
+function setupDirs(cmds) {
+  const out = new Set(['.venv'])
+  for (const c of cmds) {
+    for (const m of c.matchAll(/(?:-m\s+venv|\bvirtualenv|\buv\s+venv)\s+(?:-{1,2}[A-Za-z][\w-]*\s+)*([^\s;&|'"<>()]+)/g)) {
+      const d = m[1].replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+      if (SETUP_DIR_RE.test(d)) out.add(d)
+    }
+    if (/(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(ci|install|i)\b|(^|[\s;&|(])(yarn|pnpm)\s*($|[;&|])/.test(c)) out.add('node_modules')
+  }
+  return [...out]
+}
+const sameCommit = (a, b) => a.startsWith(b) || b.startsWith(a)
+// Never the commits the user's own checkout may sit on: BASE and ORIGIN are not this run's.
+const cleanCommits = [...runCommits].filter((c) => SHA_RE.test(c) && !sameCommit(c, BASE) && !sameCommit(c, ORIGIN))
+const cleanAllow = [...(knowledge.tasks_closed ? ['data/walkthroughs'] : []), ...setupDirs(setupOf(verification))]
+const cleanCmd = `${CLEAN_SH} --commits ${cleanCommits.join(',')} --branch-prefix vajra/${RUN}/ --allow ${cleanAllow.join(',')}`
+const cleanup = { ran: false, command: cleanCmd, removed: [], kept: [], error: '' }
+{
+  const cl = await step('cleanup', 'abhimanyu',
+    'Remove the git worktrees this delivery used. Run exactly this one shell command from the repository root of the current ' +
+    'checkout (your working directory), and nothing else. Do not edit, move or delete any file yourself, and do not run any other ' +
+    'git command: the script decides what is safe to remove and keeps everything else.\n' + commandsBlock([[cleanCmd]]) +
+    "exit_code = the command's exit code. lines = every line it printed, unchanged and in order.\n",
+    S.Cleanup, 'Deliver')
+  if (!cl.ok) cleanup.error = cl.error
+  else if (cl.out.exit_code !== 0) cleanup.error = `the cleanup script exited ${cl.out.exit_code}` + (cl.out.lines.length ? ': ' + oneLine(cl.out.lines.join(' | '), 200) : '')
+  else {
+    cleanup.ran = true
+    for (const raw of cl.out.lines) {
+      const l = oneLine(raw, 800).replace(/`/g, '')
+      let m = l.match(/^removed (\/.+)$/)
+      if (m) { cleanup.removed.push(m[1]); continue }
+      m = l.match(/^kept (\/.+?): (.+)$/)
+      if (m) cleanup.kept.push({ path: m[1], reason: oneLine(m[2], 300) })
+    }
+  }
+  if (!cleanup.ran) { campaignNotes.push('worktree cleanup did not run: ' + oneLine(cleanup.error, 300)); log('worktree cleanup failed; continuing') }
+  else log(`worktree cleanup: ${cleanup.removed.length} removed, ${cleanup.kept.length} kept`)
+}
+
 // A reviewer risk that only says it did not run the tests is answered by vidura's evidence (every criterion passed,
 // with a re-runnable command); it is replaced by one note instead of being reported as open.
 const unrun = []
@@ -862,6 +926,18 @@ md.push(`- Merge it yourself when satisfied: \`git merge --no-ff ${merge.branch}
 md.push('', '## Cleanup', `- This run's work branches are \`git branch --list 'vajra/${RUN}/*'\`. After you merge or drop the delivery, delete them with ` +
   `\`git for-each-ref --format='%(refname:short)' 'refs/heads/vajra/${RUN}/' | xargs git branch -D\`.` +
   (BASE !== ORIGIN ? ` Earlier runs of this campaign left their own \`vajra/<run>/*\` branches (see \`git branch --list 'vajra/*'\`).` : ''))
+if (cleanup.ran) {
+  md.push(`- Worktrees: removed ${cleanup.removed.length} that this run used` + (cleanup.kept.length ? `, kept ${cleanup.kept.length}:` : '.'))
+  for (const k of cleanup.kept.slice(0, 20)) {
+    md.push(`  - \`${k.path}\`: ${k.reason}. Look with \`git -C ${sq(k.path, 500)} status\`; when nothing there is needed, ` +
+      `\`git worktree remove --force ${sq(k.path, 500)} && git worktree prune\`.`)
+  }
+  if (cleanup.kept.length > 20) md.push(`  - and ${cleanup.kept.length - 20} more (\`git worktree list\`)`)
+} else {
+  md.push(`- Worktrees: the automatic cleanup did not run (${oneLine(cleanup.error, 200)}). This run's worktrees are under \`.claude/worktrees/\` ` +
+    `(\`git worktree list\`). Remove each one you no longer need with \`git worktree remove --force <path>\`, then \`git worktree prune\`, ` +
+    `or rerun \`${cleanCmd}\`.`)
+}
 md.push('', '## Open risks')
 if (risks.length) for (const r of risks) md.push(`- ${r}`); else md.push('- none reported')
 if (pending.length) {
@@ -877,5 +953,5 @@ return {
   commit: merge.commit,
   report: md.join('\n'),
   pending_approval: pending.map((x) => (x.action === 'deploy' && deployPlan ? Object.assign({}, x, { plan: deployPlan }) : x)),
-  artifacts: { understanding, plan, changes, merge, verification, reviews, campaign: CAMPAIGN, knowledge },
+  artifacts: { understanding, plan, changes, merge, verification, reviews, campaign: CAMPAIGN, knowledge, cleanup },
 }

@@ -97,6 +97,7 @@ When building any UI, draw on the patterns these products are known for:
 - Motion: animated arrows, hover animation on everything
 - Copy: em dashes, "It's not X, it's Y", fake testimonials
 - Always ship: real product demos, skeleton loaders, and on public sites a Terms of Service and Privacy Policy
+- UX checklist: build to rules 31 to 47 of that file; Vidura checks every one after each UI change
 
 ## Design Toolchain
 
@@ -135,7 +136,8 @@ I then hand off to Vidura — I don't sign off on my own UI.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
+- `frontend-designer` — Direction, UX checklist and gate-web for any page or UI (primary)
 - `design-system` — Design token architecture and component specs (primary)
 - `lld` — Low-Level Design for components (primary)
 - `code-review` — Frontend code review (secondary)

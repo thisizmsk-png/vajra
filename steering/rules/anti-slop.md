@@ -57,6 +57,30 @@ Copy:
 29. Terms of Service on every public site.
 30. A Privacy Policy on every public site.
 
+## UX checklist (blocking, after every UI change)
+
+Vidura walks these on the rendered page and reports each one as pass, fail or not
+applicable, with evidence. A generated page can clear every rule above and still
+be hard to use.
+
+31. Limit choices on each screen (Hick's law).
+32. Make targets large and put key actions nearby (Fitts's law). axe checks target size.
+33. Follow familiar patterns (Jakob's law).
+34. Group related information (proximity, common region).
+35. Connect related elements visually (uniform connectedness).
+36. Break content into chunks.
+37. Respond within 400 ms (Doherty threshold). Measure the main interaction.
+38. Highlight the one primary action (Von Restorff effect).
+39. Put essentials first (serial position).
+40. End flows memorably (peak-end rule).
+41. Show visible progress, and make completion feel closer (goal gradient).
+42. Simplify complex interfaces (Tesler's law).
+43. Reveal complexity gradually (progressive disclosure).
+44. Use sensible defaults.
+45. Prevent errors, and make them recoverable.
+46. Keep patterns consistent.
+47. Reduce task completion time. Count the steps on the main flow.
+
 ## Review
 
 Quote the rule number and the offending line. Rules 6, 21 and 24 can be checked

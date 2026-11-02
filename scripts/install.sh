@@ -8,7 +8,8 @@
 #   2. creates ~/.claude/vajra (mode 700) and a real HMAC key (openssl rand -hex 32, mode 600)
 #   3. merges hooks/hooks.json into ~/.claude/settings.json: backed up first,
 #      idempotent, keeps every non-Vajra hook (skip with --no-hooks)
-#   4. copies workflows/vajra-*.js to ~/.claude/workflows/
+#   4. copies workflows/vajra-*.js to ~/.claude/workflows/ and lists the ones
+#      that changed (restart Claude Code afterwards: it loads them at startup)
 #   5. verifies the shipped files against manifest.json and signs the manifest
 #      on this machine (~/.claude/vajra/manifest.sig) with your key
 #
@@ -25,7 +26,7 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=1 ;;
     --no-hooks) NO_HOOKS=1 ;;
     --unregister-hooks) UNREGISTER=1 ;;
-    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 64 ;;
   esac
 done
@@ -179,16 +180,20 @@ fi
 
 # --- 4. Workflows ------------------------------------------------------------
 say "[4/5] Workflows"
-WF_COUNT=0
+WF_COUNT=0 WF_CHANGED=""
 for wf in "${VAJRA_SKILL}"/workflows/vajra-*.js; do
   [ -f "$wf" ] || continue
   WF_COUNT=$((WF_COUNT + 1))
-  dest="${WF_DIR}/$(basename "$wf")"
+  name="$(basename "$wf")"
+  dest="${WF_DIR}/${name}"
   if [ -f "$dest" ] && cmp -s "$wf" "$dest"; then continue; fi
-  if [ "$DRY_RUN" = 1 ]; then plan "copy $(basename "$wf") to ${WF_DIR}/"; continue; fi
+  if [ -f "$dest" ]; then how="updated"; else how="new"; fi
+  WF_CHANGED="${WF_CHANGED}${name} (${how})
+"
+  if [ "$DRY_RUN" = 1 ]; then plan "copy ${name} to ${WF_DIR}/ (${how})"; continue; fi
   mkdir -p "$WF_DIR"
   cp "$wf" "$dest"
-  say "  installed $(basename "$wf")"
+  say "  installed ${name} (${how})"
 done
 [ "$WF_COUNT" -gt 0 ] && say "  ${WF_COUNT} workflow(s) in ${WF_DIR}" || say "  no workflows shipped in this checkout"
 MISSING_AGENTS="$(missing_agents "${VAJRA_SKILL}/workflows" "${HOME}/.claude/agents")"
@@ -229,5 +234,16 @@ say ""
 say "=== Vajra installed$([ "$DRY_RUN" = 1 ] && echo ' (dry run: nothing changed)') ==="
 say "  Skill: ${VAJRA_SKILL}"
 say "  State: ${VAJRA_HOME}"
+if [ -n "$WF_CHANGED" ]; then
+  say "  Workflows $([ "$DRY_RUN" = 1 ] && echo 'that would change' || echo 'changed') in this install:"
+  printf '%s' "$WF_CHANGED" | sed 's/^/    /'
+else
+  say "  Workflows: none changed in this install"
+fi
 say "Check the wiring: bash ${VAJRA_SKILL}/scripts/vajra-doctor.sh"
-say "Restart Claude Code so it loads the hooks. Turn on the OS sandbox too: /sandbox"
+say ""
+say "RESTART CLAUDE CODE NOW: quit every running session and start it again."
+say "Claude Code loads hooks and saved workflows only at session start, so a session"
+say "that is already running keeps the OLD hooks and keeps executing the OLD workflows"
+say "(for example /vajra still runs the previous vajra-deliver) until it is restarted."
+say "Turn on the OS sandbox too: /sandbox"

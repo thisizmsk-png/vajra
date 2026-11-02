@@ -1,0 +1,497 @@
+{
+  "$comment": "Third-party skills Vajra routes to and does not ship. scripts/vajra_skills.py installs only names listed here, at the pinned commit and sha256. tools are not installed; the router passes on how to use them.",
+  "schemaVersion": 1,
+  "skills": {
+    "apple-design": {
+      "repo": "emilkowalski/skills",
+      "commit": "a81dbca07f2217b7103e510c0f13f8d5b017afc9",
+      "path": "skills/apple-design",
+      "license": "MIT",
+      "verdict": "caution",
+      "conditions": "Motion physics only. Never imitate Apple's look and never ship SF fonts.",
+      "sha256": "98d8500d563c190cc1dc4a5cea03f84c45df85b5f20a9500b6047fd06bbd2c2b"
+    },
+    "audit": {
+      "repo": "pbakaus/impeccable",
+      "commit": "209444a9d552c18bcaa74e26bf66a25fc568a767",
+      "path": ".claude/skills/audit",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "2fac5ebe3168692c3d44f5da6183555d0e633c664904216f95b75d07808ac16a"
+    },
+    "autoresearch": {
+      "repo": "uditgoenka/autoresearch",
+      "commit": "e3d66766574df6d5013a7262a8ff7950f91136ef",
+      "path": "skills/autoresearch",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "4b42f66000902adb1398c69304d54bd7bd96a0d66cddc54a130cf61e193fe3cd"
+    },
+    "banner-design": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "9dea1bc76f4eceb825abd0b399982bcbb473b920",
+      "path": ".claude/skills/banner-design",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "79ebc32ac2e0a7150044cc3988d99d0b03e910f7241ac6e2766f6cdfa739a071"
+    },
+    "brand": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "6512820396c580a4b03f5f5cae9c620846a1a00b",
+      "path": ".claude/skills/brand",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "073224e40ee114340e9c074063948d9e1b3e1e5aa3552761167c3c53cfeda10b"
+    },
+    "canvas-design": {
+      "repo": "anthropics/skills",
+      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "path": "skills/canvas-design",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "be01b0be9391babd6e2f708f5506a91dcabb0e3fabbaa3db79b0eec9e168496f"
+    },
+    "claude-youtube": {
+      "repo": "AgriciDaniel/claude-youtube",
+      "commit": "84c3fa6805200632fadb4fe2795ef265511271c7",
+      "path": "skills/claude-youtube",
+      "license": "MIT",
+      "verdict": "caution",
+      "conditions": "Own channel, read-only scopes. Skip yt-dlp.",
+      "sha256": "bf7c6e4831945c80c260d087cbbd820449bc0150d0faceebedafe61a7763891f"
+    },
+    "composition-patterns": {
+      "repo": "vercel-labs/agent-skills",
+      "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "path": "skills/composition-patterns",
+      "license": "MIT in frontmatter, no repo licence",
+      "verdict": "as-bundled",
+      "sha256": "44e80cd76b17822bdd40d7c21cf1720bec6cb29a124cef18b945d8da4cb3a2e9"
+    },
+    "design": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "9dea1bc76f4eceb825abd0b399982bcbb473b920",
+      "path": ".claude/skills/design",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "33259d7941d43b7119d4999dfa2123d541b22df3cb5c8d9f4103d5f9a19c374e"
+    },
+    "design-motion-principles": {
+      "repo": "kylezantos/design-motion-principles",
+      "commit": "4a9ca879f24a361f4dca4174fe2da0f67b5ddee3",
+      "path": "skills/design-motion-principles",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Replace Geist Mono in its report.",
+      "sha256": "c6274e2c83297e583d0814bee60833cf9963f301e07450471c080f6e665ab7f6"
+    },
+    "design-system": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "4f78df83ef1c22a76418fe9b2b924cb23f9472a4",
+      "path": ".claude/skills/design-system",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "cc9e9b0172cb8258d6183149d8432e79071f65e3fea35a3e74df34258a8b9ff1"
+    },
+    "differential-review": {
+      "repo": "trailofbits/skills",
+      "commit": "38793f6757fd5302cf4d306dd1366e52ca1cf5e4",
+      "path": "plugins/differential-review/skills/differential-review",
+      "license": "CC-BY-SA-4.0",
+      "verdict": "as-bundled",
+      "allowed_tools": "Read, Write, Grep, Glob, Bash",
+      "sha256": "1269a185e11b8c2059f9270b93910da88f317732d65a1201737407a618c1aab7"
+    },
+    "frontend-design": {
+      "repo": "anthropics/skills",
+      "commit": "5d25128289ff72bc9c7839ac3d245f4d57515447",
+      "path": "skills/frontend-design",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "9af2c59e4f54e7ffe43745cf7614a4d670ad03e9d23b0979ec10962ebbe3f43d"
+    },
+    "git-guardrails-claude-code": {
+      "repo": "mattpocock/skills",
+      "commit": "e38b908fb73e4982eee85b2c6f6928e3b46fa0a6",
+      "path": "skills/misc/git-guardrails-claude-code",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "4510e25bd1a810c59ce1fd7488a835bbc77639d1bf313d087c7124ff718e133b"
+    },
+    "grill-me": {
+      "repo": "mattpocock/skills",
+      "commit": "694fa30311e02c2639942308513555e61ee84a6f",
+      "path": "skills/productivity/grill-me",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "a8c0906a189d9b1bf27fb6e53685f73a7fa209f7bd3b0563e5270251b2c07fdc"
+    },
+    "gsap-core": {
+      "repo": "greensock/gsap-skills",
+      "commit": "aed9cfd3277740755f6bfc1155c7aa645403b760",
+      "path": "skills/gsap-core",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Skill text only. The user installs GSAP in that project, and it never goes in Vajra.",
+      "sha256": "bd0ddc955851d398b2d7c842dc272a9ca0973e677e85ba8a28693189719dcb01"
+    },
+    "gsap-scrolltrigger": {
+      "repo": "greensock/gsap-skills",
+      "commit": "aed9cfd3277740755f6bfc1155c7aa645403b760",
+      "path": "skills/gsap-scrolltrigger",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Skill text only. The user installs GSAP in that project, and it never goes in Vajra.",
+      "sha256": "d4eb96220fd06d8c2cbeb950baf8f73e4411f50c95941c8216952ea240521a05"
+    },
+    "hallmark": {
+      "repo": "Nutlope/hallmark",
+      "commit": "4f6a46c6dc325d40ab268c93e25c7b96676ebccd",
+      "path": "skills/hallmark",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "New pages only.",
+      "sha256": "19b1164edf1647c39e77a13db5b92cc9bd4730eaa2e1e6beb35e8f5340bbbd00"
+    },
+    "ig-reel": {
+      "repo": "Jakeschincariol/instagram-agent-skill",
+      "commit": "d03c56bb598be770c60b201f94237e5d1a4268a6",
+      "path": "skills/ig-reel",
+      "license": "MIT",
+      "verdict": "caution",
+      "conditions": "Drafts only. The user pastes metrics; no logged-in browser.",
+      "sha256": "0b8585406afdddf9fa3c4e5b1bd39419a11275decb5e9b25c061c2b3e19a8429"
+    },
+    "impeccable": {
+      "repo": "pbakaus/impeccable",
+      "commit": "e89e3ada3e875a89ac2c5d33d11e65ebef6fe285",
+      "path": ".claude/skills/impeccable",
+      "license": "Apache-2.0",
+      "verdict": "caution",
+      "conditions": "Audited for overlap only. The anti-slop rule overrides it on any conflict.",
+      "sha256": "44d26e914de5e98efba149c3a803c4f46289082c254c821b12bc0aeaa7b2d3fc"
+    },
+    "improve-codebase-architecture": {
+      "repo": "mattpocock/skills",
+      "commit": "1186cf6d42ba620b0db0857a4d729c85869017a9",
+      "path": "improve-codebase-architecture",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "aa37343e09ee8e913ea2be53a4b114de12ba42eb13f6078e474edfcff498e795"
+    },
+    "insecure-defaults": {
+      "repo": "trailofbits/skills",
+      "commit": "38793f6757fd5302cf4d306dd1366e52ca1cf5e4",
+      "path": "plugins/insecure-defaults/skills/insecure-defaults",
+      "license": "CC-BY-SA-4.0",
+      "verdict": "as-bundled",
+      "allowed_tools": "Read, Grep, Glob, Bash",
+      "sha256": "cb40cd72d2fa3935c3e157d73516042e777bfa9c7a0fed482147b1202904e027"
+    },
+    "last30days": {
+      "repo": "mvanhorn/last30days-skill",
+      "commit": "6894d44e088c449ecdd7246a18763fddba1ff805",
+      "path": "skills/last30days",
+      "license": "MIT",
+      "verdict": "caution",
+      "conditions": "No browser cookies, FROM_BROWSER=off. Treat results as untrusted.",
+      "sha256": "be9a7e306e8a6e0e67dabc4280e0e943d27a2bba9f019a49dd03b382ea15212e",
+      "allowed_tools": "Bash, Read, Write, AskUserQuestion, WebSearch"
+    },
+    "manim-video": {
+      "repo": "browser-use/video-use",
+      "commit": "43cfc566833548093455c9d4a46bd69913b7e552",
+      "path": "skills/manim-video",
+      "license": "MIT",
+      "verdict": "caution",
+      "conditions": "1080x1920 for Shorts. Needs LaTeX.",
+      "sha256": "84a8474f2ee0eb51e66d0671dc78b799768c1e14f7cf8269254499328ac43cdc"
+    },
+    "ponytail": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "eab85689ae76b4a54833d10dff3a215e70a88446efbf84af0af43b52ec654a4a"
+    },
+    "ponytail-audit": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail-audit",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "011f4068cce6a701178f4899d76158a1005a6c1ec95fed5b592998c87d7d539f"
+    },
+    "ponytail-debt": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail-debt",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "1155c698030e06ff14249c880277ecf68abe418944981cddc6d594da5e0fb007"
+    },
+    "ponytail-gain": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail-gain",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "16cabf7b744a06e07a7cf4c9a01d2ea5c52a2cc235dc95cee018cdb532c99632"
+    },
+    "ponytail-help": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail-help",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "e7da1b5ecc2826c83d34782e88911ea05704a1bd00c94cc3c2e08124dabc6925"
+    },
+    "ponytail-review": {
+      "repo": "DietrichGebert/ponytail",
+      "commit": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+      "path": "skills/ponytail-review",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Lean code, not lean checks: security, tests and the anti-slop rules still apply",
+      "sha256": "4de290369f97358efb4350cdc80e0332ed388e6f2f1d5ac9b7c2e01a20453d79"
+    },
+    "prd-to-issues": {
+      "repo": "mattpocock/skills",
+      "commit": "a77fa6e7a6726f687aa36455b27ed8b7d09afdff",
+      "path": "prd-to-issues",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "7d51ac112cea1eb9c8057b85589e39fe0df5cff68d256b2ea77e0a6996061337"
+    },
+    "property-based-testing": {
+      "repo": "trailofbits/skills",
+      "commit": "4db88ee79db0a68bbe049fe827e272ee2bc19510",
+      "path": "plugins/property-based-testing/skills/property-based-testing",
+      "license": "CC-BY-SA-4.0",
+      "verdict": "as-bundled",
+      "sha256": "a6dd612700d4075cb47585ec06746ca935147af0b3616bbccf193b4aa5106460"
+    },
+    "react-best-practices": {
+      "repo": "vercel-labs/agent-skills",
+      "commit": "5847a7c7e79bab3e400cf47800b83449d7aea2d4",
+      "path": "skills/react-best-practices",
+      "license": "MIT in frontmatter, no repo licence",
+      "verdict": "as-bundled",
+      "sha256": "53c0d7231033ca2c02b5b7f11eb32d032f1d5b1409bf1f22ba0b93ee5791ea20"
+    },
+    "sentry-code-simplifier": {
+      "repo": "getsentry/skills",
+      "commit": "d12f250460ffd961f549dbebf7eeb0cf4afd4c2e",
+      "path": "skills/code-simplifier",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "9b8d5db255698e0da524060899e370e27d9780e596635241adf0ed7e4239517e"
+    },
+    "sentry-find-bugs": {
+      "repo": "getsentry/skills",
+      "commit": "d12f250460ffd961f549dbebf7eeb0cf4afd4c2e",
+      "path": "skills/find-bugs",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "71fa7deb20cc09e8385ee9c1601e3e24b287dbde0e58672d52fac0f8bb534b76"
+    },
+    "sentry-gha-security-review": {
+      "repo": "getsentry/skills",
+      "commit": "e7a87fa72645158f9b5e722cbb1c7e09266f48f1",
+      "path": "skills/gha-security-review",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "allowed_tools": "Read, Grep, Glob, Bash, Task",
+      "sha256": "8b999c5d64217fdf71471eabd3ccc63b9eb32dbd8695ef919513f1d190df2557"
+    },
+    "sentry-security-review": {
+      "repo": "getsentry/skills",
+      "commit": "9c0e34277f1b8f9a51e309551618cee81b3d5023",
+      "path": "plugins/sentry-skills/skills/security-review",
+      "license": "CC-BY-SA-4.0",
+      "verdict": "as-bundled",
+      "allowed_tools": "Read, Grep, Glob, Bash, Task",
+      "sha256": "1370a1df093c9b310488f7157c3a352ded3ed849527bd532f32bd23091ddbc07"
+    },
+    "slides": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "f32d6a61cdf0bfd57404c45854583fd19ff95088",
+      "path": ".claude/skills/slides",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "926ee11935c6f5cfd88f799ab12ad662a7b6b7f588c6a9d111587efde00ab881"
+    },
+    "theme-factory": {
+      "repo": "anthropics/skills",
+      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "path": "skills/theme-factory",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "f742bb6e895f4d075f586e3e418862fd07dd1895a0d3626b36a350e05a94847f"
+    },
+    "threejs-animation": {
+      "repo": "CloudAI-X/threejs-skills",
+      "commit": "0e181866f095b5f06d005133876e926515390d95",
+      "path": "skills/threejs-animation",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "The anti-slop rule still applies.",
+      "sha256": "42e5b5da6360952b196d6afc8bb92933f720411932f94ee49101631e2b291ed2"
+    },
+    "threejs-fundamentals": {
+      "repo": "CloudAI-X/threejs-skills",
+      "commit": "0e181866f095b5f06d005133876e926515390d95",
+      "path": "skills/threejs-fundamentals",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "The anti-slop rule still applies.",
+      "sha256": "a65c5f50aa459ac418d81846a02b77f0a5d5fa47d470847537f358d799317f36"
+    },
+    "threejs-shaders": {
+      "repo": "CloudAI-X/threejs-skills",
+      "commit": "0e181866f095b5f06d005133876e926515390d95",
+      "path": "skills/threejs-shaders",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "The anti-slop rule still applies.",
+      "sha256": "49a08f321ba636f686044c93684ebced66ceb178458d5a86853e422fa64650bd"
+    },
+    "ubiquitous-language": {
+      "repo": "mattpocock/skills",
+      "commit": "1186cf6d42ba620b0db0857a4d729c85869017a9",
+      "path": "ubiquitous-language",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "8f767570ba6bca83d3c45ec7e580341fb9f049529f5956a358fa20674cee018e"
+    },
+    "ui-styling": {
+      "repo": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "commit": "1c2cb32e2ff7313400c7c7792bc5abe351271cdc",
+      "path": ".claude/skills/ui-styling",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "c41a94f00d66aee4f2bc10034fef6a010b3b2ea5b0aa8dbb28d50e6726bd09a3"
+    },
+    "web-artifacts-builder": {
+      "repo": "anthropics/skills",
+      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "path": "skills/web-artifacts-builder",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "d361ba134eed34d687d2827ea408b500201d69db84ecc032f9701fe83cc8cf2d"
+    },
+    "web-design-guidelines": {
+      "repo": "vercel-labs/agent-skills",
+      "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "path": "skills/web-design-guidelines",
+      "license": "MIT in frontmatter, no repo licence",
+      "verdict": "as-bundled",
+      "sha256": "69c965d4cb83b90d1e8aaa1a3a284bc0172082b9263585727300188907e5fd9c"
+    },
+    "webapp-testing": {
+      "repo": "anthropics/skills",
+      "commit": "ef740771ac901e03fbca3ce4e1c453a96010f30a",
+      "path": "skills/webapp-testing",
+      "license": "Apache-2.0",
+      "verdict": "as-bundled",
+      "sha256": "faf09f4d86edd449358589a09ab54495f803bb8fd28a06027a316a18599344d5"
+    },
+    "writing-plans": {
+      "repo": "obra/superpowers",
+      "commit": "e7a2d16476bf042e9add4699c9d018a90f86e4a6",
+      "path": "skills/writing-plans",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "a4503f6c9625e78f0c03d2905e274dcc34fe0aa4753a4d62795a7ded450ee5fe"
+    },
+    "writing-skills": {
+      "repo": "obra/superpowers",
+      "commit": "bc2558c3f9f097fcd84a6d3eb7924389eaebc378",
+      "path": "skills/writing-skills",
+      "license": "MIT",
+      "verdict": "as-bundled",
+      "sha256": "ced835ca2006767b29e42b0da98ceafa46681329d1fb92e230d159546592f7db"
+    },
+    "yt-viral": {
+      "repo": "Jakeschincariol/youtube-agent-skill",
+      "commit": "a2feb2104981a375ffd4f87ee04f4f5344ac43c6",
+      "path": "skills/yt-viral",
+      "license": "MIT",
+      "verdict": "safe",
+      "conditions": "Drafts only. Copy hook structure, never transcripts.",
+      "sha256": "8ad9842924664e9251e5741f7cc4bebf1f99e58d071c366d84059a59ff60b73f"
+    }
+  },
+  "tools": {
+    "anatomy": {
+      "how": "Figures as HTML, SVG, PNG or PDF, not video.",
+      "status": "later"
+    },
+    "app-store-screenshots": {
+      "how": "Per project in a separate folder at 5386f22. Delete public/frames and mockup.png for cross-platform apps.",
+      "status": "per project"
+    },
+    "brandmd": {
+      "how": "Your own sites only. No --vision or --agent.",
+      "status": "later"
+    },
+    "chrome-devtools-mcp": {
+      "how": "Pin 1.12.0 with --no-usage-statistics --no-performance-crux --redact-network-headers --no-file-navigations --isolated. Never --autoConnect.",
+      "status": "only when needed"
+    },
+    "design-dna": {
+      "how": "Image to tokens only, audited at 593e39b, with real-asset fetching removed and sharp pinned.",
+      "status": "later"
+    },
+    "design-md-lint": {
+      "how": "Run the Google design.md linter pinned at 6e5da53 after DESIGN.md is written.",
+      "status": "with routing"
+    },
+    "earshot": {
+      "how": "Fresh venv, EARSHOT_OFFLINE=1 after the first fetch, no Gemini key, code recipes first, every licence logged.",
+      "status": "trial"
+    },
+    "ffmpeg-skill": {
+      "how": "Pin 3.1.1 and diff the npm tarball first. Only if the project's own ffmpeg code falls short.",
+      "status": "trial"
+    },
+    "ghost-editor": {
+      "how": "Sandbox, dedicated key, no --describe, no Google audit on private footage. A person approves cuts.",
+      "status": "only with recordings"
+    },
+    "hyperframes": {
+      "how": "DO_NOT_TRACK=1, HYPERFRAMES_NO_AUTO_INSTALL=1, trusted projects only, signed out of HeyGen.",
+      "status": "trial"
+    },
+    "kokoro": {
+      "how": "Local narration from hexgrad/kokoro at dfb907a. One listen against the current voice. Do not redistribute its GPL dependencies.",
+      "status": "trial"
+    },
+    "mcp-builder": {
+      "how": "From anthropics/skills. Audit it first, and only when a real tool needs a connector.",
+      "status": "on demand"
+    },
+    "playwright-mcp": {
+      "how": "Screenshots at 375, 768 and 1440 px, then read them.",
+      "status": "default"
+    },
+    "scrapecreators": {
+      "how": "Optional. A dedicated key with a spend cap, only when free sources fall short.",
+      "status": "optional"
+    },
+    "shadcn-mcp": {
+      "how": "Add the shadcn MCP per project, on shadcn stacks only.",
+      "status": "after a trial"
+    },
+    "video-shotcraft": {
+      "how": "Read demos/data from Vincentwei1021/video-shotcraft at 1266a3e. Rework to 9:16 and never use its audio.",
+      "status": "trial"
+    }
+  }
+}

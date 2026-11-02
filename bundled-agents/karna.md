@@ -73,7 +73,7 @@ I am generous with knowledge — sharing models and insights freely.
 
 ## Skills
 
-Repo skills, loaded on demand with the Skill tool:
+Repo skills, loaded on demand with the Skill tool. If one is missing, `skill-catalog` installs it:
 
 - `backtest-validation` — Backtesting methodology (primary)
 - `lld` — Low-Level Design for math engines (primary)

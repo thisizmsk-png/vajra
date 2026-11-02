@@ -36,7 +36,7 @@ points at the file that does it and the test that checks it.
   ├─ verify    vidura runs a real check per criterion; arjuna (and bhishma for security) review read-only
   ├─ fix       failing criteria go back to their owning task, at most 3 rounds
   └─ deliver   one local branch + report with evidence per criterion; the delivery, decisions and
-               fix-round lessons are written back to the ledger
+               fix-round lessons are written back to the ledger; the run's clean worktrees are removed
 ```
 
 Progress is a campaign on disk, so `/vajra continue` resumes a long delivery in
@@ -87,6 +87,14 @@ git -C ~/.claude/skills/vajra pull
 bash ~/.claude/skills/vajra/scripts/install.sh
 bash ~/.claude/skills/vajra/scripts/vajra-doctor.sh
 ```
+
+Then **restart Claude Code** (quit every running session and start it again).
+Claude Code loads hooks and saved workflows only at session start, so a session
+that was already running keeps the old hooks and keeps executing the old
+workflows (`/vajra` would still run the previous `vajra-deliver`) until it is
+restarted. The installer lists the workflow files that changed, and
+`vajra-doctor.sh` warns about a stale install when `~/.claude/workflows/vajra-*.js`
+differ from the skill's `workflows/`.
 
 **Needs:** Claude Code with hooks and saved workflows (docs checked against
 2.1.296), git, bash, python3, jq and openssl, on macOS or Linux/WSL2. The

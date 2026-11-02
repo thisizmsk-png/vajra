@@ -25,6 +25,12 @@ echo k > "$VS/.hmac-key"; echo '{}' > "$H/.claude/settings.json"
 PROJ="$H/proj"; mkdir -p "$PROJ/src" "$PROJ/node_modules"
 ln -s "$SKILL/hooks" "$PROJ/hooklink"
 ln -s "$H/.claude/settings.json" "$PROJ/settings-link"
+# Copy-out fixtures: protected sources, an outside destination, symlinked destinations.
+echo "// wf" > "$H/.claude/workflows/vajra-deliver.js"; echo "// wf" > "$H/.claude/workflows/vajra-sabha.js"
+echo "# bhima" > "$H/.claude/agents/bhima.md"; echo "# skill" > "$SKILL/SKILL.md"
+mkdir -p "$H/Development/x/.git" "$PROJ/out" "$PROJ/.claude"
+ln -s "$H/.claude/workflows" "$PROJ/wflink"
+ln -s "$SKILL/SKILL.md" "$PROJ/skillmd-link"
 
 PASS=0; FAIL=0
 judge() { # expect desc rc
@@ -240,9 +246,66 @@ bash_case ALLOW "tar project"               'tar czf /tmp/p.tgz src'
 bash_case ALLOW "tar extract into HOME/x"   'tar -xzf /tmp/p.tgz -C /tmp/out'
 bash_case ALLOW "cp -r into HOME"           'cp -r src ~/backup-src'
 bash_case ALLOW "rsync project to tmp"      'rsync -a src/ /tmp/src/'
+# --- Copiers: protected SOURCES may be read out; nothing may be copied IN ----
+bash_case ALLOW "cp workflow out (live repro)" "cp ~/.claude/workflows/vajra-deliver.js ~/Development/x/.git/copy.js"
+bash_case ALLOW "cp -p hook out"             "cp -p $SKILL/hooks/pre-tool-use.sh out/guard.sh"
+bash_case ALLOW "cp -R skill subdir out"     "cp -R ~/.claude/skills/vajra/hooks out/hooks-copy"
+bash_case ALLOW "cp glob of workflows out"   "cp ~/.claude/workflows/vajra-*.js out/"
+bash_case ALLOW "cp settings.json backup"    "cp ~/.claude/settings.json out/settings.backup.json"
+bash_case ALLOW "cp -t outside dir"          "cp -t out ~/.claude/workflows/vajra-deliver.js"
+bash_case ALLOW "cp --target-directory=out"  "cp --target-directory=out ~/.claude/agents/bhima.md"
+bash_case ALLOW "cp -- protected src"        "cp -- ~/.claude/agents/bhima.md out/b.md"
+bash_case ALLOW "rsync -a agents out"        "rsync -a --delete ~/.claude/agents/ out/agents/"
+bash_case ALLOW "ditto hooks out"            "ditto ~/.claude/skills/vajra/hooks out/h2"
+bash_case ALLOW "install -m 644 out"         "install -m 644 ~/.claude/workflows/vajra-deliver.js out/wf.js"
+bash_case ALLOW "cp audit log out"           "cp ~/.claude/vajra/audit.log /tmp/audit-copy.log"
+bash_case ALLOW "cp to unprotected ~/.claude file" "cp ~/.claude/agents/bhima.md ~/.claude/scratch-bhima.md"
+bash_case BLOCK "cp key out"                 "cp ~/.claude/vajra/.hmac-key /tmp/k"
+bash_case BLOCK "cp -r key dir out"          "cp -r ~/.claude/vajra/ /tmp/v2"
+bash_case BLOCK "cp -r ~/.claude out"        "cp -r ~/.claude /tmp/c"
+bash_case BLOCK "rsync -a key ancestor HOME" "rsync -a ~/ /tmp/h2/"
+bash_case BLOCK "install key dir out"        "install ~/.claude/vajra /tmp/v3"
+bash_case BLOCK "ditto ~/.claude out"        "ditto ~/.claude /tmp/c2"
+bash_case BLOCK "cp ancestor (skills) out"   "cp -R ~/.claude/skills /tmp/s"
+bash_case BLOCK "cp protected -> protected"  "cp ~/.claude/workflows/vajra-deliver.js ~/.claude/workflows/vajra-sabha.js"
+bash_case BLOCK "cp protected -> its dir"    "cp ~/.claude/agents/bhima.md ~/.claude/agents/"
+bash_case BLOCK "cp into ~/.claude/ (dir)"   "cp ~/.claude/agents/bhima.md ~/.claude/"
+bash_case BLOCK "cp into HOME root"          "cp ~/.claude/agents/bhima.md ~"
+bash_case BLOCK "cp -t protected dir"        "cp -t ~/.claude/agents ~/.claude/skills/vajra/SKILL.md"
+bash_case BLOCK "cp -t protected (plain)"    "cp -t ~/.claude/agents evil.md"
+bash_case BLOCK "cp -t attached"             "cp -t$H/.claude/agents evil.md"
+bash_case BLOCK "cp -rt cluster"             "cp -rt ~/.claude/agents src"
+bash_case BLOCK "cp --target-directory=prot" "cp --target-directory=$H/.claude/agents evil.md"
+bash_case BLOCK "cp --target-directory prot" "cp --target-directory ~/.claude/agents ~/.claude/workflows/vajra-deliver.js"
+bash_case BLOCK "cp --target abbreviation"   "cp --target ~/.claude/agents ~/.claude/workflows/vajra-deliver.js"
+bash_case BLOCK "install -t protected"       "install -t ~/.claude/agents ~/.claude/workflows/vajra-deliver.js"
+bash_case BLOCK "symlinked dest dir"         "cp ~/.claude/agents/bhima.md wflink/"
+bash_case BLOCK "symlinked dest file"        "cp ~/.claude/agents/bhima.md skillmd-link"
+bash_case BLOCK "symlinked dest into core"   "cp ~/.claude/agents/bhima.md hooklink/x.sh"
+bash_case BLOCK "dest is project settings"   "cp ~/.claude/skills/vajra/SKILL.md .claude/settings.json"
+bash_case BLOCK "dest dir + settings name"   "cp ~/.claude/settings.json .claude/"
+bash_case BLOCK "cp -l hard link out"        "cp -l $SKILL/hooks/pre-tool-use.sh out/hl"
+bash_case BLOCK "cp -al hard link cluster"   "cp -al ~/.claude/skills/vajra/hooks out/hl2"
+bash_case BLOCK "cp -s symlink out"          "cp -s ~/.claude/agents/bhima.md out/sl"
+bash_case BLOCK "cp --link out"              "cp --link ~/.claude/agents/bhima.md out/hl3"
+bash_case BLOCK "cp --parents"               "cp --parents ~/.claude/agents/bhima.md out"
+bash_case BLOCK "rsync --remove-source-files" "rsync --remove-source-files ~/.claude/agents/bhima.md out/"
+bash_case BLOCK "rsync --link-dest=protected" "rsync -a --link-dest=$H/.claude/agents src/ out/x/"
+bash_case BLOCK "rsync -R relative"          "rsync -R ~/.claude/agents/bhima.md out/"
+bash_case BLOCK "rsync to remote host"       "rsync -a ~/.claude/agents/ host.example:/tmp/a/"
+bash_case BLOCK "rsync --log-file value"     "rsync -a --log-file ~/.claude/vajra/audit.log src/ out/y/"
+bash_case BLOCK "rsync --log-file=value"     "rsync -a --log-file=$H/.claude/vajra/audit.log src/ out/y/"
+bash_case BLOCK "rsync -T temp dir value"    "rsync -a -T ~/.claude/agents src/ out/z/"
+bash_case BLOCK "install -d protected"       "install -d ~/.claude/agents/new"
+bash_case BLOCK "cp with no destination"     "cp ~/.claude/agents/bhima.md"
+bash_case BLOCK "cp out + redirect into core" "cp ~/.claude/agents/bhima.md out/b2.md > ~/.claude/agents/x.md"
+bash_case BLOCK "cp out ; then cp back in"   "cp ~/.claude/agents/bhima.md out/b3.md; cp out/b3.md ~/.claude/agents/bhima.md"
+bash_case BLOCK "mv protected out"           "mv ~/.claude/workflows/vajra-deliver.js out/moved.js"
+bash_case BLOCK "VAR= prefix protected"      "X=$H/.claude/agents cp a b"
 bash_case ALLOW "find project | xargs grep" 'find . -name "*.ts" | xargs grep -l TODO'
 bash_case ALLOW "ls ~/.claude/vajra"        'ls -la ~/.claude/vajra'
 bash_case ALLOW "git status in worktree"    'git -C /tmp/wt status && git -C /tmp/wt diff --stat'
+bash_case ALLOW "deliver worktree cleanup"  'bash ~/.claude/skills/vajra/scripts/vajra-worktree-clean.sh --commits b111111,d1111111 --branch-prefix vajra/20261011-0930/ --allow data/walkthroughs,.venv,node_modules'
 
 # --- Fail-closed -----------------------------------------------------------
 raw_case BLOCK "empty payload"             ''
@@ -311,9 +374,18 @@ echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"
 bash_case BLOCK "tamper: touch blocked"    'touch a'
 bash_case ALLOW "tamper: ls allowed"       'ls -la'
+bash_case BLOCK "tamper: copy-out blocked" "cp ~/.claude/agents/bhima.md out/t.md"
 bash_case ALLOW "tamper: doctor allowed"   "bash ~/.claude/skills/vajra/scripts/vajra-doctor.sh"
 file_case ALLOW "tamper: Read allowed"     Read "$PROJ/src/a.ts"
+bash_case BLOCK "tamper: skill add blocked" "python3 -I ~/.claude/skills/vajra/scripts/vajra_skills.py add hallmark"
+bash_case ALLOW "tamper: skill list allowed" "python3 -I ~/.claude/skills/vajra/scripts/vajra_skills.py list"
 rm -f "$VS/.integrity-violation"
+
+# --- Skill pins: installing is allowed, moving a pin is the owner's review ---
+bash_case ALLOW "skill add allowed"        "python3 -I ~/.claude/skills/vajra/scripts/vajra_skills.py add hallmark"
+bash_case BLOCK "skill upstream blocked"   "python3 -I ~/.claude/skills/vajra/scripts/vajra_skills.py upstream --write"
+bash_case BLOCK "skill upstream, dev copy" "python3 scripts/vajra_skills.py upstream --write"
+bash_case BLOCK "skill upstream in chain"  "ls && python3 scripts/vajra_skills.py upstream"
 
 # --- Audit log -------------------------------------------------------------
 grep -q ' BLOCK Bash ' "$VS/audit.log" 2>/dev/null; judge ALLOW "audit log records blocks" $?

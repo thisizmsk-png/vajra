@@ -1,0 +1,111 @@
+name: skill-pins
+
+# Compares each skill pin in config/skills.json with upstream, scans what changed
+# and opens one PR. Nothing updates on its own; a person merges it.
+# Needs the repo setting "Allow GitHub Actions to create pull requests".
+#
+# Three jobs on purpose. The scanner is third-party code, so it runs with no write
+# token, from the pins on the default branch. The job with the token runs nothing
+# from upstream.
+on:
+  schedule:
+    - cron: '0 6 1,15 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Compare pins with upstream
+        run: |
+          mkdir -p out/changed
+          python3 -I scripts/vajra_skills.py upstream --write --dump out/changed > out/report.json
+          cp config/skills.json out/skills.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compare
+          path: out
+          include-hidden-files: true
+
+  scan:
+    needs: compare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: compare
+          path: out
+      - name: Scan changed skills
+        run: |
+          pip install --quiet pyyaml==6.0.2
+          mkdir -p scans
+          for dir in out/changed/*/; do
+            [ -d "$dir" ] || continue
+            python3 -I bundled-skills/sentry-skill-scanner/scripts/scan_skill.py "$dir" \
+              > "scans/$(basename "$dir").json" || true
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scans
+          path: scans
+
+  pr:
+    needs: [compare, scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: compare
+          path: ${{ runner.temp }}/out
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: scans
+          path: ${{ runner.temp }}/scans
+      - name: Open one PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ runner.temp }}/out
+          SCANS: ${{ runner.temp }}/scans
+        run: |
+          python3 -I scripts/skill-pins-summary.py "$OUT/report.json" "$SCANS" > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+          cp "$OUT/skills.json" config/skills.json
+          if ! git diff --quiet config/skills.json; then
+            # Without this, the first session after the merge reports tampering.
+            bash scripts/generate-manifest.sh
+            branch=vajra/skill-pins
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -B "$branch"
+            git add config/skills.json manifest.json
+            git commit -m "skills: move pins to upstream changes"
+            git push --force origin "$branch"
+            number="$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+              --jq '[.[] | select(.isCrossRepository | not)][0].number // empty')"
+            if [ -z "$number" ]; then
+              gh pr create --head "$branch" --title "Skill pin updates" --body-file "$RUNNER_TEMP/body.md"
+            else
+              gh pr edit "$number" --body-file "$RUNNER_TEMP/body.md"
+            fi
+          fi
+          # A deleted repo or a skill that fails a check must show as a failed run.
+          if [ "$(jq '.errors | length' "$OUT/report.json")" != 0 ]; then
+            echo "::error::Some skills could not be checked; see the step summary."
+            exit 1
+          fi

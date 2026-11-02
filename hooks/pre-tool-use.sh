@@ -670,6 +670,116 @@ candidates() { # token cwd
   return 0
 }
 
+# Copiers (cp, gcp, rsync, ditto, install, ginstall) may READ protected
+# sources when they write only outside every protected area. copy_layout parses
+# one copier segment (eval_segment's SEG, n, wi, wb, SEGCWD) and sets
+#   CP_OK=1   the layout is understood and the destination is safe
+#   CP_SRC    " i j ... " token indexes of the source operands
+# Anything it does not model leaves CP_OK=0, so the old rule (only readers may
+# touch protected paths) applies. Unknown long options are assumed to take the
+# next word as their value, so a misparse can only hide a source, never turn a
+# destination or option value into one. Never relaxed: hard or symbolic links
+# (the link would alias the protected file), --parents/--relative, rsync
+# --remove-source-files, remote operands, install -d. The key, its directory and
+# its ancestors stay blocked by the recursive-copy rule above.
+CP_OK=0 CP_SRC=" "
+cp_dest_ok() { # path -> 0 if a copy may land there (not protected, not an ancestor of ~/.claude)
+  canon "$1" "$SEGCWD"
+  classify "$CANON"
+  [ -z "$PKIND" ] || return 1
+  inside "$CL" "$CANON" && return 1
+  key_anc "$CANON" && return 1
+  return 0
+}
+copy_layout() {
+  local c tok opt j ch want="" tdir="" tset=0 argl="" blk="" longok="" longblk="" dest d s dcands=() ops=() opi=()
+  CP_OK=0; CP_SRC=" "
+  case "$wb" in
+    cp|gcp)
+      argl="St"; blk="ls"
+      longblk=" --link --symbolic-link --parents "
+      longok=" --archive --attributes-only --backup --copy-contents --dereference --force --interactive --no-dereference --no-clobber --one-file-system --preserve --recursive --remove-destination --reflink --strip-trailing-slashes --update --verbose --no-target-directory --debug --keep-directory-symlink --context " ;;
+    install|ginstall)
+      argl="gmoStBfNTh"; blk="dlD"
+      longblk=" --directory --strip-program "
+      longok=" --backup --compare --preserve-timestamps --strip --verbose --no-target-directory --preserve-context --debug " ;;
+    rsync)
+      argl="eBfMT@"; blk="eR"
+      longblk=" --remove-source-files --remove-sent-files --relative --link-dest --rsh --rsync-path --daemon --server --sender "
+      longok=" --archive --recursive --verbose --quiet --checksum --update --links --copy-links --copy-unsafe-links --safe-links --hard-links --perms --executability --times --group --owner --devices --specials --dry-run --whole-file --one-file-system --existing --ignore-existing --delete --delete-before --delete-during --delete-after --delete-excluded --force --compress --progress --partial --human-readable --stats --itemize-changes --mkpath --inplace --append --sparse --omit-dir-times --no-perms --no-times --no-owner --no-group --size-only --ignore-times --keep-dirlinks --acls --xattrs --numeric-ids --prune-empty-dirs --no-motd " ;;
+    ditto)
+      longok=" --keepParent --sequesterRsrc --rsrc --norsrc --extattr --noextattr --qtn --noqtn --acl --noacl --persistRootless --nopersistRootless --hfsCompression --nohfsCompression --preserveHFSCompression --nopreserveHFSCompression --nocache --clone --noclone " ;;
+    *) return 0 ;;
+  esac
+  for ((c = wi + 1; c < n; c++)); do
+    tok="${SEG[$c]}"
+    if [ -n "$want" ]; then
+      [ "$want" = t ] && { tdir="$tok"; tset=1; }
+      want=""; continue
+    fi
+    case "$tok" in
+      ">"|"<"|__DUP__) c=$((c + 1)); continue ;;
+      --)
+        for ((c = c + 1; c < n; c++)); do
+          case "${SEG[$c]}" in ">"|"<"|__DUP__) c=$((c + 1)) ;; *) ops+=( "${SEG[$c]}" ); opi+=( "$c" ) ;; esac
+        done
+        break ;;
+      --?*)
+        opt="${tok%%=*}"
+        if [[ "$longok" == *" $opt "* ]]; then continue; fi
+        # Exact blocker or an abbreviation of one (getopt accepts prefixes).
+        for j in $longblk; do [[ "$j" == "$opt"* ]] && return 0; done
+        if [ "$wb" != rsync ] && [ "$wb" != ditto ] && [[ "--target-directory" == "$opt"* && "${#opt}" -ge 3 ]]; then
+          if [[ "$tok" == *=* ]]; then tdir="${tok#*=}"; tset=1; else want=t; fi
+          continue
+        fi
+        [[ "$tok" == *=* ]] || want=v
+        continue ;;
+      -?*)
+        for ((j = 1; j < ${#tok}; j++)); do
+          ch="${tok:j:1}"
+          [[ "$blk" == *"$ch"* ]] && return 0
+          if [[ "$argl" == *"$ch"* ]]; then
+            if [ $((j + 1)) -lt "${#tok}" ]; then
+              [ "$ch" = t ] && [ "$wb" != rsync ] && { tdir="${tok:j+1}"; tset=1; }
+            else
+              want=v; [ "$ch" = t ] && [ "$wb" != rsync ] && want=t
+            fi
+            break
+          fi
+        done
+        continue ;;
+    esac
+    ops+=( "$tok" ); opi+=( "$c" )
+  done
+  [ -z "$want" ] || return 0
+  if [ "$tset" = 1 ]; then
+    dest="$tdir"; [ "${#ops[@]}" -ge 1 ] || return 0
+  else
+    [ "${#ops[@]}" -ge 2 ] || return 0
+    dest="${ops[${#ops[@]}-1]}"
+    ops=( "${ops[@]:0:${#ops[@]}-1}" ); opi=( "${opi[@]:0:${#opi[@]}-1}" )
+  fi
+  # Remote operands (host:path, rsync://) are never part of a relaxed copy.
+  for tok in "$dest" "${ops[@]}"; do
+    case "$tok" in ""|*://*) return 0 ;; [!/]*:*) [[ "${tok%%/*}" == *:* ]] && return 0 ;; esac
+  done
+  candidates "$dest" "$SEGCWD"; dcands=( ${CANDS[@]+"${CANDS[@]}"} )
+  [ "${#dcands[@]}" -gt 0 ] || return 0
+  for d in "${dcands[@]}"; do cp_dest_ok "$d" || return 0; done
+  for ((j = 0; j < ${#ops[@]}; j++)); do
+    candidates "${ops[$j]}" "$SEGCWD"
+    for s in ${CANDS[@]+"${CANDS[@]}"}; do
+      # A source directory holding .claude/ could merge it into the destination.
+      [ -e "$s/.claude" ] && return 0
+      for d in "${dcands[@]}"; do cp_dest_ok "${d%/}/${s##*/}" || return 0; done
+    done
+    CP_SRC="$CP_SRC${opi[$j]} "
+  done
+  CP_OK=1
+  return 0
+}
+
 eval_segment() { # uses SEG array
   local n=${#SEG[@]} i=0 w="" wi=-1 wb tok reader=0 script=0 script_i=-1 hit=0 kanc=0 c k gsub_i=-1 dscript=0
   SEG_HIT=0
@@ -794,6 +904,18 @@ eval_segment() { # uses SEG array
         kprev="$tok"
       done
     fi
+    # Pins decide what `add` installs, so moving them is the user's review, and
+    # nothing installs while the integrity flag stands. Matched by file name, as above.
+    if [ "${SEG[$cand_i]##*/}" = vajra_skills.py ]; then
+      for ((c = cand_i + 1; c < n; c++)); do
+        case "${SEG[$c]}" in
+          -*) ;;
+          upstream) block "vajra_skills.py upstream moves skill pins; the skill-pins Action runs it and a person reviews the PR" ;;
+          add) if [ "$TAMPER" = 1 ]; then block "integrity violation is unresolved; no skill installs (see scripts/vajra-doctor.sh)"; fi; break ;;
+          *) break ;;
+        esac
+      done
+    fi
     canon "${SEG[$cand_i]}" "$SEGCWD"
     if inside "$CANON" "$SKILL/scripts" && [ "${#CANON}" -gt $(( ${#SKILL} + 9 )) ]; then
       sname="${CANON:${#SKILL}+9}"
@@ -912,7 +1034,7 @@ eval_segment() { # uses SEG array
       for ((c = wi + 1; c < n; c++)); do
         case "${SEG[$c]}" in --recursive) rmode=copy ;; --*) ;; -*r*) rmode=copy ;; esac
       done ;;
-    cp|gcp|ditto|rsync|scp|rclone)
+    cp|gcp|ditto|rsync|scp|rclone|install|ginstall)
       rmode=copy; nolast=1
       for ((c = wi + 1; c < n; c++)); do
         case "${SEG[$c]}" in -t|--target-directory|--target-directory=*|-t?*) nolast=0 ;; esac
@@ -984,6 +1106,9 @@ eval_segment() { # uses SEG array
     shopt -u nullglob dotglob
   fi
   fastcwd=$FAST_OK
+  CP_OK=0; CP_SRC=" "
+  local copier=0
+  case "$wb" in cp|gcp|ditto|rsync|install|ginstall) copier=1; copy_layout ;; esac
   local parts=()
   for ((c = 0; c < n; c++)); do  # from 0: VAR=value prefixes count too
     tok="${SEG[$c]}"
@@ -1024,6 +1149,10 @@ eval_segment() { # uses SEG array
             [ "$redirect" = 1 ] && block "redirect into protected path $cc"
             [ "$dataarg" = 1 ] && continue
             hit=1
+            # A copier may read a protected source (not an ancestor of one)
+            # into a destination outside every protected area.
+            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]]; then continue; fi
+            [ "$copier" = 1 ] && [ "$reader" = 0 ] && block "only read-only commands may touch protected path $cc (a copy may read protected files only into a destination outside every protected area; never into one, never via links)"
             [ "$reader" = 1 ] || block "only read-only commands may touch protected path $cc"
             ;;
         esac
