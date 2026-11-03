@@ -22,7 +22,7 @@ deliberately thin. The tools below are pinned in the catalog, not bundled here.
 | Cuts, loudness, captions on a file | The project's ffmpeg first, then `ffmpeg-skill` |
 | Talking-head edit | `ghost-editor`, own recordings only; a person approves cuts |
 | Narration | `kokoro` |
-| Sound effects | `earshot` |
+| Sound effects, or listening to the mix | `earshot` |
 | Titles, hooks, metadata | `claude-youtube`, `yt-viral`, `ig-reel` |
 
 `skill-catalog` installs a missing skill and lists each tool's conditions.

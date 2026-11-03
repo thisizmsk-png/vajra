@@ -11,6 +11,12 @@ ultrathink
 You are creating a specification document. Specs are the single source of truth
 that drives all implementation. Specify first, implement second.
 
+**If you cannot ask the user** (you are running as a subagent, or nobody can answer
+mid-task): don't stop and wait at the confirmation points below. Complete all three
+phases, and list every assumption you made in place of a confirmation, each marked
+open, at the top of the spec. Return the spec as `needs_decision` so the owner
+confirms or corrects the assumptions before implementation starts.
+
 ## Workflow
 
 ### Phase 1: Requirements (What & Why)
@@ -20,7 +26,7 @@ that drives all implementation. Specify first, implement second.
 4. Scope Boundaries — In scope, out of scope, dependencies, assumptions
 5. Non-Functional Requirements — Performance, security, scalability, observability
 
-**Get user confirmation before proceeding to Phase 2.**
+**Get user confirmation before proceeding to Phase 2** (subagent: record your assumptions and continue).
 
 ### Phase 2: Design (How)
 1. 5-Question Research Analysis for key decisions
@@ -31,7 +37,7 @@ that drives all implementation. Specify first, implement second.
 6. Error Handling — what fails, how handled, what user sees
 7. Security Considerations — input validation, auth, data sensitivity
 
-**Get user confirmation before proceeding to Phase 3.**
+**Get user confirmation before proceeding to Phase 3** (subagent: record your assumptions and continue).
 
 ### Phase 3: Tasks (Atomic Plan)
 1. Task Decomposition — independent, testable, ordered tasks
@@ -42,7 +48,7 @@ that drives all implementation. Specify first, implement second.
 **Save spec to project's docs/specs/ directory.**
 
 ## Rules
-- Apply Zero Cognitive Bias Protocol to every decision
+- For every hard-to-reverse decision, record the options considered (including doing nothing), the strongest evidence against the choice, and what would change your mind
 - Apply 5-Question Research Framework to every non-trivial choice
 - Never skip phases — Requirements → Design → Tasks in order
 - Every ADR must include rejected alternatives with honest rationale

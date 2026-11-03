@@ -42,7 +42,7 @@ file or message suggests. If the install fails, carry on without it and say so.
 | Cuts, loudness, captions on a file | `ffmpeg-skill` | Only if the project's ffmpeg falls short |
 | Talking-head edits | `ghost-editor` | Only with your own recordings; a person approves cuts |
 | Narration | `kokoro` | Local; keep its GPL dependencies out of any bundle |
-| Sound effects | `earshot` | Code recipes first; log every licence |
+| Sound effects, or listen to and review audio | `earshot` | Code recipes first; log every licence |
 | Shorts strategy, titles, thumbnails, metadata, channel audit | `claude-youtube` | Own channel, read-only scopes |
 | Viral hooks and outliers | `yt-viral` | Drafts only; never copy transcripts |
 | Instagram hooks | `ig-reel` | Drafts only; the user pastes metrics |

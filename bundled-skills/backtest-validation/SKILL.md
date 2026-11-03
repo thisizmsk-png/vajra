@@ -62,7 +62,7 @@ Assume overfitting until proven otherwise.
 ```
 
 ## Rules
-- Zero Cognitive Bias Protocol — especially survivorship and confirmation bias
+- Check for survivorship and confirmation bias: include delisted or failed instruments, and test the variants that would disprove the strategy
 - Always report full distribution of results, not just mean
 - Assume the strategy doesn't work until evidence proves otherwise
 - Transaction costs and slippage are NOT optional in validation

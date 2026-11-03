@@ -430,43 +430,43 @@
   },
   "tools": {
     "anatomy": {
-      "how": "Figures as HTML, SVG, PNG or PDF, not video.",
+      "how": "From wheresryan22/anatomy at 1482e84 (MIT). Figures as HTML, SVG, PNG or PDF, not video.",
       "status": "later"
     },
     "app-store-screenshots": {
-      "how": "Per project in a separate folder at 5386f22. Delete public/frames and mockup.png for cross-platform apps.",
+      "how": "From ParthJadhav/app-store-screenshots (MIT). Per project in a separate folder at 5386f22. Delete public/frames and mockup.png for cross-platform apps.",
       "status": "per project"
     },
     "brandmd": {
-      "how": "Your own sites only. No --vision or --agent.",
+      "how": "From yuvrajangadsingh/brandmd at b79a8a9 (MIT). Your own sites only. No --vision or --agent.",
       "status": "later"
     },
     "chrome-devtools-mcp": {
-      "how": "Pin 1.12.0 with --no-usage-statistics --no-performance-crux --redact-network-headers --no-file-navigations --isolated. Never --autoConnect.",
+      "how": "npm chrome-devtools-mcp from ChromeDevTools/chrome-devtools-mcp (Apache-2.0). Pin 1.12.0 with --no-usage-statistics --no-performance-crux --redact-network-headers --no-file-navigations --isolated. Never --autoConnect.",
       "status": "only when needed"
     },
     "design-dna": {
-      "how": "Image to tokens only, audited at 593e39b, with real-asset fetching removed and sharp pinned.",
+      "how": "From zanwei/design-dna (MIT). Image to tokens only, audited at 593e39b, with real-asset fetching removed and sharp pinned.",
       "status": "later"
     },
     "design-md-lint": {
-      "how": "Run the Google design.md linter pinned at 6e5da53 after DESIGN.md is written.",
+      "how": "From google-labs-code/design.md (Apache-2.0). Run the Google design.md linter pinned at 6e5da53 after DESIGN.md is written.",
       "status": "with routing"
     },
     "earshot": {
-      "how": "Fresh venv, EARSHOT_OFFLINE=1 after the first fetch, no Gemini key, code recipes first, every licence logged.",
+      "how": "Hear, review and make sound, from Leonxlnx/earshot at 591fa3e (0.4.0, MIT). Fresh venv, EARSHOT_OFFLINE=1 after the first fetch, no Gemini key, code recipes first, every licence logged.",
       "status": "trial"
     },
     "ffmpeg-skill": {
-      "how": "Pin 3.1.1 and diff the npm tarball first. Only if the project's own ffmpeg code falls short.",
+      "how": "npm ffmpeg-skill from kajisho5/ffmpeg-skill (MIT). Pin 3.1.1 and diff the npm tarball first. Only if the project's own ffmpeg code falls short.",
       "status": "trial"
     },
     "ghost-editor": {
-      "how": "Sandbox, dedicated key, no --describe, no Google audit on private footage. A person approves cuts.",
+      "how": "From kurbaitaev/ghost-editor at ce17272 (MIT). Sandbox, dedicated key, no --describe, no Google audit on private footage. A person approves cuts.",
       "status": "only with recordings"
     },
     "hyperframes": {
-      "how": "DO_NOT_TRACK=1, HYPERFRAMES_NO_AUTO_INSTALL=1, trusted projects only, signed out of HeyGen.",
+      "how": "npm hyperframes@0.8.229 from heygen-com/hyperframes (Apache-2.0). DO_NOT_TRACK=1, HYPERFRAMES_NO_AUTO_INSTALL=1, trusted projects only, signed out of HeyGen.",
       "status": "trial"
     },
     "kokoro": {
@@ -474,19 +474,19 @@
       "status": "trial"
     },
     "mcp-builder": {
-      "how": "From anthropics/skills. Audit it first, and only when a real tool needs a connector.",
+      "how": "From anthropics/skills, skills/mcp-builder at ca45fc4, not yet audited. Audit it first, and only when a real tool needs a connector.",
       "status": "on demand"
     },
     "playwright-mcp": {
-      "how": "Screenshots at 375, 768 and 1440 px, then read them.",
+      "how": "npm @playwright/mcp@0.0.84 from microsoft/playwright-mcp (Apache-2.0). Screenshots at 375, 768 and 1440 px, then read them.",
       "status": "default"
     },
     "scrapecreators": {
-      "how": "Optional. A dedicated key with a spend cap, only when free sources fall short.",
+      "how": "From ScrapeCreators/social-media-research-skills at 64ba7b4 (MIT). Optional. A dedicated key with a spend cap, only when free sources fall short.",
       "status": "optional"
     },
     "shadcn-mcp": {
-      "how": "Add the shadcn MCP per project, on shadcn stacks only.",
+      "how": "npm shadcn@4.23.0 from shadcn-ui/ui (MIT). Add the shadcn MCP per project, on shadcn stacks only.",
       "status": "after a trial"
     },
     "video-shotcraft": {

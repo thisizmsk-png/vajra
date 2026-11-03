@@ -62,7 +62,7 @@ For every research topic, answer ALL five questions:
 ```
 
 ## Rules
-- Apply Zero Cognitive Bias Protocol — especially confirmation and authority bias
+- Watch for confirmation and authority bias: a claim is not true because it fits the hypothesis or because a prominent source says it
 - Multiple sources for every claim — never trust a single source
 - Seek DISCONFIRMING evidence for every hypothesis
 - Include failed approaches and anti-patterns, not just successes

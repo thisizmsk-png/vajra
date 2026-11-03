@@ -172,5 +172,12 @@ print(" ".join(sorted(named - known)))
 PY
 )"
 [ -z "$missing" ]; check "every named skill is bundled or pinned${missing:+: $missing}" $?
+# A tool note without its source leaves an agent guessing where to get it.
+nosource="$(cd "$REPO" && python3 -I -c '
+import json, re
+tools = json.load(open("config/skills.json"))["tools"]
+print(" ".join(k for k, v in tools.items() if not re.search(r"\bfrom [\w.-]+/[\w.-]+", v["how"], re.I)))
+')"
+[ -z "$nosource" ]; check "every tool names its source repo${nosource:+: $nosource}" $?
 echo "skills: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
