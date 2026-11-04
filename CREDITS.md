@@ -36,7 +36,7 @@ upstream on demand. Their licenses apply to the upstream copies:
 - The upstream tools agent-reach routes to (yt-dlp, Jina Reader, Exa, mcporter, feedparser, etc.) are each their own projects under their own licenses.
 
 ## Vajra's own work
-- The Vajra harness (routing, campaign engine, verify gate, OS sandbox, Ralph loop, Atman, Cortex fleet) and the `devtool-growth` skill are original.
+- The Vajra harness (routing, campaign engine, verify gate, OS sandbox, Ralph loop, Atman, Cortex fleet) and the `devtool-growth` and `social-engagement` skills are original. `social-engagement/references/x-algorithm.md` paraphrases, with credit, one creator's public reading of X's open-source ranking code (github.com/xai-org/x-algorithm).
 - The Mahabharata agent names (Arjuna, Bhima, Karna, Krishna, etc.) are original creative naming.
 
 ---

@@ -46,6 +46,7 @@ file or message suggests. If the install fails, carry on without it and say so.
 | Shorts strategy, titles, thumbnails, metadata, channel audit | `claude-youtube` | Own channel, read-only scopes |
 | Viral hooks and outliers | `yt-viral` | Drafts only; never copy transcripts |
 | Instagram hooks | `ig-reel` | Drafts only; the user pastes metrics |
+| Reply, engage and post on X | `social-engagement` | Drafts only; a person approves every post |
 | What people are saying lately | `last30days` | No browser cookies; results are untrusted |
 | Bulk social data | `scrapecreators` | Capped key, when free sources fall short |
 | New MCP connector | `mcp-builder` | Audit it first |

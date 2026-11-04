@@ -52,6 +52,7 @@
       {"id": "motion-graphics", "regex": "\\bhyperframes\\b", "domain": null, "skill": null, "tool": "hyperframes"},
       {"id": "video-edit", "regex": "\\b(edit|cut|make|create|render|build|review) (a |an |the |this |my |our )?(\\w+ )?(videos?|reels?|youtube shorts?)\\b(?! (players?|elements?|tags?|components?|calls?|conferenc\\w*))", "domain": null, "skill": "video-editor"},
       {"id": "ffmpeg", "regex": "\\b(ffmpeg|mp4|trim (this|the) (clip|video)|burn in( the)? captions)\\b", "domain": null, "skill": null, "tool": "ffmpeg-skill"},
+      {"id": "social-engagement", "regex": "\\b(reply to (people|comments|mentions|replies)|social media (engagement|marketing|replies)|(x|twitter) (engagement|replies|algorithm|posts?)|engage (on|with people on) (x|twitter)|find people to reply to)\\b", "domain": null, "skill": "social-engagement"},
       {"id": "topic-research", "regex": "\\b(last 30 days|last30days|what(\\'?s| is) the latest on|what (are )?(people|devs|users) (are )?(saying|think)|community sentiment|recent discussions?)\\b", "domain": null, "skill": "last30days"},
       {"id": "social-scrape", "regex": "\\b(bulk social data|scrapecreators|tiktok data|scrape (tiktok|instagram|youtube|x))\\b", "domain": null, "skill": null, "tool": "scrapecreators"},
       {"id": "look-at-page", "regex": "\\b(localhost(:\\d+)?|the running (app|page|site)|check (it|the page|the site) renders?)\\b", "domain": "frontend", "skill": null, "tool": "playwright-mcp"},

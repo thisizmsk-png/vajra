@@ -48,6 +48,9 @@ want "write an instagram reel hook" ig-reel
 want "add sound effects to the video" earshot
 want "try a local tts voice-over" kokoro
 want "what are people saying about bun this month" last30days
+want "find people to reply to about my tv launcher" social-engagement
+want "help with x engagement for my repo" social-engagement
+want "reply to comments on my launch post" social-engagement
 want "trim this clip with ffmpeg" ffmpeg-skill
 
 # A missing catalog skill gets the pinned install line and its conditions.
