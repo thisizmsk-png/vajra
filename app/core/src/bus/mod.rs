@@ -26,7 +26,7 @@ pub mod synthetic;
 mod tests;
 
 /// Ring byte budget per stream.
-pub const RING_BYTES: usize = 2 * 1024 * 1024;
+pub const RING_BYTES: usize = 256 * 1024;
 /// Total size cap of the spill dir.
 pub const SPILL_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 /// Events queued per subscriber before it is dropped to a snapshot.

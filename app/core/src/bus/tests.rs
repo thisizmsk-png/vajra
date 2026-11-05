@@ -103,8 +103,8 @@ fn bus_rejects_unsafe_stream_ids() {
 }
 
 #[test]
-fn bus_default_ring_budget_is_2_mib() {
-    assert_eq!(RING_BYTES, 2 * 1024 * 1024);
+fn bus_default_ring_budget_is_256_kib() {
+    assert_eq!(RING_BYTES, 256 * 1024, "NFR-PERF-2: 256 KiB retained tail per worker");
     assert_eq!(Config::default().ring_bytes, RING_BYTES);
 }
 

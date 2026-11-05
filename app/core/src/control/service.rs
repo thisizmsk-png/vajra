@@ -143,6 +143,13 @@ impl WorkerInfo {
     }
 }
 
+/// `task.<id>.r<n>`, the only steerable step label.
+fn is_task_label(label: &str) -> bool {
+    let Some(rest) = label.strip_prefix("task.") else { return false };
+    let Some((id, round)) = rest.rsplit_once(".r") else { return false };
+    !id.is_empty() && !id.contains('.') && !round.is_empty() && round.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// `{untrusted:true, source:'agent-output', text}`
 pub fn untrusted(text: &str) -> Value {
     json!({"untrusted": true, "source": "agent-output", "text": text})
@@ -520,6 +527,11 @@ impl Service {
         let text = self.text_arg(text, MAX_TEXT, "text", false)?;
         self.session()?;
         let w = self.resolve(worker)?.clone();
+        // design 5b: only Execute-phase task workers take steering; verify, review
+        // and merge steps are the independent gate (they can still be stopped).
+        if !is_task_label(&w.worker.label) {
+            return Err(ControlError::ControlDisabled);
+        }
         if w.finished() {
             return Err(ControlError::WorkerFinished);
         }

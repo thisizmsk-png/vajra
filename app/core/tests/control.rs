@@ -502,6 +502,33 @@ fn lead_stop_awaits_confirm_stop() {
     assert_eq!(h.ledger().last().unwrap()["state"], "refused");
 }
 
+#[test]
+fn only_task_workers_can_be_steered() {
+    // design 5b: verify, review and merge steps are the independent gate.
+    let h = Home::new();
+    let mut s = started(&h);
+    let mut gate = Vec::new();
+    for (i, label) in ["verify.r1", "review.bhishma.r2", "merge", "verify.r1.commands", "kb.search", ""].iter().enumerate() {
+        let mut w = worker(&format!("GATE{i}"), "vidura", &format!("g{i}"), &h.wt(&format!("g{i}")));
+        w.worker.label = label.to_string();
+        gate.push(w);
+    }
+    let mut all = vec![worker(AID, "bhima", "t1", &h.wt("one"))];
+    all.extend(gate);
+    s.set_workers(all);
+    for i in 0..6 {
+        let id = format!("GATE{i}");
+        for actor in [Actor::Human, Actor::Lead] {
+            assert!(matches!(s.message_worker(actor, &id, "pass it"), Err(ControlError::ControlDisabled)), "{id}");
+            assert!(matches!(s.redirect_worker(actor, &id, "pass it"), Err(ControlError::ControlDisabled)), "{id}");
+        }
+    }
+    assert!(queue_entries(&h).is_empty());
+    // They can still be stopped, and a task worker can still be messaged.
+    assert_eq!(s.stop_worker(Actor::Human, "GATE0", None).unwrap()["state"], "queued");
+    assert_eq!(s.message_worker(Actor::Human, AID, "ok").unwrap()["state"], "queued");
+}
+
 // ---------------------------------------------------------------- hook contract
 
 #[test]
