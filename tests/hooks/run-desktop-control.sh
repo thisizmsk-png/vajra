@@ -275,6 +275,15 @@ run "$(raw PostToolUse Read "" '{"file_path":"x"}' "$(jq -nc --arg b "$BIG" '{co
 e=$(python3 -c "import time;print(int((time.time()-$s)*1000))")
 [ "$RC" -eq 0 ] && [ "$e" -lt 400 ]; ok "600 KB payload handled in ${e} ms (< 400)" $?
 
+# Sol P2: an ack that cannot be written leaves the entry inflight (never re-queued, never lost).
+reset_dir; q 000001 K1 message '{"agent_id":"AG1"}'; chmod 500 "$D/acks"
+post AG1; chmod 700 "$D/acks"
+ctx | grep -q hello && ls "$D/inflight" | grep -q "^K1\." && [ "$(nq)" = 0 ] && [ ! -e "$D/acks/K1.json" ]
+ok "ack write failure: delivered, entry stays inflight" $?
+reset_dir; q 000001 K2 message '{"agent_id":"AG1"}'; rmdir "$D/acks"; : > "$D/acks"
+post AG1; rm -f "$D/acks"; mkdir "$D/acks"
+ls "$D/inflight" | grep -q "^K2\."; ok "ack dir unusable: entry stays inflight" $?
+
 # --- Timing: missing session dir path, p95 <= 10 ms ---------------------------
 # Another session's dir exists, so the hook must parse the payload with jq.
 rm -rf "$D"; mkdir -p "$CTRL/sess-other-0001"

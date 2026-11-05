@@ -15,5 +15,9 @@ while IFS= read -r f; do
   have="$("${SHA[@]}" "$f" | cut -c1-64)"
   if [ "$want" = "$have" ]; then P=$((P+1)); else F=$((F+1)); echo "FAIL :: manifest.json stale for $f ($want)"; fi
 done < <(git ls-files)
+# Every manifest entry must be a shipped (tracked) file: session-start checks each exists.
+while IFS= read -r f; do
+  if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then P=$((P+1)); else F=$((F+1)); echo "FAIL :: manifest.json lists $f, which is not shipped"; fi
+done < <(jq -r '.files | keys[]' manifest.json)
 echo "manifest fresh: $P passed, $F failed"
 [ "$F" -eq 0 ]

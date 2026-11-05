@@ -111,12 +111,12 @@ stopped() { # rc 0 if a stop matches this worker; sets M_ID
 
 write_ack() { # action_id
   local tmp="$D/acks/.$1.$$.tmp"
-  [ -d "$D/acks" ] || mkdir -p "$D/acks" || return 0
+  [ -d "$D/acks" ] || mkdir -p "$D/acks" || return 1
   jq -nc --arg id "$1" --arg ts "$NOW" --arg ev "$EV" --arg tool "$TOOL" \
     --arg aid "$AID" --arg at "$ATYPE" --arg cwd "$CWD" \
     '{action_id:$id, consumed_at:$ts, hook_event:$ev, tool_name:$tool, agent_id:$aid, agent_type:$at, cwd:$cwd}' \
-    > "$tmp" && mv -f "$tmp" "$D/acks/$1.json"
-  rm -f "$tmp"
+    > "$tmp" 2>/dev/null && mv -f "$tmp" "$D/acks/$1.json" 2>/dev/null && return 0
+  rm -f "$tmp"; return 1
 }
 
 # Prints "<id> <kind> ok" or "<id> <kind> cwd <match.cwd>" for a candidate
@@ -217,8 +217,8 @@ case "$EV" in
     i=0
     while [ "$i" -lt "${#CLAIMED[@]}" ]; do
       audit ALLOW "deliver ${KINDS[$i]} id=${IDS[$i]} tool=$TOOL_S"
-      write_ack "${IDS[$i]}"
-      rm -f "${CLAIMED[$i]}"
+      # Without an ack the entry stays inflight, so the app reports "delivery unknown".
+      write_ack "${IDS[$i]}" && rm -f "${CLAIMED[$i]}"
       i=$((i + 1))
     done
     ;;

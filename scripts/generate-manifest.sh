@@ -36,7 +36,7 @@ keep_files() { # stdin paths -> shipped regular files
   local f
   while IFS= read -r f; do
     case "$f" in
-      manifest.json|manifest.json.sig|.git/*|node_modules/*|graphify-out/*|*/__pycache__/*|__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;;
+      manifest.json|manifest.json.sig|manifest.json.tmp|.git/*|node_modules/*|graphify-out/*|*/__pycache__/*|__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;;
     esac
     if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\n' "$f"; fi
   done
@@ -55,6 +55,7 @@ if [ "$IS_INSTALLED" = 1 ] && [ "$OPERATOR" = 0 ]; then
   exit 0
 fi
 
+rm -f "${MANIFEST}.tmp"
 FILES="$(list_files | LC_ALL=C sort -u | keep_files)"
 
 [ -n "$FILES" ] || { echo "ERROR: no files found" >&2; exit 1; }
