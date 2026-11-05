@@ -111,7 +111,10 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.3.1 GIVEN a worker, WHEN I press "Stop", THEN a confirm dialog names the worker and task; Cancel sends nothing.
 - AC-3.3.2 GIVEN I confirm, WHEN the worker makes its next tool call, THEN the call is blocked with reason "stopped by the human" and the worker node shows "stopped by the human".
 - AC-3.3.3 GIVEN Lead asks to stop a worker, WHEN requested, THEN the same human confirm dialog appears; the Lead cannot confirm on my behalf.
-- AC-3.3.4 (A1 B2, F2) GIVEN a stopped worker, WHEN its run's parent resumes the same agent id, THEN its tool calls are still blocked until I choose Resume worker; a stopped worker can only report blocked, never done.
+- AC-3.3.4 (GPT-1, F2) GIVEN a stopped worker, WHEN it calls `SubagentHandback`, THEN that call goes through and the parent gets a "stopped" report; any other tool name (including prefixes or look-alikes) is blocked.
+- AC-3.3.5 (GPT-1, F2) GIVEN a stopped worker that handed back, WHEN its parent resumes the same agent id with `SendMessage`, THEN its next tool call is still blocked, and no queued message is delivered to it, on handback or after.
+- AC-3.3.6 (GPT-1) GIVEN a stopped worker, WHEN I choose Resume worker and confirm, THEN the stop clears (ledger record with actor and time), and the same agent id continues; nothing else (transcript end, run end, the Lead) clears a stop.
+- AC-3.3.7 (GPT-1) GIVEN a stopped worker reports `done`, WHEN the run view renders, THEN the task shows "stopped by the human", not done.
 
 **US-3.4** As a Dev, I want every control action visible and doable directly, so that I trust the Lead.
 - AC-3.4.1 GIVEN any control action (list, inspect, message, redirect, stop), WHEN executed by the Lead or by me, THEN it appears in the activity feed and in the control ledger (append-only JSONL) with an action id; message, redirect and stop also appear in `audit.log`: the hook's delivery or stop line carries the same action id, and a Lead tool call is logged by the guard under its MCP tool name (design.md D5: the guard's own lines carry no id, and reads I make in the UI are ledger-only).
@@ -344,7 +347,7 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 | US-2.4 | AC-2.4.1 .. 2.4.4 | A11Y-2, UX-1, UX-2 |
 | US-3.1 | AC-3.1.1 .. 3.1.3 | SEC-3, SEC-5, OBS-2 |
 | US-3.2 | AC-3.2.1 .. 3.2.6 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
-| US-3.3 | AC-3.3.1 .. 3.3.3 | SEC-8, UX-3, OBS-2 |
+| US-3.3 | AC-3.3.1 .. 3.3.7 | SEC-8, UX-3, OBS-2 |
 | US-3.4 | AC-3.4.1 .. 3.4.4 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
 | US-4.1 | AC-4.1.1 .. 4.1.2 | A11Y-1, UX-2 |
 | US-4.2 | AC-4.2.1 .. 4.2.3 | PERF-3, A11Y-2 |
@@ -420,7 +423,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | Finding (review) | Decision | Requirement or design change | Acceptance id |
 |---|---|---|---|
 | B1 Steering needs the nonce tag; plain wrapper is ignored (arch review, tracer) | Fixed | design 5.3, 5.4 step 5.2, engine change E5 | AC-3.2.2 |
-| B2 / F2 Stop blocks the final output; stop file cleared too early; resume via SendMessage | Fixed | design 5.3, 5.4 step 4, ADR-8 | AC-3.3.4 |
+| B2 / F2 Stop blocks the final output; stop file cleared too early; resume via SendMessage | Fixed | design 5.3, 5.4 step 4, ADR-8 | AC-3.3.4 to 3.3.7 |
 | B3 Control not proven through the Workflow tool | Fixed: new gate G3b before E1 and C6 | tasks.md G3b; fallback stop-only (ADR-2) | G3b done-when |
 | S1 voter: a stopped worker could still report done | Fixed | design 5.4 step 4 (only status blocked passes) | AC-3.3.4 |
 | S2 voter: the verification gate was steerable | Fixed | design 5.4 step 5b, E5 (task briefs only) | AC-3.2.2 |

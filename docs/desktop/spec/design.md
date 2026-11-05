@@ -456,12 +456,10 @@ Queue entry (written atomically by the app: temp file + rename):
 ```
 Stop entry: the same shape with `kind:"stop"`, no `text`, and an optional `reason`. A stop matches only on
 `agent_id` or `cwd`, never on `agent_type` alone, so it can't hit the same task's worker in a later fix round
-(which runs in a fresh worktree). The app deletes the stop file when that worker's transcript ends or its run
-ends, whichever comes first.
-
-**Revised after the architecture review (A1, findings B2 and F2): stop is sticky until a human clears it.**
-The stop file stays until the human chooses "Resume worker" (a ledger record). It is not removed when the
-transcript ends, because a parent can resume the same agent id with `SendMessage` after handback. The source
+(which runs in a fresh worktree). A stop has no expiry. **Only an explicit human "Resume worker" (a ledger
+record) removes it**: not the transcript ending, not handback, not the run ending, not the Lead. A parent can
+resume the same agent id with `SendMessage` after handback (steering threat model F2), so the stop must
+outlive the worker's turn. Implemented in vajra-6's E1 (`origin/ao/vajra-6/m1-engine`, commit 611d969). The source
 is set from the actor (`human` or `lead-via-desktop`), never typed by the caller; the hook rejects any other
 value.
 
@@ -490,15 +488,19 @@ Behaviour:
    `agent_id`, the canonical `cwd` must equal `match.cwd`. If both lack it, `agent_type` must equal
    `match.agent_type` and the entry must carry `unique:true` (set by the app only when exactly one live
    worker has that type). Main-session calls (no agent fields, cwd = repo root) never match a worker entry.
-4. **PreToolUse + matching stop file:** exempt exactly one case: the worker's final output call (the
-   exact tool name confirmed by G3b, expected `StructuredOutput` or `SubagentHandback`) **and** its input
-   has `status: "blocked"`. Any other final output (`done`, `progress`, or a reviewer's `approve`) is
-   blocked, so a stopped worker can't report done and get merged (A1 voter S1). Steps that verify, review
-   or merge are never exempted; their blocked output ends the run as `error`, which fails closed. Otherwise: print `stopped by the human (action <id>). Stop now: make no more
+4. **PreToolUse + matching stop file:** the only exempt call is the exact tool name `SubagentHandback`,
+   so a stopped worker can still hand back and the parent gets a report (tracer finding 3). No prefix,
+   pattern or other output tool is exempt. Every other call: print `stopped by the human (action <id>). Stop now: make no more
    tool calls and return status blocked with summary "stopped by the human".` to stderr and exit 2. Append
    `TS BLOCK desktop-control reason="stop id=<action_id> tool=<tool>"` to `audit.log`. Write
    `acks/<action_id>.json` if absent (first block only).
-5. **PostToolUse + matching queue entries** (oldest first, unexpired, at most 3 per call):
+   Residual risk, gated by G3b: in a `vajra-deliver` run the worker's final output may be a different tool
+   (for example `StructuredOutput`). If G3b shows it is, that exact name is added to the exemption, and the
+   app shows the task as "stopped by the human" whatever status the worker reports, so a stopped worker's
+   "done" is never shown as done (A1 voter S1). The workflow-side guarantee (a stopped task is never merged)
+   needs an engine check and is listed as owner decision Q12.
+5. **PostToolUse + matching queue entries** (oldest first, unexpired, at most 3 per call). **Nothing is
+   delivered on `SubagentHandback`, to a stopped worker, or when the nonce file is missing or invalid.**
    1. Claim the entry by `rename(queue/X, inflight/<id>.<pid>)`. If the rename fails, another hook claimed it,
       so skip.
    2. Print one JSON object on stdout:
@@ -680,8 +682,9 @@ append-only JSONL plus captured reports.
   app-owned index (`index.sqlite` in the app dir, rebuildable, never authoritative).
 
 **ADR-8 Stop is sticky and needs human confirmation.** Decision: stop is a flag file that blocks every next
-tool call of that worker instance (matched by `agent_id` or worktree `cwd`, 5.3) until it ends; the app then
-removes the flag. The Lead can only request a stop; the human confirms.
+tool call of that worker instance (matched by `agent_id` or worktree `cwd`, 5.3), except the exact tool
+`SubagentHandback`. Only a human "Resume worker" clears it (5.3); handback and a later `SendMessage` don't. The
+Lead can only request a stop; the human confirms. Messages are not delivered while a worker is stopped.
 - Options: (a) do nothing; (b) kill the run session (kills all workers); (c) sticky hook block (chosen).
 - Evidence against: the worker may keep reasoning without tools for a turn, and the workflow may treat a
   blocked worker as failed and continue other waves.
