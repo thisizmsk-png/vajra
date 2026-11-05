@@ -246,6 +246,25 @@ All performance numbers are PROVISIONAL (A6) until the stack spike. Each is meas
 
 Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole app and are verified in the benchmark and release checklists, not per story.
 
+## 7a. Pain points from user research (pending)
+
+Filled in once the competitor pain-point research (`pain-points.md`) lands. One row per pain point: the
+accepted ones point to a requirement and an acceptance id (new ids continue the existing series, for
+example AC-2.2.5 or NFR-UX-4); the rest say "won't do" with the reason.
+
+| Pain point (source) | Decision | Requirement | Acceptance id |
+|---|---|---|---|
+| (pending) | | | |
+
+## 7b. Review findings (pending)
+
+Rows from the architecture review, the pre-mortem, the STRIDE threat model and the ponytail review of this
+spec, in the same shape: finding, decision, requirement, acceptance id.
+
+| Finding (review) | Decision | Requirement | Acceptance id |
+|---|---|---|---|
+| (pending) | | | |
+
 ## 8. Decisions requested from the owner
 
 1. Confirm A1..A9 (especially A3 transcript streams and A5 hook identification, which the spike must prove).

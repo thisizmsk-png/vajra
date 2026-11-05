@@ -251,7 +251,10 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 
 ## 13. Open questions and owner decisions
 
-| # | Question | Default if no answer |
+The owner hasn't answered these yet. Until they do, each **working assumption** below is in effect
+and the spec is written to it. Changing one later is a doc edit plus the tasks named in the row.
+
+| # | Question | Working assumption (in effect until the owner decides) |
 |---|---|---|
 | Q1 | Product name for the public Mac app ("Vajra Desktop" is the working name) | Keep "Vajra" |
 | Q2 | Rename the agents inside the engine too, or keep engine ids and map in the app only? | Map in the app only |
