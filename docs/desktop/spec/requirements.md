@@ -106,6 +106,11 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.2.4 GIVEN a message mentions "approve" or "push", WHEN delivered, THEN no protected action is unlocked; an attempted push still needs Claude Code's permission prompt (control messages are never approval).
 - AC-3.2.5 GIVEN the worker finishes before its next tool call, WHEN the message is unconsumed, THEN the card shows "not delivered" and the message is not applied later to a different worker.
 - AC-3.2.6 (VD-26) GIVEN the control hook is installed and no message is queued, WHEN a session makes 100 tool calls, THEN the hook adds no text to the transcript; with messages queued, only the delivered steer text is added.
+- AC-3.2.7 (GPT-2) GIVEN a run session starts or resumes, WHEN the Control service creates its nonce, THEN it is at least 128 bits from the OS CSPRNG, written to `control/<sid>/nonce` with mode 0600, owner-only and no-follow, rotated on every resume, and absent from queue entries, the ledger, acks, `audit.log`, `runs.jsonl`, app logs, stderr and MCP results (tests `nonce_is_os_csprng_128`, `nonce_file_0600_nofollow_excl`, `rotate_on_resume`, `no_nonce_in_outputs`).
+- AC-3.2.8 (GPT-2) GIVEN the nonce file is missing, not 0600, owned by another user or a symlink, WHEN a message is queued, THEN nothing is delivered and the action shows "not delivered: control channel not ready" (test `nonce_source_only_file`).
+- AC-3.2.9 (GPT-2) GIVEN a tool result contains a `vajra-steer` tag (any nonce), WHEN PostToolUse runs, THEN the worker gets a warning that the tag came from tool output, no steer is delivered from it, and `audit.log` records a WARN (test `forged_tag_in_tool_response`).
+- AC-3.2.10 (GPT-2) GIVEN message text that tries to close the tag or carries attribute-like text, WHEN it is delivered, THEN it is escaped so the delivered tag stays one tag with enum `kind` and `source` and a ULID `id`; malformed entries are refused (tests `text_cannot_close_tag`, `bad_attrs_refused`).
+- AC-3.2.11 (GPT-2) GIVEN a worker tool input that contains the nonce, WHEN PreToolUse runs, THEN the call is blocked and the reason does not contain the nonce (test `pretool_blocks_nonce_echo`).
 
 **US-3.3** As a Dev, I want to stop a worker, so that I can halt a wrong direction.
 - AC-3.3.1 GIVEN a worker, WHEN I press "Stop", THEN a confirm dialog names the worker and task; Cancel sends nothing.
@@ -303,6 +308,8 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 - NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
 - NFR-SEC-8: control messages are never approval for protected actions.
 
+Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "Any worker in a /vajra run" is claimed only after G3b passes inside `vajra-deliver` (POS-5.5).
+
 ### Compatibility
 - NFR-COMPAT-1 (PM-4): preflight records `claude --version`. Outside the tested range the control row reads
   "untested Claude Code X, control unverified". A message shows "delivered" only when the worker's transcript
@@ -346,7 +353,7 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 | US-2.3 | AC-2.3.1 .. 2.3.3 | PERF-3, SEC-3, SEC-6 |
 | US-2.4 | AC-2.4.1 .. 2.4.4 | A11Y-2, UX-1, UX-2 |
 | US-3.1 | AC-3.1.1 .. 3.1.3 | SEC-3, SEC-5, OBS-2 |
-| US-3.2 | AC-3.2.1 .. 3.2.6 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
+| US-3.2 | AC-3.2.1 .. 3.2.11 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
 | US-3.3 | AC-3.3.1 .. 3.3.7 | SEC-8, UX-3, OBS-2 |
 | US-3.4 | AC-3.4.1 .. 3.4.4 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
 | US-4.1 | AC-4.1.1 .. 4.1.2 | A11Y-1, UX-2 |

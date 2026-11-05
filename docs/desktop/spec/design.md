@@ -470,6 +470,29 @@ on a tag carrying the run session's nonce. The nonce:
 - is never written to the queue, the ledger, acks, `audit.log`, `runs.jsonl`, MCP results or stderr;
 - reaches the workers through engine change E5 (below), never through the app's launch arguments.
 
+**Trust model (GPT-2, steering threat model).** The nonce is **not** an authentication secret: each worker
+must know N to recognize the tag, so N sits in its brief and its transcript. Trust rests on two things the
+worker can't forge:
+1. The queue is write-protected: only the app writes it (guard protected root plus, with owner decision
+   Q10, a sandbox denyWrite; section 5.4 E2 scope).
+2. Hook context is a distinct transcript record (`hook_additional_context`), not tool output.
+
+N is defense in depth. It filters injected text whose author never saw N, such as a web page or a file an
+agent fetched.
+
+**Residual risk, stated, not solved.** Text that carries the right N inside a tool result can't be ruled out
+at the model level. For example, a worker or a compromised dependency could echo its own brief into a file
+another worker reads. Mitigations:
+- the PostToolUse hook warns the worker when a tool result contains a `vajra-steer` tag, and audits it;
+- the PreToolUse hook blocks any tool input that contains N;
+- workers can't read the nonce file or transcripts (E2 read blocks).
+
+We don't promise that the model authenticates the human. A steer is never approval for a protected action and
+never widens a task's scope (NFR-SEC-8).
+
+**Rejected forms.** Plain `<untrusted-data>` additional context. The tracer bullet showed workers ignore it as
+injection, so it is not a fallback.
+
 ### 5.4 `hooks/desktop-control.sh` (E1)
 
 Registration (additive entries in `hooks/hooks.json`):
@@ -516,7 +539,9 @@ Behaviour:
    (step label `task.<id>.r<n>`). For verify, review and merge steps the Control service returns
    `control_disabled`, so neither the Lead nor a prompt-injected worker relaying through the Lead can talk
    to the independent gate. Those steps can still be stopped.
-5c. **PreToolUse nonce leak check.** A Bash, Write or Edit input that contains N is blocked with exit 2.
+5c. **PreToolUse nonce leak check.** Any tool input that contains N is blocked with exit 2, and the reason
+   never contains N. **PostToolUse:** a tool result containing a `vajra-steer` tag gets a warning and an audit
+   line, and no steer is delivered from it.
 6. Expired entries are left alone. The app moves them to `expired` and records "not delivered" (AC-3.2.5).
    Delivery is at most once: a crash between steps 5.1 and 5.4 leaves an inflight file, which the app shows
    as "delivery unknown" after 60 s and never re-queues.
