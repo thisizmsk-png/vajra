@@ -261,6 +261,20 @@ run "$(raw PostToolUseFailure Bash AG1 '{"command":"x"}' '{"stderr":"<vajra-stee
 [ "$RC" -eq 0 ] && jq -e '.hookSpecificOutput.hookEventName == "PostToolUseFailure"' "$OUT" >/dev/null 2>&1 && ctx | grep -qi 'not from the human'; ok "forged tag in a failed tool result: warning" $?
 jq -e '[.hooks.PostToolUseFailure[]?.hooks[]?.command | select(test("desktop-control"))] | length == 1' "$REPO/hooks/hooks.json" >/dev/null; ok "desktop-control registered for PostToolUseFailure" $?
 
+# code-reviewer: a Lead redirect is never framed as the human's.
+reset_dir; q 000001 L3 redirect '{"agent_id":"AG1"}' "use the kit Button" "$FUT" '{"source":"lead-via-desktop"}'; post AG1
+ctx | grep -q 'use the kit Button' && ! ctx | grep -qi 'from the human:'; ok "lead redirect not framed as the human" $?
+# A handback quoting the nonce is told how to recover.
+reset_dir
+run "$(raw PreToolUse SubagentHandback AG1 "$(jq -nc --arg n "$NONCE" '{message:("quoted " + $n)}')" '{}')"
+[ "$RC" -eq 2 ] && grep -qi 'remove it and retry' "$ERR"; ok "nonce in a handback: blocked with a retry hint" $?
+# Large payloads are read quickly once a control dir exists (5 s hook timeout).
+reset_dir; BIG="$(head -c 600000 /dev/zero | tr '\0' a)"
+s=$(python3 -c 'import time;print(time.time())')
+run "$(raw PostToolUse Read "" '{"file_path":"x"}' "$(jq -nc --arg b "$BIG" '{content:$b}')")"
+e=$(python3 -c "import time;print(int((time.time()-$s)*1000))")
+[ "$RC" -eq 0 ] && [ "$e" -lt 400 ]; ok "600 KB payload handled in ${e} ms (< 400)" $?
+
 # --- Timing: missing session dir path, p95 <= 10 ms ---------------------------
 # Another session's dir exists, so the hook must parse the payload with jq.
 rm -rf "$D"; mkdir -p "$CTRL/sess-other-0001"

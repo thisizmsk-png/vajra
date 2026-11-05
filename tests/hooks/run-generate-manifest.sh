@@ -26,6 +26,10 @@ VAJRA_OPERATOR_SIGN=1 bash "$WT/scripts/generate-manifest.sh" < /dev/null >/dev/
 bash "$SKILL/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
 [ ! -e "$VS/manifest.sig" ]; check "installed copy without a TTY or the flag does not sign" $?
 
+echo '{"files":{}}' > "$SKILL/manifest.json"; before="$(shasum -a 256 < "$SKILL/manifest.json")"
+bash "$SKILL/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
+[ "$before" = "$(shasum -a 256 < "$SKILL/manifest.json")" ]; check "installed copy without TTY/flag leaves manifest.json untouched" $?
+
 VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" < /dev/null >/dev/null 2>&1
 [ -s "$VS/manifest.sig" ]; check "installed copy with the operator flag signs" $?
 [ ! -e "$VS/.integrity-violation" ]; check "operator re-sign clears the tamper flag" $?

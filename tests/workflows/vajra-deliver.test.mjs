@@ -901,3 +901,28 @@ await scenario('cleanup end to end: the generated command removes clean worktree
     assert.ok(!git('worktree', 'list', '--porcelain').includes(w1), 'pruned')
   } finally { rmSync(tmp, { recursive: true, force: true }) }
 })
+
+// E5: the app's steering nonce reaches Execute-phase task briefs only (spec 386a4e2).
+const NONCE = '0123456789abcdef0123456789abcdef'
+await scenario('E5: steer_nonce goes into task briefs only, with the channel rules', async () => {
+  const r = await go({ ...ARGS, steer_nonce: NONCE })
+  assert.equal(r.result.status, 'done')
+  for (const c of r.calls) {
+    const has = c.prompt.includes(NONCE)
+    if (/^task\./.test(c.label)) {
+      assert.ok(has, `${c.label} brief carries the nonce`)
+      assert.match(c.prompt, /<vajra-steer nonce=/)
+      assert.match(c.prompt, /never approval/i)
+      assert.match(c.prompt, /stopped by the human/)
+    } else assert.ok(!has, `${c.label} must not see the nonce`)
+  }
+  assert.ok(!JSON.stringify(r.result).includes(NONCE), 'nonce absent from the result and report')
+})
+await scenario('E5: a malformed steer_nonce is refused; none given means no steering text', async () => {
+  for (const bad of ['short', 'ZZ' + NONCE.slice(2), NONCE + '"><x', 42]) {
+    const r = await wf.run({ ...ARGS, steer_nonce: bad }, responder(base))
+    assert.equal(r.result.status, 'error'); assert.equal(r.result.node, 'input')
+  }
+  const r = await go(ARGS)
+  assert.ok(!r.calls.some((c) => c.prompt.includes('vajra-steer')), 'no steering text without a nonce')
+})

@@ -42,6 +42,19 @@ keep_files() { # stdin paths -> shipped regular files
   done
 }
 
+# Sign only the installed skill, and only for the operator: a TTY on stdin, or
+# VAJRA_OPERATOR_SIGN=1 (the guard blocks it in tool calls). A worktree or clone copy
+# writes its own manifest.json and stops; the installed copy without the operator
+# exits before touching anything, so its manifest and signature stay in step
+# (incident 2026-11-05).
+INSTALLED="$(cd "${HOME}/.claude/skills/vajra" 2>/dev/null && pwd -P || true)"
+IS_INSTALLED=0; [ "$(cd "$VAJRA_SKILL" && pwd -P)" = "$INSTALLED" ] && IS_INSTALLED=1
+OPERATOR=0; { [ -t 0 ] || [ "${VAJRA_OPERATOR_SIGN:-}" = 1 ]; } && OPERATOR=1
+if [ "$IS_INSTALLED" = 1 ] && [ "$OPERATOR" = 0 ]; then
+  echo "Manifest not signed and not rewritten: run this in your own terminal to re-sign the installed skill."
+  exit 0
+fi
+
 FILES="$(list_files | LC_ALL=C sort -u | keep_files)"
 
 [ -n "$FILES" ] || { echo "ERROR: no files found" >&2; exit 1; }
@@ -52,17 +65,8 @@ printf '%s\n' "$FILES" | tr '\n' '\0' | xargs -0 "${SHA[@]}" \
       | {generated: $gen, version: $ver, files: (map({(.p): .h}) | add)}' > "${MANIFEST}.tmp"
 mv "${MANIFEST}.tmp" "$MANIFEST"
 echo "Manifest written: ${MANIFEST} ($(jq '.files | length' "$MANIFEST") files)"
-
-# Sign only the installed skill, and only for the operator: a TTY on stdin, or
-# VAJRA_OPERATOR_SIGN=1 (the guard blocks it in tool calls). A worktree or clone
-# copy writes its manifest.json and stops (incident 2026-11-05).
-INSTALLED="$(cd "${HOME}/.claude/skills/vajra" 2>/dev/null && pwd -P || true)"
-if [ "$(cd "$VAJRA_SKILL" && pwd -P)" != "$INSTALLED" ]; then
+if [ "$IS_INSTALLED" = 0 ]; then
   echo "Manifest not signed: ${VAJRA_SKILL} is not the installed skill (${HOME}/.claude/skills/vajra)."
-  exit 0
-fi
-if [ ! -t 0 ] && [ "${VAJRA_OPERATOR_SIGN:-}" != 1 ]; then
-  echo "Manifest not signed: run this in your own terminal to re-sign."
   exit 0
 fi
 
