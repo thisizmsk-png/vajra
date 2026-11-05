@@ -178,7 +178,8 @@ reset_dir; entry "$D/stops/k4.json" S4 stop '{"agent_id":"AG1"}' "" "$PAST"
 pre AG1; silent; ok "expired stop does not block" $?
 
 # --- Timing: missing session dir path, p95 <= 10 ms ---------------------------
-rm -rf "$D"
+# Another session's dir exists, so the hook must parse the payload with jq.
+rm -rf "$D"; mkdir -p "$CTRL/sess-other-0001"
 if command -v python3 >/dev/null; then
   P="$(payload PreToolUse Bash AG1 "" "$TEST_HOME/other")"
   python3 -I - "$SH" "$HOOK" "$P" <<'PY'
