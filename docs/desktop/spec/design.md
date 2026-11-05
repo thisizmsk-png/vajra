@@ -228,10 +228,11 @@ sequenceDiagram
   under `<repo>/.claude/worktrees/desktop-rerun-<id>`, runs `scripts/vajra-verify-work.sh <slug> <command>`
   there as an argument array, compares exit codes, then removes that worktree. The control service refuses
   re-run requests that arrive over MCP (NFR-SEC-9).
-- **Knowledge approve, reject and forget** (POS-3.1) open a terminal pane running a shell with the
-  `vajra_kb.py` command typed into the input line but not sent. The human presses Enter. The app never
-  writes the newline. This keeps the human gate in kb.md honest, given SECURITY.md's note that a TTY check
-  is not a boundary against a process that owns a PTY.
+- **Knowledge approve, reject and forget** (POS-3.1) show the exact `vajra_kb.py` command with a Copy
+  button and the line "Run this in your own terminal" (kb.md: these are user-only, own-terminal commands).
+  The app never runs it, types it or sends it into any PTY, including its own. A process that owns a PTY
+  can pass a TTY check (SECURITY.md), so the only honest gate is the human's own terminal. The ledger view
+  refreshes when `audit.jsonl` records the approval.
 - **Runs the app did not start** (POS-2.2) come from transcripts and campaigns as in D9. Their run session
   is shown read-only with no Take over (the app doesn't own that terminal).
 - **Uninstall leaves Vajra whole** (POS-2.3). App files are plain JSONL and markdown (4.3). E4 (persist the
@@ -670,7 +671,8 @@ check.
   4. On a real quit, a crash, logout or shutdown, the run session's PTY closes and its `claude` process
      ends. On the next launch the app offers resume **only** for the sessions that were running and that
      the human did not stop or quit (VD-5). Nothing resumes without a click.
-  5. Resume runs `claude --resume <session_id>` in the repo and sends `/vajra continue` for that campaign.
+  5. Resume runs `claude --resume <session_id> '/vajra continue'` in the repo, with the slash command passed as
+     the initial prompt argument in the argv array. Nothing is typed into the PTY.
      The tracer bullet showed that `--resume` plus `SendMessage` continues the same worker id. The Lead chat
      resumes the same way.
   6. Updates (VD-6) install only when no run is active. Otherwise the update waits, and the menu bar says

@@ -73,7 +73,7 @@ K2 and K3 run in parallel (disjoint folders, so `vajra_tasks.py waves` puts them
 | S3 | Chat with Lead (dock and full) with action cards | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/chat/*` | C6, K3 | US-3.1 to US-3.4 |
 | S4 | Run view: evidence view as the run's default (criteria with pass, fail, not run, stale, unverified; failing first; no green badge while any is red), human-only Re-run with confirm, then timeline and task graph | nakula [Frontend] | `app/ui/screens/run/*` | C4, E3, K3 | US-4.1 to US-4.3, POS-1.1, POS-1.2, POS-1.3, POS-1.5 |
 | S5 | Approvals inbox | nakula [Frontend] | `app/ui/screens/inbox/*` | C3, C4, K2 | US-5.1 to US-5.3 |
-| S6 | History and knowledge search (records used per run with tier and source; approve, reject, forget prefilled in a terminal pane for the human to send); Settings | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/history/*`, `app/ui/screens/settings/*` | C4, K2 | US-6.1, US-6.2, POS-3.1, POS-3.2 |
+| S6 | History and knowledge search (records used per run with tier and source; approve, reject, forget shown as a command to copy into the human's own terminal); Settings | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/history/*`, `app/ui/screens/settings/*` | C4, K2 | US-6.1, US-6.2, POS-3.1, POS-3.2 |
 
 Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in parallel), then S2, S3, S5.
 

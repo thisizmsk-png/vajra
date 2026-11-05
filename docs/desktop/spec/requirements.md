@@ -220,9 +220,9 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 
 **POS-R3 Knowledge is earned and visible** (reason 3, weakest)
 - POS-3.1 GIVEN a run that used ledger records, WHEN I open it, THEN it lists each record with its tier and
-  source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app opens a visible
-  terminal pane with the `vajra_kb.py` command filled in and I run it myself. The app never sends the
-  keystroke (SECURITY.md: a process that owns a PTY can pass a TTY check, so that has to stay a human act).
+  source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app shows the exact
+  `vajra_kb.py` command with a Copy button to run in my own terminal, and never runs, types or sends it into
+  any PTY (SECURITY.md: a process that owns a PTY can pass a TTY check).
 - POS-3.2 GIVEN the knowledge write gate refused a record during a run, WHEN I open the run, THEN the refusal
   (reason, no refused text) shows in the run's activity, read from the ledger's `audit.jsonl`.
 - POS-3.3 (measurement) GIVEN the same class of task run twice in one repo, WHEN run with and without the
