@@ -80,19 +80,28 @@ PY
 # E7 fixtures: archive the green bundle through vajra-campaign.sh (temp HOME, its own key file).
 CAMP="$REPO/scripts/vajra-campaign.sh"
 bash "$CAMP" create arc-ce --feature "ac-1|x" >/dev/null 2>&1
+printf '{"schema":"vajra.tasks/v1","tasks":[{"id":"t1","status":"done"},{"id":"t2","status":"done"},{"id":"t3","status":"done"},{"id":"t4","status":"done"}]}\n' > "$HOME/.claude/vajra/campaigns/arc-ce/tasks.json"
+LATER="$(git -C "$R" rev-parse HEAD)"; git -C "$R" checkout -q --detach "$OLD"
 printf 'diff\n' > "$WT/green/diff.patch"; printf 'ok\n' > "$WT/green/cmd-1.log"
-bash "$CAMP" archive-evidence arc-ce t1 "$WT/green" '["npm ci"]' >/dev/null
+( cd "$R" && bash "$CAMP" archive-evidence arc-ce t1 "$WT/green" '["npm ci"]' >/dev/null )
 ARC="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t1/data/walkthroughs/green"
-bash "$CAMP" archive-evidence arc-ce t2 "$WT/green" '[]' >/dev/null
+( cd "$R" && bash "$CAMP" archive-evidence arc-ce t2 "$WT/green" '[]' >/dev/null )
 ARC2="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t2/data/walkthroughs/green"
 printf 'edited\n' >> "$ARC2/cmd-1.log"
-bash "$CAMP" archive-evidence arc-ce t3 "$WT/green" '[]' >/dev/null
+( cd "$R" && bash "$CAMP" archive-evidence arc-ce t3 "$WT/green" '[]' >/dev/null )
 ARC3="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t3/data/walkthroughs/green"
 python3 -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m["files"]["setup.json"]="0"*64; json.dump(m, open(p,"w"))' "$ARC3/manifest.json"
-bash "$CAMP" archive-evidence arc-ce t4 "$WT/green" '[]' >/dev/null
+( cd "$R" && bash "$CAMP" archive-evidence arc-ce t4 "$WT/green" '[]' >/dev/null )
 ARC4="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t4/data/walkthroughs/green"
 printf 'x\n' > "$ARC4/extra.txt"
+git -C "$R" checkout -q --detach "$LATER"
 bash "$CAMP" create arc-other --feature "ac-1|x" >/dev/null 2>&1
+# Review #1: a signed archive copied to another task or another campaign must not pass.
+cp -R "$HOME/.claude/vajra/campaigns/arc-ce/evidence/t1" "$HOME/.claude/vajra/campaigns/arc-ce/evidence/t9"
+mkdir -p "$HOME/.claude/vajra/campaigns/arc-other/evidence"
+cp -R "$HOME/.claude/vajra/campaigns/arc-ce/evidence/t1" "$HOME/.claude/vajra/campaigns/arc-other/evidence/t1"
+ARC9="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t9/data/walkthroughs/green"
+ARCO="$HOME/.claude/vajra/campaigns/arc-other/evidence/t1/data/walkthroughs/green"
 
 BEFORE="$(snap)"
 
@@ -153,6 +162,8 @@ ce "$ARC2/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 a file cha
 ce "$ARC3/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 an edited manifest (hmac no longer verifies)" 'manifest'
 ce "$ARC4/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 a file not in the manifest" 'manifest'
 ce "$ARC/evidence.json" --archived arc-ce; refused "E7 archived evidence still checks --head against the repo" 'head'
+ce "$ARC9/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 an archive copied to another task" 'manifest'
+ce "$ARCO/evidence.json" --archived arc-other --head "$OLD"; refused "E7 an archive copied to another campaign" 'manifest'
 ce "$ARC/evidence.json" --archived ../x --head "$OLD"; [ "$RC" = 2 ]; check "E7 invalid --archived slug -> exit 2 (rc=$RC)" $?
 
 # --- ac-1: human output without --json ---

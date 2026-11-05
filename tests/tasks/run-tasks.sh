@@ -78,6 +78,7 @@ T claim t1 bhima-1 >/dev/null; check "same worker re-claim is idempotent" $?
 [ "$(rc T claim t1 other)" = 3 ]; check "another worker cannot claim it (exit 3)" $?
 # E6 (Q11): the claim records the worker's worktree (absolute path only).
 [ "$(rc T claim t1 bhima-1 --worktree relative/dir)" = 2 ]; check "E6 relative --worktree rejected (exit 2)" $?
+[ "$(rc T claim t1 bhima-1 --worktree "/$(printf 'a%.0s' $(seq 1 300))")" = 2 ]; check "E6 --worktree over 300 chars rejected, not cut" $?
 T claim t1 bhima-1 --worktree "$WORK/wt-a" >/dev/null; check "E6 claim with --worktree" $?
 [ "$(TJ status t1 | field task.worktree)" = "$WORK/wt-a" ]; check "E6 tasks.json names the worktree" $?
 OK=0

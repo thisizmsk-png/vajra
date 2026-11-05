@@ -124,51 +124,90 @@ RD="$CD/rep"
 REP="$(printf '# Delivery: x\n\nBranch `b` at `c`.\n- ünïcode ✓\n')"
 B64="$(printf '%s\n' "$REP" | openssl base64 -A)"
 NB="$(printf '%s\n' "$REP" | wc -c | tr -d ' ')"
-C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null; check "report saved" $?
+SHA="$(printf '%s\n' "$REP" | openssl dgst -sha256 -r | awk '{print $1}')"
+C report --campaign rep --bytes "$NB" --sha256 "$SHA" --base64 "$B64" >/dev/null; check "report saved" $?
 [ "$(cat "$RD/report.md")" = "$REP" ]; check "report.md is the exact text (multi-line, UTF-8)" $?
 [ "$(stat -c %a "$RD/report.md" 2>/dev/null || stat -f %Lp "$RD/report.md")" = 600 ]; check "report.md mode 600" $?
 C verify rep >/dev/null 2>&1; check "state verifies with the report" $?
-C close rep --status done >/dev/null && C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null; check "report works after close (Deliver closes first)" $?
+C close rep --status done >/dev/null && C report --campaign rep --bytes "$NB" --sha256 "$SHA" --base64 "$B64" >/dev/null; check "report works after close (Deliver closes first)" $?
 printf 'tampered\n' >> "$RD/report.md"
 C verify rep >/dev/null 2>&1; [ $? -ne 0 ]; check "edited report.md fails verify" $?
-C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "report refuses a campaign whose state is invalid" $?
+C report --campaign rep --bytes "$NB" --sha256 "$SHA" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "report refuses a campaign whose state is invalid" $?
 C create rep2 --feature "ac-1|x" >/dev/null 2>&1
-C report --campaign rep2 --bytes "$NB" --base64 "$B64" >/dev/null && rm -f "$CD/rep2/report.md"
+C report --campaign rep2 --bytes "$NB" --sha256 "$SHA" --base64 "$B64" >/dev/null && rm -f "$CD/rep2/report.md"
 C verify rep2 >/dev/null 2>&1; [ $? -ne 0 ]; check "deleted report.md fails verify" $?
 C create rep3 --feature "ac-1|x" >/dev/null 2>&1
-C report --campaign rep3 --bytes 999 --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]; check "byte count mismatch refused, nothing written" $?
-C report --campaign rep3 --bytes 4 --base64 '!!!!' >/dev/null 2>&1; [ $? -ne 0 ]; check "bad base64 refused" $?
+C report --campaign rep3 --bytes 999 --sha256 "$SHA" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]; check "byte count mismatch refused, nothing written" $?
+C report --campaign rep3 --bytes 4 --sha256 "$SHA" --base64 '!!!!' >/dev/null 2>&1; [ $? -ne 0 ]; check "bad base64 refused" $?
+C report --campaign rep3 --bytes "$NB" --sha256 "$(printf '0%.0s' $(seq 1 64))" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]
+check "sha256 mismatch refused (a same-length copy error is caught)" $?
+C report --campaign rep3 --bytes "$NB" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "--sha256 is required" $?
 BIG="$(head -c 70000 /dev/zero | tr '\0' x | openssl base64 -A)"
-C report --campaign rep3 --bytes 70000 --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
+C report --campaign rep3 --bytes 70000 --sha256 "$SHA" --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
 C verify rep3 >/dev/null 2>&1; check "campaign without a report still verifies" $?
 
 # --- archive-evidence (E7, Q13): the verification bundle + the setup list, signed per campaign ---
+# Run from a git repo, as the write-back step does; the evidence must be signed and green for its HEAD,
+# and the task closed in the campaign's task graph.
 C create arc --feature "ac-1|x" >/dev/null 2>&1
 AD="$CD/arc"
-SRC="$WORK/repo/data/walkthroughs/deliver-20261105-1200"; mkdir -p "$SRC"
-printf '{"allPassed":true}\n' > "$SRC/evidence.json"; printf 'diff\n' > "$SRC/diff.patch"; printf ' 1 file\n' > "$SRC/diff.stat"
-: > "$SRC/untracked.txt"; printf 'ok\n' > "$SRC/cmd-1.log"; printf 'ok2\n' > "$SRC/cmd-12.log"
-printf 'nope\n' > "$SRC/secret.txt"; ln -s /etc/hosts "$SRC/cmd-2.log"
+RP="$WORK/repo"; mkdir -p "$RP"; git -C "$RP" init -q; git -C "$RP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+RHEAD="$(git -C "$RP" rev-parse HEAD)"
+# mkev DIR [PYCODE]: signed green verify-work evidence for RHEAD (temp test key), PYCODE edits ev first.
+mkev() { mkdir -p "$1"; python3 - "$1/evidence.json" "$HOME/.claude/vajra/.hmac-key" "$RHEAD" "${2:-}" <<'PY'
+import hashlib, hmac, json, sys
+p, kf, head, code = sys.argv[1:5]
+ev = {"allPassed": True, "commandsTotal": 1, "commandsFailed": 0,
+      "commands": [{"cmd": "test -f x", "exit": 0, "passed": True}], "git": {"head": head, "treeStable": True}}
+exec(code)
+key = bytes.fromhex(open(kf).read().strip())
+ev["hmac"] = hmac.new(key, json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+json.dump(ev, open(p, "w"))
+PY
+}
+printf '{"schema":"vajra.tasks/v1","tasks":[{"id":"t1","status":"done"},{"id":"t2","status":"in_progress"},{"id":"t3","status":"done"},{"id":"t5","status":"done"},{"id":"t6","status":"done"},{"id":"t7","status":"done"}]}\n' > "$AD/tasks.json"
+WK="$RP/data/walkthroughs"; SRC="$WK/deliver-20261105-1200"
+mkev "$SRC"; printf 'diff\n' > "$SRC/diff.patch"; printf ' 1 file\n' > "$SRC/diff.stat"
+: > "$SRC/untracked.txt"; printf 'ok\n' > "$SRC/cmd-1.log"; printf 'ok2\n' > "$SRC/cmd-12.log"; printf 'nope\n' > "$SRC/secret.txt"
+A() { ( cd "$RP" && C archive-evidence "$@" ); }
 SETUP='["npm ci","python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"]'
-C archive-evidence arc t1 "$SRC" "$SETUP" >/dev/null; check "archive-evidence succeeds" $?
+A arc t1 "$SRC" "$SETUP" >/dev/null; check "archive-evidence succeeds" $?
 DST="$AD/evidence/t1/data/walkthroughs/deliver-20261105-1200"
 [ -f "$DST/evidence.json" ] && [ -f "$DST/diff.patch" ] && [ -f "$DST/diff.stat" ] && [ -f "$DST/untracked.txt" ] && [ -f "$DST/cmd-1.log" ] && [ -f "$DST/cmd-12.log" ]
 check "bundle files copied (the walkthrough layout is kept)" $?
-[ ! -e "$DST/secret.txt" ] && [ ! -e "$DST/cmd-2.log" ]; check "only allowlisted regular files; symlinks never followed" $?
+[ ! -e "$DST/secret.txt" ]; check "only allowlisted names are copied" $?
 [ "$(jq -c . "$DST/setup.json")" = "$(printf '%s' "$SETUP" | jq -c .)" ]; check "setup.json is the exact list, untruncated" $?
-jq -e '.files["setup.json"] and .files["evidence.json"] and (.hmac | test("^[0-9a-f]{64}$"))' "$DST/manifest.json" >/dev/null; check "manifest lists every file (setup.json included) with an hmac" $?
+jq -e '.files["setup.json"] and .files["evidence.json"] and .campaign == "arc" and .task == "t1" and .evidence == "deliver-20261105-1200" and (.hmac | test("^[0-9a-f]{64}$"))' "$DST/manifest.json" >/dev/null
+check "manifest names campaign, task, evidence and every file, with an hmac" $?
 [ "$(jq -r '.files["cmd-1.log"]' "$DST/manifest.json")" = "$(openssl dgst -sha256 -r < "$DST/cmd-1.log" | awk '{print $1}')" ]; check "manifest sha256 matches the file" $?
 [ "$(stat -c %a "$DST/evidence.json" 2>/dev/null || stat -f %Lp "$DST/evidence.json")" = 600 ]; check "archived files mode 600" $?
 ! grep -rqF "$KEY" "$AD/evidence"; check "key never written into the archive" $?
-C archive-evidence arc t1 "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "an archive is written once (no overwrite)" $?
-C archive-evidence arc ../x "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "bad task id refused" $?
-C archive-evidence arc t2 "$SRC" '["a","b","c","d","e","f"]' >/dev/null 2>&1; [ $? -ne 0 ]; check "more than 5 setup commands refused" $?
-C archive-evidence arc t2 "$SRC" "[\"$(head -c 1001 /dev/zero | tr '\0' a)\"]" >/dev/null 2>&1; [ $? -ne 0 ]; check "setup command over 1000 chars refused" $?
-C archive-evidence arc t2 "$SRC" '{"cmd":1}' >/dev/null 2>&1; [ $? -ne 0 ]; check "setup must be an array of strings" $?
-C archive-evidence arc t2 "$WORK/repo/data/walkthroughs" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a dir without evidence.json refused" $?
-C archive-evidence arc t3 "$SRC" '[]' >/dev/null; check "an empty setup list is fine" $?
+[ -z "$(ls -A "$AD/evidence" | grep -v '^t1$')" ]; check "no scratch files left in the archive dir" $?
+A arc t1 "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "an archive is written once (no overwrite)" $?
+A arc ../x "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "bad task id refused" $?
+A arc t3 "$SRC" '["a","b","c","d","e","f"]' >/dev/null 2>&1; [ $? -ne 0 ]; check "more than 5 setup commands refused" $?
+A arc t3 "$SRC" "[\"$(head -c 1001 /dev/zero | tr '\0' a)\"]" >/dev/null 2>&1; [ $? -ne 0 ]; check "setup command over 1000 chars refused" $?
+A arc t3 "$SRC" '{"cmd":1}' >/dev/null 2>&1; [ $? -ne 0 ]; check "setup must be an array of strings" $?
+A arc t3 "$WK" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a dir without evidence.json refused" $?
+# Review #2: only signed, green evidence for HEAD, and only for a task closed in tasks.json.
+mkev "$WK/unsigned"; jq 'del(.hmac)' "$WK/unsigned/evidence.json" > "$WK/u.tmp" && mv "$WK/u.tmp" "$WK/unsigned/evidence.json"
+A arc t3 "$WK/unsigned" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t3" ]; check "unsigned evidence refused" $?
+mkev "$WK/red" 'ev["commands"][0]["exit"] = 1; ev["commandsFailed"] = 1; ev["allPassed"] = False'
+A arc t3 "$WK/red" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "red evidence refused" $?
+mkev "$WK/oldhead" 'ev["git"]["head"] = "f" * 40'
+A arc t3 "$WK/oldhead" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "evidence for another commit refused" $?
+A arc t2 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t2" ]; check "a task that is not closed refused" $?
+A arc t9 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a task not in tasks.json refused" $?
+# Review #2/#3: never through a planted link.
+mkdir -p "$WORK/elsewhere"; ln -s "$WORK/elsewhere" "$AD/evidence/t5"
+A arc t5 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ -z "$(ls -A "$WORK/elsewhere")" ]; check "a symlinked evidence/<task> is refused" $?
+mkev "$WK/slink"; ln -s /etc/hosts "$WK/slink/cmd-2.log"
+A arc t6 "$WK/slink" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t6" ]; check "a symlinked bundle file refuses the archive" $?
+mkev "$WK/hlink"; printf 'other\n' > "$WORK/hl-target"; ln "$WORK/hl-target" "$WK/hlink/cmd-3.log"
+A arc t6 "$WK/hlink" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t6" ]; check "a hard-linked bundle file refuses the archive" $?
+A arc t3 "$SRC" '[]' >/dev/null; check "an empty setup list is fine" $?
 printf 'x' >> "$AD/campaign.json"
-C archive-evidence arc t4 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t4" ]; check "refused when the campaign state is invalid" $?
+A arc t7 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t7" ]; check "refused when the campaign state is invalid" $?
 
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"

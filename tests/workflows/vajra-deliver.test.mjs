@@ -68,7 +68,7 @@ const base = {
   deploy_plan: { target: 'prod', commands: ['npm run deploy'], rollback: ['npm run rollback'], health_checks: ['GET /health'], risk: 'low' },
   'kb.search': { exit_code: 0, ok: true, lines: [] },
   tasks: { ok: true, outputs: ['ok'] },
-  writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
+  writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
   cleanup: { exit_code: 0, lines: ['removed /r/.claude/worktrees/agent-a1', 'removed /r/.claude/worktrees/agent-a2', 'worktrees: 2 removed, 0 kept'] },
 }
 const SID = '4f7d2c1e-9b3a-4e6f-8a21-0c5d7e9f1b2a'
@@ -94,11 +94,13 @@ await scenario('happy path: done, one integration branch, evidence per criterion
 await scenario('E4: the delivery report is saved into the campaign, byte-exact, as one base64 argument', async () => {
   const r = await go(ARGS)
   const p = call(r, 'campaign.report').prompt
-  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --base64 ([A-Za-z0-9+/]+=*)/)
+  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --sha256 ([0-9a-f]{64}) --base64 ([A-Za-z0-9+/]+=*)/)
   assert.ok(m, own(p))
-  const text = Buffer.from(m[2], 'base64').toString('utf8')
+  const raw = Buffer.from(m[3], 'base64'), text = raw.toString('utf8')
   assert.equal(text, r.result.report + '\n')
-  assert.equal(Number(m[1]), Buffer.byteLength(text, 'utf8'))
+  assert.equal(Number(m[1]), raw.length)
+  const { createHash } = await import('node:crypto')
+  assert.equal(m[2], createHash('sha256').update(raw).digest('hex'), 'the workflow sha256 matches node crypto')
   assert.equal(call(r, 'campaign.report').agentType, 'abhimanyu')
   assert.ok(own(p).length < 32 * 1024, 'the command stays under the guard analysis limit')
 })
@@ -607,6 +609,11 @@ await scenario('E7: write-back archives the evidence bundle and the exact setup 
   const arg = q.match(new RegExp(`\\{\\{a${m[0][3]}\\}\\} = (.*)`))[1]
   const unq = arg.slice(1, -1).replace(/'\\''/g, "'")
   assert.deepEqual(JSON.parse(unq), ['npm ci', long, "echo 'q' \"d\""])
+  assert.match(p, /archive_ok=false if any of them exits non-zero .* These do not count toward ok\./)
+  // A failed archive is reported on its own and does not reopen the tasks.
+  const fa = await go(ARGS, { writeback: { ...base.writeback, archive_ok: false } })
+  assert.equal(fa.result.artifacts.knowledge.tasks_closed, true)
+  assert.match(fa.result.report, /evidence archive for this delivery was not written/)
   // No archive when there is nothing verified to archive: the proposed range is unchanged.
   const plain = own(call(await go(ARGS), 'writeback').prompt)
   assert.match(plain, /Otherwise set verified=false and run commands 7 to 8 in order instead/)
@@ -632,13 +639,13 @@ await scenario('write-back: one lesson per fix round that went from failing to p
   assert.ok(!/--type lesson/.test(own(call(n, 'writeback').prompt)))
 })
 await scenario('write-back without green evidence: nothing closed, knowledge proposed, reported as a risk; failures never fatal', async () => {
-  const r = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
+  const r = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
   assert.equal(r.result.status, 'done')
   assert.equal(r.result.artifacts.knowledge.source, 'proposed')
   assert.equal(r.result.artifacts.knowledge.tasks_closed, false)
   assert.match(r.result.report, /verify-work did not pass when re-run for evidence \(exit 1\)/)
   assert.match(r.result.report, /saved as proposed, waiting in pending\//)
-  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 2, ok: true, proposed_fallbacks: 0, outputs: [] } })
+  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 2, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: [] } })
   assert.equal(lie.result.artifacts.knowledge.source, 'proposed', 'verified needs exit 0 too')
   const t = await go(ARGS, { writeback: () => new Error('boom') })
   assert.equal(t.result.status, 'done')
@@ -693,12 +700,12 @@ await scenario('write-back: the verifier setup_cmds run in the fresh worktree be
   assert.match(own(call(many, 'writeback').prompt), /Run commands 1 to 7 in order/)
 })
 await scenario('write-back: a verified record the gate refuses goes in as its proposed twin, and the report says so', async () => {
-  const r = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 1, outputs: ['refused', 'pending kb-123abc'] } })
+  const r = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 1, outputs: ['refused', 'pending kb-123abc'] } })
   assert.equal(r.result.artifacts.knowledge.source, 'verified')
   assert.equal(r.result.artifacts.knowledge.proposed_fallbacks, 1)
   assert.match(r.result.report, /1 verified knowledge record\(s\) were refused by the knowledge gate and went to pending\/ as proposed instead/)
   assert.match(r.result.report, /saved as verified, with evidence `data\/walkthroughs\/deliver-20261011-0930\/evidence\.json` \(1 refused by the gate went to pending\/ as proposed\)/)
-  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 99, outputs: [] } })
+  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 99, outputs: [] } })
   assert.equal(lie.result.artifacts.knowledge.proposed_fallbacks, 2, 'capped at the number of records')
 })
 await scenario('a worker whose claim is refused comes back blocked (need_input), naming the claim error', async () => {
@@ -858,7 +865,7 @@ await scenario('cleanup: commits of every round count; the base commit never doe
   assert.ok(!cmd.includes(HEAD.slice(0, 7)), 'a worker commit equal to the base is dropped')
 })
 await scenario('cleanup: evidence dir allowed only once tasks closed on it; setup dirs come from setup_cmds', async () => {
-  const red = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
+  const red = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
   assert.match(cleanCmdIn(red), / --allow \.venv$/, 'write-back not green: the evidence keeps its worktree')
   const setup = ['python3 -m venv --clear env && env/bin/pip install -e .', 'npm ci', 'uv venv ../escape', 'python3 -m venv /abs/venv']
   const r = await go(ARGS, { verify: realVerifier('id', { setup_cmds: setup }) })

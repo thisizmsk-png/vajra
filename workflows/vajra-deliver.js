@@ -148,7 +148,7 @@ const S = {
     artifacts: obj({ branch: STR, base_commit: STR, commit: STR, files: STRS, protected_actions_skipped: STRS }), evidence_cmds: STRS }),
   // exit_code decides availability: an empty knowledge base exits 0 and prints nothing, which is a valid "no hits".
   KbHits: obj({ exit_code: INT, ok: BOOL, lines: STRS }),
-  Writeback: obj({ verified: BOOL, verify_exit_code: INT, ok: BOOL, proposed_fallbacks: INT, outputs: STRS }),
+  Writeback: obj({ verified: BOOL, verify_exit_code: INT, ok: BOOL, archive_ok: BOOL, proposed_fallbacks: INT, outputs: STRS }),
   Merge: obj({ status: E('merged', 'conflict'), branch: STR, commit: STR, merged: STRS,
     conflicts: arr(obj({ task: STR, files: STRS })), notes: STR }),
   // command is the literal shell command that ran (re-run verbatim by the write-back and shown under "How to run it");
@@ -164,6 +164,36 @@ const S = {
 }
 
 // ---------- Helpers
+function sha256Hex(bytes) {
+  const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+    0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70,
+    0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+  const n = bytes.length, padded = new Uint8Array(((n + 9 + 63) >> 6) << 6)
+  padded.set(bytes); padded[n] = 0x80
+  const bits = n * 8, dv = new DataView(padded.buffer)
+  dv.setUint32(padded.length - 8, Math.floor(bits / 0x100000000)); dv.setUint32(padded.length - 4, bits >>> 0)
+  const w = new Uint32Array(64), r = (x, k) => (x >>> k) | (x << (32 - k))
+  for (let o = 0; o < padded.length; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4)
+    for (let i = 16; i < 64; i++) {
+      const s0 = r(w[i - 15], 7) ^ r(w[i - 15], 18) ^ (w[i - 15] >>> 3), s1 = r(w[i - 2], 17) ^ r(w[i - 2], 19) ^ (w[i - 2] >>> 10)
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0
+    }
+    let [a, b, c, d, e, f, g, h] = H
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0
+      const t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0
+  }
+  return H.map((x) => x.toString(16).padStart(8, '0')).join('')
+}
 // Wrap untrusted values; neutralize any embedded artifact tags so the content cannot close the wrapper.
 const data = (from, v) =>
   `<artifact from="${from}">\n${(typeof v === 'string' ? v : JSON.stringify(v, null, 2)).replace(/<(\/?)artifact/gi, '<$1_artifact')}\n</artifact>\n` +
@@ -825,7 +855,8 @@ const wb = await step('writeback', 'vidura',
       `(${twins}) so the record is not lost, and count the twins you ran in proposed_fallbacks. `
     : '. ') +
   (M > K ? `Otherwise set verified=false and run commands ${K + 1} to ${M} in order instead. ` : 'Otherwise set verified=false and run nothing else. ') +
-  `If verified is true, then also run commands ${M + 1} to ${X} (archive the evidence; run each even if one fails). ` +
+  `If verified is true, then also run commands ${M + 1} to ${X} (archive the evidence; run each even if one fails); ` +
+  `archive_ok=false if any of them exits non-zero (true when you did not run them). These do not count toward ok. ` +
   'proposed_fallbacks = 0 when you ran no twin. Run every command of that range even if one fails; ' +
   "ok=false if any of them exits non-zero (a refused knowledge write whose twin exited 0 does not count). Put each command's last output line in outputs.\n" + GUARD + '\n' +
   commandsBlock([
@@ -849,6 +880,7 @@ else {
     (kbOut.length ? ` and ${kbOut.length} knowledge record(s) went to pending/ for your approval (atman.sh review)` : ''))
   if (fb) campaignNotes.push(`${fb} verified knowledge record(s) were refused by the knowledge gate and went to pending/ as proposed instead (atman.sh review)`)
   if (!wb.out.ok) campaignNotes.push('knowledge write-back: some commands failed: ' + oneLine(wb.out.outputs.join(' | '), 300))
+  if (green && wb.out.archive_ok === false) campaignNotes.push('the evidence archive for this delivery was not written (vajra-campaign.sh archive-evidence failed); the tasks are still closed')
 }
 
 await recordCampaign('campaign.deliver', 'Deliver', [
@@ -966,16 +998,18 @@ if (pending.length) {
 }
 
 // E4 (Q3): save the report into the campaign so it survives without the app. One base64 argument plus its
-// byte count: the text is multi-line and untrusted, and the script refuses a copy that does not decode to N bytes.
+// byte count and sha256: the text is multi-line and untrusted, and the script refuses a copy that does not decode to
+// exactly those bytes (an agent transcribes the argument; a same-length copy error is caught by the hash).
 // At most 20 KiB (about 27 KB of base64), so the command stays under the guard's 32 KB analysis limit.
 const REPORT_SAVE_MAX = 20 * 1024
 const reportText = md.join('\n') + '\n'
 const reportBytes = new TextEncoder().encode(reportText)
+const reportSha = sha256Hex(reportBytes)
 if (reportBytes.length <= REPORT_SAVE_MAX) {
   let bin = ''
   for (const b of reportBytes) bin += String.fromCharCode(b)
   await recordCampaign('campaign.report', 'Deliver', [
-    [`${CAMPAIGN_SH} report --campaign ${CAMPAIGN} --bytes ${reportBytes.length} --base64 ${btoa(bin)}`],
+    [`${CAMPAIGN_SH} report --campaign ${CAMPAIGN} --bytes ${reportBytes.length} --sha256 ${reportSha} --base64 ${btoa(bin)}`],
   ])
 } else log(`report is ${reportBytes.length} bytes, over ${REPORT_SAVE_MAX}; not saved into the campaign (the app keeps the transcript copy)`)
 

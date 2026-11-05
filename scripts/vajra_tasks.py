@@ -397,9 +397,9 @@ def cmd_claim(a):
     if not AGENT_RE.match(a.worker or "") and not ID_RE.match(a.worker or ""):
         raise Fail(2, "invalid worker name %r" % a.worker)
     # E6: the worker's own worktree, recorded so the app can show and diff it.
-    wt = one_line(a.worktree, 300) if a.worktree else ""
-    if wt and not wt.startswith("/"):
-        raise Fail(2, "--worktree must be an absolute path")
+    wt = a.worktree or ""
+    if wt and (not wt.startswith("/") or len(wt) > 300 or wt != one_line(wt, 300)):
+        raise Fail(2, "--worktree must be one absolute path of at most 300 characters")
     with Store(a.campaign, write=True) as s:
         derive_ready(s.data["tasks"])
         t = s.task(a.id)
@@ -572,15 +572,19 @@ ARCHIVE_FILE_RE = re.compile(r"^(evidence\.json|diff\.patch|diff\.stat|untracked
 
 
 def archive_root(slug, path):
-    """E7: the <campaign>/evidence/<task> dir that holds `path`, or None when it is not in that campaign's archive."""
+    """E7: (the <campaign>/evidence/<task> dir that holds `path`, task, evidence slug), or None when `path` is
+    not in that campaign's archive."""
     base = os.path.realpath(os.path.join(campaign_dir(slug), "evidence"))
     rel = os.path.relpath(os.path.realpath(path), base).split(os.sep)
     if len(rel) != 5 or rel[0] in ("", ".", "..") or rel[1:3] != ["data", "walkthroughs"] or rel[4] != "evidence.json":
         return None
-    return os.path.join(base, rel[0])
+    return os.path.join(base, rel[0]), rel[0], rel[3]
 
 
-def check_archive_manifest(evdir):
+ARCHIVE_CAP = 8 * 1024 * 1024
+
+
+def check_archive_manifest(evdir, slug, task, eslug):
     """E7: manifest.json is signed with the Vajra key (HMAC over its canonical JSON without hmac, the key's hex
     text as the HMAC key, as vajra-campaign.sh signs) and lists exactly the files in the dir, each matching."""
     def refuse(why):
@@ -601,6 +605,9 @@ def check_archive_manifest(evdir):
     body = json.dumps({k: v for k, v in m.items() if k != "hmac"}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     if not hmac.compare_digest(m["hmac"], hmac.new(ktext.encode(), body.encode("utf-8"), hashlib.sha256).hexdigest()):
         refuse("signature (hmac) invalid")
+    # A signed archive copied to another task or campaign keeps a valid hmac; its own fields say where it belongs.
+    if (m.get("schema"), m.get("campaign"), m.get("task"), m.get("evidence")) != ("vajra-evidence-archive-v1", slug, task, eslug):
+        refuse("is for %s/%s/%s, not %s/%s/%s" % (m.get("campaign"), m.get("task"), m.get("evidence"), slug, task, eslug))
     present = sorted(n for n in os.listdir(evdir) if n != "manifest.json")
     if present != sorted(m["files"]):
         refuse("does not list exactly the archived files")
@@ -609,8 +616,9 @@ def check_archive_manifest(evdir):
         if not ARCHIVE_FILE_RE.match(n) or os.path.islink(fp) or not os.path.isfile(fp):
             refuse("lists an unexpected file %s" % n)
         with open(fp, "rb") as f:
-            if hashlib.sha256(f.read()).hexdigest() != m["files"][n]:
-                refuse("sha256 mismatch for %s" % n)
+            data = f.read(ARCHIVE_CAP + 1)
+        if len(data) > ARCHIVE_CAP or hashlib.sha256(data).hexdigest() != m["files"][n]:
+            refuse("sha256 mismatch for %s" % n)
 
 
 def cmd_check_evidence(a):
@@ -621,12 +629,13 @@ def cmd_check_evidence(a):
         raise Fail(2, "invalid --archived campaign slug")
     try:
         if a.archived:
-            root = archive_root(a.archived, a.evidence)
-            if root is None:
+            found = archive_root(a.archived, a.evidence)
+            if found is None:
                 raise Fail(3, "evidence %s refused: it must be <campaign>/evidence/<task>/data/walkthroughs/<slug>/evidence.json "
                               "in campaign %s" % (a.evidence, a.archived))
+            root, task, eslug = found
             read_evidence(a.evidence, a.head or None, root=root)
-            check_archive_manifest(os.path.dirname(os.path.realpath(a.evidence)))
+            check_archive_manifest(os.path.dirname(os.path.realpath(a.evidence)), a.archived, task, eslug)
         else:
             read_evidence(a.evidence, a.head or None)
     except Unreadable as e:

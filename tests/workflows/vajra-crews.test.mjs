@@ -29,7 +29,7 @@ const call = (r, l) => r.calls.find((c) => c.label === l)
     campaign: { ok: true, outputs: ['ok'] },
     'kb.search': { exit_code: 0, ok: true, lines: [] },
     tasks: { ok: true, outputs: ['ok'] },
-    writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
+    writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
     cleanup: { exit_code: 0, lines: ['worktrees: 0 removed, 0 kept'] },
   }
   const run = go(wf, base)
