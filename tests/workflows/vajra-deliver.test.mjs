@@ -595,6 +595,22 @@ await scenario('write-back: verify-work evidence, tasks closed on it, delivery +
   assert.equal(r.result.artifacts.knowledge.tasks_closed, true)
   assert.match(r.result.report, /## Knowledge recorded\n- 2 record\(s\) \(1 delivery, 1 decision\(s\), 0 lesson\(s\)\) saved as verified/)
 })
+await scenario('E7: write-back archives the evidence bundle and the exact setup list per task, only when verified', async () => {
+  const long = 'pip install ' + 'x'.repeat(980)
+  const r = await go(ARGS, { verify: realVerifier('id', { setup_cmds: ['npm ci', long, "echo 'q' \"d\""] }) })
+  const w = call(r, 'writeback'), p = own(w.prompt), q = wrapped(w.prompt, 'quoted_arguments')
+  const m = [...p.matchAll(/^(\d+)\. bash \S+vajra-campaign\.sh archive-evidence deliver-20261011-0930 (t\d) data\/walkthroughs\/deliver-20261011-0930 \{\{a(\d+)\}\}$/gm)]
+  assert.deepEqual(m.map((x) => x[2]), ['t1', 't2'])
+  const total = Number(m.at(-1)[1])
+  assert.match(p, new RegExp(`If verified is true, then also run commands ${m[0][1]} to ${total} \\(archive the evidence`))
+  // The argument is the exact JSON of the setup commands that ran, untruncated (the 1,000-char one included).
+  const arg = q.match(new RegExp(`\\{\\{a${m[0][3]}\\}\\} = (.*)`))[1]
+  const unq = arg.slice(1, -1).replace(/'\\''/g, "'")
+  assert.deepEqual(JSON.parse(unq), ['npm ci', long, "echo 'q' \"d\""])
+  // No archive when there is nothing verified to archive: the proposed range is unchanged.
+  const plain = own(call(await go(ARGS), 'writeback').prompt)
+  assert.match(plain, /Otherwise set verified=false and run commands 7 to 8 in order instead/)
+})
 await scenario('no worker summary is pasted into any other agent prompt', async () => {
   const r = await go(ARGS, { verify: realVerifier('id'), 'verify.r1': { ...verification, results: [pass('ac-1'), { ...pass('ac-2'), status: 'fail', exit_code: 1 }] } })
   for (const c of r.calls) if (!c.label.startsWith('task.')) assert.ok(!/did t[12]/.test(c.prompt), c.label)

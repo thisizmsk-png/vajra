@@ -8,6 +8,8 @@
 #   state.sig       HMAC-SHA256 over the three files above (written by this script only)
 #   checkpoints/    NNNN.json snapshots, each HMAC-signed and chained to the previous one
 #   report.md       the delivery report (E4); its sha256 is recorded in the signed campaign.json
+#   evidence/       <task>/data/walkthroughs/<slug>/: archived verification bundle + setup.json, with a
+#                   manifest.json (sha256 per file) signed with the HMAC key (E7)
 #
 # The HMAC key (~/.claude/vajra/.hmac-key) is read by this script and never printed,
 # so it never enters model context. Signing uses openssl.
@@ -24,6 +26,7 @@
 #   vajra-campaign.sh verify [slug]
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
 #   vajra-campaign.sh report --campaign slug --bytes N --base64 B64
+#   vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup-json>
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -399,6 +402,44 @@ cmd_report() {
   echo "report saved for $SLUG ($nb bytes)"
 }
 
+# E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
+# the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
+# manifest is HMAC-signed so the app can check it through E3 check-evidence --archived.
+manifest_hmac() { jq -cS 'del(.hmac)' "$1" | tr -d '\n' | hmac_stdin; }
+cmd_archive_evidence() {
+  local slug="${1:-}" task="${2:-}" src="${3:-}" setup="${4:-}" eslug dst f tmp
+  [ $# -eq 4 ] || usage
+  printf '%s' "$task" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "invalid task id"
+  [ -d "$src" ] && [ ! -L "$src" ] && [ -f "$src/evidence.json" ] && [ ! -L "$src/evidence.json" ] || die "not an evidence dir (no evidence.json)"
+  eslug="$(basename "$src")"
+  printf '%s' "$eslug" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' || die "invalid evidence slug"
+  printf '%s' "$setup" | jq -e 'type == "array" and length <= 5 and all(.[]; type == "string" and length >= 1 and length <= 1000)' >/dev/null 2>&1 \
+    || die "setup must be a JSON array of at most 5 strings, each 1-1000 characters"
+  resolve "$slug"; load_key; lock "$DIR"; require_valid
+  dst="$DIR/evidence/$task/data/walkthroughs/$eslug"
+  [ ! -e "$dst" ] || die "evidence for $task/$eslug is already archived"
+  tmp="$DIR/evidence/.tmp-$task-$$"
+  rm -rf "$tmp"; ( umask 077; mkdir -p "$tmp" ) || die "cannot create the archive dir"
+  for f in "$src"/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    case "$(basename "$f")" in evidence.json|diff.patch|diff.stat|untracked.txt|cmd-[0-9]*.log) ;; *) continue ;; esac
+    case "$(basename "$f")" in cmd-*) printf '%s' "$(basename "$f")" | grep -Eq '^cmd-[0-9]{1,3}\.log$' || continue ;; esac
+    ( umask 077; cp "$f" "$tmp/" ) || { rm -rf "$tmp"; die "copy failed: $(basename "$f")"; }
+  done
+  ( umask 077; printf '%s' "$setup" | jq -c . > "$tmp/setup.json" ) || { rm -rf "$tmp"; die "cannot write setup.json"; }
+  chmod 600 "$tmp"/*
+  ( cd "$tmp" && for f in *; do printf '%s\t%s\n' "$f" "$(sha256_file "$f")"; done ) \
+    | jq -R -s --arg t "$task" --arg e "$eslug" --arg c "$SLUG" --arg now "$(now)" \
+        '{schema: "vajra-evidence-archive-v1", campaign: $c, task: $t, evidence: $e, created: $now,
+          files: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add), hmac: ""}' > "$tmp/manifest.unsigned" \
+    || { rm -rf "$tmp"; die "cannot build the manifest"; }
+  jq --arg h "$(manifest_hmac "$tmp/manifest.unsigned")" '.hmac = $h' "$tmp/manifest.unsigned" > "$tmp/manifest.json" && rm -f "$tmp/manifest.unsigned"
+  chmod 600 "$tmp/manifest.json"
+  mkdir -p "$(dirname "$dst")" && mv "$tmp" "$dst" || { rm -rf "$tmp"; die "cannot place the archive"; }
+  append_progress "evidence archived: $task $eslug"; touch_updated; sign_state "$DIR"
+  echo "evidence archived for $SLUG: $task/$eslug"
+}
+
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   create)     cmd_create "$@" ;;
@@ -412,6 +453,7 @@ case "$cmd" in
   verify)     cmd_verify "$@" ;;
   close)      cmd_close "$@" ;;
   report)     cmd_report "$@" ;;
+  archive-evidence) cmd_archive_evidence "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "vajra-campaign: unknown command: $cmd" >&2; usage ;;
 esac

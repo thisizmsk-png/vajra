@@ -471,6 +471,7 @@ bash_case BLOCK "/usr/bin/env rm -rf ~"                    "/usr/bin/env rm -rf 
 bash_case ALLOW "/usr/bin/env ls still fine"               "/usr/bin/env ls"
 # E4: the Deliver step saves a report of up to 20 KiB as one base64 argument (~27 KB, under the 32 KB limit).
 B64BIG="$(head -c 20480 /dev/zero | tr '\0' x | openssl base64 -A)"
+bash_case ALLOW "E7 archive-evidence from the write-back worktree" "bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh archive-evidence deliver-1 t1 data/walkthroughs/deliver-1 '[\"npm ci\"]'"
 bash_case ALLOW "E4 campaign report with a 20 KiB base64 arg" "bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh report --campaign deliver-1 --bytes 20480 --base64 $B64BIG"
 bash_case BLOCK "env -u X -C . ./scripts/install.sh"       "env -u X -C . ./scripts/install.sh" "$WT"
 bash_case BLOCK "env -S './scripts/install.sh --x'"        "env -S './scripts/install.sh --unregister-hooks'" "$WT"

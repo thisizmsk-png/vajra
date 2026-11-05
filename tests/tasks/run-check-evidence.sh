@@ -77,6 +77,23 @@ for top in sys.argv[1:]:
 print(h.hexdigest())
 PY
 }
+# E7 fixtures: archive the green bundle through vajra-campaign.sh (temp HOME, its own key file).
+CAMP="$REPO/scripts/vajra-campaign.sh"
+bash "$CAMP" create arc-ce --feature "ac-1|x" >/dev/null 2>&1
+printf 'diff\n' > "$WT/green/diff.patch"; printf 'ok\n' > "$WT/green/cmd-1.log"
+bash "$CAMP" archive-evidence arc-ce t1 "$WT/green" '["npm ci"]' >/dev/null
+ARC="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t1/data/walkthroughs/green"
+bash "$CAMP" archive-evidence arc-ce t2 "$WT/green" '[]' >/dev/null
+ARC2="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t2/data/walkthroughs/green"
+printf 'edited\n' >> "$ARC2/cmd-1.log"
+bash "$CAMP" archive-evidence arc-ce t3 "$WT/green" '[]' >/dev/null
+ARC3="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t3/data/walkthroughs/green"
+python3 -c 'import json,sys; p=sys.argv[1]; m=json.load(open(p)); m["files"]["setup.json"]="0"*64; json.dump(m, open(p,"w"))' "$ARC3/manifest.json"
+bash "$CAMP" archive-evidence arc-ce t4 "$WT/green" '[]' >/dev/null
+ARC4="$HOME/.claude/vajra/campaigns/arc-ce/evidence/t4/data/walkthroughs/green"
+printf 'x\n' > "$ARC4/extra.txt"
+bash "$CAMP" create arc-other --feature "ac-1|x" >/dev/null 2>&1
+
 BEFORE="$(snap)"
 
 # ce [ENV...] -- ARGS: run check-evidence --json in the repo; sets OUT and RC.
@@ -126,6 +143,17 @@ ce; [ "$RC" = 2 ]; check "ac-1 usage: no evidence path -> exit 2 (rc=$RC)" $?
 ce "$WT/green/evidence.json" --head zzz; [ "$RC" = 2 ]; check "ac-1 usage: invalid --head -> exit 2 (rc=$RC)" $?
 ce "$WT/green/evidence.json" --he "$OLD"; [ "$RC" = 2 ]; check "ac-1 usage: abbreviated option refused -> exit 2 (rc=$RC)" $?
 ce "$WT/green/evidence.json" --bogus; [ "$RC" = 2 ]; check "ac-1 usage: unknown option -> exit 2 (rc=$RC)" $?
+
+# --- E7: --archived <slug> checks evidence archived in that campaign, plus its signed manifest ---
+green "E7 archived green evidence with a valid manifest" "$ARC/evidence.json" --archived arc-ce --head "$OLD"
+ce "$ARC/evidence.json" --head "$OLD"; refused "E7 archived path without --archived is outside the repo" 'data/walkthroughs'
+ce "$WT/green/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 --archived refuses a repo path" 'evidence/<task>'
+ce "$ARC/evidence.json" --archived arc-other --head "$OLD"; refused "E7 --archived names another campaign" 'evidence/<task>'
+ce "$ARC2/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 a file changed after archiving" 'manifest'
+ce "$ARC3/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 an edited manifest (hmac no longer verifies)" 'manifest'
+ce "$ARC4/evidence.json" --archived arc-ce --head "$OLD"; refused "E7 a file not in the manifest" 'manifest'
+ce "$ARC/evidence.json" --archived arc-ce; refused "E7 archived evidence still checks --head against the repo" 'head'
+ce "$ARC/evidence.json" --archived ../x --head "$OLD"; [ "$RC" = 2 ]; check "E7 invalid --archived slug -> exit 2 (rc=$RC)" $?
 
 # --- ac-1: human output without --json ---
 ( cd "$R" && python3 "$PY" check-evidence "$WT/green/evidence.json" --head "$OLD" 2>/dev/null ) | grep -q '^green'; check "ac-1 human output says green" $?

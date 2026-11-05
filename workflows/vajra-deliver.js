@@ -175,11 +175,12 @@ const sq = (s, n) => "'" + oneLine(s, n || 300).replace(/'/g, "'\\''") + "'"
 // text, criterion text, verifier output). The script shell-quotes untrusted values itself and shows them only
 // inside a data wrapper, as {{aN}} placeholders the agent substitutes verbatim.
 const U = (text, max) => ({ untrusted: text, max })
+const URAW = (text) => ({ untrusted: text, raw: true })
 function commandsBlock(cmds) {
   const vals = []
   const lines = cmds.map((parts, i) => `${i + 1}. ` + parts.map((x) => {
     if (typeof x === 'string') return x
-    vals.push(sq(x.untrusted, x.max))
+    vals.push(x.raw ? "'" + String(x.untrusted).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/'/g, "'\\''") + "'" : sq(x.untrusted, x.max))
     return `{{a${vals.length}}}`
   }).join(''))
   let out = lines.join('\n') + '\n'
@@ -804,8 +805,12 @@ const wbClose = ORDER.map((id) => [`${TASKS_PY} close ${TID(id)} --evidence ${EV
   `--base-commit ${BASE} --changed `, U(changes[id].files.join(','), 2000), ` --campaign ${CAMPAIGN}`])
 const wbVerified = [...wbClose, ...kbOut.map((r) => kbAdd(r, 'verified'))]
 const wbProposed = kbOut.map((r) => kbAdd(r, 'proposed'))
+// E7 (Q13): before cleanup removes this worktree, archive the verification bundle and the exact setup commands
+// write-back ran (built here, untruncated) into the campaign, one signed archive per task. Numbered after the
+// proposed range so the numbering of every other command stays the same.
+const wbArchive = ORDER.map((id) => [`${CAMPAIGN_SH} archive-evidence ${CAMPAIGN} ${id} data/walkthroughs/${EV_SLUG} `, URAW(JSON.stringify(setupCmds))])
 const V = 2 + setupCmds.length                       // the verify-work command
-const K = V + wbVerified.length, M = K + wbProposed.length
+const K = V + wbVerified.length, M = K + wbProposed.length, X = M + wbArchive.length
 const firstKb = V + wbClose.length + 1               // first --source verified knowledge write
 const twins = kbOut.map((r, i) => `command ${firstKb + i} -> command ${K + 1 + i}`).join(', ')
 const wb = await step('writeback', 'vidura',
@@ -820,6 +825,7 @@ const wb = await step('writeback', 'vidura',
       `(${twins}) so the record is not lost, and count the twins you ran in proposed_fallbacks. `
     : '. ') +
   (M > K ? `Otherwise set verified=false and run commands ${K + 1} to ${M} in order instead. ` : 'Otherwise set verified=false and run nothing else. ') +
+  `If verified is true, then also run commands ${M + 1} to ${X} (archive the evidence; run each even if one fails). ` +
   'proposed_fallbacks = 0 when you ran no twin. Run every command of that range even if one fails; ' +
   "ok=false if any of them exits non-zero (a refused knowledge write whose twin exited 0 does not count). Put each command's last output line in outputs.\n" + GUARD + '\n' +
   commandsBlock([
@@ -828,7 +834,7 @@ const wb = await step('writeback', 'vidura',
     // program named after the whole string (exit 127), and the guard refuses a computed command name.
     ...setupCmds.map((c) => ['bash -c ', U(c, 1000)]),
     [`VAJRA_WALKTHROUGH_DIR=data/walkthroughs ${VERIFY_SH} ${EV_SLUG}`, ...evCmds.flatMap((c) => [' ', U(c, 1000)])],
-    ...wbVerified, ...wbProposed,
+    ...wbVerified, ...wbProposed, ...wbArchive,
   ]),
   S.Writeback, 'Deliver', { isolation: 'worktree' })
 const knowledge = { records: kbOut.map((r) => r.type), source: 'none', tasks_closed: false, proposed_fallbacks: 0 }

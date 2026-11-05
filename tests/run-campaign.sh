@@ -142,6 +142,34 @@ BIG="$(head -c 70000 /dev/zero | tr '\0' x | openssl base64 -A)"
 C report --campaign rep3 --bytes 70000 --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
 C verify rep3 >/dev/null 2>&1; check "campaign without a report still verifies" $?
 
+# --- archive-evidence (E7, Q13): the verification bundle + the setup list, signed per campaign ---
+C create arc --feature "ac-1|x" >/dev/null 2>&1
+AD="$CD/arc"
+SRC="$WORK/repo/data/walkthroughs/deliver-20261105-1200"; mkdir -p "$SRC"
+printf '{"allPassed":true}\n' > "$SRC/evidence.json"; printf 'diff\n' > "$SRC/diff.patch"; printf ' 1 file\n' > "$SRC/diff.stat"
+: > "$SRC/untracked.txt"; printf 'ok\n' > "$SRC/cmd-1.log"; printf 'ok2\n' > "$SRC/cmd-12.log"
+printf 'nope\n' > "$SRC/secret.txt"; ln -s /etc/hosts "$SRC/cmd-2.log"
+SETUP='["npm ci","python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"]'
+C archive-evidence arc t1 "$SRC" "$SETUP" >/dev/null; check "archive-evidence succeeds" $?
+DST="$AD/evidence/t1/data/walkthroughs/deliver-20261105-1200"
+[ -f "$DST/evidence.json" ] && [ -f "$DST/diff.patch" ] && [ -f "$DST/diff.stat" ] && [ -f "$DST/untracked.txt" ] && [ -f "$DST/cmd-1.log" ] && [ -f "$DST/cmd-12.log" ]
+check "bundle files copied (the walkthrough layout is kept)" $?
+[ ! -e "$DST/secret.txt" ] && [ ! -e "$DST/cmd-2.log" ]; check "only allowlisted regular files; symlinks never followed" $?
+[ "$(jq -c . "$DST/setup.json")" = "$(printf '%s' "$SETUP" | jq -c .)" ]; check "setup.json is the exact list, untruncated" $?
+jq -e '.files["setup.json"] and .files["evidence.json"] and (.hmac | test("^[0-9a-f]{64}$"))' "$DST/manifest.json" >/dev/null; check "manifest lists every file (setup.json included) with an hmac" $?
+[ "$(jq -r '.files["cmd-1.log"]' "$DST/manifest.json")" = "$(openssl dgst -sha256 -r < "$DST/cmd-1.log" | awk '{print $1}')" ]; check "manifest sha256 matches the file" $?
+[ "$(stat -c %a "$DST/evidence.json" 2>/dev/null || stat -f %Lp "$DST/evidence.json")" = 600 ]; check "archived files mode 600" $?
+! grep -rqF "$KEY" "$AD/evidence"; check "key never written into the archive" $?
+C archive-evidence arc t1 "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "an archive is written once (no overwrite)" $?
+C archive-evidence arc ../x "$SRC" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "bad task id refused" $?
+C archive-evidence arc t2 "$SRC" '["a","b","c","d","e","f"]' >/dev/null 2>&1; [ $? -ne 0 ]; check "more than 5 setup commands refused" $?
+C archive-evidence arc t2 "$SRC" "[\"$(head -c 1001 /dev/zero | tr '\0' a)\"]" >/dev/null 2>&1; [ $? -ne 0 ]; check "setup command over 1000 chars refused" $?
+C archive-evidence arc t2 "$SRC" '{"cmd":1}' >/dev/null 2>&1; [ $? -ne 0 ]; check "setup must be an array of strings" $?
+C archive-evidence arc t2 "$WORK/repo/data/walkthroughs" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a dir without evidence.json refused" $?
+C archive-evidence arc t3 "$SRC" '[]' >/dev/null; check "an empty setup list is fine" $?
+printf 'x' >> "$AD/campaign.json"
+C archive-evidence arc t4 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t4" ]; check "refused when the campaign state is invalid" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

@@ -515,16 +515,19 @@ class Unreadable(Fail):
     """read_evidence() could not read or parse the file (exit 3 for close, exit 1 for check-evidence)."""
 
 
-def read_evidence(path, want_head=None):
+def read_evidence(path, want_head=None, root=None, repo=None):
     """Accept only green, signed verify-work evidence for this repository. This is the shared green rule (the
     same check as vajra_kb.py check_evidence): every command exited 0, git.treeStable is true, git.head is the
     current HEAD of the repository this runs in (or want_head, a commit the caller names), the file is
-    <repo_root>/data/walkthroughs/<slug>/evidence.json, the hmac verifies, and not every command is trivial."""
+    <root>/data/walkthroughs/<slug>/evidence.json, the hmac verifies, and not every command is trivial.
+    E7: `root` is the dir the path rule applies to (default: the repo top level; an evidence archive dir for
+    archived bundles) and `repo` is the repository the --head check runs in (default: the one this runs in)."""
     def refuse(why):
         raise Fail(3, "evidence %s refused: %s" % (path, why))
-    root = git(["rev-parse", "--show-toplevel"])
-    if not root:
+    repo = repo or git(["rev-parse", "--show-toplevel"])
+    if not repo:
         refuse("not run inside a git repository")
+    root = root or repo
     try:
         real = os.path.realpath(path)
         with open(real, "rb") as f:
@@ -536,7 +539,8 @@ def read_evidence(path, want_head=None):
     rel = os.path.relpath(real, base)
     parts = rel.split(os.sep)
     if len(parts) != 2 or parts[1] != "evidence.json" or parts[0] in ("", ".", ".."):
-        refuse("it must be <repo_root>/data/walkthroughs/<slug>/evidence.json")
+        refuse("it must be <repo_root>/data/walkthroughs/<slug>/evidence.json" if root == repo
+               else "it must be <campaign>/evidence/<task>/data/walkthroughs/<slug>/evidence.json")
     if not isinstance(ev, dict) or not isinstance(ev.get("commands"), list):
         refuse("not a verify-work evidence.json")
     cmds = ev["commands"]
@@ -553,7 +557,7 @@ def read_evidence(path, want_head=None):
     head = g.get("head")
     if not isinstance(head, str) or not re.match(r"^[0-9a-f]{40}$", head):
         refuse("no head commit recorded")
-    want = git(["rev-parse", "--verify", "-q", (want_head or "HEAD") + "^{commit}"], cwd=root)
+    want = git(["rev-parse", "--verify", "-q", (want_head or "HEAD") + "^{commit}"], cwd=repo)
     if not want or want != head:
         refuse("head %s is not %s" % (head[:12], want_head or "the current HEAD"))
     key = vajra_key()
@@ -564,12 +568,67 @@ def read_evidence(path, want_head=None):
     return {"path": real, "sha256": hashlib.sha256(raw).hexdigest(), "head": head, "commands": total}
 
 
+ARCHIVE_FILE_RE = re.compile(r"^(evidence\.json|diff\.patch|diff\.stat|untracked\.txt|setup\.json|cmd-[0-9]{1,3}\.log)$")
+
+
+def archive_root(slug, path):
+    """E7: the <campaign>/evidence/<task> dir that holds `path`, or None when it is not in that campaign's archive."""
+    base = os.path.realpath(os.path.join(campaign_dir(slug), "evidence"))
+    rel = os.path.relpath(os.path.realpath(path), base).split(os.sep)
+    if len(rel) != 5 or rel[0] in ("", ".", "..") or rel[1:3] != ["data", "walkthroughs"] or rel[4] != "evidence.json":
+        return None
+    return os.path.join(base, rel[0])
+
+
+def check_archive_manifest(evdir):
+    """E7: manifest.json is signed with the Vajra key (HMAC over its canonical JSON without hmac, the key's hex
+    text as the HMAC key, as vajra-campaign.sh signs) and lists exactly the files in the dir, each matching."""
+    def refuse(why):
+        raise Fail(3, "evidence archive %s refused: manifest %s" % (evdir, why))
+    try:
+        with open(os.path.join(evdir, "manifest.json"), "rb") as f:
+            m = json.loads(f.read(1_000_000).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        refuse("missing or unreadable")
+    if not isinstance(m, dict) or not isinstance(m.get("files"), dict) or not isinstance(m.get("hmac"), str):
+        refuse("malformed")
+    kf = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"), ".claude", "vajra", ".hmac-key")
+    try:
+        with open(kf, "r", encoding="utf-8") as f:
+            ktext = f.read().strip()
+    except OSError:
+        refuse("cannot be checked without the Vajra key")
+    body = json.dumps({k: v for k, v in m.items() if k != "hmac"}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if not hmac.compare_digest(m["hmac"], hmac.new(ktext.encode(), body.encode("utf-8"), hashlib.sha256).hexdigest()):
+        refuse("signature (hmac) invalid")
+    present = sorted(n for n in os.listdir(evdir) if n != "manifest.json")
+    if present != sorted(m["files"]):
+        refuse("does not list exactly the archived files")
+    for n in present:
+        fp = os.path.join(evdir, n)
+        if not ARCHIVE_FILE_RE.match(n) or os.path.islink(fp) or not os.path.isfile(fp):
+            refuse("lists an unexpected file %s" % n)
+        with open(fp, "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() != m["files"][n]:
+                refuse("sha256 mismatch for %s" % n)
+
+
 def cmd_check_evidence(a):
     """Read-only: run read_evidence() and report green or the refusal reason. Touches no campaign state."""
     if a.head and not SHA_RE.match(a.head):
         raise Fail(2, "invalid --head")
+    if a.archived and not SLUG_RE.match(a.archived):
+        raise Fail(2, "invalid --archived campaign slug")
     try:
-        read_evidence(a.evidence, a.head or None)
+        if a.archived:
+            root = archive_root(a.archived, a.evidence)
+            if root is None:
+                raise Fail(3, "evidence %s refused: it must be <campaign>/evidence/<task>/data/walkthroughs/<slug>/evidence.json "
+                              "in campaign %s" % (a.evidence, a.archived))
+            read_evidence(a.evidence, a.head or None, root=root)
+            check_archive_manifest(os.path.dirname(os.path.realpath(a.evidence)))
+        else:
+            read_evidence(a.evidence, a.head or None)
     except Unreadable as e:
         raise Fail(1, e.msg)
     except Fail as e:
@@ -729,6 +788,7 @@ def main(argv):
                        help="read-only: is this verify-work evidence green? (no --campaign needed)")
     s.add_argument("evidence")
     s.add_argument("--head", default="", help="commit the evidence must be for (default: the current HEAD)")
+    s.add_argument("--archived", default="", help="campaign slug: the evidence is archived in it (E7); also checks the manifest")
     s.add_argument("--json", action="store_true", help="JSON output")
     try:
         a = p.parse_args(argv)
