@@ -569,6 +569,25 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | Ponytail: resume typed into the PTY | Fixed (6db4529) | ADR-9 decision 5 uses argv | POS-2.1b |
 | Ponytail: kb approvals prefilled in an app PTY | Fixed (6db4529) | copy to own terminal | POS-3.1 |
 
+### 7c. GPT 6.1 Sol spec review (`vajra-7/spec-review.md`, REQUEST_CHANGES) and PR #2 review rounds
+
+| Finding | Decision | Commit | Acceptance ids |
+|---|---|---|---|
+| GPT-1 Stop blocks handback and can be bypassed after completion | Fixed: stop exempts exactly `SubagentHandback`, is sticky across `SendMessage` resume, and only a human clears it | 916f4b9 | AC-3.3.4 to AC-3.3.6 |
+| GPT-2 Steering uses the wrapper the tracer rejected; no nonce trust model | Fixed: `<vajra-steer nonce=N kind source id>`, nonce at least 128 bits, Execute-phase task workers only, trust model and residual risk stated | a8c02fc | AC-3.2.2, AC-3.2.7 to AC-3.2.11 |
+| GPT-3 Queue write protection lacks guard read blocks and the sandbox boundary | Fixed: worker reads of the control dir and transcripts blocked, whole data dir write-protected, same-user limitation stated, sandbox `denyWrite` is Q10 | b251b96 | AC-3.4.6 to AC-3.4.8 |
+| GPT-4 Freshness can't detect the demo's file edit | Fixed: "stale" compares the signed whole-tree id with the current one; "unverified" comes from E3 | 5d8a9b8 | POS-1.3 |
+| GPT-5 Budget tables contradict the spike | Fixed: one canonical NFR-PERF table with observed values and status; the PRD points to it | d641f83 | NFR-PERF-1 to NFR-PERF-11 |
+| GPT-6 Research coverage and MVP exclusions blank | Fixed: every MVP pain point names its task; F1, F2 and F4 added to 7b; OAuth refresh race P24 | e9c071d | AC-1.1.5 |
+| GPT-7 Positioning still pass 1, with a contradicted competitor claim | Fixed: final positioning, memory killed as a claim, banned claims, "none runs verify/fix rounds" removed, copy time labelled inference | 870b3ce | POS-1.7, POS-3.4, POS-4.2 to POS-4.7, POS-5.1 to POS-5.5 |
+| GPT-8 (optional) Separate the shipping slice | Adopted: two slices, with the evidence loop in the private beta | 074a894 | none (ordering only) |
+| PR: Re-run must replay setup commands | Fixed | 5adfbcd | POS-1.2 |
+| PR: G3b/E5 circular prerequisite | Fixed: G3b after E1 and E5, before C6 | 0e0928a | G3b done-when |
+| PR: campaign-specific resume in POS-2.1b | Fixed | f7d84c1, 148c9f0 | POS-2.1b, POS-2.1e |
+| PR: crash cleanup before "no process survives" | Fixed: startup cleanup barrier (ADR-9 6b') | f7d84c1 | POS-2.1f |
+| PR: materialize the evidence tree before Re-run | Fixed: apply `diff.patch`, require the signed tree id, else refuse | f7d84c1 | POS-1.2 |
+| PR: sandbox-off messaging policy inconsistent | Fixed: sandbox off means stop-only (Q10 working assumption) | f7d84c1 | AC-3.4.8 |
+
 ## 8. Decisions requested from the owner
 
 1. Confirm A1..A9 (especially A3 transcript streams and A5 hook identification, which the spike must prove).
