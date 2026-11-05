@@ -88,7 +88,7 @@ pub struct SpawnSpec {
     pub cols: u16,
     /// The steer nonce in the launch prompt (the TUI echoes it): replaced,
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
-    pub redact: Option<String>,
+    pub redact: Redactor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +278,7 @@ impl Supervisor {
             let bus = self.bus.clone();
             let log = self.log.clone();
             let stream = id.to_string();
-            let redact = Redactor::new(spec.redact.as_deref());
+            let redact = spec.redact.clone();
             std::thread::Builder::new()
                 .name(format!("pty-{id}"))
                 .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, log.as_deref()))

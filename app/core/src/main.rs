@@ -199,6 +199,7 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
+                        app.reap_runs();
                         nap.update(app.active_run_count());
                     }
                 }

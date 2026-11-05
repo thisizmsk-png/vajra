@@ -486,7 +486,7 @@ via:"ui"` and `source="human"`.
 ### 5.3 Queue format and location
 
 Root: `~/Library/Application Support/<app>/control/<session_id>/`. `<session_id>` is the run session id,
-validated against `^[A-Za-z0-9-]{8,128}$`. Never under `~/.claude`. Dirs are mode 0700 and files 0600.
+a canonical uuid (the app makes it; the hook accepts the wider `^[A-Za-z0-9-]{8,128}$`). Never under `~/.claude`. Dirs are mode 0700 and files 0600.
 
 ```
 queue/<seq:06d>-<action_id>.json   message|redirect, consumed once

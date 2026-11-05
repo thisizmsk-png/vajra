@@ -918,3 +918,12 @@ fn mcp_stdio_rejects_an_oversized_line_and_keeps_serving() {
     assert_eq!(replies[1]["id"], 1);
     assert!(replies[1]["result"]["tools"].is_array());
 }
+
+#[test]
+fn message_text_keeps_its_newlines() {
+    // Code-review R2: only the nonce is replaced in human text; it is not sanitized.
+    let h = Home::new();
+    let mut s = started(&h);
+    s.message_worker(Actor::Human, AID, "step 1: X\nstep 2: Y").unwrap();
+    assert_eq!(h.ledger()[0]["text"], "step 1: X\nstep 2: Y");
+}

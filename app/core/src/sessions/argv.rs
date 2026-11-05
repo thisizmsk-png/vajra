@@ -190,8 +190,6 @@ fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
-/// UTC `YYYYMMDD-HHMM` for a unix time.
-pub use crate::ids::run_id_at;
 
 #[cfg(test)]
 #[path = "argv_tests.rs"]

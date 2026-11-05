@@ -49,9 +49,9 @@ fn crew_tails_worker_transcripts_into_streams_and_inspect() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: None })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
         .unwrap();
-    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone() });
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     app.crew("c", "20261105-1230").unwrap();
     let w = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE);
@@ -81,9 +81,9 @@ fn one_active_run_at_a_time() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: None })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() })
         .unwrap();
-    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone() });
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let cwd = t.0.to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
@@ -219,7 +219,7 @@ fn workers_are_discovered_from_the_session_subagents_dir() {
     )
     .unwrap();
     let app = t.app();
-    let run = Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: repo };
+    let run = Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: repo, nonces: Redactor::default() };
     let ws = app.discover_workers(&run).unwrap();
     assert_eq!(ws.len(), 2);
     let a2 = ws.iter().find(|w| w.agent_id == "a2").unwrap();
@@ -344,8 +344,8 @@ fn worker_transcripts_redact_the_rotated_nonce() {
     let first_line = first.lines().next().unwrap().to_string();
     fs::write(sub.join("agent-aa870dd40540481f0.jsonl"), format!("{first_line}\n")).unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: None }).unwrap();
-    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone() });
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     app.crew("c", "20261105-1230").unwrap();
     lock(&app.control).resume_session().unwrap();
@@ -360,4 +360,81 @@ fn worker_transcripts_redact_the_rotated_nonce() {
     assert!(w.lines.iter().any(|l| l.text.contains("[redacted]")), "{:?}", w.lines);
     assert!(w.lines.iter().all(|l| !l.text.contains(&rotated)), "rotated nonce leaked");
     app.sup.kill(&stream).unwrap();
+}
+
+/// The fixture worker's first transcript line under `cwd`'s project dir for `sid`.
+fn seed_worker(t: &Tmp, cwd: &Path, sid: &str) -> (PathBuf, String) {
+    let sub = t.home().join(".claude/projects").join(project_slug(cwd)).join(sid).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+    fs::copy(fx.join("agent-aa870dd40540481f0.meta.json"), sub.join("agent-aa870dd40540481f0.meta.json")).unwrap();
+    let first = fs::read_to_string(fx.join("agent-aa870dd40540481f0.jsonl")).unwrap().lines().next().unwrap().to_string();
+    let path = sub.join("agent-aa870dd40540481f0.jsonl");
+    fs::write(&path, format!("{first}\n")).unwrap();
+    (path, first)
+}
+
+fn append_echo(path: &Path, first: &str, nonce: &str) {
+    let echo = first.replace("Run these Bash commands", &format!("steer {nonce} then run these Bash commands"));
+    assert_ne!(echo, first);
+    let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+    std::io::Write::write_all(&mut f, format!("{echo}\n").as_bytes()).unwrap();
+}
+
+#[test]
+fn transcripts_stay_redacted_after_the_run_exits() {
+    // Code-review R1: once the control session ends, a finished run's crew view
+    // must still redact the nonce that run was launched with.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let (path, first) = seed_worker(&t, &cwd, sid);
+    app.launch(sid, "20261105-1230", "c", &cwd, |_| Ok(vec!["true".into()]), false).unwrap();
+    let nonce = lock(&app.control).nonce().unwrap().to_string();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    app.reap_runs();
+    assert!(lock(&app.control).nonce().is_none());
+    append_echo(&path, &first, &nonce);
+    app.crew("c", "20261105-1230").unwrap();
+    let w = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE);
+    assert!(w.lines.iter().all(|l| !l.text.contains(&nonce)), "nonce leaked after the session ended");
+    assert!(w.lines.iter().any(|l| l.text.contains("[redacted]")));
+}
+
+#[test]
+fn a_reap_during_a_resume_keeps_the_new_session() {
+    // Code-review R3: a UI poll that reaps between start_session and spawn must
+    // not end the session the resume just took.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let cwd = t.0.to_string_lossy().into_owned();
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| {
+        app.reap_runs();
+        Ok(vec!["sleep".into(), "5".into()])
+    }, true).unwrap();
+    assert!(lock(&app.control).nonce().is_some(), "the resumed run is still steerable");
+    app.sup.kill(&format!("run-{sid}")).unwrap();
+}
+
+#[test]
+fn a_resumed_pty_redacts_the_launch_nonce_too() {
+    // Optional: claude --resume replays the first prompt, which holds the old nonce.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let cwd = t.0.to_string_lossy().into_owned();
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    let old = lock(&app.control).nonce().unwrap().to_string();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    let echo = format!("printf 'replay {old}\\n'");
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["/bin/sh".into(), "-c".into(), echo.clone()]), true).unwrap();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    let l = app.bus.tail(&format!("run-{sid}"), 0, MAX_PAGE);
+    assert!(l.lines.iter().any(|x| x.text.contains("replay")), "{:?}", l.lines);
+    assert!(l.lines.iter().all(|x| !x.text.contains(&old)), "old nonce shown on resume");
 }

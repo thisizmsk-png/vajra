@@ -57,6 +57,9 @@ struct Run {
     run_id: String,
     campaign: String,
     cwd: PathBuf,
+    /// Every nonce this run was launched or resumed with: its transcripts and
+    /// a replayed resume may show any of them, after its session ended too.
+    nonces: Redactor,
 }
 
 pub struct App {
@@ -160,7 +163,7 @@ impl App {
 
     /// The control service steers one session, so one run is active at a time.
     fn no_active_run(&self) -> Result<(), Value> {
-        self.reap_runs();
+        self.reap_locked();
         if self.active_run_count() > 0 {
             return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
         }
@@ -176,6 +179,14 @@ impl App {
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
+        // A launch in flight owns the session it just took; it reaps itself.
+        if let Err(std::sync::TryLockError::WouldBlock) = self.launching.try_lock() {
+            return;
+        }
+        self.reap_locked();
+    }
+
+    fn reap_locked(&self) {
         let ended: Vec<String> = lock(&self.runs)
             .iter()
             .filter(|(s, _)| !self.sup.is_running(s).unwrap_or(false))
@@ -198,6 +209,8 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
+        let _one = lock(&self.launching);
+        self.no_active_run()?;
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -211,8 +224,10 @@ impl App {
             }
         };
         let stream = format!("run-{session_id}");
+        let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
+        nonces.add(Some(&nonce));
         let spawned = argv(&nonce).and_then(|argv| {
-            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: Some(nonce) };
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone() };
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
@@ -221,7 +236,7 @@ impl App {
         }
         lock(&self.runs).insert(
             stream.clone(),
-            Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf() },
+            Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
@@ -229,8 +244,6 @@ impl App {
     pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
-        let _one = lock(&self.launching);
-        self.no_active_run()?;
         let now = ids::unix_now();
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let run_id = ids::run_id_at(now);
@@ -255,8 +268,6 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
-        let _one = lock(&self.launching);
-        self.no_active_run()?;
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
             claude.resume_argv(session_id, campaign, n).map_err(invalid_input)
@@ -304,7 +315,7 @@ impl App {
                     task_id: None,
                     title: Some(w.label.clone()),
                     round: None,
-                    live: running && !matches!(w.status, Status::Done | Status::Failed),
+                    live: !matches!(w.status, Status::Done | Status::Failed),
                     last_activity: None,
                     cwd,
                     lines,
@@ -337,6 +348,13 @@ impl App {
         if let Ok(rd) = std::fs::read_dir(dir.join("workflows")) {
             dirs.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
         }
+        let mut red = run.nonces.clone();
+        {
+            let svc = lock(&self.control);
+            if svc.session_id() == Some(run.session_id.as_str()) {
+                red.add(svc.nonce());
+            }
+        }
         let mut out = Vec::new();
         for d in dirs {
             let journal = read(&d.join("journal.jsonl")).map(|s| parse_journal(&s)).unwrap_or_default();
@@ -348,20 +366,19 @@ impl App {
                 let Some(id) = name.strip_prefix("agent-").and_then(|n| n.strip_suffix(".meta.json")) else { continue };
                 let Some(meta) = read(&p).and_then(|s| parse_meta(&s)) else { continue };
                 let j = journal.iter().rev().find(|j| j.agent_id == id);
-                out.push(self.pump_worker(&allow, &d.join(format!("agent-{id}.jsonl")), id, &meta, j));
+                out.push(self.pump_worker(&allow, &red, &d.join(format!("agent-{id}.jsonl")), id, &meta, j));
             }
         }
         Ok(out)
     }
 
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
-    fn pump_worker(&self, allow: &Allowlist, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
-        let redactor = lock(&self.control).redactor();
+    fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
-        tr.set_redactor(redactor);
+        tr.absorb(red);
         let stream = worker_stream(id);
         if bus::valid_stream_id(&stream)
             && let Err(e) = tr.pump(&self.bus, &stream)

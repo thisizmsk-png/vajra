@@ -518,7 +518,8 @@ impl Service {
         if (!allow_empty && n == 0) || n > max {
             return Err(ControlError::InvalidArgs(format!("{name} must be {}..={max} chars", u8::from(!allow_empty))));
         }
-        Ok(self.redact(text))
+        // Human and Lead text keeps its lines; only the nonce is replaced.
+        Ok(self.redactor().redact(text.to_string()))
     }
 
     // ------------------------------------------------------------ read actions

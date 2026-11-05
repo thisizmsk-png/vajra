@@ -158,14 +158,6 @@ fn build_run_argv_error_message_names_field() {
 }
 
 #[test]
-fn build_run_argv_run_id_is_utc_minutes() {
-    assert_eq!(run_id_at(0), "19700101-0000");
-    assert_eq!(run_id_at(951_782_400), "20000229-0000");
-    assert_eq!(run_id_at(T), "20261105-1230");
-    assert_eq!(run_id_at(1_798_761_599), "20261231-2359");
-}
-
-#[test]
 fn build_run_argv_public_fn_uses_fresh_uuid_and_now() {
     let a = build_run_argv(&input(), NONCE).unwrap();
     let b = build_run_argv(&input(), NONCE).unwrap();

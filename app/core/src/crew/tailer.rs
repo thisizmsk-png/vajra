@@ -119,9 +119,9 @@ impl Transcript {
         Self { tailer, redactor, unrecognized: false, prompt_first_line: None, git_branch: None, cwd: None }
     }
 
-    /// The steer nonce rotates on resume: later lines redact the current one.
-    pub fn set_redactor(&mut self, redactor: Redactor) {
-        self.redactor = redactor;
+    /// The steer nonce rotates on resume: later lines redact the new one too.
+    pub fn absorb(&mut self, redactor: &Redactor) {
+        self.redactor.absorb(redactor);
     }
 
     pub fn poll(&mut self) -> io::Result<Vec<StreamLine>> {

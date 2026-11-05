@@ -12,12 +12,28 @@ const MIN_NONCE: usize = 8;
 
 #[derive(Clone, Debug, Default)]
 pub struct Redactor {
-    nonce: Option<String>,
+    /// Every nonce this text may carry (a resume rotates it; old lines keep the old one).
+    nonces: Vec<String>,
 }
 
 impl Redactor {
     pub fn new(nonce: Option<&str>) -> Self {
-        Self { nonce: nonce.filter(|n| n.len() >= MIN_NONCE).map(str::to_string) }
+        let mut r = Self::default();
+        r.add(nonce);
+        r
+    }
+
+    pub fn add(&mut self, nonce: Option<&str>) {
+        if let Some(n) = nonce.filter(|n| n.len() >= MIN_NONCE && !self.nonces.iter().any(|x| x == n)) {
+            self.nonces.push(n.to_string());
+        }
+    }
+
+    /// Take on every nonce `other` knows. A redactor only ever gains nonces.
+    pub fn absorb(&mut self, other: &Redactor) {
+        for n in &other.nonces {
+            self.add(Some(n));
+        }
     }
 
     /// One line of agent text in, one plain-text line out.
@@ -28,10 +44,7 @@ impl Redactor {
     /// Only the nonce replacement (whole, and a fragment a terminal wrap left
     /// at either end), for text that keeps its colours: the PTY view.
     pub fn redact(&self, s: String) -> String {
-        match &self.nonce {
-            Some(n) => redact_wrapped(s.replace(n.as_str(), REDACTED), n),
-            None => s,
-        }
+        self.nonces.iter().fold(s, |s, n| redact_wrapped(s.replace(n.as_str(), REDACTED), n))
     }
 }
 
