@@ -43,9 +43,10 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 | E6 | (Approved 2026-11-05 under Q11; vajra-6 engine work) The worker's claim passes `--worktree "$PWD"` so `tasks.json` names each worker's worktree; the Control service matches workers on it and uses transcripts for display only (PM-7) | bhima [Backend] | `workflows/vajra-deliver.js`, `scripts/vajra_tasks.py`, tests | G2 | With the transcript format check forced to fail, message and stop still reach the right worker |
 | E7 | Archive the verification bundle and the executed `setupCmds` (as `setup.json`) into the campaign before cleanup, with a signed manifest; E3 `--archived` (design 1.3; approved Q13) | bhima [Backend], reviewed by vidura [Verifier] | `scripts/vajra-campaign.sh`, `scripts/vajra_tasks.py`, `workflows/vajra-deliver.js`, tests | E3 | POS-1.2 tests: delivery with its worktrees cleaned still verifies and re-runs; setup command over 300 characters replayed byte for byte; a filtered-out setup entry is never run; every existing test passes |
 | E8 | Sandbox profile (Q10 approved): the default `denyWrite` for the app data dir and control queue in `config/sandbox.json`, applied by `scripts/enable-sandbox.sh` and the Desktop first-run setup only after the user approves the change; `vajra-doctor.sh` reports it | bhima [Backend], reviewed by bhishma [Security] | `config/sandbox.json`, `scripts/enable-sandbox.sh`, `scripts/vajra-doctor.sh`, tests | E2 | AC-3.4.9, AC-3.4.10; every existing guard and sandbox test passes |
-| E9 | Human-only desktop approval path for kb and Atman (ADR-12; approved Q14 with the conditions in AC-7.1.8) | bhima [Backend], reviewed by bhishma [Security] | `scripts/vajra_kb.py`, `atman/atman.py`, `hooks/pre-tool-use.sh`, tests | E2, E8 | AC-7.1.4, AC-7.1.6 to AC-7.1.8; a forged approval (no owner auth), a stale or reused one, a swapped record, and one forged from a session that predates the sandbox settings (the AC-7.1.8 transition tests) are refused; every existing kb, atman and guard test passes |
+| E9 | Human-only desktop approval path for kb and Atman (ADR-12; approved Q14 with the conditions in AC-7.1.8) | bhima [Backend], reviewed by bhishma [Security] | `scripts/vajra_kb.py`, `atman/atman.py` (`cmd_approve` and `cmd_reject` both consume the approval; `reject` parses `--desktop-approval` before its reason), `hooks/pre-tool-use.sh`, tests | E2 | AC-7.1.4, AC-7.1.6 to AC-7.1.8; an unsigned or self-signed approval from a surviving writer, a non-enrolled or revoked key, a stale or replayed approval (even after the approvals dir is wiped) and a swapped record are refused; `desktop-enroll` is user-only; every existing kb, atman and guard test passes |
 | E10 | (post-MVP) Ledger `applied` events and `applied --json` (ids only) | sepoy-backend-1 [Backend worker 1] | `scripts/vajra_kb.py`, tests | G2 | AC-7.2.1, AC-7.3.2 |
 | E11 | (post-MVP) Atman signal source: the app's control ledger redirects; proposals only | sepoy-backend-1 [Backend worker 1] | `atman/atman.py`, tests | C6 | AC-7.4.3, AC-7.4.4 |
+| E12 | (post-MVP) Atman signal source: verify failure patterns per criterion from E7 archives; proposals only | sepoy-backend-1 [Backend worker 1] | `atman/atman.py`, tests | E7 | AC-7.4.2, AC-7.4.4 |
 | E1 | `hooks/desktop-control.sh`: delivers queued control messages to the addressed worker at its next tool call (message, redirect as additional context; stop as a block with reason), consume-once with ack; no-op when the app is not installed | bhima [Backend] | `hooks/desktop-control.sh`, `hooks/hooks.json`, `tests/hooks/run-desktop-control.sh` | G2, G3 | AC-3.2.1, AC-3.2.2, AC-3.2.5, AC-3.3.4 to AC-3.3.6 (tests: `handback_exempt_exact`, `stop_sticky_after_handback`, `no_delivery_when_stopped`, `no_delivery_on_handback`, `stop_cleared_only_by_human`; vajra-6 611d969); fails open (no queue = exit 0), never touches the guard |
 | E2 | Guard (approved by the orchestrator under Security review, 2026-11-05): the whole app data dir write-protected; worker reads of the control dir and `~/.claude/projects/` blocked (Read, Grep, Glob, LS, Bash readers, symlinks); log the app's MCP control tools in `audit.log`; the sandbox `denyWrite` itself is E8 (Q10 approved). Additive; done in vajra-6 611d969 | bhima [Backend], reviewed by bhishma [Security] | `hooks/pre-tool-use.sh`, `hooks/hooks.json`, `tests/hooks/run-guard-*.sh` | E1 | AC-3.2.3, AC-3.4.x, NFR-SEC-1; every existing guard test still passes |
 
@@ -64,7 +65,7 @@ Moved into M1 by pre-mortem PM-7: persist the delivery report as `report.md` in 
 | C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2, E5, E6, G3b, E8 | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
 | C7 | Agent-adapter interface (ADR-10) with the Claude Code adapter (from C3) and the Codex CLI adapter (flags from G4); shared conformance suite; billing source per session; fixed argv and env allowlist | bhima [Backend] | `app/core/agents/*`, tests | C3, G4 | AC-1.5.1 to 1.5.3, AC-1.1.5 to 1.1.7, NFR-SEC-16 (test: no open of any credential path in an fs trace) |
 | C8 | Conductor import (ADR-11): read-only discovery, per-item confirm, app-owned records only | sepoy-backend-1 [Backend worker 1] | `app/core/import/*`, fixtures | C4, G4 | AC-1.4.1 to 1.4.4 |
-| C9 | Memory service: inbox and rules readers over `vajra_kb.py` and `atman.sh`, the LocalAuthentication approve sheet that writes single-use approvals (ADR-12), the local search over reports and archived evidence | bhima [Backend], reviewed by bhishma [Security] | `app/core/memory/*`, tests | C4, E9 | AC-7.1.1 to 7.1.7, AC-7.2.2, AC-7.3.1 to 7.3.3, NFR-SEC-17 (test: no IPC command or MCP tool creates an approval) |
+| C9 | Memory service: inbox and rules readers over `vajra_kb.py` and `atman.sh`, the approve sheet that signs single-use approvals with a Secure Enclave key needing owner authentication, and the enrollment screen that shows the key fingerprint (ADR-12), the local search over reports and archived evidence | bhima [Backend], reviewed by bhishma [Security] | `app/core/memory/*`, tests | C4, E9 | AC-7.1.1 to 7.1.7, AC-7.2.2, AC-7.3.1 to 7.3.3, NFR-SEC-17 (test: no IPC command or MCP tool creates an approval) |
 
 C4 runs in parallel with C2 and C3 (disjoint files). C5 waits for C4's fixtures.
 
@@ -147,9 +148,10 @@ graph LR
   C3 & C3b & C4 & K2 --> S1 & S5
   C4 & E3 & K3 --> S4
   C4 & K2 --> S6
-  E2 & E8 --> E9
+  E2 --> E9
   G2 --> E10
   C6 --> E11
+  E7 --> E12
   C4 & E9 --> C9
   C9 & K3 --> S7
   C5 & K3 --> S2
@@ -190,7 +192,7 @@ Vajra's existing behaviour working:
   archived" for later deliveries.
 - E8: removes the default `denyWrite` from the profile; a user who already applied it removes it with
   `enable-sandbox.sh` (shown to them, never silent).
-Post-MVP memory items E10 and E11 follow the same rule.
+Post-MVP memory items E10 to E12 follow the same rule.
 The control channel ships behind a setting (off means the app is read-only plus start, resume and approve).
 
 ## Open
