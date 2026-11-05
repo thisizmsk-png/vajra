@@ -288,19 +288,27 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 
 ### Performance
 
-Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (Opus review: `vajra-3/stack-spike-review.md`). Definition: app RSS = app, WebKit helpers and app-owned PTY shells, summed; `claude` and agent processes reported separately; `footprint` reported next to RSS. "Spike" is the measured value on 2026-11-05 (Apple M3 Max, busy machine, summed RSS); the gate holds until a quiet-machine rerun replaces it (H1).
+One canonical table (GPT-5). Source: `vajra-2/stack-spike.md` (Tauri v2 prototype, Apple M3 Max, 2026-11-05, summed RSS on a busy machine, single runs). The owner authorized provisional Tauri MVP work; that is **not** performance approval, which both models withhold until NFR-PERF-1 and NFR-PERF-6 pass on the real build. App RSS means the app, its WebKit helpers and app-owned PTY shells; `claude` and agent processes are reported separately.
 
-- NFR-PERF-1: Idle app RSS (no run attached): ceiling 200 MiB, preferred 190 MiB; aspirational 171 MiB (15% under Runner). Spike: 220.2 MiB (Tauri spike, 1 PTY); **not met**.
-- NFR-PERF-2: Each attached worker stream adds at most 8 MiB app RSS after warm-up; retained tail at most 256 KiB per worker, then spill to disk with an explicit gap marker. Spike: 7.8 MiB amortized (not a marginal measurement); marginal curve 0, 1, 2, 10 still to run.
-- NFR-PERF-3: 10 workers streaming: app RSS at most 400 MiB; rAF p95 at most 20 ms and p99 at most 34 ms at 60 Hz; renderer work p95 at most 8 ms per frame; worker switch to paint at most 100 ms p95. Spike: 328.9 MiB at 60 min; rAF p95 20.0 ms; renderer work and switch latency not measured.
-- NFR-PERF-4: Cold start to usable crew view p95 at most 800 ms (process-cold, warm filesystem; cold boot reported separately). Spike: 394.3 ms median of 3 (not a p95).
-- NFR-PERF-5: Bounded byte queues at every hop; a slow UI can't grow backend memory; at most one in-flight UI snapshot of at most 64 KiB; slow disk pauses the source or fails visibly; a PTY or file reader is never blocked by the UI. Spike: met in the spike's design; the spike's blocking writes must not be reused (O6).
-- NFR-PERF-6: Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak and a 72 h soak with 20 window open and close cycles before release (PM-6). Spike: 31.1 MiB growth (WebContent); **not met**.
-- NFR-PERF-7: Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method. Spike: Electron, Orca beaten; Runner beats us at idle.
-- NFR-PERF-8: The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session. Spike: not measured.
-- NFR-PERF-9: A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95. Spike: not measured.
-- NFR-PERF-11 (VD-23): key press to glyph in a taken-over terminal or the Lead chat p95 at most 33 ms while 10 workers stream. Spike: not measured.
-- NFR-PERF-10: Compressed installer at most 20 MiB; installed app at most 50 MiB (arm64 and universal measured separately). Spike: 3.0 MiB DMG (unsigned, arm64).
+Not inferred from the spike: marginal per-worker cost, render duration (rAF intervals are pacing), cold-boot start, physical footprint. Each is measured by H0 and H1 on the real build.
+
+| ID | What | Target | Observed (prototype) | Status |
+|---|---|---|---|---|
+| NFR-PERF-1 | Idle app RSS, window open, no run, 60 s settle | <= 200 MiB (preferred 190) | 220.2 MiB | **Fails** |
+| NFR-PERF-2 | App RSS per worker after warm-up: hidden worker <= 4 MiB, selected-view surcharge <= 8 MiB; retained tail <= 256 KiB per worker, then spill with a gap marker | as stated (provisional) | 7.8 MiB amortized (idle to 10 workers), not a marginal cost | **Unmeasured** (marginal curve 0, 1, 2, 10) |
+| NFR-PERF-3 | 10 workers streaming: app-only RSS | <= 400 MiB | 328.9 MiB at 60 min | Passes on the prototype |
+| NFR-PERF-3a | Frame pacing at 60 Hz: rAF interval p95 / p99 | <= 20 / 34 ms | rAF p95 20.0 ms (intervals, not render time) | At the limit |
+| NFR-PERF-3b | Renderer CPU work per frame p95; worker switch to paint p95 | <= 8 ms; <= 100 ms | not measured | **Unmeasured** |
+| NFR-PERF-4 | Start to usable crew view p95, process-cold and warm filesystem; true cold boot reported separately | <= 800 ms | 394.3 ms median of 3 trials (not a p95, not cold boot) | **Unmeasured** as a p95 |
+| NFR-PERF-5 | Bounded byte queues at every hop; one in-flight UI snapshot <= 64 KiB; a slow UI can't grow backend memory; slow disk pauses or fails visibly; a PTY or file reader is never blocked | as stated | met by the spike's design; its blocking writes must not be reused (review O6) | Design passes; real build untested |
+| NFR-PERF-6 | GUI RSS growth, minute 5 to 60, 10 live workers; no sustained trend > 1 MiB/min; then 8 h, and 72 h with 20 window cycles (PM-6) | <= 20 MiB | 31.1 MiB (WebContent) | **Fails** |
+| NFR-PERF-7 | Comparison method: serial runs on a quiet machine, same fixture, RSS and `phys_footprint`, method published; "lighter" only against apps beaten by that method | as stated | Runner 201.3 idle; Orca 1,061.5 idle; Agent Orchestrator **uncontrolled** (it hosted the measurement); single busy-machine runs | **Unmeasured** (repeat runs, footprint) |
+| NFR-PERF-8 | Control hook cost per tool call when the app has no queue for the session | <= 10 ms p95 | not measured | **Unmeasured** |
+| NFR-PERF-9 | A run started outside the app appears; events reach the UI; control receipt | <= 2 s; <= 250 ms p95; <= 100 ms p95 | not measured | **Unmeasured** |
+| NFR-PERF-10 | Compressed installer; installed app (arm64 and universal separately) | <= 20 MiB; <= 50 MiB | 3.0 MiB DMG (unsigned, arm64) | Passes on the prototype |
+| NFR-PERF-11 | Key press to glyph in a taken-over terminal or the Lead chat while 10 workers stream | <= 33 ms p95 | not measured | **Unmeasured** |
+
+IDs keep their earlier meaning, so references elsewhere still hold.
 
 ### Security
 - NFR-SEC-1: respect the guard (`hooks/pre-tool-use.sh`); never weaken it or the sandbox.

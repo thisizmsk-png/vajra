@@ -9,8 +9,7 @@ rest). Engine ids appear in one place: the "Engine id" field on a worker's Task 
 
 ## 1. Principles
 
-1. **Customer experience first.** Fast to open (cold start to interactive at or under 1.0 s,
-   provisional), never janky (no dropped frames while 10 workers stream), no surprises (nothing
+1. **Customer experience first.** Fast to open (usable crew view within 800 ms, NFR-PERF-4), never janky (no dropped frames while 10 workers stream), no surprises (nothing
    irreversible happens without a visible confirm, and the app itself never pushes, opens PRs or deploys).
 2. **Keyboard-first.** Every action has a key or a palette entry. Mouse works everywhere, but nothing
    needs it.
@@ -91,7 +90,7 @@ Legend: `●` in progress, `◐` claimed, `◌` ready, `○` pending, `✓` done
 |             | deliver-20261103-0920  Fix login redirect   Verify, round 1    [Resume]  |
 | Settings    |                                                                          |
 +-------------+--------------------------------------------------------------------------+
-| No run   App 92 MB   Guard on   Engine ok                                              |
+| No run   App 188 MB  Guard on   Engine ok                                              |
 +----------------------------------------------------------------------------------------+
 ```
 
@@ -331,7 +330,7 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 | Screen | Empty | Loading | Error | Engine missing / offline | Large data |
 |---|---|---|---|---|---|
 | Home | "No campaigns to resume." | Preflight rows show skeleton | Row names the failed check and the fix | Claude not found or doctor FAIL: Start disabled, failing checks listed with "Re-check" | Resume list virtualized |
-| Crew | "No run yet. Start one from Home." with Cmd-1 hint | Tree skeleton | "Can't read transcript <path>: <reason>" on the node | Tree frozen, banner "Engine check failed; showing last known state" | Tree and stream virtualized; stream ring buffer 2 MB, older lines from disk on scroll |
+| Crew | "No run yet. Start one from Home." with Cmd-1 hint | Tree skeleton | "Can't read transcript <path>: <reason>" on the node | Tree frozen, banner "Engine check failed; showing last known state" | Tree and stream virtualized; retained tail 256 KiB per worker (NFR-PERF-2), older lines from disk on scroll |
 | Chat | "Ask the Lead about any worker." | Typing row "Lead is reading Backend" | Card status Failed with reason and Retry | Input disabled: "Lead session stopped. Restart Lead" | Thread virtualized |
 | Run | "No run selected." | Timeline and table skeleton | Criteria table: "Evidence file missing" per row | Last known state, timestamped | Graph switches to list over 40 nodes; table virtualized |
 | Approvals | "Nothing waiting for you." | Row skeleton | "Plan could not be read" with path | Approve disabled; reason shown | Virtualized |

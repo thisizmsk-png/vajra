@@ -284,22 +284,16 @@ spec (requirements 7b, PM-1 to PM-8).
 
 ## 10. Performance and memory budgets
 
-From the stack spike (Tauri v2 + Rust, reviewed by both models). Building is authorized provisionally by the owner; **performance approval is withheld by both models until the idle and growth gates are met**. Definitions and method: [spec/requirements.md](spec/requirements.md#performance).
+The canonical table (targets, prototype measurements and what is still unmeasured) is in [spec/requirements.md](spec/requirements.md#performance), not repeated here. The short version:
 
-| ID | Gate | Spike (2026-11-05) |
-|---|---|---|
-| NFR-PERF-1 | Idle app RSS (no run attached): ceiling 200 MiB, preferred 190 MiB; aspirational 171 MiB (15% under Runner) | 220.2 MiB (Tauri spike, 1 PTY); **not met** |
-| NFR-PERF-2 | Each attached worker stream adds at most 8 MiB app RSS after warm-up; retained tail at most 256 KiB per worker, then spill to disk with an explicit gap marker | 7.8 MiB amortized (not a marginal measurement); marginal curve 0, 1, 2, 10 still to run |
-| NFR-PERF-3 | 10 workers streaming: app RSS at most 400 MiB; rAF p95 at most 20 ms and p99 at most 34 ms at 60 Hz; renderer work p95 at most 8 ms per frame; worker switch to paint at most 100 ms p95 | 328.9 MiB at 60 min; rAF p95 20.0 ms; renderer work and switch latency not measured |
-| NFR-PERF-4 | Cold start to usable crew view p95 at most 800 ms (process-cold, warm filesystem; cold boot reported separately) | 394.3 ms median of 3 (not a p95) |
-| NFR-PERF-5 | Bounded byte queues at every hop; a slow UI can't grow backend memory; at most one in-flight UI snapshot of at most 64 KiB; slow disk pauses the source or fails visibly; a PTY or file reader is never blocked by the UI | met in the spike's design; the spike's blocking writes must not be reused (O6) |
-| NFR-PERF-6 | Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak before release | 31.1 MiB growth (WebContent); **not met** |
-| NFR-PERF-7 | Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method | Electron, Orca beaten; Runner beats us at idle |
-| NFR-PERF-8 | The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session | not measured |
-| NFR-PERF-9 | A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95 | not measured |
-| NFR-PERF-10 | Compressed installer at most 20 MiB; installed app at most 50 MiB (arm64 and universal measured separately) | 3.0 MiB DMG (unsigned, arm64) |
+- **Idle fails:** 220.2 MiB against a 200 MiB ceiling.
+- **Hourly growth fails:** 31.1 MiB against 20 MiB.
+- **Unmeasured:** marginal cost per worker, render time, cold boot and physical footprint.
+- **Like-for-like load:** at 10 workers the Tauri prototype measured 805.3 MiB and Runner 1,138 MiB, both
+  5-minute figures. That comparison isn't matched (Runner renders 10 terminals), so it supports no claim.
+- **Agent Orchestrator** was uncontrolled (it hosted the measurement).
 
-Measured on the same Mac: Tauri spike 220.2 MiB idle and 805.3 MiB with 10 stub workers (aggregate); Electron spike 405.6 / 1,214.9; Runner 0.19.3 201.3 / 1,138.0; Orca 1.4.249 1,061.5 / 2,232.6; Agent Orchestrator not comparable (it hosted the measurement). The loaded comparison is not like for like (competitors render 10 terminals), so no loaded claim ships until a matched run (review O1).
+The owner authorized provisional Tauri work. Performance approval is withheld by both models.
 
 ## 11. Security model
 
