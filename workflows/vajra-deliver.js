@@ -105,7 +105,8 @@ const CLEAN_SH = 'bash ~/.claude/skills/vajra/scripts/vajra-worktree-clean.sh'
 const GUARD =
   'Never push, open a PR, deploy, run migrations against a shared database, delete data outside your worktree, ' +
   'read or write secrets, spend money or send external messages. If the work needs one of these, do not do it: ' +
-  'list it in your output instead.'
+  'list it in your output instead. Never run install.sh, install-skills.sh or generate-manifest.sh (from any copy, ' +
+  'including your worktree), and never write under the real ~/.claude: tests set HOME to a temp dir.'
 
 // ---------- Schemas: object root, required = all properties, type/enum/items only; bounds checked in code.
 const STR = { type: 'string' }

@@ -28,7 +28,7 @@ mkdir -p "$SKILL"
 for d in hooks scripts config workflows atman; do [ -d "$REPO/$d" ] && cp -R "$REPO/$d" "$SKILL/"; done
 cp "$REPO/SKILL.md" "$SKILL/"
 find "$SKILL" -name '__pycache__' -type d -prune -exec rm -r {} + 2>/dev/null
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 [ -f "$SKILL/manifest.json" ]; check "generate-manifest writes manifest.json" $?
 [ ! -f "$SKILL/manifest.json.sig" ]; check "generate-manifest ships no manifest.json.sig" $?
 
@@ -152,7 +152,7 @@ printf '%s' "$out" | grep -q "NOT signed"; check "install refuses to sign a mism
 [ ! -s "$VS/manifest.sig" ]; check "no signature after refused sign" $?
 [ "$(cat "$VS/.hmac-key")" = "$KEY1" ]; check "re-install keeps the existing key" $?
 # Operator accepts the change: regenerate (signs) and the flag clears.
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 bash "$SKILL/hooks/session-start.sh" --check >/dev/null 2>&1; check "regenerated manifest verifies" $?
 
 # --- empty key is replaced ---

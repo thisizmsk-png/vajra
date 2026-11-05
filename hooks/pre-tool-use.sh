@@ -554,6 +554,7 @@ shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
 [[ "$N" == *VAJRA_ATMAN_ASSUME_HUMAN* || "$CMD" == *VAJRA_ATMAN_ASSUME_HUMAN* ]] && block "VAJRA_ATMAN_ASSUME_HUMAN is for a human at a terminal, not the agent"
+[[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 shopt -u nocasematch
 
 RE_RF="(^| )-[[:alnum:]]*([rR][[:alnum:]]*f|f[[:alnum:]]*[rR])[[:alnum:]]*( [^;|&]*)? (/|/\*|~|~/|~/\*|${HOME_RE}|${HOME_RE}/|${HOME_RE}/\*)( |;|\||&|$)"
@@ -635,7 +636,7 @@ GUARD_MAX_TOKENS=2500
 READERS=" cat less more head tail grep egrep fgrep rg ag ack wc diff cmp file stat ls du sha1sum sha256sum sha512sum shasum md5 md5sum cksum cut nl od hexdump strings column bat realpath readlink dirname basename echo printf test [ true false jq tr pwd which type whoami id date env printenv "
 SHELLS=" sh bash zsh dash ksh fish "
 INTERPS=" python python2 python3 perl ruby node php lua Rscript deno bun "
-WRAPPERS=" sudo command nohup time nice ionice "
+WRAPPERS=" sudo command nohup time nice ionice env "
 NOT_SCRIPTS=" install.sh install-skills.sh generate-manifest.sh "
 # Vajra scripts whose arguments are data (titles, bodies, queries), not paths
 # they write: their text may name protected paths. Output flags stay checked.
@@ -883,6 +884,11 @@ eval_segment() { # uses SEG array
     # TTY, and the user trust tier comes only from the router's /vajra remember
     # (it runs inside the UserPromptSubmit hook, never as a tool call). Matched
     # by file name wherever the script lives (installed copy or a dev clone).
+    # Operator-only scripts too: a worktree copy of generate-manifest.sh still
+    # signs into the real ~/.claude/vajra (incident 2026-11-05), so the name decides.
+    if [[ "$NOT_SCRIPTS" == *" ${SEG[$cand_i]##*/} "* ]]; then
+      block "${SEG[$cand_i]##*/} changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
+    fi
     if [ "${SEG[$cand_i]##*/}" = vajra_kb.py ]; then
       local kbsub="" kprev=""
       for ((c = cand_i + 1; c < n; c++)); do

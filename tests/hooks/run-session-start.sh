@@ -29,7 +29,7 @@ PASS=0; FAIL=0
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); echo "FAIL :: $1"; fi; }
 
 # 1. Not installed (no key, no signature): warn, never lock.
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 out="$(run_ss)"; rc=$?
 [ "$rc" -eq 0 ]; check "exit 0 when not set up" $?
 [ ! -f "$FLAG" ]; check "no tamper flag when unsigned" $?
@@ -38,7 +38,7 @@ printf '%s' "$out" | grep -q "Vajra campaign: login-flow"; check "prints active 
 
 # 2. Key + local signature, clean tree.
 openssl rand -hex 32 > "$VS/.hmac-key"; chmod 600 "$VS/.hmac-key"
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 [ -s "$VS/manifest.sig" ]; check "generate-manifest signs into ~/.claude/vajra/manifest.sig" $?
 [ ! -e "$SKILL/manifest.json.sig" ]; check "no signature shipped next to manifest.json" $?
 out="$(run_ss)"; rc=$?
@@ -62,7 +62,7 @@ printf '%s' "$out" | grep -q "scripts/install.sh"; [ $? -ne 0 ]; check "violatio
 printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x"},"cwd":"/tmp"}' | bash "$SKILL/hooks/pre-tool-use.sh" 2>/dev/null; rc=$?
 [ "$rc" -eq 2 ]; check "guard blocks Write while flagged" $?
 bash "$SS" --check >/dev/null; [ $? -ne 0 ]; check "--check exits 1 on a modified tree" $?
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 run_ss >/dev/null; [ ! -f "$FLAG" ]; check "flag clears after operator re-signs" $?
 
 # 5. Manifest edited to match a tampered file -> signature mismatch.
@@ -71,7 +71,7 @@ h="$(shasum -a 256 "$SKILL/config/default.json" 2>/dev/null | cut -d' ' -f1 || s
 jq --arg h "$h" '.files["config/default.json"] = $h' "$SKILL/manifest.json" > "$SKILL/m.tmp" && mv "$SKILL/m.tmp" "$SKILL/manifest.json"
 run_ss >/dev/null
 [ -f "$FLAG" ] && grep -q "signature" "$FLAG"; check "re-hashed manifest fails the signature" $?
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 
 # 6. Unlisted script dropped into scripts/ -> flagged.
 echo 'echo pwned' > "$SKILL/scripts/evil.sh"

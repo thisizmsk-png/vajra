@@ -428,6 +428,28 @@ bash_case BLOCK "skill upstream in chain"  "ls && python3 scripts/vajra_skills.p
 # --- Audit log -------------------------------------------------------------
 grep -q ' BLOCK Bash ' "$VS/audit.log" 2>/dev/null; judge ALLOW "audit log records blocks" $?
 
+# --- Operator-only scripts from any copy (manifest re-sign incident, 2026-11-05) ---
+# A worktree copy of the skill re-signed the real manifest. The script NAME decides,
+# wherever the copy lives and however it is invoked.
+WT="$H/wt-copy"; mkdir -p "$WT/scripts"
+for s in generate-manifest.sh install.sh install-skills.sh; do echo "#" > "$WT/scripts/$s"; done
+bash_case BLOCK "worktree generate-manifest (relative)"   "bash scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest (./)"        "./scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest (absolute)"  "bash $WT/scripts/generate-manifest.sh"
+bash_case BLOCK "worktree generate-manifest via sh"      "sh scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest piped"       "bash scripts/generate-manifest.sh | tail -3" "$WT"
+bash_case BLOCK "worktree generate-manifest after cd"    "cd $WT && bash scripts/generate-manifest.sh"
+bash_case BLOCK "worktree generate-manifest via env"     "env FOO=1 bash scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest, cwd=scripts" "bash generate-manifest.sh" "$WT/scripts"
+bash_case BLOCK "worktree install.sh"                    "bash scripts/install.sh --dry-run" "$WT"
+bash_case BLOCK "worktree install-skills.sh"             "bash scripts/install-skills.sh" "$WT"
+bash_case BLOCK "operator flag from a tool call"         "VAJRA_OPERATOR_SIGN=1 bash scripts/vajra-doctor.sh" "$WT"
+bash_case BLOCK "env no longer hides the command after it" "env FOO=1 rm -rf ~"
+bash_case ALLOW "plain env still lists the environment"  "env"
+bash_case ALLOW "reading the script is fine"            "cat scripts/generate-manifest.sh" "$WT"
+bash_case ALLOW "grep for the name is fine"              "grep -n generate-manifest.sh README.md" "$WT"
+bash_case ALLOW "other worktree scripts still run"       "bash scripts/vajra-doctor.sh" "$WT"
+
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"
 RUNS=40

@@ -53,6 +53,19 @@ printf '%s\n' "$FILES" | tr '\n' '\0' | xargs -0 "${SHA[@]}" \
 mv "${MANIFEST}.tmp" "$MANIFEST"
 echo "Manifest written: ${MANIFEST} ($(jq '.files | length' "$MANIFEST") files)"
 
+# Sign only the installed skill, and only for the operator: a TTY on stdin, or
+# VAJRA_OPERATOR_SIGN=1 (the guard blocks it in tool calls). A worktree or clone
+# copy writes its manifest.json and stops (incident 2026-11-05).
+INSTALLED="$(cd "${HOME}/.claude/skills/vajra" 2>/dev/null && pwd -P || true)"
+if [ "$(cd "$VAJRA_SKILL" && pwd -P)" != "$INSTALLED" ]; then
+  echo "Manifest not signed: ${VAJRA_SKILL} is not the installed skill (${HOME}/.claude/skills/vajra)."
+  exit 0
+fi
+if [ ! -t 0 ] && [ "${VAJRA_OPERATOR_SIGN:-}" != 1 ]; then
+  echo "Manifest not signed: run this in your own terminal to re-sign."
+  exit 0
+fi
+
 if [ -s "$KEY_FILE" ] && command -v openssl >/dev/null 2>&1; then
   mkdir -p "$VAJRA_HOME"
   ( umask 077
