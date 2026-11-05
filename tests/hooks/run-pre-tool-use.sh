@@ -401,6 +401,9 @@ bash_case BLOCK "E2 cd control && rm"        "cd \"$CTRL\" && rm cmd.json"
 file_case ALLOW "E2 Read control file"       Read "$CTRL/cmd.json"
 file_case ALLOW "E2 Write sibling app dir"   Write "$H/Library/Application Support/Other/x.json"
 bash_case ALLOW "E2 cat control file"        "cat \"$CTRL/cmd.json\""
+bash_case ALLOW "E2 ls sibling app dir"      "ls \"$H/Library/Application Support/Other\""
+bash_case ALLOW "E2 cp control file out"     "cp \"$CTRL/cmd.json\" out/cmd.json"
+bash_case BLOCK "E2 rm in long command"      "echo $(printf 'a%.0s' $(seq 1 1100)) ; rm \"$CTRL/cmd.json\""
 raw_case  ALLOW "E2 mcp list_workers"        "$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"mcp__vajra-desktop__list_workers",tool_input:{}}')"
 grep -q ' ALLOW mcp__vajra-desktop__list_workers$' "$VS/audit.log" 2>/dev/null; judge ALLOW "E2 mcp list_workers audited ALLOW" $?
 
