@@ -122,8 +122,8 @@ not the engine's agent ids. The engine id is visible only in a worker's inspecto
 
 1. **Customer experience first.** Fast, responsive, never janky, no surprises. Nothing happens to a worker
    that the human can't see.
-2. **Performance and memory.** Idle and active memory clearly lower than the competitors we measure (a
-   build budget, NFR-PERF; not a marketing claim, see the banned claims in section 1).
+2. **Performance and memory.** Meet the NFR-PERF budgets (a build budget, not a marketing claim; see the
+   banned claims in section 1).
    Bounded buffers everywhere. Rust core is the default if the spike's evidence supports it.
 3. **Multi-agent orchestration UX.** Hop between any worker; talk to the Lead about any worker; steer
    through a control channel, never by typing into another process's terminal behind the human's back.
@@ -251,7 +251,7 @@ part of review stage A1). Ranked by impact times likelihood.
 | 8 | We copy the 500-feature surface | Six jobs only (VD-29); every feature cites a job, P-row or POS reason | Screen count in the H2 crawl |
 | 9 | No distribution among many clones | The launch story is the evidence demo (PRD 60-second demo), backed by measurements | Installs from launch posts |
 | 10 | The two-model gate makes us too slow | Gate only irreversible stack and design decisions; time-box each round | Days per gate round |
-| 11 | Worktree disk bloat | Vajra's cleanup already removes clean worktrees; disk display deferred | Disk-full reports |
+| 11 | Worktree disk bloat | Vajra's cleanup removes clean worktrees; the app shows each kept worktree's end state and disk size and offers cleanup by end state (AC-2.1.8) | Disk-full reports |
 | 12 | Security: permission bypass by default, agent output steering the orchestrator | POS-2.4 argv test, NFR-SEC-3 and NFR-SEC-9, steering threat model (F1-F4) | Security gate H4, PoCs H5 |
 
 ### Pre-mortem, second pass (Critic, 2026-11-05)
@@ -301,8 +301,9 @@ need the owner's own Claude Code login; row 15's choice is the owner's.
 | False "done" caught | Reported number, no target yet | POS-1.4 seeded benchmark, at least 20 tasks with planted defects |
 | Review time | Reported, no target yet | POS-1.6 study, 5+ developers, transcript plus diff vs evidence view |
 | Runs survive a closed window | 100% of runs continue when the window closes; resume offered after every quit or crash | POS-2.1 to POS-2.1b in CI (ADR-9; surviving quit and SIGKILL is v1.1) |
-| Budgets | All NFR-PERF budgets met | CI perf job + 1 h soak |
+| Budgets | All NFR-PERF budgets met, or a budget revised with measured evidence and the owner's decision (H0 rule) | CI perf job + 1 h soak |
 | Keyboard-only | J1 to J6 completable without a pointer | Scripted keyboard walkthrough |
+| Engine ids in the UI | 0 Mahabharat names outside the inspector's engine id field | Automated string scan of the UI |
 | Crash-free sessions | At least 99.5% in beta | Local crash reports, opt-in |
 | Evidence honesty | 0 criteria shown as pass without evidence | Fixture campaigns with missing and failing evidence |
 
@@ -396,8 +397,8 @@ sources) includes displaced Conductor users asking in public for an alternative 
 
 ### Open questions
 
-The owner hasn't answered these yet. Until they do, each **working assumption** below is in effect
-and the spec is written to it. Changing one later is a doc edit plus the tasks named in the row.
+Decided questions say so in their last column (see the decision log above). For the rest, the **working
+assumption** is in effect and the spec is written to it. Changing one later is a doc edit plus the tasks named in the row.
 
 | # | Question | Working assumption (in effect until the owner decides) |
 |---|---|---|
@@ -408,9 +409,10 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q5 | Minimum macOS version and Intel support | macOS 14+, Apple Silicon first |
 | Q6 | Pricing and license for the app (Vajra itself is MIT) | Owner to decide before launch |
 | Q7 | Telemetry: none, or opt-in crash reports only | Opt-in crash reports only |
+| Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |
+| Q9 | `app/` in this repo, or a separate `vajra-desktop` repo? | `app/` in this repo for the MVP (tasks.md, Open) |
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | **Decided** (see the decision log): shipped by default, applied when the user enables the sandbox; with the sandbox off, control stays stop-only |
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
+| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Deferred** by the owner (2026-11-05): don't ask for now; kept as a known launch risk (section 11) |
 | Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | **Decided:** approved (see the decision log) |
 | Q14 | Approve engine change E9: a second, human-only way into the kb and Atman approval gates (owner-authenticated approval file in the protected app data dir, ADR-12)? | **Decided:** approved (see the decision log), with the conditions in AC-7.1.8 |
-| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Deferred** by the owner (2026-11-05): don't ask for now; kept as a known launch risk (section 11) |
-| Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |

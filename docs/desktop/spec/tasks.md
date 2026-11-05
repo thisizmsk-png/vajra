@@ -1,7 +1,7 @@
 # Vajra Desktop: MVP tasks (spec phase 3)
 
 Status: draft. **No task here starts before the two-model gate approves the stack and design**
-(Opus 5.5 author, GPT 6.1 Sol reviewer). Engine tasks E3 to E2 change Vajra itself and need the owner's
+(Opus 5.5 author, GPT 6.1 Sol reviewer). Engine tasks E1 to E8 change Vajra itself and need the owner's
 approval as a separate PR.
 
 Inputs: [requirements.md](requirements.md) (US, AC, NFR ids), [design.md](design.md) (components,
@@ -14,7 +14,7 @@ wave), its dependencies and the acceptance ids it must prove. Owners are **engin
 `scripts/vajra_tasks.py validate` rejects unknown agents; the UI role name is in brackets. Suggested asks,
 one per milestone, so each run stays reviewable:
 
-1. `/vajra` M1 engine changes (E3 to E2), in this repo.
+1. `/vajra` M1 engine changes (E1 to E8), in this repo.
 2. `/vajra` M2 core (C1 to C6), then M3 kit (K1 to K3), then M4 screens (S1 to S6), then M5 hardening (H1 to H6).
 
 `app/` is the working path for the app inside this repo (open: a separate repo; see Q9 below). The paths
@@ -57,7 +57,8 @@ Moved into M1 by pre-mortem PM-7: persist the delivery report as `report.md` in 
 |---|---|---|---|---|---|
 | C1 | App skeleton per the approved stack; owner-only data dir under `~/Library/Application Support/`; log rotation | arjuna [Architect] | `app/` scaffold, `app/core/main.*`, build config, lockfiles | G2 | NFR-PERF-4 smoke (cold start measured), NFR-OBS-1 |
 | C2 | Bounded event bus and per-stream tail (256 KiB, NFR-PERF-2) with disk spill and drop-to-snapshot for slow consumers | bhima [Backend] | `app/core/bus/*`, tests | C1 | NFR-PERF-2, NFR-PERF-5; property test: no reader ever blocks |
-| C3 | Session supervisor: start the run session and the Lead chat session in PTYs owned by the Rust core (ADR-9: no daemon; closing the window keeps runs alive via the menu bar; Cmd-Q confirms when runs are active; resume offered after a quit or crash; updates wait for idle; App Nap activity assertion while runs are active, with a 30 min closed-window test; a TCC prompt test for repos under ~/Documents); argv from a fixed template with argument arrays; read-only by default; explicit "Take over"; reattach with no lost events | bhima [Backend] | `app/core/sessions/*`, tests | C1, C2 | AC-1.1.x, AC-2.2.4, NFR-SEC-4, POS-2.1 to POS-2.1c, POS-2.4 (argv test) |
+| C3 | Session supervisor: start the run session and the Lead chat session in PTYs owned by the Rust core; argv from a fixed template with argument arrays; read-only by default; explicit "Take over"; reattach with no lost events | bhima [Backend] | `app/core/sessions/*`, tests | C1, C2 | AC-1.1.x, AC-2.2.4, NFR-SEC-4, POS-2.4 (argv test) |
+| C3b | App lifecycle (ADR-9 items 2 to 7): closing the window keeps runs alive via the menu bar; Cmd-Q confirms when runs are active; resume by slug after a quit or crash; the startup cleanup barrier; updates wait for idle; App Nap activity assertion while runs are active, with a 30 min closed-window test; a TCC prompt test for repos under ~/Documents | bhima [Backend] | `app/core/lifecycle/*`, tests | C3 | POS-2.1 to POS-2.1f |
 | C4 | Vajra state reader + script bridge: campaigns, tasks, features, progress, checkpoints, audit.log, routing log through a path allowlist; shell-outs to `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git` | sepoy-backend-1 [Backend worker 1] | `app/core/vajra/*`, `tests/fixtures/campaigns/*` | C1 | AC-1.2.x, AC-1.3.x, AC-1.1.3, NFR-SEC-2, NFR-SEC-6; test: the app never opens `.hmac-key` (fs trace) |
 | C5 | Transcript tailer + crew tree derivation (Lead, run, agents, sub-workers) from transcripts and `tasks.json`; schema-version check with raw fallback | bhima [Backend] | `app/core/crew/*`, `tests/fixtures/transcripts/*` | C2, C4 | AC-2.1.x, AC-2.2.1 to AC-2.2.3 |
 | C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2, E5, E6, G3b, E8 | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
@@ -81,11 +82,11 @@ K2 and K3 run in parallel (disjoint folders, so `vajra_tasks.py waves` puts them
 
 | Id | Task | Owner | Files | Deps | Acceptance |
 |---|---|---|---|---|---|
-| S1 | Home: start run, resume, preflight | nakula [Frontend] | `app/ui/screens/home/*` | C3, C4, K2, C7, C8 | US-1.1 to US-1.3 |
+| S1 | Home: start run, resume, preflight | nakula [Frontend] | `app/ui/screens/home/*` | C3, C3b, C4, K2, C7, C8 | US-1.1 to US-1.3 |
 | S2 | Crew view with worker pane tabs and hop history | nakula [Frontend] | `app/ui/screens/crew/*` | C5, K3 | US-2.1 to US-2.4 |
 | S3 | Chat with Lead (dock and full) with action cards | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/chat/*` | C6, K3 | US-3.1 to US-3.4 |
 | S4 | Run view: evidence view as the run's default (criteria with pass, fail, not run, stale, unverified; failing first; no green badge while any is red), human-only Re-run with confirm, then timeline and task graph | nakula [Frontend] | `app/ui/screens/run/*` | C4, E3, E7, K3 | US-4.1 to US-4.3, POS-1.1, POS-1.2, POS-1.2 (test: a check that needs setup passes on Re-run only with the recorded setup replayed), POS-1.3 (tests: tracked edit, untracked file, branch moved with unchanged evidence bytes), POS-1.5 |
-| S5 | Approvals inbox | nakula [Frontend] | `app/ui/screens/inbox/*` | C3, C4, K2 | US-5.1 to US-5.3 |
+| S5 | Approvals inbox | nakula [Frontend] | `app/ui/screens/inbox/*` | C3, C3b, C4, K2 | US-5.1 to US-5.3 |
 | S6 | History and knowledge search (records used per run with tier and source; approve, reject, forget shown as a command to copy into the human's own terminal); Settings | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/history/*`, `app/ui/screens/settings/*` | C4, K2 | US-6.1, US-6.2, POS-3.1, POS-3.2 |
 | S7 | Memory screen: inbox with evidence, Approve / Approve always / Edit then approve / Reject / Forget, rules by scope, search, "what primed this session" | nakula [Frontend] | `app/ui/screens/memory/*` | C9, K3, E11 | US-7.1 to US-7.4 (render-as-text tests: bidi, zero-width, 2,000-character cap) |
 
@@ -103,7 +104,7 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in p
 | H5 | Exploit PoCs as failing tests: escape-sequence injection through agent output, control-queue tampering by an agent, socket from another uid, path traversal in the state reader, shell injection through ask text; memory approval (AC-7.1.8): forge, replay, race and post-auth content swap of the E9 approval file | shakuni [Red team] | `app/tests/security/*` | C3 to C6, K3, C9 | Each PoC fails before its fix and passes after |
 | H6 | Regressions and accessibility on the final diff (WCAG 2.2 AA, VoiceOver) | vidura [Verifier] | report only | H2, H5 | NFR-A11Y-1 to NFR-A11Y-3 |
 | H7 | Positioning measurements that gate launch claims: seeded false-"done" benchmark (20+ tasks with planted defects), review-time study design (5+ developers), repeated-task knowledge eval; plus CI checks that a terminal-started run appears in the app and that uninstalling leaves every campaign readable by the CLI | sahadeva [Analyst], benchmark tasks by sepoy-test-1 [Test worker 1] | `app/bench/positioning/*` | S1 to S7 | POS-1.4, POS-1.6, POS-3.3, POS-2.2, POS-2.3 (numbers reported; no target) |
-| H8 | Live acceptance on the release candidate, run by the owner under their own Claude Code login (PM-2): L1 to L7, a 3-task `vajra-deliver` with message, redirect and stop, quit then resume, approve after resume, and an N to N+1 update with a run active. Pass or fail per item in a dated note; any fail blocks launch | abhimanyu [Prototyper] runs, vidura [Verifier] confirms | `app/bench/live/*` | E1 to E6, C6, S1 to S6 | Dated note, all items pass |
+| H8 | Live acceptance on the release candidate, run by the owner under their own Claude Code login (PM-2): L1 to L7, a 3-task `vajra-deliver` with message, redirect and stop, quit then resume, approve after resume, and an N to N+1 update with a run active. Pass or fail per item in a dated note; any fail blocks launch | abhimanyu [Prototyper] runs, vidura [Verifier] confirms | `app/bench/live/*` | E1 to E8, C6, S1 to S5 (slice 1); S6 and S7 for the full rerun | Dated note, all items pass |
 
 Packaging (signing, notarization, update feed) is a plan by hanuman [Platform] after H4; shipping it needs
 the owner's yes.
@@ -115,11 +116,12 @@ beta; slice 2 must land before the public launch.
 
 | Slice | What a user gets | Tasks |
 |---|---|---|
-| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5 to E8, C1 to C8, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
-| 2 | Knowledge in the run view (records used, refusals); the Memory screen (inbox, owner-authenticated approve, rules, search; S7, C9, E9 to E11); the task graph view; history search; the claim studies that unlock launch wording | E4, E9 to E11, C9, S4 task graph (US-4.2), S6, S7, H3, H7, H8 |
+| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5 to E8, C1 to C8 (with C3b), K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6, and H8 scoped to slice 1 (L1 to L7: message, redirect, stop, quit then resume, approve after resume) |
+| 2 | Knowledge in the run view (records used, refusals); the Memory screen (inbox, owner-authenticated approve, rules, search; S7, C9, E9 to E11); the task graph view; history search; the claim studies that unlock launch wording | E4, E9 to E11, C9, S4 task graph (US-4.2), S6, S7, H3, H7, and H8 rerun on the full build |
 
 Slice 1 needs E7 (approved under Q13, 2026-11-05). Slice 1 has no knowledge mutation, no graph view and no claim study. The 60-second demo (PRD section 1)
-needs slice 2 only for its last beat. Every acceptance id stays; only the order changes.
+needs slice 2 only for its last beat. In slice 1, H1, H2 and H6 run on the slice-1 screens
+(S1 to S5); H8 must pass on the beta build before any beta user gets it (PRD pre-mortem row 14). Every acceptance id stays; only the order changes.
 
 ## Dependency graph
 
@@ -130,7 +132,7 @@ graph LR
   G2 & G3 --> E5
   E1 & E5 --> G3b --> C6
   C1 --> C2 & C4 & K1
-  C2 --> C3
+  C2 --> C3 --> C3b
   C2 & C4 --> C5
   C2 & C5 & E1 & E2 & E5 & E6 --> C6
   G1 --> G4
@@ -142,7 +144,7 @@ graph LR
   E2 --> E8 --> C6
   C1 --> H0
   K1 --> K2 & K3
-  C3 & C4 & K2 --> S1 & S5
+  C3 & C3b & C4 & K2 --> S1 & S5
   C4 & E3 & K3 --> S4
   C4 & K2 --> S6
   E2 & E8 --> E9
@@ -156,6 +158,8 @@ graph LR
   C6 & C9 & S2 & S3 & S7 --> H4
   K3 & C6 & C9 --> H5
   H2 & H5 --> H6
+  S1 & S2 & S3 & S4 & S5 --> H7 & H8
+  E7 & E8 --> H8
 ```
 
 ## Test strategy
@@ -172,10 +176,21 @@ graph LR
 
 ## Rollback
 
-The app is additive and reads Vajra state; uninstalling it changes nothing in Vajra. E1 and E2 are the only
-engine changes: E1 is a separate hook script that exits 0 without a queue, and `install.sh
---unregister-hooks` removes it with the other hooks; E2 is a revertible commit with its own tests. The
-control channel ships behind a setting (off means the app is read-only plus start, resume and approve).
+The app is additive and reads Vajra state; uninstalling it changes nothing in Vajra. Every engine change
+(E1 to E8) lands as its own revertible commit with its own tests, and reverting one leaves the others and
+Vajra's existing behaviour working:
+- E1: a separate hook script that exits 0 without a queue; `install.sh --unregister-hooks` removes it.
+- E2: guard additions only; reverting restores the previous protected roots.
+- E3: a read-only subcommand; nothing depends on it but the app.
+- E4: `report.md` is an extra file in the campaign; reverting stops writing it and the app falls back to
+  the transcript copy (ADR-4).
+- E5: an optional `steer_nonce` argument; without it the briefs are the same as before.
+- E6: an extra `--worktree` field in `tasks.json`; readers ignore unknown fields.
+- E7: archives already written stay readable; reverting stops new ones, and the app shows "evidence not
+  archived" for later deliveries.
+- E8: removes the default `denyWrite` from the profile; a user who already applied it removes it with
+  `enable-sandbox.sh` (shown to them, never silent).
+The control channel ships behind a setting (off means the app is read-only plus start, resume and approve).
 
 ## Open
 
