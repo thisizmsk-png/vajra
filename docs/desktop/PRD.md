@@ -247,22 +247,22 @@ No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
 
 ## 10. Performance and memory budgets
 
-Provisional until the stack spike reports measured numbers; the final table goes in
-[spec/design.md](spec/design.md) and replaces these. IDs from [spec/requirements.md](spec/requirements.md).
+From the stack spike (Tauri v2 + Rust, reviewed by both models). Building is authorized provisionally by the owner; **performance approval is withheld by both models until the idle and growth gates are met**. Definitions and method: [spec/requirements.md](spec/requirements.md#performance).
 
-| ID | Budget (provisional) |
-|---|---|
-| NFR-PERF-1 | Idle RSS, app with no session attached: at most 150 MB summed over all app processes |
-| NFR-PERF-2 | Each attached agent stream adds at most 15 MB; ring buffer 2 MB per stream, then spill to disk |
-| NFR-PERF-3 | UI frame time p95 at most 16.7 ms, p99 at most 33 ms with 10 agents streaming 200 lines/s each; lists and terminals virtualized |
-| NFR-PERF-4 | Cold start to interactive at most 1.0 s on an M-series Mac |
-| NFR-PERF-5 | Bounded queues; a slow UI consumer drops to a snapshot; a PTY or file reader is never blocked |
-| NFR-PERF-6 | 1 h soak under the NFR-PERF-3 load: RSS growth at most 5% after warm-up, no leaked handles |
-| NFR-PERF-7 | Lower idle RSS and RSS per stream than every measured competitor, same machine and method |
-| NFR-PERF-8 | The control hook adds at most 10 ms p95 per tool call when the app is idle |
+| ID | Gate | Spike (2026-11-05) |
+|---|---|---|
+| NFR-PERF-1 | Idle app RSS (no run attached): ceiling 200 MiB, preferred 190 MiB; aspirational 171 MiB (15% under Runner) | 220.2 MiB (Tauri spike, 1 PTY); **not met** |
+| NFR-PERF-2 | Each attached worker stream adds at most 8 MiB app RSS after warm-up; retained tail at most 256 KiB per worker, then spill to disk with an explicit gap marker | 7.8 MiB amortized (not a marginal measurement); marginal curve 0, 1, 2, 10 still to run |
+| NFR-PERF-3 | 10 workers streaming: app RSS at most 400 MiB; rAF p95 at most 20 ms and p99 at most 34 ms at 60 Hz; renderer work p95 at most 8 ms per frame; worker switch to paint at most 100 ms p95 | 328.9 MiB at 60 min; rAF p95 20.0 ms; renderer work and switch latency not measured |
+| NFR-PERF-4 | Cold start to usable crew view p95 at most 800 ms (process-cold, warm filesystem; cold boot reported separately) | 394.3 ms median of 3 (not a p95) |
+| NFR-PERF-5 | Bounded byte queues at every hop; a slow UI can't grow backend memory; at most one in-flight UI snapshot of at most 64 KiB; slow disk pauses the source or fails visibly; a PTY or file reader is never blocked by the UI | met in the spike's design; the spike's blocking writes must not be reused (O6) |
+| NFR-PERF-6 | Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak before release | 31.1 MiB growth (WebContent); **not met** |
+| NFR-PERF-7 | Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method | Electron, Orca beaten; Runner beats us at idle |
+| NFR-PERF-8 | The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session | not measured |
+| NFR-PERF-9 | A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95 | not measured |
+| NFR-PERF-10 | Compressed installer at most 20 MiB; installed app at most 50 MiB (arm64 and universal measured separately) | 3.0 MiB DMG (unsigned, arm64) |
 
-Measured against at least two competitors installed locally (Agent Orchestrator desktop 0.14.10-nightly
-and Orca 1.4.249 are installed on the reference Mac).
+Measured on the same Mac: Tauri spike 220.2 MiB idle and 805.3 MiB with 10 stub workers (aggregate); Electron spike 405.6 / 1,214.9; Runner 0.19.3 201.3 / 1,138.0; Orca 1.4.249 1,061.5 / 2,232.6; Agent Orchestrator not comparable (it hosted the measurement). The loaded comparison is not like for like (competitors render 10 terminals), so no loaded claim ships until a matched run (review O1).
 
 ## 11. Security model
 

@@ -28,7 +28,7 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 | Id | Task | Owner | Files | Deps | Done when |
 |---|---|---|---|---|---|
 | G1 | Stack spike: measure candidates against Agent Orchestrator desktop and Orca on this Mac; answer design.md section 2 | GPT 6.1 Sol spike worker (outside Vajra) | spike report | none | Report has measured idle RSS, RSS per agent, cold start, frame time at 10 agents |
-| G2 | Adversarial review of the spike; fill design.md Architecture and the budgets | Opus 5.5 + GPT 6.1 Sol | `docs/desktop/spec/design.md`, `docs/desktop/PRD.md` | G1 | Both models approve in the PR |
+| G2 | **Done 2026-11-05 for the stack** (both models approve Tauri v2 + Rust + React/TS + xterm.js; performance approval withheld by both until NFR-PERF-1 and NFR-PERF-6 are met). Review: `vajra-3/stack-spike-review.md`, objections O1-O7 feed H1 | Opus 5.5 + GPT 6.1 Sol | `docs/desktop/spec/requirements.md`, `docs/desktop/PRD.md` | G1 | Stack approved by both; budgets in NFR-PERF-1 to 10 |
 | G3 | Confirm Claude Code facts the design depends on ("to verify in spike" list in design.md) | abhimanyu [Prototyper] | spike notes only | G1 | Each item marked confirmed or replaced by its fallback |
 
 ### M1 Engine changes (Vajra repo, owner-approved)
@@ -81,7 +81,7 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in p
 
 | Id | Task | Owner | Files | Deps | Acceptance |
 |---|---|---|---|---|---|
-| H1 | Perf harness: 10+ concurrent agent fixture at 200 lines/s each, frame-time capture, 1 h soak with leak check (RSS, handles, fds), flamegraphs; same fixture against Agent Orchestrator desktop and Orca | sepoy-test-1 [Test worker 1], numbers checked by karna [Numerics] | `app/bench/*` | S1 to S6 | NFR-PERF-1 to NFR-PERF-8 with measured numbers |
+| H1 | Perf harness: 10+ concurrent agent fixture at 200 lines/s each, frame-time capture, 1 h soak with leak check (RSS, handles, fds), flamegraphs; same fixture against Agent Orchestrator desktop and Orca | sepoy-test-1 [Test worker 1], numbers checked by karna [Numerics] | `app/bench/*` | S1 to S6 | NFR-PERF-1 to NFR-PERF-10 with measured numbers |
 | H2 | E2E: Playwright click crawl on the renderer; screenshots 1280x800 and 960x600, dark and light; keyboard-only walkthrough of J1 to J6 | sepoy-test-1 [Test worker 1] | `app/ui/e2e/*`, `docs/design/after/*` | S1 to S6 | NFR-A11Y-2, NFR-UX-1, NFR-UX-2; 0 crashes, page errors, console errors, dead controls |
 | H3 | Pre-mortem of the MVP launch | duryodhana [Critic] | report only | S1 to S6 | Ranked failure modes with owners |
 | H4 | Security gate: threat model review of IPC, control queue, filesystem scope, secrets in streams, update channel, supply chain | bhishma [Security] | report only | C6, S2, S3 | Gate verdict; every finding has a task or a written acceptance |

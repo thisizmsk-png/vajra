@@ -242,18 +242,21 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 
 ## 5. Non-functional requirements
 
-All performance numbers are PROVISIONAL (A6) until the stack spike. Each is measured on an M-series Mac.
 
 ### Performance
-- NFR-PERF-1 PROVISIONAL: idle RSS (app, no sessions), summed over all app processes, <= 150 MB.
-- NFR-PERF-2 PROVISIONAL: per attached agent stream <= 15 MB RSS; ring buffer 2 MB per stream, then spill to disk.
-- NFR-PERF-3 PROVISIONAL: with 10 agents streaming 200 lines/s each, UI frame time p95 <= 16.7 ms and p99 <= 33 ms; lists and terminals virtualized.
-- NFR-PERF-4 PROVISIONAL: cold start to interactive <= 1.0 s.
-- NFR-PERF-5: the event stream uses bounded queues; a slow consumer is dropped to a snapshot; a PTY reader is never blocked by UI or IPC (test: stall the consumer, PTY read latency unchanged).
-- NFR-PERF-6 PROVISIONAL: 1 h soak under NFR-PERF-3 load, RSS growth <= 5%.
-- NFR-PERF-7: measured against at least two installed competitors (Agent Orchestrator desktop and Orca), same machine, same method, recorded in a benchmark note; the app is lower on idle RSS and on RSS per attached stream.
-- NFR-PERF-9 PROVISIONAL: a run started outside the app (POS-2.2) appears within 2 s, and new transcript or campaign events reach the UI within 250 ms p95.
-- NFR-PERF-8 PROVISIONAL: the control hook (`hooks/desktop-control.sh`) adds <= 10 ms p95 per tool call when the app has no queue for that session.
+
+Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (Opus review: `vajra-3/stack-spike-review.md`). Definition: app RSS = app, WebKit helpers and app-owned PTY shells, summed; `claude` and agent processes reported separately; `footprint` reported next to RSS. "Spike" is the measured value on 2026-11-05 (Apple M3 Max, busy machine, summed RSS); the gate holds until a quiet-machine rerun replaces it (H1).
+
+- NFR-PERF-1: Idle app RSS (no run attached): ceiling 200 MiB, preferred 190 MiB; aspirational 171 MiB (15% under Runner). Spike: 220.2 MiB (Tauri spike, 1 PTY); **not met**.
+- NFR-PERF-2: Each attached worker stream adds at most 8 MiB app RSS after warm-up; retained tail at most 256 KiB per worker, then spill to disk with an explicit gap marker. Spike: 7.8 MiB amortized (not a marginal measurement); marginal curve 0, 1, 2, 10 still to run.
+- NFR-PERF-3: 10 workers streaming: app RSS at most 400 MiB; rAF p95 at most 20 ms and p99 at most 34 ms at 60 Hz; renderer work p95 at most 8 ms per frame; worker switch to paint at most 100 ms p95. Spike: 328.9 MiB at 60 min; rAF p95 20.0 ms; renderer work and switch latency not measured.
+- NFR-PERF-4: Cold start to usable crew view p95 at most 800 ms (process-cold, warm filesystem; cold boot reported separately). Spike: 394.3 ms median of 3 (not a p95).
+- NFR-PERF-5: Bounded byte queues at every hop; a slow UI can't grow backend memory; at most one in-flight UI snapshot of at most 64 KiB; slow disk pauses the source or fails visibly; a PTY or file reader is never blocked by the UI. Spike: met in the spike's design; the spike's blocking writes must not be reused (O6).
+- NFR-PERF-6: Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak before release. Spike: 31.1 MiB growth (WebContent); **not met**.
+- NFR-PERF-7: Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method. Spike: Electron, Orca beaten; Runner beats us at idle.
+- NFR-PERF-8: The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session. Spike: not measured.
+- NFR-PERF-9: A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95. Spike: not measured.
+- NFR-PERF-10: Compressed installer at most 20 MiB; installed app at most 50 MiB (arm64 and universal measured separately). Spike: 3.0 MiB DMG (unsigned, arm64).
 
 ### Security
 - NFR-SEC-1: respect the guard (`hooks/pre-tool-use.sh`); never weaken it or the sandbox.
