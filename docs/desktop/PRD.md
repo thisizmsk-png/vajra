@@ -349,10 +349,11 @@ From `vajra-4/billing.md` (not legal advice):
 - No reselling, paying for or proxying model usage, and no `ANTHROPIC_BASE_URL` gateway.
 - Plain-text "runs Claude Code" only, never in the product name or logo.
 
-**Launch blocker: terms status is AMBIGUOUS.** Whether a third-party orchestrator spawning the user's own
-`claude` sessions under a consumer plan is "ordinary, individual usage" isn't settled by Anthropic's
-published terms. The owner decides whether to ask Anthropic in writing (Q12). Until there's an answer,
-launch copy recommends API keys for large crews. The timeline so far:
+**Known launch risk (not a blocker): terms status is AMBIGUOUS.** Whether a third-party orchestrator
+spawning the user's own `claude` sessions under a consumer plan is "ordinary, individual usage" isn't
+settled by Anthropic's published terms. The owner deferred asking Anthropic in writing (Q12, 2026-11-05).
+Launch copy recommends API keys for large crews, and the billing rules above keep the app on the stock
+binary under the user's own login. The risk is re-checked against the timeline before launch. The timeline so far:
 
 | Date | Event |
 |---|---|
@@ -384,6 +385,8 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 | 2026-11-05 | Q11 approved: E5 (steer nonce and one sentence in task briefs only), the wider E2, E4 and E6, all additive, each under bhishma or vidura review, with every existing guard test passing | owner, via orchestrator | tasks M1 |
 | 2026-11-05 | H0 rule: if memory is over budget at the end of M3, the owner chooses between a written budget change, a stack change or a delay | owner, via orchestrator | tasks H0 |
 | 2026-11-05 | Agent-adapter interface with Codex CLI; read-only Conductor import; billing hard rules | owner | ADR-10, ADR-11, section 11 |
+| 2026-11-05 | Q14 approved: E9, Touch ID approval in the app (LocalAuthentication plus a single-use approval file in the protected data dir, checked by the engine), under the conditions in AC-7.1.8; bhishma reviews, the stage D red team attacks it | owner, via orchestrator | ADR-12, E9, AC-7.1.4, AC-7.1.8 |
+| 2026-11-05 | Q12 deferred: don't ask Anthropic for now; the terms question stays a known launch risk with the billing.md timeline, not a blocker | owner, via orchestrator | section 11 |
 | 2026-11-05 | New feature: project memory that learns with human approval (J7), built on the ledger and Atman; MVP is inbox, approve, rules view and search; claude-mem import later | owner, via orchestrator | US-7.1 to US-7.4, ADR-12, ADR-13 |
 | 2026-11-05 | Model routing: main components on Opus 5.5 (bhima, nakula, arjuna, bhishma); lighter items on Sonnet 5.5 (sepoys, abhimanyu); search and audit on Haiku; GPT 6.1 Sol reviews every PR | owner | tasks.md owners |
 
@@ -407,6 +410,6 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | **Decided** (see the decision log): shipped by default, applied when the user enables the sandbox; with the sandbox off, control stays stop-only |
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
 | Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | Yes, additive; under Security review. **Blocks slice 1 (private beta)** |
-| Q14 | Approve engine change E9: a second, human-only way into the kb and Atman approval gates (owner-authenticated approval file in the protected app data dir, ADR-12)? | Yes, under bhishma review with red-team PoCs; until then Memory approval stays a copied command |
-| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Launch blocker.** Until answered, launch copy recommends API keys for large crews |
+| Q14 | Approve engine change E9: a second, human-only way into the kb and Atman approval gates (owner-authenticated approval file in the protected app data dir, ADR-12)? | **Decided:** approved (see the decision log), with the conditions in AC-7.1.8 |
+| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Deferred** by the owner (2026-11-05): don't ask for now; kept as a known launch risk (section 11) |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |

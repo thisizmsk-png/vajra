@@ -214,10 +214,17 @@ approved ledger record (any type) or an approved route; "applied" means primed i
 - AC-7.1.1 GIVEN pending ledger proposals (`vajra_kb.py pending --json`) and Atman proposals (`atman.sh review`), WHEN I open Memory, THEN one inbox lists each with its type (rule, lesson, decision, pitfall, route), title, body, requested scope and applies, and its trigger: which run and session, and which failure, fix round, verify pattern or repeated redirect produced it, linked to that run's evidence.
 - AC-7.1.2 GIVEN a proposal, WHEN it renders, THEN its title, body, paths and evidence are shown as plain text only (no markdown, links, HTML or ANSI), control, bidi and zero-width characters are shown visibly, the body is capped at the ledger's 2,000 characters, and nothing in it is ever executed or turned into an action.
 - AC-7.1.3 GIVEN a proposal that requests `always`, global scope or a broad path glob (`**`), WHEN I open Approve, THEN the request is shown as "requested by the agent", the selected default is the narrowest one (this project, the proposal's own paths, `on_topic`), and widening needs an explicit choice by me; the requested value is never preselected.
-- AC-7.1.4 GIVEN I choose Approve, Approve always, Edit then approve, Reject or Forget, WHEN I confirm, THEN the app asks for my macOS owner authentication (Touch ID, or the login password) naming the action, the record id and the final scope, and only after it succeeds writes a single-use approval for exactly that record, its sha256 and that scope (ADR-12); Reject asks for a plain confirm only.
+- AC-7.1.4 GIVEN I choose Approve, Approve always, Edit then approve, Reject or Forget, WHEN I confirm, THEN the app asks for my macOS owner authentication (Touch ID or the device passcode or login password, nothing else) naming the action, the record id and the final scope, and only after it succeeds writes a single-use approval for exactly that record, its sha256 and that scope (ADR-12); Reject asks for a plain confirm only.
 - AC-7.1.5 GIVEN Edit then approve, WHEN I change title, body or paths, THEN the edited text goes through the ledger's write gate again (secrets, injection, caps) and a refusal shows its reason; the record keeps its original provenance and is marked "edited by you".
 - AC-7.1.6 GIVEN an approval was written, WHEN the pending record on disk changes before the engine applies it (sha256 differs) or the approval is older than 5 minutes or already used, THEN the engine refuses it, nothing is approved, and the inbox shows "proposal changed; review again".
 - AC-7.1.7 GIVEN engine change E9 is absent or the sandbox `denyWrite` for the app data dir is off, WHEN I choose any approval action, THEN the app shows the exact `atman.sh` or `vajra_kb.py` command to run in my own terminal (POS-3.1) and writes no approval.
+- AC-7.1.8 (Q14 conditions, owner decision 2026-11-05) GIVEN the E9 approval path, WHEN it is exercised, THEN all of these hold, each with a test:
+  - Authentication is biometric or the device passcode only (LocalAuthentication `deviceOwnerAuthentication`), with no reuse: `touchIDAuthenticationAllowableReuseDuration` is 0 and each approval needs its own successful authentication.
+  - The approval file is created only by the app's core process, only after authentication succeeds; it is single use, bound to one proposal id and its content sha256, and expires after 5 minutes.
+  - No MCP tool, control-channel message, Lead chat action or IPC command reachable from agent output can create, edit or trigger it (test: the full Tauri command list and MCP tool list contain no approval entry point; a fixture agent that sends every control kind produces no approval file).
+  - `always` and global scope each need their own second confirmation sheet with its own authentication, after the first.
+  - Every approval, rejection, retirement and forget writes a line to `~/.claude/vajra/audit.log` (action, id, sha256, scope, approval id; never record text) as well as the ledger's `audit.jsonl`.
+  - Review gates: bhishma reviews E9 and C9 before merge; the stage D red team (H5) attacks it, and each of these is a failing-first PoC: forge an approval file without authentication, replay a used one, race two uses of one approval, and swap the pending record's content after authentication. Each must be refused.
 
 **US-7.2** As a Dev, I want to see the rules that apply, where and when they were last used, so that I can retire stale ones.
 - AC-7.2.1 GIVEN approved records and routes, WHEN I open Rules, THEN they are grouped by scope (this project, path glob; global only for records the ledger stores in `global`) and show type, tier (you, verified, approved proposal), applies, when last applied and in which run (E10), and who approved it and when.
@@ -510,7 +517,7 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 | US-5.3 | AC-5.3.1 .. 5.3.3 | SEC-4, OBS-2 |
 | US-6.1 | AC-6.1.1 .. 6.1.3 | SEC-2, A11Y-2 |
 | US-6.2 | AC-6.2.1 .. 6.2.3 | SEC-4, SEC-6 |
-| US-7.1 | AC-7.1.1 .. 7.1.7 | SEC-3, SEC-17, OBS-2 |
+| US-7.1 | AC-7.1.1 .. 7.1.8 | SEC-3, SEC-17, OBS-2 |
 | US-7.2 | AC-7.2.1 .. 7.2.3 | SEC-17 |
 | US-7.3 | AC-7.3.1 .. 7.3.3 | SEC-6, UX-1 |
 | US-7.4 | AC-7.4.1 .. 7.4.5 | SEC-17 |
@@ -660,7 +667,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
 5. Q13: approve engine change E7 (archived evidence bundle and setup list). Blocks slice 1.
-6. Q14: approve engine change E9 (an app-side, human-only approval path for kb and Atman, ADR-12). Without it, Memory approval stays a copied command.
-7. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
+6. Q14: decided 2026-11-05 (E9 approved, conditions in AC-7.1.8).
+7. Q12: deferred 2026-11-05 (no request to Anthropic for now; a known launch risk, PRD section 11).
 
 Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
