@@ -822,7 +822,23 @@ eval_segment() { # uses SEG array
   while [ "$i" -lt "$n" ]; do
     tok="${SEG[$i]}"
     if [[ "$tok" == *=* && "$tok" != -* && "$tok" != /* ]]; then i=$((i + 1)); continue; fi
-    if [[ "$WRAPPERS" == *" $tok "* ]]; then i=$((i + 1)); continue; fi
+    # Wrappers by basename (/usr/bin/env, /usr/bin/nohup); env's own options are consumed
+    # so `env -i -u X ./script` reaches ./script. -S keeps its string as the command word.
+    if [[ "$WRAPPERS" == *" ${tok##*/} "* ]]; then
+      i=$((i + 1))
+      if [ "${tok##*/}" = env ]; then
+        while [ "$i" -lt "$n" ]; do
+          case "${SEG[$i]}" in
+            -u|-C|-P|--unset|--chdir) i=$((i + 2)) ;;
+            -S|--split-string) i=$((i + 1)); break ;;
+            --) i=$((i + 1)); break ;;
+            -*) i=$((i + 1)) ;;
+            *) break ;;
+          esac
+        done
+      fi
+      continue
+    fi
     if [ "$tok" = "-u" ] || [ "$tok" = "-n" ]; then i=$((i + 2)); continue; fi
     break
   done
