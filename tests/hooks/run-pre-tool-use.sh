@@ -369,6 +369,41 @@ file_case ALLOW "Grep project"             Grep "$PROJ"
 raw_case  ALLOW "unrelated tool"           '{"tool_name":"WebSearch","tool_input":{"query":"rm -rf /"},"cwd":"/tmp"}'
 raw_case  ALLOW "description not scanned"  '{"tool_name":"Bash","tool_input":{"command":"ls","description":"rm -rf / | sh"},"cwd":"/tmp"}'
 
+# --- E2: Vajra Desktop control dir (path has a space) ------------------------
+CTRL="$H/Library/Application Support/VajraDesktop/control"
+mkdir -p "$CTRL" "$H/Library/Application Support/Other"
+echo '{}' > "$CTRL/cmd.json"
+ln -s "$CTRL" "$PROJ/ctrllink"
+file_case BLOCK "E2 Write control file"      Write "$CTRL/cmd.json"
+file_case BLOCK "E2 Edit control file"       Edit "$CTRL/cmd.json"
+file_case BLOCK "E2 Write new control file"  Write "$CTRL/new.json"
+file_case BLOCK "E2 Write tilde path"        Write "~/Library/Application Support/VajraDesktop/control/x.json"
+file_case BLOCK "E2 Write case variant"      Write "$H/library/APPLICATION SUPPORT/vajradesktop/Control/x.json"
+file_case BLOCK "E2 Write via symlink"       Write "$PROJ/ctrllink/x.json"
+file_case BLOCK "E2 Write relative .."       Write "../Library/Application Support/VajraDesktop/control/x.json"
+bash_case BLOCK "E2 redirect quoted"         "echo x > \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 redirect escaped space"  'echo x > ~/Library/Application\ Support/VajraDesktop/control/cmd.json'
+bash_case BLOCK "E2 append redirect"         "echo x >> '$CTRL/cmd.json'"
+bash_case BLOCK "E2 redirect case variant"   "echo x > \"$H/LIBRARY/application support/VAJRADESKTOP/control/cmd.json\""
+bash_case BLOCK "E2 redirect via symlink"    'echo x > ctrllink/cmd.json'
+bash_case BLOCK "E2 mv into control"         "mv /tmp/evil.json \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 mv out of control"       "mv \"$CTRL/cmd.json\" /tmp/x.json"
+bash_case BLOCK "E2 mv via symlink"          'mv out/x.json ctrllink/'
+bash_case BLOCK "E2 mv case variant"         "mv /tmp/e.json \"$H/Library/Application Support/vajradesktop/CONTROL/\""
+bash_case BLOCK "E2 rm control file"         "rm \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 rm -rf control dir"      "rm -rf \"$CTRL\""
+bash_case BLOCK "E2 rm escaped space"        'rm -f ~/Library/Application\ Support/VajraDesktop/control/cmd.json'
+bash_case BLOCK "E2 rm case variant"         "rm '$H/library/application support/VajraDesktop/control/cmd.json'"
+bash_case BLOCK "E2 rm via symlink"          'rm ctrllink/cmd.json'
+bash_case BLOCK "E2 rm -rf parent"           "rm -rf \"$H/Library/Application Support/VajraDesktop\""
+bash_case BLOCK "E2 cp into control"         "cp /tmp/evil.json \"$CTRL/\""
+bash_case BLOCK "E2 cd control && rm"        "cd \"$CTRL\" && rm cmd.json"
+file_case ALLOW "E2 Read control file"       Read "$CTRL/cmd.json"
+file_case ALLOW "E2 Write sibling app dir"   Write "$H/Library/Application Support/Other/x.json"
+bash_case ALLOW "E2 cat control file"        "cat \"$CTRL/cmd.json\""
+raw_case  ALLOW "E2 mcp list_workers"        "$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"mcp__vajra-desktop__list_workers",tool_input:{}}')"
+grep -q ' ALLOW mcp__vajra-desktop__list_workers$' "$VS/audit.log" 2>/dev/null; judge ALLOW "E2 mcp list_workers audited ALLOW" $?
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"
