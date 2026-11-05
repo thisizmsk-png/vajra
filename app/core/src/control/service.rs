@@ -158,8 +158,8 @@ pub fn untrusted(text: &str) -> Value {
 #[derive(Clone, Debug)]
 struct Action {
     id: String,
-    kind: &'static str,
-    state: &'static str,
+    kind: Kind,
+    state: State,
     actor: Actor,
     session_id: String,
     run_id: String,
@@ -189,21 +189,76 @@ pub struct Service {
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
-    last_stop: HashMap<String, (String, &'static str)>,
+    last_stop: HashMap<String, (String, State)>,
     seq: u64,
     pub ttl: Duration,
 }
 
-fn kind_static(k: &str) -> Option<&'static str> {
-    ["list", "inspect", "message", "redirect", "stop", "resume"].into_iter().find(|x| *x == k)
+/// What an action does. `as_str` is the ledger and JSON name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    List,
+    Inspect,
+    Message,
+    Redirect,
+    Stop,
+    Resume,
 }
 
-fn state_static(s: &str) -> &'static str {
-    ["requested", "awaiting_human_confirm", "queued", "delivered", "not_delivered", "delivery_unknown", "refused", "done"]
-        .into_iter()
-        .find(|x| *x == s)
-        .unwrap_or("done")
+/// Where an action is. `as_str` is the ledger and JSON name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Requested,
+    AwaitingHumanConfirm,
+    Queued,
+    Delivered,
+    NotDelivered,
+    DeliveryUnknown,
+    Refused,
+    Done,
 }
+
+impl Kind {
+    const ALL: [Kind; 6] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume];
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::List => "list",
+            Kind::Inspect => "inspect",
+            Kind::Message => "message",
+            Kind::Redirect => "redirect",
+            Kind::Stop => "stop",
+            Kind::Resume => "resume",
+        }
+    }
+    fn parse(k: &str) -> Option<Kind> {
+        Self::ALL.into_iter().find(|x| x.as_str() == k)
+    }
+    /// Message and redirect go through the queue and can expire.
+    fn queued_text(self) -> bool {
+        matches!(self, Kind::Message | Kind::Redirect)
+    }
+}
+
+impl State {
+    const ALL: [State; 8] = [State::Requested, State::AwaitingHumanConfirm, State::Queued, State::Delivered, State::NotDelivered, State::DeliveryUnknown, State::Refused, State::Done];
+    fn as_str(self) -> &'static str {
+        match self {
+            State::Requested => "requested",
+            State::AwaitingHumanConfirm => "awaiting_human_confirm",
+            State::Queued => "queued",
+            State::Delivered => "delivered",
+            State::NotDelivered => "not_delivered",
+            State::DeliveryUnknown => "delivery_unknown",
+            State::Refused => "refused",
+            State::Done => "done",
+        }
+    }
+    /// An unknown ledger state reads as final.
+    fn parse(s: &str) -> State {
+        Self::ALL.into_iter().find(|x| x.as_str() == s).unwrap_or(State::Done)
+    }
+}
+
 
 fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
@@ -243,16 +298,16 @@ impl Service {
 
     fn rebuild(&mut self, records: &[Value]) {
         for r in records {
-            let (Some(kind), id) = (kind_static(str_field(r, "kind")), str_field(r, "action_id")) else { continue };
-            let state = state_static(str_field(r, "state"));
+            let (Some(kind), id) = (Kind::parse(str_field(r, "kind")), str_field(r, "action_id")) else { continue };
+            let state = State::parse(str_field(r, "state"));
             let worker = str_field(r, "worker").to_string();
-            if kind == "stop" {
+            if kind == Kind::Stop {
                 self.last_stop.insert(worker.clone(), (id.to_string(), state));
             }
-            if !matches!(kind, "message" | "redirect" | "stop") {
+            if !(kind.queued_text() || kind == Kind::Stop) {
                 continue;
             }
-            if matches!(state, "queued" | "awaiting_human_confirm") {
+            if matches!(state, State::Queued | State::AwaitingHumanConfirm) {
                 let created = time::parse_iso(str_field(r, "ts"))
                     .map_or(UNIX_EPOCH, |s| UNIX_EPOCH + Duration::from_secs(s.max(0) as u64));
                 let prev = self.pending.get(id).map(|a| a.created);
@@ -278,7 +333,7 @@ impl Service {
                 self.pending.remove(id);
             }
         }
-        self.seq = records.iter().filter(|r| matches!(str_field(r, "kind"), "message" | "redirect")).count() as u64;
+        self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
     }
 
     // ------------------------------------------------------------ session
@@ -317,7 +372,7 @@ impl Service {
     pub fn end_session(&mut self) {
         let now = SystemTime::now();
         let ids: Vec<String> =
-            self.pending.values().filter(|a| matches!(a.kind, "message" | "redirect")).map(|a| a.id.clone()).collect();
+            self.pending.values().filter(|a| a.kind.queued_text()).map(|a| a.id.clone()).collect();
         for id in ids {
             self.expire(&id, now);
         }
@@ -344,7 +399,7 @@ impl Service {
         let ids: Vec<String> = self
             .pending
             .values()
-            .filter(|a| a.worker == key && matches!(a.kind, "message" | "redirect"))
+            .filter(|a| a.worker == key && a.kind.queued_text())
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
@@ -403,12 +458,12 @@ impl Service {
         }
     }
 
-    fn new_action(&self, kind: &'static str, actor: Actor, w: Option<&WorkerInfo>, now: SystemTime) -> Result<Action> {
+    fn new_action(&self, kind: Kind, actor: Actor, w: Option<&WorkerInfo>, now: SystemTime) -> Result<Action> {
         let (sid, rid) = self.session.as_ref().map_or((String::new(), String::new()), |s| (s.id.clone(), s.run_id.clone()));
         Ok(Action {
             id: new_action_id(now)?,
             kind,
-            state: "requested",
+            state: State::Requested,
             actor,
             session_id: sid,
             run_id: rid,
@@ -423,13 +478,13 @@ impl Service {
     }
 
     /// Append one ledger line for `a` in `state`, plus `extra` fields.
-    fn record(&mut self, a: &Action, state: &'static str, extra: Value, now: SystemTime) -> Result<()> {
+    fn record(&mut self, a: &Action, state: State, extra: Value, now: SystemTime) -> Result<()> {
         let mut r = Map::new();
         r.insert("v".into(), json!(1));
         r.insert("ts".into(), json!(time::iso_ms(now)));
         r.insert("action_id".into(), json!(a.id));
-        r.insert("kind".into(), json!(a.kind));
-        r.insert("state".into(), json!(state));
+        r.insert("kind".into(), json!(a.kind.as_str()));
+        r.insert("state".into(), json!(state.as_str()));
         r.insert("actor".into(), json!(a.actor.name()));
         r.insert("via".into(), json!(a.actor.via()));
         r.insert("source".into(), json!(a.actor.source()));
@@ -451,7 +506,7 @@ impl Service {
             r.extend(x);
         }
         self.ledger.append(&Value::Object(r))?;
-        if a.kind == "stop" {
+        if a.kind == Kind::Stop {
             self.last_stop.insert(a.worker.clone(), (a.id.clone(), state));
         }
         self.log("control_ledger", &[]);
@@ -474,8 +529,8 @@ impl Service {
             (Some(s), Some(r)) if s.run_id != r => Vec::new(),
             _ => self.workers.iter().map(|w| self.worker_json(w)).collect(),
         };
-        let a = self.new_action("list", actor, None, now)?;
-        self.record(&a, "done", json!({}), now)?;
+        let a = self.new_action(Kind::List, actor, None, now)?;
+        self.record(&a, State::Done, json!({}), now)?;
         Ok(json!({"workers": workers}))
     }
 
@@ -493,7 +548,7 @@ impl Service {
             "live": w.live,
             "last_activity": w.last_activity,
             "stopped": stopped,
-            "stop_request": stop.map(|(_, s)| *s),
+            "stop_request": stop.map(|(_, s)| s.as_str()),
             "stop_action_id": stop.map(|(id, _)| id.clone()),
         })
     }
@@ -510,22 +565,22 @@ impl Service {
         let mut out = self.worker_json(&w);
         out["lines"] = Value::Array(tail);
         out["cwd"] = json!(w.cwd);
-        let a = self.new_action("inspect", actor, Some(&w), now)?;
-        self.record(&a, "done", json!({}), now)?;
+        let a = self.new_action(Kind::Inspect, actor, Some(&w), now)?;
+        self.record(&a, State::Done, json!({}), now)?;
         Ok(out)
     }
 
     // ------------------------------------------------------------ messages
 
     pub fn message_worker(&mut self, actor: Actor, worker: &str, text: &str) -> Result<Value> {
-        self.enqueue("message", actor, worker, text)
+        self.enqueue(Kind::Message, actor, worker, text)
     }
 
     pub fn redirect_worker(&mut self, actor: Actor, worker: &str, text: &str) -> Result<Value> {
-        self.enqueue("redirect", actor, worker, text)
+        self.enqueue(Kind::Redirect, actor, worker, text)
     }
 
-    fn enqueue(&mut self, kind: &'static str, actor: Actor, worker: &str, text: &str) -> Result<Value> {
+    fn enqueue(&mut self, kind: Kind, actor: Actor, worker: &str, text: &str) -> Result<Value> {
         let text = self.text_arg(text, MAX_TEXT, "text", false)?;
         self.session()?;
         let w = self.resolve(worker)?.clone();
@@ -561,7 +616,7 @@ impl Service {
         let now = SystemTime::now();
         let mut a = self.new_action(kind, actor, Some(&w), now)?;
         let entry = json!({
-            "v": 1, "action_id": a.id, "kind": kind,
+            "v": 1, "action_id": a.id, "kind": kind.as_str(),
             "created": time::iso_secs(now), "expires": time::iso_secs(now + self.ttl),
             "source": actor.source(), "match": Value::Object(m), "text": text,
         });
@@ -569,12 +624,12 @@ impl Service {
         self.seq += 1;
         let name = format!("{:06}-{}.json", self.seq, a.id);
         fsx::write_atomic(&dir, &name, entry.to_string().as_bytes())?;
-        a.state = "queued";
+        a.state = State::Queued;
         let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
-        self.record(&a, "queued", extra, now)?;
+        self.record(&a, State::Queued, extra, now)?;
         self.pending.insert(a.id.clone(), a.clone());
         self.log("control_queued", &[("seq", self.seq)]);
-        Ok(json!({"action_id": a.id, "state": "queued"}))
+        Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
     }
 
     // ------------------------------------------------------------ stops
@@ -598,19 +653,19 @@ impl Service {
         // One pending Lead request per worker: a looping Lead gets the same one back.
         if actor == Actor::Lead {
             let key = w.key();
-            if let Some(p) = self.pending.values().find(|p| p.kind == "stop" && p.state == "awaiting_human_confirm" && p.worker == key) {
-                return Ok(json!({"action_id": p.id, "state": p.state}));
+            if let Some(p) = self.pending.values().find(|p| p.kind == Kind::Stop && p.state == State::AwaitingHumanConfirm && p.worker == key) {
+                return Ok(json!({"action_id": p.id, "state": p.state.as_str()}));
             }
         }
-        let mut a = self.new_action("stop", actor, Some(&w), now)?;
+        let mut a = self.new_action(Kind::Stop, actor, Some(&w), now)?;
         a.reason = reason;
         a.stop_match = Some(Value::Object(m));
         match actor {
             Actor::Lead => {
-                a.state = "awaiting_human_confirm";
+                a.state = State::AwaitingHumanConfirm;
                 self.record(&a, a.state, json!({}), now)?;
                 self.pending.insert(a.id.clone(), a.clone());
-                Ok(json!({"action_id": a.id, "state": a.state}))
+                Ok(json!({"action_id": a.id, "state": a.state.as_str()}))
             }
             Actor::Human => self.write_stop(a, now),
         }
@@ -619,7 +674,7 @@ impl Service {
     fn write_stop(&mut self, mut a: Action, now: SystemTime) -> Result<Value> {
         let s = self.session()?;
         let mut entry = json!({
-            "v": 1, "action_id": a.id, "kind": "stop", "created": time::iso_secs(now),
+            "v": 1, "action_id": a.id, "kind": Kind::Stop.as_str(), "created": time::iso_secs(now),
             "source": Actor::Human.source(), "match": a.stop_match.clone().unwrap_or(json!({})),
         });
         if let Some(r) = &a.reason {
@@ -630,15 +685,15 @@ impl Service {
         fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
         // A confirmed stop is the human's action from here on.
         a.actor = Actor::Human;
-        a.state = "queued";
-        self.record(&a, "queued", json!({}), now)?;
+        a.state = State::Queued;
+        self.record(&a, State::Queued, json!({}), now)?;
         self.pending.insert(a.id.clone(), a.clone());
-        Ok(json!({"action_id": a.id, "state": "queued"}))
+        Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
     }
 
     fn awaiting(&self, action_id: &str) -> Result<Action> {
         match self.pending.get(action_id) {
-            Some(a) if a.kind == "stop" && a.state == "awaiting_human_confirm" => Ok(a.clone()),
+            Some(a) if a.kind == Kind::Stop && a.state == State::AwaitingHumanConfirm => Ok(a.clone()),
             _ => Err(ControlError::ActionNotFound),
         }
     }
@@ -659,9 +714,9 @@ impl Service {
         }
         let mut a = self.awaiting(action_id)?;
         a.actor = Actor::Human;
-        self.record(&a, "refused", json!({}), SystemTime::now())?;
+        self.record(&a, State::Refused, json!({}), SystemTime::now())?;
         self.pending.remove(action_id);
-        Ok(json!({"action_id": a.id, "state": "refused"}))
+        Ok(json!({"action_id": a.id, "state": State::Refused.as_str()}))
     }
 
     /// The only way a stop is cleared. Appends a ledger line and the audit
@@ -678,14 +733,14 @@ impl Service {
             Err(e) => return Err(e.into()),
         };
         let now = SystemTime::now();
-        let a = self.new_action("resume", Actor::Human, Some(&w), now)?;
+        let a = self.new_action(Kind::Resume, Actor::Human, Some(&w), now)?;
         fs::remove_file(&path)?;
         let stop_id = str_field(&stop, "action_id").to_string();
-        self.record(&a, "done", json!({"stop_id": stop_id}), now)?;
+        self.record(&a, State::Done, json!({"stop_id": stop_id}), now)?;
         audit::append_resume(&self.audit_log, &a.id, now)?;
         self.pending.remove(&stop_id);
         self.last_stop.remove(w.key());
-        Ok(json!({"action_id": a.id, "state": "done", "stop_id": stop_id}))
+        Ok(json!({"action_id": a.id, "state": State::Done.as_str(), "stop_id": stop_id}))
     }
 
     // ------------------------------------------------------------ ack watcher
@@ -701,11 +756,11 @@ impl Service {
         let stale: Vec<Action> = self
             .pending
             .values()
-            .filter(|a| a.state == "awaiting_human_confirm" && now.duration_since(a.created).unwrap_or_default() >= self.ttl)
+            .filter(|a| a.state == State::AwaitingHumanConfirm && now.duration_since(a.created).unwrap_or_default() >= self.ttl)
             .cloned()
             .collect();
         for a in stale {
-            let _ = self.record(&a, "refused", json!({"reason": "expired"}), now);
+            let _ = self.record(&a, State::Refused, json!({"reason": "expired"}), now);
             self.pending.remove(&a.id);
         }
         let Some(s) = &self.session else { return };
@@ -713,7 +768,7 @@ impl Service {
         let ids: Vec<String> = self
             .pending
             .values()
-            .filter(|a| a.session_id == sid && a.state == "queued")
+            .filter(|a| a.session_id == sid && a.state == State::Queued)
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
@@ -726,11 +781,11 @@ impl Service {
         if let Ok(b) = fsx::read_nofollow(&dir.ack_path(id)) {
             let ack: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
-            self.record(&a, "delivered", json!({"audit_ref": audit_ref}), now)?;
+            self.record(&a, State::Delivered, json!({"audit_ref": audit_ref}), now)?;
             self.pending.remove(id);
             return Ok(());
         }
-        if a.kind == "stop" {
+        if a.kind == Kind::Stop {
             return Ok(());
         }
         if dir.queued(id).is_some() {
@@ -743,7 +798,7 @@ impl Service {
             let Some(p) = self.pending.get_mut(id) else { return Ok(()) };
             let seen = *p.inflight_seen.get_or_insert(now);
             if now.duration_since(seen).unwrap_or_default() >= INFLIGHT_UNKNOWN {
-                self.record(&a, "delivery_unknown", json!({}), now)?;
+                self.record(&a, State::DeliveryUnknown, json!({}), now)?;
                 self.pending.remove(id);
             }
         }
@@ -763,7 +818,7 @@ impl Service {
         } else if dir.inflight(id).is_some() || dir.ack_path(id).exists() {
             return;
         }
-        if self.record(&a, "not_delivered", json!({}), now).is_ok() {
+        if self.record(&a, State::NotDelivered, json!({}), now).is_ok() {
             self.pending.remove(id);
         }
     }
