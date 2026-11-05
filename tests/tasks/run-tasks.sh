@@ -76,6 +76,10 @@ T claim t1 bhima-1 >/dev/null; check "claim ready t1" $?
 [ "$(TJ status t1 | field task.status)" = claimed ] && [ "$(TJ status t1 | field task.attempts)" = 1 ]; check "claimed, attempts 1" $?
 T claim t1 bhima-1 >/dev/null; check "same worker re-claim is idempotent" $?
 [ "$(rc T claim t1 other)" = 3 ]; check "another worker cannot claim it (exit 3)" $?
+# E6 (Q11): the claim records the worker's worktree (absolute path only).
+[ "$(rc T claim t1 bhima-1 --worktree relative/dir)" = 2 ]; check "E6 relative --worktree rejected (exit 2)" $?
+T claim t1 bhima-1 --worktree "$WORK/wt-a" >/dev/null; check "E6 claim with --worktree" $?
+[ "$(TJ status t1 | field task.worktree)" = "$WORK/wt-a" ]; check "E6 tasks.json names the worktree" $?
 OK=0
 for i in 1 2 3 4 5 6 7 8; do ( python3 "$PY" claim t3 "w$i" --campaign "$C" >/dev/null 2>&1 && echo ok > "$WORK/claim.$i" ) & done
 wait

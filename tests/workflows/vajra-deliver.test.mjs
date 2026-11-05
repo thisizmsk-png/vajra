@@ -480,7 +480,9 @@ await scenario('plan is registered in the task graph (add, then validate) with r
 await scenario('workers claim the task first, report through vajra_tasks.py, and return structured reports', async () => {
   const r = await go(ARGS)
   const p = own(call(r, 'task.t1.r1').prompt)
-  assert.match(p, /0\. Claim the task before any other work: run `python3 \S+vajra_tasks\.py claim 20261011-0930\.t1 bhima --stacked --campaign deliver-20261011-0930`\. If it exits 3/)
+  assert.match(p, /0\. Claim the task before any other work: run `python3 \S+vajra_tasks\.py claim 20261011-0930\.t1 bhima --stacked --campaign deliver-20261011-0930 --worktree "\$PWD"`\. If it exits 3/)
+  // E6 (Q11): tasks.json names each worker's worktree.
+  assert.match(own(call(r, 'task.t2.r1').prompt), /--worktree "\$PWD"`/)
   assert.match(own(call(r, 'task.t2.r1').prompt), /claim 20261011-0930\.t2 abhimanyu --stacked --campaign /)
   assert.match(p, /return status "blocked", summary = its error line, artifacts branch = vajra\/20261011-0930\/t1, base_commit = a{40}, commit = "", files = \[\]/)
   assert.match(p, /If it fails any other way \(the task graph is unavailable\), carry on/)

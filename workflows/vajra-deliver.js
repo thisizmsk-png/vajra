@@ -552,7 +552,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     const tid = TID(id)
     const r = await step(`task.${id}.r${round}`, t.owner,
       `You own task ${id} (task graph id ${tid}) of a larger delivery. Work only inside the task's files.\n` +
-      `0. Claim the task before any other work: run \`${TASKS_PY} claim ${tid} ${t.owner} --stacked --campaign ${CAMPAIGN}\`. ` +
+      `0. Claim the task before any other work: run \`${TASKS_PY} claim ${tid} ${t.owner} --stacked --campaign ${CAMPAIGN} --worktree "$PWD"\`. ` +
       'If it exits 3, the task graph refused the claim (another worker holds the task, or it is not ready): do nothing else and return ' +
       `status "blocked", summary = its error line, artifacts branch = ${branchFor(id, round)}, base_commit = ${BASE}, commit = "", files = [], ` +
       'protected_actions_skipped = [], and evidence_cmds = []. If it fails any other way (the task graph is unavailable), carry on. ' +

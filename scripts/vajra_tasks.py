@@ -15,7 +15,7 @@ Usage (every command takes --json, and all but check-evidence take --campaign <s
   vajra_tasks.py dep <id> <dep-id> [--remove]
   vajra_tasks.py validate
   vajra_tasks.py ready
-  vajra_tasks.py claim <id> <worker> [--stacked]
+  vajra_tasks.py claim <id> <worker> [--stacked] [--worktree W]
   vajra_tasks.py report <id> progress|in_progress|done|blocked|question|failed [--summary TEXT]
   vajra_tasks.py close <id> --evidence <verify-work evidence.json> [--commit SHA] [--branch B]
                            [--base-commit SHA] [--changed f1,f2] [--head SHA]
@@ -396,10 +396,17 @@ def cmd_ready(a):
 def cmd_claim(a):
     if not AGENT_RE.match(a.worker or "") and not ID_RE.match(a.worker or ""):
         raise Fail(2, "invalid worker name %r" % a.worker)
+    # E6: the worker's own worktree, recorded so the app can show and diff it.
+    wt = one_line(a.worktree, 300) if a.worktree else ""
+    if wt and not wt.startswith("/"):
+        raise Fail(2, "--worktree must be an absolute path")
     with Store(a.campaign, write=True) as s:
         derive_ready(s.data["tasks"])
         t = s.task(a.id)
         if t["status"] in ("claimed", "in_progress") and t.get("claimed_by") == a.worker:
+            if wt and t.get("worktree") != wt:
+                t["worktree"] = wt
+                s.save()
             return {"ok": True, "id": a.id, "result": "already claimed", "status": t["status"], "attempts": t["attempts"]}
         by_id = {x["id"]: x for x in s.data["tasks"]}
 
@@ -424,6 +431,8 @@ def cmd_claim(a):
         t["status"] = "claimed"
         t["claimed_by"] = a.worker
         t["attempts"] = int(t.get("attempts") or 0) + 1
+        if wt:
+            t["worktree"] = wt
         note(t, "claimed by " + a.worker + (" (retry after %s)" % was if retry else "")
              + (" (stacked on reported-done dependencies)" if not all(by_id[d]["status"] == "done" for d in t["deps"]) else ""))
         s.save()
@@ -697,6 +706,7 @@ def main(argv):
     s.add_argument("worker")
     s.add_argument("--stacked", action="store_true",
                    help="also accept dependencies whose workers reported done but that are not closed yet")
+    s.add_argument("--worktree", default="", help="absolute path of the worker's worktree (E6)")
     s = sub.add_parser("report", parents=[common], allow_abbrev=False)
     s.add_argument("id")
     s.add_argument("status")
