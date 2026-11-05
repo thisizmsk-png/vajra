@@ -36,6 +36,12 @@ tests/hmac-contract.sh"
 # fingerprinted before and after. Any change fails the run (tests/lib/home-guard.sh).
 . "$REPO/tests/lib/home-guard.sh"
 REAL_HOME="$HOME"
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) export PLAYWRIGHT_BROWSERS_PATH="$REAL_HOME/Library/Caches/ms-playwright" ;;
+    *) export PLAYWRIGHT_BROWSERS_PATH="${XDG_CACHE_HOME:-$REAL_HOME/.cache}/ms-playwright" ;;
+  esac
+fi
 HOME_BEFORE="$(home_fp "$REAL_HOME")"
 DECOY_HOME="$(mktemp -d)"
 trap 'rm -rf "$DECOY_HOME"' EXIT

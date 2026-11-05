@@ -77,7 +77,7 @@ NONCE=""
 load_nonce() {
   local f="$D/nonce" m n=""
   [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] || return 1
-  m="$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null)"
+  m="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null)"
   [ "$m" = 600 ] || return 1
   IFS= read -r n < "$f" || [ -n "$n" ] || return 1
   [[ "$n" =~ ^[0-9a-f]{32,128}$ ]] || return 1
@@ -86,6 +86,13 @@ load_nonce() {
 # Does the payload field (.tool_input or .tool_response) contain the needle / a steer tag?
 has_nonce() { jq -e --arg n "$NONCE" '.tool_input | tostring | contains($n)' <<<"$P" >/dev/null 2>&1; }
 has_tag() { jq -e '[.tool_response, .error] | tostring | test("<\\s*/?\\s*vajra-steer"; "i")' <<<"$P" >/dev/null 2>&1; }
+
+# The one call a stopped worker may make: its final report (SubagentHandback, or
+# StructuredOutput for workflow agents) saying it was stopped by the human.
+final_stop_report() {
+  case "$TOOL" in SubagentHandback|StructuredOutput) ;; *) return 1 ;; esac
+  jq -e '.tool_input | tostring | ascii_downcase | contains("stopped by the human")' <<<"$P" >/dev/null 2>&1
+}
 
 stopped() { # rc 0 if a stop matches this worker; sets M_ID
   local f
@@ -145,7 +152,7 @@ match_entry() { # file want(stop|deliver) -> sets M_ID, M_KIND; rc 0 on match
 case "$EV" in
   PreToolUse)
     # Only the exact handback tool is exempt, so a stopped worker can still report.
-    if [ "$TOOL" != SubagentHandback ] && stopped; then
+    if ! final_stop_report && stopped; then
       audit BLOCK "stop id=$M_ID tool=$TOOL_S"
       [ -e "$D/acks/$M_ID.json" ] || write_ack "$M_ID"
       printf '%s\n' "stopped by the human (action $M_ID). Stop now: make no more tool calls and return status blocked with summary \"stopped by the human\"." >&3
@@ -167,7 +174,7 @@ case "$EV" in
     fi
     CLAIMED=() IDS=() KINDS=()
     # Nothing is delivered on the handback, to a stopped worker, or without a nonce.
-    if [ "$TOOL" = SubagentHandback ] || stopped || ! load_nonce; then
+    if [ "$TOOL" = SubagentHandback ] || [ "$TOOL" = StructuredOutput ] || stopped || ! load_nonce; then
       set --
     else
       set -- "$D"/queue/*.json

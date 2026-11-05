@@ -460,6 +460,13 @@ worker BLOCK "F-C worker find -exec cat from Library"     "$(bj "find ~/Library 
 worker BLOCK "F-C worker grep -r from ~/.claude"          "$(bj "grep -r nonce ~/.claude")"
 worker BLOCK "F-D worker names control dir, odd spacing"  "$(bj 'cat ~/Library/Application${IFS}Support/VajraDesktop/control/sess-1234abcd/nonce')"
 bash_case BLOCK "F-D write via odd spacing"               'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/control/q.json'
+# GPT 6.1 Sol review threads on PR #3 (exact reproductions)
+bash_case BLOCK "Sol: cd control/<sid>; printf x > nonce"   "cd \"$CTRL/sess-1234abcd\"; printf x > nonce"
+bash_case BLOCK "Sol: same via space-normalized alias cwd"  "printf x > nonce" "$CTRL/sess-1234abcd"
+worker BLOCK "Sol: worker cd control/<sid>; cat nonce"      "$(bj "cd \"$CTRL/sess-1234abcd\"; cat nonce")"
+worker BLOCK "Sol: worker grep -R . parent of control root" "$(bj "grep -R . \"$H/Library/Application Support/VajraDesktop\"")"
+worker BLOCK "Sol: worker cp -r parent to tmp"              "$(bj "cp -r \"$H/Library/Application Support/VajraDesktop\" /tmp/x")"
+worker BLOCK "Sol: worker grep -r with cwd above control"   "$(bj "cd \"$H/Library/Application Support\" && grep -r nonce")"
 raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
 worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
 

@@ -1093,6 +1093,7 @@ eval_segment() { # uses SEG array
       # Default target is the cwd; the first operand is the pattern unless
       # -e/-f/--regexp/--file supplied it.
       key_anc "$SEGCWD" && block "${wb} would recursively read $SEGCWD, which contains the Vajra HMAC key; cd into a directory below it (for example your project) first"
+      noread_anc "$SEGCWD" && block "${wb} would recursively read $SEGCWD, which contains Vajra Desktop control files or transcripts; cd into your project first"
       skip=1
       for ((c = op_from; c < n; c++)); do
         case "${SEG[$c]}" in --regexp*|--file*) skip=0 ;; --*) ;; -*[ef]*) skip=0 ;; esac

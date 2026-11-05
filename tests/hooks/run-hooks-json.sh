@@ -17,6 +17,7 @@ jq -e . "$F" >/dev/null 2>&1; check "hooks.json is valid JSON" $?
 
 # Base: main at the time the desktop work started.
 BASE_REF="${HOOKS_JSON_BASE:-8a10d0522d286ac7e4eaa40c6ae7e982199bb72c}"
+git cat-file -e "$BASE_REF^{commit}" 2>/dev/null || git fetch -q --depth=1 origin "$BASE_REF" 2>/dev/null
 BASE="$(git show "$BASE_REF:$F" 2>/dev/null)"
 [ -n "$BASE" ]; check "base hooks.json readable ($BASE_REF)" $?
 
