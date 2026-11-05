@@ -1,0 +1,20 @@
+[package]
+name = "vajra-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Vajra Desktop: a local window onto Vajra runs and their crews"
+license = "MIT"
+publish = false
+# The bin target is src/main.rs (owned by task t8); Cargo auto-discovers it.
+
+[lib]
+name = "vajra_desktop"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+libc = "0.2"
