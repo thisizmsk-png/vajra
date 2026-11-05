@@ -31,6 +31,7 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 | G2 | **Done 2026-11-05 for the stack** (both models approve Tauri v2 + Rust + React/TS + xterm.js; performance approval withheld by both until NFR-PERF-1 and NFR-PERF-6 are met). Review: `vajra-3/stack-spike-review.md`, objections O1-O7 feed H1 | Opus 5.5 + GPT 6.1 Sol | `docs/desktop/spec/requirements.md`, `docs/desktop/PRD.md` | G1 | Stack approved by both; budgets in NFR-PERF-1 to 10 |
 | G3 | **Confirmed 2026-11-05** by vajra-6's tracer bullet (Claude Code 2.1.296, artifact `vajra-6/tracer-bullet.md`): Claude Code facts the control channel depends on (design.md 5.9) | abhimanyu [Prototyper]; done by vajra-6 | none (spike notes) | G1 | Done: subagent hook payloads carry `session_id`, `agent_id`, `agent_type`, `cwd`; `additionalContext` reaches the subagent when sent as a nonce-tagged steer (plain text is ignored as injection); exit 2 from a second PreToolUse hook blocks the call; `--resume` plus `SendMessage` continues the same agent. Still open: the same inside the `vajra-deliver` Workflow tool (M2 smoke run) |
 | G3b | Validation gate, run after E1 and E5 are built (A1 B3): one-task `vajra-deliver` run with the control hook and E5, checking step labels and `agent_id` in hook payloads, nonce steer delivery, sticky stop with the final-output exemption, and the MCP naming (design 5.9 items 9 to 11) | abhimanyu [Prototyper] | spike notes only | E1, E5 | Each item confirmed (POS-5.5); a finding (for example another final-output tool name, design 5.4) goes back to E1 as a fix and G3b reruns, and C6 starts only after G3b passes; if steering fails on this path, J3 ships as stop-only (ADR-2 fallback) and steering claims stay limited to Agent-tool subagents |
+| G4 | Spike: Codex CLI (`codex` version, PTY streaming, process-group stop, any supported inspect, message or resume hook) and Conductor's on-disk layout for repos, worktrees and sessions | abhimanyu [Prototyper] | spike notes only | G1 | Each Codex capability flag set from a run, not docs; Conductor paths confirmed or the import ships git- and transcript-only |
 
 ### M1 Engine changes (Vajra repo, owner-approved)
 
@@ -55,6 +56,8 @@ Moved into M1 by pre-mortem PM-7: persist the delivery report as `report.md` in 
 | C4 | Vajra state reader + script bridge: campaigns, tasks, features, progress, checkpoints, audit.log, routing log through a path allowlist; shell-outs to `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git` | sepoy-backend-1 [Backend worker 1] | `app/core/vajra/*`, `tests/fixtures/campaigns/*` | C1 | AC-1.2.x, AC-1.3.x, AC-1.1.3, NFR-SEC-2, NFR-SEC-6; test: the app never opens `.hmac-key` (fs trace) |
 | C5 | Transcript tailer + crew tree derivation (Lead, run, agents, sub-workers) from transcripts and `tasks.json`; schema-version check with raw fallback | bhima [Backend] | `app/core/crew/*`, `tests/fixtures/transcripts/*` | C2, C4 | AC-2.1.x, AC-2.2.1 to AC-2.2.3 |
 | C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2, E5, E6, G3b | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
+| C7 | Agent-adapter interface (ADR-10) with the Claude Code adapter (from C3) and the Codex CLI adapter (flags from G4); shared conformance suite; billing source per session; fixed argv and env allowlist | bhima [Backend] | `app/core/agents/*`, tests | C3, G4 | AC-1.5.1 to 1.5.3, AC-1.1.5 to 1.1.7, NFR-SEC-16 (test: no open of any credential path in an fs trace) |
+| C8 | Conductor import (ADR-11): read-only discovery, per-item confirm, app-owned records only | sepoy-backend-1 [Backend worker 1] | `app/core/import/*`, fixtures | C4, G4 | AC-1.4.1 to 1.4.4 |
 
 C4 runs in parallel with C2 and C3 (disjoint files). C5 waits for C4's fixtures.
 
@@ -105,7 +108,7 @@ beta; slice 2 must land before the public launch.
 
 | Slice | What a user gets | Tasks |
 |---|---|---|
-| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G3b, E1 to E3, E5, E6, C1 to C6, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
+| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5, E6, C1 to C8, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
 | 2 | Knowledge in the run view (records used, refusals) and its approve, reject and forget commands; the task graph view; history search; the claim studies that unlock launch wording | E4, S4 task graph (US-4.2), S6, H3, H7, H8 |
 
 Slice 1 has no knowledge mutation, no graph view and no claim study. The 60-second demo (PRD section 1)
@@ -123,6 +126,10 @@ graph LR
   C2 --> C3
   C2 & C4 --> C5
   C2 & C5 & E1 & E2 & E5 & E6 --> C6
+  G1 --> G4
+  C3 & G4 --> C7
+  C4 & G4 --> C8
+  C7 & C8 --> S1
   G2 --> E4 & E6
   C1 --> H0
   K1 --> K2 & K3

@@ -810,6 +810,32 @@ check.
     gives survival without a daemon of our own, so evaluate it first.
   - Vajra adding a resume that keeps a run's tasks. Then (c) or (d) are reconsidered for v1.1.
 
+**ADR-10 One small agent-adapter interface** (owner decision, 2026-11-05). Decision: the Rust core talks to
+agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`, `stop`, `resume`, and a
+`capabilities()` set of flags. The UI renders only actions whose flag is true.
+- Claude Code adapter: every flag true (the control channel in section 5 is its `message` and `stop`).
+- Codex CLI adapter: `spawn`, `stream` (its PTY), `attach_pty` and process-group `stop` (a hard stop, labelled
+  so) to start with. `inspect`, `message` and `resume` stay false until G4 proves a supported mechanism, and
+  are never emulated by typing into its PTY (ADR-2).
+- Options: (a) Claude Code only (the earlier won't-do); (b) a plugin system; (c) one compiled-in interface
+  with two adapters (chosen).
+- Evidence against: a second adapter adds a conformance suite and a test matrix, and Codex users may expect
+  parity.
+- Would change our mind: G4 shows Codex can't be streamed or stopped reliably; then the Codex adapter ships
+  later and the interface stays.
+- Gemini CLI and OpenCode come post-MVP through the same trait.
+
+**ADR-11 Conductor import is read-only discovery** (owner decision, 2026-11-05). Decision: discover repos,
+worktrees (`git worktree list`) and Claude Code sessions (transcript `cwd`), let the user confirm each, and
+record only app-owned entries. Nothing is deleted, moved or rewritten. Conductor's own layout is read only
+where G4 has confirmed it; otherwise the import says "not recognised" (AC-1.4.4).
+
+**Billing hard rules** (owner decision; PRD section 11). The session supervisor builds argv from a fixed
+template for the stock binary (no `--bare`, no `-p`, no SDK) and the child environment from an allowlist. It
+reports the billing source per session from the presence of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+an `apiKeyHelper` (API key wins), and for Codex from `codex login status`. It never reads a credential value
+(NFR-SEC-16). Spawns are staggered by at least 2 s (AC-1.1.5).
+
 ## 7. Error handling
 
 | What fails | Detection | Handling | User sees |

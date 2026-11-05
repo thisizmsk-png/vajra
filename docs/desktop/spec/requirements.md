@@ -48,6 +48,8 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.1.3 GIVEN any run start, WHEN it completes or fails, THEN no file under `~/.claude` was created or modified by the app itself; changes there come only from Claude Code and Vajra's own scripts (verified by a filesystem-event diff over `~/.claude` attributing writes by process).
 - AC-1.1.4 GIVEN the advanced section, WHEN I set maxInFlight outside 1..16, THEN the value is rejected with an inline message; a valid value is passed as `maxInFlight`.
 - AC-1.1.5 (P24, billing.md) GIVEN 10 `claude` sessions started together, WHEN they run, THEN each is the stock binary handling its own login; the app never reads, copies, refreshes or shares tokens (no access to `~/.claude/.credentials*`, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`, checked by an fs and process trace), and sessions start at least 2 s apart so the binary's own refresh isn't raced.
+- AC-1.1.6 (billing.md) GIVEN any agent row, WHEN it is shown, THEN it reads its billing source as "plan login" or "API key" (Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper` present in that session's environment or settings; Codex: `codex login status`), API key wins when both apply, and the app learns only presence, never a value.
+- AC-1.1.7 (billing.md) GIVEN any launch, WHEN argv and the child environment are inspected, THEN the binary is the user's stock `claude` or `codex`, run in a PTY, with no `--bare`, no `-p`, no Agent SDK and no `ANTHROPIC_BASE_URL` added by the app; a stray API key inherited from my shell is shown in preflight before the first start, not silently passed on.
 
 **US-1.2** As a Dev, I want to resume a campaign, so that I continue unfinished work (`/vajra continue`).
 - AC-1.2.1 GIVEN the campaign list shows campaigns found under `~/.claude/vajra/campaigns/`, WHEN I choose one and press "Resume", THEN the app runs `vajra-campaign.sh verify <slug>` first and, on exit 0, launches the run session with `campaign: <slug>` and a fresh `run_id`.
@@ -62,6 +64,17 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.3.5 (VD-27) GIVEN the control hook is not registered, WHEN preflight runs, THEN it names the missing piece and shows the exact command to run in my own terminal; the app never edits `~/.claude/settings.json` or any agent config itself (a file hash before and after is identical), and control actions show "control hook not installed" instead of failing silently.
 - AC-1.3.6 (VD-12, VD-31) GIVEN a fresh install with the network blocked, WHEN I start a run and use every screen, THEN everything works and no login or account screen appears; with the network open for an hour under a network monitor, the only outbound connection the app makes is the update check (Claude Code's own traffic excluded).
 - AC-1.3.7 (VD-28) GIVEN a Mac with Claude Code and Vajra installed, WHEN I open the signed DMG and launch the app, THEN I reach Home with a passing preflight in under 2 minutes, the app needs no Node or Python of its own, and it writes nothing outside `~/Library/Application Support/<app>/` and the repos I pick.
+
+**US-1.4** (owner decision, 2026-11-05) As a Dev leaving Conductor, I want my repos, worktrees and sessions found, so that I keep working in Vajra Desktop without redoing setup.
+- AC-1.4.1 GIVEN Conductor data on this Mac, WHEN I choose "Import from Conductor", THEN the app lists the repos, worktrees (from `git worktree list` in each repo) and Claude Code sessions (from transcripts whose `cwd` is one of those worktrees) it found, each with its path, branch and last activity, and selects none by default.
+- AC-1.4.2 GIVEN the discovery list, WHEN I confirm items one by one (or select several and confirm once, with the list shown), THEN only the confirmed items are added to the app's own `runs.jsonl` and repo list; nothing else changes.
+- AC-1.4.3 GIVEN any import, WHEN it finishes or I cancel, THEN no file or worktree is deleted, moved, renamed or written outside the app data dir, and no git command other than read-only ones ran (fs and process trace).
+- AC-1.4.4 GIVEN Conductor's on-disk layout is unknown or changed, WHEN discovery runs, THEN it shows "Conductor data not recognised" and offers to add a repo by path, instead of guessing.
+
+**US-1.5** (owner decision, 2026-11-05) As a Dev, I want to run Codex CLI agents next to Claude Code ones, so that I'm not locked into one vendor.
+- AC-1.5.1 GIVEN the agent-adapter interface (spawn, stream, PTY attach, inspect, message, stop, resume, plus capability flags), WHEN the Claude Code and Codex CLI adapters run the shared conformance suite, THEN every flag set to true passes its test and every flag set to false is hidden in the UI.
+- AC-1.5.2 GIVEN a Codex CLI worker, WHEN I open its row, THEN only the actions its flags support appear (no greyed-out Message or Stop that can't work), and the inspector names the adapter and its flags.
+- AC-1.5.3 GIVEN an unsupported action requested through the Lead or MCP, WHEN it reaches the control service, THEN it returns `unsupported_by_adapter` and nothing is queued.
 
 ### J2 Crew
 
@@ -316,13 +329,13 @@ a reason at why 4, since native agent view already does it, P23)
 
 ## 4. Scope
 
-**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions, a control channel for the Lead and the human.
+**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only Conductor import (US-1.4), a control channel for the Lead and the human.
 
 **Out of scope (non-goals).**
 - Mobile app and push to phone; multi-machine; cloud sync; team sharing.
 - Kanban board; issue-tracker intake.
 - PR/CI lifecycle and merging (Agent Orchestrator already does this; Vajra Desktop complements it).
-- Non-Claude agents; editing code in-app.
+- Agents beyond Claude Code and Codex CLI (Gemini CLI and OpenCode post-MVP); a plugin system; editing code in-app.
 - Replacing Vajra hooks, workflows, agents or campaigns.
 - Writing under `~/.claude` (except through Claude Code and Vajra's own scripts).
 - A plugin API; Windows and Linux; auto-approve of any kind.
@@ -373,6 +386,7 @@ IDs keep their earlier meaning, so references elsewhere still hold.
 - NFR-SEC-13 (STRIDE D1): parsers cap line length (1 MiB), JSON depth (64) and record size; an over-cap record shows as "truncated" and never stalls the reader.
 - NFR-SEC-14 (STRIDE E1): the Tauri command surface is a fixed, documented list; no command takes an executable path, a shell string or an arbitrary filesystem path; each validates its arguments and the calling window.
 - NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
+- NFR-SEC-16 (owner decision, billing.md): the app never reads, stores, proxies or offers credentials or a claude.ai login (no access to Claude Code's credential files, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`); it launches only the stock binaries under the user's own login, and never pays for, resells or proxies model usage.
 - NFR-SEC-8: control messages are never approval for protected actions.
 
 Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "Any worker in a /vajra run" is claimed only after G3b passes inside `vajra-deliver` (POS-5.5).
@@ -412,9 +426,11 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 
 | Story | Criteria | NFRs |
 |---|---|---|
-| US-1.1 | AC-1.1.1 .. 1.1.5 | SEC-1, SEC-4, UX-2, UX-3 |
+| US-1.1 | AC-1.1.1 .. 1.1.7 | SEC-1, SEC-4, UX-2, UX-3 |
 | US-1.2 | AC-1.2.1 .. 1.2.3 | SEC-2, SEC-4, UX-2 |
 | US-1.3 | AC-1.3.1 .. 1.3.7 | SEC-2, UX-1, A11Y-1 |
+| US-1.4 | AC-1.4.1 .. 1.4.4 | SEC-2, SEC-6 |
+| US-1.5 | AC-1.5.1 .. 1.5.3 | SEC-5, SEC-16 |
 | US-2.1 | AC-2.1.1 .. 2.1.6 | PERF-3, A11Y-1, A11Y-3 |
 | US-2.2 | AC-2.2.1 .. 2.2.6 | PERF-2, PERF-3, PERF-5, PERF-6, SEC-3 |
 | US-2.3 | AC-2.3.1 .. 2.3.3 | PERF-3, SEC-3, SEC-6 |
@@ -448,7 +464,7 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 
 ## 7a. Pain points from user research
 
-Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 25 rows MVP, 6 deferred, 8 won't do (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
+Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 26 rows MVP, 6 deferred, 7 won't do (P21 moved to MVP by owner decision) (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
 
 | Pain point | Requirement (vajra-4 id) | Decision | Where in this spec | Task |
 |---|---|---|---|---|
@@ -487,7 +503,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P18 | Submit GitHub PR reviews | Won't do | `gh` and the browser do it (agree) | none |
 | P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 | C1 |
 | P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 | G2 |
-| P21 lock-in | VD-33 agent-agnostic launch | Won't do | Positioning reason 2 is Claude Code-native; agent breadth belongs to Agent Orchestrator. Accepted cost: users who mix vendors | none |
+| P21 lock-in | VD-33 agent-agnostic launch | MVP, narrowed (owner decision, 2026-11-05) | One adapter interface; Claude Code full, Codex CLI with honest capability flags; Gemini CLI and OpenCode post-MVP; no plugin system: US-1.5 | C7 |
 | P24 parallel sessions race on one OAuth login (Runner, Paseo; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C3 |
 | P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 | none |
 | P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) | PRD rule |
@@ -546,3 +562,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 1. Confirm A1..A9 (especially A3 transcript streams and A5 hook identification, which the spike must prove).
 2. Decide whether Vajra should persist delivery reports in the campaign (A8).
 3. Decide whether renaming engine agents is wanted later (A2).
+4. Q10: apply the sandbox `denyWrite` for the control dir (still open).
+5. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
+
+Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).

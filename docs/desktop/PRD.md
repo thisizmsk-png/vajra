@@ -227,7 +227,8 @@ measured, not claimed.
 
 A fleet kanban, issue-tracker intake, PR, CI and merge automation, mobile apps and push, multi-machine
 mesh, cloud sync and shared boards, an embedded browser or IDE, fan-out of one prompt to competing
-attempts, agent breadth beyond Claude Code, and account or usage switching. Each belongs to a tool above,
+attempts, agent breadth beyond Claude Code and Codex CLI (Gemini CLI and OpenCode come post-MVP, through the same
+adapter interface), and account or usage switching. Each belongs to a tool above,
 mostly to Agent Orchestrator, which the owner already runs.
 
 No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
@@ -274,7 +275,9 @@ spec (requirements 7b, PM-1 to PM-8).
 - **PR, CI and merge lifecycle.** Agent Orchestrator does this well and the owner already uses it. Vajra
   Desktop stops at "approved plan handed to Claude Code".
 - **Mobile apps, push to phone, multi-machine, cloud sync, team sharing.**
-- **Non-Claude agents** (Codex, Gemini CLI and others). Vajra is a Claude Code harness.
+- **Agents beyond Claude Code and Codex CLI in the MVP.** One small agent-adapter interface in the core
+  (owner decision, 2026-11-05): Claude Code is the full adapter, Codex CLI the second with honest capability
+  flags. Gemini CLI and OpenCode come after the MVP. No plugin system.
 - **An editor or in-app code edits**, a plugin API, an embedded browser.
 - **Replacing any Vajra primitive**: hooks, workflows, agents, campaigns, the guard, the ledger.
 - **Auto-approve** of any protected action, ever, including batch approval of permission prompts across a crew (VD-22).
@@ -325,6 +328,32 @@ The owner authorized provisional Tauri work. Performance approval is withheld by
   the app's data directory.
 - **Signed, notarized updates; locked and audited dependencies.**
 
+### Billing and terms: hard rules (owner decision, 2026-11-05)
+
+From `vajra-4/billing.md` (not legal advice):
+- The app launches the stock, unmodified `claude` and `codex` binaries in a PTY, under the user's own login.
+- It never reads, stores, proxies or offers credentials or a claude.ai login. Sign-in happens only in the
+  agent's own `/login` or `codex login`, which the user runs.
+- No `--bare`, and no Agent SDK with plan credentials. Runs never use `-p` (VD-13).
+- Each agent row shows its billing source: plan login or API key. When an API key is present it wins (Claude
+  Code's precedence), and the row says so.
+- An optional API-key mode for big crews: the user sets their own key in their own environment or
+  `apiKeyHelper`. The app only detects that one is present; it never holds the value.
+- No reselling, paying for or proxying model usage, and no `ANTHROPIC_BASE_URL` gateway.
+- Plain-text "runs Claude Code" only, never in the product name or logo.
+
+**Launch blocker: terms status is AMBIGUOUS.** Whether a third-party orchestrator spawning the user's own
+`claude` sessions under a consumer plan is "ordinary, individual usage" isn't settled by Anthropic's
+published terms. The owner decides whether to ask Anthropic in writing (Q12). Until there's an answer,
+launch copy recommends API keys for large crews. The timeline so far:
+
+| Date | Event |
+|---|---|
+| 2026-01-09 | OpenCode's Claude Max login stops working; its maintainer believes it was blocked |
+| 2026-04-04 | Claude subscriptions stop covering usage in third-party tools (extra usage bundles or API keys instead) |
+| 2026-05-13 | Anthropic announces that the Agent SDK, `claude -p` and SDK-based apps move to a dedicated monthly credit |
+| 2026-06-15 | That change is paused "for now"; nothing changed |
+
 Threat model and tests: [spec/design.md](spec/design.md#8-security-considerations-summary-the-security-role-reviews-later), red-team tasks in
 [spec/tasks.md](spec/tasks.md).
 
@@ -352,5 +381,6 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q6 | Pricing and license for the app (Vajra itself is MIT) | Owner to decide before launch |
 | Q7 | Telemetry: none, or opt-in crash reports only | Opt-in crash reports only |
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | Yes; without it, control is stop-only when the sandbox is off |
-| Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | Yes, both additive |
+| Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
+| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Launch blocker.** Until answered, launch copy recommends API keys for large crews |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |
