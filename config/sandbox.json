@@ -53,5 +53,13 @@
     "Linux/WSL2 require: bubblewrap + socat (apt/dnf install), and `npm i -g @anthropic-ai/sandbox-runtime` for the seccomp Unix-socket filter. macOS needs nothing (Seatbelt is built in).",
     "Enable interactively any time with the /sandbox command; managed-settings lockdown (allowManagedDomainsOnly, allowManagedReadPathsOnly) enforces it org-wide.",
     "Never add a Unix socket like /var/run/docker.sock to allowUnixSockets — it grants host access and defeats the sandbox."
-  ]
+  ],
+  "optional": {
+    "vajraDesktopControl": {
+      "why": "Opt-in, not part of \"settings\" and not applied by any Vajra script. Only the Vajra Desktop app should write its control queue; the guard blocks agent writes (best effort), and this makes it an OS-level deny. Add it yourself if you use Vajra Desktop.",
+      "denyWrite": [
+        "~/Library/Application Support/VajraDesktop/control"
+      ]
+    }
+  }
 }

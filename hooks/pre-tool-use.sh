@@ -63,11 +63,11 @@ TOOL=""
 command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
 
 PAYLOAD="$(cat)"
-CWD_IN="" CMD="" P1="" P2="" P3=""
+CWD_IN="" CMD="" P1="" P2="" P3="" AID=""
 PARSED="$(jq -r '
   def s: if type == "string" then . elif . == null then "" else tostring end;
   (.tool_input | if type == "object" then . else {} end) as $i
-  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s)"
+  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) AID=\(.agent_id | s)"
 ' <<<"$PAYLOAD" 2>/dev/null)" || block "unparseable hook payload (fail-closed)"
 eval "$PARSED"
 [ -n "$TOOL" ] || block "payload has no tool_name (fail-closed)"
@@ -141,6 +141,23 @@ ROOTS=(
 # canonicalizes to.
 canon "$HOME/Library/Application Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
 canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
+# Read-protected for workers (payload carries agent_id): the control dir holds the
+# steering nonce, and transcripts hold each worker's brief (which carries it). The
+# main session and the Lead chat session have no agent_id and keep reading.
+NOREAD=( "${ROOTS[@]: -2}" )
+canon "$HOME/.claude/projects" /; NOREAD+=( "$CANON" )
+noread() { # canonical path -> 0 if a worker may not read it
+  local r
+  [ -n "$AID" ] || return 1
+  for r in "${NOREAD[@]}"; do inside "$1" "$r" && return 0; done
+  return 1
+}
+noread_anc() { # canonical dir -> 0 if a recursive worker read there reaches a NOREAD root
+  local r
+  [ -n "$AID" ] || return 1
+  for r in "${NOREAD[@]}"; do inside "$r" "$1" && return 0; done
+  return 1
+}
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
 
@@ -222,6 +239,10 @@ case "$TOOL" in
       canon "$f" "$CWD"
       classify "$CANON"
       [ "$PKIND" = key ] && block "the Vajra HMAC key is never readable by tools"
+      noread "$CANON" && block "workers may not read Vajra Desktop control files or Claude Code transcripts: $CANON"
+      if [ "$TOOL" = Grep ] && noread_anc "$CANON"; then
+        block "Grep over $CANON would search Vajra Desktop control files or transcripts; give a path below it"
+      fi
       # Grep reads file contents recursively: the key's directory or any
       # ancestor of it (~/.claude, HOME, /) would include the key.
       if [ "$TOOL" = Grep ] && key_anc "$CANON"; then
@@ -1154,6 +1175,7 @@ eval_segment() { # uses SEG array
       fi
       candidates "$part" "$SEGCWD"
       for cc in ${CANDS[@]+"${CANDS[@]}"}; do
+        noread "$cc" && block "workers may not read Vajra Desktop control files or Claude Code transcripts: $cc"
         key_anc "$cc" && kanc=1
         classify "$cc"
         case "$PKIND" in

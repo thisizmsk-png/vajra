@@ -407,6 +407,44 @@ bash_case BLOCK "E2 rm in long command"      "echo $(printf 'a%.0s' $(seq 1 1100
 raw_case  ALLOW "E2 mcp list_workers"        "$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"mcp__vajra-desktop__list_workers",tool_input:{}}')"
 grep -q ' ALLOW mcp__vajra-desktop__list_workers$' "$VS/audit.log" 2>/dev/null; judge ALLOW "E2 mcp list_workers audited ALLOW" $?
 
+# --- E2 read blocks for workers (orchestrator-approved, steering-threat-model.md) ---
+# A worker (payload carries agent_id) may not read the control dir (the steering nonce
+# lives there) or Claude Code transcripts (its brief, with the nonce, is in them). The
+# main session and the Lead chat session carry no agent_id and keep reading; the
+# desktop app reads files itself, not through tool calls, so the guard never sees it.
+worker() { # expect desc json-without-agent_id
+  local rc; printf '%s' "$(jq -c '. + {agent_id:"a1b2c3", agent_type:"general-purpose"}' <<<"$3")" | bash "$HOOK" >/dev/null 2>&1; rc=$?
+  judge "$1" "$2" "$rc"
+}
+TR="$H/.claude/projects/-Users-dev-repo"; mkdir -p "$TR/sid/subagents"
+echo '{}' > "$TR/sid.jsonl"; echo '{}' > "$TR/sid/subagents/agent-a1.jsonl"
+mkdir -p "$CTRL/sess-1234abcd"; echo 0123456789abcdef0123456789abcdef > "$CTRL/sess-1234abcd/nonce"
+ln -sf "$CTRL/sess-1234abcd/nonce" "$PROJ/noncelink"
+fj() { jq -nc --arg t "$1" --arg p "$2" --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{file_path:$p,path:$p,pattern:"."}}'; }
+bj() { jq -nc --arg c "$1" --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}'; }
+worker BLOCK "worker Read nonce"                "$(fj Read "$CTRL/sess-1234abcd/nonce")"
+worker BLOCK "worker Read nonce via symlink"    "$(fj Read "$PROJ/noncelink")"
+worker BLOCK "worker Read nonce, case variant"  "$(fj Read "$H/library/application support/vajradesktop/control/sess-1234abcd/nonce")"
+worker BLOCK "worker Grep control dir"          "$(fj Grep "$CTRL")"
+worker BLOCK "worker Grep over Application Support" "$(fj Grep "$H/Library/Application Support")"
+worker BLOCK "worker Glob control dir"          "$(fj Glob "$CTRL")"
+worker BLOCK "worker cat nonce"                 "$(bj "cat \"$CTRL/sess-1234abcd/nonce\"")"
+worker BLOCK "worker cat nonce, escaped space"  "$(bj 'cat ~/Library/Application\ Support/VajraDesktop/control/sess-1234abcd/nonce')"
+worker BLOCK "worker python open nonce"         "$(bj "python3 -c 'print(open(\"$CTRL/sess-1234abcd/nonce\").read())'")"
+worker BLOCK "worker Read run transcript"       "$(fj Read "$TR/sid.jsonl")"
+worker BLOCK "worker Read subagent transcript"  "$(fj Read "$TR/sid/subagents/agent-a1.jsonl")"
+worker BLOCK "worker Grep projects dir"         "$(fj Grep "$H/.claude/projects")"
+worker BLOCK "worker tail transcript"           "$(bj "tail -n 50 \"$TR/sid.jsonl\"")"
+worker BLOCK "worker grep -r projects"          "$(bj "grep -r nonce ~/.claude/projects")"
+worker ALLOW "worker Read own project file"     "$(fj Read "$PROJ/out")"
+worker ALLOW "worker Read sibling app dir"      "$(fj Read "$H/Library/Application Support/Other/x.json")"
+worker ALLOW "worker cat a project file"        "$(bj "cat README.md")"
+raw_case ALLOW "main session Read transcript"   "$(fj Read "$TR/sid.jsonl")"
+raw_case ALLOW "main session cat transcript"    "$(bj "tail -n 5 \"$TR/sid.jsonl\"")"
+raw_case ALLOW "main session Read control file" "$(fj Read "$CTRL/cmd.json")"
+raw_case ALLOW "Lead (no agent_id) lists ledger dir" "$(bj "ls \"$CTRL\"")"
+worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"

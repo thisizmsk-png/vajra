@@ -88,5 +88,6 @@ cat <<'EOF'
        Strict mode: set  "allowUnsandboxedCommands": false  (Overrides tab).
 EOF
 echo
+echo "  Optional (Vajra Desktop users): also add the \"optional.vajraDesktopControl.denyWrite\" path from ${REC} to denyWrite."
 warn "The default read policy still allows ~/.aws and ~/.ssh — the denyRead list above is required, not optional."
 exit 0
