@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-05T20:05:39Z",
+  "generated": "2026-11-05T20:38:11Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
@@ -297,7 +297,7 @@
     "tests/hooks/run-post-tool-use.sh": "83b3d6f0d3f08d198460a1183b70de9f2d0d4e386e9eb7babd7b772dae8a65b2",
     "tests/hooks/run-pre-compact.sh": "009e71d052f163f59c898ee2bf96b131e3df85131000100f1199e12d1027bcb9",
     "tests/hooks/run-pre-tool-use.sh": "f5b4f21a2368bca9702849403e70e8b1978f3bb56aa391de5496be70803eb76e",
-    "tests/hooks/run-sandbox-desktop.sh": "4241a3a85e9c9e6936fc4fdc131fb51fafdac50beefb36bfb2183cbcad387ad4",
+    "tests/hooks/run-sandbox-desktop.sh": "95eb7c4650e5f38fb535c441f879d25a6768dcb4c7d4458b1775be9a15cce2cc",
     "tests/hooks/run-session-start-kb.sh": "d9491a92d1da2fb187ad29e73ccb249efab4c3df9c3c4de23c8dfba0b0532fc7",
     "tests/hooks/run-session-start.sh": "10bc3b3dd229fdc83942e59d17fd2f401f88feba15ae2ce054548abc939e9fc8",
     "tests/hooks/run-user-prompt-submit.sh": "612a11e6acf07032bb9cdd76c29582ad01ac3db48de1552f5cdb2a5ebd5ce6d9",

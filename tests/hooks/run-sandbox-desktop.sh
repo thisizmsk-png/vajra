@@ -16,10 +16,14 @@ ok "no longer an opt-in extra" $?
 
 H="$(mktemp -d)"; trap 'rm -rf "$H"' EXIT
 mkdir -p "$H/.claude"
-before="$(find "$H" -type f | sort | xargs -I{} shasum {} 2>/dev/null)"
+# Print-only means nothing under the Claude dir changes. (On Linux the script runs `npm ls -g`, which
+# may write npm's own cache and logs under HOME; that is not Claude or Vajra state.)
+CL_DIR="$H/.claude"
+before="$(find "$CL_DIR" -type f | sort | xargs -I{} shasum {} 2>/dev/null)"
 out="$(HOME="$H" bash "$REPO/scripts/enable-sandbox.sh" 2>&1)"
 printf '%s' "$out" | grep -q 'Application Support/VajraDesktop'; ok "enable-sandbox shows the denyWrite entry" $?
-[ "$before" = "$(find "$H" -type f | sort | xargs -I{} shasum {} 2>/dev/null)" ]; ok "enable-sandbox writes nothing" $?
+[ "$before" = "$(find "$CL_DIR" -type f | sort | xargs -I{} shasum {} 2>/dev/null)" ] && [ ! -e "$CL_DIR/settings.json" ]
+ok "enable-sandbox writes nothing in the Claude dir" $?
 
 # The bare temp HOME has no install, so doctor exits 1; only its Desktop line matters.
 doc() { HOME="$H" bash "$REPO/scripts/vajra-doctor.sh" > "$H/doc.log" 2>&1; grep -i "desktop" "$H/doc.log"; }
