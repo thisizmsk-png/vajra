@@ -814,7 +814,18 @@ copy_layout() {
   return 0
 }
 
-eval_segment() { # uses SEG array
+# env -C/--chdir moves the cwd for one command only (Sol r4485195331): run the
+# segment with that cwd, then restore it unless the segment was a cd/pushd.
+eval_segment() {
+  local saved="$SEGCWD"
+  SEG_CD=0
+  eval_segment_body
+  local rc=$?
+  [ "$SEG_CD" = 1 ] || SEGCWD="$saved"
+  return $rc
+}
+
+eval_segment_body() { # uses SEG array
   local n=${#SEG[@]} i=0 w="" wi=-1 wb tok reader=0 script=0 script_i=-1 hit=0 kanc=0 c k gsub_i=-1 dscript=0
   SEG_HIT=0
   [ "$n" -gt 0 ] || return 0
@@ -829,7 +840,12 @@ eval_segment() { # uses SEG array
       if [ "${tok##*/}" = env ]; then
         while [ "$i" -lt "$n" ]; do
           case "${SEG[$i]}" in
-            -u|-C|-P|--unset|--chdir) i=$((i + 2)) ;;
+            -C|--chdir)
+              [ $((i + 1)) -lt "$n" ] && { canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
+              i=$((i + 2)) ;;
+            --chdir=*) canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -C?*) canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -u|-P|--unset) i=$((i + 2)) ;;
             -S|--split-string) i=$((i + 1)); break ;;
             --) i=$((i + 1)); break ;;
             -*) i=$((i + 1)) ;;
@@ -848,6 +864,7 @@ eval_segment() { # uses SEG array
 
   # cd / pushd: move the effective cwd for later segments.
   if [ "$wb" = cd ] || [ "$wb" = pushd ]; then
+    SEG_CD=1
     if [ $((wi + 1)) -lt "$n" ] && [ "${SEG[$((wi + 1))]}" != "-" ]; then
       canon "${SEG[$((wi + 1))]}" "$SEGCWD"; SEGCWD="$CANON"
     else
