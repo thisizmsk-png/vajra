@@ -27,7 +27,8 @@
         ],
         "denyWrite": [
           "~/.claude/skills/vajra",
-          "~/.claude/hooks"
+          "~/.claude/hooks",
+          "~/Library/Application Support/VajraDesktop"
         ]
       },
       "network": {
@@ -52,14 +53,7 @@
     "allowedDomains is a conservative dev default (package registries + GitHub). Tailor to your pipeline's exact hosts; the proxy matches hostname only and does NOT inspect TLS, so a broad domain like github.com can be domain-fronted — for high assurance use a TLS-terminating custom proxy (sandbox.network.httpProxyPort).",
     "Linux/WSL2 require: bubblewrap + socat (apt/dnf install), and `npm i -g @anthropic-ai/sandbox-runtime` for the seccomp Unix-socket filter. macOS needs nothing (Seatbelt is built in).",
     "Enable interactively any time with the /sandbox command; managed-settings lockdown (allowManagedDomainsOnly, allowManagedReadPathsOnly) enforces it org-wide.",
-    "Never add a Unix socket like /var/run/docker.sock to allowUnixSockets — it grants host access and defeats the sandbox."
-  ],
-  "optional": {
-    "vajraDesktopControl": {
-      "why": "Opt-in, not part of \"settings\" and not applied by any Vajra script. Only the Vajra Desktop app should write its control queue; the guard blocks agent writes (best effort), and this makes it an OS-level deny. Add it yourself if you use Vajra Desktop.",
-      "denyWrite": [
-        "~/Library/Application Support/VajraDesktop/control"
-      ]
-    }
-  }
+    "Never add a Unix socket like /var/run/docker.sock to allowUnixSockets — it grants host access and defeats the sandbox.",
+    "E8 (Q10): denyWrite ~/Library/Application Support/VajraDesktop keeps agents from writing the Vajra Desktop app dir, including its control queue (only the app writes it; the guard blocks agent writes as defense in depth). Applied only when you merge these settings yourself (or approve Vajra Desktop first-run setup); vajra-doctor reports whether it is active."
+  ]
 }

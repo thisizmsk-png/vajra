@@ -83,6 +83,14 @@ else
   dups="$(jq -r --arg m "$MARK" '[.hooks // {} | to_entries[] | .key as $k | .value[] | .hooks // [] | .[] | select((.command // "") | contains($m)) | $k] | group_by(.) | map(select(length > 1) | .[0]) | join(" ")' "$SETTINGS")"
   if [ -n "$dups" ]; then warn "duplicate Vajra hook entries for: $dups (re-run scripts/install.sh)"; fi
   if [ "$(jq -r '.sandbox.enabled // false' "$SETTINGS")" = "true" ]; then pass "OS sandbox enabled"; else warn "OS sandbox is off (the enforced boundary; enable with /sandbox)"; fi
+  # E8: OS-level deny on the Vajra Desktop app dir (control queue included).
+  desk_rule="$(jq -r --arg h "$HOME" '[.sandbox.filesystem.denyWrite // [] | .[] | sub("^~"; $h) | sub("/+$"; "")
+    | select(. == ($h + "/Library/Application Support/VajraDesktop") or . == ($h + "/Library/Application Support"))] | length' "$SETTINGS" 2>/dev/null)"
+  if [ "$(jq -r '.sandbox.enabled // false' "$SETTINGS")" = "true" ] && [ "${desk_rule:-0}" -gt 0 ]; then
+    pass "Vajra Desktop app dir write-protected by the OS sandbox (denyWrite active)"
+  else
+    warn "Vajra Desktop denyWrite not active (the guard is the only layer for its control queue; see scripts/enable-sandbox.sh)"
+  fi
 fi
 
 # --- HMAC key and signature ---------------------------------------------------------

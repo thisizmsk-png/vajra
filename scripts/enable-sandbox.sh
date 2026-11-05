@@ -88,6 +88,7 @@ cat <<'EOF'
        Strict mode: set  "allowUnsandboxedCommands": false  (Overrides tab).
 EOF
 echo
-echo "  Optional (Vajra Desktop users): also add the \"optional.vajraDesktopControl.denyWrite\" path from ${REC} to denyWrite."
+echo "  The denyWrite list includes ~/Library/Application Support/VajraDesktop (the Vajra Desktop"
+echo "  app dir and its control queue): only the app writes there. vajra-doctor reports it."
 warn "The default read policy still allows ~/.aws and ~/.ssh — the denyRead list above is required, not optional."
 exit 0
