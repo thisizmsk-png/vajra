@@ -134,6 +134,13 @@ ROOTS=(
   "$VS_C/atman-history.jsonl" "$VS_C/patches" "$VS_C/atman.paused"
   "$VS_C/kb"
 )
+# Vajra Desktop control directory ("$HOME/Library/Application Support/VajraDesktop/control"):
+# only the desktop app writes it. The Bash analysis splits words on spaces, so
+# a second Bash pass (end of file) joins "Application Support" into the single
+# token Application__SP__Support; the alias root below is what that token
+# canonicalizes to.
+canon "$HOME/Library/Application Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
+canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
 
@@ -1192,5 +1199,37 @@ for tok in ${TOKS[@]+"${TOKS[@]}"} ";"; do
     *) SEG+=( "$tok" ) ;;
   esac
 done
+
+# Second pass, additive only: the pass above has already run unchanged. If the
+# command names "Application Support" (any case), rerun the same segment loop
+# with that phrase joined into one token, so a path with that space (the Vajra
+# Desktop control dir) is judged as one path. It can only add blocks.
+APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
+T2="${T//$APPSUP_PAT/Application__SP__Support}"
+if [ "$T2" != "$T" ]; then
+  set -f
+  TOKS=( $T2 )
+  set +f
+  SEGCWD="$CWD"
+  FAST_CWD="" FAST_OK=0 FAST_LINKS=0
+  PIPE_IN=0 PIPE_TAINT=0 PIPE_KTAINT=0 SEG_HIT=0 SEG_KANC=0
+  SEG=()
+  for tok in ${TOKS[@]+"${TOKS[@]}"} ";"; do
+    case "$tok" in
+      ";"|PIPE)
+        eval_segment
+        if [ "$tok" = PIPE ]; then
+          PIPE_IN=1
+          [ "$SEG_HIT" = 1 ] && PIPE_TAINT=1
+          [ "$SEG_KANC" = 1 ] && PIPE_KTAINT=1
+        else
+          PIPE_IN=0; PIPE_TAINT=0; PIPE_KTAINT=0
+        fi
+        SEG=()
+        ;;
+      *) SEG+=( "$tok" ) ;;
+    esac
+  done
+fi
 
 allow
