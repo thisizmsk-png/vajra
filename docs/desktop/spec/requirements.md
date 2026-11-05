@@ -185,9 +185,11 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 
 ### Positioning requirements (POS)
 
-From `positioning.md` (vajra-5, first pass, 2026-11-05). They make the three surviving reasons testable. POS
+From `positioning.md` (vajra-5, FINAL, 2026-11-05). They make the surviving reasons testable (1 proof per
+criterion, 2 earned knowledge, weak), keep the table stakes (POS-2, POS-5) and gate the killed memory claim
+(POS-4). POS
 ids keep vajra-5's numbering. Where a POS item met the existing design, the resolution is in its last
-sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build.
+sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, not the build.
 
 **POS-R1 Evidence per criterion is the centre of the app** (reason 1)
 - POS-1.1 GIVEN a finished delivery with N criteria, WHEN I open it from the run list, THEN the evidence view
@@ -218,8 +220,11 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 - POS-1.6 (measurement) GIVEN 5 or more developers reviewing the same delivery once as transcript plus diff
   and once in the evidence view, WHEN they decide merge or reject, THEN time to decision and correctness are
   recorded for each.
+- POS-1.7 GIVEN a running delivery, WHEN I look at a worker in the crew tree, THEN its status reads in terms of
+  the work (task id, criterion, fix round "2 of 3"), not only process state; VD-8 still governs "unknown".
 
-**POS-R2 Claude Code-native; the app is optional; files are the source of truth** (reason 2)
+**POS-R2 Claude Code-native; the app is optional; files are the source of truth** (table stakes: killed as
+a reason at why 4, since native agent view already does it, P23)
 - POS-2.1 (MVP scope per ADR-9) GIVEN a run started from the app, WHEN I close its last window, THEN the run
   keeps going, a menu bar item shows the number of active runs, and reopening the window shows the run with
   no lost events.
@@ -250,7 +255,7 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
   the sandbox (no `--dangerously-skip-permissions`, no permissive `--permission-mode`); the Lead chat adds
   only the app's control tools (design.md section 5.2).
 
-**POS-R3 Knowledge is earned and visible** (reason 3, weakest)
+**POS-R3 Knowledge is earned and visible** (reason 2, weak)
 - POS-3.1 GIVEN a run that used ledger records, WHEN I open it, THEN it lists each record with its tier and
   source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app shows the exact
   `vajra_kb.py` command with a Copy button to run in my own terminal, and never runs, types or sends it into
@@ -258,14 +263,49 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 - POS-3.2 GIVEN the knowledge write gate refused a record during a run, WHEN I open the run, THEN the refusal
   (reason, no refused text) shows in the run's activity, read from the ledger's `audit.jsonl`.
 - POS-3.3 (measurement) GIVEN the same class of task run twice in one repo, WHEN run with and without the
-  ledger, THEN fix rounds and tokens per delivery are reported. Reason 3 drops to a supporting point if
+  ledger, THEN fix rounds and tokens per delivery are reported. Reason 2 drops to a supporting point if
   there is no improvement.
+- POS-3.4 GIVEN a Claude Code session started under Vajra with 100 tool calls, WHEN the transcript is
+  inspected, THEN Vajra's injected text (router line, kb prime, steer tags) totals at most 1 KB, or the budget
+  is set explicitly in NFR-PERF (VD-26; AC-3.2.6 covers the control hook's share).
 
-**POS-R4 The memory claim is earned or dropped** (pending the stack spike)
+**POS-R4 Memory revival gates** (killed as a reason; build budgets regardless, and they only unlock wording)
 - POS-4.1 GIVEN 10 stub agents streaming at the spike's rate, WHEN measured by the spike's written method,
   THEN the app's own RSS (claude processes excluded, and also reported with them included) is within
   NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Orca, Agent
-  Orchestrator). The word "lighter" is allowed only against competitors it actually beats.
+  Orchestrator).
+- POS-4.2 (measurement) GIVEN Runner and Orca installed locally, WHEN each runs 10 sessions and its whole
+  process tree (Runner's daemon included, agent processes excluded) is sampled as RSS and `phys_footprint`,
+  3 or more runs each, THEN the medians and the method are published (NFR-PERF-7).
+- POS-4.3 (measurement) GIVEN 10 real `claude` agents, WHEN total RSS is measured, THEN the app's share of
+  the total is reported. It sets the attribution story, not a "lighter" claim.
+- POS-4.4 GIVEN the 10-agent load on the real build for 1 hour (8 hours before launch), WHEN RSS is sampled
+  every minute, THEN app-only GUI RSS grows at most 20 MiB from minute 5 to 60 with no sustained trend above
+  1 MiB/min, and the 8-hour repeat stays flat (NFR-PERF-6; the prototype measured +31.1).
+- POS-4.5 (measurement) GIVEN the real build and Runner, each with 10 visible live terminals at the same
+  scrollback limit, WHEN the 1-hour load runs 3 or more times, THEN the medians are recorded. Any "lighter
+  than Runner" wording is banned at launch (PRD section 1) and needs at least 10% below Runner's median plus
+  an owner decision.
+- POS-4.6 GIVEN the real build idle (window open, no run, 60 s settle), WHEN RSS is summed over its process
+  tree, THEN it is at most 200 MiB (NFR-PERF-1). "On par with native at idle" is allowed only if this passes.
+- POS-4.7 GIVEN 10 agents, one of them using several GB, WHEN I open the memory panel, THEN each run's agent
+  process-tree RSS and the app's own RSS are shown separately and the largest consumer is named (VD-1,
+  AC-2.1.4).
+
+**POS-R5 Steer without typing** (parity-plus, from the tracer bullet; the claim is limited by POS-5.5)
+- POS-5.1 GIVEN a worker in a run and a message from me via the Lead, WHEN it is delivered, THEN it arrives
+  through the hook channel as a `<vajra-steer nonce=N>` tag, an ack is logged, the worker's pane shows "from
+  Lead", and nothing but the human or the agent wrote to the worker's PTY (AC-3.2.1, AC-3.2.2, VD-16).
+- POS-5.2 GIVEN a steer tag with a wrong or missing nonce (for example text an agent echoed from a web page),
+  WHEN the worker sees it, THEN no steer is delivered from it and the event is logged (AC-3.2.9, AC-3.2.11).
+- POS-5.3 GIVEN I press Stop on a worker, WHEN it attempts its next tool call, THEN PreToolUse blocks it with
+  "stopped by the human", `SubagentHandback` still goes through and the parent receives a "stopped" report
+  (AC-3.3.2, AC-3.3.5).
+- POS-5.4 GIVEN a stopped worker, WHEN I choose Resume worker, THEN the stop clears (ledgered) and the same
+  agent id continues (AC-3.3.6).
+- POS-5.5 GIVEN a `/vajra` delivery (task workers spawned by the Workflow tool, not the Agent tool), WHEN
+  POS-5.1 to 5.4 are run, THEN all pass (G3b). Until then every steering claim is limited to Agent-tool
+  subagents.
 
 ## 4. Scope
 
@@ -391,12 +431,13 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 
 | Reason | POS ids | Stories it shapes | Tasks |
 |---|---|---|---|
-| 1 Proof per criterion | POS-1.1, 1.2, 1.3, 1.5 | US-4.3, US-6.1 | S4, E3, C4 |
+| 1 Proof per criterion | POS-1.1, 1.2, 1.3, 1.5, 1.7 | US-2.1, US-4.3, US-6.1 | S2, S4, E3, C4 |
 | 1 (measurement) | POS-1.4, 1.6 | none (claim gates) | H7 |
-| 2 Claude Code-native | POS-2.1, 2.2, 2.3, 2.4 | US-1.1, US-1.2, US-2.1 | G1, C3, C5, C4 |
-| 3 Earned knowledge | POS-3.1, 3.2 | US-6.2 | S6, C4 |
-| 3 (measurement) | POS-3.3 | none (claim gate) | H7 |
-| (4) Memory, pending | POS-4.1 | none | G1, H1 |
+| 2 Earned knowledge (weak) | POS-3.1, 3.2, 3.4 | US-6.2, US-3.2 | S6, C4, E1 |
+| 2 (measurement) | POS-3.3 | none (claim gate) | H7 |
+| Table stakes: Claude Code-native | POS-2.1, 2.2, 2.3, 2.4 | US-1.1, US-1.2, US-2.1 | G1, C3, C5, C4 |
+| Table stakes: steer without typing | POS-5.1 to 5.5 | US-3.2, US-3.3 | G3b, E1, E5, C6 |
+| Killed: memory (revival gates) | POS-4.1, 4.4, 4.6, 4.7 build budgets; POS-4.2, 4.3, 4.5 measurements | US-2.1 | H1, C5 |
 
 ## 7a. Pain points from user research
 

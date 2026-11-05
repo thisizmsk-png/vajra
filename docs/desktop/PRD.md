@@ -9,53 +9,66 @@ Companion docs: [spec/requirements.md](spec/requirements.md) (stories and Given/
 
 ## 1. Summary
 
-Vajra Desktop is a fast macOS app for watching and steering Vajra runs. Vajra stays the
+Vajra Desktop is a macOS app for watching and steering Vajra runs. Vajra stays the
 engine: its hooks, saved workflows, agents, campaigns, task graph and knowledge ledger keep working
 exactly as they do in the terminal, and stay the source of truth. The app reads their state, starts
 Claude Code sessions, and adds the things a terminal can't do well: a crew tree you can hop through, a
 chat with the lead agent about any worker, a run view with evidence per acceptance criterion, an
 approvals inbox, and history.
 
-One line: **finished work with a re-runnable proof for every acceptance criterion, so you review evidence,
-not transcripts.**
+One line: **each task handed back with a re-runnable proof for every acceptance criterion, so you check
+evidence instead of reading the whole diff.**
 
-### Positioning (first pass)
+### Positioning (final)
 
-From `positioning.md` (vajra-5, 2026-11-05, first pass). It ran 15 candidate reasons through "why does the
-customer care?" five or more times, against competitor evidence. Three survived. Customer pains in it
-are inferences until the pain-point research confirms them; memory waits for the stack spike.
+From `positioning.md` (vajra-5, FINAL, 2026-11-05). It re-ran 15 candidate reasons through "why does the
+customer care?" against user evidence (vajra-4 pain points P1 to P23), the control-channel tracer (vajra-6)
+and the final stack spike (vajra-2). One strong reason survives, plus one weak one. Memory is killed as a
+claim.
 
-> For developers who already run several Claude Code agents at once and still re-read every diff, Vajra
-> Desktop is the open-source orchestrator that hands back finished work with a re-runnable proof for every
-> acceptance criterion, so you review evidence, not transcripts.
+> For Mac developers who run several Claude Code agents at once and can no longer review it all, Vajra
+> Desktop is the open-source orchestrator that hands back each task with a re-runnable proof for every
+> acceptance criterion, so you check evidence instead of reading 8,000-line diffs.
 
-| Rank | Reason | Why it is hard to copy | Requirements |
+| Rank | Reason | Evidence and copy difficulty | Requirements |
 |---|---|---|---|
-| 1 | **Proof per acceptance criterion.** Criteria written before the code by a different agent, an independent Verifier, evidence bound to the exact tree (HEAD, tree id, HMAC), a gate computed in code, fix rounds per failing criterion | An engine contract, not a widget. A shallow copy takes about a week, a faithful one months. octomux is one step away (one verify command per task), so this must be the centre of the product, not a tab | POS-1.1 to POS-1.6 |
-| 2 | **Claude Code-native; the app is optional; runs are plain files.** The run happens in the user's own Claude Code with their settings, hooks, permissions and sandbox; `/vajra` works with no app | Agent-agnostic competitors won't adopt it without dropping their own positioning | POS-2.1 to POS-2.4 |
-| 3 | **Earned project knowledge.** Every record has provenance and a trust tier; "verified" needs signed evidence; learned records wait for approval; secrets and injection are refused (weakest; drops to a supporting point if POS-3.3 shows no effect) | Moderate | POS-3.1 to POS-3.3 |
-| (4) | Light on memory compared with the Electron orchestrators. **Pending the stack spike.** "Lowest" is very likely false against Runner (native GPUI) | Easy to lose | POS-4.1 |
+| 1 | **Proof per acceptance criterion.** Criteria written before the code by a different agent, an independent Verifier, evidence bound to the exact tree (HEAD, whole-tree id, HMAC), a gate computed in code, fix rounds per failing criterion | Review can't keep up (P18, P12; indirect, since no pain point says "false done"). An engine contract, not a widget: a shallow copy takes about a week; that a faithful one takes months is our inference, not measured. octomux is one step away (one verify command per task), so this is the centre of the product, not a tab | POS-1.1 to POS-1.7 |
+| 2 (weak) | **Earned project knowledge.** Every record has provenance and a trust tier; "verified" needs signed evidence; learned records wait for approval; secrets and injection are refused | P15 (agents forget decisions). Moderate to copy. Drops to a supporting point if POS-3.3 shows no effect | POS-3.1 to POS-3.4 |
+| Killed (revivable) | Memory that stays bounded | P1 is the top pain, but the prototype failed the soak (+31.1 MiB in an hour against 20) and Orca already attributes memory (parity). Comes back only if POS-4.2, 4.4 and 4.6 pass on the real build, and is never a comparison with Runner | POS-4.1 to POS-4.7 (build budgets either way) |
 
-Killed as reasons but kept as requirements (parity, and their absence is a reason to leave): worktree per
-task, the crew tree and Lead chat, the audited control channel, the guard and approvals, resume, local
-only with no telemetry, cost per run.
+**Table stakes.** These were killed as reasons, but missing any of them is a reason to leave, so they are
+required:
+- Claude Code-native, the app optional, runs as plain files (POS-2.x). Native agent view and others already
+  do it (P23).
+- Runs outlive the window (P2, P3, P6).
+- Steer without typing into a terminal, parity-plus (POS-5.x; P8, P4).
+- Worktree per task, the guard and approvals, local only with no telemetry, a usage line.
 
-**60-second demo.** (1) Open a finished delivery: four criteria pass, one fails. Open the failing one to see
-the command, exit 1, the output, the diff, and "verified by Verifier, written by Backend". Re-run it, then
-edit a file (even without committing) and watch the evidence turn stale. (2) Start `/vajra add CSV export` in a plain terminal; the
-open app picks it up live. Quit the app; the run keeps going. Reopen it and it reattaches. (3) A second run in
-the same repo shows "2 knowledge records used", each with its source run, tier and review action.
+**60-second demo** (the memory beat is cut until POS-4.4 passes on the real build):
+
+| Time | Shows | Gate |
+|---|---|---|
+| 0 to 20 s | A finished delivery: 5 criteria, 4 pass, 1 fails. Open the failing one: command, exit 1, output, diff, "verified by Verifier, written by Backend". Re-run it live; edit a file (even without committing) and the evidence turns stale | POS-1.1 to 1.3 |
+| 20 to 35 s | Start `/vajra add CSV export` in a plain terminal; the open app picks it up live. Close the window; the run keeps going. Reopen; it reattaches | POS-2.1, 2.2 |
+| 35 to 50 s | Message a worker from the Lead chat: it arrives through the hook, acked, labelled "from Lead". Stop blocks its next tool call | POS-5.1 to 5.3 |
+| 50 to 60 s | A second run in the same repo shows "2 knowledge records used", each with its source run and tier, and a reject action | POS-3.1 |
 
 **Ideal first user** (inference, to confirm): a senior developer already paying for Claude Code, running 3
-to 8 sessions in parallel, on an Apple Silicon Mac, in a TypeScript or Python repo with a real test suite.
-Existing Vajra CLI users are the first cohort.
+to 8 sessions in parallel, on an Apple Silicon Mac, in a TypeScript or Python repo with a real test suite
+(evidence is only as good as the checks). Existing Vajra CLI users are the first cohort.
 
-**Claims we may not make until measured.** Any memory or "lighter than X" claim (stack spike, POS-4.1;
-"lighter" only against competitors we actually beat). "Faster" or "never janky with 10 agents" (load test,
-H1). Any catch rate for false "done" claims (POS-1.4). Any time saved in review (POS-1.6). "Runs survive the
-app quitting" (not in the MVP, ADR-9; v1.1). "Gets better every run" (POS-3.3). "Safe to run unattended" or "secure"
-(security gate and PoCs; the README's limits stand). "Production-ready" (a live `/vajra` run validated end to
-end). Any comparison that names a competitor needs a dated, reproducible measurement with its method.
+**Banned claims at launch** (no measurement unlocks them without an owner decision): "lighter than Runner",
+"lightest", "lowest memory", any total-RAM number, "faster startup". The only load comparison (Tauri
+prototype 805.3 MiB against Runner 1,138 MiB at 10 workers, both 5-minute figures) is unequal load and
+supports no claim.
+
+**Claims we may not make until measured.** Any memory wording (POS-4.4 and POS-4.6 on the real build).
+"Never janky with 10 agents" (load test, H1). Any catch rate for false "done" claims (POS-1.4). Any time
+saved in review (POS-1.6). "Runs survive the app quitting" (not in the MVP, ADR-9; v1.1). "Gets better every
+run" (POS-3.3). Steering for `/vajra` deliveries (POS-5.5; until then the claim covers Agent-tool subagents
+only). "Safe to run unattended" or "secure" (security gate and PoCs; the README's limits stand).
+"Production-ready" (a live `/vajra` run validated end to end). Any comparison that names a competitor needs a
+dated, reproducible measurement with its method.
 
 ## 2. Problem
 
@@ -74,8 +87,8 @@ report (`docs/commands/deliver.md`). Today all of that is one terminal:
   reading `progress.md` files by hand.
 
 The desktop orchestrators that exist (section 7) are mostly fleet dashboards: many independent agents,
-a kanban board, a PR at the end. None shows evidence per acceptance criterion, none runs verify/fix rounds,
-and the two installed on this Mac are Electron apps (bundle inspection), one using about 1.6 GB summed RSS
+a kanban board, a PR at the end. None we found shows evidence per acceptance criterion (octomux and Agent Orchestrator do loop verify
+or CI fixes, per task), and the two installed on this Mac are Electron apps (bundle inspection), one using about 1.6 GB summed RSS
 across 13 processes while running sessions (one `ps` snapshot; summed RSS over-counts shared pages).
 
 **Why now:** we plan to launch a Mac app publicly, and Vajra's engine is stable enough (v0.6, signed
@@ -108,7 +121,8 @@ not the engine's agent ids. The engine id is visible only in a worker's inspecto
 
 1. **Customer experience first.** Fast, responsive, never janky, no surprises. Nothing happens to a worker
    that the human can't see.
-2. **Performance and memory.** Idle and active memory clearly lower than the competitors we measure.
+2. **Performance and memory.** Idle and active memory clearly lower than the competitors we measure (a
+   build budget, NFR-PERF; not a marketing claim, see the banned claims in section 1).
    Bounded buffers everywhere. Rust core is the default if the spike's evidence supports it.
 3. **Multi-agent orchestration UX.** Hop between any worker; talk to the Lead about any worker; steer
    through a control channel, never by typing into another process's terminal behind the human's back.
@@ -182,8 +196,8 @@ competitor. From its README and `docs/arch/arch.md`:
 - **No worktree isolation** found in its docs, so agents share a checkout; Vajra gives every writer its own
   worktree and merges one integration branch.
 - **Memory:** the only claim is a design target (a handful of missions, about 10 live sessions, "tens of MB
-  each only when scrollback is full"); no published measurement. GPUI renders without a webview, so Runner
-  is the competitor to beat on memory, and the spike must measure it if it can be installed.
+  each only when scrollback is full"); no published measurement. GPUI renders without a webview. Runner is
+  measured by POS-4.2 for our own budgets; we don't compare ourselves with it in marketing.
 
 ### Agent Orchestrator: complement, don't duplicate
 
@@ -202,10 +216,10 @@ approve its plan; AO then carries the approved branch through PR and CI.
 | Verify and fix rounds | Up to 3 rounds, per failing criterion: only that criterion's task reruns, and the report names what is still failing | Parity on the loop itself: octomux loops one verify command until exit 0; AO sends failed CI back to the owning worker. Only the per-criterion part is ours |
 | The guard | Every tool call passes Vajra's fail-closed guard; protected actions come back as plans; the app adds no bypass | Permission prompts are passed through or answered in-app |
 | A crew you can talk to | Ask the Lead about any worker; it messages, redirects or stops workers through a documented, audited channel, never by typing into a terminal | AO has a main agent you chat with (mechanism not confirmed); Runner injects into PTYs without audit; Traycer and ai-maestro have agent-to-agent messaging |
-| Memory (pending the spike) | Budgets set from measurement and checked in CI against installed competitors; no claim until measured | No competitor publishes measured RSS. AO, Orca, wmux and Vicoa are Electron; Pragma is Tauri; Runner and Ghostex are native (Ghostex embeds Chromium) |
+| Memory | Bounded and attributed: the app and each run's agents shown separately (AC-2.1.4, POS-4.7); budgets in NFR-PERF; no comparative claim | Parity on attribution: Orca has a Resource Manager. Measured RSS: Runner 201.3 MiB and Orca 1,061.5 MiB idle (single busy-machine runs) |
 
-Pragma shares our likely stack (Tauri v2 + Rust) and Runner is native GPUI, so "lower memory" can't rest on
-the stack choice alone. It has to come from the design: no embedded browser, no database server, workers
+Memory is a budget, not a positioning claim. Pragma shares our stack (Tauri v2 + Rust) and Runner is native
+GPUI, so a low footprint can't rest on the stack choice alone. It has to come from the design: no embedded browser, no database server, workers
 read from transcripts instead of one PTY each, bounded buffers, and virtualized views. And it has to be
 measured, not claimed.
 
@@ -273,7 +287,7 @@ spec (requirements 7b, PM-1 to PM-8).
 |---|---|---|
 | Find what a worker is stuck on | Median under 10 s from opening the app | Usability test, 5 Vajra users, scripted stuck run |
 | Hidden control actions | 0 | Reconcile the control ledger against `audit.log` and the UI action feed after the 10-agent load test |
-| Memory vs competitors (pending the spike) | Idle and per-agent RSS below the measured Electron competitors (Agent Orchestrator desktop, Orca, at least); Runner measured if it can be installed | Spike harness, same machine, same 10-agent fixture (POS-4.1) |
+| Memory budgets (not a claim) | NFR-PERF-1 and NFR-PERF-6 pass on the real build; competitor medians and method published | H1 harness, same machine, same 10-agent fixture (POS-4.1, POS-4.2, POS-4.4, POS-4.6) |
 | False "done" caught | Reported number, no target yet | POS-1.4 seeded benchmark, at least 20 tasks with planted defects |
 | Review time | Reported, no target yet | POS-1.6 study, 5+ developers, transcript plus diff vs evidence view |
 | Runs survive a closed window | 100% of runs continue when the window closes; resume offered after every quit or crash | POS-2.1 to POS-2.1b in CI (ADR-9; surviving quit and SIGKILL is v1.1) |
