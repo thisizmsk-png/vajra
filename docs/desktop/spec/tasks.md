@@ -39,9 +39,10 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 |---|---|---|---|---|---|
 | E3 | `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`: read-only, reuses the shared green check, returns `{ok, green, reasons}`, writes nothing | bhima [Backend] | `scripts/vajra_tasks.py`, `tests/tasks/run-check-evidence.sh` | G2 | AC-4.3.1, AC-4.3.3; test proves no file under the campaign changes |
 | E5 | `vajra-deliver.js`: optional `steer_nonce` input and one fixed steering sentence in Execute-phase task briefs only (design 1.3) | bhima [Backend], reviewed by bhishma [Security] | `workflows/vajra-deliver.js`, `tests/workflows/*` | G2, G3 | AC-3.2.2; verify, review and merge briefs unchanged (test) |
-| E4 | Persist the delivery report as `report.md` in the campaign through `vajra-campaign.sh` (PRD Q3) | bhima [Backend] | `scripts/vajra-campaign.sh`, `workflows/vajra-deliver.js`, tests | G2 | History shows the report with the transcript format check forced to fail |
-| E6 | The worker's claim passes `--worktree "$PWD"` so `tasks.json` names each worker's worktree; the Control service matches workers on it and uses transcripts for display only (PM-7) | bhima [Backend] | `workflows/vajra-deliver.js`, `scripts/vajra_tasks.py`, tests | G2 | With the transcript format check forced to fail, message and stop still reach the right worker |
+| E4 | Persist the delivery report as `report.md` in the campaign through `vajra-campaign.sh` (Q3 approved 2026-11-05; vajra-6 engine work) | bhima [Backend] | `scripts/vajra-campaign.sh`, `workflows/vajra-deliver.js`, tests | G2 | History shows the report with the transcript format check forced to fail |
+| E6 | (Approved 2026-11-05 under Q11; vajra-6 engine work) The worker's claim passes `--worktree "$PWD"` so `tasks.json` names each worker's worktree; the Control service matches workers on it and uses transcripts for display only (PM-7) | bhima [Backend] | `workflows/vajra-deliver.js`, `scripts/vajra_tasks.py`, tests | G2 | With the transcript format check forced to fail, message and stop still reach the right worker |
 | E7 | Archive the verification bundle and the executed `setupCmds` (as `setup.json`) into the campaign before cleanup, with a signed manifest; E3 `--archived` (design 1.3; needs owner approval Q13) | bhima [Backend], reviewed by bhishma [Security] | `scripts/vajra-campaign.sh`, `scripts/vajra_tasks.py`, `workflows/vajra-deliver.js`, tests | E3 | POS-1.2 tests: delivery with its worktrees cleaned still verifies and re-runs; setup command over 300 characters replayed byte for byte; a filtered-out setup entry is never run; every existing test passes |
+| E8 | Sandbox profile (Q10 approved): the default `denyWrite` for the app data dir and control queue in `config/sandbox.json`, applied by `scripts/enable-sandbox.sh` and the Desktop first-run setup only after the user approves the change; `vajra-doctor.sh` reports it | bhima [Backend], reviewed by bhishma [Security] | `config/sandbox.json`, `scripts/enable-sandbox.sh`, `scripts/vajra-doctor.sh`, tests | E2 | AC-3.4.9, AC-3.4.10; every existing guard and sandbox test passes |
 | E1 | `hooks/desktop-control.sh`: delivers queued control messages to the addressed worker at its next tool call (message, redirect as additional context; stop as a block with reason), consume-once with ack; no-op when the app is not installed | bhima [Backend] | `hooks/desktop-control.sh`, `hooks/hooks.json`, `tests/hooks/run-desktop-control.sh` | G2, G3 | AC-3.2.1, AC-3.2.2, AC-3.2.5, AC-3.3.4 to AC-3.3.6 (tests: `handback_exempt_exact`, `stop_sticky_after_handback`, `no_delivery_when_stopped`, `no_delivery_on_handback`, `stop_cleared_only_by_human`; vajra-6 611d969); fails open (no queue = exit 0), never touches the guard |
 | E2 | Guard (approved by the orchestrator under Security review, 2026-11-05): the whole app data dir write-protected; worker reads of the control dir and `~/.claude/projects/` blocked (Read, Grep, Glob, LS, Bash readers, symlinks); log the app's MCP control tools in `audit.log`; opt-in sandbox `denyWrite` documented, not applied (Q10). Additive; done in vajra-6 611d969 | bhima [Backend], reviewed by bhishma [Security] | `hooks/pre-tool-use.sh`, `hooks/hooks.json`, `tests/hooks/run-guard-*.sh` | E1 | AC-3.2.3, AC-3.4.x, NFR-SEC-1; every existing guard test still passes |
 
@@ -109,7 +110,7 @@ beta; slice 2 must land before the public launch.
 
 | Slice | What a user gets | Tasks |
 |---|---|---|
-| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5 to E7, C1 to C8, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
+| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5 to E8, C1 to C8, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
 | 2 | Knowledge in the run view (records used, refusals) and its approve, reject and forget commands; the task graph view; history search; the claim studies that unlock launch wording | E4, S4 task graph (US-4.2), S6, H3, H7, H8 |
 
 Slice 1 has no knowledge mutation, no graph view and no claim study. The 60-second demo (PRD section 1)
@@ -133,6 +134,7 @@ graph LR
   C7 & C8 --> S1
   G2 --> E4 & E6
   E3 --> E7 --> S4
+  E2 --> E8 --> C6
   C1 --> H0
   K1 --> K2 & K3
   C3 & C4 & K2 --> S1 & S5

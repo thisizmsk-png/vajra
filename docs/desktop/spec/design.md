@@ -590,9 +590,12 @@ E2 scope (GPT-3, matching vajra-6's 611d969 on `ao/vajra-6/m1-engine`):
 - **Same-user limitation (stated):** file modes (0600) and the socket's peer-uid check separate users, not
   agents. Every agent runs as the same user, so mode 0600 is never treated as agent authorization.
   Authorization comes from the guard (defense in depth over shell) and, with Q10, the OS sandbox.
-- **Sandbox boundary:** `config/sandbox.json` carries an opt-in `denyWrite` for
-  `~/Library/Application Support/VajraDesktop/control` (611d969: documented, not applied by any script).
-  Applying it is owner decision Q10. Preflight shows whether it is on. Without it, the guard is the only
+- **Sandbox boundary (Q10 approved, 2026-11-05):** Vajra's sandbox profile ships a `denyWrite` for
+  `~/Library/Application Support/VajraDesktop/` (the control queue included) as its default. Both
+  `scripts/enable-sandbox.sh` and the Desktop first-run setup apply it, and only when the user turns the OS
+  sandbox on and approves the settings change shown to them. Nothing edits settings silently (VD-27).
+  `vajra-doctor.sh` and preflight report whether it is active. On the owner's Mac the OS sandbox is
+  currently off (doctor WARN), so the guard is the active layer until it's enabled. Without it, the guard is the only
   write protection, so the control service follows Q10's working assumption: with `denyWrite` off, control is
   **stop-only**. Message and redirect return `control_disabled: sandbox_off`, nothing is queued, and the UI
   hides them with the reason. Stop still works, because a forged or replayed stop can only halt a worker.

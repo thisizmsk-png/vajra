@@ -83,7 +83,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-2.1.2 GIVEN `tasks.json` status of a task changes, WHEN the file changes, THEN the node's status updates within 2 s without user action.
 - AC-2.1.3 GIVEN an agent id not in the mapping, WHEN it is rendered, THEN it shows the id title-cased, and no mahabharat name appears anywhere in the UI except the inspector's "engine id" field.
 - AC-2.1.4 (VD-1) GIVEN a run with 10 workers, WHEN the crew view is open, THEN the status bar shows the app's own memory and the run node shows the memory of its `claude` process tree, labelled separately; the app never shows one combined number. (Workers are subagents inside one `claude` process, so per-worker memory is not available and is not invented.)
-- AC-2.1.5 (VD-8) GIVEN a worker with no transcript, task-graph or hook event in the last 120 s while its run's `claude` process is alive, WHEN its row renders, THEN its status reads "Unknown (no signal for 2 min)", never Idle, Done or Exited. Status comes only from `tasks.json`, transcript records and hook events, never from parsing terminal text.
+- AC-2.1.5 (VD-8) GIVEN a worker the app has no signal source for (no transcript found, no task-graph entry, no hook event yet) while its run's `claude` process is alive, WHEN its row renders, THEN its status reads "Unknown (no signal)", never Idle, Done, Exited or Thinking.
+- AC-2.1.7 (P4 stall detector, 11 sources) GIVEN a worker whose transcript is being tailed, WHEN it produces no new output and no tool call for N seconds (default 90, settable 30 to 600) while its process is alive and it isn't waiting on a permission prompt, THEN its row reads "Stalled 3m 12s" with its last output line (sanitized, one line) and the time of its last tool call, never "Thinking"; any new record clears it at once, and a stall longer than 5 minutes also appears in the needs-you inbox. Status comes only from `tasks.json`, transcript records and hook events, never from parsing terminal text.
+- AC-2.1.8 (VD-19, P11, 9 sources) GIVEN worktrees left by runs, WHEN I open the worktree list, THEN each shows how its session ended (done, crashed or abandoned), its age and disk size, and retention follows the end state, not age alone: done is removed by the engine's cleanup as today; crashed is kept for resume and flagged after 7 days; abandoned (no live session, not resumable, untouched for 14 days) is offered for cleanup. Nothing is removed without my confirm, and a worktree with tracked changes or unpushed commits is never offered for removal.
 - AC-2.1.6 (VD-11) GIVEN the run's transcript records a usage-limit stop, WHEN the run node renders, THEN it shows "Rate-limited until HH:MM" (or "Rate-limited" when no time is given), not Idle or Stuck, and the inbox lists it once as "Paused by usage limit". Detection is to verify in the M2 smoke run; until then the state is Unknown.
 
 **US-2.2** As a Dev, I want a worker's live stream, so that I can read what it is doing.
@@ -142,6 +144,8 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.4.4 GIVEN the control queue directory, WHEN a worker tries to write to it, THEN the guard blocks it and `audit.log` records BLOCK.
 - AC-3.4.6 (GPT-3) GIVEN a worker tool call (payload has `agent_id`), WHEN it reads `VajraDesktop/control/<sid>/nonce` or any path under `~/.claude/projects/` through Read, Grep, Glob, LS, read-only Bash (`cat`, `head`, `python3 -c`), a symlink or a recursive Grep over an ancestor, THEN the guard blocks it and `audit.log` records BLOCK; the same reads from the main session or the Lead chat (no `agent_id`) are allowed.
 - AC-3.4.7 (GPT-3) GIVEN a worker, WHEN it tries to write anywhere under `~/Library/Application Support/VajraDesktop/` with Write, Edit, `mv`, `rm`, `cp`, `tee` or a redirect (path with a space), THEN the guard blocks it.
+- AC-3.4.9 (Q10) GIVEN the OS sandbox on with Vajra's profile applied, WHEN an agent writes to `VajraDesktop/control/` through a path the guard doesn't see (a fixture that bypasses the guard, run only in the test harness), THEN the OS denies the write and the queue is unchanged; with the sandbox off, the same fixture shows the guard as the only layer and control is stop-only (AC-3.4.8).
+- AC-3.4.10 (Q10, VD-27) GIVEN first-run setup or `enable-sandbox.sh`, WHEN the user enables the sandbox, THEN the exact settings change (including the `denyWrite` entry) is shown and applied only after the user approves it, and `vajra-doctor.sh` then reports the rule as active.
 - AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "stop only (sandbox off)", and message and redirect, from the UI,
   the Lead or MCP, return `control_disabled: sandbox_off` with nothing queued, while stop still works (Q10
   working assumption; test with the sandbox off and on). Every existing guard test still passes (CI).
@@ -447,14 +451,14 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 | US-1.3 | AC-1.3.1 .. 1.3.7 | SEC-2, UX-1, A11Y-1 |
 | US-1.4 | AC-1.4.1 .. 1.4.4 | SEC-2, SEC-6 |
 | US-1.5 | AC-1.5.1 .. 1.5.3 | SEC-5, SEC-16 |
-| US-2.1 | AC-2.1.1 .. 2.1.6 | PERF-3, A11Y-1, A11Y-3 |
+| US-2.1 | AC-2.1.1 .. 2.1.8 | PERF-3, A11Y-1, A11Y-3 |
 | US-2.2 | AC-2.2.1 .. 2.2.6 | PERF-2, PERF-3, PERF-5, PERF-6, SEC-3 |
 | US-2.3 | AC-2.3.1 .. 2.3.3 | PERF-3, SEC-3, SEC-6 |
 | US-2.4 | AC-2.4.1 .. 2.4.4 | A11Y-2, UX-1, UX-2 |
 | US-3.1 | AC-3.1.1 .. 3.1.3 | SEC-3, SEC-5, OBS-2 |
 | US-3.2 | AC-3.2.1 .. 3.2.11 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
 | US-3.3 | AC-3.3.1 .. 3.3.7 | SEC-8, UX-3, OBS-2 |
-| US-3.4 | AC-3.4.1 .. 3.4.8 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
+| US-3.4 | AC-3.4.1 .. 3.4.10 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
 | US-4.1 | AC-4.1.1 .. 4.1.2 | A11Y-1, UX-2 |
 | US-4.2 | AC-4.2.1 .. 4.2.3 | PERF-3, A11Y-2 |
 | US-4.3 | AC-4.3.1 .. 4.3.4 | SEC-2, SEC-3 |
@@ -480,7 +484,7 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 
 ## 7a. Pain points from user research
 
-Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 26 rows MVP, 6 deferred, 7 won't do (P21 moved to MVP by owner decision) (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
+Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 27 rows MVP, 5 deferred, 7 won't do (P11 moved to MVP by the vajra-4 top-up) (P21 moved to MVP by owner decision) (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
 
 | Pain point | Requirement (vajra-4 id) | Decision | Where in this spec | Task |
 |---|---|---|---|---|
@@ -491,7 +495,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P2 | VD-5 honest resume | MVP | POS-2.1b | C3 |
 | P3 crashes, bad updates | VD-6 one process generation | MVP | POS-2.1c (no daemon, updates wait for idle) | C3 |
 | P3 | VD-7 paste and output guard | MVP | AC-2.2.5; escape sanitizing NFR-SEC-3 | K3 |
-| P4 opaque status | VD-8 status from signals, else Unknown | MVP | AC-2.1.5 | C5 |
+| P4 opaque status (11 sources) | VD-8 status from signals, else Unknown; stall detector | MVP | AC-2.1.5, AC-2.1.7 | C5 |
 | P4 | VD-9 needs-you inbox | MVP (already US-5.1) | AC-5.1.1 to 5.1.4 | S5 |
 | P4 | VD-10 ask the Lead, answer cites evidence | MVP (already US-3.1) | AC-3.1.1 to 3.1.3 | S3 |
 | P5 rate limits, cost | VD-11 rate-limited state | MVP (detection to verify) | AC-2.1.6. Per-run cost stays in `/vajra cost`: deferred | C5 |
@@ -504,7 +508,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P8 typing into terminals | VD-16 documented control channel | MVP (already) | US-3.2 to 3.4, ADR-2; Lead text labelled `lead-via-desktop` (STRIDE F3) | E1, C6 |
 | P9 too many windows | VD-17 crew tree | MVP (already) | US-2.1, US-2.4. Split view of up to 4 panes: deferred (one worker pane plus the chat dock covers the MVP) | S2 |
 | P10 multi-repo | VD-18 multi-repo crew | Deferred | A Vajra run is one repo; needs engine support first | none |
-| P11 worktree bloat | VD-19 worktree lifecycle | Deferred (engine owns it) | `vajra-worktree-clean.sh` already removes clean worktrees; the report lists kept ones. Disk size display later | none |
+| P11 worktree bloat (9 sources) | VD-19 worktree lifecycle keyed to how the session ended | MVP (vajra-4 top-up) | AC-2.1.8; `vajra-worktree-clean.sh` still does the removal | C4, S2 |
 | P11 | VD-20 worktrees optional | Won't do | Vajra runs every writer in its own worktree by design; a shared checkout breaks parallel waves | none |
 | P12 permission fatigue vs YOLO | VD-21 pass the user's permission modes, never bypass | MVP | POS-2.4 (argv test) | C3 |
 | P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) | none |
