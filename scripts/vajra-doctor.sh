@@ -51,7 +51,7 @@ HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 
 # --- Skill files --------------------------------------------------------------
 if [ -d "$SKILL" ]; then pass "skill dir: $SKILL"; else fail "skill dir missing: $SKILL"; fi
-for h in pre-tool-use.sh post-tool-use.sh session-start.sh pre-compact.sh user-prompt-submit.sh; do
+for h in pre-tool-use.sh post-tool-use.sh session-start.sh pre-compact.sh user-prompt-submit.sh desktop-control.sh; do
   f="$SKILL/hooks/$h"
   if [ -f "$f" ] && bash -n "$f" 2>/dev/null; then pass "hook script: hooks/$h"; else fail "hook script missing or has a syntax error: hooks/$h"; fi
 done
