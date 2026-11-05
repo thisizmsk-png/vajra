@@ -669,13 +669,48 @@ SYSROOTS=" /etc /usr /var /bin /sbin /lib /boot /dev /sys /opt /root /home /Syst
 
 is_interp() { [[ "$SHELLS" == *" $1 "* || "$INTERPS" == *" $1 "* || "$1" =~ ^python[0-9.]+$ ]]; }
 
-SEGCWD="$CWD"
-FAST_CWD="" FAST_OK=0 FAST_LINKS=0
-PIPE_IN=0
-PIPE_TAINT=0
-PIPE_KTAINT=0
-SEG_HIT=0
-SEG_KANC=0
+# A file name, or a file-name glob, that names an operator-only script -> 0 and NS_HIT.
+# Matched in memory, never against the disk: the name decides, whatever the cwd, ~
+# form or shell (bash, zsh **/) the glob is expanded by. Any case (APFS is
+# case-insensitive). A glob with no letters besides .sh (*, *.sh) is not judged.
+NS_HIT=""
+not_script() {
+  local n lit="${1//[\*\?\[\]]/}" r=1
+  shopt -s nocasematch
+  if [[ "$NOT_SCRIPTS" == *" $1 "* ]]; then
+    r=0; NS_HIT="$1"
+  elif [[ "$1" == *[\*\?\[]* ]] && [[ "${lit%.sh}" == *[a-z]* ]]; then
+    for n in $NOT_SCRIPTS; do
+      if [[ "$n" == $1 ]]; then r=0; NS_HIT="$n"; break; fi
+    done
+  fi
+  shopt -u nocasematch
+  return $r
+}
+
+# The tokenizer splits brace and zsh glob groups ({install,x}.sh, inst(a)ll.sh) at
+# , ( ), so they are judged here on the whole command: each group is replaced by each
+# of its , or | alternatives and by *, and no variant's file name may name an
+# operator-only script. (Strict: a read of such a name is refused too.)
+RE_GROUP='[{(]([^{}() ]*)[})]'
+if [[ "$N" == *[\{\(]* ]]; then
+  set -f
+  for k in $N; do
+    case "$k" in *[\{\(]*) ;; *) continue ;; esac
+    vs=( "$k" ) i=0
+    while [ "$i" -lt "${#vs[@]}" ] && [ "${#vs[@]}" -le 64 ]; do
+      g="${vs[$i]}"; i=$((i + 1))
+      if [[ "$g" =~ $RE_GROUP ]]; then
+        m="${BASH_REMATCH[0]}" alts="${BASH_REMATCH[1]//[,|]/ }"
+        vs+=( "${g/"$m"/*}" )
+        for a in $alts; do vs+=( "${g/"$m"/$a}" ); done
+      elif [ "$g" != "$k" ] && not_script "${g##*/}"; then
+        block "${k##*/} names ${NS_HIT}, which changes Vajra's wiring or integrity state; the operator runs it in their own terminal"
+      fi
+    done
+  done
+  set +f
+fi
 
 # Expand a token into candidate canonical paths -> CANDS array.
 CANDS=()
@@ -947,22 +982,13 @@ eval_segment_body() { # uses SEG array
     local runs=0
     for ((c = wi; c < n; c++)); do
       tok="${SEG[$c]//[\"\']/}"
-      # Split on whitespace only, then expand a glob word where the command runs (the
-      # segment cwd, or HOME for ~/), so inst*.sh is judged as the install.sh it names.
-      set -f; local words=( $tok ) names=() w; set +f
-      for w in ${words[@]+"${words[@]}"}; do
-        names+=( "$w" )
-        case "$w" in *[*?[]*)
-          shopt -s nullglob
-          case "$w" in "~"/*) names+=( "$HOME"/${w#\~/} ) ;; /*) names+=( $w ) ;; *) names+=( "$SEGCWD"/$w ) ;; esac
-          shopt -u nullglob ;;
-        esac
-      done
-      for k in ${names[@]+"${names[@]}"}; do
-        if [[ "$NOT_SCRIPTS" == *" ${k##*/} "* ]] && { [ "$runs" = 1 ] || [ "$c" = "$wi" ]; }; then
-          block "${k##*/} changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
+      set -f; local words=( $tok ); set +f
+      for k in ${words[@]+"${words[@]}"}; do
+        if not_script "${k##*/}" && { [ "$runs" = 1 ] || [ "$c" = "$wi" ]; }; then
+          block "${k##*/} names ${NS_HIT}, which changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
         fi
         [[ "$SHELLS$INTERPS" == *" ${k##*/} "* ]] && runs=1
+        if [ "$c" = "$wi" ]; then case "$k" in .|source) runs=1 ;; esac; fi
       done
     done
     if [ "${SEG[$cand_i]##*/}" = vajra_kb.py ]; then
