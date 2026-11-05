@@ -591,8 +591,8 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | PR: crash cleanup before "no process survives" | Fixed: startup cleanup barrier (ADR-9 6b') | f7d84c1 | POS-2.1f |
 | PR: materialize the evidence tree before Re-run | Fixed: apply `diff.patch`, require the signed tree id, else refuse | f7d84c1 | POS-1.2 |
 | PR: sandbox-off messaging policy inconsistent | Fixed: sandbox off means stop-only (Q10 working assumption) | f7d84c1 | AC-3.4.8 |
-| PR: preserve the verification bundle before cleanup | Fixed: engine change E7 archives it with a signed manifest; E3 `--archived` | this commit | POS-1.2 |
-| PR: lossless executed setup list | Fixed: `setup.json` holds the exact executed `setupCmds`; report lines and raw `setup_cmds` are never sources | this commit | POS-1.2 |
+| PR: preserve the verification bundle before cleanup | Fixed: engine change E7 archives it with a signed manifest; E3 `--archived` | 6fa24c1 | POS-1.2 |
+| PR: lossless executed setup list | Fixed: `setup.json` holds the exact executed `setupCmds`; report lines and raw `setup_cmds` are never sources | 6fa24c1 | POS-1.2 |
 
 ## 8. Decisions requested from the owner
 
