@@ -473,6 +473,13 @@ bash_case BLOCK "env -u X -C . ./scripts/install.sh"       "env -u X -C . ./scri
 bash_case BLOCK "env -S './scripts/install.sh --x'"        "env -S './scripts/install.sh --unregister-hooks'" "$WT"
 bash_case BLOCK "/usr/bin/env -i bash generate-manifest"   "/usr/bin/env -i bash scripts/generate-manifest.sh" "$WT"
 bash_case ALLOW "env -i cat install.sh is a read"          "env -i cat scripts/install.sh" "$WT"
+# The operator-only check splits words with globbing on, so a glob that names the script still matches it.
+bash_case BLOCK "glob bash scripts/inst*.sh"               "bash scripts/inst*.sh --unregister-hooks" "$WT"
+bash_case BLOCK "glob bash scripts/i?stall.sh"             "bash scripts/i?stall.sh" "$WT"
+bash_case BLOCK "glob in cd scripts && bash gen*"          "cd scripts && bash gen*" "$WT"
+bash_case BLOCK "glob ~/ path to inst[a]ll.sh"             "bash ~/.claude/skills/vajra/scripts/inst[a]ll.sh"
+bash_case BLOCK "glob absolute path to inst*.sh"           "bash $SKILL/scripts/inst*.sh"
+bash_case ALLOW "glob that names no operator script"       "bash scripts/nomatch*.sh" "$WT"
 bash_case BLOCK "F-B nohup sh generate-manifest"         "nohup sh scripts/generate-manifest.sh" "$WT"
 worker BLOCK "F-C worker grep -r parent of control"       "$(bj "grep -r . \"$H/Library/Application Support/VajraDesktop\"")"
 worker BLOCK "F-C worker find -exec cat from Library"     "$(bj "find ~/Library -name nonce -exec cat {} +")"

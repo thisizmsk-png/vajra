@@ -139,25 +139,27 @@ ROOTS=(
 # a second Bash pass (end of file) joins "Application Support" into the single
 # token Application__SP__Support; the alias root below is what that token
 # canonicalizes to.
-canon "$HOME/Library/Application Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
-canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; ROOTS+=( "$CANON" )
+canon "$HOME/Library/Application Support/VajraDesktop/control" /; DCTL="$CANON"
+canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; DCTL2="$CANON"
+ROOTS+=( "$DCTL" "$DCTL2" )
 # Read-protected for workers (payload carries agent_id): the control dir holds the
 # steering nonce, and transcripts hold each worker's brief (which carries it). The
 # main session and the Lead chat session have no agent_id and keep reading.
-NOREAD=( "${ROOTS[@]: -2}" )
-DCTL="${ROOTS[${#ROOTS[@]}-2]}" DCTL2="${ROOTS[${#ROOTS[@]}-1]}"
-canon "$HOME/.claude/projects" /; NOREAD+=( "$CANON" )
+canon "$HOME/.claude/projects" /; NOREAD=( "$DCTL" "$DCTL2" "$CANON" )
 noread() { # canonical path -> 0 if a worker may not read it
   local r
   [ -n "$AID" ] || return 1
   for r in "${NOREAD[@]}"; do inside "$1" "$r" && return 0; done
   return 1
 }
-noread_anc() { # canonical dir -> 0 if a recursive worker read there reaches a NOREAD root
+reach_check() { # canonical dir, label -> block if a recursive read there reaches the key, or (for a worker) a NOREAD root
   local r
-  [ -n "$AID" ] || return 1
-  for r in "${NOREAD[@]}"; do inside "$r" "$1" && return 0; done
-  return 1
+  key_anc "$1" && block "$2 would reach the Vajra HMAC key; give a path below it (for example your project directory)"
+  [ -n "$AID" ] || return 0
+  for r in "${NOREAD[@]}"; do
+    inside "$r" "$1" && block "$2 would reach Vajra Desktop control files or Claude Code transcripts; give a path below it"
+  done
+  return 0
 }
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
@@ -241,14 +243,9 @@ case "$TOOL" in
       classify "$CANON"
       [ "$PKIND" = key ] && block "the Vajra HMAC key is never readable by tools"
       noread "$CANON" && block "workers may not read Vajra Desktop control files or Claude Code transcripts: $CANON"
-      if [ "$TOOL" = Grep ] && noread_anc "$CANON"; then
-        block "Grep over $CANON would search Vajra Desktop control files or transcripts; give a path below it"
-      fi
-      # Grep reads file contents recursively: the key's directory or any
-      # ancestor of it (~/.claude, HOME, /) would include the key.
-      if [ "$TOOL" = Grep ] && key_anc "$CANON"; then
-        block "Grep over $CANON would search the Vajra HMAC key; give a path below it (for example your project directory)"
-      fi
+      # Grep reads file contents recursively: an ancestor of the key (~/.claude,
+      # HOME, /) or of a worker-unreadable root would include it.
+      [ "$TOOL" = Grep ] && reach_check "$CANON" "Grep over $CANON"
     done
     allow
     ;;
@@ -950,7 +947,18 @@ eval_segment_body() { # uses SEG array
     local runs=0
     for ((c = wi; c < n; c++)); do
       tok="${SEG[$c]//[\"\']/}"
-      for k in $tok; do
+      # Split on whitespace only, then expand a glob word where the command runs (the
+      # segment cwd, or HOME for ~/), so inst*.sh is judged as the install.sh it names.
+      set -f; local words=( $tok ) names=() w; set +f
+      for w in ${words[@]+"${words[@]}"}; do
+        names+=( "$w" )
+        case "$w" in *[*?[]*)
+          shopt -s nullglob
+          case "$w" in "~"/*) names+=( "$HOME"/${w#\~/} ) ;; /*) names+=( $w ) ;; *) names+=( "$SEGCWD"/$w ) ;; esac
+          shopt -u nullglob ;;
+        esac
+      done
+      for k in ${names[@]+"${names[@]}"}; do
         if [[ "$NOT_SCRIPTS" == *" ${k##*/} "* ]] && { [ "$runs" = 1 ] || [ "$c" = "$wi" ]; }; then
           block "${k##*/} changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
         fi
@@ -1125,8 +1133,7 @@ eval_segment_body() { # uses SEG array
     if [ "$rmode" = search ]; then
       # Default target is the cwd; the first operand is the pattern unless
       # -e/-f/--regexp/--file supplied it.
-      key_anc "$SEGCWD" && block "${wb} would recursively read $SEGCWD, which contains the Vajra HMAC key; cd into a directory below it (for example your project) first"
-      noread_anc "$SEGCWD" && block "${wb} would recursively read $SEGCWD, which contains Vajra Desktop control files or transcripts; cd into your project first"
+      reach_check "$SEGCWD" "${wb} in $SEGCWD"
       skip=1
       for ((c = op_from; c < n; c++)); do
         case "${SEG[$c]}" in --regexp*|--file*) skip=0 ;; --*) ;; -*[ef]*) skip=0 ;; esac
@@ -1157,8 +1164,7 @@ eval_segment_body() { # uses SEG array
     for tok in ${ops[@]+"${ops[@]}"}; do
       candidates "$tok" "$SEGCWD"
       for cc in ${CANDS[@]+"${CANDS[@]}"}; do
-        key_anc "$cc" && block "${wb} over $cc would reach the Vajra HMAC key; name a path below it instead"
-        noread_anc "$cc" && block "${wb} over $cc would reach Vajra Desktop control files or transcripts; name a path below it instead"
+        reach_check "$cc" "${wb} over $cc"
       done
     done
   fi
@@ -1181,11 +1187,11 @@ eval_segment_body() { # uses SEG array
   # of the cwd (never . or ..), so it is expanded only when the cwd holds a
   # symlink. Both facts are cached per cwd.
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
-    FAST_CWD="$SEGCWD"; FAST_OK=0; FAST_LINKS=0
-    if ! inside "$SEGCWD" "$CL" && ! inside "$CL" "$SEGCWD" \
-       && ! inside "$SEGCWD" "$DCTL" && ! inside "$DCTL" "$SEGCWD" \
-       && ! inside "$SEGCWD" "$DCTL2" && ! inside "$DCTL2" "$SEGCWD"; then FAST_OK=1; fi
+    FAST_CWD="$SEGCWD"; FAST_OK=1; FAST_LINKS=0
     local e
+    for e in "$CL" "$DCTL" "$DCTL2"; do
+      if inside "$SEGCWD" "$e" || inside "$e" "$SEGCWD"; then FAST_OK=0; fi
+    done
     shopt -s nullglob dotglob
     for e in "$SEGCWD"/*; do [ -L "$e" ] && { FAST_LINKS=1; break; }; done
     shopt -u nullglob dotglob
@@ -1261,34 +1267,7 @@ eval_segment_body() { # uses SEG array
   return 0
 }
 
-SEG=()
-for tok in ${TOKS[@]+"${TOKS[@]}"} ";"; do
-  case "$tok" in
-    ";"|PIPE)
-      eval_segment
-      if [ "$tok" = PIPE ]; then
-        PIPE_IN=1
-        [ "$SEG_HIT" = 1 ] && PIPE_TAINT=1
-        [ "$SEG_KANC" = 1 ] && PIPE_KTAINT=1
-      else
-        PIPE_IN=0; PIPE_TAINT=0; PIPE_KTAINT=0
-      fi
-      SEG=()
-      ;;
-    *) SEG+=( "$tok" ) ;;
-  esac
-done
-
-# Second pass, additive only: the pass above has already run unchanged. If the
-# command names "Application Support" (any case), rerun the same segment loop
-# with that phrase joined into one token, so a path with that space (the Vajra
-# Desktop control dir) is judged as one path. It can only add blocks.
-APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
-T2="${T//$APPSUP_PAT/Application__SP__Support}"
-if [ "$T2" != "$T" ]; then
-  set -f
-  TOKS=( $T2 )
-  set +f
+run_pass() { # judge every segment of TOKS from the starting cwd
   SEGCWD="$CWD"
   FAST_CWD="" FAST_OK=0 FAST_LINKS=0
   PIPE_IN=0 PIPE_TAINT=0 PIPE_KTAINT=0 SEG_HIT=0 SEG_KANC=0
@@ -1309,6 +1288,20 @@ if [ "$T2" != "$T" ]; then
       *) SEG+=( "$tok" ) ;;
     esac
   done
+}
+run_pass
+
+# Second pass, additive only: the pass above has already run unchanged. If the
+# command names "Application Support" (any case), rerun the same segment loop
+# with that phrase joined into one token, so a path with that space (the Vajra
+# Desktop control dir) is judged as one path. It can only add blocks.
+APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
+T2="${T//$APPSUP_PAT/Application__SP__Support}"
+if [ "$T2" != "$T" ]; then
+  set -f
+  TOKS=( $T2 )
+  set +f
+  run_pass
 fi
 
 allow
