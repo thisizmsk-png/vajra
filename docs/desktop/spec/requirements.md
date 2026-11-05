@@ -152,6 +152,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-5.2.2 GIVEN I press Approve, WHEN submitted, THEN the app submits a visible human turn "Execute approved plan <id>" to the run session (the turn is visible in that terminal) and does not itself run git push, open a PR or deploy.
 - AC-5.2.3 GIVEN the plan includes push, PR or deploy, WHEN the run session proceeds, THEN Claude Code's own permission prompt still appears for each protected command.
 - AC-5.2.4 GIVEN approval, WHEN it happens, THEN a ledger entry and `audit.log` line record who, plan id and time.
+- AC-5.2.5 (PM-5) GIVEN a pending plan whose run session has ended, WHEN I press Approve, THEN the app starts `claude --resume <sid> 'Execute approved plan <id>'` as argv in the repo (nothing typed into a PTY) and Claude Code's permission prompts appear there. The Cmd-Q dialog counts sessions holding pending approvals. For runs started in a plain terminal, Approve shows the exact turn to copy into that terminal.
 
 **US-5.3** As a Reviewer-approver, I want to reject a plan with a reason, so that the record shows why.
 - AC-5.3.1 GIVEN a pending plan, WHEN I press Reject, THEN a reason (non-empty) is required.
@@ -209,6 +210,13 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
   purpose is not offered, and nothing resumes without a click (VD-5).
 - POS-2.1c GIVEN an update is ready and runs are active, WHEN it would install, THEN it waits until no run is
   active, and exactly one app process exists afterwards (VD-6).
+- POS-2.1d (PM-6) GIVEN the last window closes, WHEN 60 s pass, THEN no WebContent process exists and app RSS
+  is within 10 MiB of the core alone; reopening shows every run with no lost events.
+- POS-2.1e (PM-1) GIVEN runs A and B were stopped by one quit and Vajra's `.active` points at B, WHEN I resume
+  A, THEN campaign A resumes and B is untouched; resuming a campaign already live in any session is refused.
+- POS-2.1f (PM-8) GIVEN the app is killed at 50 random points during a 2-worker fixture run, WHEN it relaunches,
+  THEN no process from those runs survives, and every campaign either verifies or offers its checkpoint
+  restore (`vajra-campaign.sh resume`).
 - Deferred to v1.1 (ADR-9): runs that keep going through a quit or SIGKILL of the app (VD-4).
 - POS-2.2 GIVEN `/vajra <ask>` started in a plain terminal, WHEN the app is open, THEN the run appears live
   within the event latency budget (NFR-PERF-9), with the crew, run view and inbox. The app can't take over
@@ -268,7 +276,7 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 - NFR-PERF-3: 10 workers streaming: app RSS at most 400 MiB; rAF p95 at most 20 ms and p99 at most 34 ms at 60 Hz; renderer work p95 at most 8 ms per frame; worker switch to paint at most 100 ms p95. Spike: 328.9 MiB at 60 min; rAF p95 20.0 ms; renderer work and switch latency not measured.
 - NFR-PERF-4: Cold start to usable crew view p95 at most 800 ms (process-cold, warm filesystem; cold boot reported separately). Spike: 394.3 ms median of 3 (not a p95).
 - NFR-PERF-5: Bounded byte queues at every hop; a slow UI can't grow backend memory; at most one in-flight UI snapshot of at most 64 KiB; slow disk pauses the source or fails visibly; a PTY or file reader is never blocked by the UI. Spike: met in the spike's design; the spike's blocking writes must not be reused (O6).
-- NFR-PERF-6: Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak before release. Spike: 31.1 MiB growth (WebContent); **not met**.
+- NFR-PERF-6: Soak: 1 h with 10 live workers, GUI RSS growth from minute 5 to 60 at most 20 MiB and no sustained trend above 1 MiB/min; then an 8 h soak and a 72 h soak with 20 window open and close cycles before release (PM-6). Spike: 31.1 MiB growth (WebContent); **not met**.
 - NFR-PERF-7: Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method. Spike: Electron, Orca beaten; Runner beats us at idle.
 - NFR-PERF-8: The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session. Spike: not measured.
 - NFR-PERF-9: A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95. Spike: not measured.
@@ -291,6 +299,12 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 - NFR-SEC-14 (STRIDE E1): the Tauri command surface is a fixed, documented list; no command takes an executable path, a shell string or an arbitrary filesystem path; each validates its arguments and the calling window.
 - NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
 - NFR-SEC-8: control messages are never approval for protected actions.
+
+### Compatibility
+- NFR-COMPAT-1 (PM-4): preflight records `claude --version`. Outside the tested range the control row reads
+  "untested Claude Code X, control unverified". A message shows "delivered" only when the worker's transcript
+  contains its steer id; a hook ack alone shows "handed to hook". The G3b tracer is rerun on each new Claude
+  Code minor version before the range widens.
 
 ### Accessibility
 - NFR-A11Y-1: WCAG 2.2 AA (contrast, target size, focus visible, no color-only status).
@@ -336,7 +350,7 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 | US-4.2 | AC-4.2.1 .. 4.2.3 | PERF-3, A11Y-2 |
 | US-4.3 | AC-4.3.1 .. 4.3.4 | SEC-2, SEC-3 |
 | US-5.1 | AC-5.1.1 .. 5.1.5 | A11Y-3, UX-3 |
-| US-5.2 | AC-5.2.1 .. 5.2.4 | SEC-1, SEC-8, OBS-2, UX-3 |
+| US-5.2 | AC-5.2.1 .. 5.2.5 | SEC-1, SEC-8, OBS-2, UX-3 |
 | US-5.3 | AC-5.3.1 .. 5.3.3 | SEC-4, OBS-2 |
 | US-6.1 | AC-6.1.1 .. 6.1.3 | SEC-2, A11Y-2 |
 | US-6.2 | AC-6.2.1 .. 6.2.3 | SEC-4, SEC-6 |
@@ -401,7 +415,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 
 ## 7b. Review findings
 
-Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit 6b0cedb on a local branch, three votes: two revise, one approve; its pre-mortem step returned no output, so a Critic pre-mortem was run separately and is in the PRD); STRIDE (`vajra-3/stride.md`); ponytail review.
+Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit 6b0cedb on a local branch, three votes: two revise, one approve; its pre-mortem step returned no output, so a Critic pre-mortem was run separately: PM-1 to PM-8 below, also in the PRD); STRIDE (`vajra-3/stride.md`); ponytail review.
 
 | Finding (review) | Decision | Requirement or design change | Acceptance id |
 |---|---|---|---|
@@ -434,6 +448,14 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | STRIDE E3 malicious update | Adopted | NFR-SEC-15 | NFR-SEC-15 |
 | STRIDE E4 Lead tools widen | Adopted | AC-3.1.4 | AC-3.1.4 |
 | STRIDE E5 supply chain | Adopted | NFR-SEC-7 amended | NFR-SEC-7 |
+| PM-1 resume continued the wrong campaign (global `.active`) | Fixed | ADR-9 decision 5 resumes by slug | POS-2.1e |
+| PM-2 no task owns the live end-to-end checks | Fixed | new task H8, owner-run live acceptance | H8 done-when |
+| PM-3 performance gates close after the work they gate | Fixed | new task H0 (perf CI from C1); end-of-M3 budget rule; ADR-9 and design 5 time-boxed review | NFR-PERF-1, NFR-PERF-6 |
+| PM-4 a Claude Code update breaks steering silently | Adopted | NFR-COMPAT-1 | NFR-COMPAT-1 |
+| PM-5 approvals stranded after the session ends | Adopted | AC-5.2.5 | AC-5.2.5 |
+| PM-6 the menu bar app turns a slow leak into a multi-day one | Adopted | ADR-9 6c; 72 h soak; Install now after 72 h | POS-2.1d, NFR-PERF-6 |
+| PM-7 transcripts are a single point of failure | Adopted | E4 moves into M1; new E6 records the worktree in the claim so control matches on tasks.json | E6 done-when |
+| PM-8 a crash makes resume unsafe | Adopted | ADR-9 6b (process group); fault test | POS-2.1f |
 | Ponytail: resume typed into the PTY | Fixed (6db4529) | ADR-9 decision 5 uses argv | POS-2.1b |
 | Ponytail: kb approvals prefilled in an app PTY | Fixed (6db4529) | copy to own terminal | POS-3.1 |
 

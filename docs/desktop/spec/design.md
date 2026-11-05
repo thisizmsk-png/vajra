@@ -702,13 +702,20 @@ check.
   4. On a real quit, a crash, logout or shutdown, the run session's PTY closes and its `claude` process
      ends. On the next launch the app offers resume **only** for the sessions that were running and that
      the human did not stop or quit (VD-5). Nothing resumes without a click.
-  5. Resume runs `claude --resume <session_id> '/vajra continue'` in the repo, with the slash command passed as
-     the initial prompt argument in the argv array. Nothing is typed into the PTY.
+  5. Resume runs `claude --resume <session_id> '/vajra-deliver {"campaign":"<slug>","run_id":"<UTC now>"}'`
+     in the repo, as argv with the slug from `runs.jsonl`. Nothing is typed into the PTY. It never uses
+     `/vajra continue`, because that resumes Vajra's one global `.active` campaign, which every new run
+     rewrites (`vajra-campaign.sh` create; pre-mortem PM-1). A campaign already live in any session is not
+     offered.
      The tracer bullet showed that `--resume` plus `SendMessage` continues the same worker id. The Lead chat
      resumes the same way.
   6. Updates (VD-6) install only when no run is active. Otherwise the update waits, and the menu bar says
      "Update ready, installs when runs finish". With one process there is never an older generation left
-     running.
+     running. After 72 h waiting, the menu offers Install now, which stops the runs and offers resume (PM-6).
+  6b. Quit sends SIGTERM to each run's process group (recorded in `runs.jsonl`) and waits up to 10 s. On
+     launch, resume is refused while any process in that group is alive; the app offers Stop instead (PM-8).
+  6c. When the last window closes, the webview is destroyed and only the core stays. Reopening rebuilds the
+     UI from the core. This keeps a long-lived menu bar app from carrying webview growth (PM-6).
   7. While any run is active the core holds a macOS activity assertion, so App Nap does not throttle the
      windowless app (A1 M5). It is released when the last run ends.
 - Options:

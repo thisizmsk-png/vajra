@@ -38,10 +38,12 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 |---|---|---|---|---|---|
 | E3 | `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`: read-only, reuses the shared green check, returns `{ok, green, reasons}`, writes nothing | bhima [Backend] | `scripts/vajra_tasks.py`, `tests/tasks/run-check-evidence.sh` | G2 | AC-4.3.1, AC-4.3.3; test proves no file under the campaign changes |
 | E5 | `vajra-deliver.js`: optional `steer_nonce` input and one fixed steering sentence in Execute-phase task briefs only (design 1.3) | bhima [Backend], reviewed by bhishma [Security] | `workflows/vajra-deliver.js`, `tests/workflows/*` | G3b | AC-3.2.2; verify, review and merge briefs unchanged (test) |
+| E4 | Persist the delivery report as `report.md` in the campaign through `vajra-campaign.sh` (PRD Q3) | bhima [Backend] | `scripts/vajra-campaign.sh`, `workflows/vajra-deliver.js`, tests | G2 | History shows the report with the transcript format check forced to fail |
+| E6 | The worker's claim passes `--worktree "$PWD"` so `tasks.json` names each worker's worktree; the Control service matches workers on it and uses transcripts for display only (PM-7) | bhima [Backend] | `workflows/vajra-deliver.js`, `scripts/vajra_tasks.py`, tests | G2 | With the transcript format check forced to fail, message and stop still reach the right worker |
 | E1 | `hooks/desktop-control.sh`: delivers queued control messages to the addressed worker at its next tool call (message, redirect as additional context; stop as a block with reason), consume-once with ack; no-op when the app is not installed | bhima [Backend] | `hooks/desktop-control.sh`, `hooks/hooks.json`, `tests/hooks/run-desktop-control.sh` | G2, G3 | AC-3.2.1, AC-3.2.2, AC-3.2.5, AC-3.3.x; fails open (no queue = exit 0), never touches the guard |
 | E2 | Guard: make the whole app data dir a protected root, deny agent reads of the nonce file, and log the app's MCP control tools in `audit.log` (additive only; tests include the space in the path) | bhima [Backend], reviewed by bhishma [Security] | `hooks/pre-tool-use.sh`, `hooks/hooks.json`, `tests/hooks/run-guard-*.sh` | E1 | AC-3.2.3, AC-3.4.x, NFR-SEC-1; every existing guard test still passes |
 
-Deferred, pending owner decision Q3 in PRD and E4 in design.md: persist the delivery report as `report.md` in the campaign.
+Moved into M1 by pre-mortem PM-7: persist the delivery report as `report.md` in the campaign.
 
 ### M2 Core (no UI)
 
@@ -83,6 +85,7 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in p
 
 | Id | Task | Owner | Files | Deps | Acceptance |
 |---|---|---|---|---|---|
+| H0 | Perf CI from the first build (PM-3): every merge records idle RSS, WebContent RSS and a 10 min growth slope, and fails on a regression over 5 MiB. End of M3: if NFR-PERF-1 or NFR-PERF-6 is unmet on the K3 build, the owner picks a written budget revision, a stack change or a delay before M4; no budget edits after M4 starts | sepoy-test-1 [Test worker 1], karna [Numerics] | `app/bench/ci/*` | C1 | Numbers per merge in CI |
 | H1 | Perf harness: 10+ concurrent agent fixture at 200 lines/s each, frame-time capture, 1 h soak with leak check (RSS, handles, fds), flamegraphs; same fixture against Agent Orchestrator desktop and Orca | sepoy-test-1 [Test worker 1], numbers checked by karna [Numerics] | `app/bench/*` | S1 to S6 | NFR-PERF-1 to NFR-PERF-10 with measured numbers |
 | H2 | E2E: Playwright click crawl on the renderer; screenshots 1280x800 and 960x600, dark and light; keyboard-only walkthrough of J1 to J6 | sepoy-test-1 [Test worker 1] | `app/ui/e2e/*`, `docs/design/after/*` | S1 to S6 | NFR-A11Y-2, NFR-UX-1, NFR-UX-2; 0 crashes, page errors, console errors, dead controls |
 | H3 | Pre-mortem of the MVP launch | duryodhana [Critic] | report only | S1 to S6 | Ranked failure modes with owners |
@@ -90,6 +93,7 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in p
 | H5 | Exploit PoCs as failing tests: escape-sequence injection through agent output, control-queue tampering by an agent, socket from another uid, path traversal in the state reader, shell injection through ask text | shakuni [Red team] | `app/tests/security/*` | C3 to C6, K3 | Each PoC fails before its fix and passes after |
 | H6 | Regressions and accessibility on the final diff (WCAG 2.2 AA, VoiceOver) | vidura [Verifier] | report only | H2, H5 | NFR-A11Y-1 to NFR-A11Y-3 |
 | H7 | Positioning measurements that gate launch claims: seeded false-"done" benchmark (20+ tasks with planted defects), review-time study design (5+ developers), repeated-task knowledge eval; plus CI checks that a terminal-started run appears in the app and that uninstalling leaves every campaign readable by the CLI | sahadeva [Analyst], benchmark tasks by sepoy-test-1 [Test worker 1] | `app/bench/positioning/*` | S1 to S6 | POS-1.4, POS-1.6, POS-3.3, POS-2.2, POS-2.3 (numbers reported; no target) |
+| H8 | Live acceptance on the release candidate, run by the owner under their own Claude Code login (PM-2): L1 to L7, a 3-task `vajra-deliver` with message, redirect and stop, quit then resume, approve after resume, and an N to N+1 update with a run active. Pass or fail per item in a dated note; any fail blocks launch | abhimanyu [Prototyper] runs, vidura [Verifier] confirms | `app/bench/live/*` | E1 to E6, C6, S1 to S6 | Dated note, all items pass |
 
 Packaging (signing, notarization, update feed) is a plan by hanuman [Platform] after H4; shipping it needs
 the owner's yes.
@@ -106,6 +110,9 @@ graph LR
   C2 & C4 --> C5
   C5 & E1 & E2 & E5 --> C6
   G3b --> E5
+  G2 --> E4 & E6
+  E6 --> C6
+  C1 --> H0
   K1 --> K2 & K3
   C3 & C4 & K2 --> S1 & S5
   C4 & E3 & K3 --> S4

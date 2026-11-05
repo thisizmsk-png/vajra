@@ -238,6 +238,22 @@ part of review stage A1). Ranked by impact times likelihood.
 | 11 | Worktree disk bloat | Vajra's cleanup already removes clean worktrees; disk display deferred | Disk-full reports |
 | 12 | Security: permission bypass by default, agent output steering the orchestrator | POS-2.4 argv test, NFR-SEC-3 and NFR-SEC-9, steering threat model (F1-F4) | Security gate H4, PoCs H5 |
 
+### Pre-mortem, second pass (Critic, 2026-11-05)
+
+Eight failure modes the first table missed, found after ADR-9 and the A1 fixes. All are adopted in the
+spec (requirements 7b, PM-1 to PM-8).
+
+| # | Failure | Mitigation | Signal |
+|---|---|---|---|
+| 13 | Resume continues the wrong campaign: `/vajra continue` follows Vajra's one global `.active` pointer, which every new run rewrites | Resume by slug as argv (ADR-9); POS-2.1e | Two sessions on one slug |
+| 14 | No task owns the live end-to-end checks, so beta users are the first to run real control, resume and approve | H8 owner-run live acceptance blocks launch | RC tagged with no dated live run |
+| 15 | Performance gates close after the work they gate | H0 perf CI from C1; end-of-M3 budget rule | First real idle number arrives late |
+| 16 | A Claude Code update breaks steering silently | NFR-COMPAT-1: tested version range; "delivered" only when the transcript shows the steer | Acks with no steer in the next turn |
+| 17 | Approvals stranded after the session ends | AC-5.2.5: approve resumes the session as argv | Inbox items with exited sessions |
+| 18 | The menu bar app turns a slow leak into a multi-day one | Webview destroyed when the window closes; 72 h soak; Install now after 72 h | RSS by uptime |
+| 19 | Transcript format change breaks crew, control and reports at once | E4 and E6 into M1: control matches on `tasks.json` | "Format not recognized" rate |
+| 20 | A crash leaves orphan processes or a stale signature | Process group SIGTERM on quit; resume refused while it lives; fault test POS-2.1f | Orphans after relaunch |
+
 ## 8. Non-goals (deliberately not built)
 
 - **A fleet kanban or issue-tracker intake.** Vajra plans its own task graph from one ask.
