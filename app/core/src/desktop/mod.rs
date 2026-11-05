@@ -4,21 +4,24 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::bus::{self, Bus, Config, Event, Subscriber};
 use crate::control::service::{Actor, ControlError, Service, WorkerInfo};
-use crate::control::{self, ledger::Ledger, nonce};
+use crate::adapter::{Engine, adapter_for};
+use crate::control::ledger::Ledger;
+use crate::ids::{self, valid_run_id};
+use crate::lock;
 use crate::crew::record::{JournalEntry, Meta, parse_journal, parse_meta};
 use crate::crew::redact::Redactor;
 use crate::crew::tailer::{Tailer, Transcript};
 use crate::crew::tree::{self, Node, Signals, Status, Worker};
 use crate::logging::Logger;
 use crate::paths;
-use crate::sessions::argv::{RunInput, build_resume_argv, build_run_argv_at, run_id_at};
+use crate::sessions::argv::{self, InvalidInput, RunInput};
 use crate::sessions::{SpawnSpec, Supervisor};
 use crate::vajra::allowlist::Allowlist;
 use crate::vajra::bridge::{Bridge, Request, parse_kb_hits};
@@ -39,12 +42,12 @@ fn fail(code: &str, detail: impl std::fmt::Display) -> Value {
     json!({"error": code, "detail": detail.to_string()})
 }
 
-fn ctl(r: Result<Value, ControlError>) -> Res {
-    r.map_err(|e: ControlError| e.to_json())
+fn ctl<T>(r: Result<T, ControlError>) -> Result<T, Value> {
+    r.map_err(|e| e.to_json())
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+fn invalid_input(e: InvalidInput) -> Value {
+    invalid(e.field, e.reason)
 }
 
 /// A run session started (or resumed) by this app.
@@ -153,45 +156,92 @@ impl App {
 
     /// The control service steers one session, so one run is active at a time.
     fn no_active_run(&self) -> Result<(), Value> {
-        let busy = lock(&self.runs).keys().any(|s| self.sup.is_running(s).unwrap_or(false));
-        if busy {
+        self.reap_runs();
+        if self.active_run_count() > 0 {
             return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
         }
         Ok(())
     }
 
-    pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
-        let cwd = repo_dir(cwd)?;
-        self.no_active_run()?;
-        let now = unix_now();
-        let session_id = new_uuid().map_err(|e| fail("io_error", e))?;
-        let run_id = run_id_at(now);
-        // Validate the form before a control session is created for it.
-        build_run_argv_at(&input, &"0".repeat(32), now, &session_id).map_err(|e| invalid(e.field, e.reason))?;
+    /// Runs whose PTY is still open.
+    pub fn active_run_count(&self) -> usize {
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+    }
+
+    /// Forget runs whose PTY exited, and end the control session that steered
+    /// one, so the Lead cannot queue to its workers (their messages expire).
+    pub fn reap_runs(&self) {
+        let ended: Vec<String> = {
+            let mut runs = lock(&self.runs);
+            let gone: Vec<String> = runs.keys().filter(|s| !self.sup.is_running(s).unwrap_or(false)).cloned().collect();
+            gone.iter().filter_map(|s| runs.remove(s)).map(|r| r.session_id).collect()
+        };
+        let mut svc = lock(&self.control);
+        if svc.session_id().is_some_and(|id| ended.iter().any(|e| e == id)) {
+            svc.end_session();
+        }
+    }
+
+    /// Take the control session, build the argv with its nonce, spawn. A
+    /// failed build or spawn ends the session again, so nothing is left live.
+    pub fn launch(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+    ) -> Res {
         let nonce = {
             let mut svc = lock(&self.control);
-            ctl(svc.start_session(&session_id, &run_id).map(|_| Value::Null))?;
-            svc.nonce().unwrap_or_default().to_string()
+            ctl(svc.start_session(session_id, run_id))?;
+            let n = if rotate { ctl(svc.resume_session()) } else { Ok(svc.nonce().unwrap_or_default()) };
+            match n {
+                Ok(n) => n.to_string(),
+                Err(e) => {
+                    svc.end_session();
+                    return Err(e);
+                }
+            }
         };
-        let argv = build_run_argv_at(&input, &nonce, now, &session_id).map_err(|e| invalid(e.field, e.reason))?;
-        let redact = vec![nonce];
-        let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let stream = format!("run-{session_id}");
-        self.sup
-            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS, redact })
-            .map_err(|e| fail("spawn_failed", e))?;
-        lock(&self.runs).insert(stream.clone(), Run { session_id: session_id.clone(), run_id: run_id.clone(), campaign: campaign.clone(), cwd });
-        self.note("run_started", &[]);
+        let spawned = argv(&nonce).and_then(|argv| {
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: Some(nonce) };
+            self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
+        });
+        if let Err(e) = spawned {
+            lock(&self.control).end_session();
+            return Err(e);
+        }
+        lock(&self.runs).insert(
+            stream.clone(),
+            Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf() },
+        );
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
-    /// ADR-9 resume: `claude --resume <session_id>` then `/vajra continue`
-    /// for the campaign. The steering nonce rotates (design 5).
+    pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
+        let cwd = repo_dir(cwd)?;
+        argv::validate(&input).map_err(invalid_input)?;
+        self.no_active_run()?;
+        let now = ids::unix_now();
+        let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
+        let run_id = ids::run_id_at(now);
+        let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
+        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
+            argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+        }, false)?;
+        self.note("run_started", &[]);
+        Ok(r)
+    }
+
+    /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
+    /// through `/vajra-deliver` with a rotated steering nonce (design 5).
     pub fn resume_run(&self, session_id: &str, run_id: &str, campaign: &str, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
-        self.no_active_run()?;
-        if !control::queue::valid_session_id(session_id) {
-            return Err(invalid("session_id", "not a session id"));
+        if !ids::valid_session_id(session_id) {
+            return Err(invalid("session_id", "must be a canonical uuid"));
         }
         if !valid_run_id(run_id) {
             return Err(invalid("run_id", "must be YYYYMMDD-HHMM"));
@@ -199,24 +249,13 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
-        let nonce = {
-            let mut svc = lock(&self.control);
-            ctl(svc.start_session(session_id, run_id).map(|_| Value::Null))?;
-            ctl(svc.resume_session().map(|_| Value::Null))?;
-            svc.nonce().unwrap_or_default().to_string()
-        };
-        let argv = build_resume_argv(session_id, campaign, &nonce).map_err(|e| invalid(e.field, e.reason))?;
-        let redact = vec![nonce];
-        let stream = format!("run-{session_id}");
-        self.sup
-            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS, redact })
-            .map_err(|e| fail("spawn_failed", e))?;
-        lock(&self.runs).insert(
-            stream.clone(),
-            Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd },
-        );
+        self.no_active_run()?;
+        let claude = adapter_for(Engine::Claude);
+        let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
+            claude.resume_argv(session_id, campaign, n).map_err(invalid_input)
+        }, true)?;
         self.note("run_resumed", &[]);
-        Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
+        Ok(r)
     }
 
     // ---------------------------------------------------------------- crew
@@ -310,11 +349,12 @@ impl App {
 
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
-        let nonce = lock(&self.control).nonce().map(str::to_string);
+        let redactor = lock(&self.control).redactor();
         let mut map = lock(&self.transcripts);
         let tr = map
             .entry(id.to_string())
-            .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::new(nonce.as_deref())));
+            .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
+        tr.set_redactor(redactor);
         let stream = worker_stream(id);
         if bus::valid_stream_id(&stream)
             && let Err(e) = tr.pump(&self.bus, &stream)
@@ -421,6 +461,7 @@ impl App {
     }
 
     pub fn active_runs(&self) -> Res {
+        self.reap_runs();
         let runs = lock(&self.runs).clone();
         let mut active: Vec<Value> = runs
             .iter()
@@ -445,15 +486,7 @@ fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
-/// `YYYYMMDD-HHMM`.
-fn valid_run_id(r: &str) -> bool {
-    let b = r.as_bytes();
-    b.len() == 13 && b[8] == b'-' && b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit())
-}
 
 /// An existing absolute directory.
 fn repo_dir(s: &str) -> Result<PathBuf, Value> {
@@ -464,19 +497,6 @@ fn repo_dir(s: &str) -> Result<PathBuf, Value> {
     Ok(p)
 }
 
-/// A v4 UUID from 16 random bytes.
-fn new_uuid() -> std::io::Result<String> {
-    Ok(uuid_from_hex(&nonce::random_hex(16)?))
-}
-
-fn uuid_from_hex(h: &str) -> String {
-    let mut c: Vec<char> = h.chars().collect();
-    c[12] = '4';
-    let v = c[16].to_digit(16).unwrap_or(0);
-    c[16] = char::from_digit((v & 0x3) | 0x8, 16).unwrap_or('8');
-    let s: String = c.into_iter().collect();
-    format!("{}-{}-{}-{}-{}", &s[0..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
-}
 
 /// Claude Code's project dir name for a cwd: every non-alphanumeric is `-`.
 fn project_slug(cwd: &Path) -> String {

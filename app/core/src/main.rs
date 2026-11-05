@@ -199,8 +199,7 @@ fn main() {
                     #[cfg(target_os = "macos")]
                     {
                         let app = handle.state::<App>();
-                        let n = app.active_runs().ok().and_then(|v| v["count"].as_u64()).unwrap_or(0);
-                        nap.update(n as usize);
+                        nap.update(app.active_run_count());
                     }
                 }
             });

@@ -18,13 +18,14 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::bus::{self, Bus};
+use crate::crew::redact::Redactor;
 use crate::logging::Logger;
 
 #[cfg(test)]
@@ -85,9 +86,9 @@ pub struct SpawnSpec {
     pub cwd: PathBuf,
     pub rows: u16,
     pub cols: u16,
-    /// Secrets (the steer nonce in the launch prompt, which the TUI echoes)
-    /// replaced before a line reaches the bus, spill or IPC.
-    pub redact: Vec<String>,
+    /// The steer nonce in the launch prompt (the TUI echoes it): replaced,
+    /// with the C5 redactor, before a line reaches the bus, spill or IPC.
+    pub redact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,9 +111,7 @@ pub fn scrubbed_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str
         .collect()
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::lock;
 
 struct Session {
     pid: u32,
@@ -279,7 +278,7 @@ impl Supervisor {
             let bus = self.bus.clone();
             let log = self.log.clone();
             let stream = id.to_string();
-            let redact: Vec<String> = spec.redact.iter().filter(|s| s.len() >= REDACT_MIN).cloned().collect();
+            let redact = Redactor::new(spec.redact.as_deref());
             std::thread::Builder::new()
                 .name(format!("pty-{id}"))
                 .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, log.as_deref()))
@@ -397,40 +396,10 @@ impl Drop for Supervisor {
     }
 }
 
-/// Shortest secret fragment redacted at a line wrap.
-const REDACT_MIN: usize = 8;
-
-/// Replace each secret, and a fragment of at least `REDACT_MIN` chars that a
-/// terminal wrap left at the end (secret prefix) or start (secret suffix) of
-/// the line.
-fn redact_line(mut s: String, secrets: &[String]) -> String {
-    const R: &str = "[redacted]";
-    for n in secrets {
-        if s.contains(n.as_str()) {
-            s = s.replace(n.as_str(), R);
-        }
-        for k in (REDACT_MIN..n.len()).rev() {
-            if s.ends_with(&n[..k]) {
-                s.truncate(s.len() - k);
-                s.push_str(R);
-                break;
-            }
-        }
-        for k in (REDACT_MIN..n.len()).rev() {
-            if s.starts_with(&n[n.len() - k..]) {
-                s.replace_range(..k, R);
-                break;
-            }
-        }
-    }
-    s
-}
-
-fn push_line(bus: &Bus, stream: &str, secrets: &[String], raw: &[u8]) {
+fn push_line(bus: &Bus, stream: &str, redactor: &Redactor, raw: &[u8]) {
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let text = String::from_utf8_lossy(raw);
-    let clean = ansi::sanitize(&text);
-    let clean = if secrets.is_empty() { clean } else { redact_line(clean, secrets) };
+    let clean = redactor.redact(ansi::sanitize(&text));
     // The id was validated at spawn, so push cannot fail.
     let _ = bus.push(stream, &clean);
 }
@@ -438,7 +407,7 @@ fn push_line(bus: &Bus, stream: &str, secrets: &[String], raw: &[u8]) {
 fn read_loop(
     bus: &Bus,
     stream: &str,
-    secrets: &[String],
+    redactor: &Redactor,
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
     session: &Session,
@@ -453,12 +422,12 @@ fn read_loop(
                 pending.extend_from_slice(&buf[..n]);
                 let mut start = 0;
                 while let Some(i) = pending[start..].iter().position(|&b| b == b'\n') {
-                    push_line(bus, stream, secrets, &pending[start..start + i]);
+                    push_line(bus, stream, redactor, &pending[start..start + i]);
                     start += i + 1;
                 }
                 pending.drain(..start);
                 if pending.len() >= MAX_PENDING {
-                    push_line(bus, stream, secrets, &pending);
+                    push_line(bus, stream, redactor, &pending);
                     pending.clear();
                 }
             }
@@ -467,7 +436,7 @@ fn read_loop(
         }
     }
     if !pending.is_empty() {
-        push_line(bus, stream, secrets, &pending);
+        push_line(bus, stream, redactor, &pending);
     }
 
     // Reap. Poll under the exit lock so `signal` never races the reap.

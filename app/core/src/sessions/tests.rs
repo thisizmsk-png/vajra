@@ -28,7 +28,7 @@ fn spec(argv: &[&str], cwd: &std::path::Path) -> SpawnSpec {
         cwd: cwd.to_path_buf(),
         rows: 24,
         cols: 80,
-        redact: Vec::new(),
+        redact: None,
     }
 }
 
@@ -295,7 +295,7 @@ fn sessions_redact_the_steer_nonce_from_pty_lines() {
     let (sup, bus, dir) = setup("redact");
     let script = format!("printf 'steer_nonce: {n} ok\\n{}\\n{}\\ncommit {sha}\\n'", &n[..20], &n[20..]);
     let mut sp = spec(&["/bin/sh", "-c", &script], &dir);
-    sp.redact = vec![n.to_string()];
+    sp.redact = Some(n.to_string());
     sup.spawn("s-redact", sp).unwrap();
     sup.wait("s-redact", WAIT).unwrap();
     let l = wait_lines(&bus, "s-redact", |l| l.iter().any(|x| x.starts_with("commit")));

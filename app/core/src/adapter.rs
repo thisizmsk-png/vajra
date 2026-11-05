@@ -9,7 +9,7 @@
 
 use std::ffi::OsString;
 
-use crate::sessions::argv::{build_run_argv, InvalidInput, RunInput, MAX_ASK_BYTES};
+use crate::sessions::argv::{self, InvalidInput, RunInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
@@ -66,7 +66,9 @@ pub trait AgentAdapter: Send + Sync {
     fn engine(&self) -> Engine;
     fn capabilities(&self) -> Capabilities;
     fn run_argv(&self, input: &RunInput, steer_nonce: &str) -> Result<Vec<String>, InvalidInput>;
-    fn resume_argv(&self, session_id: &str) -> Result<Vec<String>, InvalidInput>;
+    /// `session_id` is the session being resumed; for an engine with a steer
+    /// channel the rotated `steer_nonce` goes into the resumed prompt.
+    fn resume_argv(&self, session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput>;
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing;
 }
 
@@ -88,19 +90,6 @@ fn billing(keys: &[&'static str], env: &dyn Fn(&str) -> Option<OsString>) -> Bil
     Billing { source: "login", key_in_app_env }
 }
 
-/// Canonical lowercase/uppercase 8-4-4-4-12 hex uuid only.
-fn check_uuid(id: &str) -> Result<(), InvalidInput> {
-    let ok = id.len() == 36
-        && id.bytes().enumerate().all(|(i, b)| match i {
-            8 | 13 | 18 | 23 => b == b'-',
-            _ => b.is_ascii_hexdigit(),
-        });
-    if ok {
-        Ok(())
-    } else {
-        Err(InvalidInput { field: "session_id", reason: "must be a session uuid" })
-    }
-}
 
 impl AgentAdapter for Claude {
     fn engine(&self) -> Engine {
@@ -119,11 +108,10 @@ impl AgentAdapter for Claude {
         }
     }
     fn run_argv(&self, input: &RunInput, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
-        build_run_argv(input, steer_nonce)
+        argv::build_run_argv(input, steer_nonce)
     }
-    fn resume_argv(&self, session_id: &str) -> Result<Vec<String>, InvalidInput> {
-        check_uuid(session_id)?;
-        Ok(vec!["claude".into(), "--resume".into(), session_id.into(), "/vajra continue".into()])
+    fn resume_argv(&self, session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+        argv::build_resume_argv(session_id, campaign, steer_nonce)
     }
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing {
         billing(&CLAUDE_KEYS, env)
@@ -149,16 +137,13 @@ impl AgentAdapter for Codex {
     /// `codex -- <ask>`: `--` keeps an ask like "exec ..." or "--flag" one positional
     /// prompt. No hook channel, so the nonce is not used.
     fn run_argv(&self, input: &RunInput, _steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
-        if input.ask.trim().is_empty() {
-            return Err(InvalidInput { field: "ask", reason: "must not be empty" });
-        }
-        if input.ask.len() > MAX_ASK_BYTES {
-            return Err(InvalidInput { field: "ask", reason: "is longer than 32 KiB" });
-        }
+        argv::check_ask(&input.ask)?;
         Ok(vec!["codex".into(), "--".into(), input.ask.clone()])
     }
-    fn resume_argv(&self, session_id: &str) -> Result<Vec<String>, InvalidInput> {
-        check_uuid(session_id)?;
+    fn resume_argv(&self, session_id: &str, _campaign: &str, _steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+        if !crate::ids::valid_session_id(session_id) {
+            return Err(InvalidInput { field: "session_id", reason: "must be a canonical uuid" });
+        }
         Ok(vec!["codex".into(), "resume".into(), session_id.into()])
     }
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing {

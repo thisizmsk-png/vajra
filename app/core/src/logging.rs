@@ -106,7 +106,7 @@ impl Logger {
         }
         line.push('\n');
 
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = crate::lock(&self.state);
         if state.len > 0 && state.len + line.len() as u64 > self.max_bytes {
             self.rotate(&mut state)?;
         }

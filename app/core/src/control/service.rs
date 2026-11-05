@@ -28,7 +28,7 @@ use super::ledger::Ledger;
 use super::queue::{self, SessionDir};
 use super::{audit, fsx, nonce, sha256, time};
 use crate::crew::names::ui_name;
-use crate::crew::redact::{REDACTED, Redactor};
+use crate::crew::redact::Redactor;
 use crate::crew::tree::{Status, Worker};
 use crate::logging::Logger;
 
@@ -285,7 +285,7 @@ impl Service {
 
     /// Take control of a run session: create its dirs and a fresh nonce. An
     /// existing nonce (app restart for the same session) is kept.
-    pub fn start_session(&mut self, session_id: &str, run_id: &str) -> Result<()> {
+    pub fn start_session(&mut self, session_id: &str, run_id: &str) -> Result<&str> {
         if !queue::valid_session_id(session_id) {
             return Err(ControlError::InvalidArgs("session_id".into()));
         }
@@ -297,15 +297,20 @@ impl Service {
         self.seq = self.seq.max(dir.max_seq());
         self.session = Some(Session { id: session_id.into(), run_id: run_id.into(), dir, nonce: n });
         self.log("control_session_start", &[]);
-        Ok(())
+        Ok(self.nonce().unwrap_or_default())
     }
 
     /// The run session was resumed (`claude --resume`): rotate the nonce.
-    pub fn resume_session(&mut self) -> Result<()> {
+    pub fn resume_session(&mut self) -> Result<&str> {
         let s = self.session.as_mut().ok_or(ControlError::ControlDisabled)?;
         s.nonce = nonce::rotate(&s.dir.root)?;
         self.log("control_nonce_rotated", &[]);
-        Ok(())
+        Ok(self.nonce().unwrap_or_default())
+    }
+
+    /// The session the control service steers, if any.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session.as_ref().map(|s| s.id.as_str())
     }
 
     /// The run ended. Queued messages will never be delivered; stops stay.
@@ -359,10 +364,7 @@ impl Service {
     }
 
     fn redact(&self, text: &str) -> String {
-        match self.nonce() {
-            Some(n) if !n.is_empty() => text.replace(n, REDACTED),
-            _ => text.to_string(),
-        }
+        self.redactor().clean(text)
     }
 
     fn session(&self) -> Result<&Session> {
@@ -799,9 +801,7 @@ impl Service {
             "list_workers" => {
                 let run = s("run_id", false)?;
                 if let Some(r) = run {
-                    let b = r.as_bytes();
-                    let ok = b.len() == 13 && b[8] == b'-' && b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit());
-                    if !ok {
+                    if !crate::ids::valid_run_id(r) {
                         return Err(ControlError::InvalidArgs("run_id".into()));
                     }
                 }
@@ -841,7 +841,7 @@ pub fn spawn_watcher(svc: Arc<Mutex<Service>>, every: Duration) -> Watcher {
     let flag = stop.clone();
     let handle = std::thread::spawn(move || {
         while !flag.load(Ordering::SeqCst) {
-            svc.lock().unwrap_or_else(|e| e.into_inner()).tick();
+            crate::lock(&svc).tick();
             std::thread::sleep(every);
         }
     });

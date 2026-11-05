@@ -22,12 +22,31 @@ impl Redactor {
 
     /// One line of agent text in, one plain-text line out.
     pub fn clean(&self, text: &str) -> String {
-        let s = strip(&ansi::sanitize(text));
+        self.redact(strip(&ansi::sanitize(text)))
+    }
+
+    /// Only the nonce replacement (whole, and a fragment a terminal wrap left
+    /// at either end), for text that keeps its colours: the PTY view.
+    pub fn redact(&self, s: String) -> String {
         match &self.nonce {
-            Some(n) => s.replace(n.as_str(), REDACTED),
+            Some(n) => redact_wrapped(s.replace(n.as_str(), REDACTED), n),
             None => s,
         }
     }
+}
+
+/// A terminal wrap can cut the nonce across two lines: a prefix of at least
+/// `MIN_NONCE` chars at the end of a line, or a suffix at its start, is
+/// replaced too.
+fn redact_wrapped(mut s: String, n: &str) -> String {
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| s.ends_with(&n[..k])) {
+        s.truncate(s.len() - k);
+        s.push_str(REDACTED);
+    }
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| s.starts_with(&n[n.len() - k..])) {
+        s.replace_range(..k, REDACTED);
+    }
+    s
 }
 
 /// Drop the CSI sequences `ansi::sanitize` keeps (SGR, cursor) and format

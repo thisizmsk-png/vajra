@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// Synthetic load producer for tests and memory measurement (t8). Compiled
@@ -208,10 +208,7 @@ pub struct Subscriber {
     q: Arc<SubQueue>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    // A panic elsewhere must not wedge every producer.
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::lock;
 
 fn open_spill(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};

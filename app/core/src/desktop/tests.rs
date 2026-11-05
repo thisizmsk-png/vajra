@@ -49,7 +49,7 @@ fn crew_tails_worker_transcripts_into_streams_and_inspect() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: vec![] })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -81,7 +81,7 @@ fn one_active_run_at_a_time() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: vec![] })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone() });
     let cwd = t.0.to_string_lossy().to_string();
@@ -96,17 +96,6 @@ fn one_active_run_at_a_time() {
     app.sup.kill(&stream).unwrap();
 }
 
-
-#[test]
-fn uuid_is_v4_shaped() {
-    let u = new_uuid().unwrap();
-    let parts: Vec<&str> = u.split('-').collect();
-    assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), [8, 4, 4, 4, 12]);
-    assert!(parts[2].starts_with('4'));
-    assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
-    assert!(control::queue::valid_session_id(&u));
-    assert_eq!(uuid_from_hex("ffffffffffffffffffffffffffffffff"), "ffffffff-ffff-4fff-bfff-ffffffffffff");
-}
 
 #[test]
 fn project_slug_matches_claude_code() {
@@ -304,4 +293,69 @@ fn node_json_is_recursive() {
     assert_eq!(v["kind"], "run");
     assert_eq!(v["children"][0]["kind"], "worker");
     assert_eq!(v["children"][0]["overlays"], json!(["stopped"]));
+}
+
+#[test]
+fn a_spawn_failure_rolls_the_control_session_back() {
+    // B4: start_session ran, then the PTY spawn failed; no session may stay live.
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.to_string_lossy().into_owned();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let argv = vec!["/nonexistent/vajra-no-such-binary".to_string()];
+    let e = app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(argv.clone()), false).unwrap_err();
+    assert_eq!(code(&e), "spawn_failed");
+    assert!(lock(&app.control).nonce().is_none(), "the control session ended with the failed spawn");
+    assert_eq!(app.active_run_count(), 0);
+}
+
+#[test]
+fn an_exited_run_ends_its_control_session() {
+    // B4: once the run's PTY exits, steering must not target its workers.
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.to_string_lossy().into_owned();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    assert!(lock(&app.control).nonce().is_some());
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    app.reap_runs();
+    assert!(lock(&app.control).nonce().is_none(), "end_session ran for the exited run");
+    assert_eq!(app.active_run_count(), 0);
+    assert_eq!(app.active_runs().unwrap()["count"], 0);
+}
+
+#[test]
+fn worker_transcripts_redact_the_rotated_nonce() {
+    // B4 / thermo non-blocking: a transcript tailed before a resume must
+    // redact the nonce the resume rotated to, not only the old one.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+    fs::copy(fx.join("agent-aa870dd40540481f0.meta.json"), sub.join("agent-aa870dd40540481f0.meta.json")).unwrap();
+    let first = fs::read_to_string(fx.join("agent-aa870dd40540481f0.jsonl")).unwrap();
+    let first_line = first.lines().next().unwrap().to_string();
+    fs::write(sub.join("agent-aa870dd40540481f0.jsonl"), format!("{first_line}\n")).unwrap();
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: None }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    lock(&app.control).resume_session().unwrap();
+    let rotated = lock(&app.control).nonce().unwrap().to_string();
+    // The worker now echoes the rotated nonce.
+    let echo = first_line.replace("Run these Bash commands", &format!("steer {rotated} then run these Bash commands"));
+    assert_ne!(echo, first_line);
+    let mut f = fs::OpenOptions::new().append(true).open(sub.join("agent-aa870dd40540481f0.jsonl")).unwrap();
+    std::io::Write::write_all(&mut f, format!("{echo}\n").as_bytes()).unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    let w = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE);
+    assert!(w.lines.iter().any(|l| l.text.contains("[redacted]")), "{:?}", w.lines);
+    assert!(w.lines.iter().all(|l| !l.text.contains(&rotated)), "rotated nonce leaked");
+    app.sup.kill(&stream).unwrap();
 }

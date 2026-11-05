@@ -18,10 +18,9 @@ use super::{fsx, sha256};
 
 pub const SUBDIRS: [&str; 5] = ["queue", "inflight", "stops", "acks", "expired"];
 
-/// `^[A-Za-z0-9-]{8,128}$`, the hook's own check.
-pub fn valid_session_id(s: &str) -> bool {
-    (8..=128).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
+/// One rule for every boundary (a canonical uuid, which the hook's
+/// `^[A-Za-z0-9-]{8,128}$` also accepts).
+pub use crate::ids::valid_session_id;
 
 /// The stop file name for a worker key: the first 16 hex of its SHA-256.
 pub fn stop_name(key: &str) -> String {

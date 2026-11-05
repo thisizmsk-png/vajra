@@ -125,7 +125,7 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, allowed_uid: u32) -> io::R
             Ok(v) => match v.get("tool").and_then(Value::as_str) {
                 Some(tool) => {
                     let args = v.get("args").cloned().unwrap_or(Value::Null);
-                    let mut s = svc.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = crate::lock(svc);
                     match s.call_tool(tool, &args) {
                         Ok(r) => json!({"ok": r}),
                         Err(e) => e.to_json(),

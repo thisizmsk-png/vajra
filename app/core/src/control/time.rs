@@ -12,7 +12,7 @@ pub fn unix_ms(t: SystemTime) -> u64 {
 }
 
 // Howard Hinnant's civil-from-days and days-from-civil.
-fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

@@ -56,14 +56,15 @@ fn codex_run_argv_never_carries_the_nonce() {
 
 #[test]
 fn resume_argv_takes_only_a_uuid() {
-    assert_eq!(
-        adapter_for(Engine::Claude).resume_argv(UUID).unwrap(),
-        ["claude", "--resume", UUID, "/vajra continue"]
-    );
-    assert_eq!(adapter_for(Engine::Codex).resume_argv(UUID).unwrap(), ["codex", "resume", UUID]);
+    // The Claude resume is the live one: the campaign continues through
+    // /vajra-deliver with the rotated nonce (not a bare "/vajra continue").
+    let c = adapter_for(Engine::Claude).resume_argv(UUID, "deliver-20261105-1230", NONCE).unwrap();
+    assert_eq!(&c[..3], ["claude", "--resume", UUID]);
+    assert!(c[3].starts_with("/vajra-deliver ") && c[3].contains(NONCE), "{c:?}");
+    assert_eq!(adapter_for(Engine::Codex).resume_argv(UUID, "c", NONCE).unwrap(), ["codex", "resume", UUID]);
     for bad in ["", "--last", "../x", "1b4e28ba-2fa1-41d2-883f-0016d3cca42Z", "1b4e28ba2fa141d2883f0016d3cca427"] {
-        assert!(adapter_for(Engine::Claude).resume_argv(bad).is_err(), "{bad}");
-        assert!(adapter_for(Engine::Codex).resume_argv(bad).is_err(), "{bad}");
+        assert!(adapter_for(Engine::Claude).resume_argv(bad, "c", NONCE).is_err(), "{bad}");
+        assert!(adapter_for(Engine::Codex).resume_argv(bad, "c", NONCE).is_err(), "{bad}");
     }
 }
 

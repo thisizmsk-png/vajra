@@ -5,8 +5,8 @@
 //! inert bytes inside one element.
 
 use std::fmt;
-use std::io::Read;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::ids;
 
 /// Largest accepted ask, in bytes.
 pub const MAX_ASK_BYTES: usize = 32 * 1024;
@@ -48,30 +48,28 @@ fn bad(field: &'static str, reason: &'static str) -> InvalidInput {
 /// uuid and the current UTC minute as run_id. `steer_nonce` is the caller's
 /// per-session C6 nonce.
 pub fn build_run_argv(input: &RunInput, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let session_id = new_uuid_v4().map_err(|_| bad("session_id", "no randomness available"))?;
-    build_run_argv_at(input, steer_nonce, now, &session_id)
+    let session_id = ids::uuid_v4().map_err(|_| bad("session_id", "no randomness available"))?;
+    build_run_argv_at(input, steer_nonce, ids::unix_now(), &session_id)
 }
 
-/// Deterministic core of `build_run_argv`.
-pub fn build_run_argv_at(
-    input: &RunInput,
-    steer_nonce: &str,
-    unix_secs: u64,
-    session_id: &str,
-) -> Result<Vec<String>, InvalidInput> {
-    if input.ask.trim().is_empty() {
+/// The ask rule every engine shares.
+pub fn check_ask(ask: &str) -> Result<(), InvalidInput> {
+    if ask.trim().is_empty() {
         return Err(bad("ask", "must not be empty"));
     }
-    if input.ask.len() > MAX_ASK_BYTES {
+    if ask.len() > MAX_ASK_BYTES {
         return Err(bad("ask", "is longer than 32 KiB"));
     }
-    if input.ask.contains('\0') {
+    if ask.contains('\0') {
         return Err(bad("ask", "must not contain NUL"));
     }
+    Ok(())
+}
+
+/// Every Start-run field rule, without a nonce or session: run before a
+/// control session is created for the form.
+pub fn validate(input: &RunInput) -> Result<(), InvalidInput> {
+    check_ask(&input.ask)?;
     if !(1..=3).contains(&input.max_rounds) {
         return Err(bad("max_rounds", "must be 1 to 3"));
     }
@@ -81,25 +79,30 @@ pub fn build_run_argv_at(
     if !(1..=16).contains(&input.max_in_flight) {
         return Err(bad("maxInFlight", "must be 1 to 16"));
     }
-    check_nonce(steer_nonce)?;
-    if session_id.len() < 8
-        || !session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return Err(bad("session_id", "must match ^[A-Za-z0-9-]{8,}$"));
-    }
-    let run_id = run_id_at(unix_secs);
-    let campaign = match &input.campaign {
+    match &input.campaign {
         Some(c) if !crate::bus::valid_stream_id(c) => {
-            return Err(bad(
-                "campaign",
-                "must be 1 to 128 of [A-Za-z0-9._-], not starting with a dot",
-            ));
+            Err(bad("campaign", "must be 1 to 128 of [A-Za-z0-9._-], not starting with a dot"))
         }
-        Some(c) => c.clone(),
-        None => format!("deliver-{run_id}"),
-    };
+        _ => Ok(()),
+    }
+}
+
+fn check_session_id(id: &str) -> Result<(), InvalidInput> {
+    if ids::valid_session_id(id) { Ok(()) } else { Err(bad("session_id", "must be a canonical uuid")) }
+}
+
+/// Deterministic core of `build_run_argv`.
+pub fn build_run_argv_at(
+    input: &RunInput,
+    steer_nonce: &str,
+    unix_secs: u64,
+    session_id: &str,
+) -> Result<Vec<String>, InvalidInput> {
+    validate(input)?;
+    check_nonce(steer_nonce)?;
+    check_session_id(session_id)?;
+    let run_id = ids::run_id_at(unix_secs);
+    let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
 
     let mut json = String::with_capacity(input.ask.len() + 256);
     json.push_str("{\"ask\":");
@@ -150,9 +153,7 @@ fn check_nonce(n: &str) -> Result<(), InvalidInput> {
 /// `/vajra-deliver {campaign}` (what `/vajra continue` runs) with the rotated
 /// nonce, so new worker briefs carry the nonce the hook now uses.
 pub fn build_resume_argv(session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
-    if session_id.len() < 8 || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return Err(bad("session_id", "must match ^[A-Za-z0-9-]{8,}$"));
-    }
+    check_session_id(session_id)?;
     if !crate::bus::valid_stream_id(campaign) {
         return Err(bad("campaign", "must be 1 to 128 of [A-Za-z0-9._-], not starting with a dot"));
     }
@@ -167,6 +168,9 @@ pub fn build_resume_argv(session_id: &str, campaign: &str, steer_nonce: &str) ->
     Ok(vec!["claude".into(), "--resume".into(), session_id.into(), format!("/vajra-deliver {json}")])
 }
 
+/// JSON string escaping for the slash-command argument. Not serde_json: it
+/// sorts keys (the argv tests pin the field order) and leaves U+2028/2029 raw,
+/// which older JS parsers read as line breaks.
 fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
@@ -187,37 +191,7 @@ fn push_json_str(out: &mut String, s: &str) {
 }
 
 /// UTC `YYYYMMDD-HHMM` for a unix time.
-pub fn run_id_at(unix_secs: u64) -> String {
-    let days = (unix_secs / 86_400) as i64;
-    let rem = unix_secs % 86_400;
-    // Howard Hinnant's civil_from_days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}", rem / 3600, rem % 3600 / 60)
-}
-
-fn new_uuid_v4() -> std::io::Result<String> {
-    let mut b = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    Ok(format!(
-        "{}-{}-{}-{}-{}",
-        &h[..8],
-        &h[8..12],
-        &h[12..16],
-        &h[16..20],
-        &h[20..]
-    ))
-}
+pub use crate::ids::run_id_at;
 
 #[cfg(test)]
 #[path = "argv_tests.rs"]
