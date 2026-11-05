@@ -202,6 +202,40 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-6.2.2 GIVEN search exits 0 with no output, WHEN shown, THEN the UI says "no results"; a non-zero exit says "knowledge search unavailable" with the exit code.
 - AC-6.2.3 GIVEN search, WHEN it runs, THEN the app never writes to the ledger (no `add` calls).
 
+### J7 Project memory (owner feature, 2026-11-05)
+
+Built only on what Vajra already has (ADR-12): the knowledge ledger (`docs/commands/kb.md`) for rules,
+lessons, decisions and pitfalls, Atman (`docs/commands/atman.md`) for learned routes, and native auto memory
+for preferences (`memory/tiered-memory.md`). There is no second memory store. In the UI a **rule** is an
+approved ledger record (any type) or an approved route; "applied" means primed into a matching session as
+`<untrusted-data source="vajra-kb">`, where it is data and never executed.
+
+**US-7.1** As a Dev, I want a Memory inbox of everything the system proposes to learn, with the evidence, so that only what I approve shapes later runs.
+- AC-7.1.1 GIVEN pending ledger proposals (`vajra_kb.py pending --json`) and Atman proposals (`atman.sh review`), WHEN I open Memory, THEN one inbox lists each with its type (rule, lesson, decision, pitfall, route), title, body, requested scope and applies, and its trigger: which run and session, and which failure, fix round, verify pattern or repeated redirect produced it, linked to that run's evidence.
+- AC-7.1.2 GIVEN a proposal, WHEN it renders, THEN its title, body, paths and evidence are shown as plain text only (no markdown, links, HTML or ANSI), control, bidi and zero-width characters are shown visibly, the body is capped at the ledger's 2,000 characters, and nothing in it is ever executed or turned into an action.
+- AC-7.1.3 GIVEN a proposal that requests `always`, global scope or a broad path glob (`**`), WHEN I open Approve, THEN the request is shown as "requested by the agent", the selected default is the narrowest one (this project, the proposal's own paths, `on_topic`), and widening needs an explicit choice by me; the requested value is never preselected.
+- AC-7.1.4 GIVEN I choose Approve, Approve always, Edit then approve, Reject or Forget, WHEN I confirm, THEN the app asks for my macOS owner authentication (Touch ID, or the login password) naming the action, the record id and the final scope, and only after it succeeds writes a single-use approval for exactly that record, its sha256 and that scope (ADR-12); Reject asks for a plain confirm only.
+- AC-7.1.5 GIVEN Edit then approve, WHEN I change title, body or paths, THEN the edited text goes through the ledger's write gate again (secrets, injection, caps) and a refusal shows its reason; the record keeps its original provenance and is marked "edited by you".
+- AC-7.1.6 GIVEN an approval was written, WHEN the pending record on disk changes before the engine applies it (sha256 differs) or the approval is older than 5 minutes or already used, THEN the engine refuses it, nothing is approved, and the inbox shows "proposal changed; review again".
+- AC-7.1.7 GIVEN engine change E9 is absent or the sandbox `denyWrite` for the app data dir is off, WHEN I choose any approval action, THEN the app shows the exact `atman.sh` or `vajra_kb.py` command to run in my own terminal (POS-3.1) and writes no approval.
+
+**US-7.2** As a Dev, I want to see the rules that apply, where and when they were last used, so that I can retire stale ones.
+- AC-7.2.1 GIVEN approved records and routes, WHEN I open Rules, THEN they are grouped by scope (this project, path glob; global only for records the ledger stores in `global`) and show type, tier (you, verified, approved proposal), applies, when last applied and in which run (E10), and who approved it and when.
+- AC-7.2.2 GIVEN a rule, WHEN I choose Retire or Supersede (picking the newer record), THEN it goes through the same human approval as AC-7.1.4 and the engine command `retire` or `supersede`; the old record stays in history, nothing is deleted.
+- AC-7.2.3 GIVEN a rule that was not applied in 90 days or whose paths match nothing in the repo, WHEN Rules renders, THEN it is marked stale, as the ledger's `gc` reports it.
+
+**US-7.3** As a Dev, I want one local search across what the project learned and did, so that I find the decision or proof behind something.
+- AC-7.3.1 GIVEN a query, WHEN I search, THEN results come from the ledger (`vajra_kb.py search`, AC-6.2.1), campaign reports (`report.md`, E4, or the captured copy) and archived delivery evidence (E7: criterion ids, commands and log excerpts), each labelled with its source and run, all on this Mac with no network.
+- AC-7.3.2 GIVEN a running or finished session, WHEN I open "What primed this session", THEN the records the ledger primed or returned for it are listed with ids and tiers (E10); before E10 lands, the panel says "not recorded".
+- AC-7.3.3 GIVEN search over 1,000 reports and 10,000 records, WHEN it runs, THEN first results show within 500 ms p95 and the scan never blocks the UI (NFR-UX-1); the app keeps no database of its own (ADR-7).
+
+**US-7.4** As a Dev, I want the system to notice what I keep correcting and propose it, so that I stop repeating myself.
+- AC-7.4.1 GIVEN a delivery whose fix round fixed a failing criterion, WHEN write-back runs, THEN the lesson the workflow records today (`--source proposed`) appears in the inbox with that criterion and fix round as its trigger.
+- AC-7.4.2 GIVEN the same verify failure pattern (same criterion command and error class) in 2 or more runs, WHEN Atman runs `propose`, THEN one pitfall or route proposal appears with both runs as evidence.
+- AC-7.4.3 GIVEN I sent a redirect with the same intent to workers in 2 different runs, WHEN Atman reads the app's control ledger (E11), THEN one rule proposal appears quoting both redirects as evidence; it is never applied until I approve it.
+- AC-7.4.4 GIVEN any trigger, WHEN it produces something, THEN it is a proposal only: nothing is added to `prime`, `search` or `learned-routes.json` before AC-7.1.4.
+- AC-7.4.5 (post-MVP) GIVEN I correct the agent the same way in my own prompts 3 or more times, WHEN Atman sees it, THEN it proposes a rule. Deferred: it needs prompt text, which Atman does not read today (privacy review first).
+
 ### Positioning requirements (POS)
 
 From `positioning.md` (vajra-5, FINAL, 2026-11-05). They make the surviving reasons testable (1 proof per
@@ -304,9 +338,10 @@ a reason at why 4, since native agent view already does it, P23)
 
 **POS-R3 Knowledge is earned and visible** (reason 2, weak)
 - POS-3.1 GIVEN a run that used ledger records, WHEN I open it, THEN it lists each record with its tier and
-  source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app shows the exact
-  `vajra_kb.py` command with a Copy button to run in my own terminal, and never runs, types or sends it into
-  any PTY (SECURITY.md: a process that owns a PTY can pass a TTY check).
+  source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app never runs, types or sends
+  them into any PTY (SECURITY.md: a process that owns a PTY can pass a TTY check). Without E9 it shows the
+  exact command with a Copy button for my own terminal; with E9 it uses the owner-authenticated approval of
+  US-7.1 (ADR-12).
 - POS-3.2 GIVEN the knowledge write gate refused a record during a run, WHEN I open the run, THEN the refusal
   (reason, no refused text) shows in the run's activity, read from the ledger's `audit.jsonl`.
 - POS-3.3 (measurement) GIVEN the same class of task run twice in one repo, WHEN run with and without the
@@ -414,6 +449,7 @@ IDs keep their earlier meaning, so references elsewhere still hold.
 - NFR-SEC-14 (STRIDE E1): the Tauri command surface is a fixed, documented list; no command takes an executable path, a shell string or an arbitrary filesystem path; each validates its arguments and the calling window.
 - NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
 - NFR-SEC-16 (owner decision, billing.md): the app never reads, stores, proxies or offers credentials or a claude.ai login (no access to Claude Code's credential files, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`); it launches only the stock binaries under the user's own login, and never pays for, resells or proxies model usage.
+- NFR-SEC-17 (memory, owner feature): approving, edit-approving, widening, retiring and forgetting memory are human-only. No agent, Lead chat, control message, hook or MCP tool can do them: the app exposes no MCP tool or IPC command for them that agent output can reach, and the only app path is a native sheet gated by macOS owner authentication (LocalAuthentication), which writes a single-use approval bound to the record's sha256 and the chosen scope into the write-protected app data dir (E2, and the sandbox `denyWrite` of E8). Every approval, rejection, retirement and forget is logged in the ledger's `audit.jsonl`, the app's ledger and `~/.claude/vajra/audit.log` (ids and hashes only, never record text).
 - NFR-SEC-8: control messages are never approval for protected actions.
 
 Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "Any worker in a /vajra run" is claimed only after G3b passes inside `vajra-deliver` (POS-5.5).
@@ -474,6 +510,10 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 | US-5.3 | AC-5.3.1 .. 5.3.3 | SEC-4, OBS-2 |
 | US-6.1 | AC-6.1.1 .. 6.1.3 | SEC-2, A11Y-2 |
 | US-6.2 | AC-6.2.1 .. 6.2.3 | SEC-4, SEC-6 |
+| US-7.1 | AC-7.1.1 .. 7.1.7 | SEC-3, SEC-17, OBS-2 |
+| US-7.2 | AC-7.2.1 .. 7.2.3 | SEC-17 |
+| US-7.3 | AC-7.3.1 .. 7.3.3 | SEC-6, UX-1 |
+| US-7.4 | AC-7.4.1 .. 7.4.5 | SEC-17 |
 
 Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole app and are verified in the benchmark and release checklists, not per story.
 
@@ -491,7 +531,7 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 
 ## 7a. Pain points from user research
 
-Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 27 rows MVP, 5 deferred, 7 won't do (P11 moved to MVP by the vajra-4 top-up) (P21 moved to MVP by owner decision) (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
+Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 28 rows MVP, 5 deferred, 7 won't do (P11 moved to MVP by the vajra-4 top-up) (P21 moved to MVP by owner decision) (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
 
 | Pain point | Requirement (vajra-4 id) | Decision | Where in this spec | Task |
 |---|---|---|---|---|
@@ -521,6 +561,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) | none |
 | P13 terminal fidelity | VD-23 proven terminal core, latency gate | MVP | xterm.js (G2); NFR-PERF-11; AC-2.2.6 | K3, H1 |
 | P14 notification noise | VD-24 notify on needs-you and finished runs only | MVP | AC-5.1.5. The ntfy webhook: deferred | S5 |
+| P15 lost context (9 sources) | Project memory that learns with human approval, on the existing ledger and Atman (owner feature) | MVP (inbox, approve, rules, search); claude-mem import later | US-7.1 to US-7.4, ADR-12, ADR-13 | S7, C9, E9, E10, E11 |
 | P15 lost context | VD-25 context meter and handoff | Deferred | Vajra's knowledge ledger and campaigns carry context across runs (POS-R3) | none |
 | P15 | VD-26 zero-cost hooks | MVP | AC-3.2.6, NFR-PERF-8 | E1 |
 | P16 silent config edits | VD-27 never edit config without consent | MVP | AC-1.3.5, AC-1.1.3; engine changes install through Vajra's own installer, run by the human | S1 |
@@ -558,6 +599,13 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | F1 forged steer with a leaked nonce (steering threat model) | Mitigated, residual stated | design 5.3 trust model; nonce read blocks (E2); nonce-echo block | AC-3.2.9, AC-3.2.11, AC-3.4.6 |
 | F2 stop dodged through handback then SendMessage | Fixed | stop cleared only by a human | AC-3.3.5, AC-3.3.6 |
 | F4 the tracer hook logs full payloads | Fixed | the shipped E1 logs ids and tool names only; tracer scripts never ship | AC-3.2.7 (`no_nonce_in_outputs`) |
+| STRIDE M-S memory: an agent forges an approval file | Adopted | approvals live in the app data dir, write-protected by the guard (E2) and the sandbox (E8); E9 refuses approvals when `denyWrite` is off | AC-7.1.7, NFR-SEC-17 |
+| STRIDE M-T memory: pending record swapped after approval | Adopted | approval bound to the record sha256, single use, 5 min | AC-7.1.6 |
+| STRIDE M-R memory: "I never approved that" | Adopted | owner authentication plus three audit logs | AC-7.1.4, NFR-SEC-17 |
+| STRIDE M-I memory: secrets learned into a rule | Adopted | the ledger write gate on proposals and on edited text | AC-7.1.5 |
+| STRIDE M-D memory: proposal flood | Adopted | inbox shows the newest 200 with a count; Atman `pause` | AC-7.1.1 |
+| STRIDE M-E memory: an injected proposal grants itself `always` or global scope | Adopted | requested scope never preselected; `applies` comes only from the human (as `vajra_kb.py approve` already does) | AC-7.1.3 |
+| STRIDE M-E2 memory: synthetic clicks drive the approve sheet (osascript, Accessibility) | Adopted | owner authentication is required per approval; a click alone approves nothing | AC-7.1.4 |
 | STRIDE S1 socket spoofing | Adopted | NFR-SEC-10 | NFR-SEC-10 |
 | STRIDE S2 forged inbox item | Adopted | AC-5.1.6 | AC-5.1.6 |
 | STRIDE T1 agents edit app data | Adopted | E2 protects the whole app data dir | E2 tests |
@@ -612,6 +660,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
 5. Q13: approve engine change E7 (archived evidence bundle and setup list). Blocks slice 1.
-6. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
+6. Q14: approve engine change E9 (an app-side, human-only approval path for kb and Atman, ADR-12). Without it, Memory approval stays a copied command.
+7. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
 
 Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
