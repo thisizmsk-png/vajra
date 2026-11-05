@@ -47,9 +47,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.1.2 GIVEN the ask field is empty or max rounds is outside 1..3, WHEN I press "Start run", THEN the button is disabled or an inline error names the field, and no process is spawned.
 - AC-1.1.3 GIVEN any run start, WHEN it completes or fails, THEN no file under `~/.claude` was created or modified by the app itself; changes there come only from Claude Code and Vajra's own scripts (verified by a filesystem-event diff over `~/.claude` attributing writes by process).
 - AC-1.1.4 GIVEN the advanced section, WHEN I set maxInFlight outside 1..16, THEN the value is rejected with an inline message; a valid value is passed as `maxInFlight`.
-- AC-1.1.5 (P24, billing.md) GIVEN 10 `claude` sessions started together, WHEN they run, THEN each is the stock binary handling its own login; the app never reads, copies, refreshes or shares tokens (no access to `~/.claude/.credentials*`, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`, checked by an fs and process trace), and sessions start at least 2 s apart so the binary's own refresh isn't raced.
-- AC-1.1.6 (billing.md) GIVEN any agent row, WHEN it is shown, THEN it reads its billing source as "plan login" or "API key" (Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper` present in that session's environment or settings; Codex: `codex login status`), API key wins when both apply, and the app learns only presence, never a value.
-- AC-1.1.7 (billing.md) GIVEN any launch, WHEN argv and the child environment are inspected, THEN the binary is the user's stock `claude` or `codex`, run in a PTY, with no `--bare`, no `-p`, no Agent SDK and no `ANTHROPIC_BASE_URL` added by the app; a stray API key inherited from my shell is shown in preflight before the first start, not silently passed on.
+- AC-1.1.5 (P24, billing.md) GIVEN 10 `claude` sessions requested together, WHEN they run, THEN each is the stock binary handling its own login; the app never reads, copies, refreshes or shares tokens (no access by the app's own process to `~/.claude/.credentials*`, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`, checked by an fs and process trace; the stock `claude` and `codex` children, including `codex login status`, are the named exceptions), and sessions start at least 2 s apart, a mitigation for refresh races at start; later refreshes stay the binary's own concern.
+- AC-1.1.6 (billing.md) GIVEN any agent row, WHEN it is shown, THEN it reads its billing source as "plan login" or "API key" (Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `apiKeyHelper` present in that session's environment or settings; Codex: `codex login status`), API key wins when both apply, and the app learns only presence, never a value: settings files are parsed for key names and values are dropped at parse time. Test: a canary key value in the environment and in a settings `env` block never appears in app logs, IPC payloads or a heap dump.
+- AC-1.1.7 (billing.md) GIVEN any launch, WHEN argv and the child environment are inspected, THEN the binary is the user's stock `claude` or `codex`, run in a PTY, with no `--bare`, no `-p`, no Agent SDK and no `ANTHROPIC_BASE_URL` added by the app; a stray API key inherited from my shell is shown in preflight before the first start, and it is passed to agent children only after I acknowledge it once for that repo (that acknowledgement is API-key mode); otherwise it is removed from the child environment.
 
 **US-1.2** As a Dev, I want to resume a campaign, so that I continue unfinished work (by campaign slug through `/vajra-deliver {"campaign":"<slug>"}`, never `/vajra continue`, ADR-9).
 - AC-1.2.1 GIVEN the campaign list shows campaigns found under `~/.claude/vajra/campaigns/`, WHEN I choose one and press "Resume", THEN the app runs `vajra-campaign.sh verify <slug>` first and, on exit 0, launches the run session with `campaign: <slug>` and a fresh `run_id`.
@@ -84,9 +84,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-2.1.3 GIVEN an agent id not in the mapping, WHEN it is rendered, THEN it shows the id title-cased, and no mahabharat name appears anywhere in the UI except the inspector's "engine id" field.
 - AC-2.1.4 (VD-1) GIVEN a run with 10 workers, WHEN the crew view is open, THEN the status bar shows the app's own memory and the run node shows the memory of its `claude` process tree, labelled separately; the app never shows one combined number. (Workers are subagents inside one `claude` process, so per-worker memory is not available and is not invented.)
 - AC-2.1.5 (VD-8) GIVEN a worker the app has no signal source for (no transcript found, no task-graph entry, no hook event yet) while its run's `claude` process is alive, WHEN its row renders, THEN its status reads "Unknown (no signal)", never Idle, Done, Exited or Thinking.
+- AC-2.1.6 (VD-11) GIVEN the run's transcript records a usage-limit stop, WHEN the run node renders, THEN it shows "Rate-limited until HH:MM" (or "Rate-limited" when no time is given), not Idle or Stuck, and the inbox lists it once as "Paused by usage limit". Detection is to verify in the M2 smoke run; until then the state is Unknown.
 - AC-2.1.7 (P4 stall detector, 11 sources) GIVEN a worker whose transcript is being tailed, WHEN it produces no new output and no tool call for N seconds (default 90, settable 30 to 600) while its process is alive and it isn't waiting on a permission prompt, THEN its row reads "Stalled 3m 12s" with its last output line (sanitized, one line) and the time of its last tool call, never "Thinking"; any new record clears it at once, and a stall longer than 5 minutes also appears in the needs-you inbox. Status comes only from `tasks.json`, transcript records and hook events, never from parsing terminal text.
 - AC-2.1.8 (VD-19, P11, 9 sources) GIVEN worktrees left by runs, WHEN I open the worktree list, THEN each shows how its session ended (done, crashed or abandoned), its age and disk size, and retention follows the end state, not age alone: done is removed by the engine's cleanup as today; crashed is kept for resume and flagged after 7 days; abandoned (no live session, not resumable, untouched for 14 days) is offered for cleanup. Nothing is removed without my confirm, and a worktree with tracked changes or unpushed commits is never offered for removal.
-- AC-2.1.6 (VD-11) GIVEN the run's transcript records a usage-limit stop, WHEN the run node renders, THEN it shows "Rate-limited until HH:MM" (or "Rate-limited" when no time is given), not Idle or Stuck, and the inbox lists it once as "Paused by usage limit". Detection is to verify in the M2 smoke run; until then the state is Unknown.
 
 **US-2.2** As a Dev, I want a worker's live stream, so that I can read what it is doing.
 - AC-2.2.1 GIVEN a worker node is selected, WHEN the Stream tab is shown, THEN lines from its transcript appear within 1 s of being written, rendered as plain text (no HTML, no escape sequences executed).
@@ -142,14 +142,14 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.4.2 GIVEN the Lead is unavailable or its session has ended, WHEN I use the worker's Message, Redirect and Stop controls, THEN each works without the Lead.
 - AC-3.4.3 GIVEN a reconciliation script compares ledger action ids to `audit.log`, WHEN run after a session, THEN zero ledger entries lack an audit line and zero control audit lines lack a ledger entry.
 - AC-3.4.4 GIVEN the control queue directory, WHEN a worker tries to write to it, THEN the guard blocks it and `audit.log` records BLOCK.
+- AC-3.4.5 (STRIDE R1) GIVEN any human action (approve, reject, take over, re-run, resume worker, clear stop), WHEN it happens, THEN the control ledger has one record with the actor, the exact target and the time.
 - AC-3.4.6 (GPT-3) GIVEN a worker tool call (payload has `agent_id`), WHEN it reads `VajraDesktop/control/<sid>/nonce` or any path under `~/.claude/projects/` through Read, Grep, Glob, LS, read-only Bash (`cat`, `head`, `python3 -c`), a symlink or a recursive Grep over an ancestor, THEN the guard blocks it and `audit.log` records BLOCK; the same reads from the main session or the Lead chat (no `agent_id`) are allowed.
 - AC-3.4.7 (GPT-3) GIVEN a worker, WHEN it tries to write anywhere under `~/Library/Application Support/VajraDesktop/` with Write, Edit, `mv`, `rm`, `cp`, `tee` or a redirect (path with a space), THEN the guard blocks it.
-- AC-3.4.9 (Q10) GIVEN the OS sandbox on with Vajra's profile applied, WHEN an agent writes to `VajraDesktop/control/` through a path the guard doesn't see (a fixture that bypasses the guard, run only in the test harness), THEN the OS denies the write and the queue is unchanged; with the sandbox off, the same fixture shows the guard as the only layer and control is stop-only (AC-3.4.8).
-- AC-3.4.10 (Q10, VD-27) GIVEN first-run setup or `enable-sandbox.sh`, WHEN the user enables the sandbox, THEN the exact settings change (including the `denyWrite` entry) is shown and applied only after the user approves it, and `vajra-doctor.sh` then reports the rule as active.
 - AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "stop only (sandbox off)", and message and redirect, from the UI,
   the Lead or MCP, return `control_disabled: sandbox_off` with nothing queued, while stop still works (Q10
   working assumption; test with the sandbox off and on). Every existing guard test still passes (CI).
-- AC-3.4.5 (STRIDE R1) GIVEN any human action (approve, reject, take over, re-run, resume worker, clear stop), WHEN it happens, THEN the control ledger has one record with the actor, the exact target and the time.
+- AC-3.4.9 (Q10) GIVEN the OS sandbox on with Vajra's profile applied, WHEN an agent writes to `VajraDesktop/control/` through a path the guard doesn't see (a fixture that bypasses the guard, run only in the test harness), THEN the OS denies the write and the queue is unchanged; with the sandbox off, the same fixture shows the guard as the only layer and control is stop-only (AC-3.4.8).
+- AC-3.4.10 (Q10, VD-27) GIVEN first-run setup or `enable-sandbox.sh`, WHEN the user enables the sandbox, THEN the exact settings change (including the `denyWrite` entry) is shown and applied only after the user approves it, and `vajra-doctor.sh` then reports the rule as active.
 
 ### J4 Run view
 
@@ -235,6 +235,12 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   300 characters is shown and replayed byte for byte; a setup entry that write-back filtered out (a path
   outside the repo) is neither shown nor run. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
+  Re-run runs as the user, outside Claude Code's guard and sandbox, so: the child gets an environment
+  allowlist (`PATH`, `HOME`, `LANG`, `TMPDIR` and the repo's own `.env`-free defaults; no API keys, tokens,
+  `SSH_AUTH_SOCK` or cloud credentials); the confirm renders control, bidi and zero-width characters
+  visibly (for example `<U+202E>`) and says "these run as you, outside the sandbox, and may run package
+  install scripts". Tests: a setup command with a bidi override shows it in the confirm; a check that prints
+  `env` shows none of the denied variables.
 - POS-1.3 (GPT-4) Two separate answers per criterion, never merged into one green:
   - **Proof at the recorded commit:** "verified" when E3 (`vajra_tasks.py check-evidence --head <recorded
     head>`) is green, and "unverified" when the HMAC or any green rule fails. The app never reads the key.
@@ -279,7 +285,7 @@ a reason at why 4, since native agent view already does it, P23)
 - POS-2.1f (PM-8) GIVEN the app is killed at 50 random points during a 2-worker fixture run, WHEN it relaunches,
   THEN the startup cleanup barrier (design ADR-9 6b') runs before any resume is offered and ends within
   20 s; no process in the runs' recorded process groups survives it; any escaped descendant (cwd inside a
-  run worktree) is listed and blocks that campaign's resume until I confirm its kill; and every campaign then
+  run worktree) is listed and blocks that campaign's resume until I confirm its kill or choose "Keep and resume anyway"; and every campaign then
   either verifies or offers its checkpoint restore (`vajra-campaign.sh resume`). The fixture includes a
   child that calls `setsid` to leave the group.
 - Deferred to v1.1 (ADR-9): runs that keep going through a quit or SIGKILL of the app (VD-4).
@@ -524,7 +530,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 | C1 |
 | P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 | G2 |
 | P21 lock-in | VD-33 agent-agnostic launch | MVP, narrowed (owner decision, 2026-11-05) | One adapter interface; Claude Code full, Codex CLI with honest capability flags; Gemini CLI and OpenCode post-MVP; no plugin system: US-1.5 | C7 |
-| P24 parallel sessions race on one OAuth login (Runner, Paseo; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C3 |
+| P24 parallel sessions race on one OAuth login (Runner, Paseo; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C7 |
 | P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 | none |
 | P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) | PRD rule |
 
@@ -539,7 +545,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | B3 Control not proven through the Workflow tool | Fixed: validation gate G3b after E1 and E5, before C6 (no cycle) | tasks.md G3b; fallback stop-only (ADR-2) | G3b done-when |
 | S1 voter: a stopped worker could still report done | Fixed | design 5.4 step 4 (only status blocked passes) | AC-3.3.4 |
 | S2 voter: the verification gate was steerable | Fixed | design 5.4 step 5b, E5 (task briefs only) | AC-3.2.2 |
-| S3 voter / M3: queue protection rests on guard regexes | Spec fixed, owner decision | design 5.4 E2 scope; sandbox denyWrite is Q10 | E2 tests |
+| S3 voter / M3: queue protection rests on guard regexes | Spec fixed, owner decision | design 5.4 E2 scope; sandbox denyWrite approved (Q10, E8) | E2 tests |
 | F3 Lead text labelled human | Fixed | source from actor: human or lead-via-desktop | AC-3.2.2 |
 | H1 design section 9 had stale budgets | Fixed | pointer to NFR-PERF-1 to 11; 256 KiB tail | NFR-PERF-2 |
 | M1 D1 to D3 and 5.9 still say to verify | Fixed | tasks.md G3; design 5.9 note | G3 |
@@ -594,7 +600,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | PR: campaign-specific resume in POS-2.1b | Fixed | f7d84c1, 148c9f0 | POS-2.1b, POS-2.1e |
 | PR: crash cleanup before "no process survives" | Fixed: startup cleanup barrier (ADR-9 6b') | f7d84c1 | POS-2.1f |
 | PR: materialize the evidence tree before Re-run | Fixed: apply `diff.patch`, require the signed tree id, else refuse | f7d84c1 | POS-1.2 |
-| PR: sandbox-off messaging policy inconsistent | Fixed: sandbox off means stop-only (Q10 working assumption) | f7d84c1 | AC-3.4.8 |
+| PR: sandbox-off messaging policy inconsistent | Fixed: sandbox off means stop-only (kept after Q10 was approved, for users who leave the sandbox off) | f7d84c1 | AC-3.4.8 |
 | PR: preserve the verification bundle before cleanup | Fixed: engine change E7 archives it with a signed manifest; E3 `--archived` | 6fa24c1 | POS-1.2 |
 | PR: lossless executed setup list | Fixed: `setup.json` holds the exact executed `setupCmds`; report lines and raw `setup_cmds` are never sources | 6fa24c1 | POS-1.2 |
 
@@ -603,8 +609,8 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 1. Confirm A1..A9 (especially A3 transcript streams and A5 hook identification, which the spike must prove).
 2. Decide whether Vajra should persist delivery reports in the campaign (A8).
 3. Decide whether renaming engine agents is wanted later (A2).
-4. Q10: apply the sandbox `denyWrite` for the control dir (still open).
-5. Q13: approve engine change E7 (archived evidence bundle and setup list).
+4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
+5. Q13: approve engine change E7 (archived evidence bundle and setup list). Blocks slice 1.
 6. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
 
 Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).

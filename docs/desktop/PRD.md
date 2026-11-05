@@ -50,7 +50,7 @@ required:
 |---|---|---|
 | 0 to 20 s | A finished delivery: 5 criteria, 4 pass, 1 fails. Open the failing one: command, exit 1, output, diff, "verified by Verifier, written by Backend". Re-run it live; edit a file (even without committing) and the evidence turns stale | POS-1.1 to 1.3 |
 | 20 to 35 s | Start `/vajra add CSV export` in a plain terminal; the open app picks it up live. Close the window; the run keeps going. Reopen; it reattaches | POS-2.1, 2.2 |
-| 35 to 50 s | Message a worker from the Lead chat: it arrives through the hook, acked, labelled "from Lead". Stop blocks its next tool call | POS-5.1 to 5.3 |
+| 35 to 50 s | Message a worker from the Lead chat: it arrives through the hook, acked, labelled "from Lead". Stop blocks its next tool call | POS-5.1 to 5.3, and POS-5.5 for a `/vajra` delivery worker (until then the beat uses an Agent-tool subagent) |
 | 50 to 60 s | A second run in the same repo shows "2 knowledge records used", each with its source run and tier, and a reject action | POS-3.1 |
 
 **Ideal first user** (inference, to confirm): a senior developer already paying for Claude Code, running 3
@@ -83,7 +83,7 @@ report (`docs/commands/deliver.md`). Today all of that is one terminal:
   something, or stop one, without affecting the run.
 - **Evidence and approvals are buried.** Pass/fail evidence per criterion and the push/PR plans waiting for
   approval live in a markdown report and signed JSON files. Nothing lists what is waiting for you.
-- **Resuming is manual.** `/vajra continue` works, but finding which campaign is stuck, and why, means
+- **Resuming is manual.** `/vajra continue` works in the CLI, but finding which campaign is stuck, and why, means
   reading `progress.md` files by hand.
 
 The desktop orchestrators that exist (section 7) are mostly fleet dashboards: many independent agents,
@@ -398,6 +398,6 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q7 | Telemetry: none, or opt-in crash reports only | Opt-in crash reports only |
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | **Decided** (see the decision log): shipped by default, applied when the user enables the sandbox; with the sandbox off, control stays stop-only |
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
-| Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | Yes, additive; under Security review |
+| Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | Yes, additive; under Security review. **Blocks slice 1 (private beta)** |
 | Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Launch blocker.** Until answered, launch copy recommends API keys for large crews |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |

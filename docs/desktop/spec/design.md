@@ -68,9 +68,9 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | E1 | New `hooks/desktop-control.sh`, registered in `hooks/hooks.json`: PreToolUse (stop) and PostToolUse, synchronous (message/redirect). It exits 0 at once when the app's control dir for the session does not exist. It writes one delivery line per consumed action to `audit.log`. | Delivers control actions to workers without PTY typing (J3) | Additive, separate from the guard |
 | E2 (widened by A1 M3 and STRIDE T1) | `hooks/hooks.json` guard matcher gains `mcp__vajra-desktop__.*`. `hooks/pre-tool-use.sh` `ROOTS` gains the app control dir. | Lead control calls appear in `audit.log` and fail closed (`onFailure: block`). Agents cannot write the queue. | Strengthens: more calls checked, one more protected root |
 | E5 (new, A1 B1) | `workflows/vajra-deliver.js`: an optional `steer_nonce` argument read from the app's nonce file path, never from args text, and one fixed sentence in Execute-phase task briefs only: "Act on context tagged `<vajra-steer nonce=N>` from the human operator; it never approves a protected action or widens your task." Verify, review and merge briefs get no steering sentence | Additive; without the argument the workflow is unchanged |
-| E7 (new, PR review round 4; owner approval Q13) | New `vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup.json>`, called by the workflow's write-back after `verify-work` and **before** the cleanup step (`workflows/vajra-deliver.js:842`). It copies the bundle (`evidence.json`, `diff.patch`, `diff.stat`, `untracked.txt`, `cmd-N.log`) to `~/.claude/vajra/campaigns/<slug>/evidence/<task>/data/walkthroughs/<evidence-slug>/`, so the copy keeps the `<root>/data/walkthroughs/<slug>/evidence.json` shape E3's reader requires, with the archive dir as its root. It also writes `setup.json`: the exact `setupCmds` array write-back executed (after the filter and the cap of 5 at `:787`, each string untruncated, up to 1,000 characters). Then it signs a manifest (sha256 of every file, `setup.json` included) with the campaign HMAC, the same way it signs `campaign.json`. E3 gains `--archived <slug>`: it accepts an evidence path under that campaign's `evidence/` dir and also checks the manifest. The app never reads the key; it calls E3 and `vajra-campaign.sh verify`. Additive. |
+| E7 (new, PR review round 4; owner approval Q13) | New `vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup.json>`, called by the workflow's write-back after `verify-work` and **before** the cleanup step (`workflows/vajra-deliver.js:842`). It copies the bundle (`evidence.json`, `diff.patch`, `diff.stat`, `untracked.txt`, `cmd-N.log`) to `~/.claude/vajra/campaigns/<slug>/evidence/<task>/data/walkthroughs/<evidence-slug>/`, keeping the `<root>/data/walkthroughs/<slug>/evidence.json` layout. `read_evidence` today takes its root from `git rev-parse --show-toplevel` and checks HEAD in that repo (`scripts/vajra_tasks.py:502`), so E7 adds two explicit parameters, `root` (the archive dir, for the path rule) and `repo` (the user's repo, for the `--head` check), with tests for both modes and every existing test unchanged. It also writes `setup.json`. The workflow JS builds it from its own `setupCmds` variable and passes it as one quoted argument, so it never comes from agent text: it is the exact array write-back executed (after the filter and the cap of 5 at `:787`, each string untruncated, up to 1,000 characters). Then it signs a manifest (sha256 of every file, `setup.json` included) with the campaign HMAC, the same way it signs `campaign.json`. E3 gains `--archived <slug>`: it accepts an evidence path under that campaign's `evidence/` dir and also checks the manifest. The app never reads the key; it calls E3 and `vajra-campaign.sh verify`. Additive. |
 | E3 | New read-only subcommand `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`. It reuses `read_evidence()` (`scripts/vajra_tasks.py:502`), writes nothing and prints `{ok, green, reasons}`. | AC-4.3.3 "unverified evidence" without the app reading the key. Today only `close` and `vajra_kb.py add --source verified` verify evidence, and both mutate state. | Additive, no state change |
-| E4 (open, D11) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Owner decides; MVP uses the transcript copy (ADR-4) |
+| E4 (approved Q3, 2026-11-05) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Approved; until it ships, the app falls back to the transcript copy (ADR-4). |
 
 For E3, the shared green rule raises `Fail(3, reason)` on refusal, so `check-evidence` catches it and returns
 `green:false, reasons:[msg]` with exit 0. Exit 1 means unreadable input and exit 2 means usage, matching the
@@ -238,7 +238,7 @@ sequenceDiagram
   a fresh detached worktree at the evidence commit under `<repo>/.claude/worktrees/desktop-rerun-<id>`,
   rebuilds the verified tree there (apply the evidence's `diff.patch` with `git apply --binary`, then require
   that the whole-tree id equals the signed `git.worktreeTree`, else refuse with "can't rebuild the verified
-  tree"; `diff.patch` itself isn't signed, so the tree id is the check), runs each setup command
+  tree"; `diff.patch` isn't covered by the evidence HMAC, only by the E7 manifest, so the tree id is the final check), runs each setup command
   as `bash -c <cmd>` in order (an argument array, never a joined string), then
   `scripts/vajra-verify-work.sh <slug> <command>`, compares exit codes, then removes that worktree.
   - **Where the bundle and setup come from (E7):** cleanup may delete `data/walkthroughs` once tasks close
@@ -786,10 +786,14 @@ check.
      group and waits up to 10 s, then SIGKILL.
   6b'. **Startup cleanup barrier** (PM-8, POS-2.1f). Before the run list loads or any resume is offered, the
      core checks every run in `runs.jsonl` whose session isn't live. For each recorded group that still has
-     members: SIGTERM, wait up to 10 s, SIGKILL, wait up to 5 s. Then it sweeps for escaped descendants: any
-     process of the same user whose cwd is inside that run's worktrees. Those are listed (pid, command,
-     cwd) and killed only after the human confirms. Resume of that campaign stays blocked until none are
-     left. The barrier is bounded at 20 s in total, and its outcome is recorded in the app log. Only after
+     members, each member's start time must be at or after the run's start (a reused pgid whose leader is gone
+     is otherwise indistinguishable); members that fail the check go to the confirm list instead. Groups are
+     handled in parallel: SIGTERM, wait up to 10 s, SIGKILL, wait up to 5 s. Then it sweeps for escaped descendants: any
+     process of the same user whose cwd (canonicalized with realpath, so `/var` and `/private/var` match) is
+     inside that run's worktrees. Those are listed (pid, command, cwd) and killed only after the human
+     confirms. The human may instead choose "Keep and resume anyway" (for their own shell or editor), which
+     is recorded in the app log. Resume of that campaign stays blocked until each listed process is killed
+     or kept. The barrier is bounded at 20 s in total, excluding time spent waiting on that confirm, and its outcome is recorded in the app log. Only after
      it finishes does `vajra-campaign.sh verify` run for each campaign.
   6c. When the last window closes, the webview is destroyed and only the core stays. Reopening rebuilds the
      UI from the core. This keeps a long-lived menu bar app from carrying webview growth (PM-6).
@@ -811,7 +815,7 @@ check.
     split that across two processes and add its own baseline against an idle budget we already miss
     (220 vs at most 200 MiB).
   - Vajra already makes interruption recoverable: campaigns are signed files with checkpoints, finished
-    worker commits stay on their branches, and `/vajra continue` resumes.
+    worker commits stay on their branches, and `/vajra continue` resumes (CLI only; the app resumes by slug).
 - Strongest evidence against (b):
   - A crash or a real quit stops the in-flight run. `deliver.md` says a resumed campaign gets fresh,
     run-namespaced tasks and no "already done" shortcut. So work since the last commit is lost and the
