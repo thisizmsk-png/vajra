@@ -196,10 +196,17 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   is the default view of that run and, within one click, each criterion shows a status (pass, fail, not run,
   stale, unverified), the check command, its exit code, an output excerpt linking to the full log, the diff,
   and the Verifier role next to the author role. If the two are the same role, the row says so.
-- POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the full command shown monospaced and untruncated (STRIDE E2),
-  THEN the app runs it through `scripts/vajra-verify-work.sh` in a fresh worktree detached at the evidence
-  commit (the task's own worktree is usually cleaned up), with the command passed as one argument, and shows
-  whether the new result matches the recorded one. The recorded command came from an agent, so it is
+- POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the full text shown monospaced and untruncated (STRIDE E2),
+  THEN in a fresh worktree detached at the evidence commit (the task's own worktree is usually cleaned up)
+  the app first runs the delivery's recorded setup commands, in their recorded order, each as one `bash -c`
+  argument, exactly as the Deliver write-back does (`workflows/vajra-deliver.js:787` and `:816`), then runs
+  the criterion command through `scripts/vajra-verify-work.sh` as one argument, and shows whether the new
+  result matches the recorded one. The confirm lists every setup command and the criterion command, in run
+  order. A setup failure is reported as "setup failed at command k", not as a criterion failure. When the
+  setup list can't be recovered (the captured report is missing), the confirm says "setup not recorded;
+  the result may differ" and the result is labelled the same way. Test: a fixture criterion that only passes
+  after its setup (`npm ci` or a `.venv` build) matches its recorded pass on Re-run, and fails with the
+  setup commands removed. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
 - POS-1.3 (GPT-4) Two separate answers per criterion, never merged into one green:
   - **Proof at the recorded commit:** "verified" when E3 (`vajra_tasks.py check-evidence --head <recorded
@@ -359,7 +366,7 @@ IDs keep their earlier meaning, so references elsewhere still hold.
 - NFR-SEC-5: IPC is owner-only (Unix socket mode 0600); no network listener.
 - NFR-SEC-6: filesystem reads follow an explicit path allowlist; every path is canonicalized and symlink escapes are refused; reads are size-capped; no recursive watch on `~/.claude/vajra`.
 - NFR-SEC-7: release builds are signed and notarized; updates are signed; dependencies are pinned and installed with lifecycle scripts off; `build.rs` and native dependencies are reviewed; `cargo-deny` and `npm audit` run in CI; each release has an SBOM.
-- NFR-SEC-9: the app never runs a command that came from agent output (a recorded check, a plan step) without the human confirming the exact text; the Lead and MCP tools can't trigger one.
+- NFR-SEC-9: the app never runs a command that came from agent output (a recorded check, its recorded setup commands, a plan step) without the human confirming the exact text; the Lead and MCP tools can't trigger one.
 - NFR-SEC-10 (STRIDE S1): the control socket checks the peer uid on every connection and binds each connection to the session it was started for; a connection that names another session is refused.
 - NFR-SEC-11 (STRIDE I1): spill files, logs and report copies are 0600 in the app data dir, kept at most 14 days or 1 GB (oldest first), and never uploaded.
 - NFR-SEC-12 (STRIDE I2): the webview loads only bundled assets under a strict CSP, can't navigate away or open windows, and opens links only after a human click, in the default browser.

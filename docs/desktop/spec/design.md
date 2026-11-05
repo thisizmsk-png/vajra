@@ -232,10 +232,16 @@ sequenceDiagram
   - The cache key is (evidence sha256, current tree id), never the evidence path alone.
   - When the worktree no longer exists, the row shows "no worktree to compare" next to the historical
     proof.
-- **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded command verbatim
-  and runs it only after the human confirms. It creates a fresh detached worktree at the evidence commit
-  under `<repo>/.claude/worktrees/desktop-rerun-<id>`, runs `scripts/vajra-verify-work.sh <slug> <command>`
-  there as an argument array, compares exit codes, then removes that worktree. The control service refuses
+- **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded setup commands
+  and the criterion command verbatim, in run order, and runs them only after the human confirms. It creates
+  a fresh detached worktree at the evidence commit under `<repo>/.claude/worktrees/desktop-rerun-<id>`,
+  runs each setup command there as `bash -c <cmd>` in order (an argument array, never a joined string), then
+  `scripts/vajra-verify-work.sh <slug> <command>`, compares exit codes, then removes that worktree.
+  - **Where setup comes from:** the workflow keeps the verifier's `setup_cmds` separately from the criterion
+    commands (`workflows/vajra-deliver.js:342`, filtered and capped at 5 at `:787`) and prints them as the
+    `(setup)` lines of the report's "How to run it" (`:923`). The app reads them from the captured result
+    (ADR-4), or from `report.md` once E4 lands. A missing list is shown as "setup not recorded", never
+    treated as "no setup". The control service refuses
   re-run requests that arrive over MCP (NFR-SEC-9).
 - **Knowledge approve, reject and forget** (POS-3.1) show the exact `vajra_kb.py` command with a Copy
   button and the line "Run this in your own terminal" (kb.md: these are user-only, own-terminal commands).
