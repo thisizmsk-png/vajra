@@ -875,3 +875,37 @@ fn mcp_parse_error_and_bad_socket() {
     assert_eq!(lines[0]["error"]["code"], -32700);
     assert_eq!(lines[1]["result"]["isError"], true, "app not running is a tool error, not a crash");
 }
+
+#[test]
+fn mcp_stdio_rejects_an_oversized_line_and_keeps_serving() {
+    use std::io::{BufReader, Read};
+    // A 10 MiB line, then a valid request. serve() drains the line in capped reads.
+    struct Big { left: usize, tail: std::io::Cursor<Vec<u8>> }
+    impl Read for Big {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            if self.left > 0 {
+                let n = b.len().min(self.left);
+                b[..n].fill(b'x');
+                self.left -= n;
+                return Ok(n);
+            }
+            self.tail.read(b)
+        }
+    }
+    struct NoFwd;
+    impl mcp::Forward for NoFwd {
+        fn call(&mut self, _: &str, _: &Value) -> Result<Value, Value> {
+            Ok(json!({"workers": []}))
+        }
+    }
+    let tail = b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".to_vec();
+    let input = BufReader::with_capacity(8192, Big { left: 10 * 1024 * 1024, tail: std::io::Cursor::new(tail) });
+    let mut out = Vec::new();
+    mcp::serve(input, &mut out, &mut NoFwd).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let replies: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 2, "{text}");
+    assert_eq!(replies[0]["error"]["message"], "request too large");
+    assert_eq!(replies[1]["id"], 1);
+    assert!(replies[1]["result"]["tools"].is_array());
+}

@@ -111,11 +111,12 @@ pub struct Transcript {
     unrecognized: bool,
     prompt_first_line: Option<String>,
     git_branch: Option<String>,
+    cwd: Option<String>,
 }
 
 impl Transcript {
     pub fn new(tailer: Tailer, redactor: Redactor) -> Self {
-        Self { tailer, redactor, unrecognized: false, prompt_first_line: None, git_branch: None }
+        Self { tailer, redactor, unrecognized: false, prompt_first_line: None, git_branch: None, cwd: None }
     }
 
     pub fn poll(&mut self) -> io::Result<Vec<StreamLine>> {
@@ -173,7 +174,15 @@ impl Transcript {
         self.git_branch.as_deref()
     }
 
+    /// The worker's cwd from its records (a stop's fallback match key).
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
     fn note_identity(&mut self, v: &Value) {
+        if self.cwd.is_none() {
+            self.cwd = v.get("cwd").and_then(Value::as_str).filter(|s| s.starts_with('/')).map(str::to_string);
+        }
         if self.git_branch.is_none() {
             self.git_branch = v.get("gitBranch").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
         }

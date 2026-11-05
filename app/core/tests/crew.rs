@@ -132,7 +132,7 @@ mod crew {
     #[test]
     fn tailer_skips_an_oversized_record_with_a_placeholder() {
         use vajra_desktop::crew::tailer::{OVERSIZED, PARTIAL_CAP, READ_CAP};
-        assert!(PARTIAL_CAP <= 1024 * 1024 && READ_CAP <= 1024 * 1024, "per-worker budget");
+        const { assert!(PARTIAL_CAP <= 1024 * 1024 && READ_CAP <= 1024 * 1024, "per-worker budget") };
         let h = Home::new();
         let p = h.project().join("big.jsonl");
         let mut big = vec![b'x'; PARTIAL_CAP * 3];

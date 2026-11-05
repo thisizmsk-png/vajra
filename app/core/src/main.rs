@@ -23,7 +23,9 @@ use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 use vajra_desktop::bus::{self, Bus, Config, Event, Subscriber};
 use vajra_desktop::control::service::{self, Actor, ControlError, Service, WorkerInfo};
 use vajra_desktop::control::{self, ledger::Ledger, mcp, nonce, socket};
-use vajra_desktop::crew::record::{parse_journal, parse_meta};
+use vajra_desktop::crew::record::{JournalEntry, Meta, parse_journal, parse_meta};
+use vajra_desktop::crew::redact::Redactor;
+use vajra_desktop::crew::tailer::{Tailer, Transcript};
 use vajra_desktop::crew::tree::{self, Node, Signals, Status, Worker};
 use vajra_desktop::logging::{self, Logger};
 use vajra_desktop::paths;
@@ -78,6 +80,8 @@ struct App {
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
     runs: Mutex<HashMap<String, Run>>,
+    /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
+    transcripts: Mutex<HashMap<String, Transcript>>,
     log: Option<Arc<Logger>>,
 }
 
@@ -101,6 +105,7 @@ impl App {
             bus,
             control: Arc::new(Mutex::new(svc)),
             runs: Mutex::new(HashMap::new()),
+            transcripts: Mutex::new(HashMap::new()),
             log,
         })
     }
@@ -240,22 +245,37 @@ impl App {
             Some((_, r)) => self.discover_workers(r)?,
             None => Vec::new(),
         };
+        let ctx: HashMap<String, (Option<String>, Vec<String>)> = if running {
+            let tr = lock(&self.transcripts);
+            workers
+                .iter()
+                .map(|w| {
+                    let t = self.bus.tail(&worker_stream(&w.agent_id), 0, INSPECT_BYTES);
+                    let cwd = tr.get(&w.agent_id).and_then(|t| t.cwd()).map(str::to_string);
+                    (w.agent_id.clone(), (cwd, t.lines.iter().map(|l| l.text.to_string()).collect()))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
         if running {
             lock(&self.control).set_workers(
             workers
                 .iter()
-                .map(|w| WorkerInfo {
+                .map(|w| {
+                    let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
+                    WorkerInfo {
                     worker: w.clone(),
                     task_id: None,
                     title: Some(w.label.clone()),
                     round: None,
                     live: running && !matches!(w.status, Status::Done | Status::Failed),
                     last_activity: None,
-                    cwd: None,
-                    lines: Vec::new(),
-                })
+                    cwd,
+                    lines,
+                }})
                 .collect(),
             );
         }
@@ -295,10 +315,26 @@ impl App {
                 let Some(id) = name.strip_prefix("agent-").and_then(|n| n.strip_suffix(".meta.json")) else { continue };
                 let Some(meta) = read(&p).and_then(|s| parse_meta(&s)) else { continue };
                 let j = journal.iter().rev().find(|j| j.agent_id == id);
-                out.push(tree::worker_from(id, &meta, j, None));
+                out.push(self.pump_worker(&allow, &d.join(format!("agent-{id}.jsonl")), id, &meta, j));
             }
         }
         Ok(out)
+    }
+
+    /// Tail one worker transcript into its stream (new bytes only) and build its node.
+    fn pump_worker(&self, allow: &Allowlist, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
+        let nonce = lock(&self.control).nonce().map(str::to_string);
+        let mut map = lock(&self.transcripts);
+        let tr = map
+            .entry(id.to_string())
+            .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::new(nonce.as_deref())));
+        let stream = worker_stream(id);
+        if bus::valid_stream_id(&stream)
+            && let Err(e) = tr.pump(&self.bus, &stream)
+        {
+            self.note("transcript_read_failed", &[("kind", e.kind() as u64)]);
+        }
+        tree::worker_from(id, meta, j, Some(tr))
     }
 
     fn tail(&self, stream: &str, after_seq: u64, max_bytes: usize) -> Res {
@@ -410,6 +446,13 @@ impl App {
 }
 
 // -------------------------------------------------------------------- helpers
+
+/// Recent transcript bytes kept for the Lead's `inspect_worker`.
+const INSPECT_BYTES: usize = 16 * 1024;
+
+fn worker_stream(agent_id: &str) -> String {
+    format!("w-{agent_id}")
+}
 
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
@@ -754,6 +797,40 @@ mod tests {
 
     fn code(v: &Value) -> &str {
         v["error"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn crew_tails_worker_transcripts_into_streams_and_inspect() {
+        // Review #8: the C5 tailer feeds per-worker streams and the Lead's inspect.
+        let t = Tmp::new();
+        let app = t.app();
+        let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let cwd = t.0.join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+        fs::create_dir_all(&sub).unwrap();
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+        for f in ["agent-aa870dd40540481f0.jsonl", "agent-aa870dd40540481f0.meta.json"] {
+            fs::copy(fx.join(f), sub.join(f)).unwrap();
+        }
+        let stream = format!("run-{sid}");
+        app.sup
+            .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: vec![] })
+            .unwrap();
+        lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone() });
+        lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+        app.crew("c", "20261105-1230").unwrap();
+        let w = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE);
+        assert!(w.lines.iter().any(|l| l.text.contains("step1")), "worker stream has transcript lines");
+        let i = lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).unwrap();
+        let lines = i["lines"].as_array().unwrap();
+        assert!(!lines.is_empty() && lines.iter().all(|l| l["untrusted"] == true), "{i}");
+        assert_eq!(i["cwd"], "/repo");
+        // A second crew call reads only new bytes: no duplicate lines.
+        let n = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE).lines.len();
+        app.crew("c", "20261105-1230").unwrap();
+        assert_eq!(app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE).lines.len(), n);
+        app.sup.kill(&stream).unwrap();
     }
 
     #[test]

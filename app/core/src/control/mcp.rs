@@ -6,7 +6,7 @@
 //! Agent text in results arrives already wrapped by the service as
 //! `{untrusted:true, source:'agent-output', text}`.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -137,17 +137,41 @@ fn write_line(out: &mut impl Write, v: &Value) -> io::Result<()> {
 }
 
 /// Serve JSON-RPC lines from `input` until EOF.
-pub fn serve(input: impl BufRead, mut out: impl Write, fwd: &mut impl Forward) -> io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+pub fn serve(mut input: impl BufRead, mut out: impl Write, fwd: &mut impl Forward) -> io::Result<()> {
+    let mut buf = Vec::new();
+    loop {
+        // Never buffer more than MAX_REQUEST + 1 bytes of one line.
+        buf.clear();
+        if Read::by_ref(&mut input).take(MAX_REQUEST as u64 + 1).read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
         }
-        if line.len() > MAX_REQUEST {
+        if buf.last() != Some(&b'\n') && buf.len() > MAX_REQUEST {
+            // Drain the rest of the oversized line in bounded reads.
+            loop {
+                let chunk = input.fill_buf()?;
+                if chunk.is_empty() {
+                    break;
+                }
+                match chunk.iter().position(|&b| b == b'\n') {
+                    Some(i) => {
+                        input.consume(i + 1);
+                        break;
+                    }
+                    None => {
+                        let n = chunk.len();
+                        input.consume(n);
+                    }
+                }
+            }
             write_line(&mut out, &err(&Value::Null, -32600, "request too large"))?;
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let reply = match serde_json::from_str::<Value>(line) {
             Ok(msg) if msg.is_object() => handle(&msg, fwd),
             Ok(_) => Some(err(&Value::Null, -32600, "invalid request")),
             Err(_) => Some(err(&Value::Null, -32700, "parse error")),
@@ -156,7 +180,6 @@ pub fn serve(input: impl BufRead, mut out: impl Write, fwd: &mut impl Forward) -
             write_line(&mut out, &r)?;
         }
     }
-    Ok(())
 }
 
 /// The `--mcp` entry point: stdin/stdout, forwarding to `socket_path`.
