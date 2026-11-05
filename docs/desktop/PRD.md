@@ -348,10 +348,11 @@ From `vajra-4/billing.md` (not legal advice):
 - No reselling, paying for or proxying model usage, and no `ANTHROPIC_BASE_URL` gateway.
 - Plain-text "runs Claude Code" only, never in the product name or logo.
 
-**Launch blocker: terms status is AMBIGUOUS.** Whether a third-party orchestrator spawning the user's own
-`claude` sessions under a consumer plan is "ordinary, individual usage" isn't settled by Anthropic's
-published terms. The owner decides whether to ask Anthropic in writing (Q12). Until there's an answer,
-launch copy recommends API keys for large crews. The timeline so far:
+**Known launch risk (not a blocker): terms status is AMBIGUOUS.** Whether a third-party orchestrator
+spawning the user's own `claude` sessions under a consumer plan is "ordinary, individual usage" isn't
+settled by Anthropic's published terms. The owner deferred asking Anthropic in writing (Q12, 2026-11-05).
+Launch copy recommends API keys for large crews, and the billing rules above keep the app on the stock
+binary under the user's own login. The risk is re-checked against the timeline before launch. The timeline so far:
 
 | Date | Event |
 |---|---|
@@ -380,6 +381,7 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 |---|---|---|---|
 | 2026-11-05 | Q3 approved: engine change E4 (persist the delivery report as `report.md` in the campaign) | owner, via orchestrator | tasks E4 (M1, vajra-6 engine work) |
 | 2026-11-05 | Q10 approved: the sandbox `denyWrite` for the app data dir and control queue ships as the default in Vajra's sandbox profile, applied only when the user turns the OS sandbox on and approves the settings change | owner, via orchestrator | design 5.4, AC-3.4.8, AC-3.4.9, tasks E8 |
+| 2026-11-05 | Q12 deferred: don't ask Anthropic for now; the terms question stays a known launch risk with the billing.md timeline, not a blocker | owner, via orchestrator | section 11 |
 | 2026-11-05 | Q13 approved: engine change E7 (archive each delivery's evidence bundle and executed setup list before cleanup), additive, under vidura review, every existing test passing | owner, via orchestrator | tasks E7 (vajra-6 engine work); unblocks slice 1 |
 | 2026-11-05 | Q11 approved: E5 (steer nonce and one sentence in task briefs only), the wider E2, E4 and E6, all additive, each under bhishma or vidura review, with every existing guard test passing | owner, via orchestrator | tasks M1 |
 | 2026-11-05 | H0 rule: if memory is over budget at the end of M3, the owner chooses between a written budget change, a stack change or a delay | owner, via orchestrator | tasks H0 |
@@ -406,5 +408,5 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | **Decided** (see the decision log): shipped by default, applied when the user enables the sandbox; with the sandbox off, control stays stop-only |
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
 | Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | **Decided:** approved (see the decision log) |
-| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Launch blocker.** Until answered, launch copy recommends API keys for large crews |
+| Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Deferred** by the owner (2026-11-05): don't ask for now; kept as a known launch risk (section 11) |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |

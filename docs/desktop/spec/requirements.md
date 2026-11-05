@@ -612,6 +612,6 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
 5. Q13: decided 2026-11-05 (E7 approved, under vidura review).
-6. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
+6. Q12: deferred 2026-11-05 (no request to Anthropic for now; a known launch risk, PRD section 11).
 
 Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
