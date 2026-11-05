@@ -357,6 +357,8 @@ impl Service {
 
     /// The run session was resumed (`claude --resume`): rotate the nonce.
     pub fn resume_session(&mut self) -> Result<&str> {
+        self.session()?;
+        self.retire_pending();
         let s = self.session.as_mut().ok_or(ControlError::ControlDisabled)?;
         s.nonce = nonce::rotate(&s.dir.root)?;
         self.log("control_nonce_rotated", &[]);
@@ -370,13 +372,28 @@ impl Service {
 
     /// The run ended. Queued messages will never be delivered; stops stay.
     pub fn end_session(&mut self) {
+        self.retire_pending();
+        self.session = None;
+        self.workers.clear();
+    }
+
+    /// Queued messages expire and unconfirmed Lead stops are refused: neither
+    /// may reach a later session or the run after a nonce rotation. Confirmed
+    /// stops stay (only resume_worker clears one).
+    fn retire_pending(&mut self) {
         let now = SystemTime::now();
         let ids: Vec<String> =
             self.pending.values().filter(|a| a.kind.queued_text()).map(|a| a.id.clone()).collect();
         for id in ids {
             self.expire(&id, now);
         }
-        self.session = None;
+        let asks: Vec<Action> =
+            self.pending.values().filter(|a| a.state == State::AwaitingHumanConfirm).cloned().collect();
+        for a in asks {
+            if self.record(&a, State::Refused, json!({"reason": "session_ended"}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
     }
 
     /// The nonce for the worker brief. Never log or return it in a tool result.
@@ -694,7 +711,13 @@ impl Service {
 
     fn awaiting(&self, action_id: &str) -> Result<Action> {
         match self.pending.get(action_id) {
-            Some(a) if a.kind == Kind::Stop && a.state == State::AwaitingHumanConfirm => Ok(a.clone()),
+            Some(a)
+                if a.kind == Kind::Stop
+                    && a.state == State::AwaitingHumanConfirm
+                    && self.session.as_ref().is_some_and(|s| s.id == a.session_id) =>
+            {
+                Ok(a.clone())
+            }
             _ => Err(ControlError::ActionNotFound),
         }
     }

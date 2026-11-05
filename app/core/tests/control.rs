@@ -460,6 +460,8 @@ fn stop_cleared_only_by_human() {
 
     // Only a human resume clears it, with a ledger line and an audit line.
     s.start_session(SID, RUN).unwrap();
+    // The app sets the run's workers again once it is live (end_session cleared them).
+    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
     let r = s.resume_worker(Actor::Human, AID).unwrap();
     let resume_id = r["action_id"].as_str().unwrap().to_string();
     assert!(stop_files(&h).is_empty());
@@ -926,4 +928,47 @@ fn message_text_keeps_its_newlines() {
     let mut s = started(&h);
     s.message_worker(Actor::Human, AID, "step 1: X\nstep 2: Y").unwrap();
     assert_eq!(h.ledger()[0]["text"], "step 1: X\nstep 2: Y");
+}
+
+const SID2: &str = "8d3f1c2a-5b6e-4f70-9a81-2c3d4e5f6a7b";
+
+#[test]
+fn a_stop_request_is_bound_to_its_session() {
+    // Panel lead (nemotron): a Lead stop awaiting confirmation must not be
+    // confirmable into a later session's stops dir.
+    let h = Home::new();
+    let mut s = started(&h);
+    let r = s.stop_worker(Actor::Lead, AID2, None).unwrap();
+    let id = r["action_id"].as_str().unwrap().to_string();
+    s.end_session();
+    s.start_session(SID2, RUN).unwrap();
+    s.set_workers(vec![worker(AID, "bhima", "t1", &h.wt("one")), worker(AID2, "nakula", "t2", &h.wt("two"))]);
+    assert!(matches!(s.confirm_stop(Actor::Human, &id), Err(ControlError::ActionNotFound)));
+    let stops = h.data().join("control").join(SID2).join("stops");
+    assert!(fs::read_dir(&stops).map(|mut d| d.next().is_none()).unwrap_or(true), "no stop written into the new session");
+    assert!(h.ledger().iter().any(|r| r["action_id"] == id.as_str() && r["state"] == "refused"));
+}
+
+#[test]
+fn a_resume_retires_messages_queued_under_the_old_nonce() {
+    // Panel lead (nemotron): after a resume rotates the nonce, a message queued
+    // before it is not delivered into the resumed run (the human resends).
+    let h = Home::new();
+    let mut s = started(&h);
+    let r = s.message_worker(Actor::Human, AID, "before resume").unwrap();
+    let id = r["action_id"].as_str().unwrap().to_string();
+    s.resume_session().unwrap();
+    assert!(h.ledger().iter().any(|r| r["action_id"] == id.as_str() && r["state"] == "not_delivered"));
+    let q = h.data().join("control").join(SID).join("queue");
+    assert!(fs::read_dir(&q).map(|mut d| d.next().is_none()).unwrap_or(true), "old message left in the queue");
+}
+
+#[test]
+fn an_ended_session_lists_no_workers() {
+    // Panel lead (dots): the Lead must not see the last run's workers as live.
+    let h = Home::new();
+    let mut s = started(&h);
+    s.end_session();
+    assert_eq!(s.list_workers(Actor::Lead, None).unwrap()["workers"], json!([]));
+    assert!(matches!(s.inspect_worker(Actor::Lead, AID, 5), Err(ControlError::WorkerNotFound)));
 }
