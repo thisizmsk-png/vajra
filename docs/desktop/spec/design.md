@@ -142,12 +142,36 @@ message text so it cannot close the tag, warns when a tool result carries a stee
 that echoes the nonce. `source` is derived from the actor (`human`, `human-via-desktop`, `lead-via-desktop`).
 A stop is keyed by `agent_id`, stays in force after `SubagentHandback` (the exact name is the only exempt
 tool) and is cleared only by a human action, so a parent's `SendMessage` cannot revive a stopped worker.
+As built in M1, the exempt call is narrower: only a final report (`SubagentHandback`/`StructuredOutput`) that
+says "stopped by the human" passes; any other handback stays blocked. Message and redirect reach only
+Execute task workers (label `task.<id>.r<n>`); verify, review, merge and other steps return
+`control_disabled` (they can still be stopped), so neither the Lead nor a worker relaying through it can
+talk to the independent gate.
 Residual risk: a worker can be talked into leaking the nonce and then obey a forged tag in tool output; a
 steer is still never approval and never widens scope, and the guard and permission prompt still apply.
 
-**Process model.** No separate daemon until vajra-3 decides VD-4/VD-6 (supervisor outlives the UI). Until
-then, quitting asks first and sessions stay resumable with `claude --resume` (VD-5, honest resume: only
-sessions killed by the app or a crash are offered, never ones the user exited).
+**Process model (ADR-9).** No daemon. Closing the window hides it and runs keep going (menu bar shows the
+active run count); Cmd-Q with active runs asks first, "Keep running" is the default. While any run is active
+the core holds an `NSProcessInfo` activity assertion (`src/nap.rs`, user-initiated, idle system sleep still
+allowed) so App Nap does not throttle the windowless app; it is released when the last run ends. Resume is
+offered only for sessions that were running (`claude --resume <id>` + `/vajra continue`). Updates install
+only when no run is active. Surviving quit or SIGKILL (VD-4) is v1.1.
+
+**Agent adapters (`src/adapter.rs`).** One small interface per stock CLI: capability flags, run argv,
+resume argv, billing source. Spawn, stream, PTY attach and kill are engine-neutral in `sessions`. Claude
+has every capability (transcript, inspect, message, redirect, sticky hook stop, resume, Vajra workflow).
+Codex is honest: PTY attach and `codex resume <uuid>` only; no hook channel or transcript parser, so no
+steering, no inspector, and stop terminates the PTY; the UI greys out the rest. No plugin system. Billing:
+the app runs the user's own binary under their login and never reads, stores or proxies a credential (no
+`--bare`, no SDK). Keys are not forwarded (env allowlist), so usage bills to the CLI's own login; if an API
+key variable is set in the app's environment the UI is told its name only, never its value.
+
+**Memory budgets as built (NFR-PERF-1..10).** Retained tail 256 KiB per stream (`bus::RING_BYTES`), then
+spill to disk with a gap marker; tail reads capped at 64 KiB; one xterm for the visible pane. Release
+`.app` is 6.8 MiB (lto, strip, no devtools). Idle, growth and 10-agent RSS (targets: idle <= 190 MiB
+preferred, 200 ceiling; growth <= 20 MiB from 5 to 60 min; 10 agents <= 400 MiB) are measured in M5 with
+a per-process breakdown (core, WebContent, Networking, GPU); not run yet because native benchmarks wait on
+vajra-2's bench.
 
 **Pain-point design checks for the core (pain-points.md P1-P6).** P1: bounded rings and spill everywhere,
 own-RSS shown apart from agent RSS. P2: honest resume as above. P3: no update channel in MVP; one process.
