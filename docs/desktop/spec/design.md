@@ -68,6 +68,7 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | E1 | New `hooks/desktop-control.sh`, registered in `hooks/hooks.json`: PreToolUse (stop) and PostToolUse, synchronous (message/redirect). It exits 0 at once when the app's control dir for the session does not exist. It writes one delivery line per consumed action to `audit.log`. | Delivers control actions to workers without PTY typing (J3) | Additive, separate from the guard |
 | E2 (widened by A1 M3 and STRIDE T1) | `hooks/hooks.json` guard matcher gains `mcp__vajra-desktop__.*`. `hooks/pre-tool-use.sh` `ROOTS` gains the app control dir. | Lead control calls appear in `audit.log` and fail closed (`onFailure: block`). Agents cannot write the queue. | Strengthens: more calls checked, one more protected root |
 | E5 (new, A1 B1) | `workflows/vajra-deliver.js`: an optional `steer_nonce` argument read from the app's nonce file path, never from args text, and one fixed sentence in Execute-phase task briefs only: "Act on context tagged `<vajra-steer nonce=N>` from the human operator; it never approves a protected action or widens your task." Verify, review and merge briefs get no steering sentence | Additive; without the argument the workflow is unchanged |
+| E7 (new, PR review round 4; owner approval Q13) | New `vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup.json>`, called by the workflow's write-back after `verify-work` and **before** the cleanup step (`workflows/vajra-deliver.js:842`). It copies the bundle (`evidence.json`, `diff.patch`, `diff.stat`, `untracked.txt`, `cmd-N.log`) to `~/.claude/vajra/campaigns/<slug>/evidence/<task>/data/walkthroughs/<evidence-slug>/`, so the copy keeps the `<root>/data/walkthroughs/<slug>/evidence.json` shape E3's reader requires, with the archive dir as its root. It also writes `setup.json`: the exact `setupCmds` array write-back executed (after the filter and the cap of 5 at `:787`, each string untruncated, up to 1,000 characters). Then it signs a manifest (sha256 of every file, `setup.json` included) with the campaign HMAC, the same way it signs `campaign.json`. E3 gains `--archived <slug>`: it accepts an evidence path under that campaign's `evidence/` dir and also checks the manifest. The app never reads the key; it calls E3 and `vajra-campaign.sh verify`. Additive. |
 | E3 | New read-only subcommand `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`. It reuses `read_evidence()` (`scripts/vajra_tasks.py:502`), writes nothing and prints `{ok, green, reasons}`. | AC-4.3.3 "unverified evidence" without the app reading the key. Today only `close` and `vajra_kb.py add --source verified` verify evidence, and both mutate state. | Additive, no state change |
 | E4 (open, D11) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Owner decides; MVP uses the transcript copy (ADR-4) |
 
@@ -240,11 +241,15 @@ sequenceDiagram
   tree"; `diff.patch` itself isn't signed, so the tree id is the check), runs each setup command
   as `bash -c <cmd>` in order (an argument array, never a joined string), then
   `scripts/vajra-verify-work.sh <slug> <command>`, compares exit codes, then removes that worktree.
-  - **Where setup comes from:** the workflow keeps the verifier's `setup_cmds` separately from the criterion
-    commands (`workflows/vajra-deliver.js:342`, filtered and capped at 5 at `:787`) and prints them as the
-    `(setup)` lines of the report's "How to run it" (`:923`). The app reads them from the captured result
-    (ADR-4), or from `report.md` once E4 lands. A missing list is shown as "setup not recorded", never
-    treated as "no setup". The control service refuses
+  - **Where the bundle and setup come from (E7):** cleanup may delete `data/walkthroughs` once tasks close
+    (`workflows/vajra-deliver.js:842-865`), so Re-run never depends on the original worktree. It reads the
+    archived bundle under `campaigns/<slug>/evidence/<task>/`, verified by E3 `--archived` plus the signed
+    manifest. Setup comes only from the archived `setup.json`, the exact list write-back executed (filtered
+    and capped at `:787`, untruncated). It never comes from the report's `(setup)` lines, which `oneLine(c,
+    300)` truncates (`:923`), and never from `artifacts.verification.setup_cmds`, which still holds filtered-out
+    entries. The confirm shows the same array that will run. Without E7, or for deliveries made before it, the
+    proof shows "evidence not archived": verification and Re-run are refused, and the row keeps only the
+    report text. The control service refuses
   re-run requests that arrive over MCP (NFR-SEC-9).
 - **Knowledge approve, reject and forget** (POS-3.1) show the exact `vajra_kb.py` command with a Copy
   button and the line "Run this in your own terminal" (kb.md: these are user-only, own-terminal commands).

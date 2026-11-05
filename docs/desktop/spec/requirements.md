@@ -220,12 +220,16 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   argument, exactly as the Deliver write-back does (`workflows/vajra-deliver.js:787` and `:816`), then runs
   the criterion command through `scripts/vajra-verify-work.sh` as one argument, and shows whether the new
   result matches the recorded one. The confirm lists every setup command and the criterion command, in run
-  order. A setup failure is reported as "setup failed at command k", not as a criterion failure. When the
-  setup list can't be recovered (the captured report is missing), the confirm says "setup not recorded;
-  the result may differ" and the result is labelled the same way. Test: a fixture criterion that only passes
+  order. The bundle and the setup list come only from the delivery's archived, signed copy (engine change E7,
+  design 3.2): never the report's truncated `(setup)` lines, and never the verifier's unfiltered
+  `setup_cmds`. A setup failure is reported as "setup failed at command k", not as a criterion failure.
+  Without an archive the row shows "evidence not archived", and verification and Re-run are refused. Test: a fixture criterion that only passes
   after its setup (`npm ci` or a `.venv` build) matches its recorded pass on Re-run, and fails with the
   setup commands removed. A second test: signed evidence taken on a dirty tree (a tracked edit plus an
-  untracked file) reproduces on Re-run, and with one byte of `diff.patch` changed it is refused. The recorded command came from an agent, so it is
+  untracked file) reproduces on Re-run, and with one byte of `diff.patch` changed it is refused. Also tested (E7): a completed delivery whose
+  worktrees cleanup already removed still verifies and re-runs from its archive; a setup command longer than
+  300 characters is shown and replayed byte for byte; a setup entry that write-back filtered out (a path
+  outside the repo) is neither shown nor run. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
 - POS-1.3 (GPT-4) Two separate answers per criterion, never merged into one green:
   - **Proof at the recorded commit:** "verified" when E3 (`vajra_tasks.py check-evidence --head <recorded
@@ -587,6 +591,8 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | PR: crash cleanup before "no process survives" | Fixed: startup cleanup barrier (ADR-9 6b') | f7d84c1 | POS-2.1f |
 | PR: materialize the evidence tree before Re-run | Fixed: apply `diff.patch`, require the signed tree id, else refuse | f7d84c1 | POS-1.2 |
 | PR: sandbox-off messaging policy inconsistent | Fixed: sandbox off means stop-only (Q10 working assumption) | f7d84c1 | AC-3.4.8 |
+| PR: preserve the verification bundle before cleanup | Fixed: engine change E7 archives it with a signed manifest; E3 `--archived` | this commit | POS-1.2 |
+| PR: lossless executed setup list | Fixed: `setup.json` holds the exact executed `setupCmds`; report lines and raw `setup_cmds` are never sources | this commit | POS-1.2 |
 
 ## 8. Decisions requested from the owner
 
@@ -594,6 +600,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 2. Decide whether Vajra should persist delivery reports in the campaign (A8).
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: apply the sandbox `denyWrite` for the control dir (still open).
-5. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
+5. Q13: approve engine change E7 (archived evidence bundle and setup list).
+6. Q12 (launch blocker): whether to ask Anthropic in writing about consumer-plan use by a local orchestrator (PRD section 11).
 
 Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).

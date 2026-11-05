@@ -382,5 +382,6 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q7 | Telemetry: none, or opt-in crash reports only | Opt-in crash reports only |
 | Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | Yes; without it, control is stop-only when the sandbox is off |
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
+| Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | Yes, additive; under Security review |
 | Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Launch blocker.** Until answered, launch copy recommends API keys for large crews |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |
