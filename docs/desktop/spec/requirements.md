@@ -154,6 +154,68 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-6.2.2 GIVEN search exits 0 with no output, WHEN shown, THEN the UI says "no results"; a non-zero exit says "knowledge search unavailable" with the exit code.
 - AC-6.2.3 GIVEN search, WHEN it runs, THEN the app never writes to the ledger (no `add` calls).
 
+### Positioning requirements (POS)
+
+From `positioning.md` (vajra-5, first pass, 2026-11-05). They make the three surviving reasons testable. POS
+ids keep vajra-5's numbering. Where a POS item met the existing design, the resolution is in its last
+sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build.
+
+**POS-R1 Evidence per criterion is the centre of the app** (reason 1)
+- POS-1.1 GIVEN a finished delivery with N criteria, WHEN I open it from the run list, THEN the evidence view
+  is the default view of that run and, within one click, each criterion shows a status (pass, fail, not run,
+  stale, unverified), the check command, its exit code, an output excerpt linking to the full log, the diff,
+  and the Verifier role next to the author role. If the two are the same role, the row says so.
+- POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the exact command shown,
+  THEN the app runs it through `scripts/vajra-verify-work.sh` in a fresh worktree detached at the evidence
+  commit (the task's own worktree is usually cleaned up), with the command passed as one argument, and shows
+  whether the new result matches the recorded one. The recorded command came from an agent, so it is
+  untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
+- POS-1.3 GIVEN evidence whose HMAC fails, or whose `git.head` differs from the branch head now, WHEN the
+  delivery is shown, THEN the criterion shows "unverified" or "stale", never pass. The check goes through
+  engine change E3 (`vajra_tasks.py check-evidence --head`); the app never reads the key.
+- POS-1.4 (measurement) GIVEN a seeded benchmark of at least 20 tasks with planted defects where the author
+  claims done, WHEN each runs through `/vajra`, THEN the report states how many false "done" claims were
+  caught and how many slipped through. No catch-rate claim ships without this number.
+- POS-1.5 GIVEN a criterion still failing after the last fix round, WHEN the delivery ends, THEN the run shows
+  "not done" with the failing criteria listed first, and no aggregate green badge appears anywhere.
+- POS-1.6 (measurement) GIVEN 5 or more developers reviewing the same delivery once as transcript plus diff
+  and once in the evidence view, WHEN they decide merge or reject, THEN time to decision and correctness are
+  recorded for each.
+
+**POS-R2 Claude Code-native; the app is optional; files are the source of truth** (reason 2)
+- POS-2.1 GIVEN a run started from the app, WHEN the app is quit or killed with SIGKILL, THEN the run keeps
+  going, and on relaunch the app reattaches with no lost events. Design cost: the run session can't be a
+  PTY child of the UI process. How it is supervised (a small supervisor process outside the UI, or a
+  launchd agent) is a question for the stack spike (design.md section 2).
+- POS-2.2 GIVEN `/vajra <ask>` started in a plain terminal, WHEN the app is open, THEN the run appears live
+  within the event latency budget (NFR-PERF-9), with the crew, run view and inbox. The app can't take over
+  that terminal; the control channel works if the control hook is installed.
+- POS-2.3 GIVEN the app is uninstalled, WHEN I list `~/.claude/vajra/`, THEN every campaign, evidence file
+  and ledger record is still there, readable with the CLI. The app's own files (run index, control ledger,
+  report copies) are plain JSONL and markdown in its data directory. This strengthens Q3 in the PRD
+  (persist the delivery report in the campaign, engine change E4).
+- POS-2.4 GIVEN my Claude Code settings (permissions, hooks, sandbox), WHEN the app starts any session, THEN
+  that session uses exactly those settings. The app never passes a flag that widens permissions or disables
+  the sandbox (no `--dangerously-skip-permissions`, no permissive `--permission-mode`); the Lead chat adds
+  only the app's control tools (design.md section 5.2).
+
+**POS-R3 Knowledge is earned and visible** (reason 3, weakest)
+- POS-3.1 GIVEN a run that used ledger records, WHEN I open it, THEN it lists each record with its tier and
+  source (a run id or "you"). Approve, reject and forget stay Vajra's human gates: the app opens a visible
+  terminal pane with the `vajra_kb.py` command filled in and I run it myself. The app never sends the
+  keystroke (SECURITY.md: a process that owns a PTY can pass a TTY check, so that has to stay a human act).
+- POS-3.2 GIVEN the knowledge write gate refused a record during a run, WHEN I open the run, THEN the refusal
+  (reason, no refused text) shows in the run's activity, read from the ledger's `audit.jsonl`.
+- POS-3.3 (measurement) GIVEN the same class of task run twice in one repo, WHEN run with and without the
+  ledger, THEN fix rounds and tokens per delivery are reported. Reason 3 drops to a supporting point if
+  there is no improvement.
+
+**POS-R4 The memory claim is earned or dropped** (pending the stack spike)
+- POS-4.1 GIVEN 10 stub agents streaming at the spike's rate, WHEN measured by the spike's written method,
+  THEN the app's own RSS (claude processes excluded, and also reported with them included) is within
+  NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Orca, Agent
+  Orchestrator). The word "lighter" is allowed only against competitors it actually beats.
+
 ## 4. Scope
 
 **In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions, a control channel for the Lead and the human.
@@ -183,6 +245,7 @@ All performance numbers are PROVISIONAL (A6) until the stack spike. Each is meas
 - NFR-PERF-5: the event stream uses bounded queues; a slow consumer is dropped to a snapshot; a PTY reader is never blocked by UI or IPC (test: stall the consumer, PTY read latency unchanged).
 - NFR-PERF-6 PROVISIONAL: 1 h soak under NFR-PERF-3 load, RSS growth <= 5%.
 - NFR-PERF-7: measured against at least two installed competitors (Agent Orchestrator desktop and Orca), same machine, same method, recorded in a benchmark note; the app is lower on idle RSS and on RSS per attached stream.
+- NFR-PERF-9 PROVISIONAL: a run started outside the app (POS-2.2) appears within 2 s, and new transcript or campaign events reach the UI within 250 ms p95.
 - NFR-PERF-8 PROVISIONAL: the control hook (`hooks/desktop-control.sh`) adds <= 10 ms p95 per tool call when the app has no queue for that session.
 
 ### Security
@@ -193,6 +256,7 @@ All performance numbers are PROVISIONAL (A6) until the stack spike. Each is meas
 - NFR-SEC-5: IPC is owner-only (Unix socket mode 0600); no network listener.
 - NFR-SEC-6: filesystem reads follow an explicit path allowlist; no recursive watch on `~/.claude/vajra`.
 - NFR-SEC-7: release builds are signed and notarized; updates are signed; dependencies are pinned and checked (lockfile audit, SBOM).
+- NFR-SEC-9: the app never runs a command that came from agent output (a recorded check, a plan step) without the human confirming the exact text; the Lead and MCP tools can't trigger one.
 - NFR-SEC-8: control messages are never approval for protected actions.
 
 ### Accessibility
@@ -245,6 +309,17 @@ All performance numbers are PROVISIONAL (A6) until the stack spike. Each is meas
 | US-6.2 | AC-6.2.1 .. 6.2.3 | SEC-4, SEC-6 |
 
 Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole app and are verified in the benchmark and release checklists, not per story.
+
+### Positioning traceability
+
+| Reason | POS ids | Stories it shapes | Tasks |
+|---|---|---|---|
+| 1 Proof per criterion | POS-1.1, 1.2, 1.3, 1.5 | US-4.3, US-6.1 | S4, E3, C4 |
+| 1 (measurement) | POS-1.4, 1.6 | none (claim gates) | H7 |
+| 2 Claude Code-native | POS-2.1, 2.2, 2.3, 2.4 | US-1.1, US-1.2, US-2.1 | G1, C3, C5, C4 |
+| 3 Earned knowledge | POS-3.1, 3.2 | US-6.2 | S6, C4 |
+| 3 (measurement) | POS-3.3 | none (claim gate) | H7 |
+| (4) Memory, pending | POS-4.1 | none | G1, H1 |
 
 ## 7a. Pain points from user research (pending)
 

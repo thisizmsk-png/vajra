@@ -47,7 +47,7 @@ Deferred, pending owner decision Q3 in PRD and E4 in design.md: persist the deli
 |---|---|---|---|---|---|
 | C1 | App skeleton per the approved stack; owner-only data dir under `~/Library/Application Support/`; log rotation | arjuna [Architect] | `app/` scaffold, `app/core/main.*`, build config, lockfiles | G2 | NFR-PERF-4 smoke (cold start measured), NFR-OBS-1 |
 | C2 | Bounded event bus and per-stream ring buffer (2 MB) with disk spill and drop-to-snapshot for slow consumers | bhima [Backend] | `app/core/bus/*`, tests | C1 | NFR-PERF-2, NFR-PERF-5; property test: no reader ever blocks |
-| C3 | Session supervisor: start the run session and the Lead chat session in PTYs with argument arrays; read-only by default; explicit "Take over" | bhima [Backend] | `app/core/sessions/*`, tests | C1, C2 | AC-1.1.x, AC-2.2.4, NFR-SEC-4 |
+| C3 | Session supervisor: start the run session and the Lead chat session in PTYs, outside the UI process so runs survive quit and SIGKILL (process model from G2); argv from a fixed template with argument arrays; read-only by default; explicit "Take over"; reattach with no lost events | bhima [Backend] | `app/core/sessions/*`, tests | C1, C2 | AC-1.1.x, AC-2.2.4, NFR-SEC-4, POS-2.1, POS-2.4 (argv test) |
 | C4 | Vajra state reader + script bridge: campaigns, tasks, features, progress, checkpoints, audit.log, routing log through a path allowlist; shell-outs to `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git` | sepoy-backend-1 [Backend worker 1] | `app/core/vajra/*`, `tests/fixtures/campaigns/*` | C1 | AC-1.2.x, AC-1.3.x, AC-1.1.3, NFR-SEC-2, NFR-SEC-6; test: the app never opens `.hmac-key` (fs trace) |
 | C5 | Transcript tailer + crew tree derivation (Lead, run, agents, sub-workers) from transcripts and `tasks.json`; schema-version check with raw fallback | bhima [Backend] | `app/core/crew/*`, `tests/fixtures/transcripts/*` | C2, C4 | AC-2.1.x, AC-2.2.1 to AC-2.2.3 |
 | C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2 | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
@@ -71,11 +71,11 @@ K2 and K3 run in parallel (disjoint folders, so `vajra_tasks.py waves` puts them
 | S1 | Home: start run, resume, preflight | nakula [Frontend] | `app/ui/screens/home/*` | C3, C4, K2 | US-1.1 to US-1.3 |
 | S2 | Crew view with worker pane tabs and hop history | nakula [Frontend] | `app/ui/screens/crew/*` | C5, K3 | US-2.1 to US-2.4 |
 | S3 | Chat with Lead (dock and full) with action cards | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/chat/*` | C6, K3 | US-3.1 to US-3.4 |
-| S4 | Run view: phase timeline, task graph, criteria with evidence | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/run/*` | C4, E3, K3 | US-4.1 to US-4.3 |
+| S4 | Run view: evidence view as the run's default (criteria with pass, fail, not run, stale, unverified; failing first; no green badge while any is red), human-only Re-run with confirm, then timeline and task graph | nakula [Frontend] | `app/ui/screens/run/*` | C4, E3, K3 | US-4.1 to US-4.3, POS-1.1, POS-1.2, POS-1.3, POS-1.5 |
 | S5 | Approvals inbox | nakula [Frontend] | `app/ui/screens/inbox/*` | C3, C4, K2 | US-5.1 to US-5.3 |
-| S6 | History and knowledge search; Settings | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/history/*`, `app/ui/screens/settings/*` | C4, K2 | US-6.1, US-6.2 |
+| S6 | History and knowledge search (records used per run with tier and source; approve, reject, forget prefilled in a terminal pane for the human to send); Settings | sepoy-frontend-1 [Frontend worker 1] | `app/ui/screens/history/*`, `app/ui/screens/settings/*` | C4, K2 | US-6.1, US-6.2, POS-3.1, POS-3.2 |
 
-Waves: S1, S4, S6 can share a wave (disjoint dirs, different owners), then S2, S3, S5.
+Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in parallel), then S2, S3, S5.
 
 ### M5 Hardening and red team
 
@@ -87,6 +87,7 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs, different owners), then S2, S
 | H4 | Security gate: threat model review of IPC, control queue, filesystem scope, secrets in streams, update channel, supply chain | bhishma [Security] | report only | C6, S2, S3 | Gate verdict; every finding has a task or a written acceptance |
 | H5 | Exploit PoCs as failing tests: escape-sequence injection through agent output, control-queue tampering by an agent, socket from another uid, path traversal in the state reader, shell injection through ask text | shakuni [Red team] | `app/tests/security/*` | C3 to C6, K3 | Each PoC fails before its fix and passes after |
 | H6 | Regressions and accessibility on the final diff (WCAG 2.2 AA, VoiceOver) | vidura [Verifier] | report only | H2, H5 | NFR-A11Y-1 to NFR-A11Y-3 |
+| H7 | Positioning measurements that gate launch claims: seeded false-"done" benchmark (20+ tasks with planted defects), review-time study design (5+ developers), repeated-task knowledge eval; plus CI checks that a terminal-started run appears in the app and that uninstalling leaves every campaign readable by the CLI | sahadeva [Analyst], benchmark tasks by sepoy-test-1 [Test worker 1] | `app/bench/positioning/*` | S1 to S6 | POS-1.4, POS-1.6, POS-3.3, POS-2.2, POS-2.3 (numbers reported; no target) |
 
 Packaging (signing, notarization, update feed) is a plan by hanuman [Platform] after H4; shipping it needs
 the owner's yes.

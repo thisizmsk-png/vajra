@@ -161,31 +161,38 @@ The Lead may message and redirect on its own; every such action renders a card w
 The dock (320 px) shows the same thread with cards compacted to two lines.
 960x600: the full view is unchanged; the dock becomes an overlay sheet 320 px wide.
 
-### 4.4 Run view (J4)
+### 4.4 Run view (J4): evidence first
+
+Positioning reason 1 (PRD section 1): opening a run lands on its criteria, failing ones first (POS-1.1,
+POS-1.5). The timeline and task graph sit below them and are one key away.
 
 ```
 +------+-------------------------------------------------------------------------------------+
-| Home | Run 20261105-0930  "add CSV export to the reports page"   Round 1 of 3              |
-| Crew | ✓ Route  ✓ Recall  ✓ Understand  ✓ Plan  ● Execute  ○ Verify  ○ Fix  ○ Deliver      |
+| Home | Run 20261105-0930  "add CSV export to the reports page"   Not done: 1 failing       |
+| Crew | ✓ Route  ✓ Recall  ✓ Understand  ✓ Plan  ✓ Execute  ✓ Verify  ● Fix 1 of 3  ○ Deliver|
 | Chat |-------------------------------------------------------------------------------------|
-| Run  | Task graph                                   Wave 2 of 3, 2 of 4 workers busy       |
-| Appr |  [t1 Schema  Architect ✓ Done] ──> [t3 CSV endpoint Backend ● In progress] ─┐      |
-| Hist |  [t2 Button  Frontend  ✓ Done] ──> [t4 Export menu Frontend ● In progress] ─┼> [t5 |
-|      |                                                         Tests Test worker 1 ○]      |
+| Run  | Acceptance criteria                 3 pass, 1 fail, 1 stale, 1 not run              |
+| Appr | ID  Criterion              Result       Command                 Exit  Checked by    |
+| Hist | C2  CSV has header row     ✕ Fail       pytest tests/test_csv   1     Verifier      |
+|      | C4  Keyboard reachable     ◐ Stale      npx playwright test a11y 0    Verifier      |
+|      | C5  Docs updated           ○ Not run    -                       -     -             |
+|      | C1  Export button visible  ✓ Pass       npm test -- export      0     Verifier      |
+|      | C3  Streams > 10k rows     ✓ Pass       pytest -k large         0     Verifier      |
+|      |   > C2 expanded: written by Backend, checked by Verifier. Exit 1. Output excerpt (3    |
+|      |     lines, full log link). Diff (2 files). Evidence ev.json @ 9f3e2a. [Re-run...]      |
 |      |-------------------------------------------------------------------------------------|
-|      | Acceptance criteria                          3 pass, 1 fail, 2 not run              |
-|      | ID  Criterion              Result     Command                 Exit  Evidence  Commit|
-|      | C1  Export button visible  ✓ Pass     npm test -- export      0     ev.json   9f3e2a|
-|      | C2  CSV has header row     ✕ Fail     pytest tests/test_csv   1     ev.json   9f3e2a|
-|      | C3  Streams > 10k rows     ✓ Pass     pytest -k large         0     ev.json   9f3e2a|
-|      | C4  Keyboard reachable     ✓ Pass     npx playwright test a11y 0    ev.json   9f3e2a|
-|      | C5  Docs updated           ○ Not run  -                       -     -         -     |
-|      | C6  No new lint errors     ○ Not run  -                       -     -         -     |
+|      | Task graph                                   Wave 2 of 3, 2 of 4 workers busy       |
+|      |  [t1 Schema  Architect ✓ Done] ──> [t3 CSV endpoint Backend ● In progress] ─┐      |
+|      |  [t2 Button  Frontend  ✓ Done] ──> [t4 Export menu Frontend ● In progress] ─┼> [t5 |
 +------+-------------------------------------------------------------------------------------+
 | Run 20261105-0930  Execute, round 1   App 138 MB   Guard on   Engine ok                     |
 +---------------------------------------------------------------------------------------------+
 ```
 
+Status words: Pass, Fail, Not run, Stale (evidence is for an older head), Unverified (signature check
+failed). Each has its own icon and text, never color alone. The header never shows a green "done" while any
+criterion is not Pass. **Re-run...** opens a confirm dialog that shows the exact recorded command and where it
+will run (a fresh worktree at the evidence commit); the result row shows "same as recorded" or "differs".
 Graph nodes are focusable (arrow keys follow edges); Enter opens the worker in Crew. The criteria
 table rows expand to show the full command, notes and the evidence path
 `data/walkthroughs/deliver-<run_id>/evidence.json`. "Copy command" copies the literal command.

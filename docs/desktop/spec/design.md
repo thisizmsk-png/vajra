@@ -85,7 +85,7 @@ The spike must answer:
 
 | Question | Options |
 |---|---|
-| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. A daemon keeps sessions alive when the UI quits but adds lifecycle and update complexity. |
+| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. **POS-2.1 now requires runs to survive the UI quitting or being killed with SIGKILL, so a supervisor inside the UI process no longer meets the requirements.** The spike prices the cheapest option that holds the PTYs outside the UI, measures its idle RSS on its own and in the app total, and says how the UI reattaches with no lost events. |
 | UI toolkit | Tauri v2 (system WKWebView, Rust core) vs Electron vs native (SwiftUI/AppKit) |
 | PTY | `portable-pty` / `pty-process` crates (Rust), `node-pty` (Electron), `forkpty` (native). Resize, SIGWINCH, child reaping, no blocking reads on the UI thread. |
 | Terminal renderer | xterm.js (WebGL addon) vs a native renderer. Must allow turning OSC 8 and OSC 52 off and must virtualize scrollback. |
@@ -106,7 +106,7 @@ are Electron (bundle inspection: `Electron Framework.framework` and Squirrel in 
 snapshot from the brief: Agent Orchestrator 0.14.10-nightly with sessions, 13 processes, about 1608 MB `ps`
 RSS sum (over-counts shared pages; the spike should also report `footprint`/phys_footprint).
 
-The spike also settles every "to verify in spike" item in this document (list in 5.9).
+The spike also settles every "to verify in spike" item in this document (list in 5.9), plus: how long a run started in a plain terminal takes to show up and how events reach the UI (NFR-PERF-9, POS-2.2).
 
 ## 3. Logical components (stack-agnostic)
 
@@ -114,7 +114,7 @@ The spike also settles every "to verify in spike" item in this document (list in
 |---|---|---|---|
 | Session supervisor | Owns the PTYs of the Run session and the Lead chat session. Spawns `claude` with an argv array. Reads PTYs on dedicated readers that never block. Handles resize, exit and reap. "Take over" toggles human keystroke passthrough. | Start/resume form, approve action | PTY byte streams, exit codes |
 | Transcript tailer | Tails the run session jsonl and the subagent transcripts. Parses records into `StreamLine` and `WorkerSeen` events. Checks a schema fingerprint. | Files under `~/.claude/projects/<cwd-slug>/` (allowlist) | Events, captured workflow result |
-| Vajra state reader | Reads campaign files, `tasks.json`, `features.json`, `progress.md`, checkpoint names, `.active`, the `audit.log` tail and the `routing-log.jsonl` tail. Coalesced watch. Keeps the last good snapshot on parse error. | Allowlisted paths | Snapshots, diffs |
+| Vajra state reader | Reads campaign files, `tasks.json`, `features.json`, `progress.md`, checkpoint names, `.active`, the `audit.log` tail, the `routing-log.jsonl` tail and the knowledge ledger's `audit.jsonl` tail (refusals for POS-3.2; hashes and reasons only). Coalesced watch. Keeps the last good snapshot on parse error. | Allowlisted paths | Snapshots, diffs |
 | Script bridge | The only place that executes programs: `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git`. Fixed executable paths, an argv array, never a shell string, timeout, capped output, scrubbed env. | Typed requests | Typed results (exit code, stdout JSON) |
 | Control service | Validates control requests, resolves the target worker, writes queue and stop files, watches acks, expires stale entries | UI actions, MCP calls | Queue files, ledger records, events |
 | MCP server | `vajra-desktop-mcp` stdio binary launched by the Lead chat session. It forwards tool calls to the Control service over an owner-only Unix socket. It holds no state. | stdio JSON-RPC | Tool results |
@@ -215,6 +215,30 @@ sequenceDiagram
   RUN-->>H: Claude Code permission prompt for push/PR/deploy (human answers in terminal)
   UI->>CS: ledger "approved" (plan id, who, time)
 ```
+
+### 3.2 Positioning additions (POS, from positioning.md)
+
+- **Evidence view is a run's default view** (POS-1.1). Opening a run lands on its criteria. The crew view
+  and timeline are one key away. Status values: pass, fail, not run, stale, unverified. An aggregate badge
+  never shows green while any criterion is red (POS-1.5).
+- **Stale and unverified** (POS-1.3) come from E3: `vajra_tasks.py check-evidence <file> --head <branch
+  head> --json`. `green:false` with an HMAC reason means unverified, and a head mismatch means stale.
+- **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded command verbatim
+  and runs it only after the human confirms. It creates a fresh detached worktree at the evidence commit
+  under `<repo>/.claude/worktrees/desktop-rerun-<id>`, runs `scripts/vajra-verify-work.sh <slug> <command>`
+  there as an argument array, compares exit codes, then removes that worktree. The control service refuses
+  re-run requests that arrive over MCP (NFR-SEC-9).
+- **Knowledge approve, reject and forget** (POS-3.1) open a terminal pane running a shell with the
+  `vajra_kb.py` command typed into the input line but not sent. The human presses Enter. The app never
+  writes the newline. This keeps the human gate in kb.md honest, given SECURITY.md's note that a TTY check
+  is not a boundary against a process that owns a PTY.
+- **Runs the app did not start** (POS-2.2) come from transcripts and campaigns as in D9. Their run session
+  is shown read-only with no Take over (the app doesn't own that terminal).
+- **Uninstall leaves Vajra whole** (POS-2.3). App files are plain JSONL and markdown (4.3). E4 (persist the
+  report in the campaign) becomes the recommended default.
+- **No permission-widening flags** (POS-2.4). The session supervisor builds argv from a fixed template.
+  A unit test fails if any argv contains `--dangerously-skip-permissions` or a `--permission-mode` other
+  than the user's default.
 
 ## 4. Data model
 
