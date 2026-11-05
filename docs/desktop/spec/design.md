@@ -895,17 +895,37 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
      - the user's Claude Code settings have `sandbox.enabled` true, `allowUnsandboxedCommands` false, and a
        `denyWrite` covering the dir (checked directly, not via doctor's `enabled` line), and no non-Claude
        worker (Codex, ADR-10) is running;
+     - **every process that could forge the file started under those settings** (PR review: current settings
+       say nothing about sessions already running, or about what they left behind). A session keeps the
+       sandbox it started with, and a detached child of an old unsandboxed session can outlive it with no
+       marker, so restarting sessions is not enough to verify. The check uses times an agent can't move:
+       - T_settings is the newest inode change time (`st_ctime`, which `touch` can't set backwards) of every
+         settings file that can shape a session's sandbox: managed settings, `~/.claude/settings.json`, and
+         `.claude/settings.json` and `settings.local.json` in every repo that has a Claude Code transcript
+         written since T_login (the transcript's `cwd`) or a live `claude` process (its cwd);
+       - T_login is the start time of the user's `loginwindow` process (the login session), read from the
+         kernel process table;
+       - E9 accepts only when T_settings < T_login: every process of this login session, including every
+         Claude session and anything it spawned, started after the current sandbox settings took effect.
+         Otherwise it refuses with "Touch ID approval resumes after you log out and back in: sandbox settings
+         changed at <time>", and the app falls back to the copy-command path (AC-7.1.7).
+       - Defense in depth on top of that rule: every live `claude` process must have started after
+         T_settings, and every live process carrying `CLAUDECODE=1` that isn't `claude` itself must report as
+         sandboxed (`sandbox_check(pid)`).
      - under the store lock it atomically claims the approval (`rename` into `used/`, refused if present; one
        used-set for all stores), reads the pending bytes once, and their sha256 matches;
      - the approval is under 5 minutes old.
      It then builds the record from those same bytes, re-runs the write gate, applies and audits. The parser
      already refuses abbreviations (`allow_abbrev=False`, `scripts/vajra_kb.py:1653`), so `--desk` can't stand
      in for the flag; the guard matches the full name. No other input to these commands changes, so the TTY path stays as it is for the CLI.
-- **Why it holds:** agents can't write the approvals dir (guard E2, plus the OS sandbox E8), and the app
+- **Why it holds:** agents can't write the approvals dir (guard E2, plus the OS sandbox E8, which E9 verifies
+  covered every process of the login session), and the app
   offers no MCP tool or IPC command that creates an approval. A synthetic click reaches the sheet but not
   the owner authentication.
-- **Residual risk:** a non-agent process of the same user can write the dir, and sessions started before
-  the sandbox change keep their old settings until restarted. That is the same-user limit
+- **Residual risk:** a non-agent process of the same user can write the dir. Sessions started before a
+  sandbox change can't forge an accepted approval: E9 stays off until the next login (step 4). The cost is
+  that any edit to a settings file in scope turns Touch ID approval off until the user logs out and back
+  in; the copy-command path keeps working meanwhile. That is the same-user limit
   as control (5.4).
 - **Options:** (a) keep copy-to-terminal only; (b) the app drives the TTY prompt (rejected: it defeats the
   gate); (c) the app holds the key and mints user tokens (rejected: the app never reads the key); (d) an
