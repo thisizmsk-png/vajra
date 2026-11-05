@@ -81,12 +81,7 @@ pub fn build_run_argv_at(
     if !(1..=16).contains(&input.max_in_flight) {
         return Err(bad("maxInFlight", "must be 1 to 16"));
     }
-    if !valid_slug(steer_nonce, 8) {
-        return Err(bad(
-            "hints.steer_nonce",
-            "must be 8 to 128 of [A-Za-z0-9_-]",
-        ));
-    }
+    check_nonce(steer_nonce)?;
     if session_id.len() < 8
         || !session_id
             .bytes()
@@ -119,9 +114,9 @@ pub fn build_run_argv_at(
     json.push_str(&format!(",\"maxInFlight\":{}", input.max_in_flight));
     json.push_str(",\"campaign\":");
     push_json_str(&mut json, &campaign);
-    json.push_str(",\"hints\":{\"steer_nonce\":");
+    json.push_str(",\"steer_nonce\":");
     push_json_str(&mut json, steer_nonce);
-    json.push_str("}}");
+    json.push('}');
 
     Ok(vec![
         "claude".to_string(),
@@ -140,6 +135,36 @@ fn valid_base(s: &str) -> bool {
         && !s.contains("..")
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+}
+
+/// Same rule as vajra-deliver.js (E5), which reads `steer_nonce` at the top level.
+fn check_nonce(n: &str) -> Result<(), InvalidInput> {
+    if (32..=128).contains(&n.len()) && n.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        Ok(())
+    } else {
+        Err(bad("steer_nonce", "must be 32 to 128 lowercase hex characters"))
+    }
+}
+
+/// ADR-9 resume: `claude --resume <id>` continuing the campaign through
+/// `/vajra-deliver {campaign}` (what `/vajra continue` runs) with the rotated
+/// nonce, so new worker briefs carry the nonce the hook now uses.
+pub fn build_resume_argv(session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+    if session_id.len() < 8 || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(bad("session_id", "must match ^[A-Za-z0-9-]{8,}$"));
+    }
+    if !crate::bus::valid_stream_id(campaign) {
+        return Err(bad("campaign", "must be 1 to 128 of [A-Za-z0-9._-], not starting with a dot"));
+    }
+    check_nonce(steer_nonce)?;
+    let mut json = String::from("{\"campaign\":");
+    push_json_str(&mut json, campaign);
+    json.push_str(",\"session_id\":");
+    push_json_str(&mut json, session_id);
+    json.push_str(",\"steer_nonce\":");
+    push_json_str(&mut json, steer_nonce);
+    json.push('}');
+    Ok(vec!["claude".into(), "--resume".into(), session_id.into(), format!("/vajra-deliver {json}")])
 }
 
 fn valid_slug(s: &str, min: usize) -> bool {

@@ -85,6 +85,9 @@ pub struct SpawnSpec {
     pub cwd: PathBuf,
     pub rows: u16,
     pub cols: u16,
+    /// Secrets (the steer nonce in the launch prompt, which the TUI echoes)
+    /// replaced before a line reaches the bus, spill or IPC.
+    pub redact: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,9 +279,10 @@ impl Supervisor {
             let bus = self.bus.clone();
             let log = self.log.clone();
             let stream = id.to_string();
+            let redact: Vec<String> = spec.redact.iter().filter(|s| s.len() >= REDACT_MIN).cloned().collect();
             std::thread::Builder::new()
                 .name(format!("pty-{id}"))
-                .spawn(move || read_loop(&bus, &stream, reader, child, &session, log.as_deref()))
+                .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, log.as_deref()))
                 .map_err(|e| SessionError::Io(e.to_string()))?
         };
         *lock(&session.reader) = Some(handle);
@@ -393,16 +397,48 @@ impl Drop for Supervisor {
     }
 }
 
-fn push_line(bus: &Bus, stream: &str, raw: &[u8]) {
+/// Shortest secret fragment redacted at a line wrap.
+const REDACT_MIN: usize = 8;
+
+/// Replace each secret, and a fragment of at least `REDACT_MIN` chars that a
+/// terminal wrap left at the end (secret prefix) or start (secret suffix) of
+/// the line.
+fn redact_line(mut s: String, secrets: &[String]) -> String {
+    const R: &str = "[redacted]";
+    for n in secrets {
+        if s.contains(n.as_str()) {
+            s = s.replace(n.as_str(), R);
+        }
+        for k in (REDACT_MIN..n.len()).rev() {
+            if s.ends_with(&n[..k]) {
+                s.truncate(s.len() - k);
+                s.push_str(R);
+                break;
+            }
+        }
+        for k in (REDACT_MIN..n.len()).rev() {
+            if s.starts_with(&n[n.len() - k..]) {
+                s.replace_range(..k, R);
+                break;
+            }
+        }
+    }
+    s
+}
+
+fn push_line(bus: &Bus, stream: &str, secrets: &[String], raw: &[u8]) {
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let text = String::from_utf8_lossy(raw);
+    let clean = ansi::sanitize(&text);
+    let clean = if secrets.is_empty() { clean } else { redact_line(clean, secrets) };
     // The id was validated at spawn, so push cannot fail.
-    let _ = bus.push(stream, &ansi::sanitize(&text));
+    let _ = bus.push(stream, &clean);
 }
 
 fn read_loop(
     bus: &Bus,
     stream: &str,
+    secrets: &[String],
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
     session: &Session,
@@ -417,12 +453,12 @@ fn read_loop(
                 pending.extend_from_slice(&buf[..n]);
                 let mut start = 0;
                 while let Some(i) = pending[start..].iter().position(|&b| b == b'\n') {
-                    push_line(bus, stream, &pending[start..start + i]);
+                    push_line(bus, stream, secrets, &pending[start..start + i]);
                     start += i + 1;
                 }
                 pending.drain(..start);
                 if pending.len() >= MAX_PENDING {
-                    push_line(bus, stream, &pending);
+                    push_line(bus, stream, secrets, &pending);
                     pending.clear();
                 }
             }
@@ -431,7 +467,7 @@ fn read_loop(
         }
     }
     if !pending.is_empty() {
-        push_line(bus, stream, &pending);
+        push_line(bus, stream, secrets, &pending);
     }
 
     // Reap. Poll under the exit lock so `signal` never races the reap.

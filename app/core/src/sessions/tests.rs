@@ -28,6 +28,7 @@ fn spec(argv: &[&str], cwd: &std::path::Path) -> SpawnSpec {
         cwd: cwd.to_path_buf(),
         rows: 24,
         cols: 80,
+        redact: Vec::new(),
     }
 }
 
@@ -277,11 +278,29 @@ fn sessions_build_run_argv_spawns_as_argv() {
         max_in_flight: 2,
         campaign: None,
     };
-    let mut a = argv::build_run_argv(&input, "nonce-12345678").unwrap();
+    let mut a = argv::build_run_argv(&input, "0123456789abcdef0123456789abcdef").unwrap();
     a[0] = "echo".into();
     let argv: Vec<&str> = a.iter().map(String::as_str).collect();
     sup.spawn("s-launch", spec(&argv, &dir)).unwrap();
     sup.wait("s-launch", WAIT).unwrap();
     let l = wait_lines(&bus, "s-launch", |l| !l.is_empty());
     assert_eq!(l, vec![a[1..].join(" ")]);
+}
+
+#[test]
+fn sessions_redact_the_steer_nonce_from_pty_lines() {
+    // Claude's TUI echoes the launch prompt, which carries the nonce; it may wrap mid-nonce.
+    let n = "0123456789abcdef0123456789abcdef";
+    let sha = "a".repeat(40);
+    let (sup, bus, dir) = setup("redact");
+    let script = format!("printf 'steer_nonce: {n} ok\\n{}\\n{}\\ncommit {sha}\\n'", &n[..20], &n[20..]);
+    let mut sp = spec(&["/bin/sh", "-c", &script], &dir);
+    sp.redact = vec![n.to_string()];
+    sup.spawn("s-redact", sp).unwrap();
+    sup.wait("s-redact", WAIT).unwrap();
+    let l = wait_lines(&bus, "s-redact", |l| l.iter().any(|x| x.starts_with("commit")));
+    let all = l.join("\n");
+    assert!(!all.contains(n) && !all.contains(&n[..20]) && !all.contains(&n[20..]), "{all}");
+    assert!(all.contains("steer_nonce: [redacted] ok"), "{all}");
+    assert!(all.contains(&format!("commit {sha}")), "unrelated hex stays: {all}");
 }

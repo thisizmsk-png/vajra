@@ -1,6 +1,6 @@
 use super::*;
 
-const NONCE: &str = "n0nce-ABCDEFGH1234";
+const NONCE: &str = "0123456789abcdef0123456789abcdef";
 const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 // 2026-11-05 12:30:59 UTC
 const T: u64 = 1_793_881_859;
@@ -35,7 +35,7 @@ fn build_run_argv_exact_shape() {
         "/vajra-deliver {\"ask\":\"add a dark mode toggle\",\"run_id\":\"20261105-1230\",\
          \"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"max_rounds\":2,\
          \"base\":\"main\",\"maxInFlight\":4,\"campaign\":\"deliver-20261105-1230\",\
-         \"hints\":{\"steer_nonce\":\"n0nce-ABCDEFGH1234\"}}"
+         \"steer_nonce\":\"0123456789abcdef0123456789abcdef\"}"
     );
 }
 
@@ -140,9 +140,12 @@ fn build_run_argv_bad_campaign_names_field() {
 
 #[test]
 fn build_run_argv_bad_nonce_names_field() {
-    for bad in ["", "short", "has space nonce", "quote\"nonce1234"] {
+    // vajra-deliver.js reads top-level `steer_nonce` and accepts only /^[0-9a-f]{32,128}$/.
+    let upper = "0123456789ABCDEF0123456789ABCDEF".to_string();
+    let long = "a".repeat(129);
+    for bad in ["", "short", "has space nonce", "quote\"nonce1234", "n0nce-ABCDEFGH1234", &upper, &long, &"a".repeat(31)] {
         let err = build_run_argv_at(&input(), bad, T, SID).unwrap_err();
-        assert_eq!(err.field, "hints.steer_nonce", "nonce {bad:?}");
+        assert_eq!(err.field, "steer_nonce", "nonce {bad:?}");
     }
 }
 
@@ -183,4 +186,22 @@ fn build_run_argv_public_fn_uses_fresh_uuid_and_now() {
             .chain(rid[9..].bytes())
             .all(|c| c.is_ascii_digit())
     );
+}
+
+#[test]
+fn resume_argv_carries_the_rotated_nonce() {
+    let a = build_resume_argv(SID, "deliver-20261105-1230", NONCE).unwrap();
+    assert_eq!(
+        a,
+        [
+            "claude",
+            "--resume",
+            SID,
+            "/vajra-deliver {\"campaign\":\"deliver-20261105-1230\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\
+             \"steer_nonce\":\"0123456789abcdef0123456789abcdef\"}"
+        ]
+    );
+    assert_eq!(build_resume_argv(SID, "../x", NONCE).unwrap_err().field, "campaign");
+    assert_eq!(build_resume_argv(SID, "deliver-1", "short").unwrap_err().field, "steer_nonce");
+    assert_eq!(build_resume_argv("--last", "deliver-1", NONCE).unwrap_err().field, "session_id");
 }

@@ -27,7 +27,7 @@ use vajra_desktop::crew::record::{parse_journal, parse_meta};
 use vajra_desktop::crew::tree::{self, Node, Signals, Status, Worker};
 use vajra_desktop::logging::{self, Logger};
 use vajra_desktop::paths;
-use vajra_desktop::sessions::argv::{RunInput, build_run_argv_at, run_id_at};
+use vajra_desktop::sessions::argv::{RunInput, build_resume_argv, build_run_argv_at, run_id_at};
 use vajra_desktop::sessions::{SpawnSpec, Supervisor};
 use vajra_desktop::vajra::allowlist::Allowlist;
 use vajra_desktop::vajra::bridge::{Bridge, Request, parse_kb_hits};
@@ -172,10 +172,11 @@ impl App {
             svc.nonce().unwrap_or_default().to_string()
         };
         let argv = build_run_argv_at(&input, &nonce, now, &session_id).map_err(|e| invalid(e.field, e.reason))?;
+        let redact = vec![nonce];
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let stream = format!("run-{session_id}");
         self.sup
-            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS })
+            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS, redact })
             .map_err(|e| fail("spawn_failed", e))?;
         lock(&self.runs).insert(stream.clone(), Run { session_id: session_id.clone(), run_id: run_id.clone(), campaign: campaign.clone(), cwd });
         self.note("run_started", &[]);
@@ -195,15 +196,17 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
-        {
+        let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id).map(|_| Value::Null))?;
             ctl(svc.resume_session().map(|_| Value::Null))?;
-        }
-        let argv = resume_argv(session_id, campaign);
+            svc.nonce().unwrap_or_default().to_string()
+        };
+        let argv = build_resume_argv(session_id, campaign, &nonce).map_err(|e| invalid(e.field, e.reason))?;
+        let redact = vec![nonce];
         let stream = format!("run-{session_id}");
         self.sup
-            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS })
+            .spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: PTY_ROWS, cols: PTY_COLS, redact })
             .map_err(|e| fail("spawn_failed", e))?;
         lock(&self.runs).insert(
             stream.clone(),
@@ -429,10 +432,6 @@ fn uuid_from_hex(h: &str) -> String {
 /// Claude Code's project dir name for a cwd: every non-alphanumeric is `-`.
 fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
-}
-
-fn resume_argv(session_id: &str, campaign: &str) -> Vec<String> {
-    vec!["claude".into(), "--resume".into(), session_id.into(), format!("/vajra continue --campaign {campaign}")]
 }
 
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
@@ -755,13 +754,6 @@ mod tests {
     #[test]
     fn project_slug_matches_claude_code() {
         assert_eq!(project_slug(Path::new("/Users/a/my.repo")), "-Users-a-my-repo");
-    }
-
-    #[test]
-    fn resume_argv_is_an_array_with_continue() {
-        let v = resume_argv("abc-12345678", "deliver-20261105-1810");
-        assert_eq!(v[..3], ["claude", "--resume", "abc-12345678"]);
-        assert_eq!(v[3], "/vajra continue --campaign deliver-20261105-1810");
     }
 
     #[test]
