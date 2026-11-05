@@ -1,0 +1,10 @@
+{"type":"launched"}
+{"type":"started","key":"v2:c0c9063e34fc3383dd481b124b8eed3aa4426b3c39c1e8ac06c278e743e85ef0","agentId":"a3dea76dc37f6f3e1","label":"kb.search","phase":"Understand"}
+{"type":"result","key":"v2:c0c9063e34fc3383dd481b124b8eed3aa4426b3c39c1e8ac06c278e743e85ef0","agentId":"a3dea76dc37f6f3e1","result":"(elided)","remoteControlDeviceReport":false,"toolsUsed":["Bash","StructuredOutput"]}
+{"type":"started","key":"v2:3c1ce9de8a831a1ac938de63b3c69a4021db7ef528a8a52aad5ce12c899adb64","agentId":"aead9535e27049caf","label":"understand","phase":"Understand"}
+{"type":"result","key":"v2:3c1ce9de8a831a1ac938de63b3c69a4021db7ef528a8a52aad5ce12c899adb64","agentId":"aead9535e27049caf","result":"(elided)","remoteControlDeviceReport":false,"toolsUsed":["Glob","Grep","StructuredOutput"]}
+{"type":"started","key":"v2:52d08e6f63e85bb99cf579592f46e9cee29a22815048f323773316cfae7cd0c4","agentId":"a1c924ff1642e7810","label":"preflight","phase":"Understand"}
+{"type":"result","key":"v2:52d08e6f63e85bb99cf579592f46e9cee29a22815048f323773316cfae7cd0c4","agentId":"a1c924ff1642e7810","result":"(elided)","remoteControlDeviceReport":false,"toolsUsed":["Bash","StructuredOutput"]}
+{"type":"started","key":"v2:b13441763567f03679b10a193f00ca92abb28b710a97f60ca0bbfdb5b2fd3c8d","agentId":"ad9daab774e9dc814","label":"plan.1","phase":"Plan"}
+{"type":"result","key":"v2:b13441763567f03679b10a193f00ca92abb28b710a97f60ca0bbfdb5b2fd3c8d","agentId":"ad9daab774e9dc814","result":"(elided)","remoteControlDeviceReport":false,"toolsUsed":["Glob","Grep","StructuredOutput"]}
+{"type":"started","key":"v2:6228a338b0872507c77514fb307f3313ad26836f2b80fba789ac908695d14635","agentId":"a33208c29ba12a5f3","label":"plan.2","phase":"Plan"}

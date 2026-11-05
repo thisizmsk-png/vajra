@@ -75,38 +75,54 @@ For E3, the shared green rule raises `Fail(3, reason)` on refusal, so `check-evi
 script's convention (`scripts/vajra_tasks.py:45`). One unit test covers each refusal branch of
 `read_evidence`.
 
-## 2. Architecture (STUB)
+## 2. Architecture
 
-> **STUB: Pending the stack spike (GPT 6.1 Sol worker) and two-model approval.** Nothing in this section
-> is decided. Tauri v2 with a Rust core is the option to beat. Electron is chosen only if it wins on the
-> measured numbers.
+> **Provisional until the spike report lands** (`stack-spike.md`, GPT 6.1 Sol). The orchestrator decided the
+> stack (G1/G2) from the spike's measured numbers; budgets in section 9 are replaced when the final report
+> and memory budgets arrive.
 
-The spike must answer:
+**Decision: Tauri v2, Rust core, React + TypeScript renderer in the system WKWebView.**
 
-| Question | Options |
+Spike evidence (this Mac, same Node stub workload, 10 streaming agents, `ps` RSS summed over the process
+tree including the WebKit XPC helpers):
+
+| | Tauri v2 | Electron 45 | Orca (installed) | Agent Orchestrator desktop |
+|---|---|---|---|---|
+| RSS, 10 streaming agents | 861 MiB | 1230 MiB | ~2286 MiB | n/a in spike |
+| Idle RSS | 281 MiB | 411 MiB | n/a | ~1608 MB with sessions (brief snapshot) |
+| Unsigned DMG | 3 MiB | 147 MiB | n/a | n/a |
+
+The strongest rival is Runner (native GPUI). Tauri keeps the renderer in the OS WebView and the hot paths
+(PTY, file tailing, rings, control) in Rust, which is the only way to approach native memory without
+writing a GPU UI toolkit.
+
+| Question | Answer |
 |---|---|
-| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. A daemon keeps sessions alive when the UI quits but adds lifecycle and update complexity. |
-| UI toolkit | Tauri v2 (system WKWebView, Rust core) vs Electron vs native (SwiftUI/AppKit) |
-| PTY | `portable-pty` / `pty-process` crates (Rust), `node-pty` (Electron), `forkpty` (native). Resize, SIGWINCH, child reaping, no blocking reads on the UI thread. |
-| Terminal renderer | xterm.js (WebGL addon) vs a native renderer. Must allow turning OSC 8 and OSC 52 off and must virtualize scrollback. |
-| File watching | FSEvents directly vs `notify` crate vs chokidar. Must support coalescing and non-recursive scope. |
-| IPC framing | UI <-> core (Tauri commands/events vs Electron IPC) and MCP binary <-> app socket (length-prefixed JSON vs NDJSON) |
-| Updater | Tauri updater (signed manifest) vs Sparkle vs Squirrel. Signature verification is mandatory. |
-| Signing | Developer ID, hardened runtime, notarization, entitlements (no App Sandbox, D7) |
+| Process model | One app process (Rust core + Tauri) plus the OS WebView helpers. No daemon in MVP: Claude Code sessions are children of the app; quitting asks first and SIGHUPs them. A launchd daemon is a later option if users ask for sessions that outlive the window. |
+| UI toolkit | Tauri v2 (`tauri` 2.x), React 19, Vite, Tailwind with CSS variables, shadcn/ui on Radix primitives. |
+| PTY | `portable-pty` in the core. One reader thread per PTY writes into a bounded ring; it never waits on the UI. The run session PTY is read-only until "Take over". |
+| Terminal renderer | xterm.js, one instance for the visible pane only; scrollback 5000 lines. Bytes pass the core's ANSI sanitizer first (SGR and cursor moves only; OSC 8, OSC 52 and title sequences dropped). Worker transcripts are plain text rows, never a terminal. |
+| File watching | `notify` (FSEvents backend), non-recursive, on the allowlisted directories in section 9; 150 ms coalescing. |
+| UI <-> core | Tauri commands (request/response JSON) only. **Pull, not push:** the renderer polls `tail(stream, after_seq, max_bytes<=64 KiB)` for the one visible stream at up to 20 Hz with one request in flight, and `crew()` (statuses and activity counters) at 2 Hz. A stalled renderer therefore never queues anything in the core (NFR-PERF-5). One Tauri event, `changed`, nudges the renderer after a state change. |
+| MCP <-> app | `vajra-desktop-mcp` is a mode of the app binary (`--mcp`), stdio JSON-RPC to the Lead, forwarding over a Unix socket (0600, in a 0700 dir; peer uid checked) with newline-delimited JSON, 64 KiB request cap. |
+| Updater | Not in MVP (unsigned local build). Plan: Tauri updater with a signed manifest after signing exists (NFR-SEC-7, H-packaging). |
+| Signing | Not in MVP. Developer ID + hardened runtime + notarization are the release plan (D7). |
 
-Evidence required, on this Mac, with the same method for every candidate (NFR-PERF-7):
-- idle RSS summed over all app processes (NFR-PERF-1)
-- RSS per attached agent stream (NFR-PERF-2)
-- cold start to interactive (NFR-PERF-4)
-- frame time p95 and p99 with 10 agents at 200 lines/s each (NFR-PERF-3)
-- 1 h soak RSS growth (NFR-PERF-6)
+**Rust core modules** (`app/core/src/`): `bus` (ring buffer, spill, sequence numbers), `sessions` (PTY
+supervisor, argv-only spawn), `vajra` (allowlisted reader + script bridge), `crew` (transcript tailer, tree
+derivation, name mapping), `control` (queue writer, ledger, socket, MCP), `main` (Tauri commands).
 
-Comparison targets: at least two competitors installed locally, Agent Orchestrator desktop and Orca. Both
-are Electron (bundle inspection: `Electron Framework.framework` and Squirrel in `Contents/Frameworks`). One
-snapshot from the brief: Agent Orchestrator 0.14.10-nightly with sessions, 13 processes, about 1608 MB `ps`
-RSS sum (over-counts shared pages; the spike should also report `footprint`/phys_footprint).
+**Tracer bullet (G3, 2026-11-05, Claude Code 2.1.296, real subagent).** Confirmed: hook payloads of subagent
+tool calls carry `session_id`, `agent_id`, `agent_type`, `cwd`; the subagent transcript lives at
+`~/.claude/projects/<cwd-slug>/<session_id>/subagents/agent-<agent_id>.jsonl` with a `.meta.json`
+(`agentType`, `description`); PostToolUse `additionalContext` reaches the calling subagent; exit 2 from a
+second PreToolUse hook blocks the call; `claude --resume <id>` plus `SendMessage` continues the same agent.
+Changed: plain `additionalContext` is treated by the worker as injection and ignored, so messages carry a
+per-session nonce (`<vajra-steer nonce=...>`) that the worker's brief declares; and stop must let
+`SubagentHandback` through so a stopped worker can still report. Not yet confirmed inside the Workflow tool.
 
-The spike also settles every "to verify in spike" item in this document (list in 5.9).
+Toolchain recorded: rustup stable updated to Rust 1.99.1 (system rustc 1.86 cannot build Tauri 2); Node
+22.22.2 (nvm).
 
 ## 3. Logical components (stack-agnostic)
 
