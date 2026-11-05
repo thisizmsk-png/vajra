@@ -629,9 +629,18 @@ fn main() {
         .setup(move |a| {
             let handle = a.handle().clone();
             std::thread::spawn(move || {
+                #[cfg(target_os = "macos")]
+                let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
                 loop {
                     if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
                         let _ = handle.emit(CHANGED, payload);
+                    }
+                    // ADR-9 item 7: no App Nap while a run is active.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let app = handle.state::<App>();
+                        let n = app.active_runs().ok().and_then(|v| v["count"].as_u64()).unwrap_or(0);
+                        nap.update(n as usize);
                     }
                 }
             });

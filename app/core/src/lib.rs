@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod logging;
+pub mod nap;
 pub mod paths;
 
 // Each of these is owned by a later task. Until its src/<name>/mod.rs
