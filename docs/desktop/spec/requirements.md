@@ -500,7 +500,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 |---|---|---|---|
 | B1 Steering needs the nonce tag; plain wrapper is ignored (arch review, tracer) | Fixed | design 5.3, 5.4 step 5.2, engine change E5 | AC-3.2.2 |
 | B2 / F2 Stop blocks the final output; stop file cleared too early; resume via SendMessage | Fixed | design 5.3, 5.4 step 4, ADR-8 | AC-3.3.4 to 3.3.7 |
-| B3 Control not proven through the Workflow tool | Fixed: new gate G3b before E1 and C6 | tasks.md G3b; fallback stop-only (ADR-2) | G3b done-when |
+| B3 Control not proven through the Workflow tool | Fixed: validation gate G3b after E1 and E5, before C6 (no cycle) | tasks.md G3b; fallback stop-only (ADR-2) | G3b done-when |
 | S1 voter: a stopped worker could still report done | Fixed | design 5.4 step 4 (only status blocked passes) | AC-3.3.4 |
 | S2 voter: the verification gate was steerable | Fixed | design 5.4 step 5b, E5 (task briefs only) | AC-3.2.2 |
 | S3 voter / M3: queue protection rests on guard regexes | Spec fixed, owner decision | design 5.4 E2 scope; sandbox denyWrite is Q10 | E2 tests |

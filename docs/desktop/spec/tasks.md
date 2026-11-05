@@ -30,14 +30,14 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 | G1 | Stack spike: measure candidates against Agent Orchestrator desktop and Orca on this Mac; answer design.md section 2 | GPT 6.1 Sol spike worker (outside Vajra) | spike report | none | Report has measured idle RSS, RSS per agent, cold start, frame time at 10 agents |
 | G2 | **Done 2026-11-05 for the stack** (both models approve Tauri v2 + Rust + React/TS + xterm.js; performance approval withheld by both until NFR-PERF-1 and NFR-PERF-6 are met). Review: `vajra-3/stack-spike-review.md`, objections O1-O7 feed H1 | Opus 5.5 + GPT 6.1 Sol | `docs/desktop/spec/requirements.md`, `docs/desktop/PRD.md` | G1 | Stack approved by both; budgets in NFR-PERF-1 to 10 |
 | G3 | **Confirmed 2026-11-05** by vajra-6's tracer bullet (Claude Code 2.1.296, artifact `vajra-6/tracer-bullet.md`): Claude Code facts the control channel depends on (design.md 5.9) | abhimanyu [Prototyper]; done by vajra-6 | none (spike notes) | G1 | Done: subagent hook payloads carry `session_id`, `agent_id`, `agent_type`, `cwd`; `additionalContext` reaches the subagent when sent as a nonce-tagged steer (plain text is ignored as injection); exit 2 from a second PreToolUse hook blocks the call; `--resume` plus `SendMessage` continues the same agent. Still open: the same inside the `vajra-deliver` Workflow tool (M2 smoke run) |
-| G3b | Tracer through the real path (A1 B3): one-task `vajra-deliver` run with the control hook and E5, checking step labels and `agent_id` in hook payloads, nonce steer delivery, sticky stop with the final-output exemption, and the MCP naming (design 5.9 items 9 to 11) | abhimanyu [Prototyper] | spike notes only | G3 | Each item confirmed (POS-5.5); if steering fails on this path, J3 ships as stop-only (ADR-2 fallback) and steering claims stay limited to Agent-tool subagents |
+| G3b | Validation gate, run after E1 and E5 are built (A1 B3): one-task `vajra-deliver` run with the control hook and E5, checking step labels and `agent_id` in hook payloads, nonce steer delivery, sticky stop with the final-output exemption, and the MCP naming (design 5.9 items 9 to 11) | abhimanyu [Prototyper] | spike notes only | E1, E5 | Each item confirmed (POS-5.5); a finding (for example another final-output tool name, design 5.4) goes back to E1 as a fix and G3b reruns, and C6 starts only after G3b passes; if steering fails on this path, J3 ships as stop-only (ADR-2 fallback) and steering claims stay limited to Agent-tool subagents |
 
 ### M1 Engine changes (Vajra repo, owner-approved)
 
 | Id | Task | Owner | Files | Deps | Acceptance |
 |---|---|---|---|---|---|
 | E3 | `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`: read-only, reuses the shared green check, returns `{ok, green, reasons}`, writes nothing | bhima [Backend] | `scripts/vajra_tasks.py`, `tests/tasks/run-check-evidence.sh` | G2 | AC-4.3.1, AC-4.3.3; test proves no file under the campaign changes |
-| E5 | `vajra-deliver.js`: optional `steer_nonce` input and one fixed steering sentence in Execute-phase task briefs only (design 1.3) | bhima [Backend], reviewed by bhishma [Security] | `workflows/vajra-deliver.js`, `tests/workflows/*` | G3b | AC-3.2.2; verify, review and merge briefs unchanged (test) |
+| E5 | `vajra-deliver.js`: optional `steer_nonce` input and one fixed steering sentence in Execute-phase task briefs only (design 1.3) | bhima [Backend], reviewed by bhishma [Security] | `workflows/vajra-deliver.js`, `tests/workflows/*` | G2, G3 | AC-3.2.2; verify, review and merge briefs unchanged (test) |
 | E4 | Persist the delivery report as `report.md` in the campaign through `vajra-campaign.sh` (PRD Q3) | bhima [Backend] | `scripts/vajra-campaign.sh`, `workflows/vajra-deliver.js`, tests | G2 | History shows the report with the transcript format check forced to fail |
 | E6 | The worker's claim passes `--worktree "$PWD"` so `tasks.json` names each worker's worktree; the Control service matches workers on it and uses transcripts for display only (PM-7) | bhima [Backend] | `workflows/vajra-deliver.js`, `scripts/vajra_tasks.py`, tests | G2 | With the transcript format check forced to fail, message and stop still reach the right worker |
 | E1 | `hooks/desktop-control.sh`: delivers queued control messages to the addressed worker at its next tool call (message, redirect as additional context; stop as a block with reason), consume-once with ack; no-op when the app is not installed | bhima [Backend] | `hooks/desktop-control.sh`, `hooks/hooks.json`, `tests/hooks/run-desktop-control.sh` | G2, G3 | AC-3.2.1, AC-3.2.2, AC-3.2.5, AC-3.3.4 to AC-3.3.6 (tests: `handback_exempt_exact`, `stop_sticky_after_handback`, `no_delivery_when_stopped`, `no_delivery_on_handback`, `stop_cleared_only_by_human`; vajra-6 611d969); fails open (no queue = exit 0), never touches the guard |
@@ -54,7 +54,7 @@ Moved into M1 by pre-mortem PM-7: persist the delivery report as `report.md` in 
 | C3 | Session supervisor: start the run session and the Lead chat session in PTYs owned by the Rust core (ADR-9: no daemon; closing the window keeps runs alive via the menu bar; Cmd-Q confirms when runs are active; resume offered after a quit or crash; updates wait for idle; App Nap activity assertion while runs are active, with a 30 min closed-window test; a TCC prompt test for repos under ~/Documents); argv from a fixed template with argument arrays; read-only by default; explicit "Take over"; reattach with no lost events | bhima [Backend] | `app/core/sessions/*`, tests | C1, C2 | AC-1.1.x, AC-2.2.4, NFR-SEC-4, POS-2.1 to POS-2.1c, POS-2.4 (argv test) |
 | C4 | Vajra state reader + script bridge: campaigns, tasks, features, progress, checkpoints, audit.log, routing log through a path allowlist; shell-outs to `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git` | sepoy-backend-1 [Backend worker 1] | `app/core/vajra/*`, `tests/fixtures/campaigns/*` | C1 | AC-1.2.x, AC-1.3.x, AC-1.1.3, NFR-SEC-2, NFR-SEC-6; test: the app never opens `.hmac-key` (fs trace) |
 | C5 | Transcript tailer + crew tree derivation (Lead, run, agents, sub-workers) from transcripts and `tasks.json`; schema-version check with raw fallback | bhima [Backend] | `app/core/crew/*`, `tests/fixtures/transcripts/*` | C2, C4 | AC-2.1.x, AC-2.2.1 to AC-2.2.3 |
-| C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2 | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
+| C6 | Control service: MCP server (`list_workers`, `inspect_worker`, `message_worker`, `redirect_worker`, `stop_worker`) over an owner-only socket, queue writer, control ledger | bhima [Backend] | `app/core/control/*`, tests | C2, C5, E1, E2, E5, E6, G3b | AC-3.1.x to AC-3.4.x, NFR-SEC-5, NFR-SEC-8 |
 
 C4 runs in parallel with C2 and C3 (disjoint files). C5 waits for C4's fixtures.
 
@@ -116,15 +116,14 @@ needs slice 2 only for its last beat. Every acceptance id stays; only the order 
 ```mermaid
 graph LR
   G1 --> G2 --> E3 & E1 & C1
-  G1 --> G3 --> G3b --> E1 --> E2
-  G3b --> C6
+  G1 --> G3 --> E1 --> E2
+  G2 & G3 --> E5
+  E1 & E5 --> G3b --> C6
   C1 --> C2 & C4 & K1
   C2 --> C3
   C2 & C4 --> C5
-  C5 & E1 & E2 & E5 --> C6
-  G3b --> E5
+  C2 & C5 & E1 & E2 & E5 & E6 --> C6
   G2 --> E4 & E6
-  E6 --> C6
   C1 --> H0
   K1 --> K2 & K3
   C3 & C4 & K2 --> S1 & S5
