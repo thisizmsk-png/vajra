@@ -106,7 +106,7 @@ campaigns, a task graph, a verified knowledge ledger) to put a product over it.
 
 | Job | The human can... | Stories |
 |---|---|---|
-| J1 Start and resume | Start a `/vajra` run (repo, ask, base branch, max rounds) and resume a campaign (`/vajra continue`), after a preflight that shows whether Claude Code, Vajra's hooks and the sandbox are in place | US-1.1 to US-1.3 |
+| J1 Start and resume | Start a `/vajra` run (repo, ask, base branch, max rounds) and resume a campaign by its slug (never `/vajra continue`, which follows the global `.active` pointer), after a preflight that shows whether Claude Code, Vajra's hooks and the sandbox are in place | US-1.1 to US-1.3 |
 | J2 Crew view | See a tree of Lead, the run, its agents and their sub-workers; hop to any of them; see its live stream, status, current task, worktree and diff | US-2.1 to US-2.4 |
 | J3 Orchestrator chat | Ask the Lead about any worker ("what is Backend stuck on?"), and have it message, redirect or stop a worker through a documented control channel. Every action is visible in the UI and the audit log; the human can take the same actions directly | US-3.1 to US-3.4 |
 | J4 Run view | Follow the phase timeline (route, recall, understand, plan, execute, verify, fix, deliver), the task graph with owners, and every acceptance criterion with pass/fail evidence | US-4.1 to US-4.3 |
