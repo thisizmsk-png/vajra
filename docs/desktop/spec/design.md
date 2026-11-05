@@ -121,6 +121,40 @@ Changed: plain `additionalContext` is treated by the worker as injection and ign
 per-session nonce (`<vajra-steer nonce=...>`) that the worker's brief declares; and stop must let
 `SubagentHandback` through so a stopped worker can still report. Not yet confirmed inside the Workflow tool.
 
+**Two-model dissent on idle memory.** GPT 6.1 Sol did NOT approve the stack on idle numbers: Runner (native
+GPUI) idles at about 203 MiB against the Tauri prototype's 281 MiB (38% higher). Under a 10-agent load Tauri
+wins (about 858 vs Runner 1138 vs Electron 1232 MiB). The owner lifted the gate; the condition for closing the
+dissent is an explicit idle budget: **release build idle RSS <= 200 MiB summed over all app processes,
+measured flat over a 1 h soak** (M5 task with its own script). Designed in from the start: only the visible
+pane mounts an xterm instance (lazy, unmounted when hidden); hidden streams live only in the Rust ring, never
+in the WebView; the renderer pulls (no pushed backlog); no devtools or dev tooling in release builds.
+
+**Control channel trust (tracer + bhishma threat model, `steering-threat-model.md`).** Trust is anchored in
+the channel, not in a secret: only the app writes the queue (0700 dir, guard-protected root), the
+`desktop-control.sh` hook is the only emitter, and Claude Code records hook context as its own record type
+(`hook_additional_context`), distinct from tool results. The per-session nonce in the `<vajra-steer>` tag is
+defense in depth: it rejects injected text whose author never saw it. It cannot be secret from the worker
+(the worker must know it to check it, so it sits in the brief and therefore the transcript). Rules: CSPRNG,
+at least 128 bits, one per run session, rotated on resume; never written to queue entries, the ledger,
+audit lines, acks, app logs or MCP results (`inspect_worker` redacts it); the guard blocks agent reads of the
+control dir and, when the call carries `agent_id`, of `~/.claude/projects` transcripts; the hook escapes
+message text so it cannot close the tag, warns when a tool result carries a steer tag, and blocks tool input
+that echoes the nonce. `source` is derived from the actor (`human`, `human-via-desktop`, `lead-via-desktop`).
+A stop is keyed by `agent_id`, stays in force after `SubagentHandback` (the exact name is the only exempt
+tool) and is cleared only by a human action, so a parent's `SendMessage` cannot revive a stopped worker.
+Residual risk: a worker can be talked into leaking the nonce and then obey a forged tag in tool output; a
+steer is still never approval and never widens scope, and the guard and permission prompt still apply.
+
+**Process model.** No separate daemon until vajra-3 decides VD-4/VD-6 (supervisor outlives the UI). Until
+then, quitting asks first and sessions stay resumable with `claude --resume` (VD-5, honest resume: only
+sessions killed by the app or a crash are offered, never ones the user exited).
+
+**Pain-point design checks for the core (pain-points.md P1-P6).** P1: bounded rings and spill everywhere,
+own-RSS shown apart from agent RSS. P2: honest resume as above. P3: no update channel in MVP; one process.
+P4: status only from hooks, `tasks.json` and transcripts; "unknown" when no signal, never an invented idle.
+P5: a "rate-limited" worker state when the transcript reports a usage limit. P6: offline, no account, all
+app state in plain JSONL in the app data dir.
+
 Toolchain recorded: rustup stable updated to Rust 1.99.1 (system rustc 1.86 cannot build Tauri 2); Node
 22.22.2 (nvm).
 
