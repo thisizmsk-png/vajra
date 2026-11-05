@@ -666,7 +666,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 2. Decide whether Vajra should persist delivery reports in the campaign (A8).
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
-5. Q13: approve engine change E7 (archived evidence bundle and setup list). Blocks slice 1.
+5. Q13: decided 2026-11-05 (E7 approved, under vidura review).
 6. Q14: decided 2026-11-05 (E9 approved, conditions in AC-7.1.8).
 7. Q12: deferred 2026-11-05 (no request to Anthropic for now; a known launch risk, PRD section 11).
 
