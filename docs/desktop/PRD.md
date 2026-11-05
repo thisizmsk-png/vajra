@@ -326,4 +326,6 @@ and the spec is written to it. Changing one later is a doc edit plus the tasks n
 | Q5 | Minimum macOS version and Intel support | macOS 14+, Apple Silicon first |
 | Q6 | Pricing and license for the app (Vajra itself is MIT) | Owner to decide before launch |
 | Q7 | Telemetry: none, or opt-in crash reports only | Opt-in crash reports only |
+| Q10 | Add a sandbox denyWrite for the app data dir in `config/sandbox.json` (A1 M3)? | Yes; without it, control is stop-only when the sandbox is off |
+| Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | Yes, both additive |
 | Q8 | Claude Code facts the design depends on (transcript layout for subagents, hook payload agent fields, `additionalContext` for subagent tool calls) | Verify in the spike; fallbacks in design.md |

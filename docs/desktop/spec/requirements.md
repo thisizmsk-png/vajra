@@ -97,10 +97,11 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.1.1 GIVEN the chat panel, WHEN I ask "what is Backend stuck on?", THEN the Lead calls `list_workers` / `inspect_worker` and its reply cites the worker, task id and the last transcript evidence; each call appears as an action card.
 - AC-3.1.2 GIVEN the Lead chat session, WHEN it runs, THEN it is a separate Claude Code session from the run session; a chat message never appears in any worker's context (verified: absent from every worker transcript).
 - AC-3.1.3 GIVEN a read-only question, WHEN the Lead answers, THEN no entry is added to any worker queue.
+- AC-3.1.4 (STRIDE E4) GIVEN the Lead chat session, WHEN it starts, THEN its tool list is exactly the read tools plus the five control tools; a test fails on any other tool (for example Bash, Write, Agent or Workflow).
 
 **US-3.2** As a Dev, I want to message or redirect a worker (for example "use the kit Button" to Frontend), so that I steer it without typing into the run session.
 - AC-3.2.1 GIVEN a worker is running, WHEN I send a message to it (via Lead or the worker's "Message" control), THEN nothing is written to any PTY (verified: zero bytes to the run PTY from the control path).
-- AC-3.2.2 GIVEN a queued message, WHEN the worker makes its next tool call, THEN the message appears in that worker's next tool-call context as additionalContext wrapped in `<untrusted-data source="human-via-desktop">` (`source="human"` if typed directly by the human), and the queue entry is acknowledged exactly once.
+- AC-3.2.2 GIVEN a queued message for an Execute-phase task worker, WHEN that worker makes its next tool call, THEN the message appears in its context as `<vajra-steer nonce=N source="human"|"lead-via-desktop">`, the nonce appears in no app file except `control/<sid>/nonce`, and the worker's next action reflects it (L4 live check). Messages to verify, review or merge steps are refused with "control disabled for the verification gate".
 - AC-3.2.3 GIVEN a message was sent, WHEN I check the four places, THEN it appears (a) as an action card in the chat, (b) on the worker's activity feed, (c) as a line in the control ledger, (d) in Vajra's `audit.log` as an ALLOW or BLOCK line for the control tool.
 - AC-3.2.4 GIVEN a message mentions "approve" or "push", WHEN delivered, THEN no protected action is unlocked; an attempted push still needs Claude Code's permission prompt (control messages are never approval).
 - AC-3.2.5 GIVEN the worker finishes before its next tool call, WHEN the message is unconsumed, THEN the card shows "not delivered" and the message is not applied later to a different worker.
@@ -110,12 +111,14 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.3.1 GIVEN a worker, WHEN I press "Stop", THEN a confirm dialog names the worker and task; Cancel sends nothing.
 - AC-3.3.2 GIVEN I confirm, WHEN the worker makes its next tool call, THEN the call is blocked with reason "stopped by the human" and the worker node shows "stopped by the human".
 - AC-3.3.3 GIVEN Lead asks to stop a worker, WHEN requested, THEN the same human confirm dialog appears; the Lead cannot confirm on my behalf.
+- AC-3.3.4 (A1 B2, F2) GIVEN a stopped worker, WHEN its run's parent resumes the same agent id, THEN its tool calls are still blocked until I choose Resume worker; a stopped worker can only report blocked, never done.
 
 **US-3.4** As a Dev, I want every control action visible and doable directly, so that I trust the Lead.
 - AC-3.4.1 GIVEN any control action (list, inspect, message, redirect, stop), WHEN executed by the Lead or by me, THEN it appears in the activity feed and in the control ledger (append-only JSONL) with an action id; message, redirect and stop also appear in `audit.log`: the hook's delivery or stop line carries the same action id, and a Lead tool call is logged by the guard under its MCP tool name (design.md D5: the guard's own lines carry no id, and reads I make in the UI are ledger-only).
 - AC-3.4.2 GIVEN the Lead is unavailable or its session has ended, WHEN I use the worker's Message, Redirect and Stop controls, THEN each works without the Lead.
 - AC-3.4.3 GIVEN a reconciliation script compares ledger action ids to `audit.log`, WHEN run after a session, THEN zero ledger entries lack an audit line and zero control audit lines lack a ledger entry.
 - AC-3.4.4 GIVEN the control queue directory, WHEN a worker tries to write to it, THEN the guard blocks it and `audit.log` records BLOCK.
+- AC-3.4.5 (STRIDE R1) GIVEN any human action (approve, reject, take over, re-run, resume worker, clear stop), WHEN it happens, THEN the control ledger has one record with the actor, the exact target and the time.
 
 ### J4 Run view
 
@@ -142,6 +145,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-5.1.3 GIVEN a new item arrives, WHEN the app is in the background, THEN the Dock badge count updates within 2 s.
 - AC-5.1.4 (VD-9) GIVEN 3 items waiting on me, WHEN I open the inbox (Cmd-5), THEN they are listed oldest first with how long each has waited and the last 3 lines of context, and Enter opens the item's worker or plan.
 - AC-5.1.5 (VD-24) GIVEN 5 workers finish turns and 1 waits for a permission prompt while the app is in the background, WHEN notifications fire, THEN exactly 1 notification appears (the permission wait); worker turn ends never notify; a finished or stuck run notifies once.
+- AC-5.1.6 (STRIDE S2) GIVEN agent output that looks like an inbox item or an app notice, WHEN rendered, THEN it appears only inside that worker's stream as text; inbox items come only from the workflow result, task status or a permission wait.
 
 **US-5.2** As a Reviewer-approver, I want to approve a plan, so that execution proceeds under my control.
 - AC-5.2.1 GIVEN a pending plan, WHEN I open it, THEN the exact plan text (commands, rollback) is shown unabridged before the Approve button is enabled.
@@ -177,7 +181,7 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
   is the default view of that run and, within one click, each criterion shows a status (pass, fail, not run,
   stale, unverified), the check command, its exit code, an output excerpt linking to the full log, the diff,
   and the Verifier role next to the author role. If the two are the same role, the row says so.
-- POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the exact command shown,
+- POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the full command shown monospaced and untruncated (STRIDE E2),
   THEN the app runs it through `scripts/vajra-verify-work.sh` in a fresh worktree detached at the evidence
   commit (the task's own worktree is usually cleaned up), with the command passed as one argument, and shows
   whether the new result matches the recorded one. The recorded command came from an agent, so it is
@@ -208,7 +212,7 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
 - Deferred to v1.1 (ADR-9): runs that keep going through a quit or SIGKILL of the app (VD-4).
 - POS-2.2 GIVEN `/vajra <ask>` started in a plain terminal, WHEN the app is open, THEN the run appears live
   within the event latency budget (NFR-PERF-9), with the crew, run view and inbox. The app can't take over
-  that terminal; the control channel works if the control hook is installed.
+  that terminal. Workers in it can be stopped but not messaged, because the app did not create its nonce (A1 M4).
 - POS-2.3 GIVEN the app is uninstalled, WHEN I list `~/.claude/vajra/`, THEN every campaign, evidence file
   and ledger record is still there, readable with the CLI. The app's own files (run index, control ledger,
   report copies) are plain JSONL and markdown in its data directory. This strengthens Q3 in the PRD
@@ -277,9 +281,15 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 - NFR-SEC-3: all agent output is untrusted; rendered as text; no HTML or escape-sequence execution.
 - NFR-SEC-4: no shell interpolation of agent or user text; arguments are passed as argv.
 - NFR-SEC-5: IPC is owner-only (Unix socket mode 0600); no network listener.
-- NFR-SEC-6: filesystem reads follow an explicit path allowlist; no recursive watch on `~/.claude/vajra`.
-- NFR-SEC-7: release builds are signed and notarized; updates are signed; dependencies are pinned and checked (lockfile audit, SBOM).
+- NFR-SEC-6: filesystem reads follow an explicit path allowlist; every path is canonicalized and symlink escapes are refused; reads are size-capped; no recursive watch on `~/.claude/vajra`.
+- NFR-SEC-7: release builds are signed and notarized; updates are signed; dependencies are pinned and installed with lifecycle scripts off; `build.rs` and native dependencies are reviewed; `cargo-deny` and `npm audit` run in CI; each release has an SBOM.
 - NFR-SEC-9: the app never runs a command that came from agent output (a recorded check, a plan step) without the human confirming the exact text; the Lead and MCP tools can't trigger one.
+- NFR-SEC-10 (STRIDE S1): the control socket checks the peer uid on every connection and binds each connection to the session it was started for; a connection that names another session is refused.
+- NFR-SEC-11 (STRIDE I1): spill files, logs and report copies are 0600 in the app data dir, kept at most 14 days or 1 GB (oldest first), and never uploaded.
+- NFR-SEC-12 (STRIDE I2): the webview loads only bundled assets under a strict CSP, can't navigate away or open windows, and opens links only after a human click, in the default browser.
+- NFR-SEC-13 (STRIDE D1): parsers cap line length (1 MiB), JSON depth (64) and record size; an over-cap record shows as "truncated" and never stalls the reader.
+- NFR-SEC-14 (STRIDE E1): the Tauri command surface is a fixed, documented list; no command takes an executable path, a shell string or an arbitrary filesystem path; each validates its arguments and the calling window.
+- NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
 - NFR-SEC-8: control messages are never approval for protected actions.
 
 ### Accessibility
@@ -389,14 +399,43 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 |
 | P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) |
 
-## 7b. Review findings (pending)
+## 7b. Review findings
 
-Rows from the architecture review, the pre-mortem, the STRIDE threat model and the ponytail review of this
-spec, in the same shape: finding, decision, requirement, acceptance id.
+Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit 6b0cedb on a local branch, three votes: two revise, one approve; its pre-mortem step returned no output, so a Critic pre-mortem was run separately and is in the PRD); STRIDE (`vajra-3/stride.md`); ponytail review.
 
-| Finding (review) | Decision | Requirement | Acceptance id |
+| Finding (review) | Decision | Requirement or design change | Acceptance id |
 |---|---|---|---|
-| (pending) | | | |
+| B1 Steering needs the nonce tag; plain wrapper is ignored (arch review, tracer) | Fixed | design 5.3, 5.4 step 5.2, engine change E5 | AC-3.2.2 |
+| B2 / F2 Stop blocks the final output; stop file cleared too early; resume via SendMessage | Fixed | design 5.3, 5.4 step 4, ADR-8 | AC-3.3.4 |
+| B3 Control not proven through the Workflow tool | Fixed: new gate G3b before E1 and C6 | tasks.md G3b; fallback stop-only (ADR-2) | G3b done-when |
+| S1 voter: a stopped worker could still report done | Fixed | design 5.4 step 4 (only status blocked passes) | AC-3.3.4 |
+| S2 voter: the verification gate was steerable | Fixed | design 5.4 step 5b, E5 (task briefs only) | AC-3.2.2 |
+| S3 voter / M3: queue protection rests on guard regexes | Spec fixed, owner decision | design 5.4 E2 scope; sandbox denyWrite is Q10 | E2 tests |
+| F3 Lead text labelled human | Fixed | source from actor: human or lead-via-desktop | AC-3.2.2 |
+| H1 design section 9 had stale budgets | Fixed | pointer to NFR-PERF-1 to 11; 256 KiB tail | NFR-PERF-2 |
+| M1 D1 to D3 and 5.9 still say to verify | Fixed | tasks.md G3; design 5.9 note | G3 |
+| M4 terminal-started runs promised steering | Fixed | POS-2.2 narrowed to stop only | POS-2.2 |
+| M5 windowless menu bar app may be throttled by App Nap | Added | ADR-9: hold an activity assertion while runs are active; 30 min closed-window test in C3 | POS-2.1 |
+| M6 control hook should check the dir before jq | Fixed | design 5.4 step 2 | NFR-PERF-8 |
+| L1 app directory name | Fixed | `VajraDesktop` everywhere | none |
+| L3 privacy prompts for repos under ~/Documents | Added | C3 test for the TCC prompt | AC-1.1.x |
+| STRIDE S1 socket spoofing | Adopted | NFR-SEC-10 | NFR-SEC-10 |
+| STRIDE S2 forged inbox item | Adopted | AC-5.1.6 | AC-5.1.6 |
+| STRIDE T1 agents edit app data | Adopted | E2 protects the whole app data dir | E2 tests |
+| STRIDE T2 symlink escape | Adopted | NFR-SEC-6 amended | NFR-SEC-6 |
+| STRIDE R1 human actions unrecorded | Adopted | AC-3.4.5 | AC-3.4.5 |
+| STRIDE I1 secrets in spill files | Adopted | NFR-SEC-11 | NFR-SEC-11 |
+| STRIDE I2 remote content | Adopted | NFR-SEC-12 | NFR-SEC-12 |
+| STRIDE I3 clipboard escapes | Adopted | NFR-SEC-3 plus test | NFR-SEC-3 |
+| STRIDE D1 parser floods | Adopted | NFR-SEC-13 | NFR-SEC-13 |
+| STRIDE D2 control write blocks | Adopted | NFR-PERF-5 plus test | NFR-PERF-5 |
+| STRIDE E1 broad Tauri commands | Adopted | NFR-SEC-14 | NFR-SEC-14 |
+| STRIDE E2 re-run of reflowed command | Adopted | POS-1.2 amended | POS-1.2 |
+| STRIDE E3 malicious update | Adopted | NFR-SEC-15 | NFR-SEC-15 |
+| STRIDE E4 Lead tools widen | Adopted | AC-3.1.4 | AC-3.1.4 |
+| STRIDE E5 supply chain | Adopted | NFR-SEC-7 amended | NFR-SEC-7 |
+| Ponytail: resume typed into the PTY | Fixed (6db4529) | ADR-9 decision 5 uses argv | POS-2.1b |
+| Ponytail: kb approvals prefilled in an app PTY | Fixed (6db4529) | copy to own terminal | POS-3.1 |
 
 ## 8. Decisions requested from the owner
 
