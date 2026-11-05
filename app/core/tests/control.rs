@@ -134,20 +134,29 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 
 /// Copy the real hook out of git into `dir`. Fails (never skips) if git can't.
 fn real_hook(dir: &Path) -> PathBuf {
-    let out = Command::new("git")
-        .args(["show", "ao/vajra-6/m1-engine:hooks/desktop-control.sh"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("git must be runnable for the hook contract test");
-    assert!(
-        out.status.success(),
-        "git show ao/vajra-6/m1-engine:hooks/desktop-control.sh failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("desktop-control"), "not the control hook");
+    // The repo's own hook once M1 is merged; until then the M1 branch (local or origin).
+    let repo_hook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/desktop-control.sh");
+    let body = match fs::read(&repo_hook) {
+        Ok(b) => b,
+        Err(_) => {
+            let show = |rev: &str| {
+                Command::new("git")
+                    .args(["show", &format!("{rev}:hooks/desktop-control.sh")])
+                    .current_dir(env!("CARGO_MANIFEST_DIR"))
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| o.stdout)
+            };
+            show("ao/vajra-6/m1-engine")
+                .or_else(|| show("origin/ao/vajra-6/m1-engine"))
+                .expect("hooks/desktop-control.sh: not in the repo and no m1-engine branch")
+        }
+    };
+    assert!(String::from_utf8_lossy(&body).contains("desktop-control"), "not the control hook");
     fs::create_dir_all(dir).unwrap();
     let path = dir.join("desktop-control.sh");
-    fs::write(&path, &out.stdout).unwrap();
+    fs::write(&path, &body).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path
 }
