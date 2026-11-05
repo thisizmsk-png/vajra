@@ -47,6 +47,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.1.2 GIVEN the ask field is empty or max rounds is outside 1..3, WHEN I press "Start run", THEN the button is disabled or an inline error names the field, and no process is spawned.
 - AC-1.1.3 GIVEN any run start, WHEN it completes or fails, THEN no file under `~/.claude` was created or modified by the app itself; changes there come only from Claude Code and Vajra's own scripts (verified by a filesystem-event diff over `~/.claude` attributing writes by process).
 - AC-1.1.4 GIVEN the advanced section, WHEN I set maxInFlight outside 1..16, THEN the value is rejected with an inline message; a valid value is passed as `maxInFlight`.
+- AC-1.1.5 (P24, billing.md) GIVEN 10 `claude` sessions started together, WHEN they run, THEN each is the stock binary handling its own login; the app never reads, copies, refreshes or shares tokens (no access to `~/.claude/.credentials*`, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`, checked by an fs and process trace), and sessions start at least 2 s apart so the binary's own refresh isn't raced.
 
 **US-1.2** As a Dev, I want to resume a campaign, so that I continue unfinished work (`/vajra continue`).
 - AC-1.2.1 GIVEN the campaign list shows campaigns found under `~/.claude/vajra/campaigns/`, WHEN I choose one and press "Resume", THEN the app runs `vajra-campaign.sh verify <slug>` first and, on exit 0, launches the run session with `campaign: <slug>` and a fresh `run_id`.
@@ -364,7 +365,7 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 
 | Story | Criteria | NFRs |
 |---|---|---|
-| US-1.1 | AC-1.1.1 .. 1.1.4 | SEC-1, SEC-4, UX-2, UX-3 |
+| US-1.1 | AC-1.1.1 .. 1.1.5 | SEC-1, SEC-4, UX-2, UX-3 |
 | US-1.2 | AC-1.2.1 .. 1.2.3 | SEC-2, SEC-4, UX-2 |
 | US-1.3 | AC-1.3.1 .. 1.3.7 | SEC-2, UX-1, A11Y-1 |
 | US-2.1 | AC-2.1.1 .. 2.1.6 | PERF-3, A11Y-1, A11Y-3 |
@@ -399,48 +400,49 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 
 ## 7a. Pain points from user research
 
-Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 24 rows MVP, 6 deferred, 8 won't do. New criteria from this table carry their VD id in brackets in section 3.
+Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 25 rows MVP, 6 deferred, 8 won't do (P24 added from `vajra-4/billing.md`). Every MVP row names the task that delivers it. New criteria from this table carry their VD id in brackets in section 3.
 
-| Pain point | Requirement (vajra-4 id) | Decision | Where in this spec |
-|---|---|---|---|
-| P1 memory bloat | VD-1 own vs agent memory | MVP | AC-2.1.4; NFR-PERF-1 to 3 define app RSS without agents |
-| P1 | VD-2 bounded buffers | MVP (already) | AC-2.2.2, NFR-PERF-2, NFR-PERF-5 |
-| P1 | VD-3 hidden panes free their view | MVP | AC-2.4.4 |
-| P2 sessions die | VD-4 daemon outlives the UI | Deferred v1.1 (ADR-9) | MVP keeps runs alive while the window is closed: POS-2.1, 2.1a |
-| P2 | VD-5 honest resume | MVP | POS-2.1b |
-| P3 crashes, bad updates | VD-6 one process generation | MVP | POS-2.1c (no daemon, updates wait for idle) |
-| P3 | VD-7 paste and output guard | MVP | AC-2.2.5; escape sanitizing NFR-SEC-3 |
-| P4 opaque status | VD-8 status from signals, else Unknown | MVP | AC-2.1.5 |
-| P4 | VD-9 needs-you inbox | MVP (already US-5.1) | AC-5.1.1 to 5.1.4 |
-| P4 | VD-10 ask the Lead, answer cites evidence | MVP (already US-3.1) | AC-3.1.1 to 3.1.3 |
-| P5 rate limits, cost | VD-11 rate-limited state | MVP (detection to verify) | AC-2.1.6. Per-run cost stays in `/vajra cost`: deferred |
-| P5 | Automatic account failover | Won't do | Credential rotation across accounts; terms and secrets risk (agree with vajra-4) |
-| P6 tool disappears | VD-12 no cloud, no account, open files | MVP | AC-1.3.6, POS-2.3 |
-| P6 | VD-13 run the real interactive CLI | MVP | POS-2.4; the app never uses `-p` for runs or proxies auth |
-| P7 agents collide | VD-14 conflicts routed to the owner | Won't do in the app | Vajra's deliver workflow owns the integration merge and the fix loop; a failing merge already returns to the owning task |
-| P7 | VD-15 per-worker ports and env | Deferred (engine) | Belongs in the workflow's worktree setup, not the app |
-| P7 | Semantic conflict detection | Won't do | Research-grade (agree with vajra-4) |
-| P8 typing into terminals | VD-16 documented control channel | MVP (already) | US-3.2 to 3.4, ADR-2; Lead text labelled `lead-via-desktop` (STRIDE F3) |
-| P9 too many windows | VD-17 crew tree | MVP (already) | US-2.1, US-2.4. Split view of up to 4 panes: deferred (one worker pane plus the chat dock covers the MVP) |
-| P10 multi-repo | VD-18 multi-repo crew | Deferred | A Vajra run is one repo; needs engine support first |
-| P11 worktree bloat | VD-19 worktree lifecycle | Deferred (engine owns it) | `vajra-worktree-clean.sh` already removes clean worktrees; the report lists kept ones. Disk size display later |
-| P11 | VD-20 worktrees optional | Won't do | Vajra runs every writer in its own worktree by design; a shared checkout breaks parallel waves |
-| P12 permission fatigue vs YOLO | VD-21 pass the user's permission modes, never bypass | MVP | POS-2.4 (argv test) |
-| P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) |
-| P13 terminal fidelity | VD-23 proven terminal core, latency gate | MVP | xterm.js (G2); NFR-PERF-11; AC-2.2.6 |
-| P14 notification noise | VD-24 notify on needs-you and finished runs only | MVP | AC-5.1.5. The ntfy webhook: deferred |
-| P15 lost context | VD-25 context meter and handoff | Deferred | Vajra's knowledge ledger and campaigns carry context across runs (POS-R3) |
-| P15 | VD-26 zero-cost hooks | MVP | AC-3.2.6, NFR-PERF-8 |
-| P16 silent config edits | VD-27 never edit config without consent | MVP | AC-1.3.5, AC-1.1.3; engine changes install through Vajra's own installer, run by the human |
-| P16 | VD-28 two-minute first run | MVP (app part) | AC-1.3.7. Vajra itself still needs python3, jq and openssl |
-| P17 feature bloat | VD-29 small surface by rule | MVP | The six jobs plus Settings (UX.md); H2 click crawl finds no other screen |
-| P18 diff review bottleneck | VD-30 hunk comments sent to the worker | Deferred v1.1 | Evidence per criterion (POS-R1) is the MVP answer; workers have usually finished by review time |
-| P18 | Submit GitHub PR reviews | Won't do | `gh` and the browser do it (agree) |
-| P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 |
-| P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 |
-| P21 lock-in | VD-33 agent-agnostic launch | Won't do | Positioning reason 2 is Claude Code-native; agent breadth belongs to Agent Orchestrator. Accepted cost: users who mix vendors |
-| P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 |
-| P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) |
+| Pain point | Requirement (vajra-4 id) | Decision | Where in this spec | Task |
+|---|---|---|---|---|
+| P1 memory bloat | VD-1 own vs agent memory | MVP | AC-2.1.4; NFR-PERF-1 to 3 define app RSS without agents | C5, S2 |
+| P1 | VD-2 bounded buffers | MVP (already) | AC-2.2.2, NFR-PERF-2, NFR-PERF-5 | C2 |
+| P1 | VD-3 hidden panes free their view | MVP | AC-2.4.4 | K3 |
+| P2 sessions die | VD-4 daemon outlives the UI | Deferred v1.1 (ADR-9) | MVP keeps runs alive while the window is closed: POS-2.1, 2.1a | none |
+| P2 | VD-5 honest resume | MVP | POS-2.1b | C3 |
+| P3 crashes, bad updates | VD-6 one process generation | MVP | POS-2.1c (no daemon, updates wait for idle) | C3 |
+| P3 | VD-7 paste and output guard | MVP | AC-2.2.5; escape sanitizing NFR-SEC-3 | K3 |
+| P4 opaque status | VD-8 status from signals, else Unknown | MVP | AC-2.1.5 | C5 |
+| P4 | VD-9 needs-you inbox | MVP (already US-5.1) | AC-5.1.1 to 5.1.4 | S5 |
+| P4 | VD-10 ask the Lead, answer cites evidence | MVP (already US-3.1) | AC-3.1.1 to 3.1.3 | S3 |
+| P5 rate limits, cost | VD-11 rate-limited state | MVP (detection to verify) | AC-2.1.6. Per-run cost stays in `/vajra cost`: deferred | C5 |
+| P5 | Automatic account failover | Won't do | Credential rotation across accounts; terms and secrets risk (agree with vajra-4) | none |
+| P6 tool disappears | VD-12 no cloud, no account, open files | MVP | AC-1.3.6, POS-2.3 | C1, H7 |
+| P6 | VD-13 run the real interactive CLI | MVP | POS-2.4; the app never uses `-p` for runs or proxies auth | C3 |
+| P7 agents collide | VD-14 conflicts routed to the owner | Won't do in the app | Vajra's deliver workflow owns the integration merge and the fix loop; a failing merge already returns to the owning task | none |
+| P7 | VD-15 per-worker ports and env | Deferred (engine) | Belongs in the workflow's worktree setup, not the app | none |
+| P7 | Semantic conflict detection | Won't do | Research-grade (agree with vajra-4) | none |
+| P8 typing into terminals | VD-16 documented control channel | MVP (already) | US-3.2 to 3.4, ADR-2; Lead text labelled `lead-via-desktop` (STRIDE F3) | E1, C6 |
+| P9 too many windows | VD-17 crew tree | MVP (already) | US-2.1, US-2.4. Split view of up to 4 panes: deferred (one worker pane plus the chat dock covers the MVP) | S2 |
+| P10 multi-repo | VD-18 multi-repo crew | Deferred | A Vajra run is one repo; needs engine support first | none |
+| P11 worktree bloat | VD-19 worktree lifecycle | Deferred (engine owns it) | `vajra-worktree-clean.sh` already removes clean worktrees; the report lists kept ones. Disk size display later | none |
+| P11 | VD-20 worktrees optional | Won't do | Vajra runs every writer in its own worktree by design; a shared checkout breaks parallel waves | none |
+| P12 permission fatigue vs YOLO | VD-21 pass the user's permission modes, never bypass | MVP | POS-2.4 (argv test) | C3 |
+| P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) | none |
+| P13 terminal fidelity | VD-23 proven terminal core, latency gate | MVP | xterm.js (G2); NFR-PERF-11; AC-2.2.6 | K3, H1 |
+| P14 notification noise | VD-24 notify on needs-you and finished runs only | MVP | AC-5.1.5. The ntfy webhook: deferred | S5 |
+| P15 lost context | VD-25 context meter and handoff | Deferred | Vajra's knowledge ledger and campaigns carry context across runs (POS-R3) | none |
+| P15 | VD-26 zero-cost hooks | MVP | AC-3.2.6, NFR-PERF-8 | E1 |
+| P16 silent config edits | VD-27 never edit config without consent | MVP | AC-1.3.5, AC-1.1.3; engine changes install through Vajra's own installer, run by the human | S1 |
+| P16 | VD-28 two-minute first run | MVP (app part) | AC-1.3.7. Vajra itself still needs python3, jq and openssl | S1 |
+| P17 feature bloat | VD-29 small surface by rule | MVP | The six jobs plus Settings (UX.md); H2 click crawl finds no other screen | H2 |
+| P18 diff review bottleneck | VD-30 hunk comments sent to the worker | Deferred v1.1 | Evidence per criterion (POS-R1) is the MVP answer; workers have usually finished by review time | none |
+| P18 | Submit GitHub PR reviews | Won't do | `gh` and the browser do it (agree) | none |
+| P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 | C1 |
+| P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 | G2 |
+| P21 lock-in | VD-33 agent-agnostic launch | Won't do | Positioning reason 2 is Claude Code-native; agent breadth belongs to Agent Orchestrator. Accepted cost: users who mix vendors | none |
+| P24 parallel sessions race on one OAuth login (Runner, Paseo; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C3 |
+| P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 | none |
+| P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) | PRD rule |
 
 ## 7b. Review findings
 
@@ -462,6 +464,9 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 | M6 control hook should check the dir before jq | Fixed | design 5.4 step 2 | NFR-PERF-8 |
 | L1 app directory name | Fixed | `VajraDesktop` everywhere | none |
 | L3 privacy prompts for repos under ~/Documents | Added | C3 test for the TCC prompt | AC-1.1.x |
+| F1 forged steer with a leaked nonce (steering threat model) | Mitigated, residual stated | design 5.3 trust model; nonce read blocks (E2); nonce-echo block | AC-3.2.9, AC-3.2.11, AC-3.4.6 |
+| F2 stop dodged through handback then SendMessage | Fixed | stop cleared only by a human | AC-3.3.5, AC-3.3.6 |
+| F4 the tracer hook logs full payloads | Fixed | the shipped E1 logs ids and tool names only; tracer scripts never ship | AC-3.2.7 (`no_nonce_in_outputs`) |
 | STRIDE S1 socket spoofing | Adopted | NFR-SEC-10 | NFR-SEC-10 |
 | STRIDE S2 forged inbox item | Adopted | AC-5.1.6 | AC-5.1.6 |
 | STRIDE T1 agents edit app data | Adopted | E2 protects the whole app data dir | E2 tests |
