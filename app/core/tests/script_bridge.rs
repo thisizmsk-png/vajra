@@ -219,7 +219,7 @@ fn preflight_all_green() {
 fn preflight_missing_claude_blocks_start_with_fix() {
     let e = env_with(DOCTOR_OK, true);
     fs::remove_file(&e.claude).unwrap();
-    let rows = preflight::run(&e.allow, &e.bridge, &[e.bin.clone()]);
+    let rows = preflight::run(&e.allow, &e.bridge, std::slice::from_ref(&e.bin));
     assert!(!start_enabled(&rows));
     let r = get(&rows, "claude");
     assert!(!r.ok);
@@ -229,7 +229,7 @@ fn preflight_missing_claude_blocks_start_with_fix() {
 #[test]
 fn preflight_doctor_fail_lists_failures() {
     let e = env_with("echo 'FAIL  integrity: manifest'\nexit 1", true);
-    let rows = preflight::run(&e.allow, &e.bridge, &[e.bin.clone()]);
+    let rows = preflight::run(&e.allow, &e.bridge, std::slice::from_ref(&e.bin));
     let d = get(&rows, "vajra doctor");
     assert!(!d.ok);
     assert!(d.detail.contains("integrity: manifest"));
@@ -241,7 +241,7 @@ fn preflight_doctor_fail_lists_failures() {
 #[test]
 fn preflight_missing_workflow_shows_install_then_doctor() {
     let e = env_with(DOCTOR_OK, false);
-    let rows = preflight::run(&e.allow, &e.bridge, &[e.bin.clone()]);
+    let rows = preflight::run(&e.allow, &e.bridge, std::slice::from_ref(&e.bin));
     let w = get(&rows, "workflow");
     assert!(!w.ok);
     assert!(w.detail.contains("vajra-deliver.js"));
@@ -252,7 +252,7 @@ fn preflight_missing_workflow_shows_install_then_doctor() {
 fn preflight_missing_tool_row_fails() {
     let e = env_with(DOCTOR_OK, true);
     fs::remove_file(e.bin.join("jq")).unwrap();
-    let rows = preflight::run(&e.allow, &e.bridge, &[e.bin.clone()]);
+    let rows = preflight::run(&e.allow, &e.bridge, std::slice::from_ref(&e.bin));
     assert!(!get(&rows, "jq").ok);
     assert_eq!(get(&rows, "jq").fix, "brew install jq");
     assert!(!start_enabled(&rows));

@@ -553,7 +553,7 @@ fn queue_entry_matches_hook() {
     let red = s.redirect_worker(Actor::Lead, "t2", "switch to plan B").unwrap();
     let rid = red["action_id"].as_str().unwrap().to_string();
     let r = run_hook(&hook, &h.home, &payload("PostToolUse", "Read", AID2, &h.wt("two")));
-    assert!(r.stdout.contains("Change of direction from the human: switch to plan B"), "{}", r.stdout);
+    assert!(r.stdout.contains("Change of direction from the Lead: switch to plan B"), "{}", r.stdout);
     assert!(r.stdout.contains("source=\\\"lead-via-desktop\\\" kind=\\\"redirect\\\""), "{}", r.stdout);
     assert!(h.session_dir().join("acks").join(format!("{rid}.json")).exists());
 
@@ -566,9 +566,14 @@ fn queue_entry_matches_hook() {
     assert!(h.audit_text().contains(&format!("BLOCK desktop-control reason=\"stop id={sid} tool=Bash\"")));
     let free = run_hook(&hook, &h.home, &payload("PreToolUse", "Bash", AID2, &h.wt("two")));
     assert_eq!(free.code, 0);
-    // The handback still goes through, and the stop stays in force after it.
-    let hb = run_hook(&hook, &h.home, &payload("PreToolUse", "SubagentHandback", AID, &h.wt("one")));
-    assert_eq!(hb.code, 0);
+    // Only the final report that says it was stopped goes through (M1 exemption);
+    // any other handback stays blocked, and the stop stays in force after it.
+    let plain = run_hook(&hook, &h.home, &payload("PreToolUse", "SubagentHandback", AID, &h.wt("one")));
+    assert_eq!(plain.code, 2, "a handback that hides the stop is blocked");
+    let mut fin = payload("PreToolUse", "SubagentHandback", AID, &h.wt("one"));
+    fin["tool_input"] = json!({"summary": "Stopped by the human before t1 finished."});
+    let hb = run_hook(&hook, &h.home, &fin);
+    assert_eq!(hb.code, 0, "{}", hb.stderr);
     let r = run_hook(&hook, &h.home, &payload("PreToolUse", "Bash", AID, &h.wt("one")));
     assert_eq!(r.code, 2);
     s.tick();
