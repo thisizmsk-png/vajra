@@ -66,10 +66,10 @@ jq -e '.hooks.PreToolUse[] | .hooks[] | select(.command == "/usr/local/bin/my-gu
 jq -e '.hooks.Stop[0].hooks[0].command == "say done"' "$SETTINGS" >/dev/null; check "user's Stop hook kept" $?
 for ev in PreToolUse PostToolUse PostToolUseFailure SessionStart PreCompact UserPromptSubmit; do
   n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("/.claude/skills/vajra/hooks/"))] | length' "$SETTINGS")"
-  want=1; case "$ev" in PreToolUse|PostToolUse) want=2 ;; esac  # + desktop-control.sh
+  want=1; case "$ev" in PreToolUse|PostToolUse|PostToolUseFailure) want=2 ;; esac  # + desktop-control.sh
   [ "$n" = "$want" ]; check "registered once: $ev" $?
 done
-for ev in PreToolUse PostToolUse; do
+for ev in PreToolUse PostToolUse PostToolUseFailure; do
   n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("desktop-control.sh"))] | length' "$SETTINGS")"
   [ "$n" = 1 ]; check "desktop-control.sh registered once: $ev" $?
 done

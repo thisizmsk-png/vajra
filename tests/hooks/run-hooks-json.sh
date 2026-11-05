@@ -21,7 +21,7 @@ BASE="$(git show "$BASE_REF:$F" 2>/dev/null)"
 [ -n "$BASE" ]; check "base hooks.json readable ($BASE_REF)" $?
 
 DC='bash "$HOME/.claude/skills/vajra/hooks/desktop-control.sh"'
-for ev in PreToolUse PostToolUse; do
+for ev in PreToolUse PostToolUse PostToolUseFailure; do
   n="$(jq --arg ev "$ev" --arg c "$DC" '[.hooks[$ev][] | select(.matcher=="*") | .hooks[] | select(.command==$c and .timeout==5 and .type=="command" and (.async|not))] | length' "$F")"
   [ "$n" = 1 ]; check "$ev has one '*' desktop-control.sh entry, timeout 5, not async" $?
 done

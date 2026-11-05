@@ -443,6 +443,24 @@ raw_case ALLOW "main session Read transcript"   "$(fj Read "$TR/sid.jsonl")"
 raw_case ALLOW "main session cat transcript"    "$(bj "tail -n 5 \"$TR/sid.jsonl\"")"
 raw_case ALLOW "main session Read control file" "$(fj Read "$CTRL/cmd.json")"
 raw_case ALLOW "Lead (no agent_id) lists ledger dir" "$(bj "ls \"$CTRL\"")"
+# bhishma gate findings on this diff (F-A..F-D)
+WT="$H/wt-copy"; mkdir -p "$WT/scripts"
+for s in generate-manifest.sh install.sh install-skills.sh; do echo "#" > "$WT/scripts/$s"; done
+mkdir -p "$CTRL/sess-1234abcd/queue"
+bash_case BLOCK "F-A cd into queue, plain-word redirect"  "cd \"$CTRL/sess-1234abcd/queue\" && printf x > q.json"
+bash_case BLOCK "F-A cd into queue, escaped space"        'cd ~/Library/Application\ Support/VajraDesktop/control/sess-1234abcd/queue && echo x > q.json'
+bash_case BLOCK "F-A cwd is the queue dir"                "echo x > q.json" "$CTRL/sess-1234abcd/queue"
+bash_case BLOCK "F-A cd parent then mv plain word"        "cd \"$H/Library/Application Support/VajraDesktop\" && rm -rf control"
+worker BLOCK "F-A worker cd control && cat nonce"         "$(bj "cd \"$CTRL/sess-1234abcd\" && cat nonce")"
+bash_case BLOCK "F-B bash -c install.sh"                  "bash -c \"bash scripts/install.sh --unregister-hooks\"" "$WT"
+bash_case BLOCK "F-B env -i bash install.sh"              "env -i bash scripts/install.sh --unregister-hooks" "$WT"
+bash_case BLOCK "F-B nohup sh generate-manifest"          "nohup sh scripts/generate-manifest.sh" "$WT"
+worker BLOCK "F-C worker grep -r parent of control"       "$(bj "grep -r . \"$H/Library/Application Support/VajraDesktop\"")"
+worker BLOCK "F-C worker find -exec cat from Library"     "$(bj "find ~/Library -name nonce -exec cat {} +")"
+worker BLOCK "F-C worker grep -r from ~/.claude"          "$(bj "grep -r nonce ~/.claude")"
+worker BLOCK "F-D worker names control dir, odd spacing"  "$(bj 'cat ~/Library/Application${IFS}Support/VajraDesktop/control/sess-1234abcd/nonce')"
+bash_case BLOCK "F-D write via odd spacing"               'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/control/q.json'
+raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
 worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
 
 # --- Tamper flag: reads still run, mutations blocked -----------------------
@@ -469,8 +487,6 @@ grep -q ' BLOCK Bash ' "$VS/audit.log" 2>/dev/null; judge ALLOW "audit log recor
 # --- Operator-only scripts from any copy (manifest re-sign incident, 2026-11-05) ---
 # A worktree copy of the skill re-signed the real manifest. The script NAME decides,
 # wherever the copy lives and however it is invoked.
-WT="$H/wt-copy"; mkdir -p "$WT/scripts"
-for s in generate-manifest.sh install.sh install-skills.sh; do echo "#" > "$WT/scripts/$s"; done
 bash_case BLOCK "worktree generate-manifest (relative)"   "bash scripts/generate-manifest.sh" "$WT"
 bash_case BLOCK "worktree generate-manifest (./)"        "./scripts/generate-manifest.sh" "$WT"
 bash_case BLOCK "worktree generate-manifest (absolute)"  "bash $WT/scripts/generate-manifest.sh"

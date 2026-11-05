@@ -145,6 +145,7 @@ canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; ROOTS+=( 
 # steering nonce, and transcripts hold each worker's brief (which carries it). The
 # main session and the Lead chat session have no agent_id and keep reading.
 NOREAD=( "${ROOTS[@]: -2}" )
+DCTL="${ROOTS[${#ROOTS[@]}-2]}" DCTL2="${ROOTS[${#ROOTS[@]}-1]}"
 canon "$HOME/.claude/projects" /; NOREAD+=( "$CANON" )
 noread() { # canonical path -> 0 if a worker may not read it
   local r
@@ -576,6 +577,10 @@ shopt -s nocasematch
 # Checked on the raw command too: even a heredoc body may not set it.
 [[ "$N" == *VAJRA_ATMAN_ASSUME_HUMAN* || "$CMD" == *VAJRA_ATMAN_ASSUME_HUMAN* ]] && block "VAJRA_ATMAN_ASSUME_HUMAN is for a human at a terminal, not the agent"
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
+if [[ "$CMD" == *vajradesktop/control* ]]; then
+  [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+fi
 shopt -u nocasematch
 
 RE_RF="(^| )-[[:alnum:]]*([rR][[:alnum:]]*f|f[[:alnum:]]*[rR])[[:alnum:]]*( [^;|&]*)? (/|/\*|~|~/|~/\*|${HOME_RE}|${HOME_RE}/|${HOME_RE}/\*)( |;|\||&|$)"
@@ -907,9 +912,18 @@ eval_segment() { # uses SEG array
     # by file name wherever the script lives (installed copy or a dev clone).
     # Operator-only scripts too: a worktree copy of generate-manifest.sh still
     # signs into the real ~/.claude/vajra (incident 2026-11-05), so the name decides.
-    if [[ "$NOT_SCRIPTS" == *" ${SEG[$cand_i]##*/} "* ]]; then
-      block "${SEG[$cand_i]##*/} changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
-    fi
+    # Run, not named: the script is the command word or follows a shell or
+    # interpreter, also inside a bash -c string (cat or grep of it is fine).
+    local runs=0
+    for ((c = wi; c < n; c++)); do
+      tok="${SEG[$c]//[\"\']/}"
+      for k in $tok; do
+        if [[ "$NOT_SCRIPTS" == *" ${k##*/} "* ]] && { [ "$runs" = 1 ] || [ "$c" = "$wi" ]; }; then
+          block "${k##*/} changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
+        fi
+        [[ "$SHELLS$INTERPS" == *" ${k##*/} "* ]] && runs=1
+      done
+    done
     if [ "${SEG[$cand_i]##*/}" = vajra_kb.py ]; then
       local kbsub="" kprev=""
       for ((c = cand_i + 1; c < n; c++)); do
@@ -1110,6 +1124,7 @@ eval_segment() { # uses SEG array
       candidates "$tok" "$SEGCWD"
       for cc in ${CANDS[@]+"${CANDS[@]}"}; do
         key_anc "$cc" && block "${wb} over $cc would reach the Vajra HMAC key; name a path below it instead"
+        noread_anc "$cc" && block "${wb} over $cc would reach Vajra Desktop control files or transcripts; name a path below it instead"
       done
     done
   fi
@@ -1133,7 +1148,9 @@ eval_segment() { # uses SEG array
   # symlink. Both facts are cached per cwd.
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
     FAST_CWD="$SEGCWD"; FAST_OK=0; FAST_LINKS=0
-    if ! inside "$SEGCWD" "$CL" && ! inside "$CL" "$SEGCWD"; then FAST_OK=1; fi
+    if ! inside "$SEGCWD" "$CL" && ! inside "$CL" "$SEGCWD" \
+       && ! inside "$SEGCWD" "$DCTL" && ! inside "$DCTL" "$SEGCWD" \
+       && ! inside "$SEGCWD" "$DCTL2" && ! inside "$DCTL2" "$SEGCWD"; then FAST_OK=1; fi
     local e
     shopt -s nullglob dotglob
     for e in "$SEGCWD"/*; do [ -L "$e" ] && { FAST_LINKS=1; break; }; done
