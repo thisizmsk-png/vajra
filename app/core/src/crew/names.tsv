@@ -1,0 +1,21 @@
+# engine id<TAB>UI name (design.md 4.4). An engine rename only touches this file.
+krishna	Lead
+arjuna	Architect
+bhima	Backend
+nakula	Frontend
+vidura	Verifier
+bhishma	Security
+shakuni	Red team
+duryodhana	Critic (pre-mortem)
+drona	Acceptance
+draupadi	Product
+dhrishtadyumna	Release planner
+yudhishthira	Arbiter
+abhimanyu	Prototyper
+karna	Numerics
+sahadeva	Analyst
+hanuman	Platform
+ashwatthama	Incident lead
+sepoy-backend-1	Backend worker 1
+sepoy-frontend-1	Frontend worker 1
+sepoy-test-1	Test worker 1

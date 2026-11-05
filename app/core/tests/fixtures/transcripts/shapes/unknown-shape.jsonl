@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","sessionId":"s1","gitBranch":"vajra/20261105-1810/t1","message":{"role":"user","content":"You own task t1 (task graph id 20261105-1810.t1) of a larger delivery.\nSecond line"}}
+{"type":"assistant","uuid":"u2","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"structured line"}]}}
+{"kind":"message","body":"a record shape Claude Code never wrote"}
+{"type":"assistant","uuid":"u3","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"after the change"}]}}
