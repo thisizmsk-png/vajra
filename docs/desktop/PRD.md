@@ -42,7 +42,7 @@ only with no telemetry, cost per run.
 
 **60-second demo.** (1) Open a finished delivery: four criteria pass, one fails. Open the failing one to see
 the command, exit 1, the output, the diff, and "verified by Verifier, written by Backend". Re-run it, then
-edit a file and watch the evidence turn stale. (2) Start `/vajra add CSV export` in a plain terminal; the
+edit a file (even without committing) and watch the evidence turn stale. (2) Start `/vajra add CSV export` in a plain terminal; the
 open app picks it up live. Quit the app; the run keeps going. Reopen it and it reattaches. (3) A second run in
 the same repo shows "2 knowledge records used", each with its source run, tier and review action.
 

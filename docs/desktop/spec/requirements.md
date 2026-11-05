@@ -198,9 +198,17 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
   commit (the task's own worktree is usually cleaned up), with the command passed as one argument, and shows
   whether the new result matches the recorded one. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
-- POS-1.3 GIVEN evidence whose HMAC fails, or whose `git.head` differs from the branch head now, WHEN the
-  delivery is shown, THEN the criterion shows "unverified" or "stale", never pass. The check goes through
-  engine change E3 (`vajra_tasks.py check-evidence --head`); the app never reads the key.
+- POS-1.3 (GPT-4) Two separate answers per criterion, never merged into one green:
+  - **Proof at the recorded commit:** "verified" when E3 (`vajra_tasks.py check-evidence --head <recorded
+    head>`) is green, and "unverified" when the HMAC or any green rule fails. The app never reads the key.
+    This stays visible as history.
+  - **Current:** "current" only when the evidence's `git.worktreeTree` equals the whole-tree id of the
+    checked-out integration worktree now, computed the same way (`git add -A` into a throwaway
+    `GIT_INDEX_FILE`, then `git write-tree`). That covers tracked edits, staged changes and untracked files,
+    with ignored files excluded. Otherwise "stale", or "no worktree to compare" when that worktree is gone.
+  - GIVEN a passing criterion, WHEN I (a) edit a tracked file without committing, (b) add an untracked file,
+    or (c) move the branch to another commit while the evidence bytes are unchanged, THEN within 2 s of the
+    file event the criterion shows "stale", never a current pass.
 - POS-1.4 (measurement) GIVEN a seeded benchmark of at least 20 tasks with planted defects where the author
   claims done, WHEN each runs through `/vajra`, THEN the report states how many false "done" claims were
   caught and how many slipped through. No catch-rate claim ships without this number.

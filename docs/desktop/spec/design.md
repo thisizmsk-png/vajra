@@ -222,8 +222,16 @@ sequenceDiagram
 - **Evidence view is a run's default view** (POS-1.1). Opening a run lands on its criteria. The crew view
   and timeline are one key away. Status values: pass, fail, not run, stale, unverified. An aggregate badge
   never shows green while any criterion is red (POS-1.5).
-- **Stale and unverified** (POS-1.3) come from E3: `vajra_tasks.py check-evidence <file> --head <branch
-  head> --json`. `green:false` with an HMAC reason means unverified, and a head mismatch means stale.
+- **Unverified and stale** (POS-1.3) are two different checks:
+  - **Unverified** comes from E3 (`vajra_tasks.py check-evidence <file> --head <recorded head> --json`,
+    vajra-6 m1-engine): `green:false` means the proof itself doesn't hold.
+  - **Stale** compares the evidence's `git.worktreeTree` with the current whole-tree id of the integration
+    worktree. The Rust core computes that read-only, with the same algorithm as `vajra-verify-work.sh`: a
+    throwaway `GIT_INDEX_FILE`, `read-tree HEAD`, `add -A`, `write-tree`, and the walkthrough dir excluded.
+    It is recomputed when the coalesced file watcher sees a change in that worktree, or when HEAD moves.
+  - The cache key is (evidence sha256, current tree id), never the evidence path alone.
+  - When the worktree no longer exists, the row shows "no worktree to compare" next to the historical
+    proof.
 - **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded command verbatim
   and runs it only after the human confirms. It creates a fresh detached worktree at the evidence commit
   under `<repo>/.claude/worktrees/desktop-rerun-<id>`, runs `scripts/vajra-verify-work.sh <slug> <command>`
@@ -889,7 +897,7 @@ malware is out of scope, consistent with SECURITY.md "Same-user trust boundary".
   Events coalesce for 150 ms, then the reader re-reads only changed files, skipping when size and mtime are
   unchanged. `tasks.json` is small and re-read whole; jsonl and logs are read from the last offset.
 - **Script calls.** Cached per input with short TTLs: `verify` per campaign per change of `state.sig`
-  mtime, `check-evidence` per (path, sha256), doctor on demand.
+  mtime, `check-evidence` per (evidence sha256, recorded head); the stale check per (evidence sha256, current tree id), doctor on demand.
 
 Budgets: NFR-PERF-1 to NFR-PERF-11 in [requirements.md](requirements.md#performance), adopted from the
 stack spike and reviewed by both models. They replace the provisional table that was here (A1 finding H1).
