@@ -12,9 +12,9 @@ Sources: `docs/commands/deliver.md`, `docs/commands/campaign.md`, the shared bri
 | A3 | Workers are subagents inside ONE Claude Code run session. They have no PTY. Their live stream is rendered from Claude Code transcript files (session jsonl plus subagent transcripts), tailed read-only. Transcript layout and stability are to be verified in the stack spike. | open |
 | A4 | The Lead chat is a separate Claude Code session (Lead agent, read tools plus the app's control tools), so chat never reaches workflow agents (deliver.md, "Messages sent while it runs"). | open |
 | A5 | Control messages reach a worker through a new Vajra hook script (`hooks/desktop-control.sh`, not the guard) reading an app-owned queue. The queue directory is guard-protected from agents. Feasibility of agent identification from the hook payload is to be verified in the spike. | open |
-| A6 | All numeric budgets (Section 5) are PROVISIONAL until the stack spike replaces them with measured numbers. | open |
-| A7 | Stack (Tauri v2 + Rust core vs Electron) is undecided; this document is stack-agnostic. | open |
-| A8 | Delivery reports are workflow result text, not files. The app stores its own copy; whether Vajra should persist the report in the campaign is an open question for the Vajra owner. | open |
+| A6 | All numeric budgets (Section 5) are PROVISIONAL until the stack spike replaces them with measured numbers. | **decided:** the spike ran; the canonical NFR-PERF table holds measured values and status |
+| A7 | Stack (Tauri v2 + Rust core vs Electron) is undecided; this document is stack-agnostic. | **decided:** Tauri v2 + Rust + React/TS + xterm.js (G2, both models; performance approval withheld) |
+| A8 | Delivery reports are workflow result text, not files. The app stores its own copy; whether Vajra should persist the report in the campaign is an open question for the Vajra owner. | **decided:** E4 approved (Q3); the app copy stays as the fallback for older campaigns |
 | A9 | Light theme is derived from the dark brand palette (no light art exists). Design concern, not a requirement here. | open |
 
 ## 1. Problem statement
@@ -147,7 +147,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.4.7 (GPT-3) GIVEN a worker, WHEN it tries to write anywhere under `~/Library/Application Support/VajraDesktop/` with Write, Edit, `mv`, `rm`, `cp`, `tee` or a redirect (path with a space), THEN the guard blocks it.
 - AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "stop only (sandbox off)", and message and redirect, from the UI,
   the Lead or MCP, return `control_disabled: sandbox_off` with nothing queued, while stop still works (Q10
-  working assumption; test with the sandbox off and on). Every existing guard test still passes (CI).
+  behaviour with the sandbox off, kept after Q10; test with the sandbox off and on). Every existing guard test still passes (CI).
 - AC-3.4.9 (Q10) GIVEN the OS sandbox on with Vajra's profile applied, WHEN an agent writes to `VajraDesktop/control/` through a path the guard doesn't see (a fixture that bypasses the guard, run only in the test harness), THEN the OS denies the write and the queue is unchanged; with the sandbox off, the same fixture shows the guard as the only layer and control is stop-only (AC-3.4.8).
 - AC-3.4.10 (Q10, VD-27) GIVEN first-run setup or `enable-sandbox.sh`, WHEN the user enables the sandbox, THEN the exact settings change (including the `denyWrite` entry) is shown and applied only after the user approves it, and `vajra-doctor.sh` then reports the rule as active.
 
@@ -358,14 +358,7 @@ a reason at why 4, since native agent view already does it, P23)
 
 **In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only Conductor import (US-1.4), a control channel for the Lead and the human.
 
-**Out of scope (non-goals).**
-- Mobile app and push to phone; multi-machine; cloud sync; team sharing.
-- Kanban board; issue-tracker intake.
-- PR/CI lifecycle and merging (Agent Orchestrator already does this; Vajra Desktop complements it).
-- Agents beyond Claude Code and Codex CLI (Gemini CLI and OpenCode post-MVP); a plugin system; editing code in-app.
-- Replacing Vajra hooks, workflows, agents or campaigns.
-- Writing under `~/.claude` (except through Claude Code and Vajra's own scripts).
-- A plugin API; Windows and Linux; auto-approve of any kind.
+**Out of scope (non-goals).** The canonical list is [PRD section 8](../PRD.md#8-non-goals-deliberately-not-built).
 
 **Dependencies.** Claude Code CLI; Vajra installed with hooks registered; git; python3; jq; openssl. New Vajra pieces: `hooks/desktop-control.sh`, extended `hooks.json` matcher (strengthens the guard's audit coverage, does not loosen it).
 
@@ -390,7 +383,7 @@ Not inferred from the spike: marginal per-worker cost, render duration (rAF inte
 | NFR-PERF-4 | Start to usable crew view p95, process-cold and warm filesystem; true cold boot reported separately | <= 800 ms | 394.3 ms median of 3 trials (not a p95, not cold boot) | **Unmeasured** as a p95 |
 | NFR-PERF-5 | Bounded byte queues at every hop; one in-flight UI snapshot <= 64 KiB; a slow UI can't grow backend memory; slow disk pauses or fails visibly; a PTY or file reader is never blocked | as stated | met by the spike's design; its blocking writes must not be reused (review O6) | Design passes; real build untested |
 | NFR-PERF-6 | GUI RSS growth, minute 5 to 60, 10 live workers; no sustained trend > 1 MiB/min; then 8 h, and 72 h with 20 window cycles (PM-6) | <= 20 MiB | 31.1 MiB (WebContent) | **Fails** |
-| NFR-PERF-7 | Comparison method: serial runs on a quiet machine, same fixture, RSS and `phys_footprint`, method published; "lighter" only against apps beaten by that method | as stated | Runner 201.3 idle; Orca 1,061.5 idle; Agent Orchestrator **uncontrolled** (it hosted the measurement); single busy-machine runs | **Unmeasured** (repeat runs, footprint) |
+| NFR-PERF-7 | Comparison method: serial runs on a quiet machine, same fixture, RSS and `phys_footprint`, method published; "lighter" only against apps beaten by that method, and only with the owner's approval (PRD section 1 bans it at launch) | as stated | Runner 201.3 idle; Orca 1,061.5 idle; Agent Orchestrator **uncontrolled** (it hosted the measurement); single busy-machine runs | **Unmeasured** (repeat runs, footprint) |
 | NFR-PERF-8 | Control hook cost per tool call when the app has no queue for the session | <= 10 ms p95 | not measured | **Unmeasured** |
 | NFR-PERF-9 | A run started outside the app appears; events reach the UI; control receipt | <= 2 s; <= 250 ms p95; <= 100 ms p95 | not measured | **Unmeasured** |
 | NFR-PERF-10 | Compressed installer; installed app (arm64 and universal separately) | <= 20 MiB; <= 50 MiB | 3.0 MiB DMG (unsigned, arm64) | Passes on the prototype |
@@ -406,6 +399,7 @@ IDs keep their earlier meaning, so references elsewhere still hold.
 - NFR-SEC-5: IPC is owner-only (Unix socket mode 0600); no network listener.
 - NFR-SEC-6: filesystem reads follow an explicit path allowlist; every path is canonicalized and symlink escapes are refused; reads are size-capped; no recursive watch on `~/.claude/vajra`.
 - NFR-SEC-7: release builds are signed and notarized; updates are signed; dependencies are pinned and installed with lifecycle scripts off; `build.rs` and native dependencies are reviewed; `cargo-deny` and `npm audit` run in CI; each release has an SBOM.
+- NFR-SEC-8: control messages are never approval for protected actions.
 - NFR-SEC-9: the app never runs a command that came from agent output (a recorded check, its recorded setup commands, a plan step) without the human confirming the exact text; the Lead and MCP tools can't trigger one.
 - NFR-SEC-10 (STRIDE S1): the control socket checks the peer uid on every connection and binds each connection to the session it was started for; a connection that names another session is refused.
 - NFR-SEC-11 (STRIDE I1): spill files, logs and report copies are 0600 in the app data dir, kept at most 14 days or 1 GB (oldest first), and never uploaded.
@@ -414,7 +408,6 @@ IDs keep their earlier meaning, so references elsewhere still hold.
 - NFR-SEC-14 (STRIDE E1): the Tauri command surface is a fixed, documented list; no command takes an executable path, a shell string or an arbitrary filesystem path; each validates its arguments and the calling window.
 - NFR-SEC-15 (STRIDE E3): updates are signed with an offline key held by the owner; a bad signature or a downgrade is refused, shown, and leaves the installed app unchanged.
 - NFR-SEC-16 (owner decision, billing.md): the app never reads, stores, proxies or offers credentials or a claude.ai login (no access to Claude Code's credential files, the keychain item, `CLAUDE_CODE_OAUTH_TOKEN` or `~/.codex/auth.json`); it launches only the stock binaries under the user's own login, and never pays for, resells or proxies model usage.
-- NFR-SEC-8: control messages are never approval for protected actions.
 
 Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "Any worker in a /vajra run" is claimed only after G3b passes inside `vajra-deliver` (POS-5.5).
 
@@ -440,14 +433,7 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 
 ## 6. Success metrics
 
-| Metric | Target |
-|---|---|
-| Time to find what a worker is stuck on (usability test, 5+ participants) | under 10 s |
-| Hidden control actions (ledger vs `audit.log` reconciliation, AC-3.4.3) | 0 |
-| Provisional budgets (NFR-PERF-1..7) | all met, or budget revised with measured evidence |
-| Crash-free sessions in beta | >= 99.5% |
-| Vajra user completes J1..J6 keyboard-only | yes, in usability test |
-| Mahabharat names outside the inspector engine id field | 0 (automated string scan of UI) |
+The canonical table is [PRD section 9](../PRD.md#9-success-metrics), not repeated here.
 
 ## 7. Traceability
 
@@ -608,7 +594,7 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 ## 8. Decisions requested from the owner
 
 1. Confirm A1..A9 (especially A3 transcript streams and A5 hook identification, which the spike must prove).
-2. Decide whether Vajra should persist delivery reports in the campaign (A8).
+2. A8: decided 2026-11-05 (E4 approved, Q3).
 3. Decide whether renaming engine agents is wanted later (A2).
 4. Q10: decided 2026-11-05 (approved; E8, AC-3.4.9, AC-3.4.10).
 5. Q13: decided 2026-11-05 (E7 approved, under vidura review).

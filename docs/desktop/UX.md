@@ -2,7 +2,7 @@
 
 Status: draft for owner review. Scope: the six MVP jobs (J1 start/resume, J2 crew, J3 orchestrator
 chat and control, J4 run view, J5 approvals, J6 history and knowledge). macOS only. No mobile.
-Visual tokens and components live in [DESIGN.md](DESIGN.md). Story IDs (US-x.y) come from the PRD.
+Visual tokens and components live in [DESIGN.md](DESIGN.md). Story IDs (US-x.y) come from [spec/requirements.md](spec/requirements.md).
 
 The UI shows generic role names only (Lead, Architect, Backend, Frontend, Verifier, Security, and the
 rest). Engine ids appear in one place: the "Engine id" field on a worker's Task tab.
@@ -287,8 +287,8 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
    terminal read-only. The status bar shows "Run <id> Route".
 
 **F2 Resume** (US-1.2)
-1. Home, Resume list (or History row, "Resume"). Rows show phase and round from campaign.json.
-2. The app runs `vajra-campaign.sh verify <slug>`; on exit 3 the row shows "Signature check failed"
+1. Home, Resume list (or History row, "Resume"). Rows show phase and round from `progress.md` and `tasks.json` (campaign.json has neither, D9).
+2. The app runs `vajra-campaign.sh verify <slug>`; on exit 3 the row shows "Integrity check failed"
    and Resume is disabled, with "Show details".
 3. Resume launches the run session with the campaign slug; Crew opens on the restored tree.
 
@@ -306,7 +306,8 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 1. Via Lead: ask in chat ("tell Frontend to use the kit Button"); an action card appears.
 2. Directly: worker header "Message" or "Redirect" (or palette). A sheet shows the target, the text and
    for Redirect the new instruction that replaces the current one. Cmd-Enter sends.
-3. The card moves Queued, Delivered (hook consumed it), Acknowledged (worker's next turn). Each card
+3. The card moves Queued, Handed to hook (the hook consumed it), Delivered (the worker transcript shows the
+   steer id, NFR-COMPAT-1), Acknowledged (worker's next turn). Each card
    has "View in audit" for the audit.log line and appears in the worker's Stream.
 
 **F6 Stop a worker** (US-3.3, US-3.4)

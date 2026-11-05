@@ -22,8 +22,8 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | D7 | The app is distributed outside the Mac App Store (Developer ID, notarized) and is not App Sandbox-ed. It has to spawn `claude`, `git` and `python3`, and read `~/.claude`. | open |
 | D8 | App data dir is `~/Library/Application Support/<app>/` where `<app>` is the final bundle name (placeholder `VajraDesktop`). | open |
 | D9 | `campaign.json` records no repository path (observed: keys `schema, slug, goal, status, created, updated, featuresDefSha256`). The app keeps its own `runs.jsonl` mapping run to repo. For runs it did not launch, it recovers the repo from the session transcript `cwd`, and otherwise shows "repo unknown". | open |
-| D10 | All budgets in section 9 are PROVISIONAL until the stack spike measures them. | open |
-| D11 | Engine change E4 (persist the delivery report in the campaign) is an open question. The MVP does not depend on it. | open |
+| D10 | All budgets in section 9 are PROVISIONAL until the stack spike measures them. | **decided:** measured; see the canonical NFR-PERF table |
+| D11 | Engine change E4 (persist the delivery report in the campaign) is an open question. The MVP does not depend on it. | **decided:** approved (Q3) |
 
 ## 1. Context and constraints
 
@@ -77,11 +77,11 @@ For E3, the shared green rule raises `Fail(3, reason)` on refusal, so `check-evi
 script's convention (`scripts/vajra_tasks.py:45`). One unit test covers each refusal branch of
 `read_evidence`.
 
-## 2. Architecture (STUB)
+## 2. Architecture (stack approved; process model in ADR-9)
 
-> **STUB: Pending the stack spike (GPT 6.1 Sol worker) and two-model approval.** Nothing in this section
-> is decided. Tauri v2 with a Rust core is the option to beat. Electron is chosen only if it wins on the
-> measured numbers.
+> **Stack approved** (G2, 2026-11-05, both models): Tauri v2 + Rust core + React/TS + xterm.js. Performance
+> approval is withheld until NFR-PERF-1 and NFR-PERF-6 pass on the real build. The process model is ADR-9.
+> Detail below this note is owned by the MVP build (vajra-6).
 
 The spike must answer:
 
@@ -677,7 +677,7 @@ Reconciliation (AC-3.4.3):
 
 ## 6. ADRs
 
-**ADR-1 Separate Lead chat session.** Decision: the human chats with a second Claude Code session (Lead
+**ADR-1 Separate Lead chat session.** Status: accepted 2026-11-05. Decision: the human chats with a second Claude Code session (Lead
 agent, read tools plus control tools, no Agent/Workflow tool), never with the run session.
 - Options: (a) do nothing, so the human types into the run session; (b) the app answers questions itself
   with no model; (c) separate Lead session (chosen).
@@ -687,7 +687,7 @@ agent, read tools plus control tools, no Agent/Workflow tool), never with the ru
   (b) cannot answer "why is Backend stuck".
 - Would change our mind: Claude Code gains per-agent addressing inside a workflow with no relay.
 
-**ADR-2 Control by hook + queue, not PTY injection.** Decision: control reaches workers only through E1
+**ADR-2 Control by hook + queue, not PTY injection.** Status: accepted 2026-11-05. Decision: control reaches workers only through E1
 reading the app-owned queue.
 - Options: (a) do nothing (no steering); (b) PTY injection, as Runner's router writes into agent stdin; (c)
   hook + queue (chosen); (d) restart the worker with a new brief.
@@ -700,8 +700,8 @@ reading the app-owned queue.
 - Would change our mind: the spike shows subagent hooks cannot inject context. Fallback then is
   stop-only plus "message on next round" through the fix-loop feedback, and J3 messaging is descoped.
 
-**ADR-3 Read-only over `~/.claude`.** Decision: the app reads an allowlist and mutates only through Vajra
-scripts and Claude Code. The engine additions it needs are E1-E3 (E4 open).
+**ADR-3 Read-only over `~/.claude`.** Status: accepted 2026-11-05. Decision: the app reads an allowlist and mutates only through Vajra
+scripts and Claude Code. The engine additions it needs are E1 to E8.
 - Options: (a) do nothing (app writes campaign files directly); (b) the app links Vajra's logic as a
   library; (c) read-only plus scripts (chosen), with E3 `check-evidence` so evidence can be verified without
   the key or a state change.
@@ -712,7 +712,8 @@ scripts and Claude Code. The engine additions it needs are E1-E3 (E4 open).
 - Would change our mind: measured script latency breaks NFR-UX-1 on common paths. The answer would still be
   a batch read-only script, not direct writes.
 
-**ADR-4 Capture the delivery report from the transcript.** Decision: the tailer captures the workflow result
+**ADR-4 Capture the delivery report from the transcript.** Status: superseded by E4 (Q3, 2026-11-05);
+capture is kept only as the fallback for campaigns delivered before E4. Decision: the tailer captures the workflow result
 from the run transcript and stores `reports/<run_id>.md` and `results/<run_id>.json` in the app dir.
 - Options: (a) do nothing (report only on screen); (b) parse the PTY screen; (c) transcript capture (chosen);
   (d) E4 engine persistence.
@@ -720,7 +721,7 @@ from the run transcript and stores `reports/<run_id>.md` and `results/<run_id>.j
   if their transcript still exists.
 - Would change our mind: the owner approves E4. Then the app reads `report.md` and drops capture.
 
-**ADR-5 Worker streams from transcripts, not PTYs.** Decision: render worker streams from transcript files
+**ADR-5 Worker streams from transcripts, not PTYs.** Status: accepted 2026-11-05. Decision: render worker streams from transcript files
 tailed read-only.
 - Options: (a) do nothing (one run PTY only); (b) a PTY per worker (needs the engine to spawn processes per
   worker, which breaks the one-process workflow model); (c) transcripts (chosen).
@@ -729,7 +730,7 @@ tailed read-only.
 - Mitigation: schema fingerprint plus raw view (section 7).
 - Would change our mind: Claude Code ships a documented event stream for workflow agents.
 
-**ADR-6 MCP vs CLI for control tools.** Decision: a stdio MCP server forwarding to the app socket.
+**ADR-6 MCP vs CLI for control tools.** Status: accepted 2026-11-05. Decision: a stdio MCP server forwarding to the app socket.
 - Options: (a) do nothing (Lead is read-only); (b) a CLI (`vajra-desktop ctl message ...`) called by the
   Lead through Bash; (c) MCP (chosen).
 - Evidence against: one more binary, and the MCP naming and config behaviors are to verify in spike.
@@ -738,7 +739,7 @@ tailed read-only.
   matcher and clean action cards.
 - Would change our mind: the spike shows inline agents cannot be given MCP tools.
 
-**ADR-7 No own database in MVP.** Decision: derive everything from files on read. App files are
+**ADR-7 No own database in MVP.** Status: accepted 2026-11-05. Decision: derive everything from files on read. App files are
 append-only JSONL plus captured reports.
 - Options: (a) do nothing (rescan everything on each view); (b) SQLite index of campaigns, runs and
   transcripts; (c) derive from files with in-memory snapshots (chosen).
@@ -747,7 +748,7 @@ append-only JSONL plus captured reports.
 - Would change our mind: measured History open > 300 ms or cold start over NFR-PERF-4. Then add a small
   app-owned index (`index.sqlite` in the app dir, rebuildable, never authoritative).
 
-**ADR-8 Stop is sticky and needs human confirmation.** Decision: stop is a flag file that blocks every next
+**ADR-8 Stop is sticky and needs human confirmation.** Status: accepted 2026-11-05. Decision: stop is a flag file that blocks every next
 tool call of that worker instance (matched by `agent_id` or worktree `cwd`, 5.3), except the exact tool
 `SubagentHandback`. Only a human "Resume worker" clears it (5.3); handback and a later `SendMessage` don't. The
 Lead can only request a stop; the human confirms. Messages are not delivered while a worker is stopped.
@@ -757,7 +758,7 @@ Lead can only request a stop; the human confirms. Messages are not delivered whi
 - Why: (c) is the only per-worker stop that works inside one process.
 - Would change our mind: Claude Code exposes per-subagent cancel.
 
-**ADR-9 No separate daemon in the MVP; runs survive a closed window, not a quit or crash** (VD-4, VD-5,
+**ADR-9 No separate daemon in the MVP; runs survive a closed window, not a quit or crash** Status: accepted 2026-11-05. (VD-4, VD-5,
 VD-6, POS-2.1). Decided 2026-11-05 by Opus 5.5, accepting the orchestrator's recommendation; GPT 6.1 Sol to
 check.
 - Decision:
@@ -835,7 +836,7 @@ check.
     gives survival without a daemon of our own, so evaluate it first.
   - Vajra adding a resume that keeps a run's tasks. Then (c) or (d) are reconsidered for v1.1.
 
-**ADR-10 One small agent-adapter interface** (owner decision, 2026-11-05). Decision: the Rust core talks to
+**ADR-10 One small agent-adapter interface** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: the Rust core talks to
 agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`, `stop`, `resume`, and a
 `capabilities()` set of flags. The UI renders only actions whose flag is true.
 - Claude Code adapter: every flag true (the control channel in section 5 is its `message` and `stop`).
@@ -850,12 +851,20 @@ agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`,
   later and the interface stays.
 - Gemini CLI and OpenCode come post-MVP through the same trait.
 
-**ADR-11 Conductor import is read-only discovery** (owner decision, 2026-11-05). Decision: discover repos,
+**ADR-11 Conductor import is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
 worktrees (`git worktree list`) and Claude Code sessions (transcript `cwd`), let the user confirm each, and
 record only app-owned entries. Nothing is deleted, moved or rewritten. Conductor's own layout is read only
 where G4 has confirmed it; otherwise the import says "not recognised" (AC-1.4.4).
+- Options: (a) no import; (b) full import that moves worktrees and converts Conductor state; (c) read-only
+  discovery with per-item confirm (chosen).
+- Evidence: P6 (13 sources) includes displaced Conductor users asking for an alternative. (b) risks
+  losing someone's work in a tool we don't control.
+- Consequences: users keep their worktrees where they are; anything Conductor-only (its own chat history)
+  isn't carried over.
+- Would change our mind: G4 finds no stable on-disk layout; then the import is git- and transcript-only.
 
-**Billing hard rules** (owner decision; PRD section 11). The session supervisor builds argv from a fixed
+**Billing hard rules** (owner decision; PRD section 11; status: accepted 2026-11-05; options and evidence in
+`vajra-4/billing.md`). The session supervisor builds argv from a fixed
 template for the stock binary (no `--bare`, no `-p`, no SDK) and the child environment from an allowlist. It
 reports the billing source per session from the presence of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
 an `apiKeyHelper` (API key wins), and for Codex from `codex login status`. It never reads a credential value
