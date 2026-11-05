@@ -72,6 +72,9 @@ pub struct App {
     runs: Mutex<HashMap<String, Run>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
+    /// Held from the one-active-run check until the run is recorded, so two
+    /// Start clicks cannot both pass the check.
+    launching: Mutex<()>,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -96,6 +99,7 @@ impl App {
             control: Arc::new(Mutex::new(svc)),
             runs: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
+            launching: Mutex::new(()),
             log,
         })
     }
@@ -168,14 +172,15 @@ impl App {
         lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
     }
 
-    /// Forget runs whose PTY exited, and end the control session that steered
-    /// one, so the Lead cannot queue to its workers (their messages expire).
+    /// End the control session once its run's PTY exited, so the Lead cannot
+    /// queue to its workers (their messages expire). The run stays in `runs`:
+    /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
-        let ended: Vec<String> = {
-            let mut runs = lock(&self.runs);
-            let gone: Vec<String> = runs.keys().filter(|s| !self.sup.is_running(s).unwrap_or(false)).cloned().collect();
-            gone.iter().filter_map(|s| runs.remove(s)).map(|r| r.session_id).collect()
-        };
+        let ended: Vec<String> = lock(&self.runs)
+            .iter()
+            .filter(|(s, _)| !self.sup.is_running(s).unwrap_or(false))
+            .map(|(_, r)| r.session_id.clone())
+            .collect();
         let mut svc = lock(&self.control);
         if svc.session_id().is_some_and(|id| ended.iter().any(|e| e == id)) {
             svc.end_session();
@@ -224,6 +229,7 @@ impl App {
     pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
+        let _one = lock(&self.launching);
         self.no_active_run()?;
         let now = ids::unix_now();
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
@@ -249,6 +255,7 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
+        let _one = lock(&self.launching);
         self.no_active_run()?;
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {

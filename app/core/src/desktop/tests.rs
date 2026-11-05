@@ -323,6 +323,8 @@ fn an_exited_run_ends_its_control_session() {
     assert!(lock(&app.control).nonce().is_none(), "end_session ran for the exited run");
     assert_eq!(app.active_run_count(), 0);
     assert_eq!(app.active_runs().unwrap()["count"], 0);
+    // The finished run is still known, so its crew view keeps its workers.
+    assert!(app.run_by_id("20261105-1230").is_some(), "an exited run stays viewable");
 }
 
 #[test]
