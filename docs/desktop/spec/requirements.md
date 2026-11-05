@@ -236,8 +236,9 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   outside the repo) is neither shown nor run. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
   Re-run runs as the user, outside Claude Code's guard and sandbox, so: the child gets an environment
-  allowlist (`PATH`, `HOME`, `LANG`, `TMPDIR` and the repo's own `.env`-free defaults; no API keys, tokens,
-  `SSH_AUTH_SOCK` or cloud credentials); the confirm renders control, bidi and zero-width characters
+  allowlist of exactly `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_ALL`, `TERM` and `TMPDIR` (no API keys,
+  tokens, `SSH_AUTH_SOCK` or cloud credentials; setup that needs a registry token such as `NPM_TOKEN` fails on
+  Re-run by design, and the result says which variable was withheld if the output names it); the confirm renders control, bidi and zero-width characters
   visibly (for example `<U+202E>`) and says "these run as you, outside the sandbox, and may run package
   install scripts". Tests: a setup command with a bidi override shows it in the confirm; a check that prints
   `env` shows none of the denied variables.

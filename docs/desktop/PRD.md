@@ -255,19 +255,25 @@ part of review stage A1). Ranked by impact times likelihood.
 
 ### Pre-mortem, second pass (Critic, 2026-11-05)
 
-Eight failure modes the first table missed, found after ADR-9 and the A1 fixes. All are adopted in the
-spec (requirements 7b, PM-1 to PM-8).
+Eight failure modes the first table missed, from the Critic (duryodhana) after ADR-9 and the A1 fixes,
+reviewed at 386a4e2. All eight are adopted (requirements 7b, PM-1 to PM-8). The mitigations below are the
+current spec, not the Critic's first wording. The last column is the Critic's own test for dropping a row.
 
-| # | Failure | Mitigation | Signal |
-|---|---|---|---|
-| 13 | Resume continues the wrong campaign: `/vajra continue` follows Vajra's one global `.active` pointer, which every new run rewrites | Resume by slug as argv (ADR-9); POS-2.1e | Two sessions on one slug |
-| 14 | No task owns the live end-to-end checks, so beta users are the first to run real control, resume and approve | H8 owner-run live acceptance blocks launch | RC tagged with no dated live run |
-| 15 | Performance gates close after the work they gate | H0 perf CI from C1; end-of-M3 budget rule | First real idle number arrives late |
-| 16 | A Claude Code update breaks steering silently | NFR-COMPAT-1: tested version range; "delivered" only when the transcript shows the steer | Acks with no steer in the next turn |
-| 17 | Approvals stranded after the session ends | AC-5.2.5: approve resumes the session as argv | Inbox items with exited sessions |
-| 18 | The menu bar app turns a slow leak into a multi-day one | Webview destroyed when the window closes; 72 h soak; Install now after 72 h | RSS by uptime |
-| 19 | Transcript format change breaks crew, control and reports at once | E4 and E6 into M1: control matches on `tasks.json` | "Format not recognized" rate |
-| 20 | A crash leaves orphan processes or a stale signature | Process group SIGTERM on quit; resume refused while it lives; fault test POS-2.1f | Orphans after relaunch |
+| # | Failure (I x L) | Mitigation now in the spec | Earliest signal | Owner | Drop it if |
+|---|---|---|---|---|---|
+| 13 | Resume continues the wrong campaign: `/vajra continue` follows the one global `.active` pointer, which every new run rewrites (H x H) | Resume by slug as argv everywhere (ADR-9 decision 5, POS-2.1b, POS-2.1e, US-1.2); a campaign live in another session is refused | Two sessions on one slug | arjuna (ADR), bhima (C3) | `/vajra continue` takes its slug from the resumed session |
+| 14 | No task owns the live end-to-end checks, so beta users are the first to run real control, resume and approve (H x H) | H8: owner-run live acceptance on the RC (L1 to L7, a 3-task delivery with message, redirect and stop, quit and resume, approve after resume, N to N+1 update); any fail blocks launch. G3b now runs after E1 and E5, and H8 re-proves them | RC tagged with no dated live run | abhimanyu runs, vidura confirms; owner holds the login | a task owning L1 to L7 already existed |
+| 15 | Performance gates close after the work they gate (H x H) | H0 perf CI from C1 (fails on a regression over 5 MiB); end-of-M3 rule, **accepted by the owner**: over budget means a written budget change, a stack change or a delay, chosen by the owner before M4 | First real idle number arrives late | sepoy-test-1, karna; owner decides | an early real-app idle number is at or under 200 MiB |
+| 16 | A Claude Code or model update breaks steering silently (H x M-H) | NFR-COMPAT-1 tested range; "delivered" only when the worker transcript shows the steer id; G3b rerun on each Claude Code minor | Acks with no steer in the next turn | bhima (C6), abhimanyu | Anthropic documents subagent `additionalContext` as a stable contract |
+| 17 | Approvals stranded after the session ends (M-H x H) | AC-5.2.5: Approve resumes the session as argv; Cmd-Q counts pending approvals; terminal-started runs get the turn to copy | Inbox items with exited sessions | bhima (C3), nakula (S5) | median approval wait is shorter than a session's life |
+| 18 | The menu bar app turns a slow leak into a multi-day one (M-H x M-H) | Webview destroyed when the window closes (POS-2.1d); 72 h soak with 20 window cycles; Install now after 72 h | RSS by uptime; "Update ready" older than 3 days | bhima (C3), sepoy-test-1 | a 4 h soak plateaus |
+| 19 | Transcript format change breaks crew, control and reports at once (H x M) | E4 and E6 **approved** (Q3, Q11) and in M1 (vajra-6): control matches on `tasks.json`, reports persist in the campaign; E7 archives the evidence | "Format not recognized" and `worker_ambiguous` rates | arjuna, bhima | the transcript schema becomes documented |
+| 20 | A crash leaves orphan processes or a stale signature (M x M) | Process groups with leader start time; SIGTERM then SIGKILL on quit; the startup cleanup barrier (ADR-9 6b') before any resume; fault test POS-2.1f with a `setsid` child | Orphans after relaunch; integrity failures right after a crash | bhima (C3), sepoy-test-1 | the fault test passes |
+
+What held up, per the Critic: the control hook fails open, consumes each message once and delivers at most
+once; ADR-9's case against a daemon is well evidenced; App Nap is covered. Not checked by the Critic: SIGHUP
+behaviour of the EXIT trap, and Claude Code's auto-update default (both go to G4 and H8). Rows 14 and 16
+need the owner's own Claude Code login; row 15's choice is the owner's.
 
 ## 8. Non-goals (deliberately not built)
 
