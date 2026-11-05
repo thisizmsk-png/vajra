@@ -85,7 +85,7 @@ The spike must answer:
 
 | Question | Options |
 |---|---|
-| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. **POS-2.1 now requires runs to survive the UI quitting or being killed with SIGKILL, so a supervisor inside the UI process no longer meets the requirements.** The spike prices the cheapest option that holds the PTYs outside the UI, measures its idle RSS on its own and in the app total, and says how the UI reattaches with no lost events. |
+| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. Decided in ADR-9 (section 6): no daemon in the MVP; the Rust core in the app process owns the PTYs and the app stays alive in the menu bar when its window closes. |
 | UI toolkit | Tauri v2 (system WKWebView, Rust core) vs Electron vs native (SwiftUI/AppKit) |
 | PTY | `portable-pty` / `pty-process` crates (Rust), `node-pty` (Electron), `forkpty` (native). Resize, SIGWINCH, child reaping, no blocking reads on the UI thread. |
 | Terminal renderer | xterm.js (WebGL addon) vs a native renderer. Must allow turning OSC 8 and OSC 52 off and must virtualize scrollback. |
@@ -655,6 +655,62 @@ removes the flag. The Lead can only request a stop; the human confirms.
   blocked worker as failed and continue other waves.
 - Why: (c) is the only per-worker stop that works inside one process.
 - Would change our mind: Claude Code exposes per-subagent cancel.
+
+**ADR-9 No separate daemon in the MVP; runs survive a closed window, not a quit or crash** (VD-4, VD-5,
+VD-6, POS-2.1). Decided 2026-11-05 by Opus 5.5, accepting the orchestrator's recommendation; GPT 6.1 Sol to
+check.
+- Decision:
+  1. The Rust core owns the PTYs of the run session and the Lead chat inside the app process. There is no
+     separate daemon or launchd agent.
+  2. Closing the last window does not quit. The app stays alive as a menu bar item showing the number of
+     active runs, and its runs and agents keep going. Reopening the window reattaches with nothing lost,
+     because the core never stopped.
+  3. Cmd-Q with active runs asks first: "Quit and stop 2 runs?" with **Keep running** (closes the window,
+     the default) and **Quit** (destructive). With no active runs, quit is immediate.
+  4. On a real quit, a crash, logout or shutdown, the run session's PTY closes and its `claude` process
+     ends. On the next launch the app offers resume **only** for the sessions that were running and that
+     the human did not stop or quit (VD-5). Nothing resumes without a click.
+  5. Resume runs `claude --resume <session_id>` in the repo and sends `/vajra continue` for that campaign.
+     The tracer bullet showed that `--resume` plus `SendMessage` continues the same worker id. The Lead chat
+     resumes the same way.
+  6. Updates (VD-6) install only when no run is active. Otherwise the update waits, and the menu bar says
+     "Update ready, installs when runs finish". With one process there is never an older generation left
+     running.
+- Options:
+  - (a) Do nothing: the window owns everything, and closing it stops runs. Rejected: it fails P2 at the
+    most common moment.
+  - (b) Menu bar app, no daemon (chosen).
+  - (c) A separate Rust daemon (launchd agent) owning the PTYs, with versioned IPC and an update handoff.
+  - (d) A detached terminal multiplexer (tmux or dtach) holding each PTY.
+  - (e) Claude Code's own background sessions, if they cover workflow runs.
+- Evidence for (b):
+  - P2 and P3 in `pain-points.md` (vajra-4) are mostly daemon-lifecycle failures in apps that have one:
+    old daemon generations left running after an update (orca#9138), every session swept to `exited` after
+    a daemon restart (AO#6639), and duplicate sessions after an upgrade (wmux#537, ai-maestro#75). (c)
+    takes on exactly that failure class plus a versioned protocol, in exchange for surviving crashes.
+  - The spike measured the app core at about 110 MiB RSS (Rust main, flat over an hour). A daemon would
+    split that across two processes and add its own baseline against an idle budget we already miss
+    (220 vs at most 200 MiB).
+  - Vajra already makes interruption recoverable: campaigns are signed files with checkpoints, finished
+    worker commits stay on their branches, and `/vajra continue` resumes.
+- Strongest evidence against (b):
+  - A crash or a real quit stops the in-flight run. `deliver.md` says a resumed campaign gets fresh,
+    run-namespaced tasks and no "already done" shortcut. So work since the last commit is lost and the
+    current wave is redone. That is a real cost on a long delivery.
+  - Shutdown and logout can't be blocked.
+  - Runner and Herdr survive reboots of their UI, and users praise it (pain-points.md, praise table).
+- Consequences:
+  - POS-2.1 is narrowed. In the MVP the requirement is that runs survive the window closing and the app
+    sleeping. Surviving SIGKILL and Quit moves to v1.1.
+  - VD-4 as written (a daemon) is deferred. VD-5 and VD-6 are met as described in the decision above.
+  - Runs started in a plain terminal (POS-2.2) are not owned by the app, so they survive anything the
+    app does.
+- What would change our mind, each measured in beta:
+  - Crash-free sessions below 99.5%.
+  - More than 1 in 20 deliveries interrupted by a quit or crash.
+  - Claude Code documenting background sessions that a workflow run can live in. That is option (e): it
+    gives survival without a daemon of our own, so evaluate it first.
+  - Vajra adding a resume that keeps a run's tasks. Then (c) or (d) are reconsidered for v1.1.
 
 ## 7. Error handling
 

@@ -183,10 +183,17 @@ sentence. POS-1.4, 1.6 and 3.3 are measurements: they gate claims, not the build
   recorded for each.
 
 **POS-R2 Claude Code-native; the app is optional; files are the source of truth** (reason 2)
-- POS-2.1 GIVEN a run started from the app, WHEN the app is quit or killed with SIGKILL, THEN the run keeps
-  going, and on relaunch the app reattaches with no lost events. Design cost: the run session can't be a
-  PTY child of the UI process. How it is supervised (a small supervisor process outside the UI, or a
-  launchd agent) is a question for the stack spike (design.md section 2).
+- POS-2.1 (MVP scope per ADR-9) GIVEN a run started from the app, WHEN I close its last window, THEN the run
+  keeps going, a menu bar item shows the number of active runs, and reopening the window shows the run with
+  no lost events.
+- POS-2.1a GIVEN active runs, WHEN I press Cmd-Q, THEN a dialog asks "Quit and stop N runs?" with Keep
+  running as the default; choosing Keep running closes the window and the runs continue.
+- POS-2.1b GIVEN a run that was running when the app quit or crashed, WHEN the app next starts, THEN it is
+  offered for resume (`claude --resume <session_id>` plus `/vajra continue`). A session I stopped or quit on
+  purpose is not offered, and nothing resumes without a click (VD-5).
+- POS-2.1c GIVEN an update is ready and runs are active, WHEN it would install, THEN it waits until no run is
+  active, and exactly one app process exists afterwards (VD-6).
+- Deferred to v1.1 (ADR-9): runs that keep going through a quit or SIGKILL of the app (VD-4).
 - POS-2.2 GIVEN `/vajra <ask>` started in a plain terminal, WHEN the app is open, THEN the run appears live
   within the event latency budget (NFR-PERF-9), with the crew, run view and inbox. The app can't take over
   that terminal; the control channel works if the control hook is installed.

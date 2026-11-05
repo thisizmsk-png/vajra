@@ -53,7 +53,7 @@ Existing Vajra CLI users are the first cohort.
 **Claims we may not make until measured.** Any memory or "lighter than X" claim (stack spike, POS-4.1;
 "lighter" only against competitors we actually beat). "Faster" or "never janky with 10 agents" (load test,
 H1). Any catch rate for false "done" claims (POS-1.4). Any time saved in review (POS-1.6). "Runs survive the
-app quitting" (POS-2.1 in CI). "Gets better every run" (POS-3.3). "Safe to run unattended" or "secure"
+app quitting" (not in the MVP, ADR-9; v1.1). "Gets better every run" (POS-3.3). "Safe to run unattended" or "secure"
 (security gate and PoCs; the README's limits stand). "Production-ready" (a live `/vajra` run validated end to
 end). Any comparison that names a competitor needs a dated, reproducible measurement with its method.
 
@@ -239,7 +239,7 @@ No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
 | Memory vs competitors (pending the spike) | Idle and per-agent RSS below the measured Electron competitors (Agent Orchestrator desktop, Orca, at least); Runner measured if it can be installed | Spike harness, same machine, same 10-agent fixture (POS-4.1) |
 | False "done" caught | Reported number, no target yet | POS-1.4 seeded benchmark, at least 20 tasks with planted defects |
 | Review time | Reported, no target yet | POS-1.6 study, 5+ developers, transcript plus diff vs evidence view |
-| Runs survive the app | 100% of runs continue through quit and SIGKILL | POS-2.1 in CI |
+| Runs survive a closed window | 100% of runs continue when the window closes; resume offered after every quit or crash | POS-2.1 to POS-2.1b in CI (ADR-9; surviving quit and SIGKILL is v1.1) |
 | Budgets | All NFR-PERF budgets met | CI perf job + 1 h soak |
 | Keyboard-only | J1 to J6 completable without a pointer | Scripted keyboard walkthrough |
 | Crash-free sessions | At least 99.5% in beta | Local crash reports, opt-in |
