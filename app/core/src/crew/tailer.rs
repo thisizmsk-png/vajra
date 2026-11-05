@@ -15,9 +15,11 @@ use crate::bus::Bus;
 use crate::vajra::allowlist::{Allowlist, Denied};
 
 /// Bytes read per poll; the rest waits for the next poll.
-pub const READ_CAP: u64 = 4 * 1024 * 1024;
-/// A partial line longer than this is emitted as is rather than grow forever.
-pub const PARTIAL_CAP: usize = 16 * 1024 * 1024;
+pub const READ_CAP: u64 = 256 * 1024;
+/// A record longer than this is skipped whole and shown as `OVERSIZED`, so a
+/// huge tool result never pins memory or splits into unparseable fragments.
+pub const PARTIAL_CAP: usize = 1024 * 1024;
+pub const OVERSIZED: &str = "[record over 1 MiB not shown]";
 
 #[derive(Debug, Default)]
 pub struct Chunk {
@@ -32,11 +34,13 @@ pub struct Tailer {
     offset: u64,
     ino: Option<u64>,
     partial: Vec<u8>,
+    /// Inside an oversized record: drop bytes until its newline.
+    skipping: bool,
 }
 
 impl Tailer {
     pub fn new(allow: Allowlist, path: PathBuf) -> Self {
-        Self { allow, path, offset: 0, ino: None, partial: Vec::new() }
+        Self { allow, path, offset: 0, ino: None, partial: Vec::new(), skipping: false }
     }
 
     pub fn poll(&mut self) -> io::Result<Chunk> {
@@ -51,6 +55,7 @@ impl Tailer {
             chunk.truncated = true;
             self.offset = 0;
             self.partial.clear();
+            self.skipping = false;
         }
         self.ino = Some(meta.ino());
         self.read_new(&mut file, &mut chunk)?;
@@ -64,13 +69,25 @@ impl Tailer {
         self.offset += n as u64;
         let mut rest = buf.as_slice();
         while let Some(i) = rest.iter().position(|&b| b == b'\n') {
-            self.partial.extend_from_slice(&rest[..i]);
-            chunk.lines.push(take_line(&mut self.partial));
+            if self.skipping {
+                self.skipping = false;
+                chunk.lines.push(OVERSIZED.to_string());
+            } else if self.partial.len() + i > PARTIAL_CAP {
+                self.partial.clear();
+                chunk.lines.push(OVERSIZED.to_string());
+            } else {
+                self.partial.extend_from_slice(&rest[..i]);
+                chunk.lines.push(take_line(&mut self.partial));
+            }
             rest = &rest[i + 1..];
         }
-        self.partial.extend_from_slice(rest);
-        if self.partial.len() > PARTIAL_CAP {
-            chunk.lines.push(take_line(&mut self.partial));
+        if !self.skipping {
+            if self.partial.len() + rest.len() > PARTIAL_CAP {
+                self.partial = Vec::new();
+                self.skipping = true;
+            } else {
+                self.partial.extend_from_slice(rest);
+            }
         }
         Ok(())
     }
@@ -109,6 +126,10 @@ impl Transcript {
         let mut out = Vec::new();
         for line in &chunk.lines {
             if line.trim().is_empty() {
+                continue;
+            }
+            if line == OVERSIZED {
+                out.push(StreamLine { kind: LineKind::Raw, text: line.clone() });
                 continue;
             }
             if !self.unrecognized {

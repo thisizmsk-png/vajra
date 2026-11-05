@@ -130,6 +130,39 @@ mod crew {
     }
 
     #[test]
+    fn tailer_skips_an_oversized_record_with_a_placeholder() {
+        use vajra_desktop::crew::tailer::{OVERSIZED, PARTIAL_CAP, READ_CAP};
+        assert!(PARTIAL_CAP <= 1024 * 1024 && READ_CAP <= 1024 * 1024, "per-worker budget");
+        let h = Home::new();
+        let p = h.project().join("big.jsonl");
+        let mut big = vec![b'x'; PARTIAL_CAP * 3];
+        big.push(b'\n');
+        fs::write(&p, b"one\n").unwrap();
+        append(&p, &big);
+        append(&p, b"two\n");
+        let mut t = Tailer::new(h.allow(), p.clone());
+        let mut got = Vec::new();
+        for _ in 0..16 {
+            got.extend(t.poll().unwrap().lines);
+        }
+        assert_eq!(got, vec!["one".to_string(), OVERSIZED.to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn oversized_record_keeps_the_transcript_recognized() {
+        use vajra_desktop::crew::tailer::PARTIAL_CAP;
+        let h = Home::new();
+        let p = h.project().join("big2.jsonl");
+        let rec = json!({"type": "user", "message": {"role": "user", "content": "x".repeat(PARTIAL_CAP * 2)}});
+        fs::write(&p, format!("{rec}\n")).unwrap();
+        let mut tr = Transcript::new(Tailer::new(h.allow(), p), Redactor::new(None));
+        for _ in 0..8 {
+            tr.poll().unwrap();
+        }
+        assert!(!tr.format_unrecognized());
+    }
+
+    #[test]
     fn tailer_restarts_from_zero_after_truncation() {
         let h = Home::new();
         let p = h.project().join("live.jsonl");
