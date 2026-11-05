@@ -1,0 +1,14 @@
+{
+  "features": [
+    {
+      "id": "ac-1",
+      "description": "criterion 1",
+      "passes": true
+    },
+    {
+      "id": "ac-2",
+      "description": "criterion 2",
+      "passes": false
+    }
+  ]
+}

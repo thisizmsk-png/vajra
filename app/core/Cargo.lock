@@ -3688,6 +3688,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "portable-pty",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]

@@ -1,0 +1,28 @@
+{
+  "campaign": "deliver-evidence-gone",
+  "schema": "vajra.tasks/v1",
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Task t1",
+      "owner_agent": "sepoy-backend-1",
+      "deps": [],
+      "acceptance": [
+        "ac-1"
+      ],
+      "status": "closed",
+      "attempts": 1,
+      "branch": "vajra/20261101-0900/t1",
+      "worktree": "",
+      "claimed_by": "sepoy-backend-1",
+      "evidence": {
+        "commands": [
+          "cargo test"
+        ],
+        "head": "abc1234",
+        "path": "/nonexistent/worktree/evidence.json",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  ]
+}

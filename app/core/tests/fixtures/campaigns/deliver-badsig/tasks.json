@@ -1,0 +1,21 @@
+{
+  "campaign": "deliver-badsig",
+  "schema": "vajra.tasks/v1",
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Task t1",
+      "owner_agent": "sepoy-backend-1",
+      "deps": [],
+      "acceptance": [
+        "ac-1"
+      ],
+      "status": "closed",
+      "attempts": 1,
+      "branch": "vajra/20261101-0900/t1",
+      "worktree": "",
+      "claimed_by": "sepoy-backend-1",
+      "evidence": null
+    }
+  ]
+}

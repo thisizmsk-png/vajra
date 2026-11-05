@@ -1,0 +1,9 @@
+{
+  "schema": "vajra.campaign/v1",
+  "slug": "deliver-20261011-1710",
+  "goal": "Fixture goal for deliver-20261011-1710",
+  "status": "done",
+  "created": "2026-11-01T09:00:00Z",
+  "updated": "2026-11-01T09:30:00Z",
+  "featuresDefSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}
