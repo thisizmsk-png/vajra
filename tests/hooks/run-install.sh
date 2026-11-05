@@ -66,8 +66,14 @@ jq -e '.hooks.PreToolUse[] | .hooks[] | select(.command == "/usr/local/bin/my-gu
 jq -e '.hooks.Stop[0].hooks[0].command == "say done"' "$SETTINGS" >/dev/null; check "user's Stop hook kept" $?
 for ev in PreToolUse PostToolUse PostToolUseFailure SessionStart PreCompact UserPromptSubmit; do
   n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("/.claude/skills/vajra/hooks/"))] | length' "$SETTINGS")"
-  [ "$n" = 1 ]; check "registered once: $ev" $?
+  want=1; case "$ev" in PreToolUse|PostToolUse) want=2 ;; esac  # + desktop-control.sh
+  [ "$n" = "$want" ]; check "registered once: $ev" $?
 done
+for ev in PreToolUse PostToolUse; do
+  n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("desktop-control.sh"))] | length' "$SETTINGS")"
+  [ "$n" = 1 ]; check "desktop-control.sh registered once: $ev" $?
+done
+[ -x "$SKILL/hooks/desktop-control.sh" ]; check "desktop-control.sh installed and executable" $?
 jq -e '[.hooks.PreToolUse[].hooks[] | select(.command | contains("pre-tool-use.sh"))][0].onFailure == "block"' "$SETTINGS" >/dev/null; check "guard registered with onFailure: block" $?
 jq -e '[.hooks.PostToolUse[].hooks[]][0].async == true' "$SETTINGS" >/dev/null; check "PostToolUse registered async" $?
 [ -s "$VS/manifest.sig" ]; check "manifest signed locally" $?
