@@ -98,6 +98,19 @@ Waves: S1, S4, S6 can share a wave (disjoint dirs; two Frontend workers run in p
 Packaging (signing, notarization, update feed) is a plan by hanuman [Platform] after H4; shipping it needs
 the owner's yes.
 
+## Shipping slices (GPT-8)
+
+The MVP ships in two slices so the evidence loop reaches users before the rest. Slice 1 is the private
+beta; slice 2 must land before the public launch.
+
+| Slice | What a user gets | Tasks |
+|---|---|---|
+| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G3b, E1 to E3, E5, E6, C1 to C6, K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6 |
+| 2 | Knowledge in the run view (records used, refusals) and its approve, reject and forget commands; the task graph view; history search; the claim studies that unlock launch wording | E4, S4 task graph (US-4.2), S6, H3, H7, H8 |
+
+Slice 1 has no knowledge mutation, no graph view and no claim study. The 60-second demo (PRD section 1)
+needs slice 2 only for its last beat. Every acceptance id stays; only the order changes.
+
 ## Dependency graph
 
 ```mermaid

@@ -330,8 +330,9 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 
 ## 12. Release plan (MVP)
 
-1. Stack spike and two-model approval (in progress).
-2. Build the MVP from [spec/tasks.md](spec/tasks.md) with a `/vajra` run.
+1. Stack spike and two-model approval (stack approved; performance approval withheld).
+2. Build the MVP from [spec/tasks.md](spec/tasks.md) with a `/vajra` run, in two slices (tasks.md,
+   "Shipping slices"): slice 1 is the private beta, slice 2 must land before the public launch.
 3. Red team: pre-mortem, security gate, exploit PoCs as failing tests, regressions and a11y, load and
    soak, flamegraphs.
 4. Private beta on macOS (signed and notarized), then public launch. Each step needs the owner's yes.
