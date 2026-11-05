@@ -7,6 +7,7 @@
 #   progress.md     append-only progress notes
 #   state.sig       HMAC-SHA256 over the three files above (written by this script only)
 #   checkpoints/    NNNN.json snapshots, each HMAC-signed and chained to the previous one
+#   report.md       the delivery report (E4); its sha256 is recorded in the signed campaign.json
 #
 # The HMAC key (~/.claude/vajra/.hmac-key) is read by this script and never printed,
 # so it never enters model context. Signing uses openssl.
@@ -22,6 +23,7 @@
 #   vajra-campaign.sh resume [slug] [--from-checkpoint N]
 #   vajra-campaign.sh verify [slug]
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
+#   vajra-campaign.sh report --campaign slug --bytes N --base64 B64
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -90,6 +92,11 @@ verify_state() {
   got="$(state_digest "$d" | hmac_stdin)"
   [ -n "$want" ] && [ "$want" = "$got" ] || return 1
   [ "$(jq -r '.featuresDefSha256' "$d/campaign.json")" = "$(features_def_sha "$d/features.json")" ] || return 1
+  # E4: once a report is recorded, report.md must exist and match (edit or delete -> invalid).
+  want="$(jq -r '.reportSha256 // ""' "$d/campaign.json")"
+  if [ -n "$want" ]; then
+    [ -f "$d/report.md" ] && [ ! -L "$d/report.md" ] && [ "$(sha256_file "$d/report.md")" = "$want" ] || return 1
+  fi
   return 0
 }
 
@@ -365,6 +372,33 @@ cmd_close() {
   echo "campaign $SLUG closed ($st, $(counts) features passing)"
 }
 
+# E4: the Deliver step saves its report. The text comes base64-encoded (one argument,
+# multi-line safe) with its byte length, so a damaged copy is refused rather than saved.
+REPORT_MAX=65536
+cmd_report() {
+  local slug="" nb="" b64="" tmp got
+  while [ $# -gt 0 ]; do case "$1" in
+    --campaign) slug="${2:-}"; shift 2 ;;
+    --bytes) nb="${2:-}"; shift 2 ;;
+    --base64) b64="${2:-}"; shift 2 ;;
+    *) die "unknown option: $1" ;;
+  esac; done
+  case "$nb" in ""|*[!0-9]*) die "--bytes must be a number" ;; esac
+  [ "$nb" -ge 1 ] && [ "$nb" -le "$REPORT_MAX" ] || die "report must be 1 to $REPORT_MAX bytes"
+  [ -n "$b64" ] && [ "${#b64}" -le $(( (REPORT_MAX / 3 + 2) * 4 )) ] || die "--base64 missing or too long"
+  printf '%s' "$b64" | grep -Eq '^[A-Za-z0-9+/]+={0,2}$' || die "--base64 is not base64"
+  [ -n "$slug" ] || die "--campaign is required"
+  resolve "$slug"; load_key; lock "$DIR"; require_valid
+  tmp="$DIR/report.md.tmp"
+  ( umask 077; printf '%s' "$b64" | openssl base64 -d -A > "$tmp" ) 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
+  got="$(wc -c < "$tmp" | tr -d ' ')"
+  [ "$got" = "$nb" ] || { rm -f "$tmp"; die "decoded report is $got bytes, expected $nb"; }
+  mv -f "$tmp" "$DIR/report.md"
+  jqw "$DIR/campaign.json" --arg h "$(sha256_file "$DIR/report.md")" '.reportSha256 = $h' "$DIR/campaign.json"
+  touch_updated; sign_state "$DIR"
+  echo "report saved for $SLUG ($nb bytes)"
+}
+
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   create)     cmd_create "$@" ;;
@@ -377,6 +411,7 @@ case "$cmd" in
   resume)     cmd_resume "$@" ;;
   verify)     cmd_verify "$@" ;;
   close)      cmd_close "$@" ;;
+  report)     cmd_report "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "vajra-campaign: unknown command: $cmd" >&2; usage ;;
 esac

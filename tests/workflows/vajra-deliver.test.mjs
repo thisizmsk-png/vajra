@@ -84,12 +84,23 @@ await scenario('happy path: done, one integration branch, evidence per criterion
   const r = await go(ARGS)
   assert.equal(r.result.status, 'done')
   assert.equal(r.result.branch, `vajra/${RUN}/integration`)
-  assert.deepEqual(labels(r), ['kb.search', 'understand', 'preflight', 'plan.1', 'tasks.register', 'task.t1.r1', 'task.t2.r1', 'merge.r1', 'verify.r1', 'review.arjuna.r1', 'writeback', 'campaign.deliver', 'cleanup'])
+  assert.deepEqual(labels(r), ['kb.search', 'understand', 'preflight', 'plan.1', 'tasks.register', 'task.t1.r1', 'task.t2.r1', 'merge.r1', 'verify.r1', 'review.arjuna.r1', 'writeback', 'campaign.deliver', 'cleanup', 'campaign.report'])
   assert.match(r.result.report, /ac-1 export --json prints valid JSON: `npm test -- export` exit 0/)
   assert.match(r.result.report, /## How to run it/)
   assert.match(r.result.report, /large exports buffer in memory/)
   assert.match(r.result.report, /git merge --no-ff vajra\/20261011-0930\/integration/)
   assert.deepEqual(r.result.pending_approval, [])
+})
+await scenario('E4: the delivery report is saved into the campaign, byte-exact, as one base64 argument', async () => {
+  const r = await go(ARGS)
+  const p = call(r, 'campaign.report').prompt
+  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --base64 ([A-Za-z0-9+/]+=*)/)
+  assert.ok(m, own(p))
+  const text = Buffer.from(m[2], 'base64').toString('utf8')
+  assert.equal(text, r.result.report + '\n')
+  assert.equal(Number(m[1]), Buffer.byteLength(text, 'utf8'))
+  assert.equal(call(r, 'campaign.report').agentType, 'abhimanyu')
+  assert.ok(own(p).length < 32 * 1024, 'the command stays under the guard analysis limit')
 })
 await scenario('roles: writers in worktrees, reviewers read-only, vidura verifies, drona understands', async () => {
   const r = await go(ARGS)
@@ -805,7 +816,9 @@ const cleanCmdIn = (r) => (own(call(r, 'cleanup').prompt).match(/^1\. (bash \S+v
 await scenario('cleanup: last step, in the user checkout, with this run\'s commits, branch prefix and allowed dirs', async () => {
   const r = await go(ARGS)
   const c = call(r, 'cleanup')
-  assert.equal(labels(r).at(-1), 'cleanup')
+  // Only the E4 report save (it records cleanup's results, in the user checkout, no worktree) follows cleanup.
+  assert.deepEqual(labels(r).slice(-2), ['cleanup', 'campaign.report'])
+  assert.equal(call(r, 'campaign.report').isolation, undefined)
   assert.equal(c.agentType, 'abhimanyu')
   assert.equal(c.isolation, undefined, 'runs in the user checkout, never in a worktree it would have to remove')
   assert.equal(c.phase, 'Deliver')

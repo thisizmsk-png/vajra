@@ -118,6 +118,30 @@ C close deliver-20261011-0930 --status bogus >/dev/null 2>&1; [ $? -ne 0 ]; chec
 C >/dev/null 2>&1; [ $? -eq 2 ]; check "no command -> usage (exit 2)" $?
 C bogus >/dev/null 2>&1; [ $? -eq 2 ]; check "unknown command -> usage (exit 2)" $?
 
+# --- report (E4, Q3): the Deliver step saves report.md, bound into the signed state ---
+C create rep --feature "ac-1|x" >/dev/null 2>&1
+RD="$CD/rep"
+REP="$(printf '# Delivery: x\n\nBranch `b` at `c`.\n- ünïcode ✓\n')"
+B64="$(printf '%s\n' "$REP" | openssl base64 -A)"
+NB="$(printf '%s\n' "$REP" | wc -c | tr -d ' ')"
+C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null; check "report saved" $?
+[ "$(cat "$RD/report.md")" = "$REP" ]; check "report.md is the exact text (multi-line, UTF-8)" $?
+[ "$(stat -c %a "$RD/report.md" 2>/dev/null || stat -f %Lp "$RD/report.md")" = 600 ]; check "report.md mode 600" $?
+C verify rep >/dev/null 2>&1; check "state verifies with the report" $?
+C close rep --status done >/dev/null && C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null; check "report works after close (Deliver closes first)" $?
+printf 'tampered\n' >> "$RD/report.md"
+C verify rep >/dev/null 2>&1; [ $? -ne 0 ]; check "edited report.md fails verify" $?
+C report --campaign rep --bytes "$NB" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "report refuses a campaign whose state is invalid" $?
+C create rep2 --feature "ac-1|x" >/dev/null 2>&1
+C report --campaign rep2 --bytes "$NB" --base64 "$B64" >/dev/null && rm -f "$CD/rep2/report.md"
+C verify rep2 >/dev/null 2>&1; [ $? -ne 0 ]; check "deleted report.md fails verify" $?
+C create rep3 --feature "ac-1|x" >/dev/null 2>&1
+C report --campaign rep3 --bytes 999 --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]; check "byte count mismatch refused, nothing written" $?
+C report --campaign rep3 --bytes 4 --base64 '!!!!' >/dev/null 2>&1; [ $? -ne 0 ]; check "bad base64 refused" $?
+BIG="$(head -c 70000 /dev/zero | tr '\0' x | openssl base64 -A)"
+C report --campaign rep3 --bytes 70000 --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
+C verify rep3 >/dev/null 2>&1; check "campaign without a report still verifies" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

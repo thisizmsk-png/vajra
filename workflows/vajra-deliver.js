@@ -959,6 +959,20 @@ if (pending.length) {
   if (deployPlan) md.push(`- deploy plan: ${deployPlan.commands.length} command(s), rollback ${deployPlan.rollback.length}, risk ${deployPlan.risk}`)
 }
 
+// E4 (Q3): save the report into the campaign so it survives without the app. One base64 argument plus its
+// byte count: the text is multi-line and untrusted, and the script refuses a copy that does not decode to N bytes.
+// At most 20 KiB (about 27 KB of base64), so the command stays under the guard's 32 KB analysis limit.
+const REPORT_SAVE_MAX = 20 * 1024
+const reportText = md.join('\n') + '\n'
+const reportBytes = new TextEncoder().encode(reportText)
+if (reportBytes.length <= REPORT_SAVE_MAX) {
+  let bin = ''
+  for (const b of reportBytes) bin += String.fromCharCode(b)
+  await recordCampaign('campaign.report', 'Deliver', [
+    [`${CAMPAIGN_SH} report --campaign ${CAMPAIGN} --bytes ${reportBytes.length} --base64 ${btoa(bin)}`],
+  ])
+} else log(`report is ${reportBytes.length} bytes, over ${REPORT_SAVE_MAX}; not saved into the campaign (the app keeps the transcript copy)`)
+
 return {
   status: 'done',
   node: 'deliver',
