@@ -42,7 +42,7 @@ const CHANGED: &str = "changed";
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
-const MAX_PAGE: usize = 1024 * 1024;
+const MAX_PAGE: usize = 64 * 1024;
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -159,8 +159,18 @@ impl App {
         })
     }
 
+    /// The control service steers one session, so one run is active at a time.
+    fn no_active_run(&self) -> Result<(), Value> {
+        let busy = lock(&self.runs).keys().any(|s| self.sup.is_running(s).unwrap_or(false));
+        if busy {
+            return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
+        }
+        Ok(())
+    }
+
     fn start_run(&self, input: RunInput, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
+        self.no_active_run()?;
         let now = unix_now();
         let session_id = new_uuid().map_err(|e| fail("io_error", e))?;
         let run_id = run_id_at(now);
@@ -187,6 +197,7 @@ impl App {
     /// for the campaign. The steering nonce rotates (design 5).
     fn resume_run(&self, session_id: &str, run_id: &str, campaign: &str, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
+        self.no_active_run()?;
         if !control::queue::valid_session_id(session_id) {
             return Err(invalid("session_id", "not a session id"));
         }
@@ -229,7 +240,10 @@ impl App {
             Some((_, r)) => self.discover_workers(r)?,
             None => Vec::new(),
         };
-        lock(&self.control).set_workers(
+        // Only the live run's workers are steering targets; viewing a past run
+        // never retargets the control service.
+        if running {
+            lock(&self.control).set_workers(
             workers
                 .iter()
                 .map(|w| WorkerInfo {
@@ -243,7 +257,8 @@ impl App {
                     lines: Vec::new(),
                 })
                 .collect(),
-        );
+            );
+        }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
         let node = self.with_reader(|r| {
@@ -350,6 +365,10 @@ impl App {
 
     fn confirm_stop(&self, action_id: &str) -> Res {
         ctl(lock(&self.control).confirm_stop(Actor::Human, action_id))
+    }
+
+    fn cancel_stop(&self, action_id: &str) -> Res {
+        ctl(lock(&self.control).cancel_stop(Actor::Human, action_id))
     }
 
     fn resume_worker(&self, worker: &str) -> Res {
@@ -551,6 +570,11 @@ fn confirm_stop(app: State<'_, App>, action_id: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn cancel_stop(app: State<'_, App>, action_id: String) -> Res {
+    app.cancel_stop(&action_id)
+}
+
+#[tauri::command(async)]
 fn resume_worker(app: State<'_, App>, worker: String) -> Res {
     app.resume_worker(&worker)
 }
@@ -666,6 +690,7 @@ fn main() {
             control_redirect,
             control_stop,
             confirm_stop,
+            cancel_stop,
             resume_worker,
             ledger,
             kb_search,
@@ -729,6 +754,35 @@ mod tests {
 
     fn code(v: &Value) -> &str {
         v["error"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn pages_are_capped_at_64_kib() {
+        assert_eq!(MAX_PAGE, 64 * 1024);
+    }
+
+    #[test]
+    fn one_active_run_at_a_time() {
+        // The control service steers one session; a second concurrent run would
+        // get the first run's messages and stops (review #4).
+        let t = Tmp::new();
+        let app = t.app();
+        let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let stream = format!("run-{sid}");
+        app.sup
+            .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: vec![] })
+            .unwrap();
+        lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone() });
+        let cwd = t.0.to_string_lossy().to_string();
+        let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None };
+        assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
+        let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+        assert_eq!(code(&app.resume_run(other, "20261105-1231", "c2", &cwd).unwrap_err()), "run_active");
+        // A past run's crew view never retargets the control service.
+        let before = lock(&app.control).nonce().map(str::to_string);
+        let _ = app.crew("c-old", "20261101-0000");
+        assert_eq!(lock(&app.control).nonce().map(str::to_string), before);
+        app.sup.kill(&stream).unwrap();
     }
 
     #[test]

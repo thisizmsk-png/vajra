@@ -58,7 +58,29 @@ fn argv_for_each_fixed_request() {
     assert_eq!(dr.stdout, "PASS ok\n");
 
     let g = b.run(&Request::Git { cwd: repo, args: vec!["rev-parse".into(), "--".into(), "a b".into()] }).unwrap();
-    assert_eq!(g.stdout, "[--no-pager]\n[rev-parse]\n[--]\n[a b]\n");
+    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[rev-parse]\n[--]\n[a b]\n");
+    // diff never runs a repo-configured external diff or textconv driver.
+    let g = b.run(&Request::Git { cwd: tmp(), args: vec!["diff".into(), "main".into(), "--".into()] }).unwrap();
+    assert_eq!(g.stdout, "[--no-pager]\n[-c]\n[core.fsmonitor=]\n[diff]\n[--no-ext-diff]\n[--no-textconv]\n[main]\n[--]\n");
+}
+
+#[test]
+fn real_git_diff_ignores_repo_diff_external() {
+    let repo = tmp();
+    let marker = repo.join("pwned");
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("/usr/bin/git").args(args).current_dir(&repo).env("HOME", &repo).output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
+    fs::write(repo.join("f.txt"), "a\n").unwrap();
+    git(&["add", "f.txt"]);
+    git(&["config", "diff.external", &format!("/usr/bin/touch {}", marker.display())]);
+    let b = Bridge::new(tmp());
+    let o = b.run(&Request::Git { cwd: repo.clone(), args: vec!["diff".into(), "--cached".into(), "HEAD".into(), "--".into()] }).unwrap();
+    assert!(!marker.exists(), "diff.external ran");
+    assert!(o.stdout.contains("+a"), "{}", o.stdout);
 }
 
 #[test]

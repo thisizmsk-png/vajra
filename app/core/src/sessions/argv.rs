@@ -167,12 +167,6 @@ pub fn build_resume_argv(session_id: &str, campaign: &str, steer_nonce: &str) ->
     Ok(vec!["claude".into(), "--resume".into(), session_id.into(), format!("/vajra-deliver {json}")])
 }
 
-fn valid_slug(s: &str, min: usize) -> bool {
-    (min..=128).contains(&s.len())
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
 fn push_json_str(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {

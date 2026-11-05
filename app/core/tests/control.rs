@@ -478,7 +478,7 @@ fn lead_stop_awaits_confirm_stop() {
     let id = r["action_id"].as_str().unwrap().to_string();
     assert!(stop_files(&h).is_empty(), "nothing is written until the human confirms");
     // Time passing does not turn it into a stop.
-    s.tick_at(SystemTime::now() + Duration::from_secs(3600));
+    s.tick_at(SystemTime::now() + Duration::from_secs(60));
     assert!(stop_files(&h).is_empty());
     // The Lead cannot confirm for the human.
     assert!(matches!(s.confirm_stop(Actor::Lead, &id), Err(ControlError::NotPermitted)));
@@ -527,6 +527,27 @@ fn only_task_workers_can_be_steered() {
     // They can still be stopped, and a task worker can still be messaged.
     assert_eq!(s.stop_worker(Actor::Human, "GATE0", None).unwrap()["state"], "queued");
     assert_eq!(s.message_worker(Actor::Human, AID, "ok").unwrap()["state"], "queued");
+}
+
+#[test]
+fn lead_stop_requests_are_bounded_and_expire() {
+    let h = Home::new();
+    let mut s = started(&h);
+    // A Lead looping stop_worker on one worker gets the one pending request back.
+    let a = s.call_tool("stop_worker", &json!({"worker": AID})).unwrap();
+    for _ in 0..50 {
+        let b = s.call_tool("stop_worker", &json!({"worker": AID})).unwrap();
+        assert_eq!(b["action_id"], a["action_id"]);
+        assert_eq!(b["state"], "awaiting_human_confirm");
+    }
+    let awaiting = h.ledger().iter().filter(|r| r["state"] == "awaiting_human_confirm").count();
+    assert_eq!(awaiting, 1, "one ledger line, not 51");
+    // Unconfirmed requests are refused after the TTL; the human then has nothing to confirm.
+    s.tick_at(SystemTime::now() + s.ttl + Duration::from_secs(1));
+    assert_eq!(h.ledger().last().unwrap()["state"], "refused");
+    let id = a["action_id"].as_str().unwrap();
+    assert!(s.confirm_stop(Actor::Human, id).is_err());
+    assert!(stop_files(&h).is_empty());
 }
 
 // ---------------------------------------------------------------- hook contract

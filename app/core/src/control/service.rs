@@ -593,6 +593,13 @@ impl Service {
             return Err(ControlError::WorkerAmbiguous);
         }
         let now = SystemTime::now();
+        // One pending Lead request per worker: a looping Lead gets the same one back.
+        if actor == Actor::Lead {
+            let key = w.key();
+            if let Some(p) = self.pending.values().find(|p| p.kind == "stop" && p.state == "awaiting_human_confirm" && p.worker == key) {
+                return Ok(json!({"action_id": p.id, "state": p.state}));
+            }
+        }
         let mut a = self.new_action("stop", actor, Some(&w), now)?;
         a.reason = reason;
         a.stop_match = Some(Value::Object(m));
@@ -688,6 +695,17 @@ impl Service {
     /// One pass of the ack watcher: acks -> delivered, expired queue entries
     /// -> not_delivered, stale inflight claims -> delivery_unknown.
     pub fn tick_at(&mut self, now: SystemTime) {
+        // Unconfirmed Lead stop requests are refused after the TTL.
+        let stale: Vec<Action> = self
+            .pending
+            .values()
+            .filter(|a| a.state == "awaiting_human_confirm" && now.duration_since(a.created).unwrap_or_default() >= self.ttl)
+            .cloned()
+            .collect();
+        for a in stale {
+            let _ = self.record(&a, "refused", json!({"reason": "expired"}), now);
+            self.pending.remove(&a.id);
+        }
         let Some(s) = &self.session else { return };
         let (sid, dir) = (s.id.clone(), s.dir.clone());
         let ids: Vec<String> = self

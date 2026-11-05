@@ -127,8 +127,15 @@ impl Bridge {
                 }) {
                     return Err(BridgeError::Invalid(format!("git flag not allowed: {bad}")));
                 }
-                let mut argv = vec!["--no-pager".to_string()];
-                argv.extend(args.iter().cloned());
+                // No repo-configured helper ever runs: no fsmonitor hook, and diff
+                // skips diff.external and textconv drivers (a worktree's .git/config
+                // may have been written by an agent).
+                let mut argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor="].map(String::from).to_vec();
+                argv.push(sub.to_string());
+                if sub == "diff" {
+                    argv.extend(["--no-ext-diff".to_string(), "--no-textconv".to_string()]);
+                }
+                argv.extend(args.iter().skip(1).cloned());
                 (self.git.clone(), argv, Some(cwd.clone()))
             }
         })
@@ -153,6 +160,7 @@ fn scrubbed_env(cmd: &mut Command) {
     cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
     cmd.env("LC_ALL", "C.UTF-8");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
     if let Some(home) = std::env::var_os("HOME") {
         cmd.env("HOME", home);
     }
