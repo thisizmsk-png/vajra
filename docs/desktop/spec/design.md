@@ -235,7 +235,10 @@ sequenceDiagram
 - **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded setup commands
   and the criterion command verbatim, in run order, and runs them only after the human confirms. It creates
   a fresh detached worktree at the evidence commit under `<repo>/.claude/worktrees/desktop-rerun-<id>`,
-  runs each setup command there as `bash -c <cmd>` in order (an argument array, never a joined string), then
+  rebuilds the verified tree there (apply the evidence's `diff.patch` with `git apply --binary`, then require
+  that the whole-tree id equals the signed `git.worktreeTree`, else refuse with "can't rebuild the verified
+  tree"; `diff.patch` itself isn't signed, so the tree id is the check), runs each setup command
+  as `bash -c <cmd>` in order (an argument array, never a joined string), then
   `scripts/vajra-verify-work.sh <slug> <command>`, compares exit codes, then removes that worktree.
   - **Where setup comes from:** the workflow keeps the verifier's `setup_cmds` separately from the criterion
     commands (`workflows/vajra-deliver.js:342`, filtered and capped at 5 at `:787`) and prints them as the
@@ -585,7 +588,9 @@ E2 scope (GPT-3, matching vajra-6's 611d969 on `ao/vajra-6/m1-engine`):
 - **Sandbox boundary:** `config/sandbox.json` carries an opt-in `denyWrite` for
   `~/Library/Application Support/VajraDesktop/control` (611d969: documented, not applied by any script).
   Applying it is owner decision Q10. Preflight shows whether it is on. Without it, the guard is the only
-  write protection, and the app labels control "best effort (sandbox off)".
+  write protection, so the control service follows Q10's working assumption: with `denyWrite` off, control is
+  **stop-only**. Message and redirect return `control_disabled: sandbox_off`, nothing is queued, and the UI
+  hides them with the reason. Stop still works, because a forged or replayed stop can only halt a worker.
 
 ### 5.5 Worker identification
 
@@ -768,8 +773,16 @@ check.
   6. Updates (VD-6) install only when no run is active. Otherwise the update waits, and the menu bar says
      "Update ready, installs when runs finish". With one process there is never an older generation left
      running. After 72 h waiting, the menu offers Install now, which stops the runs and offers resume (PM-6).
-  6b. Quit sends SIGTERM to each run's process group (recorded in `runs.jsonl`) and waits up to 10 s. On
-     launch, resume is refused while any process in that group is alive; the app offers Stop instead (PM-8).
+  6b. Each run session is spawned as the leader of a new process group, and `runs.jsonl` records its pgid
+     and the leader's start time (so a reused pid is never mistaken for it). Quit sends SIGTERM to each
+     group and waits up to 10 s, then SIGKILL.
+  6b'. **Startup cleanup barrier** (PM-8, POS-2.1f). Before the run list loads or any resume is offered, the
+     core checks every run in `runs.jsonl` whose session isn't live. For each recorded group that still has
+     members: SIGTERM, wait up to 10 s, SIGKILL, wait up to 5 s. Then it sweeps for escaped descendants: any
+     process of the same user whose cwd is inside that run's worktrees. Those are listed (pid, command,
+     cwd) and killed only after the human confirms. Resume of that campaign stays blocked until none are
+     left. The barrier is bounded at 20 s in total, and its outcome is recorded in the app log. Only after
+     it finishes does `vajra-campaign.sh verify` run for each campaign.
   6c. When the last window closes, the webview is destroyed and only the core stays. Reopening rebuilds the
      UI from the core. This keeps a long-lived menu bar app from carrying webview growth (PM-6).
   7. While any run is active the core holds a macOS activity assertion, so App Nap does not throttle the

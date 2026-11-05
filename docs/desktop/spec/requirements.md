@@ -142,7 +142,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.4.4 GIVEN the control queue directory, WHEN a worker tries to write to it, THEN the guard blocks it and `audit.log` records BLOCK.
 - AC-3.4.6 (GPT-3) GIVEN a worker tool call (payload has `agent_id`), WHEN it reads `VajraDesktop/control/<sid>/nonce` or any path under `~/.claude/projects/` through Read, Grep, Glob, LS, read-only Bash (`cat`, `head`, `python3 -c`), a symlink or a recursive Grep over an ancestor, THEN the guard blocks it and `audit.log` records BLOCK; the same reads from the main session or the Lead chat (no `agent_id`) are allowed.
 - AC-3.4.7 (GPT-3) GIVEN a worker, WHEN it tries to write anywhere under `~/Library/Application Support/VajraDesktop/` with Write, Edit, `mv`, `rm`, `cp`, `tee` or a redirect (path with a space), THEN the guard blocks it.
-- AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "best effort (sandbox off)". Every existing guard test still passes (CI).
+- AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "stop only (sandbox off)", and message and redirect, from the UI,
+  the Lead or MCP, return `control_disabled: sandbox_off` with nothing queued, while stop still works (Q10
+  working assumption; test with the sandbox off and on). Every existing guard test still passes (CI).
 - AC-3.4.5 (STRIDE R1) GIVEN any human action (approve, reject, take over, re-run, resume worker, clear stop), WHEN it happens, THEN the control ledger has one record with the actor, the exact target and the time.
 
 ### J4 Run view
@@ -211,7 +213,10 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   and the Verifier role next to the author role. If the two are the same role, the row says so.
 - POS-1.2 GIVEN a criterion with recorded evidence, WHEN I choose Re-run and confirm the full text shown monospaced and untruncated (STRIDE E2),
   THEN in a fresh worktree detached at the evidence commit (the task's own worktree is usually cleaned up)
-  the app first runs the delivery's recorded setup commands, in their recorded order, each as one `bash -c`
+  the app first rebuilds the verified tree: it applies the evidence's `diff.patch` (`git apply --binary`,
+  untracked files included) and checks that the whole-tree id, computed as in POS-1.3, equals the signed
+  `git.worktreeTree`; if the patch is missing, doesn't apply, or the id differs, Re-run is refused with "can't
+  rebuild the verified tree" and nothing runs. Then it runs the delivery's recorded setup commands, in their recorded order, each as one `bash -c`
   argument, exactly as the Deliver write-back does (`workflows/vajra-deliver.js:787` and `:816`), then runs
   the criterion command through `scripts/vajra-verify-work.sh` as one argument, and shows whether the new
   result matches the recorded one. The confirm lists every setup command and the criterion command, in run
@@ -219,7 +224,8 @@ sentence. POS-1.4, 1.6, 3.3 and 4.2 to 4.5 are measurements: they gate claims, n
   setup list can't be recovered (the captured report is missing), the confirm says "setup not recorded;
   the result may differ" and the result is labelled the same way. Test: a fixture criterion that only passes
   after its setup (`npm ci` or a `.venv` build) matches its recorded pass on Re-run, and fails with the
-  setup commands removed. The recorded command came from an agent, so it is
+  setup commands removed. A second test: signed evidence taken on a dirty tree (a tracked edit plus an
+  untracked file) reproduces on Re-run, and with one byte of `diff.patch` changed it is refused. The recorded command came from an agent, so it is
   untrusted: it never runs without this confirm, and the Lead and MCP tools cannot start a re-run (NFR-SEC-9).
 - POS-1.3 (GPT-4) Two separate answers per criterion, never merged into one green:
   - **Proof at the recorded commit:** "verified" when E3 (`vajra_tasks.py check-evidence --head <recorded
@@ -251,8 +257,11 @@ a reason at why 4, since native agent view already does it, P23)
 - POS-2.1a GIVEN active runs, WHEN I press Cmd-Q, THEN a dialog asks "Quit and stop N runs?" with Keep
   running as the default; choosing Keep running closes the window and the runs continue.
 - POS-2.1b GIVEN a run that was running when the app quit or crashed, WHEN the app next starts, THEN it is
-  offered for resume (`claude --resume <session_id>` plus `/vajra continue`). A session I stopped or quit on
-  purpose is not offered, and nothing resumes without a click (VD-5).
+  offered for resume by its own campaign slug: argv `claude --resume <session_id>
+  '/vajra-deliver {"campaign":"<slug>","run_id":"<UTC now>"}'` with the slug from `runs.jsonl` (ADR-9
+  decision 5), never `/vajra continue`, which follows the global `.active` pointer. A session I stopped or
+  quit on purpose is not offered, and nothing resumes without a click (VD-5). Test: the two-campaign fixture
+  of POS-2.1e, with argv asserted.
 - POS-2.1c GIVEN an update is ready and runs are active, WHEN it would install, THEN it waits until no run is
   active, and exactly one app process exists afterwards (VD-6).
 - POS-2.1d (PM-6) GIVEN the last window closes, WHEN 60 s pass, THEN no WebContent process exists and app RSS
@@ -260,8 +269,11 @@ a reason at why 4, since native agent view already does it, P23)
 - POS-2.1e (PM-1) GIVEN runs A and B were stopped by one quit and Vajra's `.active` points at B, WHEN I resume
   A, THEN campaign A resumes and B is untouched; resuming a campaign already live in any session is refused.
 - POS-2.1f (PM-8) GIVEN the app is killed at 50 random points during a 2-worker fixture run, WHEN it relaunches,
-  THEN no process from those runs survives, and every campaign either verifies or offers its checkpoint
-  restore (`vajra-campaign.sh resume`).
+  THEN the startup cleanup barrier (design ADR-9 6b') runs before any resume is offered and ends within
+  20 s; no process in the runs' recorded process groups survives it; any escaped descendant (cwd inside a
+  run worktree) is listed and blocks that campaign's resume until I confirm its kill; and every campaign then
+  either verifies or offers its checkpoint restore (`vajra-campaign.sh resume`). The fixture includes a
+  child that calls `setsid` to leave the group.
 - Deferred to v1.1 (ADR-9): runs that keep going through a quit or SIGKILL of the app (VD-4).
 - POS-2.2 GIVEN `/vajra <ask>` started in a plain terminal, WHEN the app is open, THEN the run appears live
   within the event latency budget (NFR-PERF-9), with the crew, run view and inbox. The app can't take over
