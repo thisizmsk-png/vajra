@@ -29,7 +29,7 @@ under `app/` are placeholders until the spike fixes the stack: `core/` is the Ru
 |---|---|---|---|---|---|
 | G1 | Stack spike: measure candidates against Agent Orchestrator desktop and Orca on this Mac; answer design.md section 2 | GPT 6.1 Sol spike worker (outside Vajra) | spike report | none | Report has measured idle RSS, RSS per agent, cold start, frame time at 10 agents |
 | G2 | **Done 2026-11-05 for the stack** (both models approve Tauri v2 + Rust + React/TS + xterm.js; performance approval withheld by both until NFR-PERF-1 and NFR-PERF-6 are met). Review: `vajra-3/stack-spike-review.md`, objections O1-O7 feed H1 | Opus 5.5 + GPT 6.1 Sol | `docs/desktop/spec/requirements.md`, `docs/desktop/PRD.md` | G1 | Stack approved by both; budgets in NFR-PERF-1 to 10 |
-| G3 | Confirm Claude Code facts the design depends on ("to verify in spike" list in design.md) | abhimanyu [Prototyper] | spike notes only | G1 | Each item marked confirmed or replaced by its fallback |
+| G3 | **Confirmed 2026-11-05** by vajra-6's tracer bullet (Claude Code 2.1.296, artifact `vajra-6/tracer-bullet.md`): Claude Code facts the control channel depends on (design.md 5.9) | abhimanyu [Prototyper]; done by vajra-6 | none (spike notes) | G1 | Done: subagent hook payloads carry `session_id`, `agent_id`, `agent_type`, `cwd`; `additionalContext` reaches the subagent when sent as a nonce-tagged steer (plain text is ignored as injection); exit 2 from a second PreToolUse hook blocks the call; `--resume` plus `SendMessage` continues the same agent. Still open: the same inside the `vajra-deliver` Workflow tool (M2 smoke run) |
 
 ### M1 Engine changes (Vajra repo, owner-approved)
 

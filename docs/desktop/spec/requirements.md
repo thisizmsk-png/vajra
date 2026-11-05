@@ -58,6 +58,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.3.2 GIVEN any required row fails, WHEN I look at the Start screen, THEN "Start run" is disabled and the failing row shows one fix hint (a command or link).
 - AC-1.3.3 GIVEN preflight, WHEN it executes, THEN it only runs read-only commands and never reads `~/.claude/vajra/.hmac-key` (verified: no open of that path in the process trace).
 - AC-1.3.4 GIVEN `~/.claude/workflows/vajra-deliver.js` is missing, WHEN preflight runs, THEN the row says so and shows `bash ~/.claude/skills/vajra/scripts/install.sh` followed by `/vajra doctor`.
+- AC-1.3.5 (VD-27) GIVEN the control hook is not registered, WHEN preflight runs, THEN it names the missing piece and shows the exact command to run in my own terminal; the app never edits `~/.claude/settings.json` or any agent config itself (a file hash before and after is identical), and control actions show "control hook not installed" instead of failing silently.
+- AC-1.3.6 (VD-12, VD-31) GIVEN a fresh install with the network blocked, WHEN I start a run and use every screen, THEN everything works and no login or account screen appears; with the network open for an hour under a network monitor, the only outbound connection the app makes is the update check (Claude Code's own traffic excluded).
+- AC-1.3.7 (VD-28) GIVEN a Mac with Claude Code and Vajra installed, WHEN I open the signed DMG and launch the app, THEN I reach Home with a passing preflight in under 2 minutes, the app needs no Node or Python of its own, and it writes nothing outside `~/Library/Application Support/<app>/` and the repos I pick.
 
 ### J2 Crew
 
@@ -65,12 +68,17 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-2.1.1 GIVEN a run is active, WHEN I open Crew view, THEN the tree shows Lead -> Run -> agents (one node per task owner per round) -> sub-workers (verifier and reviewer passes, fix-round reruns), each node with role name, a status dot AND a text status (pending, ready, claimed, in_progress, done, blocked, question, failed).
 - AC-2.1.2 GIVEN `tasks.json` status of a task changes, WHEN the file changes, THEN the node's status updates within 2 s without user action.
 - AC-2.1.3 GIVEN an agent id not in the mapping, WHEN it is rendered, THEN it shows the id title-cased, and no mahabharat name appears anywhere in the UI except the inspector's "engine id" field.
+- AC-2.1.4 (VD-1) GIVEN a run with 10 workers, WHEN the crew view is open, THEN the status bar shows the app's own memory and the run node shows the memory of its `claude` process tree, labelled separately; the app never shows one combined number. (Workers are subagents inside one `claude` process, so per-worker memory is not available and is not invented.)
+- AC-2.1.5 (VD-8) GIVEN a worker with no transcript, task-graph or hook event in the last 120 s while its run's `claude` process is alive, WHEN its row renders, THEN its status reads "Unknown (no signal for 2 min)", never Idle, Done or Exited. Status comes only from `tasks.json`, transcript records and hook events, never from parsing terminal text.
+- AC-2.1.6 (VD-11) GIVEN the run's transcript records a usage-limit stop, WHEN the run node renders, THEN it shows "Rate-limited until HH:MM" (or "Rate-limited" when no time is given), not Idle or Stuck, and the inbox lists it once as "Paused by usage limit". Detection is to verify in the M2 smoke run; until then the state is Unknown.
 
 **US-2.2** As a Dev, I want a worker's live stream, so that I can read what it is doing.
 - AC-2.2.1 GIVEN a worker node is selected, WHEN the Stream tab is shown, THEN lines from its transcript appear within 1 s of being written, rendered as plain text (no HTML, no escape sequences executed).
 - AC-2.2.2 GIVEN a stream exceeds its ring buffer, WHEN more lines arrive, THEN the oldest lines spill to disk and remain reachable by scrolling, and app memory per attached stream stays within NFR-PERF-2.
 - AC-2.2.3 GIVEN a worker is not selected, WHEN it produces output, THEN no UI tab is rendered for it but its buffer keeps receiving data and the node shows an "activity" indicator.
 - AC-2.2.4 GIVEN the run session PTY is shown, WHEN I type in it without pressing "Take over", THEN no input is sent; "Take over" is an explicit button and the pane shows "You are controlling the run session" while active.
+- AC-2.2.5 (VD-7) GIVEN I took over the run terminal, WHEN I paste more than 64 KiB or a binary blob, THEN the app asks before sending, sends it in bounded chunks, and the UI stays within NFR-PERF-3.
+- AC-2.2.6 (VD-23) GIVEN a stream or terminal receiving output, WHEN I select text and press Cmd-C, THEN the selection holds (the view does not snap to the bottom) and the copy works.
 
 **US-2.3** As a Dev, I want a worker's diff, worktree and current task, so that I can judge its progress.
 - AC-2.3.1 GIVEN a worker with a worktree, WHEN I open the Diff tab, THEN it shows `git diff` of that worktree against its base, read-only, with no edit control.
@@ -81,6 +89,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-2.4.1 GIVEN Crew view, WHEN I press Cmd-K and type a role or task name, THEN the palette lists matching workers and Enter focuses that worker's pane.
 - AC-2.4.2 GIVEN focus is in the tree, WHEN I press Up/Down/Left/Right, THEN focus moves between nodes and the Worker pane follows within 100 ms.
 - AC-2.4.3 GIVEN any worker, WHEN I use only the keyboard, THEN I can switch tabs (Stream, Diff, Task, Worktree) and return focus to the tree.
+- AC-2.4.4 (VD-3) GIVEN 10 workers with one visible, WHEN the other 9 have been hidden for 60 s, THEN they hold no rendered view or terminal grid (only their bounded tail), and reopening one paints within 100 ms p95.
 
 ### J3 Lead chat and control
 
@@ -95,6 +104,7 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.2.3 GIVEN a message was sent, WHEN I check the four places, THEN it appears (a) as an action card in the chat, (b) on the worker's activity feed, (c) as a line in the control ledger, (d) in Vajra's `audit.log` as an ALLOW or BLOCK line for the control tool.
 - AC-3.2.4 GIVEN a message mentions "approve" or "push", WHEN delivered, THEN no protected action is unlocked; an attempted push still needs Claude Code's permission prompt (control messages are never approval).
 - AC-3.2.5 GIVEN the worker finishes before its next tool call, WHEN the message is unconsumed, THEN the card shows "not delivered" and the message is not applied later to a different worker.
+- AC-3.2.6 (VD-26) GIVEN the control hook is installed and no message is queued, WHEN a session makes 100 tool calls, THEN the hook adds no text to the transcript; with messages queued, only the delivered steer text is added.
 
 **US-3.3** As a Dev, I want to stop a worker, so that I can halt a wrong direction.
 - AC-3.3.1 GIVEN a worker, WHEN I press "Stop", THEN a confirm dialog names the worker and task; Cancel sends nothing.
@@ -130,6 +140,8 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-5.1.1 GIVEN items exist, WHEN I open the inbox, THEN it lists `pending_approval` plans, `need_input` questions, tasks in blocked or question, and sessions waiting on a Claude Code permission prompt, each with source, age and a link.
 - AC-5.1.2 GIVEN a session waits on a permission prompt, WHEN I choose its item, THEN the app focuses that terminal; it does not answer the prompt.
 - AC-5.1.3 GIVEN a new item arrives, WHEN the app is in the background, THEN the Dock badge count updates within 2 s.
+- AC-5.1.4 (VD-9) GIVEN 3 items waiting on me, WHEN I open the inbox (Cmd-5), THEN they are listed oldest first with how long each has waited and the last 3 lines of context, and Enter opens the item's worker or plan.
+- AC-5.1.5 (VD-24) GIVEN 5 workers finish turns and 1 waits for a permission prompt while the app is in the background, WHEN notifications fire, THEN exactly 1 notification appears (the permission wait); worker turn ends never notify; a finished or stuck run notifies once.
 
 **US-5.2** As a Reviewer-approver, I want to approve a plan, so that execution proceeds under my control.
 - AC-5.2.1 GIVEN a pending plan, WHEN I open it, THEN the exact plan text (commands, rollback) is shown unabridged before the Approve button is enabled.
@@ -256,6 +268,7 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 - NFR-PERF-7: Every gate is run serially on a quiet machine against at least two installed competitors with the same fixture, and published with its method; "lighter" is claimed only against apps beaten on that method. Spike: Electron, Orca beaten; Runner beats us at idle.
 - NFR-PERF-8: The control hook adds at most 10 ms p95 per tool call when the app has no queue for that session. Spike: not measured.
 - NFR-PERF-9: A run started outside the app appears within 2 s; new transcript or campaign events reach the UI within 250 ms p95; control receipt within 100 ms p95. Spike: not measured.
+- NFR-PERF-11 (VD-23): key press to glyph in a taken-over terminal or the Lead chat p95 at most 33 ms while 10 workers stream. Spike: not measured.
 - NFR-PERF-10: Compressed installer at most 20 MiB; installed app at most 50 MiB (arm64 and universal measured separately). Spike: 3.0 MiB DMG (unsigned, arm64).
 
 ### Security
@@ -300,19 +313,19 @@ Gates from the stack spike (`vajra-2/stack-spike.md`), reviewed by both models (
 |---|---|---|
 | US-1.1 | AC-1.1.1 .. 1.1.4 | SEC-1, SEC-4, UX-2, UX-3 |
 | US-1.2 | AC-1.2.1 .. 1.2.3 | SEC-2, SEC-4, UX-2 |
-| US-1.3 | AC-1.3.1 .. 1.3.4 | SEC-2, UX-1, A11Y-1 |
-| US-2.1 | AC-2.1.1 .. 2.1.3 | PERF-3, A11Y-1, A11Y-3 |
-| US-2.2 | AC-2.2.1 .. 2.2.4 | PERF-2, PERF-3, PERF-5, PERF-6, SEC-3 |
+| US-1.3 | AC-1.3.1 .. 1.3.7 | SEC-2, UX-1, A11Y-1 |
+| US-2.1 | AC-2.1.1 .. 2.1.6 | PERF-3, A11Y-1, A11Y-3 |
+| US-2.2 | AC-2.2.1 .. 2.2.6 | PERF-2, PERF-3, PERF-5, PERF-6, SEC-3 |
 | US-2.3 | AC-2.3.1 .. 2.3.3 | PERF-3, SEC-3, SEC-6 |
-| US-2.4 | AC-2.4.1 .. 2.4.3 | A11Y-2, UX-1, UX-2 |
+| US-2.4 | AC-2.4.1 .. 2.4.4 | A11Y-2, UX-1, UX-2 |
 | US-3.1 | AC-3.1.1 .. 3.1.3 | SEC-3, SEC-5, OBS-2 |
-| US-3.2 | AC-3.2.1 .. 3.2.5 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
+| US-3.2 | AC-3.2.1 .. 3.2.6 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
 | US-3.3 | AC-3.3.1 .. 3.3.3 | SEC-8, UX-3, OBS-2 |
 | US-3.4 | AC-3.4.1 .. 3.4.4 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
 | US-4.1 | AC-4.1.1 .. 4.1.2 | A11Y-1, UX-2 |
 | US-4.2 | AC-4.2.1 .. 4.2.3 | PERF-3, A11Y-2 |
 | US-4.3 | AC-4.3.1 .. 4.3.4 | SEC-2, SEC-3 |
-| US-5.1 | AC-5.1.1 .. 5.1.3 | A11Y-3, UX-3 |
+| US-5.1 | AC-5.1.1 .. 5.1.5 | A11Y-3, UX-3 |
 | US-5.2 | AC-5.2.1 .. 5.2.4 | SEC-1, SEC-8, OBS-2, UX-3 |
 | US-5.3 | AC-5.3.1 .. 5.3.3 | SEC-4, OBS-2 |
 | US-6.1 | AC-6.1.1 .. 6.1.3 | SEC-2, A11Y-2 |
@@ -331,15 +344,50 @@ Cross-cutting: NFR-PERF-1, 4, 7, NFR-SEC-5, 7 and NFR-OBS-1 apply to the whole a
 | 3 (measurement) | POS-3.3 | none (claim gate) | H7 |
 | (4) Memory, pending | POS-4.1 | none | G1, H1 |
 
-## 7a. Pain points from user research (pending)
+## 7a. Pain points from user research
 
-Filled in once the competitor pain-point research (`pain-points.md`) lands. One row per pain point: the
-accepted ones point to a requirement and an acceptance id (new ids continue the existing series, for
-example AC-2.2.5 or NFR-UX-4); the rest say "won't do" with the reason.
+Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX and Product Hunt, 2026-11-05). Ponytail applied: 24 rows MVP, 6 deferred, 8 won't do. New criteria from this table carry their VD id in brackets in section 3.
 
-| Pain point (source) | Decision | Requirement | Acceptance id |
+| Pain point | Requirement (vajra-4 id) | Decision | Where in this spec |
 |---|---|---|---|
-| (pending) | | | |
+| P1 memory bloat | VD-1 own vs agent memory | MVP | AC-2.1.4; NFR-PERF-1 to 3 define app RSS without agents |
+| P1 | VD-2 bounded buffers | MVP (already) | AC-2.2.2, NFR-PERF-2, NFR-PERF-5 |
+| P1 | VD-3 hidden panes free their view | MVP | AC-2.4.4 |
+| P2 sessions die | VD-4 daemon outlives the UI | Deferred v1.1 (ADR-9) | MVP keeps runs alive while the window is closed: POS-2.1, 2.1a |
+| P2 | VD-5 honest resume | MVP | POS-2.1b |
+| P3 crashes, bad updates | VD-6 one process generation | MVP | POS-2.1c (no daemon, updates wait for idle) |
+| P3 | VD-7 paste and output guard | MVP | AC-2.2.5; escape sanitizing NFR-SEC-3 |
+| P4 opaque status | VD-8 status from signals, else Unknown | MVP | AC-2.1.5 |
+| P4 | VD-9 needs-you inbox | MVP (already US-5.1) | AC-5.1.1 to 5.1.4 |
+| P4 | VD-10 ask the Lead, answer cites evidence | MVP (already US-3.1) | AC-3.1.1 to 3.1.3 |
+| P5 rate limits, cost | VD-11 rate-limited state | MVP (detection to verify) | AC-2.1.6. Per-run cost stays in `/vajra cost`: deferred |
+| P5 | Automatic account failover | Won't do | Credential rotation across accounts; terms and secrets risk (agree with vajra-4) |
+| P6 tool disappears | VD-12 no cloud, no account, open files | MVP | AC-1.3.6, POS-2.3 |
+| P6 | VD-13 run the real interactive CLI | MVP | POS-2.4; the app never uses `-p` for runs or proxies auth |
+| P7 agents collide | VD-14 conflicts routed to the owner | Won't do in the app | Vajra's deliver workflow owns the integration merge and the fix loop; a failing merge already returns to the owning task |
+| P7 | VD-15 per-worker ports and env | Deferred (engine) | Belongs in the workflow's worktree setup, not the app |
+| P7 | Semantic conflict detection | Won't do | Research-grade (agree with vajra-4) |
+| P8 typing into terminals | VD-16 documented control channel | MVP (already) | US-3.2 to 3.4, ADR-2; Lead text labelled `lead-via-desktop` (STRIDE F3) |
+| P9 too many windows | VD-17 crew tree | MVP (already) | US-2.1, US-2.4. Split view of up to 4 panes: deferred (one worker pane plus the chat dock covers the MVP) |
+| P10 multi-repo | VD-18 multi-repo crew | Deferred | A Vajra run is one repo; needs engine support first |
+| P11 worktree bloat | VD-19 worktree lifecycle | Deferred (engine owns it) | `vajra-worktree-clean.sh` already removes clean worktrees; the report lists kept ones. Disk size display later |
+| P11 | VD-20 worktrees optional | Won't do | Vajra runs every writer in its own worktree by design; a shared checkout breaks parallel waves |
+| P12 permission fatigue vs YOLO | VD-21 pass the user's permission modes, never bypass | MVP | POS-2.4 (argv test) |
+| P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) |
+| P13 terminal fidelity | VD-23 proven terminal core, latency gate | MVP | xterm.js (G2); NFR-PERF-11; AC-2.2.6 |
+| P14 notification noise | VD-24 notify on needs-you and finished runs only | MVP | AC-5.1.5. The ntfy webhook: deferred |
+| P15 lost context | VD-25 context meter and handoff | Deferred | Vajra's knowledge ledger and campaigns carry context across runs (POS-R3) |
+| P15 | VD-26 zero-cost hooks | MVP | AC-3.2.6, NFR-PERF-8 |
+| P16 silent config edits | VD-27 never edit config without consent | MVP | AC-1.3.5, AC-1.1.3; engine changes install through Vajra's own installer, run by the human |
+| P16 | VD-28 two-minute first run | MVP (app part) | AC-1.3.7. Vajra itself still needs python3, jq and openssl |
+| P17 feature bloat | VD-29 small surface by rule | MVP | The six jobs plus Settings (UX.md); H2 click crawl finds no other screen |
+| P18 diff review bottleneck | VD-30 hunk comments sent to the worker | Deferred v1.1 | Evidence per criterion (POS-R1) is the MVP answer; workers have usually finished by review time |
+| P18 | Submit GitHub PR reviews | Won't do | `gh` and the browser do it (agree) |
+| P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 |
+| P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 |
+| P21 lock-in | VD-33 agent-agnostic launch | Won't do | Positioning reason 2 is Claude Code-native; agent breadth belongs to Agent Orchestrator. Accepted cost: users who mix vendors |
+| P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 |
+| P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) |
 
 ## 7b. Review findings (pending)
 

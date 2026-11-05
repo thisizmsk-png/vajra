@@ -218,6 +218,26 @@ mostly to Agent Orchestrator, which the owner already runs.
 
 No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
 
+### Pre-mortem: six months after launch, why did it fail?
+
+From `vajra-4/pain-points.md` (the Critic's protocol, run inline by vajra-4; an independent Critic pass is
+part of review stage A1). Ranked by impact times likelihood.
+
+| # | Failure | Mitigation in this spec | Detection signal |
+|---|---|---|---|
+| 1 | The platform absorbed us: Claude Code's own agent view and Desktop ship crew views, and we read as "a Claude wrapper" | Compete where Claude Code is weak: evidence per criterion, the audited control channel, Vajra's verify gate. Cut any feature it ships natively (VD-34) | Each Claude Code release note checked against our feature list |
+| 2 | Provider terms or billing stop subscription use through third-party apps | The app runs the stock interactive `claude` under the user's own login and never proxies auth or uses `-p` for runs (POS-2.4, VD-13) | Provider terms changes |
+| 3 | "Low memory" is disproved on day one because agents dominate RAM | App and agent memory always shown separately (AC-2.1.4); no claim until NFR-PERF gates are met, and never a total-RAM number | Launch reviews quoting Activity Monitor |
+| 4 | Terminal feel worse than a real terminal, so power users go back to tmux | xterm.js core, NFR-PERF-11, AC-2.2.6 | "Went back to tmux" in feedback |
+| 5 | Wrong status kills trust | Unknown instead of guessing (AC-2.1.5) | False-idle rate on fixtures |
+| 6 | Workers ignore control messages, so steering is hollow | Proven by the tracer bullet with a nonce-tagged steer; L1-L7 live-model checks (STRIDE) before launch | Steer obedience rate in L4 |
+| 7 | An update breaks live sessions | One process, updates wait until no run is active (POS-2.1c) | N to N+1 upgrade test with a live run |
+| 8 | We copy the 500-feature surface | Six jobs only (VD-29); every feature cites a job, P-row or POS reason | Screen count in the H2 crawl |
+| 9 | No distribution among many clones | The launch story is the evidence demo (PRD 60-second demo), backed by measurements | Installs from launch posts |
+| 10 | The two-model gate makes us too slow | Gate only irreversible stack and design decisions; time-box each round | Days per gate round |
+| 11 | Worktree disk bloat | Vajra's cleanup already removes clean worktrees; disk display deferred | Disk-full reports |
+| 12 | Security: permission bypass by default, agent output steering the orchestrator | POS-2.4 argv test, NFR-SEC-3 and NFR-SEC-9, steering threat model (F1-F4) | Security gate H4, PoCs H5 |
+
 ## 8. Non-goals (deliberately not built)
 
 - **A fleet kanban or issue-tracker intake.** Vajra plans its own task graph from one ask.
@@ -227,7 +247,8 @@ No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
 - **Non-Claude agents** (Codex, Gemini CLI and others). Vajra is a Claude Code harness.
 - **An editor or in-app code edits**, a plugin API, an embedded browser.
 - **Replacing any Vajra primitive**: hooks, workflows, agents, campaigns, the guard, the ledger.
-- **Auto-approve** of any protected action, ever.
+- **Auto-approve** of any protected action, ever, including batch approval of permission prompts across a crew (VD-22).
+- **Features without a reason.** Every feature cites an MVP job, a pain point (requirements 7a) or a positioning reason.
 - **Windows and Linux** in the MVP.
 
 ## 9. Success metrics
