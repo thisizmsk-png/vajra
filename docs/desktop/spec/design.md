@@ -884,22 +884,34 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
      (`deviceOwnerAuthentication`: Touch ID, or the login password) with the action, id and scope in the
      reason string.
   2. On success the core writes `~/Library/Application Support/VajraDesktop/approvals/<id>.json`: action,
-     record id, sha256 of the pending record as read, final `applies` and paths, edited text if any, a
+     store (project id or `global`), record id, sha256 of the pending record as read, final `applies` and paths, edited text if any, a
      random 128-bit id, and the time.
   3. The script bridge runs `vajra_kb.py approve <id> --desktop-approval <file>` (or `reject`, `forget`,
-     `retire`, `supersede`; `atman.sh approve <id> --desktop-approval <file>` for routes).
-  4. E9 accepts the file only when: it is under that dir (realpath); `vajra-doctor` shows the sandbox
-     `denyWrite` for the dir active; the approval is unused and under 5 minutes old; and the record's
-     sha256 still matches. It then re-runs the write gate, applies, records the approval id as used, and
-     audits. No other input to these commands changes, so the TTY path stays as it is for the CLI.
+     `retire`, `supersede`; `atman.sh approve <id> --desktop-approval <file>` for routes; for a `kb-` id Atman passes the flag through
+     `kb_call`). Atman skill and agent patch proposals stay copy-command: they are applied with `git apply` by
+     the user anyway.
+  4. E9 accepts the file only when all of these hold:
+     - it is under that dir (realpath) and its action and store match the command;
+     - the user's Claude Code settings have `sandbox.enabled` true, `allowUnsandboxedCommands` false, and a
+       `denyWrite` covering the dir (checked directly, not via doctor's `enabled` line), and no non-Claude
+       worker (Codex, ADR-10) is running;
+     - under the store lock it atomically claims the approval (`rename` into `used/`, refused if present; one
+       used-set for all stores), reads the pending bytes once, and their sha256 matches;
+     - the approval is under 5 minutes old.
+     It then builds the record from those same bytes, re-runs the write gate, applies and audits. The parser
+     already refuses abbreviations (`allow_abbrev=False`, `scripts/vajra_kb.py:1653`), so `--desk` can't stand
+     in for the flag; the guard matches the full name. No other input to these commands changes, so the TTY path stays as it is for the CLI.
 - **Why it holds:** agents can't write the approvals dir (guard E2, plus the OS sandbox E8), and the app
   offers no MCP tool or IPC command that creates an approval. A synthetic click reaches the sheet but not
   the owner authentication.
-- **Residual risk:** a non-agent process of the same user can write the dir. That is the same-user limit
+- **Residual risk:** a non-agent process of the same user can write the dir, and sessions started before
+  the sandbox change keep their old settings until restarted. That is the same-user limit
   as control (5.4).
 - **Options:** (a) keep copy-to-terminal only; (b) the app drives the TTY prompt (rejected: it defeats the
   gate); (c) the app holds the key and mints user tokens (rejected: the app never reads the key); (d) an
-  owner-authenticated approval file checked by the engine (chosen).
+  owner-authenticated approval file checked by the engine (chosen); (e) a Secure Enclave key that signs each
+  approval only after user presence (the fallback if a PoC breaks (d): it removes the reliance on file
+  location, at the cost of an ECDSA verify outside Python's standard library).
 - **Evidence against:** it adds a second way into a human gate, so it needs bhishma's review and red-team
   PoCs (H5). Would change our mind: a PoC writes an accepted approval without owner authentication. Then we
   fall back to (a).
