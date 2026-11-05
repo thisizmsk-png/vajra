@@ -1,5 +1,6 @@
 //! Vajra Desktop core.
 
+pub mod adapter;
 pub mod logging;
 pub mod paths;
 
