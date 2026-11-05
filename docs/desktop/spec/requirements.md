@@ -126,6 +126,9 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-3.4.2 GIVEN the Lead is unavailable or its session has ended, WHEN I use the worker's Message, Redirect and Stop controls, THEN each works without the Lead.
 - AC-3.4.3 GIVEN a reconciliation script compares ledger action ids to `audit.log`, WHEN run after a session, THEN zero ledger entries lack an audit line and zero control audit lines lack a ledger entry.
 - AC-3.4.4 GIVEN the control queue directory, WHEN a worker tries to write to it, THEN the guard blocks it and `audit.log` records BLOCK.
+- AC-3.4.6 (GPT-3) GIVEN a worker tool call (payload has `agent_id`), WHEN it reads `VajraDesktop/control/<sid>/nonce` or any path under `~/.claude/projects/` through Read, Grep, Glob, LS, read-only Bash (`cat`, `head`, `python3 -c`), a symlink or a recursive Grep over an ancestor, THEN the guard blocks it and `audit.log` records BLOCK; the same reads from the main session or the Lead chat (no `agent_id`) are allowed.
+- AC-3.4.7 (GPT-3) GIVEN a worker, WHEN it tries to write anywhere under `~/Library/Application Support/VajraDesktop/` with Write, Edit, `mv`, `rm`, `cp`, `tee` or a redirect (path with a space), THEN the guard blocks it.
+- AC-3.4.8 (GPT-3, Q10) GIVEN preflight, WHEN it runs, THEN it shows whether the sandbox `denyWrite` for the control dir is active; when it isn't, the control row reads "best effort (sandbox off)". Every existing guard test still passes (CI).
 - AC-3.4.5 (STRIDE R1) GIVEN any human action (approve, reject, take over, re-run, resume worker, clear stop), WHEN it happens, THEN the control ledger has one record with the actor, the exact target and the time.
 
 ### J4 Run view
@@ -355,7 +358,7 @@ Steering claim limit (GPT-2): proven for Agent-tool subagents (tracer bullet). "
 | US-3.1 | AC-3.1.1 .. 3.1.3 | SEC-3, SEC-5, OBS-2 |
 | US-3.2 | AC-3.2.1 .. 3.2.11 | SEC-1, SEC-3, SEC-4, SEC-8, OBS-2 |
 | US-3.3 | AC-3.3.1 .. 3.3.7 | SEC-8, UX-3, OBS-2 |
-| US-3.4 | AC-3.4.1 .. 3.4.4 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
+| US-3.4 | AC-3.4.1 .. 3.4.8 | SEC-1, SEC-5, OBS-1, OBS-2, UX-3 |
 | US-4.1 | AC-4.1.1 .. 4.1.2 | A11Y-1, UX-2 |
 | US-4.2 | AC-4.2.1 .. 4.2.3 | PERF-3, A11Y-2 |
 | US-4.3 | AC-4.3.1 .. 4.3.4 | SEC-2, SEC-3 |

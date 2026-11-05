@@ -553,11 +553,25 @@ reaches the subagent, and that exit 2 from a second PreToolUse hook blocks while
 the same call. In that case the audit shows ALLOW from the guard plus BLOCK from desktop-control, and the UI
 explains this.
 
-E2 scope after A1: the whole app data directory (`~/Library/Application Support/VajraDesktop/`) becomes a guard
-protected root for writes, and the nonce file is read-denied to agents (Read, Grep, Glob and Bash readers),
-both with tests for the space in the path. The guard is regex defense in depth over Bash. The enforced
-boundary is the OS sandbox, so `config/sandbox.json` should add a denyWrite for that directory; this is owner
-decision Q10. If the owner declines, the control channel ships as stop-only for runs with the sandbox off.
+E2 scope (GPT-3, matching vajra-6's 611d969 on `ao/vajra-6/m1-engine`):
+- **Write-protected root:** the whole app data directory (`~/Library/Application Support/VajraDesktop/`), for
+  Write, Edit, MultiEdit, NotebookEdit and Bash writers (`mv`, `rm`, `cp`, `tee`, redirects), with the space
+  in the path covered by tests.
+- **Read-protected for workers:** any tool call whose payload carries an `agent_id` may not read
+  `VajraDesktop/control/` (which holds the nonce) or `~/.claude/projects/` (transcripts, which hold each
+  worker's brief and so the nonce). This covers Read, Grep, Glob and LS, read-only Bash (`cat`, `head`,
+  `python3 -c`, `grep -r` and so on), symlinks resolved canonically, and recursive Grep over an ancestor.
+- **Main-session policy (documented):** the main session and the Lead chat have no `agent_id` and keep
+  reading. The Lead needs transcripts to answer questions about workers.
+- **Not covered:** a worker that never names those paths can still read its own transcript through Claude
+  Code itself. The nonce trust model (5.3) does not depend on hiding N from the worker that holds it.
+- **Same-user limitation (stated):** file modes (0600) and the socket's peer-uid check separate users, not
+  agents. Every agent runs as the same user, so mode 0600 is never treated as agent authorization.
+  Authorization comes from the guard (defense in depth over shell) and, with Q10, the OS sandbox.
+- **Sandbox boundary:** `config/sandbox.json` carries an opt-in `denyWrite` for
+  `~/Library/Application Support/VajraDesktop/control` (611d969: documented, not applied by any script).
+  Applying it is owner decision Q10. Preflight shows whether it is on. Without it, the guard is the only
+  write protection, and the app labels control "best effort (sandbox off)".
 
 ### 5.5 Worker identification
 
