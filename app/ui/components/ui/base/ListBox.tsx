@@ -38,6 +38,14 @@ export function ListBox({ label, children }: { label: string; children: ReactNod
       tabIndex={0}
       className="v-listbox"
       onKeyDown={key}
+      // A pointer selection moves the active option too, so Enter and Space act on what was clicked.
+      onClick={(e) => {
+        const o = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]');
+        if (o) {
+          setActive(o.id);
+          ref.current?.focus();
+        }
+      }}
       onFocus={() => {
         if (!active) setActive((options().find((o) => o.getAttribute("aria-selected") === "true") ?? options()[0])?.id);
       }}
