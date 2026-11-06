@@ -242,6 +242,16 @@ d["title"] = 5
 json.dump(d, open(pt, "w"))
 ft_, _ = approval(K, "approve", store_t, rid_t, hashlib.sha256(open(pt, "rb").read()).hexdigest(), applies="on_topic")
 check("non-string title in a pending file: refused, not a crash", run(["approve", rid_t, "--desktop-approval", ft_], PROJ)[0] == 3)
+for field, bad in (("tags", 7), ("scope", {"paths": 7})):
+    rid_m, store_m, _s = propose("Quokka harbor ledger" if field == "tags" else "Violet anvil sparrow")
+    pm = os.path.join(kb.KB_ROOT, store_m, "pending", rid_m + ".json")
+    dm = json.load(open(pm))
+    dm[field] = bad
+    json.dump(dm, open(pm, "w"))
+    fm, _ = approval(K, "approve", store_m, rid_m, hashlib.sha256(open(pm, "rb").read()).hexdigest(), applies="on_topic")
+    check("non-list %s in a pending file: refused, not a crash" % field,
+          run(["approve", rid_m, "--desktop-approval", fm], PROJ)[0] == 3)
+    os.remove(pm)
 rid_v, _s2, _h = propose("Vanishing target")
 os.remove(os.path.join(kb.KB_ROOT, store_t, "pending", rid_v + ".json"))
 check("pending --json survives a file that vanished", run(["pending", "--json"], PROJ)[0] == 0)

@@ -1605,9 +1605,9 @@ def approved_record(store, p, rid, applies, edit=None):
     if edit:
         scope["paths"] = edit["paths"]
     paths, tags = scope.get("paths") or [], p.get("tags") or []
-    texts = [title, body] + [x for x in paths] + [x for x in tags]
-    # Pending files are not signed: check every type before the gate joins or scans the text.
-    well_typed = all(isinstance(x, str) for x in texts) and isinstance(paths, list) and isinstance(tags, list)
+    # Pending files are not signed: check every shape and type before anything iterates or joins them.
+    well_typed = (isinstance(paths, list) and isinstance(tags, list)
+                  and all(isinstance(x, str) for x in [title, body] + paths + tags))
     reason = gate_check([title, body, " ".join(paths), " ".join(tags)]) if well_typed else None
     if not well_typed or reason or p.get("type") not in TYPES \
             or not title or len(title) > MAX_TITLE or len(body) > MAX_BODY \
