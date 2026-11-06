@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import {
-  AlertDialog, Badge, Button, Card, Input, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
+  AlertDialog, Badge, Button, Card, Input, ListBox, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
   useToasts,
 } from "../components/ui/base";
 import { S } from "../strings";
@@ -92,15 +92,32 @@ describe("Input", () => {
 });
 
 describe("ListRow, SegmentedControl, Switch", () => {
-  it("ListRow is a tabbable option; selected is exposed only when given; Enter selects", () => {
-    const f = vi.fn();
-    render(<div role="listbox" aria-label="Runs"><ListRow selected meta="3 of 7">Run one</ListRow><ListRow onSelect={f}>Run two</ListRow></div>);
-    expect(screen.getAllByRole("option")).toHaveLength(2);
-    expect(screen.getByRole("option", { name: /Run one/ }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("option", { name: "Run two" }).hasAttribute("aria-selected")).toBe(false);
-    expect(screen.getAllByRole("option").every((o) => o.tabIndex === 0)).toBe(true);
-    fireEvent.keyDown(screen.getByRole("option", { name: "Run two" }), { key: "Enter" });
-    expect(f).toHaveBeenCalledOnce();
+  it("ListBox is one tab stop; arrows, Home and End move the active option; Enter and Space select it", () => {
+    const [a, b] = [vi.fn(), vi.fn()];
+    render(<ListBox label="Runs"><ListRow selected onSelect={a} meta="3 of 7">Run one</ListRow><ListRow onSelect={b}>Run two</ListRow><ListRow>Run three</ListRow></ListBox>);
+    const box = screen.getByRole("listbox", { name: "Runs" });
+    const opts = screen.getAllByRole("option");
+    expect(box.tabIndex).toBe(0);
+    expect(opts.every((o) => !o.hasAttribute("tabindex"))).toBe(true);
+    expect(opts[0].getAttribute("aria-selected")).toBe("true");
+    expect(opts[1].hasAttribute("aria-selected")).toBe(false);
+    fireEvent.focus(box);
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[0].id);       // starts on the selected option
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[1].id);
+    expect(opts[1].hasAttribute("data-active")).toBe(true);
+    expect(opts[0].hasAttribute("data-active")).toBe(false);
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(b).toHaveBeenCalledOnce();
+    fireEvent.keyDown(box, { key: "End" });
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[2].id);
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[2].id);       // clamps
+    fireEvent.keyDown(box, { key: "Home" });
+    fireEvent.keyDown(box, { key: " " });
+    expect(a).toHaveBeenCalledOnce();
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[0].id);
   });
   it("ListRow can be a grid row with cells and no aria-selected", () => {
     render(<div role="grid" aria-label="Criteria"><ListRow role="row" selected meta="exit 0">ac-1</ListRow></div>);
