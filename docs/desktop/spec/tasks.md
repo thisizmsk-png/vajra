@@ -117,12 +117,12 @@ beta; slice 2 must land before the public launch.
 
 | Slice | What a user gets | Tasks |
 |---|---|---|
-| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E3, E5 to E8, C1 to C8 (with C3b), K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6, and H8 scoped to slice 1 (L1 to L7: message, redirect, stop, quit then resume, approve after resume) |
-| 2 | Knowledge in the run view (records used, refusals); the Memory screen (inbox, owner-authenticated approve, rules, search; S7, C9, E9); the task graph view; history search; the claim studies that unlock launch wording | E4, E9, C9, S4 task graph (US-4.2), S6, S7, H3, H7, and H8 rerun on the full build |
+| 1 | Start a run or reattach to one (terminal-started too); the evidence-first run view with Re-run, stale and unverified; each worker's stream and diff; direct audited controls (message, redirect, stop, resume worker) and the Lead chat; the needs-you inbox | G1 to G4, E1 to E8, C1 to C8 (with C3b), K1 to K3, S1, S2, S3, S4 without the task graph, S5, H0, H1, H2, H4, H5, H6, and H8 scoped to slice 1 (L1 to L7: message, redirect, stop, quit then resume, approve after resume) |
+| 2 | Knowledge in the run view (records used, refusals); the Memory screen (inbox, owner-authenticated approve, rules, search; S7, C9, E9); the task graph view; history search; the claim studies that unlock launch wording | E9, C9, S4 task graph (US-4.2), S6, S7, H3, H7, and H8 rerun on the full build |
 
 Slice 1 needs E7 (approved under Q13, 2026-11-05). Slice 1 has no knowledge mutation, no graph view and no claim study. The 60-second demo (PRD section 1)
 needs slice 2 only for its last beat. In slice 1, H1, H2 and H6 run on the slice-1 screens
-(S1 to S5); H8 must pass on the beta build before any beta user gets it (PRD pre-mortem row 14). Every acceptance id stays; only the order changes.
+(S1 to S5). In slice 1, H4 and H5 gate everything except the memory path: their C9 and S7 prerequisites and the AC-7.1.8 PoCs apply to the slice-2 build, where both rerun before public launch. H8 must pass on the beta build before any beta user gets it (PRD pre-mortem row 14). Every acceptance id stays; only the order changes.
 
 ## Dependency graph
 
