@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import {
-  ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip, parseDiff, score,
+  ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip, parseDiff, score, NO_MATCH,
 } from "../components/ui/desktop";
 import type { CrewNode } from "../components/ui/desktop";
 
@@ -105,8 +105,24 @@ describe("CommandPalette", () => {
   const mk = () => [{ id: "stop", label: "Stop worker", run: vi.fn() }, { id: "start", label: "Start run", run: vi.fn() }, { id: "open", label: "Open settings", hint: "Cmd ,", run: vi.fn() }];
   it("scores fuzzy matches in order and rejects non-matches", () => {
     expect(score("sw", "Stop worker")).toBeGreaterThan(0);
-    expect(score("zz", "Stop worker")).toBe(-1);
+    expect(score("zz", "Stop worker")).toBe(NO_MATCH);
+    // A late letter can score below zero; that is still a match, and it ranks below an early one.
+    expect(score("s", "Open advanced settings")).toBeLessThan(0);
+    expect(score("s", "Open advanced settings")).not.toBe(NO_MATCH);
+    expect(score("g", "Open settings")).not.toBe(NO_MATCH);
+    expect(score("s", "Stop")).toBeGreaterThan(score("s", "Open advanced settings"));
     expect(score("start", "Start run")).toBeGreaterThan(score("sr", "Start run"));
+  });
+  it("keeps a late single-letter match visible while typing", () => {
+    const cmds = [{ id: "adv", label: "Open advanced settings", run: vi.fn() }, { id: "set", label: "Open settings", run: vi.fn() }, { id: "stop", label: "Stop worker", run: vi.fn() }];
+    render(<CommandPalette open onClose={() => {}} commands={cmds} />);
+    const box = screen.getByRole("combobox", { hidden: true });
+    fireEvent.change(box, { target: { value: "g" } });
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["Open settings", "Open advanced settings"]);
+    fireEvent.change(box, { target: { value: "s" } });
+    const names = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(names).toHaveLength(3);
+    expect(names[0]).toBe("Stop worker"); // the earliest match still ranks first
   });
   it("is a combobox over a listbox; filters, moves with arrows, runs on Enter and closes", () => {
     const cmds = mk();

@@ -3,7 +3,10 @@ import { Sheet } from "../base/Sheet";
 
 export type Command = { id: string; label: string; hint?: string; run: () => void };
 
-/** Fuzzy score: every query letter must appear in order; earlier and consecutive matches rank higher. -1 means no match. */
+/** The result of `score` for a label that does not match. A real match can score below zero (a late letter), so no number such as -1 can mean "no match". */
+export const NO_MATCH = Number.NEGATIVE_INFINITY;
+
+/** Fuzzy score: every query letter must appear in order; earlier and consecutive matches rank higher. `NO_MATCH` means no match. */
 export function score(query: string, label: string): number {
   const q = query.toLowerCase();
   const t = label.toLowerCase();
@@ -12,7 +15,7 @@ export function score(query: string, label: string): number {
   let streak = 0;
   for (const ch of q) {
     const at = t.indexOf(ch, ti);
-    if (at < 0) return -1;
+    if (at < 0) return NO_MATCH;
     streak = at === ti ? streak + 1 : 0;
     s += 10 + streak * 5 - Math.min(at, 20);
     ti = at + 1;
@@ -26,7 +29,7 @@ export function CommandPalette({ open, onClose, commands, title = "Command palet
   const [active, setActive] = useState(0);
   const base = useId();
   const shown = useMemo(
-    () => (q ? commands.map((c) => ({ c, s: score(q, c.label) })).filter((x) => x.s >= 0).sort((a, b) => b.s - a.s).map((x) => x.c) : commands),
+    () => (q ? commands.map((c) => ({ c, s: score(q, c.label) })).filter((x) => x.s !== NO_MATCH).sort((a, b) => b.s - a.s).map((x) => x.c) : commands),
     [q, commands],
   );
   useEffect(() => { if (open) { setQ(""); setActive(0); } }, [open]);
