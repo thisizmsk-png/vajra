@@ -119,6 +119,21 @@ describe("ListRow, SegmentedControl, Switch", () => {
     fireEvent.keyDown(box, { key: "ArrowUp" });
     expect(box.getAttribute("aria-activedescendant")).toBe(opts[0].id);
   });
+  it("a click moves the active option, so Enter acts on the clicked row (not the previously active one)", () => {
+    const [a, b] = [vi.fn(), vi.fn()];
+    render(<ListBox label="Runs"><ListRow selected onSelect={a}>Run one</ListRow><ListRow onSelect={b}>Run two</ListRow></ListBox>);
+    const box = screen.getByRole("listbox", { name: "Runs" });
+    const opts = screen.getAllByRole("option");
+    fireEvent.focus(box);
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[0].id);
+    fireEvent.click(opts[1]);
+    expect(b).toHaveBeenCalledOnce();
+    expect(box.getAttribute("aria-activedescendant")).toBe(opts[1].id);
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(b).toHaveBeenCalledTimes(2);
+    expect(a).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(box);
+  });
   it("ListRow can be a grid row with cells and no aria-selected", () => {
     render(<div role="grid" aria-label="Criteria"><ListRow role="row" selected meta="exit 0">ac-1</ListRow></div>);
     const row = screen.getByRole("row");
