@@ -948,6 +948,7 @@ def desktop_take(files, store, op, rid, read, confirmations=False, use=False):
         main, conf = da.verify_all(files, key["pem"], op, store.pid, rid)
     except da.Refused as e:
         refuse(str(e))
+    main["_key"] = key["fingerprint"]  # desktop_use requires it to still be the enrolled key
     if conf and not confirmations:
         refuse("%s takes one approval" % op)
     if used & ({main["id"]} | {c["id"] for c in conf.values()}):
@@ -967,7 +968,11 @@ def desktop_use(store, op, rid, main, conf):
     ids = [main["id"]] + [c["id"] for c in conf.values()]
 
     def mark():
-        if set(ids) & desktop_state()[1]:
+        cur, used = desktop_state()
+        if not cur or cur["fingerprint"] != main["_key"]:
+            store.audit("refused", op=op, id=rid, reason="desktop approval: key revoked or replaced", approval=main["id"])
+            raise Refused("the desktop key was revoked or replaced while the approval was being used")
+        if set(ids) & used:
             store.audit("refused", op=op, id=rid, reason="desktop approval: already used", approval=main["id"])
             raise Refused("approval was already used")
         for i in ids:

@@ -883,7 +883,7 @@ function setupDirs(cmds) {
 const sameCommit = (a, b) => a.startsWith(b) || b.startsWith(a)
 // Never the commits the user's own checkout may sit on: BASE and ORIGIN are not this run's.
 const cleanCommits = [...runCommits].filter((c) => SHA_RE.test(c) && !sameCommit(c, BASE) && !sameCommit(c, ORIGIN))
-const cleanAllow = [...(knowledge.tasks_closed && wb.out.archive_ok !== false ? ['data/walkthroughs'] : []), ...setupDirs(setupOf(verification))]
+const cleanAllow = [...(knowledge.tasks_closed && wb.out.archive_ok === true ? ['data/walkthroughs'] : []), ...setupDirs(setupOf(verification))]
 const cleanCmd = `${CLEAN_SH} --commits ${cleanCommits.join(',')} --branch-prefix vajra/${RUN}/ --allow ${cleanAllow.join(',')}`
 const cleanup = { ran: false, command: cleanCmd, removed: [], kept: [], error: '' }
 {

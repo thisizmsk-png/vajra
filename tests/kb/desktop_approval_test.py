@@ -246,6 +246,22 @@ rid_v, _s2, _h = propose("Vanishing target")
 os.remove(os.path.join(kb.KB_ROOT, store_t, "pending", rid_v + ".json"))
 check("pending --json survives a file that vanished", run(["pending", "--json"], PROJ)[0] == 0)
 
+# A revoke or key replacement that lands between verification and use stops the approval.
+rid_w, store_w, sha_w = propose("Zebra lantern midway scenario")
+fw, aw = approval(K, "approve", store_w, rid_w, sha_w, applies="on_topic")
+st_w = kb.Store(store_w)
+real_use = kb.desktop_use
+def use_after_revoke(*args, **kw):
+    kb.desktop_use = real_use
+    run(["desktop-revoke"], PROJ, HUMAN)
+    return real_use(*args, **kw)
+kb.desktop_use = use_after_revoke
+rcw = run(["approve", rid_w, "--desktop-approval", fw], PROJ)[0]
+kb.desktop_use = real_use
+check("a key revoked between verification and use: refused, approval not consumed",
+      rcw != 0 and aw["id"] not in used_ids() and show(rid_w).get("status") == "pending")
+run(["desktop-enroll", K.pub], PROJ, HUMAN)
+
 # race: four processes use one approval at once; exactly one wins.
 rid_c, store_c, sha_c = propose("Race target")
 fc, ac = approval(K, "approve", store_c, rid_c, sha_c, applies="on_topic")

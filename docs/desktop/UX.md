@@ -2,15 +2,14 @@
 
 Status: draft for owner review. Scope: the six MVP jobs (J1 start/resume, J2 crew, J3 orchestrator
 chat and control, J4 run view, J5 approvals, J6 history and knowledge). macOS only. No mobile.
-Visual tokens and components live in [DESIGN.md](DESIGN.md). Story IDs (US-x.y) come from the PRD.
+Visual tokens and components live in [DESIGN.md](DESIGN.md). Story IDs (US-x.y) come from [spec/requirements.md](spec/requirements.md).
 
 The UI shows generic role names only (Lead, Architect, Backend, Frontend, Verifier, Security, and the
 rest). Engine ids appear in one place: the "Engine id" field on a worker's Task tab.
 
 ## 1. Principles
 
-1. **Customer experience first.** Fast to open (cold start to interactive at or under 1.0 s,
-   provisional), never janky (no dropped frames while 10 workers stream), no surprises (nothing
+1. **Customer experience first.** Fast to open (usable crew view within 800 ms, NFR-PERF-4), never janky (no dropped frames while 10 workers stream), no surprises (nothing
    irreversible happens without a visible confirm, and the app itself never pushes, opens PRs or deploys).
 2. **Keyboard-first.** Every action has a key or a palette entry. Mouse works everywhere, but nothing
    needs it.
@@ -91,7 +90,7 @@ Legend: `●` in progress, `◐` claimed, `◌` ready, `○` pending, `✓` done
 |             | deliver-20261103-0920  Fix login redirect   Verify, round 1    [Resume]  |
 | Settings    |                                                                          |
 +-------------+--------------------------------------------------------------------------+
-| No run   App 92 MB   Guard on   Engine ok                                              |
+| No run   App 188 MB  Guard on   Engine ok                                              |
 +----------------------------------------------------------------------------------------+
 ```
 
@@ -161,31 +160,38 @@ The Lead may message and redirect on its own; every such action renders a card w
 The dock (320 px) shows the same thread with cards compacted to two lines.
 960x600: the full view is unchanged; the dock becomes an overlay sheet 320 px wide.
 
-### 4.4 Run view (J4)
+### 4.4 Run view (J4): evidence first
+
+Positioning reason 1 (PRD section 1): opening a run lands on its criteria, failing ones first (POS-1.1,
+POS-1.5). The timeline and task graph sit below them and are one key away.
 
 ```
 +------+-------------------------------------------------------------------------------------+
-| Home | Run 20261105-0930  "add CSV export to the reports page"   Round 1 of 3              |
-| Crew | ✓ Route  ✓ Recall  ✓ Understand  ✓ Plan  ● Execute  ○ Verify  ○ Fix  ○ Deliver      |
+| Home | Run 20261105-0930  "add CSV export to the reports page"   Not done: 1 failing       |
+| Crew | ✓ Route  ✓ Recall  ✓ Understand  ✓ Plan  ✓ Execute  ✓ Verify  ● Fix 1 of 3  ○ Deliver|
 | Chat |-------------------------------------------------------------------------------------|
-| Run  | Task graph                                   Wave 2 of 3, 2 of 4 workers busy       |
-| Appr |  [t1 Schema  Architect ✓ Done] ──> [t3 CSV endpoint Backend ● In progress] ─┐      |
-| Hist |  [t2 Button  Frontend  ✓ Done] ──> [t4 Export menu Frontend ● In progress] ─┼> [t5 |
-|      |                                                         Tests Test worker 1 ○]      |
+| Run  | Acceptance criteria                 3 pass, 1 fail, 1 stale, 1 not run              |
+| Appr | ID  Criterion              Result       Command                 Exit  Checked by    |
+| Hist | C2  CSV has header row     ✕ Fail       pytest tests/test_csv   1     Verifier      |
+|      | C4  Keyboard reachable     ◐ Stale      npx playwright test a11y 0    Verifier      |
+|      | C5  Docs updated           ○ Not run    -                       -     -             |
+|      | C1  Export button visible  ✓ Pass       npm test -- export      0     Verifier      |
+|      | C3  Streams > 10k rows     ✓ Pass       pytest -k large         0     Verifier      |
+|      |   > C2 expanded: written by Backend, checked by Verifier. Exit 1. Output excerpt (3    |
+|      |     lines, full log link). Diff (2 files). Evidence ev.json @ 9f3e2a. [Re-run...]      |
 |      |-------------------------------------------------------------------------------------|
-|      | Acceptance criteria                          3 pass, 1 fail, 2 not run              |
-|      | ID  Criterion              Result     Command                 Exit  Evidence  Commit|
-|      | C1  Export button visible  ✓ Pass     npm test -- export      0     ev.json   9f3e2a|
-|      | C2  CSV has header row     ✕ Fail     pytest tests/test_csv   1     ev.json   9f3e2a|
-|      | C3  Streams > 10k rows     ✓ Pass     pytest -k large         0     ev.json   9f3e2a|
-|      | C4  Keyboard reachable     ✓ Pass     npx playwright test a11y 0    ev.json   9f3e2a|
-|      | C5  Docs updated           ○ Not run  -                       -     -         -     |
-|      | C6  No new lint errors     ○ Not run  -                       -     -         -     |
+|      | Task graph                                   Wave 2 of 3, 2 of 4 workers busy       |
+|      |  [t1 Schema  Architect ✓ Done] ──> [t3 CSV endpoint Backend ● In progress] ─┐      |
+|      |  [t2 Button  Frontend  ✓ Done] ──> [t4 Export menu Frontend ● In progress] ─┼> [t5 |
 +------+-------------------------------------------------------------------------------------+
 | Run 20261105-0930  Execute, round 1   App 138 MB   Guard on   Engine ok                     |
 +---------------------------------------------------------------------------------------------+
 ```
 
+Status words: Pass, Fail, Not run, Stale (evidence is for an older head), Unverified (signature check
+failed). Each has its own icon and text, never color alone. The header never shows a green "done" while any
+criterion is not Pass. **Re-run...** opens a confirm dialog that shows the exact recorded command and where it
+will run (a fresh worktree at the evidence commit); the result row shows "same as recorded" or "differs".
 Graph nodes are focusable (arrow keys follow edges); Enter opens the worker in Crew. The criteria
 table rows expand to show the full command, notes and the evidence path
 `data/walkthroughs/deliver-<run_id>/evidence.json`. "Copy command" copies the literal command.
@@ -281,8 +287,8 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
    terminal read-only. The status bar shows "Run <id> Route".
 
 **F2 Resume** (US-1.2)
-1. Home, Resume list (or History row, "Resume"). Rows show phase and round from campaign.json.
-2. The app runs `vajra-campaign.sh verify <slug>`; on exit 3 the row shows "Signature check failed"
+1. Home, Resume list (or History row, "Resume"). Rows show phase and round from `progress.md` and `tasks.json` (campaign.json has neither, D9).
+2. The app runs `vajra-campaign.sh verify <slug>`; on exit 3 the row shows "Integrity check failed"
    and Resume is disabled, with "Show details".
 3. Resume launches the run session with the campaign slug; Crew opens on the restored tree.
 
@@ -300,7 +306,8 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 1. Via Lead: ask in chat ("tell Frontend to use the kit Button"); an action card appears.
 2. Directly: worker header "Message" or "Redirect" (or palette). A sheet shows the target, the text and
    for Redirect the new instruction that replaces the current one. Cmd-Enter sends.
-3. The card moves Queued, Delivered (hook consumed it), Acknowledged (worker's next turn). Each card
+3. The card moves Queued, Handed to hook (the hook consumed it), Delivered (the worker transcript shows the
+   steer id, NFR-COMPAT-1), Acknowledged (worker's next turn). Each card
    has "View in audit" for the audit.log line and appears in the worker's Stream.
 
 **F6 Stop a worker** (US-3.3, US-3.4)
@@ -324,7 +331,7 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 | Screen | Empty | Loading | Error | Engine missing / offline | Large data |
 |---|---|---|---|---|---|
 | Home | "No campaigns to resume." | Preflight rows show skeleton | Row names the failed check and the fix | Claude not found or doctor FAIL: Start disabled, failing checks listed with "Re-check" | Resume list virtualized |
-| Crew | "No run yet. Start one from Home." with Cmd-1 hint | Tree skeleton | "Can't read transcript <path>: <reason>" on the node | Tree frozen, banner "Engine check failed; showing last known state" | Tree and stream virtualized; stream ring buffer 2 MB, older lines from disk on scroll |
+| Crew | "No run yet. Start one from Home." with Cmd-1 hint | Tree skeleton | "Can't read transcript <path>: <reason>" on the node | Tree frozen, banner "Engine check failed; showing last known state" | Tree and stream virtualized; retained tail 256 KiB per worker (NFR-PERF-2), older lines from disk on scroll |
 | Chat | "Ask the Lead about any worker." | Typing row "Lead is reading Backend" | Card status Failed with reason and Retry | Input disabled: "Lead session stopped. Restart Lead" | Thread virtualized |
 | Run | "No run selected." | Timeline and table skeleton | Criteria table: "Evidence file missing" per row | Last known state, timestamped | Graph switches to list over 40 nodes; table virtualized |
 | Approvals | "Nothing waiting for you." | Row skeleton | "Plan could not be read" with path | Approve disabled; reason shown | Virtualized |
