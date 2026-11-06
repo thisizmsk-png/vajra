@@ -6,8 +6,8 @@ import type { Screen } from "../router";
 
 const notBuilt = (screen: Screen): ComponentType => function NotBuilt() {
   return (
-    <section aria-labelledby={`h-${screen}`}>
-      <Text as="h1" variant="headline-lg" id={`h-${screen}`}>{S.nav[screen]}</Text>
+    <section aria-label={S.nav[screen]}>
+      <Text as="h1" variant="headline-lg">{S.nav[screen]}</Text>
       <Text variant="body-sm">{S.shell.notBuilt}</Text>
     </section>
   );
