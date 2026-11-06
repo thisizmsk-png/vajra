@@ -301,6 +301,15 @@ impl Service {
             let (Some(kind), id) = (Kind::parse(str_field(r, "kind")), str_field(r, "action_id")) else { continue };
             let state = State::parse(str_field(r, "state"));
             let worker = str_field(r, "worker").to_string();
+            if kind == Kind::Resume {
+                // A resume clears the stop it names (and any still-pending record of it), exactly as resume_worker does live.
+                let stopped = str_field(r, "stop_id");
+                if self.last_stop.get(&worker).is_some_and(|(sid, _)| sid == stopped) {
+                    self.last_stop.remove(&worker);
+                }
+                self.pending.remove(stopped);
+                continue;
+            }
             if kind == Kind::Stop {
                 self.last_stop.insert(worker.clone(), (id.to_string(), state));
             }

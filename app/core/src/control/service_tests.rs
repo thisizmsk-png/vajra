@@ -57,3 +57,26 @@ fn a_failed_resume_leaves_the_stop_in_force() {
     assert_eq!(files(&dir, "stops"), 1, "a resume that could not be recorded must not clear the stop");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_resume_survives_a_restart() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert!(s.last_stop.is_empty());
+    drop(s);
+    let again = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+    assert!(again.last_stop.is_empty(), "replay must apply the resume record: {:?}", again.last_stop);
+    assert!(again.pending.is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stop_without_a_resume_survives_a_restart() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    drop(s);
+    let again = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+    assert_eq!(again.last_stop.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
