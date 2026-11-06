@@ -34,6 +34,7 @@ mkdir -p "$CD/$C"
 [ "$(rc T add t1 --title a --owner 'Bad Agent')" = 2 ]; check "invalid owner -> exit 2" $?
 [ "$(rc T add t1 --title a --owner bhima --files '../etc')" = 2 ]; check "path traversal in files -> exit 2" $?
 [ "$(rc T add t1 --title a --owner bhima --files '/abs')" = 2 ]; check "absolute path in files -> exit 2" $?
+[ "$(rc T add t1 --title a --owner bhima --worktree relative/dir)" = 2 ]; check "add: relative --worktree -> exit 2 (one policy with claim)" $?
 [ "$(rc T add t1 --title a --owner bhima --deps t1)" = 2 ]; check "self dependency -> exit 2" $?
 [ ! -e "$CD/$C/tasks.json" ]; check "refused adds write nothing" $?
 
@@ -76,6 +77,11 @@ T claim t1 bhima-1 >/dev/null; check "claim ready t1" $?
 [ "$(TJ status t1 | field task.status)" = claimed ] && [ "$(TJ status t1 | field task.attempts)" = 1 ]; check "claimed, attempts 1" $?
 T claim t1 bhima-1 >/dev/null; check "same worker re-claim is idempotent" $?
 [ "$(rc T claim t1 other)" = 3 ]; check "another worker cannot claim it (exit 3)" $?
+# E6 (Q11): the claim records the worker's worktree (absolute path only).
+[ "$(rc T claim t1 bhima-1 --worktree relative/dir)" = 2 ]; check "E6 relative --worktree rejected (exit 2)" $?
+[ "$(rc T claim t1 bhima-1 --worktree "/$(printf 'a%.0s' $(seq 1 300))")" = 2 ]; check "E6 --worktree over 300 chars rejected, not cut" $?
+T claim t1 bhima-1 --worktree "$WORK/wt-a" >/dev/null; check "E6 claim with --worktree" $?
+[ "$(TJ status t1 | field task.worktree)" = "$WORK/wt-a" ]; check "E6 tasks.json names the worktree" $?
 OK=0
 for i in 1 2 3 4 5 6 7 8; do ( python3 "$PY" claim t3 "w$i" --campaign "$C" >/dev/null 2>&1 && echo ok > "$WORK/claim.$i" ) & done
 wait

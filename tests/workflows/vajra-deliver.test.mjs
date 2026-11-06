@@ -68,7 +68,7 @@ const base = {
   deploy_plan: { target: 'prod', commands: ['npm run deploy'], rollback: ['npm run rollback'], health_checks: ['GET /health'], risk: 'low' },
   'kb.search': { exit_code: 0, ok: true, lines: [] },
   tasks: { ok: true, outputs: ['ok'] },
-  writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
+  writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['ok'] },
   cleanup: { exit_code: 0, lines: ['removed /r/.claude/worktrees/agent-a1', 'removed /r/.claude/worktrees/agent-a2', 'worktrees: 2 removed, 0 kept'] },
 }
 const SID = '4f7d2c1e-9b3a-4e6f-8a21-0c5d7e9f1b2a'
@@ -84,12 +84,27 @@ await scenario('happy path: done, one integration branch, evidence per criterion
   const r = await go(ARGS)
   assert.equal(r.result.status, 'done')
   assert.equal(r.result.branch, `vajra/${RUN}/integration`)
-  assert.deepEqual(labels(r), ['kb.search', 'understand', 'preflight', 'plan.1', 'tasks.register', 'task.t1.r1', 'task.t2.r1', 'merge.r1', 'verify.r1', 'review.arjuna.r1', 'writeback', 'campaign.deliver', 'cleanup'])
+  assert.deepEqual(labels(r), ['kb.search', 'understand', 'preflight', 'plan.1', 'tasks.register', 'task.t1.r1', 'task.t2.r1', 'merge.r1', 'verify.r1', 'review.arjuna.r1', 'writeback', 'campaign.deliver', 'cleanup', 'campaign.report'])
   assert.match(r.result.report, /ac-1 export --json prints valid JSON: `npm test -- export` exit 0/)
   assert.match(r.result.report, /## How to run it/)
   assert.match(r.result.report, /large exports buffer in memory/)
   assert.match(r.result.report, /git merge --no-ff vajra\/20261011-0930\/integration/)
   assert.deepEqual(r.result.pending_approval, [])
+})
+await scenario('E4: the delivery report is saved into the campaign, byte-exact, as one base64 argument', async () => {
+  const r = await go(ARGS)
+  const p = call(r, 'campaign.report').prompt
+  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --check ([0-9a-f]{8}) --base64 ([A-Za-z0-9+/]+=*)/)
+  assert.ok(m, own(p))
+  const raw = Buffer.from(m[3], 'base64'), text = raw.toString('utf8')
+  assert.equal(text, r.result.report + '\n')
+  assert.equal(Number(m[1]), raw.length)
+  // FNV-1a 32 of the base64 text: catches a copy error by the agent (the script re-computes it).
+  let h = 0x811c9dc5
+  for (const c of m[3]) { h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0 }
+  assert.equal(m[2], h.toString(16).padStart(8, '0'))
+  assert.equal(call(r, 'campaign.report').agentType, 'abhimanyu')
+  assert.ok(own(p).length < 32 * 1024, 'the command stays under the guard analysis limit')
 })
 await scenario('roles: writers in worktrees, reviewers read-only, vidura verifies, drona understands', async () => {
   const r = await go(ARGS)
@@ -480,7 +495,9 @@ await scenario('plan is registered in the task graph (add, then validate) with r
 await scenario('workers claim the task first, report through vajra_tasks.py, and return structured reports', async () => {
   const r = await go(ARGS)
   const p = own(call(r, 'task.t1.r1').prompt)
-  assert.match(p, /0\. Claim the task before any other work: run `python3 \S+vajra_tasks\.py claim 20261011-0930\.t1 bhima --stacked --campaign deliver-20261011-0930`\. If it exits 3/)
+  assert.match(p, /0\. Claim the task before any other work: run `python3 \S+vajra_tasks\.py claim 20261011-0930\.t1 bhima --stacked --campaign deliver-20261011-0930 --worktree "\$PWD"`\. If it exits 3/)
+  // E6 (Q11): tasks.json names each worker's worktree.
+  assert.match(own(call(r, 'task.t2.r1').prompt), /--worktree "\$PWD"`/)
   assert.match(own(call(r, 'task.t2.r1').prompt), /claim 20261011-0930\.t2 abhimanyu --stacked --campaign /)
   assert.match(p, /return status "blocked", summary = its error line, artifacts branch = vajra\/20261011-0930\/t1, base_commit = a{40}, commit = "", files = \[\]/)
   assert.match(p, /If it fails any other way \(the task graph is unavailable\), carry on/)
@@ -582,6 +599,33 @@ await scenario('write-back: verify-work evidence, tasks closed on it, delivery +
   assert.equal(r.result.artifacts.knowledge.tasks_closed, true)
   assert.match(r.result.report, /## Knowledge recorded\n- 2 record\(s\) \(1 delivery, 1 decision\(s\), 0 lesson\(s\)\) saved as verified/)
 })
+await scenario('E7: write-back archives the evidence bundle and the exact setup list once per delivery, only when verified', async () => {
+  const long = 'pip install ' + 'x'.repeat(980)
+  const r = await go(ARGS, { verify: realVerifier('id', { setup_cmds: ['npm ci', long, "echo 'q' \"d\""] }) })
+  const w = call(r, 'writeback'), p = own(w.prompt), q = wrapped(w.prompt, 'quoted_arguments')
+  // One archive per delivery, no task id: the script archives it for every task closed on this evidence
+  // (a bare t1 here was refused, as the graph holds run-prefixed ids).
+  const m = [...p.matchAll(/^(\d+)\. bash \S+vajra-campaign\.sh archive-evidence (.*)$/gm)]
+  assert.equal(m.length, 1)
+  const am = m[0][2].match(/^deliver-20261011-0930 data\/walkthroughs\/deliver-20261011-0930 d1111111 \{\{a(\d+)\}\}$/)
+  assert.ok(am, m[0][2])
+  assert.match(p, new RegExp(`If verified is true, then also run command ${m[0][1]} \\(archive the evidence\\)`))
+  // The argument is the exact JSON of the setup commands that ran, untruncated (the 1,000-char one included).
+  const arg = q.match(new RegExp(`\\{\\{a${am[1]}\\}\\} = (.*)`))[1]
+  const unq = arg.slice(1, -1).replace(/'\\''/g, "'")
+  assert.deepEqual(JSON.parse(unq), ['npm ci', long, "echo 'q' \"d\""])
+  assert.match(p, /archive_ok=false if it exits non-zero .* It does not count toward ok\./)
+  // A failed archive is reported on its own and does not reopen the tasks.
+  const fa = await go(ARGS, { writeback: { ...base.writeback, archive_ok: false } })
+  assert.equal(fa.result.artifacts.knowledge.tasks_closed, true)
+  assert.match(fa.result.report, /evidence archive for this delivery was not written/)
+  // The write-back worktree holds the only bundle, so cleanup must not be allowed to remove it.
+  assert.ok(!fa.result.artifacts.cleanup.command.includes('data/walkthroughs'))
+  assert.match((await go(ARGS)).result.artifacts.cleanup.command, /data\/walkthroughs/)
+  // No archive when there is nothing verified to archive: the proposed range is unchanged.
+  const plain = own(call(await go(ARGS), 'writeback').prompt)
+  assert.match(plain, /Otherwise set verified=false and run commands 7 to 8 in order instead/)
+})
 await scenario('no worker summary is pasted into any other agent prompt', async () => {
   const r = await go(ARGS, { verify: realVerifier('id'), 'verify.r1': { ...verification, results: [pass('ac-1'), { ...pass('ac-2'), status: 'fail', exit_code: 1 }] } })
   for (const c of r.calls) if (!c.label.startsWith('task.')) assert.ok(!/did t[12]/.test(c.prompt), c.label)
@@ -603,13 +647,13 @@ await scenario('write-back: one lesson per fix round that went from failing to p
   assert.ok(!/--type lesson/.test(own(call(n, 'writeback').prompt)))
 })
 await scenario('write-back without green evidence: nothing closed, knowledge proposed, reported as a risk; failures never fatal', async () => {
-  const r = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
+  const r = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
   assert.equal(r.result.status, 'done')
   assert.equal(r.result.artifacts.knowledge.source, 'proposed')
   assert.equal(r.result.artifacts.knowledge.tasks_closed, false)
   assert.match(r.result.report, /verify-work did not pass when re-run for evidence \(exit 1\)/)
   assert.match(r.result.report, /saved as proposed, waiting in pending\//)
-  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 2, ok: true, proposed_fallbacks: 0, outputs: [] } })
+  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 2, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: [] } })
   assert.equal(lie.result.artifacts.knowledge.source, 'proposed', 'verified needs exit 0 too')
   const t = await go(ARGS, { writeback: () => new Error('boom') })
   assert.equal(t.result.status, 'done')
@@ -664,12 +708,12 @@ await scenario('write-back: the verifier setup_cmds run in the fresh worktree be
   assert.match(own(call(many, 'writeback').prompt), /Run commands 1 to 7 in order/)
 })
 await scenario('write-back: a verified record the gate refuses goes in as its proposed twin, and the report says so', async () => {
-  const r = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 1, outputs: ['refused', 'pending kb-123abc'] } })
+  const r = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 1, outputs: ['refused', 'pending kb-123abc'] } })
   assert.equal(r.result.artifacts.knowledge.source, 'verified')
   assert.equal(r.result.artifacts.knowledge.proposed_fallbacks, 1)
   assert.match(r.result.report, /1 verified knowledge record\(s\) were refused by the knowledge gate and went to pending\/ as proposed instead/)
   assert.match(r.result.report, /saved as verified, with evidence `data\/walkthroughs\/deliver-20261011-0930\/evidence\.json` \(1 refused by the gate went to pending\/ as proposed\)/)
-  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, proposed_fallbacks: 99, outputs: [] } })
+  const lie = await go(ARGS, { writeback: { verified: true, verify_exit_code: 0, ok: true, archive_ok: true, proposed_fallbacks: 99, outputs: [] } })
   assert.equal(lie.result.artifacts.knowledge.proposed_fallbacks, 2, 'capped at the number of records')
 })
 await scenario('a worker whose claim is refused comes back blocked (need_input), naming the claim error', async () => {
@@ -803,7 +847,9 @@ const cleanCmdIn = (r) => (own(call(r, 'cleanup').prompt).match(/^1\. (bash \S+v
 await scenario('cleanup: last step, in the user checkout, with this run\'s commits, branch prefix and allowed dirs', async () => {
   const r = await go(ARGS)
   const c = call(r, 'cleanup')
-  assert.equal(labels(r).at(-1), 'cleanup')
+  // Only the E4 report save (it records cleanup's results, in the user checkout, no worktree) follows cleanup.
+  assert.deepEqual(labels(r).slice(-2), ['cleanup', 'campaign.report'])
+  assert.equal(call(r, 'campaign.report').isolation, undefined)
   assert.equal(c.agentType, 'abhimanyu')
   assert.equal(c.isolation, undefined, 'runs in the user checkout, never in a worktree it would have to remove')
   assert.equal(c.phase, 'Deliver')
@@ -827,7 +873,7 @@ await scenario('cleanup: commits of every round count; the base commit never doe
   assert.ok(!cmd.includes(HEAD.slice(0, 7)), 'a worker commit equal to the base is dropped')
 })
 await scenario('cleanup: evidence dir allowed only once tasks closed on it; setup dirs come from setup_cmds', async () => {
-  const red = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
+  const red = await go(ARGS, { writeback: { verified: false, verify_exit_code: 1, ok: true, archive_ok: true, proposed_fallbacks: 0, outputs: ['FAILED'] } })
   assert.match(cleanCmdIn(red), / --allow \.venv$/, 'write-back not green: the evidence keeps its worktree')
   const setup = ['python3 -m venv --clear env && env/bin/pip install -e .', 'npm ci', 'uv venv ../escape', 'python3 -m venv /abs/venv']
   const r = await go(ARGS, { verify: realVerifier('id', { setup_cmds: setup }) })

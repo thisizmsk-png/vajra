@@ -148,7 +148,7 @@ const S = {
     artifacts: obj({ branch: STR, base_commit: STR, commit: STR, files: STRS, protected_actions_skipped: STRS }), evidence_cmds: STRS }),
   // exit_code decides availability: an empty knowledge base exits 0 and prints nothing, which is a valid "no hits".
   KbHits: obj({ exit_code: INT, ok: BOOL, lines: STRS }),
-  Writeback: obj({ verified: BOOL, verify_exit_code: INT, ok: BOOL, proposed_fallbacks: INT, outputs: STRS }),
+  Writeback: obj({ verified: BOOL, verify_exit_code: INT, ok: BOOL, archive_ok: BOOL, proposed_fallbacks: INT, outputs: STRS }),
   Merge: obj({ status: E('merged', 'conflict'), branch: STR, commit: STR, merged: STRS,
     conflicts: arr(obj({ task: STR, files: STRS })), notes: STR }),
   // command is the literal shell command that ran (re-run verbatim by the write-back and shown under "How to run it");
@@ -175,11 +175,12 @@ const sq = (s, n) => "'" + oneLine(s, n || 300).replace(/'/g, "'\\''") + "'"
 // text, criterion text, verifier output). The script shell-quotes untrusted values itself and shows them only
 // inside a data wrapper, as {{aN}} placeholders the agent substitutes verbatim.
 const U = (text, max) => ({ untrusted: text, max })
+const URAW = (text) => ({ untrusted: text, raw: true })
 function commandsBlock(cmds) {
   const vals = []
   const lines = cmds.map((parts, i) => `${i + 1}. ` + parts.map((x) => {
     if (typeof x === 'string') return x
-    vals.push(sq(x.untrusted, x.max))
+    vals.push(x.raw ? "'" + String(x.untrusted).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/'/g, "'\\''") + "'" : sq(x.untrusted, x.max))
     return `{{a${vals.length}}}`
   }).join(''))
   let out = lines.join('\n') + '\n'
@@ -552,7 +553,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     const tid = TID(id)
     const r = await step(`task.${id}.r${round}`, t.owner,
       `You own task ${id} (task graph id ${tid}) of a larger delivery. Work only inside the task's files.\n` +
-      `0. Claim the task before any other work: run \`${TASKS_PY} claim ${tid} ${t.owner} --stacked --campaign ${CAMPAIGN}\`. ` +
+      `0. Claim the task before any other work: run \`${TASKS_PY} claim ${tid} ${t.owner} --stacked --campaign ${CAMPAIGN} --worktree "$PWD"\`. ` +
       'If it exits 3, the task graph refused the claim (another worker holds the task, or it is not ready): do nothing else and return ' +
       `status "blocked", summary = its error line, artifacts branch = ${branchFor(id, round)}, base_commit = ${BASE}, commit = "", files = [], ` +
       'protected_actions_skipped = [], and evidence_cmds = []. If it fails any other way (the task graph is unavailable), carry on. ' +
@@ -804,6 +805,10 @@ const wbClose = ORDER.map((id) => [`${TASKS_PY} close ${TID(id)} --evidence ${EV
   `--base-commit ${BASE} --changed `, U(changes[id].files.join(','), 2000), ` --campaign ${CAMPAIGN}`])
 const wbVerified = [...wbClose, ...kbOut.map((r) => kbAdd(r, 'verified'))]
 const wbProposed = kbOut.map((r) => kbAdd(r, 'proposed'))
+// E7 (Q13): before cleanup removes this worktree, archive the verification bundle and the exact setup commands
+// write-back ran (built here, untruncated) into the campaign, once; the script names every task closed on it.
+// Numbered after the proposed range so the numbering of every other command stays the same.
+const wbArchive = [`${CAMPAIGN_SH} archive-evidence ${CAMPAIGN} data/walkthroughs/${EV_SLUG} ${merge.commit} `, URAW(JSON.stringify(setupCmds))]
 const V = 2 + setupCmds.length                       // the verify-work command
 const K = V + wbVerified.length, M = K + wbProposed.length
 const firstKb = V + wbClose.length + 1               // first --source verified knowledge write
@@ -820,6 +825,8 @@ const wb = await step('writeback', 'vidura',
       `(${twins}) so the record is not lost, and count the twins you ran in proposed_fallbacks. `
     : '. ') +
   (M > K ? `Otherwise set verified=false and run commands ${K + 1} to ${M} in order instead. ` : 'Otherwise set verified=false and run nothing else. ') +
+  `If verified is true, then also run command ${M + 1} (archive the evidence); ` +
+  `archive_ok=false if it exits non-zero (true when you did not run it). It does not count toward ok. ` +
   'proposed_fallbacks = 0 when you ran no twin. Run every command of that range even if one fails; ' +
   "ok=false if any of them exits non-zero (a refused knowledge write whose twin exited 0 does not count). Put each command's last output line in outputs.\n" + GUARD + '\n' +
   commandsBlock([
@@ -828,7 +835,7 @@ const wb = await step('writeback', 'vidura',
     // program named after the whole string (exit 127), and the guard refuses a computed command name.
     ...setupCmds.map((c) => ['bash -c ', U(c, 1000)]),
     [`VAJRA_WALKTHROUGH_DIR=data/walkthroughs ${VERIFY_SH} ${EV_SLUG}`, ...evCmds.flatMap((c) => [' ', U(c, 1000)])],
-    ...wbVerified, ...wbProposed,
+    ...wbVerified, ...wbProposed, wbArchive,
   ]),
   S.Writeback, 'Deliver', { isolation: 'worktree' })
 const knowledge = { records: kbOut.map((r) => r.type), source: 'none', tasks_closed: false, proposed_fallbacks: 0 }
@@ -843,6 +850,7 @@ else {
     (kbOut.length ? ` and ${kbOut.length} knowledge record(s) went to pending/ for your approval (atman.sh review)` : ''))
   if (fb) campaignNotes.push(`${fb} verified knowledge record(s) were refused by the knowledge gate and went to pending/ as proposed instead (atman.sh review)`)
   if (!wb.out.ok) campaignNotes.push('knowledge write-back: some commands failed: ' + oneLine(wb.out.outputs.join(' | '), 300))
+  if (green && wb.out.archive_ok === false) campaignNotes.push('the evidence archive for this delivery was not written (vajra-campaign.sh archive-evidence failed); the tasks are still closed')
 }
 
 await recordCampaign('campaign.deliver', 'Deliver', [
@@ -875,7 +883,7 @@ function setupDirs(cmds) {
 const sameCommit = (a, b) => a.startsWith(b) || b.startsWith(a)
 // Never the commits the user's own checkout may sit on: BASE and ORIGIN are not this run's.
 const cleanCommits = [...runCommits].filter((c) => SHA_RE.test(c) && !sameCommit(c, BASE) && !sameCommit(c, ORIGIN))
-const cleanAllow = [...(knowledge.tasks_closed ? ['data/walkthroughs'] : []), ...setupDirs(setupOf(verification))]
+const cleanAllow = [...(knowledge.tasks_closed && wb.out.archive_ok === true ? ['data/walkthroughs'] : []), ...setupDirs(setupOf(verification))]
 const cleanCmd = `${CLEAN_SH} --commits ${cleanCommits.join(',')} --branch-prefix vajra/${RUN}/ --allow ${cleanAllow.join(',')}`
 const cleanup = { ran: false, command: cleanCmd, removed: [], kept: [], error: '' }
 {
@@ -958,6 +966,20 @@ if (pending.length) {
   for (const x of pending) md.push(`- ${x.action}: ${x.why}`)
   if (deployPlan) md.push(`- deploy plan: ${deployPlan.commands.length} command(s), rollback ${deployPlan.rollback.length}, risk ${deployPlan.risk}`)
 }
+
+// E4 (Q3): save the report into the campaign so it survives without the app. One base64 argument plus its
+// byte count and the fnv of the base64 text: the text is multi-line and untrusted, and the script refuses a copy
+// that does not match (an agent transcribes the argument; the script records the sha256 of what it saved).
+// At most 20 KiB (about 27 KB of base64), so the command stays under the guard's 32 KB analysis limit.
+const REPORT_SAVE_MAX = 20 * 1024
+const reportText = md.join('\n') + '\n'
+const reportBytes = new TextEncoder().encode(reportText)
+if (reportBytes.length <= REPORT_SAVE_MAX) {
+  const b64 = btoa(String.fromCharCode(...reportBytes))
+  await recordCampaign('campaign.report', 'Deliver', [
+    [`${CAMPAIGN_SH} report --campaign ${CAMPAIGN} --bytes ${reportBytes.length} --check ${fnv(b64)} --base64 ${b64}`],
+  ])
+} else log(`report is ${reportBytes.length} bytes, over ${REPORT_SAVE_MAX}; not saved into the campaign (the app keeps the transcript copy)`)
 
 return {
   status: 'done',
