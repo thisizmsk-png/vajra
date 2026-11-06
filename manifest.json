@@ -333,7 +333,7 @@
     "workflows/vajra-incident-response.js": "dd95c795eeb43884e87ac8961f79692457d8947c35c7d2bb144e5c23d1f4e94e",
     "workflows/vajra-sabha.js": "1321836bd9c80dd94d8907509f816b1ee0bfcf31d429c6b9e07006da21e04dcf",
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
-    "scripts/desktop_approval.py": "501c383c390526daa9a41b957ae507dc50c4aaccc105c50c096cc901d78c9f45",
+    "scripts/desktop_approval.py": "e629d9d07a4d7d16d92ad03842d57829791e2f9b5c1d04e0213c397dc0d21a52",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
     "tests/kb/desktop_approval_test.py": "b94af06e0883759d763f8b8231ee312dc87836f9ed662b967461f92890dbca74"
   }

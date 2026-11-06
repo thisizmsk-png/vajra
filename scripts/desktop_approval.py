@@ -67,6 +67,9 @@ def read_small(path, limit):
 def public_key(path):
     """(pem, fingerprint) of a P-256 public key file; the fingerprint is sha256 of its DER."""
     raw = read_small(path, 4096)
+    # OpenSSL 3 derives a public key from a private key file; refuse that rather than enrol from a secret.
+    if b"-----BEGIN PUBLIC KEY-----" not in raw or b"PRIVATE" in raw:
+        raise Refused("not a PEM public key (a private key file must never be given)")
     d = tempfile.mkdtemp(prefix="vajra-e9-")
     try:
         p = os.path.join(d, "k.pem")
