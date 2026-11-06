@@ -766,10 +766,12 @@ impl Service {
         };
         let now = SystemTime::now();
         let a = self.new_action(Kind::Resume, Actor::Human, Some(&w), now)?;
-        fs::remove_file(&path)?;
         let stop_id = str_field(&stop, "action_id").to_string();
+        // Records first, stop file last: a failure leaves the stop in force (a retry may add a duplicate
+        // resume record), never a cleared stop without its ledger and audit lines.
         self.record(&a, State::Done, json!({"stop_id": stop_id}), now)?;
         audit::append_resume(&self.audit_log, &a.id, now)?;
+        fs::remove_file(&path)?;
         self.pending.remove(&stop_id);
         self.last_stop.remove(w.key());
         Ok(json!({"action_id": a.id, "state": State::Done.as_str(), "stop_id": stop_id}))

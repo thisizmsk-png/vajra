@@ -46,3 +46,14 @@ fn a_ledger_failure_leaves_no_queue_entry_and_no_stop_file() {
     assert_eq!(files(&dir, "stops"), 0, "a stop reported as failed must not be enforced");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_failed_resume_leaves_the_stop_in_force() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert_eq!(files(&dir, "stops"), 1);
+    s.ledger.break_for_test();
+    assert!(s.resume_worker(Actor::Human, "bhima").is_err());
+    assert_eq!(files(&dir, "stops"), 1, "a resume that could not be recorded must not clear the stop");
+    let _ = fs::remove_dir_all(&dir);
+}
