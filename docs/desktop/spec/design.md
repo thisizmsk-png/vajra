@@ -910,8 +910,14 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
        ledger, not in a file a writer could delete), the pending record's bytes are read once, and their
        sha256 matches;
      - the approval is under 5 minutes old.
-     It then builds the record from those same bytes, re-runs the write gate, applies, records the approval
-     id as used, and audits. The parser already refuses abbreviations (`allow_abbrev=False`,
+     It then builds the record from those same bytes. For Edit then approve, the payload carries the edited
+     `title`, `body` and `paths` (all three always present, so an omitted field can't mean "keep the
+     original"): the engine replaces exactly those fields on the record built from the hashed bytes and
+     keeps everything else from it (id, type, source, provenance, created). The sha256 still binds the
+     approval to the original pending record, and the signature binds the edit. The write gate then runs on
+     the final record, edit included, not on the original bytes, so a refusal returns the gate's reason
+     and nothing is applied. It then applies the final record, records the approval id as used, and audits
+     (the audit stores the sha256 of both the original and the final record, never the text). The parser already refuses abbreviations (`allow_abbrev=False`,
      `scripts/vajra_kb.py:1653`), so `--desk` can't stand in for the flag, and the guard matches the full
      name. No other input to these commands changes, so the TTY path stays as it is for the CLI.
 - **Why it holds:** a forger needs a signature from a Secure Enclave key that signs only after owner
