@@ -976,8 +976,7 @@ def cmd_approve(args):
             print("atman: only route proposals can be approved from Vajra Desktop; apply a patch yourself",
                   file=sys.stderr)
             return 3
-        if not desk_gate("approve", p, files):
-            return 3
+        # The signed approval is single use: it is consumed below, after the checks, right before the write.
     elif not human_gate("approve", p["id"]):
         return 3
     extra = {}
@@ -989,6 +988,8 @@ def cmd_approve(args):
         if not resolve_target("skill", skill):
             print("atman: note: skill '%s' was not found under %s" % (skill, SKILLS_DIR))
         d = load_learned()
+        if files and not desk_gate("approve", p, files):
+            return 3
         d["routes"] = [r for r in d["routes"] if r.get("word") != word]
         d["routes"].append({"word": word, "skill": skill, "agent": None,
                             "precision": p["evidence"].get("precision"),

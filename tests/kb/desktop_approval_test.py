@@ -446,6 +446,14 @@ fr2, _ = approval(K, "reject", "global", route2["id"], r2sha, reason="not now")
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     rc = atman.cmd_reject([route2["id"], "--desktop-approval", fr2, "not now"])
 check("atman reject consumes a desktop approval", rc == 0 and atman.load_proposals()[route2["id"]]["status"] == "rejected")
+bad_route = dict(route, id="route-0123456789ad", word="x")   # fails WORD_RE: must not burn the approval
+atman.save_proposal(bad_route)
+bsha = hashlib.sha256(atman.canon(atman.load_proposals()[bad_route["id"]]).encode("utf-8")).hexdigest()
+fbr, abr = approval(K, "approve", "global", bad_route["id"], bsha)
+cbr, _ = approval(K, "approve", "global", bad_route["id"], bsha, confirms=abr["id"], widen="global")
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    rcb = atman.cmd_approve([bad_route["id"], "--desktop-approval", fbr, "--desktop-approval", cbr])
+check("atman: an invalid route is refused before the approval is consumed", rcb != 0 and abr["id"] not in used_ids())
 skillp = {"id": "skill-0123456789ab", "kind": "skill", "target": "x", "status": "pending", "evidence": {}}
 atman.save_proposal(skillp)
 fk3, _ = approval(K, "approve", "global", skillp["id"], hashlib.sha256(

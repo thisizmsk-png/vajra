@@ -12,7 +12,7 @@
     "SECURITY.md": "4312f9d89a6e79b939c0e4b5ed021e717cc67f200dfa313093867f04ee04aeea",
     "SKILL.md": "a303fd1f3b5a145b492194fec1444b33e3399cd8d422b2db6869c64925b92f0a",
     "atman/ATMAN.md": "1a53789e485b812cd214d9d7f9dc888a0b22b687b5f749bb29f524e2ae19f865",
-    "atman/atman.py": "dfe12abdddcf903ce10880fa144626368f752a6fa369cdff69c350304291c859",
+    "atman/atman.py": "a465ecb54e101a282f8a40d0c08acb4f9f39f10b7f4b8f9edbbaba68bacfdfdc",
     "atman/muscle-memory.md": "8816d3adc86b5eca23855c13e0fa6d100a5d82c7d1f1e9109fe16de4312b62f5",
     "atman/oracle.md": "dce5a11f0ad2fef2853ff8b483bbc29343617dfeebf72756d4b22c0432fc8651",
     "atman/practice-observer.md": "7a99ffce7afdbc3d55610770523240761c91afab83e3b4133348d0551124bab9",
@@ -335,6 +335,6 @@
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
     "scripts/desktop_approval.py": "e629d9d07a4d7d16d92ad03842d57829791e2f9b5c1d04e0213c397dc0d21a52",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
-    "tests/kb/desktop_approval_test.py": "b94af06e0883759d763f8b8231ee312dc87836f9ed662b967461f92890dbca74"
+    "tests/kb/desktop_approval_test.py": "7f7053d645b017207f8c7418c4f5cb98eb0d1ed47f8a86c19f14e833c542310c"
   }
 }
