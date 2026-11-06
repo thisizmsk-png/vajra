@@ -162,3 +162,19 @@ fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
     s.set_workers(ws);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_queued_record_with_no_file_settles_as_not_delivered() {
+    // Review: the ledger is written before the queue file, so a crash between them leaves "queued" with no file.
+    // Nothing can deliver it, and check() used to leave it pending forever.
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "lost in a crash").unwrap()["action_id"].as_str().unwrap().to_string();
+    let q = fs::read_dir(dir.join("control").join(SID).join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(q).unwrap();
+    let now = SystemTime::now();
+    s.tick_at(now + Duration::from_secs(5));
+    assert!(s.pending.contains_key(&id), "not settled while it may still be mid-publish");
+    s.tick_at(now + INFLIGHT_UNKNOWN + Duration::from_secs(5));
+    assert!(!s.pending.contains_key(&id), "settled once clearly lost");
+    let _ = fs::remove_dir_all(&dir);
+}

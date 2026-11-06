@@ -860,6 +860,13 @@ impl Service {
                 self.record(&a, State::DeliveryUnknown, json!({}), now)?;
                 self.pending.remove(id);
             }
+            return Ok(());
+        }
+        // Recorded as queued but no file, no claim and no ack: the app died between the record and the publish (the
+        // ledger is written first). Nothing can deliver it now, so settle it once it is clearly not mid-publish.
+        if now.duration_since(a.created).unwrap_or_default() >= INFLIGHT_UNKNOWN {
+            self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now)?;
+            self.pending.remove(id);
         }
         Ok(())
     }
