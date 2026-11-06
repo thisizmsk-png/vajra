@@ -192,7 +192,10 @@ fn last_record(s: &Service, id: &str) -> Value {
 fn every_delivery_crash_point_settles_as_the_table_says() {
     use Ack::*;
     let cases = [
-        Case { name: "recorded, crashed before publish", q: false, i: false, a: None, e: false, at: 0, want: Some(("not_delivered", Some("not_published"))) },
+        // Absence alone is not proof of non-publication: an ack and a claim removal that were never made durable look the
+        // same after power loss. So it is delivery_unknown, never a terminal not_delivered.
+        Case { name: "recorded, crashed before publish", q: false, i: false, a: None, e: false, at: 0, want: Some(("delivery_unknown", Some("no_evidence"))) },
+        Case { name: "power loss: ack and claim removal not durable", q: false, i: false, a: None, e: false, at: 600, want: Some(("delivery_unknown", Some("no_evidence"))) },
         Case { name: "published, not yet claimed", q: true, i: false, a: None, e: false, at: 5, want: Option::None },
         Case { name: "forged ack beside a queued file", q: true, i: false, a: Valid, e: false, at: 5, want: Option::None },
         Case { name: "queued past the ttl", q: true, i: false, a: None, e: false, at: 31 * 60, want: Some(("not_delivered", Some("expired"))) },
@@ -282,5 +285,54 @@ fn an_ack_arriving_between_two_ticks_wins_over_the_claim_timer() {
     fs::remove_file(claim).unwrap();
     s.tick_at(t0 + INFLIGHT_UNKNOWN + Duration::from_secs(30));
     assert_eq!(last_record(&s, &id)["state"], "delivered");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_fifo_at_the_ack_path_is_refused_without_blocking() {
+    // Review P1: a worker (same user) can plant a FIFO; a blocking open froze the watcher while it held the mutex.
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::rename(&qf, root.join("inflight").join(format!("{id}.4242"))).unwrap();
+    fs::create_dir_all(root.join("acks")).unwrap();
+    let fifo = std::ffi::CString::new(root.join("acks").join(format!("{id}.json")).to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = std::thread::spawn(move || {
+        s.tick_at(SystemTime::now());
+        tx.send(()).unwrap();
+        s
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the watcher blocked on the FIFO");
+    let s = h.join().unwrap();
+    assert!(!s.pending.contains_key(&id));
+    let r = last_record(&s, &id);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("ack_invalid")), "{r}");
+    // The reader itself refuses it too.
+    assert!(fsx::read_nofollow_capped(&root.join("acks").join(format!("{id}.json")), 1024).is_err());
+    assert!(fsx::read_nofollow(&root.join("acks").join(format!("{id}.json"))).is_err());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_directory_scan_is_retried_not_settled() {
+    // Review P2: find() swallowed read_dir errors, so an unreadable queue/ looked like "no queue file" and the message
+    // was settled terminally while the hook could still deliver it.
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads any directory
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let q = dir.join("control").join(SID).join("queue");
+    fs::set_permissions(&q, fs::Permissions::from_mode(0o000)).unwrap();
+    s.tick_at(SystemTime::now() + Duration::from_secs(600));
+    fs::set_permissions(&q, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(s.pending.contains_key(&id), "an unreadable queue directory must not settle the message");
+    assert_eq!(files(&dir, "queue"), 1, "and the file is still there for the hook");
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "readable again: it is simply still queued");
     let _ = fs::remove_dir_all(&dir);
 }
