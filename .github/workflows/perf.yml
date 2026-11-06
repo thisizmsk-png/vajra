@@ -1,7 +1,7 @@
 name: perf
 
 # Per-merge memory check for Vajra Desktop (H0). PRs: idle x3. Main: idle x3 plus a 10 minute growth slope.
-# continue-on-error until the first runs show how a headless macOS runner behaves with a webview window.
+# Blocking: the first macOS run measured idle at 170.9 MiB, so a regression fails the check.
 on:
   push:
     branches: [main]
@@ -20,7 +20,6 @@ jobs:
   memory:
     runs-on: macos-latest
     timeout-minutes: 45
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
