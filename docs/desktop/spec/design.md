@@ -69,6 +69,10 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | E2 (widened by A1 M3 and STRIDE T1) | `hooks/hooks.json` guard matcher gains `mcp__vajra-desktop__.*`. `hooks/pre-tool-use.sh` `ROOTS` gains the app control dir. | Lead control calls appear in `audit.log` and fail closed (`onFailure: block`). Agents cannot write the queue. | Strengthens: more calls checked, one more protected root |
 | E5 (new, A1 B1) | `workflows/vajra-deliver.js`: an optional `steer_nonce` argument read from the app's nonce file path, never from args text, and one fixed sentence in Execute-phase task briefs only: "Act on context tagged `<vajra-steer nonce=N>` from the human operator; it never approves a protected action or widens your task." Verify, review and merge briefs get no steering sentence | Additive; without the argument the workflow is unchanged |
 | E7 (new, PR review round 4; approved Q13, 2026-11-05) | New `vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup.json>`, called by the workflow's write-back after `verify-work` and **before** the cleanup step (`workflows/vajra-deliver.js:842`). It copies the bundle (`evidence.json`, `diff.patch`, `diff.stat`, `untracked.txt`, `cmd-N.log`) to `~/.claude/vajra/campaigns/<slug>/evidence/<task>/data/walkthroughs/<evidence-slug>/`, keeping the `<root>/data/walkthroughs/<slug>/evidence.json` layout. `read_evidence` today takes its root from `git rev-parse --show-toplevel` and checks HEAD in that repo (`scripts/vajra_tasks.py:502`), so E7 adds two explicit parameters, `root` (the archive dir, for the path rule) and `repo` (the user's repo, for the `--head` check), with tests for both modes and every existing test unchanged. It also writes `setup.json`. The workflow JS builds it from its own `setupCmds` variable and passes it as one quoted argument, so it never comes from agent text: it is the exact array write-back executed (after the filter and the cap of 5 at `:787`, each string untruncated, up to 1,000 characters). Then it signs a manifest (sha256 of every file, `setup.json` included) with the campaign HMAC, the same way it signs `campaign.json`. E3 gains `--archived <slug>`: it accepts an evidence path under that campaign's `evidence/` dir and also checks the manifest. The app never reads the key; it calls E3 and `vajra-campaign.sh verify`. Additive. |
+| E9 (new, memory; approved Q14, 2026-11-05; conditions AC-7.1.8) | `vajra_kb.py` approve, reject, forget, retire, supersede and `atman.sh approve|reject` accept a signed `--desktop-approval <file>` checked against a key enrolled by the user-only `vajra_kb.py desktop-enroll` (ADR-12), with edited text re-gated and used approval ids kept in the HMAC chain; the guard blocks agents from naming `--desktop-approval` or `desktop-enroll` | Human approval from the app without a PTY | bhishma review, PoCs in H5 |
+| E10 (new, memory, post-MVP) | `vajra_kb.py` appends `applied` events (record ids, session id, time; never text) when `prime` or `search` returns records, plus a read-only `applied --json` | Rules view "last applied" and "what primed this session" | Read-mostly; tests |
+| E11 (new, memory, post-MVP) | Atman reads the app's control ledger (redirect intents, read-only) as a new signal source and proposes rules from repeated redirects | Learning trigger AC-7.4.3 | Proposals only |
+| E12 (new, memory, post-MVP) | Atman signal source: verify failures per criterion from the archived evidence (E7: criterion id, command, first error line, run), proposing a pitfall when the same normalized pattern appears in 2 or more runs | Learning trigger AC-7.4.2 | Proposals only |
 | E3 | New read-only subcommand `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`. It reuses `read_evidence()` (`scripts/vajra_tasks.py:502`), writes nothing and prints `{ok, green, reasons}`. | AC-4.3.3 "unverified evidence" without the app reading the key. Today only `close` and `vajra_kb.py add --source verified` verify evidence, and both mutate state. | Additive, no state change |
 | E4 (approved Q3, 2026-11-05) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Approved; until it ships, the app falls back to the transcript copy (ADR-4). |
 
@@ -251,7 +255,8 @@ sequenceDiagram
     proof shows "evidence not archived": verification and Re-run are refused, and the row keeps only the
     report text. The control service refuses
   re-run requests that arrive over MCP (NFR-SEC-9).
-- **Knowledge approve, reject and forget** (POS-3.1) show the exact `vajra_kb.py` command with a Copy
+- **Knowledge approve, reject and forget** (POS-3.1): with E9, through the owner-authenticated approval
+  of ADR-12. Without it, they show the exact `vajra_kb.py` command with a Copy
   button and the line "Run this in your own terminal" (kb.md: these are user-only, own-terminal commands).
   The app never runs it, types it or sends it into any PTY, including its own. A process that owns a PTY
   can pass a TTY check (SECURITY.md), so the only honest gate is the human's own terminal. The ledger view
@@ -869,6 +874,94 @@ template for the stock binary (no `--bare`, no `-p`, no SDK) and the child envir
 reports the billing source per session from the presence of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
 an `apiKeyHelper` (API key wins), and for Codex from `codex login status`. It never reads a credential value
 (NFR-SEC-16). Spawns are staggered by at least 2 s (AC-1.1.5).
+
+**ADR-12 Project memory is a view on the ledger and Atman, with one human-only approval path**
+(owner feature, 2026-11-05; E9 approved as Q14 with the conditions in AC-7.1.8). Decision: no new memory store. Inbox, rules, search and triggers read and
+mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
+- **Why not a PTY:** the TTY gate in `human_gate` (`scripts/vajra_kb.py:845`) can't tell the app from an
+  agent, because any process that owns a PTY passes it (SECURITY.md). So the app never satisfies it.
+- **The approval path (E9, owner approval Q14): signed approvals.** File location is not a boundary: any
+  same-user process can write a file, including a detached process or launch agent left by an older
+  unsandboxed session, which survives restarts and logins (PR review). So the engine trusts a signature,
+  not a path.
+  1. **Enrollment, once, human-only.** On first use the core creates a P-256 key in the Secure Enclave
+     (non-exportable, access control `userPresence`, so every signature needs Touch ID, a paired Apple
+     Watch or the login password; no reuse window). The user enrols its public key by running
+     `vajra_kb.py desktop-enroll <pubkey-file>` in their own terminal. That command sits behind the same
+     human gate and guard block as `approve`, shows the key's fingerprint and asks the user to compare it
+     with the one shown in the app, then appends an HMAC-chained `desktop_key` event. `desktop-revoke`
+     removes it the same way. The latest enrolled key is the only one E9 accepts.
+  2. **Each approval.** The human confirms in a native sheet. The core asks the Secure Enclave to sign the
+     approval payload, which triggers the owner authentication with the action, id and scope in the reason
+     string. The payload is canonical JSON: action, store (project id or `global`), record id, sha256 of
+     the pending record as read, final `applies` and paths, edited text if any, a random 128-bit approval
+     id, and the time. The core writes the payload plus its signature to
+     `~/Library/Application Support/VajraDesktop/approvals/<approval id>.json`.
+  3. The script bridge runs `vajra_kb.py approve <id> --desktop-approval <file>` (or `reject`, `forget`,
+     `retire`, `supersede`; `atman.sh approve|reject <id> --desktop-approval <file> [reason]` for routes,
+     where `reject` parses the flag before treating the rest as the reason (today `cmd_reject`,
+     `atman/atman.py:988`, takes every remaining argument as the reason and calls its own `human_gate`); for
+     a `kb-` id Atman passes the flag through `kb_call`). Atman skill and agent patch proposals stay
+     copy-command: the user applies them with `git apply` anyway.
+  4. E9 accepts the file only when all of these hold:
+     - the signature verifies against the enrolled key (`openssl dgst -sha256 -verify`, already a Vajra
+       dependency), and the action and store in the payload match the command;
+     - under the store lock: the approval id has not been used (the used ids are recorded in the HMAC-chained
+       ledger, not in a file a writer could delete), the pending record's bytes are read once, and their
+       sha256 matches;
+     - the approval is under 5 minutes old.
+     It then builds the record from those same bytes. For Edit then approve, the payload carries the edited
+     `title`, `body` and `paths` (all three always present, so an omitted field can't mean "keep the
+     original"): the engine replaces exactly those fields on the record built from the hashed bytes and
+     keeps everything else from it (id, type, source, provenance, created). The sha256 still binds the
+     approval to the original pending record, and the signature binds the edit. The write gate then runs on
+     the final record, edit included, not on the original bytes, so a refusal returns the gate's reason
+     and nothing is applied. It then applies the final record, records the approval id as used, and audits
+     (the audit stores the sha256 of both the original and the final record, never the text). The parser already refuses abbreviations (`allow_abbrev=False`,
+     `scripts/vajra_kb.py:1653`), so `--desk` can't stand in for the flag, and the guard matches the full
+     name. No other input to these commands changes, so the TTY path stays as it is for the CLI.
+- **Why it holds:** a forger needs a signature from a Secure Enclave key that signs only after owner
+  authentication, or the Vajra HMAC key to enrol its own key. Neither depends on which processes are
+  sandboxed or when they started. Agents can't run `desktop-enroll` (guard), and the app offers no MCP tool
+  or IPC command that produces a signature. A synthetic click reaches the sheet, but not the authentication.
+- **Residual risk:** a same-user process that can read the Vajra HMAC key can already forge any ledger event
+  directly, so E9 is no weaker than the existing kb model. Enrollment is the one step that goes through the
+  TTY gate, and the user compares fingerprints there.
+- **Options:** (a) keep copy-to-terminal only; (b) the app drives the TTY prompt (rejected: it defeats the
+  gate); (c) the app holds the HMAC key and mints user tokens (rejected: the app never reads the key);
+  (d) an owner-authenticated approval file trusted for its location (rejected after review: a surviving
+  same-user writer can forge it, and no timestamp test excludes one); (e) Secure Enclave signed approvals
+  checked against a human-enrolled key (chosen).
+- **Evidence against:** it adds a second way into a human gate, and an enrollment step, so it needs
+  bhishma's review and red-team PoCs (H5). Would change our mind: a PoC gets an approval accepted without
+  owner authentication. Then we fall back to (a).
+- **"Applied" stays data:** approved records are primed as `<untrusted-data>` exactly as today. The app adds
+  no instruction channel.
+
+**ADR-13 claude-mem: no integration in the MVP; a one-shot read-only import later** (owner request,
+2026-11-05). Evidence (GitHub API and docs.claude-mem.ai, 2026-11-05; not installed on the owner's machine):
+- **Project:** `thedotmack/claude-mem`, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
+  141 open issues).
+- **Storage:** SQLite at `~/.claude-mem/claude-mem.db` (WAL mode, sessions, observations and summaries,
+  FTS5) plus a Chroma vector store. Settings are in `~/.claude-mem/settings.json`.
+- **Capture:** six Claude Code hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
+  SessionEnd) capture what the agent does, compress it with a model, and inject context into later
+  sessions. A local Bun worker serves an HTTP API and a viewer, with loopback bind as its only protection
+  (its docs say so).
+- **Billing and privacy:** compression defaults to provider `claude` with
+  `CLAUDE_MEM_CLAUDE_AUTH_METHOD=subscription`, which conflicts with our billing rules (no SDK use of plan
+  credentials). The installer offers a hosted account (CMEM Pro, cloud sync) unless opted out. `<private>`
+  tags exclude content.
+- **Options:**
+  - (a) Integrate as a live read-only source. Rejected: it would tie us to an unauthenticated local HTTP
+    API and a fast-moving schema, and blur "what shaped this run".
+  - (b) A one-shot import into the ledger as `proposed` records. Chosen, post-MVP: the user starts it, it
+    reads the SQLite file directly (never the worker API), checks the schema version, and each imported
+    observation still passes the write gate and the human approval (US-7.1).
+  - (c) Ignore it.
+- **Coexistence:** if `vajra-doctor` finds claude-mem's hooks next to Vajra's, preflight warns that two
+  memories inject context (P15 context-cost risk). The app never edits either one's settings.
+- **Would change our mind:** claude-mem documents a stable export format; then (b) uses that instead.
 
 ## 7. Error handling
 

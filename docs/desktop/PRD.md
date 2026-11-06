@@ -112,6 +112,7 @@ campaigns, a task graph, a verified knowledge ledger) to put a product over it.
 | J4 Run view | Follow the phase timeline (route, recall, understand, plan, execute, verify, fix, deliver), the task graph with owners, and every acceptance criterion with pass/fail evidence | US-4.1 to US-4.3 |
 | J5 Approvals inbox | See every plan waiting for them (push, PR, deploy) and questions from the run; approve or reject | US-5.1 to US-5.3 |
 | J6 History and knowledge | Browse past campaigns and delivery reports; search the knowledge ledger | US-6.1, US-6.2 |
+| J7 Project memory | See what the system proposes to learn (rules, lessons, routes) with the evidence behind it; approve it with Touch ID, edit or reject it; see which rules apply where (which rules primed which session is post-MVP, E10); search everything locally. Built on the ledger and Atman, no second store (ADR-12). claude-mem: a one-shot import later (ADR-13) | US-7.1 to US-7.4 |
 
 Names: the app shows generic role names (Lead, Architect, Backend, Frontend, Verifier, Security, ...),
 not the engine's agent ids. The engine id is visible only in a worker's inspector. Mapping table:
@@ -387,6 +388,8 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 | 2026-11-05 | Q11 approved: E5 (steer nonce and one sentence in task briefs only), the wider E2, E4 and E6, all additive, each under bhishma or vidura review, with every existing guard test passing | owner, via orchestrator | tasks M1 |
 | 2026-11-05 | H0 rule: if memory is over budget at the end of M3, the owner chooses between a written budget change, a stack change or a delay | owner, via orchestrator | tasks H0 |
 | 2026-11-05 | Agent-adapter interface with Codex CLI; read-only Conductor import; billing hard rules | owner | ADR-10, ADR-11, section 11 |
+| 2026-11-05 | Q14 approved: E9, Touch ID approval in the app (LocalAuthentication plus a single-use approval file in the protected data dir, checked by the engine), under the conditions in AC-7.1.8; bhishma reviews, the stage D red team attacks it | owner, via orchestrator | ADR-12, E9, AC-7.1.4, AC-7.1.8 |
+| 2026-11-05 | New feature: project memory that learns with human approval (J7), built on the ledger and Atman; MVP is inbox, approve, rules view and search; claude-mem import later | owner, via orchestrator | US-7.1 to US-7.4, ADR-12, ADR-13 |
 | 2026-11-05 | Model routing: main components on Opus 5.5 (bhima, nakula, arjuna, bhishma); lighter items on Sonnet 5.5 (sepoys, abhimanyu); search and audit on Haiku; GPT 6.1 Sol reviews every PR | owner | tasks.md owners |
 
 Conductor import is backed by the clearest live demand in the research: P6 (tool shutdown or rug-pull, 13
@@ -412,3 +415,4 @@ assumption** is in effect and the spec is written to it. Changing one later is a
 | Q11 | Approve engine change E5 (steer nonce argument and one brief sentence in `vajra-deliver.js`) and the wider E2? | **Approved** (2026-11-05): E5 for task briefs only and the wider E2, both under Security review, with every existing guard test passing |
 | Q12 | Ask Anthropic in writing whether a local orchestrator spawning the user's own unmodified `claude` sessions under a consumer plan is permitted, and whether the Commercial Terms apply (section 11)? | **Deferred** by the owner (2026-11-05): don't ask for now; kept as a known launch risk (section 11) |
 | Q13 | Approve engine change E7 (archive each delivery's signed verification bundle and executed setup list into the campaign before cleanup; E3 `--archived`)? Without it the app can show past proofs only as report text | **Decided:** approved (see the decision log) |
+| Q14 | Approve engine change E9: a second, human-only way into the kb and Atman approval gates (owner-authenticated approval file in the protected app data dir, ADR-12)? | **Decided:** approved (see the decision log), with the conditions in AC-7.1.8 |
