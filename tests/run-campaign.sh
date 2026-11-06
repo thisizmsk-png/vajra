@@ -10,7 +10,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO/scripts/vajra-campaign.sh"
 BASH_BIN="${BASH:-bash}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-campaign-XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+trap 'pkill -f "sleep 7919" 2>/dev/null; rm -rf "$WORK"' EXIT
 export HOME="$WORK"
 C() { "$BASH_BIN" "$SCRIPT" "$@"; }
 CD="$HOME/.claude/vajra/campaigns"
@@ -246,12 +246,31 @@ jq --arg s "$(esha "$WK/late")" '.tasks += [{id: "r2.t1", status: "done", eviden
 A arc "$WK/late" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/late" ]; check "refused when the campaign state is invalid" $?
 
 # --- an option given without its value is refused, never a hang ---
-bounded() { # run C "$@" for at most 5 s; 0 if it exited non-zero in time
-  C "$@" >/dev/null 2>&1 & local p=$! i=0
-  while kill -0 "$p" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
-  if kill -0 "$p" 2>/dev/null; then kill "$p"; wait "$p" 2>/dev/null; return 1; fi
-  wait "$p"; [ $? -ne 0 ]
+# bounded_cmd SECONDS CMD...: run CMD directly in its own process group for at most SECONDS; 0 if it exited
+# non-zero in time, 1 if it was still running (the whole group is then killed, so nothing is orphaned).
+# CMD is run directly, never through a shell function: with a function, $! is the subshell, and killing it
+# leaves the real process running with ppid 1 (issue #16).
+bounded_cmd() {
+  local secs="$1" p i=0 rc; shift
+  set -m
+  "$@" >/dev/null 2>&1 & p=$!
+  set +m
+  while kill -0 "$p" 2>/dev/null && [ "$i" -lt $((secs * 10)) ]; do sleep 0.1; i=$((i+1)); done
+  if kill -0 "$p" 2>/dev/null; then
+    { kill -TERM -- "-$p"; sleep 0.2; kill -KILL -- "-$p"; wait "$p"; } 2>/dev/null
+    return 1
+  fi
+  wait "$p"; rc=$?; [ "$rc" -ne 0 ]
 }
+bounded() { bounded_cmd 5 "$BASH_BIN" "$SCRIPT" "$@"; }
+
+# a hung case is reaped: the stub and the child it spawned are both gone after bounded_cmd returns 1
+STUB="$WORK/hang.sh"; printf '#!/bin/bash\nsleep 7919 &\nwait\n' > "$STUB"
+bounded_cmd 1 "$BASH_BIN" "$STUB"; [ $? -eq 1 ]; check "bounded_cmd reports a timeout" $?
+sleep 0.3; ! pgrep -f "sleep 7919" >/dev/null; check "bounded_cmd reaps a hung case and its children" $?
+pkill -f "sleep 7919" 2>/dev/null
+bounded_cmd 1 "$BASH_BIN" -c 'exit 3'; check "bounded_cmd returns 0 for a fast non-zero exit" $?
+! bounded_cmd 1 "$BASH_BIN" -c 'exit 0'; check "bounded_cmd returns non-zero for a fast success" $?
 for args in "report --campaign" "report --bytes" "report --check" "close --status" "resume --from-checkpoint" "create nogoal-1 --goal" "fail --campaign"; do
   bounded $args; check "$args with no value exits with an error" $?
 done
