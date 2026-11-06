@@ -641,10 +641,14 @@ impl Service {
         let dir = self.session()?.dir.dir("queue");
         self.seq += 1;
         let name = format!("{:06}-{}.json", self.seq, a.id);
-        fsx::write_atomic(&dir, &name, entry.to_string().as_bytes())?;
+        let queued = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes())?;
         a.state = State::Queued;
         let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
-        self.record(&a, State::Queued, extra, now)?;
+        // The hook delivers whatever is in the queue, so an entry the ledger does not know must not stay.
+        if let Err(e) = self.record(&a, State::Queued, extra, now) {
+            let _ = std::fs::remove_file(&queued);
+            return Err(e);
+        }
         self.pending.insert(a.id.clone(), a.clone());
         self.log("control_queued", &[("seq", self.seq)]);
         Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
@@ -700,11 +704,15 @@ impl Service {
         }
         let path = s.dir.stop_path(&a.worker);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
+        let written = fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
         // A confirmed stop is the human's action from here on.
         a.actor = Actor::Human;
         a.state = State::Queued;
-        self.record(&a, State::Queued, json!({}), now)?;
+        // Same rule as a message: a stop the ledger cannot record is not enforced.
+        if let Err(e) = self.record(&a, State::Queued, json!({}), now) {
+            let _ = std::fs::remove_file(&written);
+            return Err(e);
+        }
         self.pending.insert(a.id.clone(), a.clone());
         Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
     }
@@ -926,3 +934,7 @@ pub fn spawn_watcher(svc: Arc<Mutex<Service>>, every: Duration) -> Watcher {
     });
     Watcher { stop, handle: Some(handle) }
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod tests;

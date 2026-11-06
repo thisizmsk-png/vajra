@@ -20,6 +20,12 @@ impl Ledger {
         Ok(Self { path: path.to_path_buf(), file: fsx::open_append(path)? })
     }
 
+    /// Test only: appends fail from now on (the file is reopened read-only).
+    #[cfg(test)]
+    pub(super) fn break_for_test(&mut self) {
+        self.file = File::open(&self.path).unwrap();
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
