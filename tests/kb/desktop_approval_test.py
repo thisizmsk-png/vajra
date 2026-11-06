@@ -226,6 +226,18 @@ rc, out, err = run(["approve", rid2, "--desktop-approval", f2], PROJ)
 check("swap after authentication: refused, still pending", rc == 3 and os.path.exists(pend2) and "review again" in err)
 check("swap: the refused approval is not burned", a2["id"] not in used_ids())
 
+# A pending file with a non-string title is refused cleanly (no traceback), and a vanished file does not break the listing.
+rid_t, store_t, _s = propose("Typed title target")
+pt = os.path.join(kb.KB_ROOT, store_t, "pending", rid_t + ".json")
+d = json.load(open(pt))
+d["title"] = 5
+json.dump(d, open(pt, "w"))
+ft_, _ = approval(K, "approve", store_t, rid_t, hashlib.sha256(open(pt, "rb").read()).hexdigest(), applies="on_topic")
+check("non-string title in a pending file: refused, not a crash", run(["approve", rid_t, "--desktop-approval", ft_], PROJ)[0] == 3)
+rid_v, _s2, _h = propose("Vanishing target")
+os.remove(os.path.join(kb.KB_ROOT, store_t, "pending", rid_v + ".json"))
+check("pending --json survives a file that vanished", run(["pending", "--json"], PROJ)[0] == 0)
+
 # race: four processes use one approval at once; exactly one wins.
 rid_c, store_c, sha_c = propose("Race target")
 fc, ac = approval(K, "approve", store_c, rid_c, sha_c, applies="on_topic")
@@ -301,6 +313,10 @@ check("retire with a stale record sha: refused", run(["retire", rid, "--desktop-
 fr, _ = approval(K, "retire", store, rid, r["sha256"])
 rc, _, err = run(["retire", rid, "--desktop-approval", fr], PROJ)
 check("desktop retire (%s)" % err, rc == 0 and show(rid)["status"] == "retired")
+rr = show(rid_r)
+fre, _ = approval(K, "retire", store, rid_r, rr["sha256"])
+check("retire --reason that the approval does not carry: refused",
+      run(["retire", rid_r, "--reason", "obsolete", "--desktop-approval", fre], PROJ)[0] == 3)
 r3 = show(rid3)
 fsu, _ = approval(K, "supersede", store, rid3, r3["sha256"], by=rid5)
 check("supersede bound to its new id",

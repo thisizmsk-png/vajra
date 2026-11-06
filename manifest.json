@@ -12,7 +12,7 @@
     "SECURITY.md": "4312f9d89a6e79b939c0e4b5ed021e717cc67f200dfa313093867f04ee04aeea",
     "SKILL.md": "a303fd1f3b5a145b492194fec1444b33e3399cd8d422b2db6869c64925b92f0a",
     "atman/ATMAN.md": "1a53789e485b812cd214d9d7f9dc888a0b22b687b5f749bb29f524e2ae19f865",
-    "atman/atman.py": "92aa55115b945158526c46604b04de08f180314e81344375a009a359f21b245f",
+    "atman/atman.py": "997bbdddb4a8b7d2878bf28d1b29ceee020d35c3343cae1b26b6f6a809a29e87",
     "atman/muscle-memory.md": "8816d3adc86b5eca23855c13e0fa6d100a5d82c7d1f1e9109fe16de4312b62f5",
     "atman/oracle.md": "dce5a11f0ad2fef2853ff8b483bbc29343617dfeebf72756d4b22c0432fc8651",
     "atman/practice-observer.md": "7a99ffce7afdbc3d55610770523240761c91afab83e3b4133348d0551124bab9",
@@ -144,7 +144,7 @@
     "docs/commands/doctor.md": "68fb1e56db4c5eaaa14fa54e6d30ae17e785d84f7de9836c78906d902c708720",
     "docs/commands/fleet.md": "2edf3a477beebfec092481fec10aed6ebbf367bbe09dc99bcd068345eedf2eb9",
     "docs/commands/help.md": "8f17ca40628cedf5b05be6884d5b6750fced7b8bfabd54663e508ea9890d63a6",
-    "docs/commands/kb.md": "0b11064f496610b9a67125e7805497c374c8cda52b60fcde1c0bf403115697d3",
+    "docs/commands/kb.md": "8251fc6509704c06206dbd276465971c708225feb32256a561b60db7f1dd248b",
     "docs/commands/plan.md": "d7439a8c946a38ea919d29138badd2fffd2e984cb983a9433ea531dbde936f7d",
     "docs/commands/ralph.md": "28e29085bd39e9fc60cf82ef3e500de2bfaafeedaf61412b3e564beaff54997c",
     "docs/commands/redteam.md": "504eadaeb7ca3c2aeb4a3c76f0678db622919bfefe966149d24ec6d60eb07802",
@@ -248,7 +248,7 @@
     "scripts/vajra-replay.sh": "1da671e19b550647a1c4d28eecbf1a4b41c08110af87553c69837cefbd76d359",
     "scripts/vajra-verify-work.sh": "e15d33e51d62704948e85d1b19148cdbae21bfdccfc54a991d605b6053606033",
     "scripts/vajra-worktree-clean.sh": "3b5a2a66c85a39353523bfd70b350f17ee9f1dba9cc780911e0912107ee72110",
-    "scripts/vajra_kb.py": "e4e69e30b801065bcc7e0587322aef4e8829191833dc23c9bf725740930dd921",
+    "scripts/vajra_kb.py": "d5b7c6c4725a9de3fc10415f56d45c8f4cee50115705142396fc0592ef37f767",
     "scripts/vajra_repomap.py": "6f8ba78a7e508e73f2c3bee84ce12af19745fd9cdf40ceb3192fc7554cc737c9",
     "scripts/vajra_route.py": "c2de7facfb029943055021d7939ff35f59a3a480dc419bebaa979c736ffc049e",
     "scripts/vajra_skills.py": "1166826a18c94c1a69c60323ff6f2a398a29624bf70076892a105e3857b4a597",
@@ -333,8 +333,8 @@
     "workflows/vajra-incident-response.js": "dd95c795eeb43884e87ac8961f79692457d8947c35c7d2bb144e5c23d1f4e94e",
     "workflows/vajra-sabha.js": "1321836bd9c80dd94d8907509f816b1ee0bfcf31d429c6b9e07006da21e04dcf",
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
-    "scripts/desktop_approval.py": "6a8d192605ce3e6fa4a859f02f4e03a70bc7ab8b16547c5d82bed7612e9f1cfe",
+    "scripts/desktop_approval.py": "501c383c390526daa9a41b957ae507dc50c4aaccc105c50c096cc901d78c9f45",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
-    "tests/kb/desktop_approval_test.py": "e9f34020243830ccc3ef75d27462f41502389ccbd51da877d37edd5f448353dd"
+    "tests/kb/desktop_approval_test.py": "6893bc88f5027a3125270e305e996effa7df7ac71eb71b23acbcc049d1d9fb0f"
   }
 }

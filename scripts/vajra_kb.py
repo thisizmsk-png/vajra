@@ -908,7 +908,7 @@ def desktop_state():
     return cur, used
 
 
-def desktop_take(a, store, op, rid, read, confirmations=False):
+def desktop_take(files, store, op, rid, read, confirmations=False, use=False):
     """Under the store lock: verify the signed approval file(s) against the enrolled key, then read the
     record once (read() returns (sha256, data)) and require the approved sha256. Nothing is marked used
     yet: the caller checks the rest, then calls desktop_use. Returns (approval, confirmations, data)."""
@@ -921,7 +921,7 @@ def desktop_take(a, store, op, rid, read, confirmations=False):
     if not key:
         refuse("no desktop key is enrolled (run vajra_kb.py desktop-enroll in your terminal)")
     try:
-        main, conf = da.verify_all(a.desktop_approval, key["pem"], op, store.pid, rid)
+        main, conf = da.verify_all(files, key["pem"], op, store.pid, rid)
     except da.Refused as e:
         refuse(str(e))
     if conf and not confirmations:
@@ -931,6 +931,8 @@ def desktop_take(a, store, op, rid, read, confirmations=False):
     sha, data = read()
     if sha != main["sha256"]:
         refuse("proposal changed; review again (it differs from what you approved)", approval=main["id"])
+    if use:
+        desktop_use(store, op, rid, main, conf)
     return main, conf, data
 
 
@@ -958,13 +960,12 @@ def desktop_audit(op, main, store, applies=None):
 
 
 def cmd_desktop_consume(a, out):
-    """For Atman: verify and use up a signed desktop approval for an Atman proposal (store "atman").
+    """For Atman: verify and use up a signed desktop approval for an Atman proposal. Bound to store "global".
     Atman computed the proposal's sha256 from the bytes it then acts on."""
     g = Store("global")
     with Lock(g.lock_path):
-        a.desktop_approval = a.desktop_approval or []
-        main, conf, _ = desktop_take(a, g, a.action, a.record, lambda: (a.sha256, None))
-        desktop_use(g, a.action, a.record, main, conf)
+        # Atman read the proposal and computed the sha256 itself; the kb only checks it equals the signed one.
+        main, conf, _ = desktop_take(a.desktop_approval or [], g, a.action, a.record, lambda: (a.sha256, None), use=True)
     desktop_audit(a.action, main, g)
     out.emit({"result": "consumed", "approval": main["id"]}, "approval %s used" % main["id"])
     return 0
@@ -1429,7 +1430,7 @@ def user_record_gate(store, rid, op, token):
 
 
 def _mutate(rid, op, check, extra=None, out=None, msg=None, token=None, desk=None):
-    """desk: the parsed args when a desktop approval stands in for the user gate (E9)."""
+    """desk: the approval files when a desktop approval stands in for the user gate (E9)."""
     store = Store()
     if desk is None:
         user_record_gate(store, rid, op, token)
@@ -1443,9 +1444,10 @@ def _mutate(rid, op, check, extra=None, out=None, msg=None, token=None, desk=Non
             raise KbError("%s was forgotten" % rid)
         if desk is not None:
             main, _c, _r = desktop_take(desk, store, op, rid, lambda: (record_sha(r), r))
-            if main.get("by") != (extra or {}).get("by"):
-                store.audit("refused", op=op, id=rid, reason="approval names another record", approval=main["id"])
-                raise Refused("approval %s is for superseding by %s" % (main["id"], main.get("by")))
+            # The signature binds every extra the command carries (superseded-by id, retire reason).
+            if any(main.get(k) != v for k, v in (extra or {}).items()):
+                store.audit("refused", op=op, id=rid, reason="approval differs from the command", approval=main["id"])
+                raise Refused("approval %s does not carry the same %s as the command" % (main["id"], "/".join(extra)))
         check(store, r)
         if main:
             desktop_use(store, op, rid, main, {})
@@ -1480,7 +1482,7 @@ def cmd_supersede(a, out):
                 raise KbError("supersede would create a cycle")
             cur = store.get(cur["superseded_by"])
     return _mutate(old, "supersede", check, {"by": new}, out, "superseded %s by %s" % (old, new),
-                   a.user_token, a if a.desktop_approval else None)
+                   a.user_token, a.desktop_approval)
 
 
 def cmd_retire(a, out):
@@ -1496,7 +1498,7 @@ def cmd_retire(a, out):
             raise Refused("retire reason refused by the write gate")
         extra["reason"] = reason
     return _mutate(rid, "retire", check, extra, out, "retired %s" % rid, a.user_token,
-                   a if a.desktop_approval else None)
+                   a.desktop_approval)
 
 
 def cmd_restore(a, out):
@@ -1523,8 +1525,14 @@ def cmd_pending(a, out):
         for p in s.pending():
             rows.append((s.pid, p))
     if out.as_json:
-        out.emit({"pending": [dict(public(p), project=pid, sha256=pending_bytes(Store(pid), p["id"])[0])
-                              for pid, p in rows]}, None)
+        listed = []
+        for s in stores:
+            for p in s.pending():
+                try:
+                    listed.append(dict(public(p), project=s.pid, sha256=pending_bytes(s, p["id"])[0]))
+                except Refused:
+                    continue  # vanished or replaced by a link since the listing: not offered for approval
+        out.emit({"pending": listed}, None)
         return 0
     if not rows:
         print("No pending kb records.")
@@ -1546,10 +1554,14 @@ def approved_record(store, p, rid, applies, edit=None):
     scope = dict(p.get("scope") or {})
     if edit:
         scope["paths"] = edit["paths"]
-    reason = gate_check([title, body, " ".join(scope.get("paths") or []), " ".join(p.get("tags") or [])])
-    if reason or p.get("type") not in TYPES or not isinstance(title, str) or not isinstance(body, str) \
+    paths, tags = scope.get("paths") or [], p.get("tags") or []
+    texts = [title, body] + [x for x in paths] + [x for x in tags]
+    # Pending files are not signed: check every type before the gate joins or scans the text.
+    well_typed = all(isinstance(x, str) for x in texts) and isinstance(paths, list) and isinstance(tags, list)
+    reason = gate_check([title, body, " ".join(paths), " ".join(tags)]) if well_typed else None
+    if not well_typed or reason or p.get("type") not in TYPES \
             or not title or len(title) > MAX_TITLE or len(body) > MAX_BODY \
-            or len(scope.get("paths") or []) > MAX_PATHS or any(len(x) > MAX_PATH_LEN for x in scope.get("paths") or []):
+            or len(paths) > MAX_PATHS or any(len(x) > MAX_PATH_LEN for x in paths):
         store.audit("refused", op="approve", id=rid, reason=reason or "malformed record",
                     sha256=sha256_hex(canon(p)))
         raise Refused("pending record failed the write gate: %s" % (reason or "malformed"))
@@ -1571,7 +1583,7 @@ def _approve_desktop(a, out, rid):
     if not p or not pend:
         raise KbError("no pending kb record %s" % rid)
     with Lock(store.lock_path):
-        main, conf, raw = desktop_take(a, store, "approve", rid, lambda: pending_bytes(store, rid), True)
+        main, conf, raw = desktop_take(a.desktop_approval, store, "approve", rid, lambda: pending_bytes(store, rid), True)
 
         def refuse(why):
             store.audit("refused", op="approve", id=rid, reason=why, approval=main["id"])
@@ -1644,8 +1656,8 @@ def cmd_reject(a, out):
         return 3
     with Lock(store.lock_path):
         if a.desktop_approval:
-            main, _c, _raw = desktop_take(a, store, "reject", rid, lambda: pending_bytes(store, rid))
-            desktop_use(store, "reject", rid, main, {})
+            main, _c, _raw = desktop_take(a.desktop_approval, store, "reject", rid,
+                                          lambda: pending_bytes(store, rid), use=True)
         rej_dir = os.path.join(store.pending_dir, "rejected")
         ensure_dir(rej_dir)
         os.replace(store.pending_path(rid), os.path.join(rej_dir, rid + ".json"))
@@ -1676,9 +1688,8 @@ def cmd_forget(a, out):
         if a.desktop_approval:
             store._cache = None
             r = store.get(rid)
-            main, _c, _d = desktop_take(a, store, "forget", rid,
-                                        lambda: (record_sha(r), r) if r else pending_bytes(store, rid))
-            desktop_use(store, "forget", rid, main, {})
+            main, _c, _d = desktop_take(a.desktop_approval, store, "forget", rid,
+                                        lambda: (record_sha(r), r) if r else pending_bytes(store, rid), use=True)
         if os.path.isfile(pend_path):
             os.remove(pend_path)
         if r:
@@ -1897,6 +1908,11 @@ class Parser(argparse.ArgumentParser):
         sys.exit(2)
 
 
+def desk_arg(s):
+    s.add_argument("--desktop-approval", action="append", metavar="FILE",
+                   help="E9: an approval the Vajra Desktop app signed after owner authentication")
+
+
 def build_parser():
     top = Parser(add_help=False)
     top.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1944,8 +1960,7 @@ def build_parser():
     s.add_argument("old")
     s.add_argument("new")
     s.add_argument("--user-token", help="needed (or a TTY) when <old> is a user record")
-    s.add_argument("--desktop-approval", action="append", metavar="FILE",
-                   help="E9: an approval the Vajra Desktop app wrote after owner authentication")
+    desk_arg(s)
     s.set_defaults(fn=cmd_supersede)
 
     for name, fn in (("retire", cmd_retire), ("restore", cmd_restore)):
@@ -1954,26 +1969,22 @@ def build_parser():
         s.add_argument("--user-token", help="needed (or a TTY) for a user record")
         if name == "retire":
             s.add_argument("--reason")
-            s.add_argument("--desktop-approval", action="append", metavar="FILE",
-                           help="E9: an approval the Vajra Desktop app wrote after owner authentication")
+            desk_arg(s)
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("approve", parents=[common], help="human only")
     s.add_argument("id")
     s.add_argument("--always", action="store_true", help="promote to applies=always")
-    s.add_argument("--desktop-approval", action="append", metavar="FILE",
-                   help="E9: an approval the Vajra Desktop app wrote after owner authentication")
+    desk_arg(s)
     s.set_defaults(fn=cmd_approve)
     s = sub.add_parser("reject", parents=[common], help="human only")
     s.add_argument("id")
     s.add_argument("reason", nargs="*")
-    s.add_argument("--desktop-approval", action="append", metavar="FILE",
-                   help="E9: an approval the Vajra Desktop app wrote after owner authentication")
+    desk_arg(s)
     s.set_defaults(fn=cmd_reject)
     s = sub.add_parser("forget", parents=[common], help="human only: hard delete with a tombstone")
     s.add_argument("id")
-    s.add_argument("--desktop-approval", action="append", metavar="FILE",
-                   help="E9: an approval the Vajra Desktop app wrote after owner authentication")
+    desk_arg(s)
     s.set_defaults(fn=cmd_forget)
 
     s = sub.add_parser("desktop-enroll", parents=[common], help="human only: enroll the Vajra Desktop signing key")

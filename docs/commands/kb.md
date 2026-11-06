@@ -161,3 +161,7 @@ store, record and the sha256 of the bytes it showed, expires after 5 minutes and
 HMAC-chained events in the global store). `atman.sh approve|reject <id> --desktop-approval <file>` takes the same
 file; only route proposals can be approved this way. Agents never run any of this: the guard blocks
 `--desktop-approval`, `desktop-enroll`, `desktop-revoke` and `desktop-consume`.
+
+`show --json` and `pending --json` name a `sha256`: for an active record it is the sha256 of its canonical
+public JSON (sorted keys, compact), for a pending record the sha256 of the pending file's raw bytes. An
+approval binds whichever applies. Atman route proposals bind `sha256(canon(proposal))` under store `global`.

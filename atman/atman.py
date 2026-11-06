@@ -933,7 +933,10 @@ def split_desk(args):
     """(args without the desktop flags, [approval files]). Exact flag name only; no abbreviations."""
     rest, files, i = [], [], 0
     while i < len(args):
-        if args[i] == DESK and i + 1 < len(args):
+        if args[i] == DESK:
+            if i + 1 >= len(args):
+                print("atman: %s needs a file" % DESK, file=sys.stderr)
+                raise SystemExit(2)
             files.append(args[i + 1])
             i += 2
         else:
@@ -952,9 +955,9 @@ def desk_gate(action, p, files):
 
 
 def cmd_approve(args):
+    if args and KB_ID_RE.match(args[0]):
+        return kb_call(["approve"] + list(args))[0]
     args, files = split_desk(args)
-    if len(args) == 1 and KB_ID_RE.match(args[0]):
-        return kb_call(["approve", args[0]] + [x for f in files for x in (DESK, f)])[0]
     if len(args) != 1 or not ID_RE.match(args[0]):
         print("usage: atman.sh approve <proposal-id> [%s FILE]" % DESK, file=sys.stderr)
         return 2

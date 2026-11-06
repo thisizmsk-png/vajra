@@ -153,6 +153,12 @@ def audit(action, a, sha256, store, applies=None):
     line = "%s desktop-approval action=%s record=%s sha256=%s store=%s%s approval=%s\n" % (
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), action, a.get("record"), sha256, store,
         (" applies=%s" % applies) if applies else "", a["id"])
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "a") as f:
-        f.write(line)
+    # Runs after the change is committed: a failure here must not look like a failed approval.
+    try:
+        os.makedirs(os.path.dirname(path), 0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line)
+    except OSError as e:
+        import sys
+        sys.stderr.write("vajra_kb: approved, but audit.log could not be written: %s\n" % (e.strerror or e))
