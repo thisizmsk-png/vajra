@@ -926,11 +926,37 @@ def kb_pending():
         return []
 
 
+DESK = "--desktop-approval"
+
+
+def split_desk(args):
+    """(args without the desktop flags, [approval files]). Exact flag name only; no abbreviations."""
+    rest, files, i = [], [], 0
+    while i < len(args):
+        if args[i] == DESK and i + 1 < len(args):
+            files.append(args[i + 1])
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    return rest, files
+
+
+def desk_gate(action, p, files):
+    """E9: stand in for human_gate with Vajra Desktop's signed approval. The kb checks the signature, the
+    5 minute age, the action/record binding and the sha256 of this proposal, and marks it used."""
+    cmd = ["desktop-consume", "--action", action, "--record", p["id"], "--sha256", sha256_hex(canon(p))]
+    for f in files:
+        cmd += [DESK, f]
+    return kb_call(cmd)[0] == 0
+
+
 def cmd_approve(args):
+    args, files = split_desk(args)
     if len(args) == 1 and KB_ID_RE.match(args[0]):
-        return kb_call(["approve", args[0]])[0]
+        return kb_call(["approve", args[0]] + [x for f in files for x in (DESK, f)])[0]
     if len(args) != 1 or not ID_RE.match(args[0]):
-        print("usage: atman.sh approve <proposal-id>", file=sys.stderr)
+        print("usage: atman.sh approve <proposal-id> [%s FILE]" % DESK, file=sys.stderr)
         return 2
     props = load_proposals()
     p = props.get(args[0])
@@ -941,7 +967,14 @@ def cmd_approve(args):
         print("atman: %s is already %s" % (p["id"], p.get("status")), file=sys.stderr)
         return 1
     print(describe(p))
-    if not human_gate("approve", p["id"]):
+    if files:
+        if p["kind"] != "route":
+            print("atman: only route proposals can be approved from Vajra Desktop; apply a patch yourself",
+                  file=sys.stderr)
+            return 3
+        if not desk_gate("approve", p, files):
+            return 3
+    elif not human_gate("approve", p["id"]):
         return 3
     extra = {}
     if p["kind"] == "route":
@@ -988,6 +1021,7 @@ def cmd_approve(args):
 def cmd_reject(args):
     if args and KB_ID_RE.match(args[0]):
         return kb_call(["reject"] + list(args))[0]
+    args, files = split_desk(args)
     if len(args) < 1 or not ID_RE.match(args[0]):
         print("usage: atman.sh reject <proposal-id> [reason]", file=sys.stderr)
         return 2
@@ -995,7 +1029,10 @@ def cmd_reject(args):
     if not p or p.get("status") != "pending":
         print("atman: no pending proposal %s" % args[0], file=sys.stderr)
         return 1
-    if not human_gate("reject", p["id"]):
+    if files:
+        if not desk_gate("reject", p, files):
+            return 3
+    elif not human_gate("reject", p["id"]):
         return 3
     p["status"] = "rejected"
     p["rejected_at"] = now_iso()

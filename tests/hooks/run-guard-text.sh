@@ -211,6 +211,16 @@ bash_case BLOCK "kb add --source user from a tool call"   "$KBPY add --type fact
 bash_case BLOCK "kb add --source=user"                    "$KBPY add --type fact --title x --body y --source=user"
 bash_case BLOCK "kb add --source \"user\" (quoted)"       "$KBPY add --title x --source \"user\" --body y"
 bash_case BLOCK "kb test override env var"                "VAJRA_ATMAN_ASSUME_HUMAN=1 $KBPY approve kb-abc123"
+# E9: an agent may not enrol a desktop key or name a desktop approval, in any spelling of the command.
+bash_case BLOCK "kb desktop-enroll"                       "$KBPY desktop-enroll /tmp/k.pem"
+bash_case BLOCK "kb desktop-revoke"                       "$KBPY desktop-revoke"
+bash_case BLOCK "kb desktop-consume"                      "$KBPY desktop-consume --action approve --record x --sha256 y"
+bash_case BLOCK "kb retire with --desktop-approval"       "$KBPY retire kb-abc123 --desktop-approval /tmp/a.json"
+bash_case BLOCK "atman approve with --desktop-approval"   "bash ~/.claude/skills/vajra/scripts/atman.sh reject kb-abc123 --desktop-approval /tmp/a.json"
+bash_case BLOCK "--desktop-approval in a heredoc body"    "cat > run.sh <<'EOF'
+python3 x.py supersede a b --desktop-approval f
+EOF
+bash run.sh"
 bash_case BLOCK "test override set inside a heredoc body" "cat > run.sh <<'EOF'
 export VAJRA_ATMAN_ASSUME_HUMAN=1
 EOF
