@@ -369,6 +369,150 @@ file_case ALLOW "Grep project"             Grep "$PROJ"
 raw_case  ALLOW "unrelated tool"           '{"tool_name":"WebSearch","tool_input":{"query":"rm -rf /"},"cwd":"/tmp"}'
 raw_case  ALLOW "description not scanned"  '{"tool_name":"Bash","tool_input":{"command":"ls","description":"rm -rf / | sh"},"cwd":"/tmp"}'
 
+# --- E2: Vajra Desktop control dir (path has a space) ------------------------
+CTRL="$H/Library/Application Support/VajraDesktop/control"
+mkdir -p "$CTRL" "$H/Library/Application Support/Other"
+echo '{}' > "$CTRL/cmd.json"
+ln -s "$CTRL" "$PROJ/ctrllink"
+file_case BLOCK "E2 Write control file"      Write "$CTRL/cmd.json"
+file_case BLOCK "E2 Edit control file"       Edit "$CTRL/cmd.json"
+file_case BLOCK "E2 Write new control file"  Write "$CTRL/new.json"
+file_case BLOCK "E2 Write tilde path"        Write "~/Library/Application Support/VajraDesktop/control/x.json"
+file_case BLOCK "E2 Write case variant"      Write "$H/library/APPLICATION SUPPORT/vajradesktop/Control/x.json"
+file_case BLOCK "E2 Write via symlink"       Write "$PROJ/ctrllink/x.json"
+file_case BLOCK "E2 Write relative .."       Write "../Library/Application Support/VajraDesktop/control/x.json"
+bash_case BLOCK "E2 redirect quoted"         "echo x > \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 redirect escaped space"  'echo x > ~/Library/Application\ Support/VajraDesktop/control/cmd.json'
+bash_case BLOCK "E2 append redirect"         "echo x >> '$CTRL/cmd.json'"
+bash_case BLOCK "E2 redirect case variant"   "echo x > \"$H/LIBRARY/application support/VAJRADESKTOP/control/cmd.json\""
+bash_case BLOCK "E2 redirect via symlink"    'echo x > ctrllink/cmd.json'
+bash_case BLOCK "E2 mv into control"         "mv /tmp/evil.json \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 mv out of control"       "mv \"$CTRL/cmd.json\" /tmp/x.json"
+bash_case BLOCK "E2 mv via symlink"          'mv out/x.json ctrllink/'
+bash_case BLOCK "E2 mv case variant"         "mv /tmp/e.json \"$H/Library/Application Support/vajradesktop/CONTROL/\""
+bash_case BLOCK "E2 rm control file"         "rm \"$CTRL/cmd.json\""
+bash_case BLOCK "E2 rm -rf control dir"      "rm -rf \"$CTRL\""
+bash_case BLOCK "E2 rm escaped space"        'rm -f ~/Library/Application\ Support/VajraDesktop/control/cmd.json'
+bash_case BLOCK "E2 rm case variant"         "rm '$H/library/application support/VajraDesktop/control/cmd.json'"
+bash_case BLOCK "E2 rm via symlink"          'rm ctrllink/cmd.json'
+bash_case BLOCK "E2 rm -rf parent"           "rm -rf \"$H/Library/Application Support/VajraDesktop\""
+bash_case BLOCK "E2 cp into control"         "cp /tmp/evil.json \"$CTRL/\""
+bash_case BLOCK "E2 cd control && rm"        "cd \"$CTRL\" && rm cmd.json"
+file_case ALLOW "E2 Read control file"       Read "$CTRL/cmd.json"
+file_case ALLOW "E2 Write sibling app dir"   Write "$H/Library/Application Support/Other/x.json"
+bash_case ALLOW "E2 cat control file"        "cat \"$CTRL/cmd.json\""
+bash_case ALLOW "E2 ls sibling app dir"      "ls \"$H/Library/Application Support/Other\""
+bash_case ALLOW "E2 cp control file out"     "cp \"$CTRL/cmd.json\" out/cmd.json"
+bash_case BLOCK "E2 rm in long command"      "echo $(printf 'a%.0s' $(seq 1 1100)) ; rm \"$CTRL/cmd.json\""
+raw_case  ALLOW "E2 mcp list_workers"        "$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"mcp__vajra-desktop__list_workers",tool_input:{}}')"
+grep -q ' ALLOW mcp__vajra-desktop__list_workers$' "$VS/audit.log" 2>/dev/null; judge ALLOW "E2 mcp list_workers audited ALLOW" $?
+
+# --- E2 read blocks for workers (orchestrator-approved, steering-threat-model.md) ---
+# A worker (payload carries agent_id) may not read the control dir (the steering nonce
+# lives there) or Claude Code transcripts (its brief, with the nonce, is in them). The
+# main session and the Lead chat session carry no agent_id and keep reading; the
+# desktop app reads files itself, not through tool calls, so the guard never sees it.
+worker() { # expect desc json-without-agent_id
+  local rc; printf '%s' "$(jq -c '. + {agent_id:"a1b2c3", agent_type:"general-purpose"}' <<<"$3")" | bash "$HOOK" >/dev/null 2>&1; rc=$?
+  judge "$1" "$2" "$rc"
+}
+TR="$H/.claude/projects/-Users-dev-repo"; mkdir -p "$TR/sid/subagents"
+echo '{}' > "$TR/sid.jsonl"; echo '{}' > "$TR/sid/subagents/agent-a1.jsonl"
+mkdir -p "$CTRL/sess-1234abcd"; echo 0123456789abcdef0123456789abcdef > "$CTRL/sess-1234abcd/nonce"
+ln -sf "$CTRL/sess-1234abcd/nonce" "$PROJ/noncelink"
+fj() { jq -nc --arg t "$1" --arg p "$2" --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:$t,tool_input:{file_path:$p,path:$p,pattern:"."}}'; }
+bj() { jq -nc --arg c "$1" --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}'; }
+worker BLOCK "worker Read nonce"                "$(fj Read "$CTRL/sess-1234abcd/nonce")"
+worker BLOCK "worker Read nonce via symlink"    "$(fj Read "$PROJ/noncelink")"
+worker BLOCK "worker Read nonce, case variant"  "$(fj Read "$H/library/application support/vajradesktop/control/sess-1234abcd/nonce")"
+worker BLOCK "worker Grep control dir"          "$(fj Grep "$CTRL")"
+worker BLOCK "worker Grep over Application Support" "$(fj Grep "$H/Library/Application Support")"
+worker BLOCK "worker Glob control dir"          "$(fj Glob "$CTRL")"
+worker BLOCK "worker cat nonce"                 "$(bj "cat \"$CTRL/sess-1234abcd/nonce\"")"
+worker BLOCK "worker cat nonce, escaped space"  "$(bj 'cat ~/Library/Application\ Support/VajraDesktop/control/sess-1234abcd/nonce')"
+worker BLOCK "worker python open nonce"         "$(bj "python3 -c 'print(open(\"$CTRL/sess-1234abcd/nonce\").read())'")"
+worker BLOCK "worker Read run transcript"       "$(fj Read "$TR/sid.jsonl")"
+worker BLOCK "worker Read subagent transcript"  "$(fj Read "$TR/sid/subagents/agent-a1.jsonl")"
+worker BLOCK "worker Grep projects dir"         "$(fj Grep "$H/.claude/projects")"
+worker BLOCK "worker tail transcript"           "$(bj "tail -n 50 \"$TR/sid.jsonl\"")"
+worker BLOCK "worker grep -r projects"          "$(bj "grep -r nonce ~/.claude/projects")"
+worker ALLOW "worker Read own project file"     "$(fj Read "$PROJ/out")"
+worker ALLOW "worker Read sibling app dir"      "$(fj Read "$H/Library/Application Support/Other/x.json")"
+worker ALLOW "worker cat a project file"        "$(bj "cat README.md")"
+raw_case ALLOW "main session Read transcript"   "$(fj Read "$TR/sid.jsonl")"
+raw_case ALLOW "main session cat transcript"    "$(bj "tail -n 5 \"$TR/sid.jsonl\"")"
+raw_case ALLOW "main session Read control file" "$(fj Read "$CTRL/cmd.json")"
+raw_case ALLOW "Lead (no agent_id) lists ledger dir" "$(bj "ls \"$CTRL\"")"
+# bhishma gate findings on this diff (F-A..F-D)
+WT="$H/wt-copy"; mkdir -p "$WT/scripts"
+for s in generate-manifest.sh install.sh install-skills.sh; do echo "#" > "$WT/scripts/$s"; done
+mkdir -p "$CTRL/sess-1234abcd/queue"
+bash_case BLOCK "F-A cd into queue, plain-word redirect"  "cd \"$CTRL/sess-1234abcd/queue\" && printf x > q.json"
+bash_case BLOCK "F-A cd into queue, escaped space"        'cd ~/Library/Application\ Support/VajraDesktop/control/sess-1234abcd/queue && echo x > q.json'
+bash_case BLOCK "F-A cwd is the queue dir"                "echo x > q.json" "$CTRL/sess-1234abcd/queue"
+bash_case BLOCK "F-A cd parent then mv plain word"        "cd \"$H/Library/Application Support/VajraDesktop\" && rm -rf control"
+worker BLOCK "F-A worker cd control && cat nonce"         "$(bj "cd \"$CTRL/sess-1234abcd\" && cat nonce")"
+# Sol P1 (r4485195331): env -C/--chdir moves the cwd for the command it runs.
+worker BLOCK "Sol: env -C ~/.claude cat transcript"       "$(bj 'env -C "$HOME/.claude" cat projects/-Users-dev-repo/sid.jsonl')"
+worker BLOCK "Sol: env -C AppSupport cat control nonce"   "$(bj 'env -C "$HOME/Library/Application Support/VajraDesktop" cat control/sess-1234abcd/nonce')"
+worker BLOCK "env --chdir=DIR cat nonce"                  "$(bj "env --chdir=$CTRL/sess-1234abcd cat nonce")"
+worker BLOCK "env -CDIR tail transcript"                  "$(bj "env -C$TR tail sid.jsonl")"
+worker BLOCK "/usr/bin/env -i -C dir cat nonce"           "$(bj "/usr/bin/env -i -C $CTRL/sess-1234abcd cat nonce")"
+worker ALLOW "env -C does not carry into the next segment" "$(bj "env -C $PROJ true ; cat README.md")"
+worker ALLOW "env -C into the project still reads"        "$(bj "env -C $PROJ cat README.md")"
+bash_case BLOCK "F-B bash -c install.sh"                  "bash -c \"bash scripts/install.sh --unregister-hooks\"" "$WT"
+bash_case BLOCK "F-B env -i bash install.sh"              "env -i bash scripts/install.sh --unregister-hooks" "$WT"
+chmod +x "$WT/scripts/install.sh"
+bash_case BLOCK "Sol: /usr/bin/env ./scripts/install.sh"   "/usr/bin/env ./scripts/install.sh --unregister-hooks" "$WT"
+bash_case BLOCK "Sol: env -i HOME= PATH= ./install.sh"     "env -i HOME=\"\$HOME\" PATH=\"\$PATH\" ./scripts/install.sh --unregister-hooks" "$WT"
+bash_case BLOCK "direct ./scripts/install.sh"              "./scripts/install.sh --unregister-hooks" "$WT"
+bash_case BLOCK "/usr/bin/nohup ./scripts/install.sh"      "/usr/bin/nohup ./scripts/install.sh" "$WT"
+bash_case BLOCK "/usr/bin/env rm -rf ~"                    "/usr/bin/env rm -rf ~"
+bash_case ALLOW "/usr/bin/env ls still fine"               "/usr/bin/env ls"
+bash_case BLOCK "env -u X -C . ./scripts/install.sh"       "env -u X -C . ./scripts/install.sh" "$WT"
+bash_case BLOCK "env -S './scripts/install.sh --x'"        "env -S './scripts/install.sh --unregister-hooks'" "$WT"
+bash_case BLOCK "/usr/bin/env -i bash generate-manifest"   "/usr/bin/env -i bash scripts/generate-manifest.sh" "$WT"
+bash_case ALLOW "env -i cat install.sh is a read"          "env -i cat scripts/install.sh" "$WT"
+# The operator-only check matches a glob against the script names in memory: no cwd, ~ form,
+# shell or -c string changes the answer.
+bash_case BLOCK "glob bash scripts/inst*.sh"               "bash scripts/inst*.sh --unregister-hooks" "$WT"
+bash_case BLOCK "glob bash scripts/i?stall.sh"             "bash scripts/i?stall.sh" "$WT"
+bash_case BLOCK "glob in cd scripts && bash gen*"          "cd scripts && bash gen*" "$WT"
+bash_case BLOCK "glob ~/ path to inst[a]ll.sh"             "bash ~/.claude/skills/vajra/scripts/inst[a]ll.sh"
+bash_case BLOCK "glob absolute path to inst*.sh"           "bash $SKILL/scripts/inst*.sh"
+bash_case ALLOW "glob that names no operator script"       "bash scripts/nomatch*.sh" "$WT"
+bash_case BLOCK "glob inside bash -c after cd"             "bash -c \"cd scripts && bash inst*.sh\"" "$WT"
+bash_case BLOCK "glob inside sh -c after cd ;"             "sh -c \"cd scripts; sh gen*\"" "$WT"
+bash_case BLOCK "zsh **/ glob"                             "bash ~/**/inst*.sh"
+bash_case BLOCK "zsh group glob inst(a)ll.sh"              "bash scripts/inst(a)ll.sh" "$WT"
+bash_case BLOCK "~+ glob"                                  "bash ~+/scripts/inst*.sh" "$WT"
+bash_case BLOCK "~user glob"                               "bash ~nobody/scripts/inst*.sh" "$WT"
+bash_case BLOCK "brace ins{t,}all.sh"                      "bash scripts/ins{t,}all.sh" "$WT"
+bash_case BLOCK "brace {install,x}.sh"                     "bash scripts/{install,x}.sh" "$WT"
+bash_case BLOCK "case-insensitive Install.sh"              "bash scripts/Install.sh" "$WT"
+bash_case BLOCK "source install.sh"                        "source scripts/install.sh" "$WT"
+bash_case BLOCK ". install.sh"                             ". scripts/install.sh" "$WT"
+bash_case ALLOW "bash -c ls * is not a script name"        "bash -c \"ls *\"" "$WT"
+bash_case ALLOW "bash *.sh glob has no name letters"       "bash -c \"shellcheck *.sh\"" "$WT"
+bash_case ALLOW "find . -name install.sh is not run"       "find . -name install.sh" "$WT"
+bash_case ALLOW "brace glob with no operator name"         "mkdir -p src/{a,b}" "$WT"
+bash_case ALLOW "subshell and \$(...) are not groups"      "(cd src && ls) ; echo \$(date)" "$WT"
+bash_case BLOCK "F-B nohup sh generate-manifest"         "nohup sh scripts/generate-manifest.sh" "$WT"
+worker BLOCK "F-C worker grep -r parent of control"       "$(bj "grep -r . \"$H/Library/Application Support/VajraDesktop\"")"
+worker BLOCK "F-C worker find -exec cat from Library"     "$(bj "find ~/Library -name nonce -exec cat {} +")"
+worker BLOCK "F-C worker grep -r from ~/.claude"          "$(bj "grep -r nonce ~/.claude")"
+worker BLOCK "F-D worker names control dir, odd spacing"  "$(bj 'cat ~/Library/Application${IFS}Support/VajraDesktop/control/sess-1234abcd/nonce')"
+bash_case BLOCK "F-D write via odd spacing"               'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/control/q.json'
+# GPT 6.1 Sol review threads on PR #3 (exact reproductions)
+bash_case BLOCK "Sol: cd control/<sid>; printf x > nonce"   "cd \"$CTRL/sess-1234abcd\"; printf x > nonce"
+bash_case BLOCK "Sol: same via space-normalized alias cwd"  "printf x > nonce" "$CTRL/sess-1234abcd"
+worker BLOCK "Sol: worker cd control/<sid>; cat nonce"      "$(bj "cd \"$CTRL/sess-1234abcd\"; cat nonce")"
+worker BLOCK "Sol: worker grep -R . parent of control root" "$(bj "grep -R . \"$H/Library/Application Support/VajraDesktop\"")"
+worker BLOCK "Sol: worker cp -r parent to tmp"              "$(bj "cp -r \"$H/Library/Application Support/VajraDesktop\" /tmp/x")"
+worker BLOCK "Sol: worker grep -r with cwd above control"   "$(bj "cd \"$H/Library/Application Support\" && grep -r nonce")"
+raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
+worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"
@@ -389,6 +533,26 @@ bash_case BLOCK "skill upstream in chain"  "ls && python3 scripts/vajra_skills.p
 
 # --- Audit log -------------------------------------------------------------
 grep -q ' BLOCK Bash ' "$VS/audit.log" 2>/dev/null; judge ALLOW "audit log records blocks" $?
+
+# --- Operator-only scripts from any copy (manifest re-sign incident, 2026-11-05) ---
+# A worktree copy of the skill re-signed the real manifest. The script NAME decides,
+# wherever the copy lives and however it is invoked.
+bash_case BLOCK "worktree generate-manifest (relative)"   "bash scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest (./)"        "./scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest (absolute)"  "bash $WT/scripts/generate-manifest.sh"
+bash_case BLOCK "worktree generate-manifest via sh"      "sh scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest piped"       "bash scripts/generate-manifest.sh | tail -3" "$WT"
+bash_case BLOCK "worktree generate-manifest after cd"    "cd $WT && bash scripts/generate-manifest.sh"
+bash_case BLOCK "worktree generate-manifest via env"     "env FOO=1 bash scripts/generate-manifest.sh" "$WT"
+bash_case BLOCK "worktree generate-manifest, cwd=scripts" "bash generate-manifest.sh" "$WT/scripts"
+bash_case BLOCK "worktree install.sh"                    "bash scripts/install.sh --dry-run" "$WT"
+bash_case BLOCK "worktree install-skills.sh"             "bash scripts/install-skills.sh" "$WT"
+bash_case BLOCK "operator flag from a tool call"         "VAJRA_OPERATOR_SIGN=1 bash scripts/vajra-doctor.sh" "$WT"
+bash_case BLOCK "env no longer hides the command after it" "env FOO=1 rm -rf ~"
+bash_case ALLOW "plain env still lists the environment"  "env"
+bash_case ALLOW "reading the script is fine"            "cat scripts/generate-manifest.sh" "$WT"
+bash_case ALLOW "grep for the name is fine"              "grep -n generate-manifest.sh README.md" "$WT"
+bash_case ALLOW "other worktree scripts still run"       "bash scripts/vajra-doctor.sh" "$WT"
 
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"

@@ -9,7 +9,7 @@ branch, worktree (plus claimed_by, report, commit, base_commit, changed, updates
 Status: pending, ready, claimed, in_progress, done, blocked, question, failed. pending and ready are
 derived: a pending or ready task is ready exactly when every dependency is done.
 
-Usage (every command takes --campaign <slug> and --json):
+Usage (every command takes --json, and all but check-evidence take --campaign <slug>):
   vajra_tasks.py add <id> --title T --owner AGENT [--deps a,b] [--files g1,g2] [--acceptance X]...
                          [--branch B] [--worktree W]
   vajra_tasks.py dep <id> <dep-id> [--remove]
@@ -20,6 +20,7 @@ Usage (every command takes --campaign <slug> and --json):
   vajra_tasks.py close <id> --evidence <verify-work evidence.json> [--commit SHA] [--branch B]
                            [--base-commit SHA] [--changed f1,f2] [--head SHA]
   vajra_tasks.py status <id>
+  vajra_tasks.py check-evidence <evidence.json> [--head SHA]   (read-only; --campaign not needed)
   vajra_tasks.py list
   vajra_tasks.py waves [--max-in-flight N]
   vajra_tasks.py graph
@@ -44,6 +45,8 @@ vajra-deliver.js implements the same algorithm in JavaScript; tests/workflows ch
 
 Exit codes: 0 ok, 1 error (not found, lock, I/O), 2 usage or invalid graph, 3 refused by state
 (claim conflict, illegal transition, close without green evidence).
+check-evidence exits 0 with {ok, green, reasons} whether or not the evidence is green (the reasons are
+read_evidence()'s refusal), 1 when the file cannot be read or parsed, and 2 on bad usage.
 """
 import argparse
 import hashlib
@@ -499,6 +502,10 @@ def trivial(cmd):
     return bool(TRIVIAL_CMD.match(c))
 
 
+class Unreadable(Fail):
+    """read_evidence() could not read or parse the file (exit 3 for close, exit 1 for check-evidence)."""
+
+
 def read_evidence(path, want_head=None):
     """Accept only green, signed verify-work evidence for this repository. This is the shared green rule (the
     same check as vajra_kb.py check_evidence): every command exited 0, git.treeStable is true, git.head is the
@@ -515,7 +522,7 @@ def read_evidence(path, want_head=None):
             raw = f.read(5_000_000)
         ev = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as e:
-        raise Fail(3, "evidence %s unreadable: %s" % (path, e))
+        raise Unreadable(3, "evidence %s unreadable: %s" % (path, e))
     base = os.path.join(os.path.realpath(root), "data", "walkthroughs")
     rel = os.path.relpath(real, base)
     parts = rel.split(os.sep)
@@ -546,6 +553,21 @@ def read_evidence(path, want_head=None):
     if not evidence_hmac_ok(ev, key):
         refuse("signature (hmac) missing or invalid")
     return {"path": real, "sha256": hashlib.sha256(raw).hexdigest(), "head": head, "commands": total}
+
+
+def cmd_check_evidence(a):
+    """Read-only: run read_evidence() and report green or the refusal reason. Touches no campaign state."""
+    if a.head and not SHA_RE.match(a.head):
+        raise Fail(2, "invalid --head")
+    try:
+        read_evidence(a.evidence, a.head or None)
+    except Unreadable as e:
+        raise Fail(1, e.msg)
+    except Fail as e:
+        if e.code != 3:
+            raise
+        return {"ok": True, "green": False, "reasons": [e.msg]}
+    return {"ok": True, "green": True, "reasons": []}
 
 
 def cmd_close(a):
@@ -641,6 +663,8 @@ def human(cmd, res):
         return "\n".join("%s  %s  %s  %s" % (t["id"], t["status"], t["owner_agent"], t["title"]) for t in res["tasks"]) or "no tasks"
     if cmd == "ready":
         return "\n".join(res["ready"])
+    if cmd == "check-evidence":
+        return "green" if res["green"] else "not green: " + "; ".join(res["reasons"])
     if cmd == "validate":
         return "ok: %d task(s), graph valid" % res["tasks"]
     return "%s %s%s" % (res.get("id", ""), res.get("result", res.get("status", "ok")),
@@ -691,12 +715,17 @@ def main(argv):
     s = sub.add_parser("waves", parents=[common], allow_abbrev=False)
     s.add_argument("--max-in-flight", type=int, default=None)
     sub.add_parser("graph", parents=[common], allow_abbrev=False)
+    s = sub.add_parser("check-evidence", allow_abbrev=False,
+                       help="read-only: is this verify-work evidence green? (no --campaign needed)")
+    s.add_argument("evidence")
+    s.add_argument("--head", default="", help="commit the evidence must be for (default: the current HEAD)")
+    s.add_argument("--json", action="store_true", help="JSON output")
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
     os.umask(0o077)
-    fn = globals()["cmd_" + a.cmd]
+    fn = globals()["cmd_" + a.cmd.replace("-", "_")]
     try:
         res = fn(a)
     except FailJSON as e:

@@ -63,11 +63,11 @@ TOOL=""
 command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
 
 PAYLOAD="$(cat)"
-CWD_IN="" CMD="" P1="" P2="" P3=""
+CWD_IN="" CMD="" P1="" P2="" P3="" AID=""
 PARSED="$(jq -r '
   def s: if type == "string" then . elif . == null then "" else tostring end;
   (.tool_input | if type == "object" then . else {} end) as $i
-  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s)"
+  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) AID=\(.agent_id | s)"
 ' <<<"$PAYLOAD" 2>/dev/null)" || block "unparseable hook payload (fail-closed)"
 eval "$PARSED"
 [ -n "$TOOL" ] || block "payload has no tool_name (fail-closed)"
@@ -134,6 +134,33 @@ ROOTS=(
   "$VS_C/atman-history.jsonl" "$VS_C/patches" "$VS_C/atman.paused"
   "$VS_C/kb"
 )
+# Vajra Desktop control directory ("$HOME/Library/Application Support/VajraDesktop/control"):
+# only the desktop app writes it. The Bash analysis splits words on spaces, so
+# a second Bash pass (end of file) joins "Application Support" into the single
+# token Application__SP__Support; the alias root below is what that token
+# canonicalizes to.
+canon "$HOME/Library/Application Support/VajraDesktop/control" /; DCTL="$CANON"
+canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; DCTL2="$CANON"
+ROOTS+=( "$DCTL" "$DCTL2" )
+# Read-protected for workers (payload carries agent_id): the control dir holds the
+# steering nonce, and transcripts hold each worker's brief (which carries it). The
+# main session and the Lead chat session have no agent_id and keep reading.
+canon "$HOME/.claude/projects" /; NOREAD=( "$DCTL" "$DCTL2" "$CANON" )
+noread() { # canonical path -> 0 if a worker may not read it
+  local r
+  [ -n "$AID" ] || return 1
+  for r in "${NOREAD[@]}"; do inside "$1" "$r" && return 0; done
+  return 1
+}
+reach_check() { # canonical dir, label -> block if a recursive read there reaches the key, or (for a worker) a NOREAD root
+  local r
+  key_anc "$1" && block "$2 would reach the Vajra HMAC key; give a path below it (for example your project directory)"
+  [ -n "$AID" ] || return 0
+  for r in "${NOREAD[@]}"; do
+    inside "$r" "$1" && block "$2 would reach Vajra Desktop control files or Claude Code transcripts; give a path below it"
+  done
+  return 0
+}
 # Knowledge ledger (kb/) and task graphs (campaigns/<slug>/tasks.json*) change
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
 
@@ -215,11 +242,10 @@ case "$TOOL" in
       canon "$f" "$CWD"
       classify "$CANON"
       [ "$PKIND" = key ] && block "the Vajra HMAC key is never readable by tools"
-      # Grep reads file contents recursively: the key's directory or any
-      # ancestor of it (~/.claude, HOME, /) would include the key.
-      if [ "$TOOL" = Grep ] && key_anc "$CANON"; then
-        block "Grep over $CANON would search the Vajra HMAC key; give a path below it (for example your project directory)"
-      fi
+      noread "$CANON" && block "workers may not read Vajra Desktop control files or Claude Code transcripts: $CANON"
+      # Grep reads file contents recursively: an ancestor of the key (~/.claude,
+      # HOME, /) or of a worker-unreadable root would include it.
+      [ "$TOOL" = Grep ] && reach_check "$CANON" "Grep over $CANON"
     done
     allow
     ;;
@@ -547,6 +573,11 @@ shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
 [[ "$N" == *VAJRA_ATMAN_ASSUME_HUMAN* || "$CMD" == *VAJRA_ATMAN_ASSUME_HUMAN* ]] && block "VAJRA_ATMAN_ASSUME_HUMAN is for a human at a terminal, not the agent"
+[[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
+if [[ "$CMD" == *vajradesktop/control* ]]; then
+  [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+fi
 shopt -u nocasematch
 
 RE_RF="(^| )-[[:alnum:]]*([rR][[:alnum:]]*f|f[[:alnum:]]*[rR])[[:alnum:]]*( [^;|&]*)? (/|/\*|~|~/|~/\*|${HOME_RE}|${HOME_RE}/|${HOME_RE}/\*)( |;|\||&|$)"
@@ -628,7 +659,7 @@ GUARD_MAX_TOKENS=2500
 READERS=" cat less more head tail grep egrep fgrep rg ag ack wc diff cmp file stat ls du sha1sum sha256sum sha512sum shasum md5 md5sum cksum cut nl od hexdump strings column bat realpath readlink dirname basename echo printf test [ true false jq tr pwd which type whoami id date env printenv "
 SHELLS=" sh bash zsh dash ksh fish "
 INTERPS=" python python2 python3 perl ruby node php lua Rscript deno bun "
-WRAPPERS=" sudo command nohup time nice ionice "
+WRAPPERS=" sudo command nohup time nice ionice env "
 NOT_SCRIPTS=" install.sh install-skills.sh generate-manifest.sh "
 # Vajra scripts whose arguments are data (titles, bodies, queries), not paths
 # they write: their text may name protected paths. Output flags stay checked.
@@ -638,13 +669,48 @@ SYSROOTS=" /etc /usr /var /bin /sbin /lib /boot /dev /sys /opt /root /home /Syst
 
 is_interp() { [[ "$SHELLS" == *" $1 "* || "$INTERPS" == *" $1 "* || "$1" =~ ^python[0-9.]+$ ]]; }
 
-SEGCWD="$CWD"
-FAST_CWD="" FAST_OK=0 FAST_LINKS=0
-PIPE_IN=0
-PIPE_TAINT=0
-PIPE_KTAINT=0
-SEG_HIT=0
-SEG_KANC=0
+# A file name, or a file-name glob, that names an operator-only script -> 0 and NS_HIT.
+# Matched in memory, never against the disk: the name decides, whatever the cwd, ~
+# form or shell (bash, zsh **/) the glob is expanded by. Any case (APFS is
+# case-insensitive). A glob with no letters besides .sh (*, *.sh) is not judged.
+NS_HIT=""
+not_script() {
+  local n lit="${1//[\*\?\[\]]/}" r=1
+  shopt -s nocasematch
+  if [[ "$NOT_SCRIPTS" == *" $1 "* ]]; then
+    r=0; NS_HIT="$1"
+  elif [[ "$1" == *[\*\?\[]* ]] && [[ "${lit%.sh}" == *[a-z]* ]]; then
+    for n in $NOT_SCRIPTS; do
+      if [[ "$n" == $1 ]]; then r=0; NS_HIT="$n"; break; fi
+    done
+  fi
+  shopt -u nocasematch
+  return $r
+}
+
+# The tokenizer splits brace and zsh glob groups ({install,x}.sh, inst(a)ll.sh) at
+# , ( ), so they are judged here on the whole command: each group is replaced by each
+# of its , or | alternatives and by *, and no variant's file name may name an
+# operator-only script. (Strict: a read of such a name is refused too.)
+RE_GROUP='[{(]([^{}() ]*)[})]'
+if [[ "$N" == *[\{\(]* ]]; then
+  set -f
+  for k in $N; do
+    case "$k" in *[\{\(]*) ;; *) continue ;; esac
+    vs=( "$k" ) i=0
+    while [ "$i" -lt "${#vs[@]}" ] && [ "${#vs[@]}" -le 64 ]; do
+      g="${vs[$i]}"; i=$((i + 1))
+      if [[ "$g" =~ $RE_GROUP ]]; then
+        m="${BASH_REMATCH[0]}" alts="${BASH_REMATCH[1]//[,|]/ }"
+        vs+=( "${g/"$m"/*}" )
+        for a in $alts; do vs+=( "${g/"$m"/$a}" ); done
+      elif [ "$g" != "$k" ] && not_script "${g##*/}"; then
+        block "${k##*/} names ${NS_HIT}, which changes Vajra's wiring or integrity state; the operator runs it in their own terminal"
+      fi
+    done
+  done
+  set +f
+fi
 
 # Expand a token into candidate canonical paths -> CANDS array.
 CANDS=()
@@ -780,7 +846,18 @@ copy_layout() {
   return 0
 }
 
-eval_segment() { # uses SEG array
+# env -C/--chdir moves the cwd for one command only (Sol r4485195331): run the
+# segment with that cwd, then restore it unless the segment was a cd/pushd.
+eval_segment() {
+  local saved="$SEGCWD"
+  SEG_CD=0
+  eval_segment_body
+  local rc=$?
+  [ "$SEG_CD" = 1 ] || SEGCWD="$saved"
+  return $rc
+}
+
+eval_segment_body() { # uses SEG array
   local n=${#SEG[@]} i=0 w="" wi=-1 wb tok reader=0 script=0 script_i=-1 hit=0 kanc=0 c k gsub_i=-1 dscript=0
   SEG_HIT=0
   [ "$n" -gt 0 ] || return 0
@@ -788,7 +865,28 @@ eval_segment() { # uses SEG array
   while [ "$i" -lt "$n" ]; do
     tok="${SEG[$i]}"
     if [[ "$tok" == *=* && "$tok" != -* && "$tok" != /* ]]; then i=$((i + 1)); continue; fi
-    if [[ "$WRAPPERS" == *" $tok "* ]]; then i=$((i + 1)); continue; fi
+    # Wrappers by basename (/usr/bin/env, /usr/bin/nohup); env's own options are consumed
+    # so `env -i -u X ./script` reaches ./script. -S keeps its string as the command word.
+    if [[ "$WRAPPERS" == *" ${tok##*/} "* ]]; then
+      i=$((i + 1))
+      if [ "${tok##*/}" = env ]; then
+        while [ "$i" -lt "$n" ]; do
+          case "${SEG[$i]}" in
+            -C|--chdir)
+              [ $((i + 1)) -lt "$n" ] && { canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
+              i=$((i + 2)) ;;
+            --chdir=*) canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -C?*) canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -u|-P|--unset) i=$((i + 2)) ;;
+            -S|--split-string) i=$((i + 1)); break ;;
+            --) i=$((i + 1)); break ;;
+            -*) i=$((i + 1)) ;;
+            *) break ;;
+          esac
+        done
+      fi
+      continue
+    fi
     if [ "$tok" = "-u" ] || [ "$tok" = "-n" ]; then i=$((i + 2)); continue; fi
     break
   done
@@ -798,6 +896,7 @@ eval_segment() { # uses SEG array
 
   # cd / pushd: move the effective cwd for later segments.
   if [ "$wb" = cd ] || [ "$wb" = pushd ]; then
+    SEG_CD=1
     if [ $((wi + 1)) -lt "$n" ] && [ "${SEG[$((wi + 1))]}" != "-" ]; then
       canon "${SEG[$((wi + 1))]}" "$SEGCWD"; SEGCWD="$CANON"
     else
@@ -876,6 +975,22 @@ eval_segment() { # uses SEG array
     # TTY, and the user trust tier comes only from the router's /vajra remember
     # (it runs inside the UserPromptSubmit hook, never as a tool call). Matched
     # by file name wherever the script lives (installed copy or a dev clone).
+    # Operator-only scripts too: a worktree copy of generate-manifest.sh still
+    # signs into the real ~/.claude/vajra (incident 2026-11-05), so the name decides.
+    # Run, not named: the script is the command word or follows a shell or
+    # interpreter, also inside a bash -c string (cat or grep of it is fine).
+    local runs=0
+    for ((c = wi; c < n; c++)); do
+      tok="${SEG[$c]//[\"\']/}"
+      set -f; local words=( $tok ); set +f
+      for k in ${words[@]+"${words[@]}"}; do
+        if not_script "${k##*/}" && { [ "$runs" = 1 ] || [ "$c" = "$wi" ]; }; then
+          block "${k##*/} names ${NS_HIT}, which changes Vajra's wiring or integrity state, from any copy of the skill; the operator runs it in their own terminal"
+        fi
+        [[ "$SHELLS$INTERPS" == *" ${k##*/} "* ]] && runs=1
+        if [ "$c" = "$wi" ]; then case "$k" in .|source) runs=1 ;; esac; fi
+      done
+    done
     if [ "${SEG[$cand_i]##*/}" = vajra_kb.py ]; then
       local kbsub="" kprev=""
       for ((c = cand_i + 1; c < n; c++)); do
@@ -1044,7 +1159,7 @@ eval_segment() { # uses SEG array
     if [ "$rmode" = search ]; then
       # Default target is the cwd; the first operand is the pattern unless
       # -e/-f/--regexp/--file supplied it.
-      key_anc "$SEGCWD" && block "${wb} would recursively read $SEGCWD, which contains the Vajra HMAC key; cd into a directory below it (for example your project) first"
+      reach_check "$SEGCWD" "${wb} in $SEGCWD"
       skip=1
       for ((c = op_from; c < n; c++)); do
         case "${SEG[$c]}" in --regexp*|--file*) skip=0 ;; --*) ;; -*[ef]*) skip=0 ;; esac
@@ -1075,7 +1190,7 @@ eval_segment() { # uses SEG array
     for tok in ${ops[@]+"${ops[@]}"}; do
       candidates "$tok" "$SEGCWD"
       for cc in ${CANDS[@]+"${CANDS[@]}"}; do
-        key_anc "$cc" && block "${wb} over $cc would reach the Vajra HMAC key; name a path below it instead"
+        reach_check "$cc" "${wb} over $cc"
       done
     done
   fi
@@ -1098,9 +1213,11 @@ eval_segment() { # uses SEG array
   # of the cwd (never . or ..), so it is expanded only when the cwd holds a
   # symlink. Both facts are cached per cwd.
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
-    FAST_CWD="$SEGCWD"; FAST_OK=0; FAST_LINKS=0
-    if ! inside "$SEGCWD" "$CL" && ! inside "$CL" "$SEGCWD"; then FAST_OK=1; fi
+    FAST_CWD="$SEGCWD"; FAST_OK=1; FAST_LINKS=0
     local e
+    for e in "$CL" "$DCTL" "$DCTL2"; do
+      if inside "$SEGCWD" "$e" || inside "$e" "$SEGCWD"; then FAST_OK=0; fi
+    done
     shopt -s nullglob dotglob
     for e in "$SEGCWD"/*; do [ -L "$e" ] && { FAST_LINKS=1; break; }; done
     shopt -u nullglob dotglob
@@ -1141,6 +1258,7 @@ eval_segment() { # uses SEG array
       fi
       candidates "$part" "$SEGCWD"
       for cc in ${CANDS[@]+"${CANDS[@]}"}; do
+        noread "$cc" && block "workers may not read Vajra Desktop control files or Claude Code transcripts: $cc"
         key_anc "$cc" && kanc=1
         classify "$cc"
         case "$PKIND" in
@@ -1175,22 +1293,41 @@ eval_segment() { # uses SEG array
   return 0
 }
 
-SEG=()
-for tok in ${TOKS[@]+"${TOKS[@]}"} ";"; do
-  case "$tok" in
-    ";"|PIPE)
-      eval_segment
-      if [ "$tok" = PIPE ]; then
-        PIPE_IN=1
-        [ "$SEG_HIT" = 1 ] && PIPE_TAINT=1
-        [ "$SEG_KANC" = 1 ] && PIPE_KTAINT=1
-      else
-        PIPE_IN=0; PIPE_TAINT=0; PIPE_KTAINT=0
-      fi
-      SEG=()
-      ;;
-    *) SEG+=( "$tok" ) ;;
-  esac
-done
+run_pass() { # judge every segment of TOKS from the starting cwd
+  SEGCWD="$CWD"
+  FAST_CWD="" FAST_OK=0 FAST_LINKS=0
+  PIPE_IN=0 PIPE_TAINT=0 PIPE_KTAINT=0 SEG_HIT=0 SEG_KANC=0
+  SEG=()
+  for tok in ${TOKS[@]+"${TOKS[@]}"} ";"; do
+    case "$tok" in
+      ";"|PIPE)
+        eval_segment
+        if [ "$tok" = PIPE ]; then
+          PIPE_IN=1
+          [ "$SEG_HIT" = 1 ] && PIPE_TAINT=1
+          [ "$SEG_KANC" = 1 ] && PIPE_KTAINT=1
+        else
+          PIPE_IN=0; PIPE_TAINT=0; PIPE_KTAINT=0
+        fi
+        SEG=()
+        ;;
+      *) SEG+=( "$tok" ) ;;
+    esac
+  done
+}
+run_pass
+
+# Second pass, additive only: the pass above has already run unchanged. If the
+# command names "Application Support" (any case), rerun the same segment loop
+# with that phrase joined into one token, so a path with that space (the Vajra
+# Desktop control dir) is judged as one path. It can only add blocks.
+APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
+T2="${T//$APPSUP_PAT/Application__SP__Support}"
+if [ "$T2" != "$T" ]; then
+  set -f
+  TOKS=( $T2 )
+  set +f
+  run_pass
+fi
 
 allow

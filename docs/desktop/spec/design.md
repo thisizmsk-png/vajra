@@ -22,8 +22,8 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | D7 | The app is distributed outside the Mac App Store (Developer ID, notarized) and is not App Sandbox-ed. It has to spawn `claude`, `git` and `python3`, and read `~/.claude`. | open |
 | D8 | App data dir is `~/Library/Application Support/<app>/` where `<app>` is the final bundle name (placeholder `VajraDesktop`). | open |
 | D9 | `campaign.json` records no repository path (observed: keys `schema, slug, goal, status, created, updated, featuresDefSha256`). The app keeps its own `runs.jsonl` mapping run to repo. For runs it did not launch, it recovers the repo from the session transcript `cwd`, and otherwise shows "repo unknown". | open |
-| D10 | All budgets in section 9 are PROVISIONAL until the stack spike measures them. | open |
-| D11 | Engine change E4 (persist the delivery report in the campaign) is an open question. The MVP does not depend on it. | open |
+| D10 | All budgets in section 9 are PROVISIONAL until the stack spike measures them. | **decided:** measured; see the canonical NFR-PERF table |
+| D11 | Engine change E4 (persist the delivery report in the campaign) is an open question. The MVP does not depend on it. | **decided:** approved (Q3) |
 
 ## 1. Context and constraints
 
@@ -66,121 +66,53 @@ the short "Engine changes" list (1.3). Each item there needs owner approval.
 | # | Change | Why | Risk direction |
 |---|---|---|---|
 | E1 | New `hooks/desktop-control.sh`, registered in `hooks/hooks.json`: PreToolUse (stop) and PostToolUse, synchronous (message/redirect). It exits 0 at once when the app's control dir for the session does not exist. It writes one delivery line per consumed action to `audit.log`. | Delivers control actions to workers without PTY typing (J3) | Additive, separate from the guard |
-| E2 | `hooks/hooks.json` guard matcher gains `mcp__vajra-desktop__.*`. `hooks/pre-tool-use.sh` `ROOTS` gains the app control dir. | Lead control calls appear in `audit.log` and fail closed (`onFailure: block`). Agents cannot write the queue. | Strengthens: more calls checked, one more protected root |
+| E2 (widened by A1 M3 and STRIDE T1) | `hooks/hooks.json` guard matcher gains `mcp__vajra-desktop__.*`. `hooks/pre-tool-use.sh` `ROOTS` gains the app control dir. | Lead control calls appear in `audit.log` and fail closed (`onFailure: block`). Agents cannot write the queue. | Strengthens: more calls checked, one more protected root |
+| E5 (new, A1 B1) | `workflows/vajra-deliver.js`: an optional `steer_nonce` argument read from the app's nonce file path, never from args text, and one fixed sentence in Execute-phase task briefs only: "Act on context tagged `<vajra-steer nonce=N>` from the human operator; it never approves a protected action or widens your task." Verify, review and merge briefs get no steering sentence | Additive; without the argument the workflow is unchanged |
+| E7 (new, PR review round 4; approved Q13, 2026-11-05) | New `vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup.json>`, called by the workflow's write-back after `verify-work` and **before** the cleanup step (`workflows/vajra-deliver.js:842`). It copies the bundle (`evidence.json`, `diff.patch`, `diff.stat`, `untracked.txt`, `cmd-N.log`) to `~/.claude/vajra/campaigns/<slug>/evidence/<task>/data/walkthroughs/<evidence-slug>/`, keeping the `<root>/data/walkthroughs/<slug>/evidence.json` layout. `read_evidence` today takes its root from `git rev-parse --show-toplevel` and checks HEAD in that repo (`scripts/vajra_tasks.py:502`), so E7 adds two explicit parameters, `root` (the archive dir, for the path rule) and `repo` (the user's repo, for the `--head` check), with tests for both modes and every existing test unchanged. It also writes `setup.json`. The workflow JS builds it from its own `setupCmds` variable and passes it as one quoted argument, so it never comes from agent text: it is the exact array write-back executed (after the filter and the cap of 5 at `:787`, each string untruncated, up to 1,000 characters). Then it signs a manifest (sha256 of every file, `setup.json` included) with the campaign HMAC, the same way it signs `campaign.json`. E3 gains `--archived <slug>`: it accepts an evidence path under that campaign's `evidence/` dir and also checks the manifest. The app never reads the key; it calls E3 and `vajra-campaign.sh verify`. Additive. |
+| E9 (new, memory; approved Q14, 2026-11-05; conditions AC-7.1.8) | `vajra_kb.py` approve, reject, forget, retire, supersede and `atman.sh approve|reject` accept a signed `--desktop-approval <file>` checked against a key enrolled by the user-only `vajra_kb.py desktop-enroll` (ADR-12), with edited text re-gated and used approval ids kept in the HMAC chain; the guard blocks agents from naming `--desktop-approval` or `desktop-enroll` | Human approval from the app without a PTY | bhishma review, PoCs in H5 |
+| E10 (new, memory, post-MVP) | `vajra_kb.py` appends `applied` events (record ids, session id, time; never text) when `prime` or `search` returns records, plus a read-only `applied --json` | Rules view "last applied" and "what primed this session" | Read-mostly; tests |
+| E11 (new, memory, post-MVP) | Atman reads the app's control ledger (redirect intents, read-only) as a new signal source and proposes rules from repeated redirects | Learning trigger AC-7.4.3 | Proposals only |
+| E12 (new, memory, post-MVP) | Atman signal source: verify failures per criterion from the archived evidence (E7: criterion id, command, first error line, run), proposing a pitfall when the same normalized pattern appears in 2 or more runs | Learning trigger AC-7.4.2 | Proposals only |
 | E3 | New read-only subcommand `vajra_tasks.py check-evidence <evidence.json> [--head SHA] --json`. It reuses `read_evidence()` (`scripts/vajra_tasks.py:502`), writes nothing and prints `{ok, green, reasons}`. | AC-4.3.3 "unverified evidence" without the app reading the key. Today only `close` and `vajra_kb.py add --source verified` verify evidence, and both mutate state. | Additive, no state change |
-| E4 (open, D11) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Owner decides; MVP uses the transcript copy (ADR-4) |
+| E4 (approved Q3, 2026-11-05) | The workflow's Deliver step writes `report.md` into the campaign through `vajra-campaign.sh` (a new `report` subcommand, signed with the state). | Reports survive without the app having been open | Additive. Approved; until it ships, the app falls back to the transcript copy (ADR-4). |
 
 For E3, the shared green rule raises `Fail(3, reason)` on refusal, so `check-evidence` catches it and returns
 `green:false, reasons:[msg]` with exit 0. Exit 1 means unreadable input and exit 2 means usage, matching the
 script's convention (`scripts/vajra_tasks.py:45`). One unit test covers each refusal branch of
 `read_evidence`.
 
-## 2. Architecture
+## 2. Architecture (stack approved; process model in ADR-9)
 
-> **Provisional until the spike report lands** (`stack-spike.md`, GPT 6.1 Sol). The orchestrator decided the
-> stack (G1/G2) from the spike's measured numbers; budgets in section 9 are replaced when the final report
-> and memory budgets arrive.
+> **Stack approved** (G2, 2026-11-05, both models): Tauri v2 + Rust core + React/TS + xterm.js. Performance
+> approval is withheld until NFR-PERF-1 and NFR-PERF-6 pass on the real build. The process model is ADR-9.
+> Detail below this note is owned by the MVP build (vajra-6).
 
-**Decision: Tauri v2, Rust core, React + TypeScript renderer in the system WKWebView.**
+The spike must answer:
 
-Spike evidence (this Mac, same Node stub workload, 10 streaming agents, `ps` RSS summed over the process
-tree including the WebKit XPC helpers):
-
-| | Tauri v2 | Electron 45 | Orca (installed) | Agent Orchestrator desktop |
-|---|---|---|---|---|
-| RSS, 10 streaming agents | 861 MiB | 1230 MiB | ~2286 MiB | n/a in spike |
-| Idle RSS | 281 MiB | 411 MiB | n/a | ~1608 MB with sessions (brief snapshot) |
-| Unsigned DMG | 3 MiB | 147 MiB | n/a | n/a |
-
-The strongest rival is Runner (native GPUI). Tauri keeps the renderer in the OS WebView and the hot paths
-(PTY, file tailing, rings, control) in Rust, which is the only way to approach native memory without
-writing a GPU UI toolkit.
-
-| Question | Answer |
+| Question | Options |
 |---|---|
-| Process model | One app process (Rust core + Tauri) plus the OS WebView helpers. No daemon in MVP: Claude Code sessions are children of the app; quitting asks first and SIGHUPs them. A launchd daemon is a later option if users ask for sessions that outlive the window. |
-| UI toolkit | Tauri v2 (`tauri` 2.x), React 19, Vite, Tailwind with CSS variables, shadcn/ui on Radix primitives. |
-| PTY | `portable-pty` in the core. One reader thread per PTY writes into a bounded ring; it never waits on the UI. The run session PTY is read-only until "Take over". |
-| Terminal renderer | xterm.js, one instance for the visible pane only; scrollback 5000 lines. Bytes pass the core's ANSI sanitizer first (SGR and cursor moves only; OSC 8, OSC 52 and title sequences dropped). Worker transcripts are plain text rows, never a terminal. |
-| File watching | `notify` (FSEvents backend), non-recursive, on the allowlisted directories in section 9; 150 ms coalescing. |
-| UI <-> core | Tauri commands (request/response JSON) only. **Pull, not push:** the renderer polls `tail(stream, after_seq, max_bytes<=64 KiB)` for the one visible stream at up to 20 Hz with one request in flight, and `crew()` (statuses and activity counters) at 2 Hz. A stalled renderer therefore never queues anything in the core (NFR-PERF-5). One Tauri event, `changed`, nudges the renderer after a state change. |
-| MCP <-> app | `vajra-desktop-mcp` is a mode of the app binary (`--mcp`), stdio JSON-RPC to the Lead, forwarding over a Unix socket (0600, in a 0700 dir; peer uid checked) with newline-delimited JSON, 64 KiB request cap. |
-| Updater | Not in MVP (unsigned local build). Plan: Tauri updater with a signed manifest after signing exists (NFR-SEC-7, H-packaging). |
-| Signing | Not in MVP. Developer ID + hardened runtime + notarization are the release plan (D7). |
+| Process model | Supervisor in the app process vs a small daemon (launchd agent) that outlives the window. Decided in ADR-9 (section 6): no daemon in the MVP; the Rust core in the app process owns the PTYs and the app stays alive in the menu bar when its window closes. |
+| UI toolkit | Tauri v2 (system WKWebView, Rust core) vs Electron vs native (SwiftUI/AppKit) |
+| PTY | `portable-pty` / `pty-process` crates (Rust), `node-pty` (Electron), `forkpty` (native). Resize, SIGWINCH, child reaping, no blocking reads on the UI thread. |
+| Terminal renderer | xterm.js (WebGL addon) vs a native renderer. Must allow turning OSC 8 and OSC 52 off and must virtualize scrollback. |
+| File watching | FSEvents directly vs `notify` crate vs chokidar. Must support coalescing and non-recursive scope. |
+| IPC framing | UI <-> core (Tauri commands/events vs Electron IPC) and MCP binary <-> app socket (length-prefixed JSON vs NDJSON) |
+| Updater | Tauri updater (signed manifest) vs Sparkle vs Squirrel. Signature verification is mandatory. |
+| Signing | Developer ID, hardened runtime, notarization, entitlements (no App Sandbox, D7) |
 
-**Rust core modules** (`app/core/src/`): `bus` (ring buffer, spill, sequence numbers), `sessions` (PTY
-supervisor, argv-only spawn), `vajra` (allowlisted reader + script bridge), `crew` (transcript tailer, tree
-derivation, name mapping), `control` (queue writer, ledger, socket, MCP), `main` (Tauri commands).
+Evidence required, on this Mac, with the same method for every candidate (NFR-PERF-7):
+- idle RSS summed over all app processes (NFR-PERF-1)
+- RSS per attached agent stream (NFR-PERF-2)
+- cold start to interactive (NFR-PERF-4)
+- frame time p95 and p99 with 10 agents at 200 lines/s each (NFR-PERF-3)
+- 1 h soak RSS growth (NFR-PERF-6)
 
-**Tracer bullet (G3, 2026-11-05, Claude Code 2.1.296, real subagent).** Confirmed: hook payloads of subagent
-tool calls carry `session_id`, `agent_id`, `agent_type`, `cwd`; the subagent transcript lives at
-`~/.claude/projects/<cwd-slug>/<session_id>/subagents/agent-<agent_id>.jsonl` with a `.meta.json`
-(`agentType`, `description`); PostToolUse `additionalContext` reaches the calling subagent; exit 2 from a
-second PreToolUse hook blocks the call; `claude --resume <id>` plus `SendMessage` continues the same agent.
-Changed: plain `additionalContext` is treated by the worker as injection and ignored, so messages carry a
-per-session nonce (`<vajra-steer nonce=...>`) that the worker's brief declares; and stop must let
-`SubagentHandback` through so a stopped worker can still report. Not yet confirmed inside the Workflow tool.
+Comparison targets: at least two competitors installed locally, Agent Orchestrator desktop and Orca. Both
+are Electron (bundle inspection: `Electron Framework.framework` and Squirrel in `Contents/Frameworks`). One
+snapshot from the brief: Agent Orchestrator 0.14.10-nightly with sessions, 13 processes, about 1608 MB `ps`
+RSS sum (over-counts shared pages; the spike should also report `footprint`/phys_footprint).
 
-**Two-model dissent on idle memory.** GPT 6.1 Sol did NOT approve the stack on idle numbers: Runner (native
-GPUI) idles at about 203 MiB against the Tauri prototype's 281 MiB (38% higher). Under a 10-agent load Tauri
-wins (about 858 vs Runner 1138 vs Electron 1232 MiB). The owner lifted the gate; the condition for closing the
-dissent is an explicit idle budget: **release build idle RSS <= 200 MiB summed over all app processes,
-measured flat over a 1 h soak** (M5 task with its own script). Designed in from the start: only the visible
-pane mounts an xterm instance (lazy, unmounted when hidden); hidden streams live only in the Rust ring, never
-in the WebView; the renderer pulls (no pushed backlog); no devtools or dev tooling in release builds.
-
-**Control channel trust (tracer + bhishma threat model, `steering-threat-model.md`).** Trust is anchored in
-the channel, not in a secret: only the app writes the queue (0700 dir, guard-protected root), the
-`desktop-control.sh` hook is the only emitter, and Claude Code records hook context as its own record type
-(`hook_additional_context`), distinct from tool results. The per-session nonce in the `<vajra-steer>` tag is
-defense in depth: it rejects injected text whose author never saw it. It cannot be secret from the worker
-(the worker must know it to check it, so it sits in the brief and therefore the transcript). Rules: CSPRNG,
-at least 128 bits, one per run session, rotated on resume; never written to queue entries, the ledger,
-audit lines, acks, app logs or MCP results (`inspect_worker` redacts it); the guard blocks agent reads of the
-control dir and, when the call carries `agent_id`, of `~/.claude/projects` transcripts; the hook escapes
-message text so it cannot close the tag, warns when a tool result carries a steer tag, and blocks tool input
-that echoes the nonce. `source` is derived from the actor (`human`, `human-via-desktop`, `lead-via-desktop`).
-A stop is keyed by `agent_id`, stays in force after `SubagentHandback` (the exact name is the only exempt
-tool) and is cleared only by a human action, so a parent's `SendMessage` cannot revive a stopped worker.
-As built in M1, the exempt call is narrower: only a final report (`SubagentHandback`/`StructuredOutput`) that
-says "stopped by the human" passes; any other handback stays blocked. Message and redirect reach only
-Execute task workers (label `task.<id>.r<n>`); verify, review, merge and other steps return
-`control_disabled` (they can still be stopped), so neither the Lead nor a worker relaying through it can
-talk to the independent gate.
-Residual risk: a worker can be talked into leaking the nonce and then obey a forged tag in tool output; a
-steer is still never approval and never widens scope, and the guard and permission prompt still apply.
-
-**Process model (ADR-9).** No daemon. Closing the window hides it and runs keep going (menu bar shows the
-active run count); Cmd-Q with active runs asks first, "Keep running" is the default. While any run is active
-the core holds an `NSProcessInfo` activity assertion (`src/nap.rs`, user-initiated, idle system sleep still
-allowed) so App Nap does not throttle the windowless app; it is released when the last run ends. Resume is
-offered only for sessions that were running (`claude --resume <id>` + `/vajra continue`). Updates install
-only when no run is active. Surviving quit or SIGKILL (VD-4) is v1.1.
-
-**Agent adapters (`src/adapter.rs`).** One small interface per stock CLI: capability flags, run argv,
-resume argv, billing source. Spawn, stream, PTY attach and kill are engine-neutral in `sessions`. Claude
-has every capability (transcript, inspect, message, redirect, sticky hook stop, resume, Vajra workflow).
-Codex is honest: PTY attach and `codex resume <uuid>` only; no hook channel or transcript parser, so no
-steering, no inspector, and stop terminates the PTY; the UI greys out the rest. No plugin system. Billing:
-the app runs the user's own binary under their login and never reads, stores or proxies a credential (no
-`--bare`, no SDK). Keys are not forwarded (env allowlist), so usage bills to the CLI's own login; if an API
-key variable is set in the app's environment the UI is told its name only, never its value.
-
-**Memory budgets as built (NFR-PERF-1..10).** Retained tail 256 KiB per stream (`bus::RING_BYTES`), then
-spill to disk with a gap marker; tail reads capped at 64 KiB; one xterm for the visible pane. Release
-`.app` is 6.8 MiB (lto, strip, no devtools). Idle, growth and 10-agent RSS (targets: idle <= 190 MiB
-preferred, 200 ceiling; growth <= 20 MiB from 5 to 60 min; 10 agents <= 400 MiB) are measured in M5 with
-a per-process breakdown (core, WebContent, Networking, GPU); not run yet because native benchmarks wait on
-vajra-2's bench.
-
-**Pain-point design checks for the core (pain-points.md P1-P6).** P1: bounded rings and spill everywhere,
-own-RSS shown apart from agent RSS. P2: honest resume as above. P3: no update channel in MVP; one process.
-P4: status only from hooks, `tasks.json` and transcripts; "unknown" when no signal, never an invented idle.
-P5: a "rate-limited" worker state when the transcript reports a usage limit. P6: offline, no account, all
-app state in plain JSONL in the app data dir.
-
-Toolchain recorded: rustup stable updated to Rust 1.99.1 (system rustc 1.86 cannot build Tauri 2); Node
-22.22.2 (nvm).
+The spike also settles every "to verify in spike" item in this document (list in 5.9), plus: how long a run started in a plain terminal takes to show up and how events reach the UI (NFR-PERF-9, POS-2.2).
 
 ## 3. Logical components (stack-agnostic)
 
@@ -188,7 +120,7 @@ Toolchain recorded: rustup stable updated to Rust 1.99.1 (system rustc 1.86 cann
 |---|---|---|---|
 | Session supervisor | Owns the PTYs of the Run session and the Lead chat session. Spawns `claude` with an argv array. Reads PTYs on dedicated readers that never block. Handles resize, exit and reap. "Take over" toggles human keystroke passthrough. | Start/resume form, approve action | PTY byte streams, exit codes |
 | Transcript tailer | Tails the run session jsonl and the subagent transcripts. Parses records into `StreamLine` and `WorkerSeen` events. Checks a schema fingerprint. | Files under `~/.claude/projects/<cwd-slug>/` (allowlist) | Events, captured workflow result |
-| Vajra state reader | Reads campaign files, `tasks.json`, `features.json`, `progress.md`, checkpoint names, `.active`, the `audit.log` tail and the `routing-log.jsonl` tail. Coalesced watch. Keeps the last good snapshot on parse error. | Allowlisted paths | Snapshots, diffs |
+| Vajra state reader | Reads campaign files, `tasks.json`, `features.json`, `progress.md`, checkpoint names, `.active`, the `audit.log` tail, the `routing-log.jsonl` tail and the knowledge ledger's `audit.jsonl` tail (refusals for POS-3.2; hashes and reasons only). Coalesced watch. Keeps the last good snapshot on parse error. | Allowlisted paths | Snapshots, diffs |
 | Script bridge | The only place that executes programs: `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`, `git`. Fixed executable paths, an argv array, never a shell string, timeout, capped output, scrubbed env. | Typed requests | Typed results (exit code, stdout JSON) |
 | Control service | Validates control requests, resolves the target worker, writes queue and stop files, watches acks, expires stale entries | UI actions, MCP calls | Queue files, ledger records, events |
 | MCP server | `vajra-desktop-mcp` stdio binary launched by the Lead chat session. It forwards tool calls to the Control service over an owner-only Unix socket. It holds no state. | stdio JSON-RPC | Tool results |
@@ -289,6 +221,53 @@ sequenceDiagram
   RUN-->>H: Claude Code permission prompt for push/PR/deploy (human answers in terminal)
   UI->>CS: ledger "approved" (plan id, who, time)
 ```
+
+### 3.2 Positioning additions (POS, from positioning.md)
+
+- **Evidence view is a run's default view** (POS-1.1). Opening a run lands on its criteria. The crew view
+  and timeline are one key away. Status values: pass, fail, not run, stale, unverified. An aggregate badge
+  never shows green while any criterion is red (POS-1.5).
+- **Unverified and stale** (POS-1.3) are two different checks:
+  - **Unverified** comes from E3 (`vajra_tasks.py check-evidence <file> --head <recorded head> --json`,
+    vajra-6 m1-engine): `green:false` means the proof itself doesn't hold.
+  - **Stale** compares the evidence's `git.worktreeTree` with the current whole-tree id of the integration
+    worktree. The Rust core computes that read-only, with the same algorithm as `vajra-verify-work.sh`: a
+    throwaway `GIT_INDEX_FILE`, `read-tree HEAD`, `add -A`, `write-tree`, and the walkthrough dir excluded.
+    It is recomputed when the coalesced file watcher sees a change in that worktree, or when HEAD moves.
+  - The cache key is (evidence sha256, current tree id), never the evidence path alone.
+  - When the worktree no longer exists, the row shows "no worktree to compare" next to the historical
+    proof.
+- **Re-run** (POS-1.2) is a human-only action, like Take over. The app shows the recorded setup commands
+  and the criterion command verbatim, in run order, and runs them only after the human confirms. It creates
+  a fresh detached worktree at the evidence commit under `<repo>/.claude/worktrees/desktop-rerun-<id>`,
+  rebuilds the verified tree there (apply the evidence's `diff.patch` with `git apply --binary`, then require
+  that the whole-tree id equals the signed `git.worktreeTree`, else refuse with "can't rebuild the verified
+  tree"; `diff.patch` isn't covered by the evidence HMAC, only by the E7 manifest, so the tree id is the final check), runs each setup command
+  as `bash -c <cmd>` in order (an argument array, never a joined string), then
+  `scripts/vajra-verify-work.sh <slug> <command>`, compares exit codes, then removes that worktree.
+  - **Where the bundle and setup come from (E7):** cleanup may delete `data/walkthroughs` once tasks close
+    (`workflows/vajra-deliver.js:842-865`), so Re-run never depends on the original worktree. It reads the
+    archived bundle under `campaigns/<slug>/evidence/<task>/`, verified by E3 `--archived` plus the signed
+    manifest. Setup comes only from the archived `setup.json`, the exact list write-back executed (filtered
+    and capped at `:787`, untruncated). It never comes from the report's `(setup)` lines, which `oneLine(c,
+    300)` truncates (`:923`), and never from `artifacts.verification.setup_cmds`, which still holds filtered-out
+    entries. The confirm shows the same array that will run. Without E7, or for deliveries made before it, the
+    proof shows "evidence not archived": verification and Re-run are refused, and the row keeps only the
+    report text. The control service refuses
+  re-run requests that arrive over MCP (NFR-SEC-9).
+- **Knowledge approve, reject and forget** (POS-3.1): with E9, through the owner-authenticated approval
+  of ADR-12. Without it, they show the exact `vajra_kb.py` command with a Copy
+  button and the line "Run this in your own terminal" (kb.md: these are user-only, own-terminal commands).
+  The app never runs it, types it or sends it into any PTY, including its own. A process that owns a PTY
+  can pass a TTY check (SECURITY.md), so the only honest gate is the human's own terminal. The ledger view
+  refreshes when `audit.jsonl` records the approval.
+- **Runs the app did not start** (POS-2.2) come from transcripts and campaigns as in D9. Their run session
+  is shown read-only with no Take over (the app doesn't own that terminal).
+- **Uninstall leaves Vajra whole** (POS-2.3). App files are plain JSONL and markdown (4.3). E4 (persist the
+  report in the campaign) becomes the recommended default.
+- **No permission-widening flags** (POS-2.4). The session supervisor builds argv from a fixed template.
+  A unit test fails if any argv contains `--dangerously-skip-permissions` or a `--permission-mode` other
+  than the user's default.
 
 ## 4. Data model
 
@@ -486,7 +465,7 @@ via:"ui"` and `source="human"`.
 ### 5.3 Queue format and location
 
 Root: `~/Library/Application Support/<app>/control/<session_id>/`. `<session_id>` is the run session id,
-a canonical uuid (the app makes it; the hook accepts the wider `^[A-Za-z0-9-]{8,128}$`). Never under `~/.claude`. Dirs are mode 0700 and files 0600.
+validated against `^[A-Za-z0-9-]{8,128}$`. Never under `~/.claude`. Dirs are mode 0700 and files 0600.
 
 ```
 queue/<seq:06d>-<action_id>.json   message|redirect, consumed once
@@ -498,14 +477,48 @@ acks/<action_id>.json              written by the hook
 Queue entry (written atomically by the app: temp file + rename):
 ```json
 {"v":1,"action_id":"01JC...ULID","kind":"message","created":"2026-11-05T10:00:00Z",
- "expires":"2026-11-05T10:30:00Z","source":"human-via-desktop",
+ "expires":"2026-11-05T10:30:00Z","source":"human|lead-via-desktop",
  "match":{"agent_id":"<if known>","cwd":"/repo/.claude/worktrees/wf_x","agent_type":"nakula","task_id":"20261105-1000.t2"},
  "text":"use the kit Button"}
 ```
 Stop entry: the same shape with `kind:"stop"`, no `text`, and an optional `reason`. A stop matches only on
 `agent_id` or `cwd`, never on `agent_type` alone, so it can't hit the same task's worker in a later fix round
-(which runs in a fresh worktree). The app deletes the stop file when that worker's transcript ends or its run
-ends, whichever comes first.
+(which runs in a fresh worktree). A stop has no expiry. **Only an explicit human "Resume worker" (a ledger
+record) removes it**: not the transcript ending, not handback, not the run ending, not the Lead. A parent can
+resume the same agent id with `SendMessage` after handback (steering threat model F2), so the stop must
+outlive the worker's turn. Implemented in vajra-6's E1 (`origin/ao/vajra-6/m1-engine`, commit 611d969). The source
+is set from the actor (`human` or `lead-via-desktop`), never typed by the caller; the hook rejects any other
+value.
+
+**Steer nonce (A1 finding B1, tracer bullet).** Workers ignore plain `<untrusted-data>` context and act only
+on a tag carrying the run session's nonce. The nonce:
+- is 128 bits from the OS CSPRNG, created per run session (and rotated on resume) by the Control service;
+- lives only in `control/<session_id>/nonce` (0600, created with no-follow and exclusive create);
+- is never written to the queue, the ledger, acks, `audit.log`, `runs.jsonl`, MCP results or stderr;
+- reaches the workers through engine change E5 (below), never through the app's launch arguments.
+
+**Trust model (GPT-2, steering threat model).** The nonce is **not** an authentication secret: each worker
+must know N to recognize the tag, so N sits in its brief and its transcript. Trust rests on two things the
+worker can't forge:
+1. The queue is write-protected: only the app writes it (guard protected root plus, with owner decision
+   Q10, a sandbox denyWrite; section 5.4 E2 scope).
+2. Hook context is a distinct transcript record (`hook_additional_context`), not tool output.
+
+N is defense in depth. It filters injected text whose author never saw N, such as a web page or a file an
+agent fetched.
+
+**Residual risk, stated, not solved.** Text that carries the right N inside a tool result can't be ruled out
+at the model level. For example, a worker or a compromised dependency could echo its own brief into a file
+another worker reads. Mitigations:
+- the PostToolUse hook warns the worker when a tool result contains a `vajra-steer` tag, and audits it;
+- the PreToolUse hook blocks any tool input that contains N;
+- workers can't read the nonce file or transcripts (E2 read blocks).
+
+We don't promise that the model authenticates the human. A steer is never approval for a protected action and
+never widens a task's scope (NFR-SEC-8).
+
+**Rejected forms.** Plain `<untrusted-data>` additional context. The tracer bullet showed workers ignore it as
+injection, so it is not a fallback.
 
 ### 5.4 `hooks/desktop-control.sh` (E1)
 
@@ -519,26 +532,43 @@ The consequence is that stop is best effort, and the UI shows "stop pending" unt
 Behaviour:
 1. Read the payload (`session_id, hook_event_name, tool_name, cwd, agent_id?, agent_type?`) with `jq`. If
    `jq` is missing or the payload is malformed, exit 0 (no decision; the guard still fails closed on its own).
-2. Validate `session_id`. If `control/<session_id>/` does not exist, exit 0. This is the fast path for every
+2. Check that `control/<session_id>/` exists before running `jq` at all (A1 M6), then validate `session_id`. If the directory does not exist, exit 0. This is the fast path for every
    session the app does not own, with a target under 10 ms.
 3. Match. An entry matches when `match.agent_id` equals the payload `agent_id`. If either side lacks
    `agent_id`, the canonical `cwd` must equal `match.cwd`. If both lack it, `agent_type` must equal
    `match.agent_type` and the entry must carry `unique:true` (set by the app only when exactly one live
    worker has that type). Main-session calls (no agent fields, cwd = repo root) never match a worker entry.
-4. **PreToolUse + matching stop file:** print `stopped by the human (action <id>). Stop now: make no more
+4. **PreToolUse + matching stop file:** the only exempt call is the exact tool name `SubagentHandback`,
+   so a stopped worker can still hand back and the parent gets a report (tracer finding 3). No prefix,
+   pattern or other output tool is exempt. Every other call: print `stopped by the human (action <id>). Stop now: make no more
    tool calls and return status blocked with summary "stopped by the human".` to stderr and exit 2. Append
    `TS BLOCK desktop-control reason="stop id=<action_id> tool=<tool>"` to `audit.log`. Write
    `acks/<action_id>.json` if absent (first block only).
-5. **PostToolUse + matching queue entries** (oldest first, unexpired, at most 3 per call):
+   Residual risk, gated by G3b: in a `vajra-deliver` run the worker's final output may be a different tool
+   (for example `StructuredOutput`). If G3b shows it is, that exact name is added to the exemption, and the
+   app shows the task as "stopped by the human" whatever status the worker reports, so a stopped worker's
+   "done" is never shown as done (A1 voter S1). The workflow-side guarantee (a stopped task is never merged)
+   needs an engine check and is listed as owner decision Q12.
+5. **PostToolUse + matching queue entries** (oldest first, unexpired, at most 3 per call). **Nothing is
+   delivered on `SubagentHandback`, to a stopped worker, or when the nonce file is missing or invalid.**
    1. Claim the entry by `rename(queue/X, inflight/<id>.<pid>)`. If the rename fails, another hook claimed it,
       so skip.
    2. Print one JSON object on stdout:
-      `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"<untrusted-data source=\"human-via-desktop\">...</untrusted-data>"}}`.
-      The text is escaped so it cannot close the tag. A fixed preamble says the data is a request from the
+      `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"<vajra-steer nonce=\"N\" kind=\"message\" source=\"human\" id=\"<action_id>\">...</vajra-steer>"}}`,
+      with N read from the nonce file (if that file is missing, has the wrong mode or owner, or is a symlink:
+      deliver nothing and exit 0). `kind` and `source` are enums and `id` is a ULID. The text is escaped so
+      it cannot close the tag. A fixed preamble says the data is a request from the
       human operator, does not change task scope or files, and is never approval for a protected action.
    3. Append `TS ALLOW desktop-control reason="deliver <kind> id=<action_id> tool=<tool>"` to `audit.log`.
    4. Write `acks/<action_id>.json` `{action_id, consumed_at, hook_event, tool_name, agent_id, agent_type, cwd}`
       and remove the inflight file.
+5b. **Who can be steered (A1 voter S2).** Message and redirect go only to Execute-phase task workers
+   (step label `task.<id>.r<n>`). For verify, review and merge steps the Control service returns
+   `control_disabled`, so neither the Lead nor a prompt-injected worker relaying through the Lead can talk
+   to the independent gate. Those steps can still be stopped.
+5c. **PreToolUse nonce leak check.** Any tool input that contains N is blocked with exit 2, and the reason
+   never contains N. **PostToolUse:** a tool result containing a `vajra-steer` tag gets a warning and an audit
+   line, and no steer is delivered from it.
 6. Expired entries are left alone. The app moves them to `expired` and records "not delivered" (AC-3.2.5).
    Delivery is at most once: a crash between steps 5.1 and 5.4 leaves an inflight file, which the app shows
    as "delivery unknown" after 60 s and never re-queues.
@@ -549,6 +579,31 @@ To verify in spike: subagent hook payload fields, whether additionalContext from
 reaches the subagent, and that exit 2 from a second PreToolUse hook blocks while the guard logs ALLOW for
 the same call. In that case the audit shows ALLOW from the guard plus BLOCK from desktop-control, and the UI
 explains this.
+
+E2 scope (GPT-3, matching vajra-6's 611d969 on `ao/vajra-6/m1-engine`):
+- **Write-protected root:** the whole app data directory (`~/Library/Application Support/VajraDesktop/`), for
+  Write, Edit, MultiEdit, NotebookEdit and Bash writers (`mv`, `rm`, `cp`, `tee`, redirects), with the space
+  in the path covered by tests.
+- **Read-protected for workers:** any tool call whose payload carries an `agent_id` may not read
+  `VajraDesktop/control/` (which holds the nonce) or `~/.claude/projects/` (transcripts, which hold each
+  worker's brief and so the nonce). This covers Read, Grep, Glob and LS, read-only Bash (`cat`, `head`,
+  `python3 -c`, `grep -r` and so on), symlinks resolved canonically, and recursive Grep over an ancestor.
+- **Main-session policy (documented):** the main session and the Lead chat have no `agent_id` and keep
+  reading. The Lead needs transcripts to answer questions about workers.
+- **Not covered:** a worker that never names those paths can still read its own transcript through Claude
+  Code itself. The nonce trust model (5.3) does not depend on hiding N from the worker that holds it.
+- **Same-user limitation (stated):** file modes (0600) and the socket's peer-uid check separate users, not
+  agents. Every agent runs as the same user, so mode 0600 is never treated as agent authorization.
+  Authorization comes from the guard (defense in depth over shell) and, with Q10, the OS sandbox.
+- **Sandbox boundary (Q10 approved, 2026-11-05):** Vajra's sandbox profile ships a `denyWrite` for
+  `~/Library/Application Support/VajraDesktop/` (the control queue included) as its default. Both
+  `scripts/enable-sandbox.sh` and the Desktop first-run setup apply it, and only when the user turns the OS
+  sandbox on and approves the settings change shown to them. Nothing edits settings silently (VD-27).
+  `vajra-doctor.sh` and preflight report whether it is active. On the owner's Mac the OS sandbox is
+  currently off (doctor WARN), so the guard is the active layer until it's enabled. Without it, the guard is the only
+  write protection, so the control service follows Q10's working assumption: with `denyWrite` off, control is
+  **stop-only**. Message and redirect return `control_disabled: sandbox_off`, nothing is queued, and the UI
+  hides them with the reason. Stop still works, because a forged or replayed stop can only halt a worker.
 
 ### 5.5 Worker identification
 
@@ -570,7 +625,7 @@ graph.
  "state":"requested|awaiting_human_confirm|queued|delivered|not_delivered|delivery_unknown|refused|done",
  "actor":"human|lead","via":"ui|mcp","run_id":"20261105-1000","session_id":"<run session>",
  "worker":"<app key>","engine_id":"nakula","task_id":"20261105-1000.t2",
- "source":"human|human-via-desktop","text":"<= 4000 chars, as delivered","text_sha256":"...",
+ "source":"human|lead-via-desktop","text":"<= 4000 chars, as delivered","text_sha256":"...",
  "audit_ref":{"kind":"guard|desktop-control","ts":"...","tool":"..."}}
 ```
 `text` is the exact message the worker receives: typed by the human (`actor:"human"`) or written by the Lead
@@ -627,7 +682,7 @@ Reconciliation (AC-3.4.3):
 
 ## 6. ADRs
 
-**ADR-1 Separate Lead chat session.** Decision: the human chats with a second Claude Code session (Lead
+**ADR-1 Separate Lead chat session.** Status: accepted 2026-11-05. Decision: the human chats with a second Claude Code session (Lead
 agent, read tools plus control tools, no Agent/Workflow tool), never with the run session.
 - Options: (a) do nothing, so the human types into the run session; (b) the app answers questions itself
   with no model; (c) separate Lead session (chosen).
@@ -637,7 +692,7 @@ agent, read tools plus control tools, no Agent/Workflow tool), never with the ru
   (b) cannot answer "why is Backend stuck".
 - Would change our mind: Claude Code gains per-agent addressing inside a workflow with no relay.
 
-**ADR-2 Control by hook + queue, not PTY injection.** Decision: control reaches workers only through E1
+**ADR-2 Control by hook + queue, not PTY injection.** Status: accepted 2026-11-05. Decision: control reaches workers only through E1
 reading the app-owned queue.
 - Options: (a) do nothing (no steering); (b) PTY injection, as Runner's router writes into agent stdin; (c)
   hook + queue (chosen); (d) restart the worker with a new brief.
@@ -650,8 +705,8 @@ reading the app-owned queue.
 - Would change our mind: the spike shows subagent hooks cannot inject context. Fallback then is
   stop-only plus "message on next round" through the fix-loop feedback, and J3 messaging is descoped.
 
-**ADR-3 Read-only over `~/.claude`.** Decision: the app reads an allowlist and mutates only through Vajra
-scripts and Claude Code. The engine additions it needs are E1-E3 (E4 open).
+**ADR-3 Read-only over `~/.claude`.** Status: accepted 2026-11-05. Decision: the app reads an allowlist and mutates only through Vajra
+scripts and Claude Code. The engine additions it needs are E1 to E8.
 - Options: (a) do nothing (app writes campaign files directly); (b) the app links Vajra's logic as a
   library; (c) read-only plus scripts (chosen), with E3 `check-evidence` so evidence can be verified without
   the key or a state change.
@@ -662,7 +717,8 @@ scripts and Claude Code. The engine additions it needs are E1-E3 (E4 open).
 - Would change our mind: measured script latency breaks NFR-UX-1 on common paths. The answer would still be
   a batch read-only script, not direct writes.
 
-**ADR-4 Capture the delivery report from the transcript.** Decision: the tailer captures the workflow result
+**ADR-4 Capture the delivery report from the transcript.** Status: superseded by E4 (Q3, 2026-11-05);
+capture is kept only as the fallback for campaigns delivered before E4. Decision: the tailer captures the workflow result
 from the run transcript and stores `reports/<run_id>.md` and `results/<run_id>.json` in the app dir.
 - Options: (a) do nothing (report only on screen); (b) parse the PTY screen; (c) transcript capture (chosen);
   (d) E4 engine persistence.
@@ -670,7 +726,7 @@ from the run transcript and stores `reports/<run_id>.md` and `results/<run_id>.j
   if their transcript still exists.
 - Would change our mind: the owner approves E4. Then the app reads `report.md` and drops capture.
 
-**ADR-5 Worker streams from transcripts, not PTYs.** Decision: render worker streams from transcript files
+**ADR-5 Worker streams from transcripts, not PTYs.** Status: accepted 2026-11-05. Decision: render worker streams from transcript files
 tailed read-only.
 - Options: (a) do nothing (one run PTY only); (b) a PTY per worker (needs the engine to spawn processes per
   worker, which breaks the one-process workflow model); (c) transcripts (chosen).
@@ -679,7 +735,7 @@ tailed read-only.
 - Mitigation: schema fingerprint plus raw view (section 7).
 - Would change our mind: Claude Code ships a documented event stream for workflow agents.
 
-**ADR-6 MCP vs CLI for control tools.** Decision: a stdio MCP server forwarding to the app socket.
+**ADR-6 MCP vs CLI for control tools.** Status: accepted 2026-11-05. Decision: a stdio MCP server forwarding to the app socket.
 - Options: (a) do nothing (Lead is read-only); (b) a CLI (`vajra-desktop ctl message ...`) called by the
   Lead through Bash; (c) MCP (chosen).
 - Evidence against: one more binary, and the MCP naming and config behaviors are to verify in spike.
@@ -688,7 +744,7 @@ tailed read-only.
   matcher and clean action cards.
 - Would change our mind: the spike shows inline agents cannot be given MCP tools.
 
-**ADR-7 No own database in MVP.** Decision: derive everything from files on read. App files are
+**ADR-7 No own database in MVP.** Status: accepted 2026-11-05. Decision: derive everything from files on read. App files are
 append-only JSONL plus captured reports.
 - Options: (a) do nothing (rescan everything on each view); (b) SQLite index of campaigns, runs and
   transcripts; (c) derive from files with in-memory snapshots (chosen).
@@ -697,14 +753,215 @@ append-only JSONL plus captured reports.
 - Would change our mind: measured History open > 300 ms or cold start over NFR-PERF-4. Then add a small
   app-owned index (`index.sqlite` in the app dir, rebuildable, never authoritative).
 
-**ADR-8 Stop is sticky and needs human confirmation.** Decision: stop is a flag file that blocks every next
-tool call of that worker instance (matched by `agent_id` or worktree `cwd`, 5.3) until it ends; the app then
-removes the flag. The Lead can only request a stop; the human confirms.
+**ADR-8 Stop is sticky and needs human confirmation.** Status: accepted 2026-11-05. Decision: stop is a flag file that blocks every next
+tool call of that worker instance (matched by `agent_id` or worktree `cwd`, 5.3), except the exact tool
+`SubagentHandback`. Only a human "Resume worker" clears it (5.3); handback and a later `SendMessage` don't. The
+Lead can only request a stop; the human confirms. Messages are not delivered while a worker is stopped.
 - Options: (a) do nothing; (b) kill the run session (kills all workers); (c) sticky hook block (chosen).
 - Evidence against: the worker may keep reasoning without tools for a turn, and the workflow may treat a
   blocked worker as failed and continue other waves.
 - Why: (c) is the only per-worker stop that works inside one process.
 - Would change our mind: Claude Code exposes per-subagent cancel.
+
+**ADR-9 No separate daemon in the MVP; runs survive a closed window, not a quit or crash** Status: accepted 2026-11-05. (VD-4, VD-5,
+VD-6, POS-2.1). Decided 2026-11-05 by Opus 5.5, accepting the orchestrator's recommendation; GPT 6.1 Sol to
+check.
+- Decision:
+  1. The Rust core owns the PTYs of the run session and the Lead chat inside the app process. There is no
+     separate daemon or launchd agent.
+  2. Closing the last window does not quit. The app stays alive as a menu bar item showing the number of
+     active runs, and its runs and agents keep going. Reopening the window reattaches with nothing lost,
+     because the core never stopped.
+  3. Cmd-Q with active runs asks first: "Quit and stop 2 runs?" with **Keep running** (closes the window,
+     the default) and **Quit** (destructive). With no active runs, quit is immediate.
+  4. On a real quit, a crash, logout or shutdown, the run session's PTY closes and its `claude` process
+     ends. On the next launch the app offers resume **only** for the sessions that were running and that
+     the human did not stop or quit (VD-5). Nothing resumes without a click.
+  5. Resume runs `claude --resume <session_id> '/vajra-deliver {"campaign":"<slug>","run_id":"<UTC now>"}'`
+     in the repo, as argv with the slug from `runs.jsonl`. Nothing is typed into the PTY. It never uses
+     `/vajra continue`, because that resumes Vajra's one global `.active` campaign, which every new run
+     rewrites (`vajra-campaign.sh` create; pre-mortem PM-1). A campaign already live in any session is not
+     offered.
+     The tracer bullet showed that `--resume` plus `SendMessage` continues the same worker id. The Lead chat
+     resumes the same way.
+  6. Updates (VD-6) install only when no run is active. Otherwise the update waits, and the menu bar says
+     "Update ready, installs when runs finish". With one process there is never an older generation left
+     running. After 72 h waiting, the menu offers Install now, which stops the runs and offers resume (PM-6).
+  6b. Each run session is spawned as the leader of a new process group, and `runs.jsonl` records its pgid
+     and the leader's start time (so a reused pid is never mistaken for it). Quit sends SIGTERM to each
+     group and waits up to 10 s, then SIGKILL.
+  6b'. **Startup cleanup barrier** (PM-8, POS-2.1f). Before the run list loads or any resume is offered, the
+     core checks every run in `runs.jsonl` whose session isn't live. For each recorded group that still has
+     members, each member's start time must be at or after the run's start (a reused pgid whose leader is gone
+     is otherwise indistinguishable); members that fail the check go to the confirm list instead. Groups are
+     handled in parallel: SIGTERM, wait up to 10 s, SIGKILL, wait up to 5 s. Then it sweeps for escaped descendants: any
+     process of the same user whose cwd (canonicalized with realpath, so `/var` and `/private/var` match) is
+     inside that run's worktrees. Those are listed (pid, command, cwd) and killed only after the human
+     confirms. The human may instead choose "Keep and resume anyway" (for their own shell or editor), which
+     is recorded in the app log. Resume of that campaign stays blocked until each listed process is killed
+     or kept. The barrier is bounded at 20 s in total, excluding time spent waiting on that confirm, and its outcome is recorded in the app log. Only after
+     it finishes does `vajra-campaign.sh verify` run for each campaign.
+  6c. When the last window closes, the webview is destroyed and only the core stays. Reopening rebuilds the
+     UI from the core. This keeps a long-lived menu bar app from carrying webview growth (PM-6).
+  7. While any run is active the core holds a macOS activity assertion, so App Nap does not throttle the
+     windowless app (A1 M5). It is released when the last run ends.
+- Options:
+  - (a) Do nothing: the window owns everything, and closing it stops runs. Rejected: it fails P2 at the
+    most common moment.
+  - (b) Menu bar app, no daemon (chosen).
+  - (c) A separate Rust daemon (launchd agent) owning the PTYs, with versioned IPC and an update handoff.
+  - (d) A detached terminal multiplexer (tmux or dtach) holding each PTY.
+  - (e) Claude Code's own background sessions, if they cover workflow runs.
+- Evidence for (b):
+  - P2 and P3 in `pain-points.md` (vajra-4) are mostly daemon-lifecycle failures in apps that have one:
+    old daemon generations left running after an update (orca#9138), every session swept to `exited` after
+    a daemon restart (AO#6639), and duplicate sessions after an upgrade (wmux#537, ai-maestro#75). (c)
+    takes on exactly that failure class plus a versioned protocol, in exchange for surviving crashes.
+  - The spike measured the app core at about 110 MiB RSS (Rust main, flat over an hour). A daemon would
+    split that across two processes and add its own baseline against an idle budget we already miss
+    (220 vs at most 200 MiB).
+  - Vajra already makes interruption recoverable: campaigns are signed files with checkpoints, finished
+    worker commits stay on their branches, and `/vajra continue` resumes (CLI only; the app resumes by slug).
+- Strongest evidence against (b):
+  - A crash or a real quit stops the in-flight run. `deliver.md` says a resumed campaign gets fresh,
+    run-namespaced tasks and no "already done" shortcut. So work since the last commit is lost and the
+    current wave is redone. That is a real cost on a long delivery.
+  - Shutdown and logout can't be blocked.
+  - Runner and Herdr survive reboots of their UI, and users praise it (pain-points.md, praise table).
+- Consequences:
+  - POS-2.1 is narrowed. In the MVP the requirement is that runs survive the window closing and the app
+    sleeping. Surviving SIGKILL and Quit moves to v1.1.
+  - VD-4 as written (a daemon) is deferred. VD-5 and VD-6 are met as described in the decision above.
+  - Runs started in a plain terminal (POS-2.2) are not owned by the app, so they survive anything the
+    app does.
+- What would change our mind, each measured in beta:
+  - Crash-free sessions below 99.5%.
+  - More than 1 in 20 deliveries interrupted by a quit or crash.
+  - Claude Code documenting background sessions that a workflow run can live in. That is option (e): it
+    gives survival without a daemon of our own, so evaluate it first.
+  - Vajra adding a resume that keeps a run's tasks. Then (c) or (d) are reconsidered for v1.1.
+
+**ADR-10 One small agent-adapter interface** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: the Rust core talks to
+agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`, `stop`, `resume`, and a
+`capabilities()` set of flags. The UI renders only actions whose flag is true.
+- Claude Code adapter: every flag true (the control channel in section 5 is its `message` and `stop`).
+- Codex CLI adapter: `spawn`, `stream` (its PTY), `attach_pty` and process-group `stop` (a hard stop, labelled
+  so) to start with. `inspect`, `message` and `resume` stay false until G4 proves a supported mechanism, and
+  are never emulated by typing into its PTY (ADR-2).
+- Options: (a) Claude Code only (the earlier won't-do); (b) a plugin system; (c) one compiled-in interface
+  with two adapters (chosen).
+- Evidence against: a second adapter adds a conformance suite and a test matrix, and Codex users may expect
+  parity.
+- Would change our mind: G4 shows Codex can't be streamed or stopped reliably; then the Codex adapter ships
+  later and the interface stays.
+- Gemini CLI and OpenCode come post-MVP through the same trait.
+
+**ADR-11 Conductor import is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
+worktrees (`git worktree list`) and Claude Code sessions (transcript `cwd`), let the user confirm each, and
+record only app-owned entries. Nothing is deleted, moved or rewritten. Conductor's own layout is read only
+where G4 has confirmed it; otherwise the import says "not recognised" (AC-1.4.4).
+- Options: (a) no import; (b) full import that moves worktrees and converts Conductor state; (c) read-only
+  discovery with per-item confirm (chosen).
+- Evidence: P6 (13 sources) includes displaced Conductor users asking for an alternative. (b) risks
+  losing someone's work in a tool we don't control.
+- Consequences: users keep their worktrees where they are; anything Conductor-only (its own chat history)
+  isn't carried over.
+- Would change our mind: G4 finds no stable on-disk layout; then the import is git- and transcript-only.
+
+**Billing hard rules** (owner decision; PRD section 11; status: accepted 2026-11-05; options and evidence in
+`vajra-4/billing.md`). The session supervisor builds argv from a fixed
+template for the stock binary (no `--bare`, no `-p`, no SDK) and the child environment from an allowlist. It
+reports the billing source per session from the presence of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+an `apiKeyHelper` (API key wins), and for Codex from `codex login status`. It never reads a credential value
+(NFR-SEC-16). Spawns are staggered by at least 2 s (AC-1.1.5).
+
+**ADR-12 Project memory is a view on the ledger and Atman, with one human-only approval path**
+(owner feature, 2026-11-05; E9 approved as Q14 with the conditions in AC-7.1.8). Decision: no new memory store. Inbox, rules, search and triggers read and
+mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
+- **Why not a PTY:** the TTY gate in `human_gate` (`scripts/vajra_kb.py:845`) can't tell the app from an
+  agent, because any process that owns a PTY passes it (SECURITY.md). So the app never satisfies it.
+- **The approval path (E9, owner approval Q14): signed approvals.** File location is not a boundary: any
+  same-user process can write a file, including a detached process or launch agent left by an older
+  unsandboxed session, which survives restarts and logins (PR review). So the engine trusts a signature,
+  not a path.
+  1. **Enrollment, once, human-only.** On first use the core creates a P-256 key in the Secure Enclave
+     (non-exportable, access control `userPresence`, so every signature needs Touch ID, a paired Apple
+     Watch or the login password; no reuse window). The user enrols its public key by running
+     `vajra_kb.py desktop-enroll <pubkey-file>` in their own terminal. That command sits behind the same
+     human gate and guard block as `approve`, shows the key's fingerprint and asks the user to compare it
+     with the one shown in the app, then appends an HMAC-chained `desktop_key` event. `desktop-revoke`
+     removes it the same way. The latest enrolled key is the only one E9 accepts.
+  2. **Each approval.** The human confirms in a native sheet. The core asks the Secure Enclave to sign the
+     approval payload, which triggers the owner authentication with the action, id and scope in the reason
+     string. The payload is canonical JSON: action, store (project id or `global`), record id, sha256 of
+     the pending record as read, final `applies` and paths, edited text if any, a random 128-bit approval
+     id, and the time. The core writes the payload plus its signature to
+     `~/Library/Application Support/VajraDesktop/approvals/<approval id>.json`.
+  3. The script bridge runs `vajra_kb.py approve <id> --desktop-approval <file>` (or `reject`, `forget`,
+     `retire`, `supersede`; `atman.sh approve|reject <id> --desktop-approval <file> [reason]` for routes,
+     where `reject` parses the flag before treating the rest as the reason (today `cmd_reject`,
+     `atman/atman.py:988`, takes every remaining argument as the reason and calls its own `human_gate`); for
+     a `kb-` id Atman passes the flag through `kb_call`). Atman skill and agent patch proposals stay
+     copy-command: the user applies them with `git apply` anyway.
+  4. E9 accepts the file only when all of these hold:
+     - the signature verifies against the enrolled key (`openssl dgst -sha256 -verify`, already a Vajra
+       dependency), and the action and store in the payload match the command;
+     - under the store lock: the approval id has not been used (the used ids are recorded in the HMAC-chained
+       ledger, not in a file a writer could delete), the pending record's bytes are read once, and their
+       sha256 matches;
+     - the approval is under 5 minutes old.
+     It then builds the record from those same bytes. For Edit then approve, the payload carries the edited
+     `title`, `body` and `paths` (all three always present, so an omitted field can't mean "keep the
+     original"): the engine replaces exactly those fields on the record built from the hashed bytes and
+     keeps everything else from it (id, type, source, provenance, created). The sha256 still binds the
+     approval to the original pending record, and the signature binds the edit. The write gate then runs on
+     the final record, edit included, not on the original bytes, so a refusal returns the gate's reason
+     and nothing is applied. It then applies the final record, records the approval id as used, and audits
+     (the audit stores the sha256 of both the original and the final record, never the text). The parser already refuses abbreviations (`allow_abbrev=False`,
+     `scripts/vajra_kb.py:1653`), so `--desk` can't stand in for the flag, and the guard matches the full
+     name. No other input to these commands changes, so the TTY path stays as it is for the CLI.
+- **Why it holds:** a forger needs a signature from a Secure Enclave key that signs only after owner
+  authentication, or the Vajra HMAC key to enrol its own key. Neither depends on which processes are
+  sandboxed or when they started. Agents can't run `desktop-enroll` (guard), and the app offers no MCP tool
+  or IPC command that produces a signature. A synthetic click reaches the sheet, but not the authentication.
+- **Residual risk:** a same-user process that can read the Vajra HMAC key can already forge any ledger event
+  directly, so E9 is no weaker than the existing kb model. Enrollment is the one step that goes through the
+  TTY gate, and the user compares fingerprints there.
+- **Options:** (a) keep copy-to-terminal only; (b) the app drives the TTY prompt (rejected: it defeats the
+  gate); (c) the app holds the HMAC key and mints user tokens (rejected: the app never reads the key);
+  (d) an owner-authenticated approval file trusted for its location (rejected after review: a surviving
+  same-user writer can forge it, and no timestamp test excludes one); (e) Secure Enclave signed approvals
+  checked against a human-enrolled key (chosen).
+- **Evidence against:** it adds a second way into a human gate, and an enrollment step, so it needs
+  bhishma's review and red-team PoCs (H5). Would change our mind: a PoC gets an approval accepted without
+  owner authentication. Then we fall back to (a).
+- **"Applied" stays data:** approved records are primed as `<untrusted-data>` exactly as today. The app adds
+  no instruction channel.
+
+**ADR-13 claude-mem: no integration in the MVP; a one-shot read-only import later** (owner request,
+2026-11-05). Evidence (GitHub API and docs.claude-mem.ai, 2026-11-05; not installed on the owner's machine):
+- **Project:** `thedotmack/claude-mem`, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
+  141 open issues).
+- **Storage:** SQLite at `~/.claude-mem/claude-mem.db` (WAL mode, sessions, observations and summaries,
+  FTS5) plus a Chroma vector store. Settings are in `~/.claude-mem/settings.json`.
+- **Capture:** six Claude Code hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
+  SessionEnd) capture what the agent does, compress it with a model, and inject context into later
+  sessions. A local Bun worker serves an HTTP API and a viewer, with loopback bind as its only protection
+  (its docs say so).
+- **Billing and privacy:** compression defaults to provider `claude` with
+  `CLAUDE_MEM_CLAUDE_AUTH_METHOD=subscription`, which conflicts with our billing rules (no SDK use of plan
+  credentials). The installer offers a hosted account (CMEM Pro, cloud sync) unless opted out. `<private>`
+  tags exclude content.
+- **Options:**
+  - (a) Integrate as a live read-only source. Rejected: it would tie us to an unauthenticated local HTTP
+    API and a fast-moving schema, and blur "what shaped this run".
+  - (b) A one-shot import into the ledger as `proposed` records. Chosen, post-MVP: the user starts it, it
+    reads the SQLite file directly (never the worker API), checks the schema version, and each imported
+    observation still passes the write gate and the human approval (US-7.1).
+  - (c) Ignore it.
+- **Coexistence:** if `vajra-doctor` finds claude-mem's hooks next to Vajra's, preflight warns that two
+  memories inject context (P15 context-cost risk). The app never edits either one's settings.
+- **Would change our mind:** claude-mem documents a stable export format; then (b) uses that instead.
 
 ## 7. Error handling
 
@@ -782,7 +1039,7 @@ malware is out of scope, consistent with SECURITY.md "Same-user trust boundary".
 ## 9. Performance design
 
 - **Readers never block.** Each PTY and transcript has a dedicated reader that writes into a per-stream ring
-  buffer (2 MB). Overflow appends to `spill/<stream>.log`, with a total spill cap (default 1 GB, LRU by run).
+  buffer (256 KiB, NFR-PERF-2). Overflow appends to `spill/<stream>.log`, with a total spill cap (default 1 GB, LRU by run).
   Scrolling past the ring reads spill pages on demand (AC-2.2.2).
 - **Backpressure.** The bus keeps one bounded queue per subscriber (e.g. 1024 events). On overflow it drops
   that subscriber's queue and sends a `snapshot_needed` marker; the subscriber pulls a compact snapshot (last
@@ -799,18 +1056,11 @@ malware is out of scope, consistent with SECURITY.md "Same-user trust boundary".
   Events coalesce for 150 ms, then the reader re-reads only changed files, skipping when size and mtime are
   unchanged. `tasks.json` is small and re-read whole; jsonl and logs are read from the last offset.
 - **Script calls.** Cached per input with short TTLs: `verify` per campaign per change of `state.sig`
-  mtime, `check-evidence` per (path, sha256), doctor on demand.
+  mtime, `check-evidence` per (evidence sha256, recorded head); the stale check per (evidence sha256, current tree id), doctor on demand.
 
-| Budget | ID | Value (PROVISIONAL, from the brief, replace with spike numbers) |
-|---|---|---|
-| Idle RSS, all app processes | NFR-PERF-1 | <= 150 MB |
-| RSS per attached agent stream | NFR-PERF-2 | <= 15 MB; ring 2 MB per stream |
-| Frame time at 10 agents x 200 lines/s | NFR-PERF-3 | p95 <= 16.7 ms, p99 <= 33 ms |
-| Cold start to interactive | NFR-PERF-4 | <= 1.0 s (M-series) |
-| Slow consumer | NFR-PERF-5 | PTY read latency unchanged with a stalled UI |
-| 1 h soak | NFR-PERF-6 | RSS growth <= 5% |
-| Vs competitors | NFR-PERF-7 | Lower idle RSS and per-stream RSS than Agent Orchestrator and Orca |
-| Hook fast path (E1, not our session) | (new, propose NFR-PERF-8) | <= 10 ms p95 per tool call |
+Budgets: NFR-PERF-1 to NFR-PERF-11 in [requirements.md](requirements.md#performance), adopted from the
+stack spike and reviewed by both models. They replace the provisional table that was here (A1 finding H1).
+The retained tail per worker is 256 KiB (NFR-PERF-2), not 2 MB.
 
 ## 10. Test strategy and rollback
 
