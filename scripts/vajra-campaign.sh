@@ -7,6 +7,9 @@
 #   progress.md     append-only progress notes
 #   state.sig       HMAC-SHA256 over the three files above (written by this script only)
 #   checkpoints/    NNNN.json snapshots, each HMAC-signed and chained to the previous one
+#   report.md       the delivery report (E4); its sha256 is recorded in the signed campaign.json
+#   evidence/       <slug>/: one archived verification bundle per delivery + setup.json, with a
+#                   manifest.json (tasks closed on it, sha256 per file) signed with the HMAC key (E7)
 #
 # The HMAC key (~/.claude/vajra/.hmac-key) is read by this script and never printed,
 # so it never enters model context. Signing uses openssl.
@@ -22,6 +25,8 @@
 #   vajra-campaign.sh resume [slug] [--from-checkpoint N]
 #   vajra-campaign.sh verify [slug]
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
+#   vajra-campaign.sh report --campaign slug --bytes N --check FNV32 --base64 B64
+#   vajra-campaign.sh archive-evidence <slug> <evidence-dir> <head> <setup-json>
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -32,6 +37,7 @@ umask 077
 VAJRA_DIR="${HOME}/.claude/vajra"
 ROOT="${VAJRA_DIR}/campaigns"
 KEY_FILE="${VAJRA_DIR}/.hmac-key"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACTIVE_FILE="${ROOT}/.active"
 SCHEMA="vajra.campaign/v1"
 
@@ -90,6 +96,11 @@ verify_state() {
   got="$(state_digest "$d" | hmac_stdin)"
   [ -n "$want" ] && [ "$want" = "$got" ] || return 1
   [ "$(jq -r '.featuresDefSha256' "$d/campaign.json")" = "$(features_def_sha "$d/features.json")" ] || return 1
+  # E4: once a report is recorded, report.md must exist and match (edit or delete -> invalid).
+  want="$(jq -r '.reportSha256 // ""' "$d/campaign.json")"
+  if [ -n "$want" ]; then
+    [ -f "$d/report.md" ] && [ ! -L "$d/report.md" ] && [ "$(sha256_file "$d/report.md")" = "$want" ] || return 1
+  fi
   return 0
 }
 
@@ -147,9 +158,9 @@ cmd_create() {
   local goal="" feats="[]" spec id desc
   while [ $# -gt 0 ]; do
     case "$1" in
-      --goal) goal="$(clean_line "${2:-}" 1000)"; shift 2 ;;
+      --goal) goal="$(clean_line "${2:-}" 1000)"; shift 2 || die "missing value for $1" ;;
       --feature)
-        spec="${2:-}"; shift 2
+        spec="${2:-}"; shift 2 || die "missing value for $1"
         id="${spec%%|*}"; desc=""
         [ "$id" != "$spec" ] && desc="${spec#*|}"
         valid_feature_id "$id" || die "invalid feature id: '$id' (letters, digits, . _ -; max 64)"
@@ -243,8 +254,8 @@ cmd_pass() {
   local slug="" ev="" revoke=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --campaign) slug="${2:-}"; shift 2 ;;
-      --evidence) ev="$(clean_line "${2:-}" 300)"; shift 2 ;;
+      --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;;
+      --evidence) ev="$(clean_line "${2:-}" 300)"; shift 2 || die "missing value for $1" ;;
       --revoke) revoke=1; shift ;;
       *) die "unknown option: $1" ;;
     esac
@@ -265,7 +276,7 @@ cmd_pass() {
 cmd_progress() {
   local text="${1:-}"; [ -n "$text" ] || usage; shift
   local slug=""
-  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;; *) die "unknown option: $1" ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   append_progress "$text"; touch_updated; sign_state "$DIR"
   echo "progress recorded for $SLUG"
@@ -275,7 +286,7 @@ checkpoint_hmac() { jq -cS 'del(.hmac)' "$1" | tr -d '\n' | hmac_stdin; }
 
 cmd_checkpoint() {
   local label="" slug=""
-  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) label="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) label="$1"; shift ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   mkdir -p "$DIR/checkpoints"
   local last seq prev f
@@ -311,7 +322,7 @@ latest_valid_checkpoint() {
 
 cmd_resume() {
   local slug="" from=""
-  while [ $# -gt 0 ]; do case "$1" in --from-checkpoint) from="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --from-checkpoint) from="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"
   if [ -n "$from" ]; then
     printf '%s' "$from" | grep -Eq '^[0-9]{1,4}$' || die "invalid checkpoint number: $from"
@@ -354,7 +365,7 @@ cmd_verify() {
 
 cmd_close() {
   local slug="" st="done"
-  while [ $# -gt 0 ]; do case "$1" in --status) st="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --status) st="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   case "$st" in done|abandoned) ;; *) die "--status must be done or abandoned" ;; esac
   resolve "$slug"; load_key; lock "$DIR"
   # An abandoned campaign may be closed even if its signature is broken.
@@ -363,6 +374,60 @@ cmd_close() {
   append_progress "closed: $st"; touch_updated; sign_state "$DIR"
   [ "$(active_slug || true)" = "$SLUG" ] && rm -f "$ACTIVE_FILE"
   echo "campaign $SLUG closed ($st, $(counts) features passing)"
+}
+
+# E4: the Deliver step saves its report. The text comes base64-encoded (one argument,
+# multi-line safe) with its byte length and sha256, so a damaged copy is refused rather than saved.
+# Any agent can run this, as with every campaign command: reportSha256 binds the file to the
+# signed state; it is not proof that the workflow wrote it.
+REPORT_MAX=65536
+# FNV-1a 32 of $1 (ASCII), as the workflow's fnv(): a copy check, not a security property.
+fnv32() { python3 -I -c 'import sys
+h = 0x811c9dc5
+for b in sys.argv[1].encode(): h = ((h ^ b) * 0x01000193) & 0xffffffff
+print("%08x" % h)' "$1"; }
+
+cmd_report() {
+  local slug="" nb="" b64="" chk="" tmp got
+  while [ $# -gt 0 ]; do case "$1" in
+    --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --bytes) nb="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --check) chk="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --base64) b64="${2:-}"; shift 2 || die "missing value for $1" ;;
+    *) die "unknown option: $1" ;;
+  esac; done
+  case "$nb" in ""|*[!0-9]*) die "--bytes must be a number" ;; esac
+  [ "$nb" -ge 1 ] && [ "$nb" -le "$REPORT_MAX" ] || die "report must be 1 to $REPORT_MAX bytes"
+  [ -n "$b64" ] && [ "${#b64}" -le $(( (REPORT_MAX / 3 + 2) * 4 )) ] || die "--base64 missing or too long"
+  printf '%s' "$b64" | grep -Eq '^[A-Za-z0-9+/]+={0,2}$' || die "--base64 is not base64"
+  printf '%s' "$chk" | grep -Eq '^[0-9a-f]{8}$' || die "--check must be the 8-hex FNV-1a 32 of the base64 text"
+  # The base64 is copied by an agent: a copy error is caught here, not saved and signed.
+  [ "$(fnv32 "$b64")" = "$chk" ] || die "--base64 does not match --check (a copy error)"
+  [ -n "$slug" ] || die "--campaign is required"
+  resolve "$slug"; load_key; lock "$DIR"; require_valid
+  tmp="$(umask 077; mktemp "$DIR/.report.XXXXXX")" || die "cannot create a temp file"
+  printf '%s' "$b64" | openssl base64 -d -A > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
+  got="$(wc -c < "$tmp" | tr -d ' ')"
+  [ "$got" = "$nb" ] || { rm -f "$tmp"; die "decoded report is $got bytes, expected $nb"; }
+  mv -f "$tmp" "$DIR/report.md"
+  jqw "$DIR/campaign.json" --arg h "$(sha256_file "$DIR/report.md")" '.reportSha256 = $h' "$DIR/campaign.json"
+  touch_updated; sign_state "$DIR"
+  echo "report saved for $SLUG ($nb bytes)"
+}
+
+# E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
+# the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
+# manifest is HMAC-signed so the app can check it through E3 check-evidence --archived.
+cmd_archive_evidence() {
+  local slug="${1:-}" src="${2:-}" head="${3:-}" setup="${4:-}" out
+  [ $# -eq 4 ] || usage
+  resolve "$slug"; load_key; lock "$DIR"; require_valid
+  # vajra_tasks.py judges the bundle (signed, green for head, a task closed on it), copies exactly
+  # those bytes without following links, and signs the manifest; this keeps the state signed.
+  out="$(python3 -I "$SCRIPT_DIR/vajra_tasks.py" archive-evidence --campaign "$SLUG" "$src" --head "$head" --setup "$setup")" \
+    || die "evidence archive refused"
+  append_progress "evidence archived: ${out#evidence archived for "$SLUG": }"; touch_updated; sign_state "$DIR"
+  echo "$out"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
@@ -377,6 +442,8 @@ case "$cmd" in
   resume)     cmd_resume "$@" ;;
   verify)     cmd_verify "$@" ;;
   close)      cmd_close "$@" ;;
+  report)     cmd_report "$@" ;;
+  archive-evidence) cmd_archive_evidence "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "vajra-campaign: unknown command: $cmd" >&2; usage ;;
 esac
