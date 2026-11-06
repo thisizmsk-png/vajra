@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -262,7 +263,11 @@ def append_line(path, line):
 
 def read_json(path, default=None):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # Regular files only, never blocking: a FIFO planted in a pending dir must not hang a listing.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return default
             return json.load(f)
     except (OSError, ValueError):
         return default
@@ -438,6 +443,16 @@ class Store(object):
 
     def append(self, body):
         """Append one event (caller holds the lock). Returns the event."""
+        entry = self.prepare(body)
+        self.commit(entry)
+        return entry
+
+    def commit(self, entry):
+        append_line(self.events, canon(entry))
+        self._cache = None
+
+    def prepare(self, body):
+        """The next signed event, not yet written (caller holds the lock)."""
         key = load_key()
         if not key:
             raise KbError("no valid HMAC key at %s (run scripts/install.sh)" % KEY_FILE)
@@ -451,8 +466,6 @@ class Store(object):
         entry.update(body)
         entry["prevHmac"] = prev
         entry["hmac"] = sign(key, entry)
-        append_line(self.events, canon(entry))
-        self._cache = None
         return entry
 
     def audit(self, action, **fields):
@@ -860,6 +873,293 @@ def human_gate(action, ident, hint=None):
 
 
 # --------------------------------------------------------------------------
+# E9: the Vajra Desktop approval path (scripts/desktop_approval.py, ADR-12)
+# --------------------------------------------------------------------------
+
+
+def _desktop():
+    """The desktop_approval module next to this script (-I keeps the script dir off sys.path)."""
+    mod = sys.modules.get("desktop_approval")
+    if mod is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "desktop_approval.py")
+        spec = importlib.util.spec_from_file_location("desktop_approval", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules["desktop_approval"] = mod
+    return mod
+
+
+def record_sha(r):
+    """sha256 of a materialized record as `show --json` names it (what a desktop approval binds)."""
+    return sha256_hex(json.dumps(public(r), sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+
+
+def pending_bytes(store, rid):
+    """(sha256, bytes) of a pending record file, read once (no link followed)."""
+    try:
+        # O_NONBLOCK so a FIFO planted in place of the file cannot block the open or the read.
+        fd = os.open(store.pending_path(rid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise Refused("pending kb record %s is not a regular file" % rid)
+            raw = f.read(1_000_001)
+    except OSError:
+        raise Refused("no pending kb record %s" % rid)
+    if len(raw) > 1_000_000:  # an approval may only bind a complete file
+        raise Refused("pending kb record %s is too large" % rid)
+    return sha256_hex(raw), raw
+
+
+def _anchor_path():
+    return os.path.join(Store("global").dir, "desktop-anchor.json")
+
+
+def desktop_append(body):
+    """Append a desktop event to the global chain (caller holds its lock) and re-sign the anchor: the
+    newest desktop event's seq and hmac. read_events accepts any valid prefix of the chain, so without
+    the anchor cutting the last lines would silently undo a revoke, a key replacement or a used id."""
+    g = Store("global")
+    e = g.prepare(body)
+    _write_anchor(e["seq"], e["hmac"])  # first: a crash before the append leaves it ahead of the chain (refused, repairable)
+    g.commit(e)
+
+
+def _write_anchor(seq, head):
+    a = {"seq": seq, "head": head}
+    atomic_write(_anchor_path(), canon(dict(a, mac=sign(load_key(), a))))
+
+
+def pending_view(store, rid):
+    """(record, sha256) of a pending file, both from one read: what the app shows is what it signs."""
+    sha, raw = pending_bytes(store, rid)
+    try:
+        r = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise Refused("pending kb record %s is malformed" % rid)
+    if not isinstance(r, dict) or r.get("id") != rid:
+        raise Refused("pending kb record %s is malformed" % rid)
+    r["status"] = "pending"
+    return r, sha
+
+
+def desktop_state():
+    """(enrolled key or None, used approval ids) from the global store's HMAC chain. The latest enrolled
+    key is the only one accepted; a revoke of that key leaves none. Refuses if the chain no longer
+    contains the newest desktop event the anchor names (truncated or replaced)."""
+    events, _st = Store("global").read_events()
+    anchor = read_json(_anchor_path())
+    last = [e for e in events if str(e.get("op", "")).startswith("desktop_")][-1:]
+    if anchor is None and last:
+        raise Refused("the desktop key ledger anchor is missing or unreadable; a human runs vajra_kb.py desktop-repair")
+    if anchor is not None:
+        key = load_key()
+        try:
+            body = {"seq": anchor["seq"], "head": anchor["head"]}
+            ok = key is not None and _hmac.compare_digest(str(anchor.get("mac")), sign(key, body))
+        except (KeyError, TypeError):
+            ok = False
+        # It must name exactly the newest desktop event: older means an unanchored tail (a crash), newer or
+        # absent means a truncated chain. Both fail closed until a human repairs it.
+        if not ok or not last or (last[0].get("seq"), last[0].get("hmac")) != (body["seq"], body["head"]):
+            raise Refused("the desktop key ledger and its anchor disagree (truncated, replaced or interrupted); "
+                          "a human runs vajra_kb.py desktop-repair")
+    cur, used = None, set()
+    for e in events:
+        if e.get("op") == "desktop_key":
+            cur = {"pem": e.get("pem"), "fingerprint": e.get("fingerprint")}
+        elif e.get("op") == "desktop_revoke" and cur and e.get("fingerprint") == cur["fingerprint"]:
+            cur = None
+        elif e.get("op") == "desktop_used":
+            used.add(e.get("approval"))
+    return cur, used
+
+
+def desktop_take(files, store, op, rid, read, confirmations=False, use=False):
+    """Under the store lock: verify the signed approval file(s) against the enrolled key, then read the
+    record once (read() returns (sha256, data)) and require the approved sha256. Nothing is marked used
+    yet: the caller checks the rest, then calls desktop_use. Returns (approval, confirmations, data)."""
+    da = _desktop()
+
+    def refuse(why, **f):
+        store.audit("refused", op=op, id=rid, reason=safe_line("desktop approval: %s" % why, 200), **f)
+        raise Refused(why)
+    key, used = desktop_state()
+    if not key:
+        refuse("no desktop key is enrolled (run vajra_kb.py desktop-enroll in your terminal)")
+    try:
+        main, conf = da.verify_all(files, key["pem"], op, store.pid, rid)
+    except da.Refused as e:
+        refuse(str(e))
+    main["_key"] = key["fingerprint"]  # desktop_use requires it to still be the enrolled key
+    if conf and not confirmations:
+        refuse("%s takes one approval" % op)
+    if used & ({main["id"]} | {c["id"] for c in conf.values()}):
+        refuse("approval was already used", approval=main["id"])
+    sha, data = read()
+    if sha != main["sha256"]:
+        refuse("proposal changed; review again (it differs from what you approved)", approval=main["id"])
+    if use:
+        desktop_use(store, op, rid, main, conf)
+    return main, conf, data
+
+
+def desktop_use(store, op, rid, main, conf):
+    """Mark the approval(s) used in the global HMAC chain (one used-set for every store). Caller holds
+    store's lock; the global lock is taken here unless that is the store."""
+    g = Store("global")
+    ids = [main["id"]] + [c["id"] for c in conf.values()]
+
+    def mark():
+        cur, used = desktop_state()
+        if not cur or cur["fingerprint"] != main["_key"]:
+            store.audit("refused", op=op, id=rid, reason="desktop approval: key revoked or replaced", approval=main["id"])
+            raise Refused("the desktop key was revoked or replaced while the approval was being used")
+        if set(ids) & used:
+            store.audit("refused", op=op, id=rid, reason="desktop approval: already used", approval=main["id"])
+            raise Refused("approval was already used")
+        for i in ids:
+            desktop_append({"op": "desktop_used", "approval": i, "action": op, "store": store.pid, "target": rid})
+    if store.pid == "global":
+        mark()
+    else:
+        with Lock(g.lock_path):
+            mark()
+
+
+def desktop_audit(op, main, store, applies=None):
+    _desktop().audit(op, main, main["sha256"], store.pid, applies)
+
+
+def cmd_desktop_consume(a, out):
+    """For Atman: verify and use up a signed desktop approval for an Atman proposal. Bound to store "global".
+    Atman computed the proposal's sha256 from the bytes it then acts on."""
+    g = Store("global")
+    with Lock(g.lock_path):
+        # Atman read the proposal and computed the sha256 itself; the kb only checks it equals the signed one.
+        main, conf, _ = desktop_take(a.desktop_approval or [], g, a.action, a.record, lambda: (a.sha256, None), True)
+        # Routes are global scope: approving one needs the second, separately signed confirmation.
+        need = {"global"} if a.action == "approve" else set()
+        if set(conf) != need or (main.get("reason") or "") != (a.reason or ""):
+            g.audit("refused", op=a.action, id=a.record, reason="desktop approval: scope confirmation or reason differs",
+                    approval=main["id"])
+            raise Refused("an Atman %s needs %s and the signed reason" % (a.action, "its global confirmation" if need else "no confirmation"))
+        desktop_use(g, a.action, a.record, main, conf)
+    desktop_audit(a.action, main, g)
+    out.emit({"result": "consumed", "approval": main["id"]}, "approval %s used" % main["id"])
+    return 0
+
+
+def tty_gate(action, ident, hint):
+    """A human at a terminal, with no environment override: an enrolled key outlives any one approval, so
+    VAJRA_ATMAN_ASSUME_HUMAN (a test switch an agent can build with string tricks) does not count here."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        sys.stderr.write("vajra_kb: '%s' needs a human at a terminal. Run it yourself:\n  %s\n" % (action, hint))
+        return False
+    try:
+        return input("%s %s? [y/N] " % (action, ident)).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _fingerprint(fp):
+    return ":".join(fp[i:i + 4] for i in range(0, 32, 4))
+
+
+def cmd_desktop_enroll(a, out):
+    da = _desktop()
+    try:
+        pem, fp = da.public_key(a.pubkey)
+    except da.Refused as e:
+        raise KbError(str(e))
+    print("Vajra Desktop key fingerprint: %s" % _fingerprint(fp))
+    print("Compare it with the fingerprint the app shows. Enroll only if they match.")
+    if not tty_gate("desktop-enroll", fp[:16], "python3 vajra_kb.py desktop-enroll <pubkey-file>"):
+        return 3
+    g = Store("global")
+    with Lock(g.lock_path):
+        desktop_append({"op": "desktop_key", "pem": pem, "fingerprint": fp})
+        g.audit("desktop_enrolled", fingerprint=fp)
+    out.emit({"result": "enrolled", "fingerprint": fp}, "enrolled the desktop key %s" % _fingerprint(fp))
+    return 0
+
+
+def _read_anchor():
+    """The verified anchor (seq, head), or None when it is missing, unreadable or its MAC is wrong."""
+    anchor = read_json(_anchor_path())
+    key = load_key()
+    try:
+        body = {"seq": anchor["seq"], "head": anchor["head"]}
+        if key is not None and _hmac.compare_digest(str(anchor.get("mac")), sign(key, body)):
+            return body
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
+def cmd_desktop_repair(a, out):
+    """Human only. Two different situations look alike from the outside:
+    - an interrupted write: the chain holds desktop events NEWER than the anchor. They are HMAC-verified, so the
+      anchor is moved forward over them; nothing is lost. This needs only the terminal confirmation.
+    - a rollback: the anchor is AHEAD of the chain, missing or invalid. Events may be gone (a revoke, used approval
+      ids), and moving the anchor would make that rollback permanent. It is refused unless the person passes
+      --accept-rollback after reading what is missing, and the audit says so."""
+    g = Store("global")
+    events, _st = g.read_events()
+    desk = [e for e in events if str(e.get("op", "")).startswith("desktop_")]
+    last = desk[-1] if desk else None
+    anchor = _read_anchor()
+    pos = next((k for k, e in enumerate(desk) if anchor and (e.get("seq"), e.get("hmac")) == (anchor["seq"], anchor["head"])), None)
+    if anchor is not None and pos is not None and pos == len(desk) - 1:
+        out.emit({"result": "consistent"}, "the desktop key ledger and its anchor agree; nothing to repair")
+        return 0
+    if pos is not None:  # anchor present in the chain with newer desktop events after it
+        tail = desk[pos + 1:]
+        print("Desktop events after the anchor (HMAC-verified, kept): %s" % ", ".join("seq %s %s" % (e.get("seq"), e.get("op")) for e in tail))
+        accepted = False
+    else:
+        missing = (int(anchor["seq"]) - int(events[-1]["seq"])) if anchor and events else None
+        print("The anchor is not in the ledger chain: %s." % (
+            ("the anchor is at seq %s, the chain ends at seq %s (%s event(s) missing; one missing event is consistent with an "
+             "interrupted write, more suggests a truncation)" % (anchor["seq"], events[-1]["seq"] if events else "none", missing))
+            if anchor else "the anchor is missing or invalid"))
+        print("Events a rollback can undo: a revoke, a key replacement, used approval ids. Restore the ledger if you can.")
+        if not a.accept_rollback:
+            raise Refused("refusing to overwrite the anchor; restore events.jsonl, or re-run with --accept-rollback "
+                          "after reading the above")
+        accepted = True
+    if not tty_gate("desktop-repair", "the ledger anchor", "python3 vajra_kb.py desktop-repair"):
+        return 3
+    with Lock(g.lock_path):
+        if last:
+            _write_anchor(last["seq"], last["hmac"])
+        else:
+            try:
+                os.remove(_anchor_path())
+            except OSError:
+                pass
+        g.audit("desktop_repaired", head=last["hmac"] if last else None, accepted_rollback=accepted,
+                old_anchor_seq=anchor["seq"] if anchor else None)
+    out.emit({"result": "repaired", "accepted_rollback": accepted}, "re-anchored the desktop key ledger")
+    return 0
+
+
+def cmd_desktop_revoke(a, out):
+    key = desktop_state()[0]
+    if not key:
+        raise KbError("no desktop key is enrolled")
+    print("Revoking the Vajra Desktop key %s" % _fingerprint(key["fingerprint"]))
+    if not tty_gate("desktop-revoke", key["fingerprint"][:16], "python3 vajra_kb.py desktop-revoke"):
+        return 3
+    g = Store("global")
+    with Lock(g.lock_path):
+        desktop_append({"op": "desktop_revoke", "fingerprint": key["fingerprint"]})
+        g.audit("desktop_revoked", fingerprint=key["fingerprint"])
+    out.emit({"result": "revoked", "fingerprint": key["fingerprint"]}, "revoked the desktop key")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
 
@@ -1201,10 +1501,14 @@ def cmd_show(a, out):
     store, r, _pend = _find_anywhere(rid)
     if not r:
         raise KbError("no record %s" % rid)
+    if _pend:
+        r, sha = pending_view(store, rid)
+    else:
+        sha = record_sha(r)
     r = dict(r)
     r["_stale"] = is_stale(r, repo_root()) if store.pid == project_id() else False
     if out.as_json:
-        out.emit(dict(public(r), project=store.pid, stale=r["_stale"]), None)
+        out.emit(dict(public(r), project=store.pid, stale=r["_stale"], sha256=sha), None)
     else:
         print('<untrusted-data source="vajra-kb">')
         print(neutralize(full_text(r)))
@@ -1279,21 +1583,36 @@ def user_record_gate(store, rid, op, token):
     raise Refused("%s is a user record; %s needs the user (a TTY or a user token)" % (rid, op))
 
 
-def _mutate(rid, op, check, extra=None, out=None, msg=None, token=None):
+def _mutate(rid, op, check, extra=None, out=None, msg=None, token=None, desk=None):
+    """desk: the approval files when a desktop approval stands in for the user gate (E9)."""
     store = Store()
-    user_record_gate(store, rid, op, token)
+    if desk is None:
+        user_record_gate(store, rid, op, token)
     store._cache = None
+    main = None
     with Lock(store.lock_path):
         r = store.get(rid)
         if not r:
             raise KbError("no record %s in project %s" % (rid, store.pid))
         if r.get("forgotten"):
             raise KbError("%s was forgotten" % rid)
+        if desk is not None:
+            main, _c, _r = desktop_take(desk, store, op, rid, lambda: (record_sha(r), r))
+            # The signature binds every extra the command carries (superseded-by id, retire reason).
+            if any(main.get(k) != v for k, v in (extra or {}).items()):
+                store.audit("refused", op=op, id=rid, reason="approval differs from the command", approval=main["id"])
+                raise Refused("approval %s does not carry the same %s as the command" % (main["id"], "/".join(extra)))
         check(store, r)
+        if main:
+            desktop_use(store, op, rid, main, {})
         body = {"op": op, "id": rid}
         body.update(extra or {})
         store.append(body)
         store.rebuild()
+        if main:
+            store.audit(op, id=rid, approval=main["id"], sha256=main["sha256"])
+    if main:
+        desktop_audit(op, main, store)
     out.emit({"result": op, "id": rid}, msg or "%s %s" % (op, rid))
     return 0
 
@@ -1317,7 +1636,7 @@ def cmd_supersede(a, out):
                 raise KbError("supersede would create a cycle")
             cur = store.get(cur["superseded_by"])
     return _mutate(old, "supersede", check, {"by": new}, out, "superseded %s by %s" % (old, new),
-                   a.user_token)
+                   a.user_token, a.desktop_approval)
 
 
 def cmd_retire(a, out):
@@ -1332,7 +1651,8 @@ def cmd_retire(a, out):
         if gate_check([reason]):
             raise Refused("retire reason refused by the write gate")
         extra["reason"] = reason
-    return _mutate(rid, "retire", check, extra, out, "retired %s" % rid, a.user_token)
+    return _mutate(rid, "retire", check, extra, out, "retired %s" % rid, a.user_token,
+                   a.desktop_approval)
 
 
 def cmd_restore(a, out):
@@ -1359,7 +1679,15 @@ def cmd_pending(a, out):
         for p in s.pending():
             rows.append((s.pid, p))
     if out.as_json:
-        out.emit({"pending": [dict(public(p), project=pid) for pid, p in rows]}, None)
+        listed = []
+        for s in stores:
+            for p in s.pending():
+                try:
+                    rec, sha = pending_view(s, p["id"])
+                    listed.append(dict(public(rec), project=s.pid, sha256=sha))
+                except Refused:
+                    continue  # vanished or replaced by a link since the listing: not offered for approval
+        out.emit({"pending": listed}, None)
         return 0
     if not rows:
         print("No pending kb records.")
@@ -1374,8 +1702,86 @@ def cmd_pending(a, out):
     return 0
 
 
+def approved_record(store, p, rid, applies, edit=None):
+    """The active record built from a pending one, re-gated: pending files are not signed, and edited
+    text (E9) goes through the write gate like any new text."""
+    title, body = (edit["title"], edit["body"]) if edit else (p.get("title", ""), p.get("body", ""))
+    if not all(isinstance(p.get(k) or {}, dict) for k in ("scope", "source")):
+        store.audit("refused", op="approve", id=rid, reason="malformed record", sha256=sha256_hex(canon(p)))
+        raise Refused("pending record failed the write gate: malformed")
+    scope = dict(p.get("scope") or {})
+    if edit:
+        scope["paths"] = edit["paths"]
+    paths, tags = scope.get("paths") or [], p.get("tags") or []
+    # Pending files are not signed: check every shape and type before anything iterates or joins them.
+    well_typed = (isinstance(paths, list) and isinstance(tags, list)
+                  and all(isinstance(x, str) for x in [title, body] + paths + tags))
+    reason = gate_check([title, body, " ".join(paths), " ".join(tags)]) if well_typed else None
+    if not well_typed or reason or p.get("type") not in TYPES \
+            or not title or len(title) > MAX_TITLE or len(body) > MAX_BODY \
+            or len(paths) > MAX_PATHS or any(len(x) > MAX_PATH_LEN for x in paths):
+        store.audit("refused", op="approve", id=rid, reason=reason or "malformed record",
+                    sha256=sha256_hex(canon(p)))
+        raise Refused("pending record failed the write gate: %s" % (reason or "malformed"))
+    rec = {k: p.get(k) for k in ("id", "type", "title", "body", "scope", "applies", "source",
+                                 "valid_from", "invalid_at", "superseded_by", "expires", "tags")}
+    rec.update(title=title, body=body, scope=scope)
+    rec["source"] = dict(rec.get("source") or {}, kind="proposed", approved_at=now_iso())
+    if edit:
+        rec["source"]["edited_by_user"] = True
+    # Pending files are not signed, so their applies field is not trusted:
+    # only the approving human promotes a record to always.
+    rec["applies"] = applies
+    rec["valid_from"] = now_iso()
+    return rec
+
+
+def _approve_desktop(a, out, rid):
+    store, p, pend = _find_anywhere(rid)
+    if not p or not pend:
+        raise KbError("no pending kb record %s" % rid)
+    with Lock(store.lock_path):
+        main, conf, raw = desktop_take(a.desktop_approval, store, "approve", rid, lambda: pending_bytes(store, rid), True)
+
+        def refuse(why):
+            store.audit("refused", op="approve", id=rid, reason=why, approval=main["id"])
+            raise Refused(why)
+        try:
+            p = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            p = None
+        if not isinstance(p, dict) or p.get("id") != rid:
+            refuse("pending record is malformed")
+        applies = main.get("applies")
+        if applies not in APPLIES or (getattr(a, "always", False) and applies != "always"):
+            refuse("--always and the approval's applies differ")
+        need = ({"always"} if applies == "always" else set()) | ({"global"} if store.pid == "global" else set())
+        if set(conf) != need:
+            refuse("always and global scope each need their own confirmation (needed: %s)"
+                   % (", ".join(sorted(need)) or "none"))
+        # An edit carries all three fields, so an omitted one can never mean "keep the original".
+        edit = main.get("edited")
+        if edit is not None and not (
+                isinstance(edit, dict) and set(edit) == {"title", "body", "paths"}
+                and isinstance(edit["title"], str) and isinstance(edit["body"], str)
+                and isinstance(edit["paths"], list) and all(isinstance(x, str) for x in edit["paths"])):
+            refuse("approval edits are malformed (title, body and paths are all required)")
+        rec = approved_record(store, p, rid, applies, edit)
+        desktop_use(store, "approve", rid, main, conf)
+        store.append({"op": "add", "id": rid, "record": rec})
+        os.remove(store.pending_path(rid))
+        store.audit("approved", id=rid, approval=main["id"], sha256=main["sha256"],
+                    final_sha256=sha256_hex(canon(rec)), applies=applies)
+        store.rebuild()
+    desktop_audit("approve", main, store, applies)
+    out.emit({"result": "approved", "id": rid, "applies": applies}, "approved %s (%s)" % (rid, applies))
+    return 0
+
+
 def cmd_approve(a, out):
     rid = need_id(a.id)
+    if a.desktop_approval:
+        return _approve_desktop(a, out, rid)
     store, p, pend = _find_anywhere(rid)
     if not p or not pend:
         raise KbError("no pending kb record %s" % rid)
@@ -1387,21 +1793,7 @@ def cmd_approve(a, out):
     if not human_gate("approve", rid):
         return 3
     # Re-run the gate on what is on disk: pending files are not signed.
-    reason = gate_check([p.get("title", ""), p.get("body", ""),
-                         " ".join((p.get("scope") or {}).get("paths") or []),
-                         " ".join(p.get("tags") or [])])
-    if reason or p.get("type") not in TYPES or len(p.get("title", "")) > MAX_TITLE \
-            or len(p.get("body", "")) > MAX_BODY:
-        store.audit("refused", op="approve", id=rid, reason=reason or "malformed record",
-                    sha256=sha256_hex(canon(p)))
-        raise Refused("pending record failed the write gate: %s" % (reason or "malformed"))
-    rec = {k: p.get(k) for k in ("id", "type", "title", "body", "scope", "applies", "source",
-                                 "valid_from", "invalid_at", "superseded_by", "expires", "tags")}
-    rec["source"] = dict(rec.get("source") or {}, kind="proposed", approved_at=now_iso())
-    # Pending files are not signed, so their applies field is not trusted:
-    # only the approving human promotes a record to always.
-    rec["applies"] = "always" if getattr(a, "always", False) else "on_topic"
-    rec["valid_from"] = now_iso()
+    rec = approved_record(store, p, rid, "always" if getattr(a, "always", False) else "on_topic")
     with Lock(store.lock_path):
         store.append({"op": "add", "id": rid, "record": rec})
         os.remove(store.pending_path(rid))
@@ -1417,14 +1809,24 @@ def cmd_reject(a, out):
     store, p, pend = _find_anywhere(rid)
     if not p or not pend:
         raise KbError("no pending kb record %s" % rid)
-    if not human_gate("reject", rid):
+    main = None
+    if not a.desktop_approval and not human_gate("reject", rid):
         return 3
     with Lock(store.lock_path):
+        if a.desktop_approval:
+            main, _c, _raw = desktop_take(a.desktop_approval, store, "reject", rid, lambda: pending_bytes(store, rid))
+            if (main.get("reason") or "") != " ".join(a.reason or []):
+                store.audit("refused", op="reject", id=rid, reason="desktop approval: reason differs", approval=main["id"])
+                raise Refused("the approval does not carry the reason given on the command line")
+            desktop_use(store, "reject", rid, main, {})
         rej_dir = os.path.join(store.pending_dir, "rejected")
         ensure_dir(rej_dir)
         os.replace(store.pending_path(rid), os.path.join(rej_dir, rid + ".json"))
-        store.audit("rejected", id=rid, reason=safe_line(" ".join(a.reason or []), 200) or None)
+        store.audit("rejected", id=rid, reason=safe_line(" ".join(a.reason or []), 200) or None,
+                    **({"approval": main["id"], "sha256": main["sha256"]} if main else {}))
         store.write_index()
+    if main:
+        desktop_audit("reject", main, store)
     out.emit({"result": "rejected", "id": rid}, "rejected %s" % rid)
     return 0
 
@@ -1437,12 +1839,18 @@ def cmd_forget(a, out):
     pend_path = store.pending_path(rid)
     if not r and not os.path.isfile(pend_path):
         raise KbError("no record %s in project %s" % (rid, store.pid))
-    if not human_gate("forget", rid):
+    main = None
+    if not a.desktop_approval and not human_gate("forget", rid):
         return 3
     key = load_key()
     if not key:
         raise KbError("no valid HMAC key")
     with Lock(store.lock_path):
+        if a.desktop_approval:
+            store._cache = None
+            r = store.get(rid)
+            main, _c, _d = desktop_take(a.desktop_approval, store, "forget", rid,
+                                        lambda: (record_sha(r), r) if r else pending_bytes(store, rid), use=True)
         if os.path.isfile(pend_path):
             os.remove(pend_path)
         if r:
@@ -1474,7 +1882,9 @@ def cmd_forget(a, out):
                 except OSError:
                     pass
             store.rebuild()
-        store.audit("forgotten", id=rid)
+        store.audit("forgotten", id=rid, **({"approval": main["id"], "sha256": main["sha256"]} if main else {}))
+    if main:
+        desktop_audit("forget", main, store)
     out.emit({"result": "forgotten", "id": rid}, "forgot %s (tombstone written)" % rid)
     return 0
 
@@ -1659,6 +2069,11 @@ class Parser(argparse.ArgumentParser):
         sys.exit(2)
 
 
+def desk_arg(s):
+    s.add_argument("--desktop-approval", action="append", metavar="FILE",
+                   help="E9: an approval the Vajra Desktop app signed after owner authentication")
+
+
 def build_parser():
     top = Parser(add_help=False)
     top.add_argument("--json", action="store_true", help="machine-readable output")
@@ -1706,6 +2121,7 @@ def build_parser():
     s.add_argument("old")
     s.add_argument("new")
     s.add_argument("--user-token", help="needed (or a TTY) when <old> is a user record")
+    desk_arg(s)
     s.set_defaults(fn=cmd_supersede)
 
     for name, fn in (("retire", cmd_retire), ("restore", cmd_restore)):
@@ -1714,19 +2130,39 @@ def build_parser():
         s.add_argument("--user-token", help="needed (or a TTY) for a user record")
         if name == "retire":
             s.add_argument("--reason")
+            desk_arg(s)
         s.set_defaults(fn=fn)
 
     s = sub.add_parser("approve", parents=[common], help="human only")
     s.add_argument("id")
     s.add_argument("--always", action="store_true", help="promote to applies=always")
+    desk_arg(s)
     s.set_defaults(fn=cmd_approve)
     s = sub.add_parser("reject", parents=[common], help="human only")
     s.add_argument("id")
     s.add_argument("reason", nargs="*")
+    desk_arg(s)
     s.set_defaults(fn=cmd_reject)
     s = sub.add_parser("forget", parents=[common], help="human only: hard delete with a tombstone")
     s.add_argument("id")
+    desk_arg(s)
     s.set_defaults(fn=cmd_forget)
+
+    s = sub.add_parser("desktop-enroll", parents=[common], help="human only: enroll the Vajra Desktop signing key")
+    s.add_argument("pubkey", help="PEM P-256 public key file")
+    s.set_defaults(fn=cmd_desktop_enroll)
+    s = sub.add_parser("desktop-consume", parents=[common], help="Atman: use up a signed desktop approval")
+    s.add_argument("--action", choices=("approve", "reject"), required=True)
+    s.add_argument("--record", required=True)
+    s.add_argument("--sha256", required=True)
+    s.add_argument("--reason", default="")
+    s.add_argument("--desktop-approval", action="append", metavar="FILE")
+    s.set_defaults(fn=cmd_desktop_consume)
+    s = sub.add_parser("desktop-repair", parents=[common], help="human only: re-anchor the desktop key ledger")
+    s.add_argument("--accept-rollback", action="store_true", help="the anchor is ahead of the chain: accept that events may be lost")
+    s.set_defaults(fn=cmd_desktop_repair)
+    s = sub.add_parser("desktop-revoke", parents=[common], help="human only: revoke the enrolled Vajra Desktop key")
+    s.set_defaults(fn=cmd_desktop_revoke)
 
     s = sub.add_parser("pending", parents=[common])
     s.add_argument("--all", action="store_true", help="every project")

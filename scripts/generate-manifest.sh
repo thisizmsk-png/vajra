@@ -36,7 +36,7 @@ keep_files() { # stdin paths -> shipped regular files (app/ is the desktop produ
   local f
   while IFS= read -r f; do
     case "$f" in
-      manifest.json|manifest.json.sig|manifest.json.tmp|.git/*|node_modules/*|graphify-out/*|*/__pycache__/*|__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;;
+      app/*|manifest.json|manifest.json.sig|manifest.json.tmp|.git/*|node_modules/*|graphify-out/*|*/__pycache__/*|__pycache__/*|*.pyc|*.db|.DS_Store|*/.DS_Store) continue ;;
     esac
     if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\n' "$f"; fi
   done

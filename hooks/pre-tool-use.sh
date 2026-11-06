@@ -165,10 +165,19 @@ reach_check() { # canonical dir, label -> block if a recursive read there reache
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
 
 PKIND=""
+# The shortcut above is valid only while no protected root was moved by a symlink under HOME.
+CLASSIFY_FAST=""
+if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
+   && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
 classify() { shopt -s nocasematch; classify_ "$1"; shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
   PKIND=""
+  # Every protected path is under the Claude dir or ~/Library, or is a settings file in a Claude dir:
+  # anything else is decided here, once, instead of by the loops below (a 4 KB command has ~4,000 words).
+  if [ -n "$CLASSIFY_FAST" ]; then
+    case "$p" in *.claude*|"$CHOME"/Library*) ;; *) return 0 ;; esac
+  fi
   if [[ "$p" == "$KEY" ]]; then PKIND=key; return 0; fi
   for r in "${ROOTS[@]}"; do
     if [[ "$p" == "$r" || "$p" == "$r"/* ]]; then PKIND=core; return 0; fi
@@ -573,6 +582,7 @@ shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
 [[ "$N" == *VAJRA_ATMAN_ASSUME_HUMAN* || "$CMD" == *VAJRA_ATMAN_ASSUME_HUMAN* ]] && block "VAJRA_ATMAN_ASSUME_HUMAN is for a human at a terminal, not the agent"
+[[ "$N" == *--desktop-approval* || "$CMD" == *--desktop-approval* ]] && block "--desktop-approval is for the Vajra Desktop app, not the agent"
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
@@ -998,6 +1008,7 @@ eval_segment_body() { # uses SEG array
         if [ -z "$kbsub" ]; then
           case "$tok" in -*) continue ;; *) kbsub="$tok" ;; esac
           case "$kbsub" in
+            desktop-enroll|desktop-revoke|desktop-consume|desktop-repair) block "vajra_kb.py ${kbsub} is for the user's own terminal and the Vajra Desktop app, not the agent" ;;
             approve|reject|forget) block "vajra_kb.py ${kbsub} is a user decision and needs a TTY; ask the user to run it in their own terminal: python3 ~/.claude/skills/vajra/scripts/vajra_kb.py ${kbsub} <id>" ;;
           esac
           kprev="$tok"

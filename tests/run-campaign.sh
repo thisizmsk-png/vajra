@@ -118,6 +118,144 @@ C close deliver-20261011-0930 --status bogus >/dev/null 2>&1; [ $? -ne 0 ]; chec
 C >/dev/null 2>&1; [ $? -eq 2 ]; check "no command -> usage (exit 2)" $?
 C bogus >/dev/null 2>&1; [ $? -eq 2 ]; check "unknown command -> usage (exit 2)" $?
 
+# --- report (E4, Q3): the Deliver step saves report.md, bound into the signed state ---
+C create rep --feature "ac-1|x" >/dev/null 2>&1
+RD="$CD/rep"
+REP="$(printf '# Delivery: x\n\nBranch `b` at `c`.\n- ünïcode ✓\n')"
+B64="$(printf '%s\n' "$REP" | openssl base64 -A)"
+NB="$(printf '%s\n' "$REP" | wc -c | tr -d ' ')"
+fnv() { python3 -c 'import sys
+h = 0x811c9dc5
+for b in sys.argv[1].encode(): h = ((h ^ b) * 0x01000193) & 0xffffffff
+print("%08x" % h)' "$1"; }
+SHA="$(fnv "$B64")"
+C report --campaign rep --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null; check "report saved" $?
+[ "$(cat "$RD/report.md")" = "$REP" ]; check "report.md is the exact text (multi-line, UTF-8)" $?
+[ "$(stat -c %a "$RD/report.md" 2>/dev/null || stat -f %Lp "$RD/report.md")" = 600 ]; check "report.md mode 600" $?
+C verify rep >/dev/null 2>&1; check "state verifies with the report" $?
+C close rep --status done >/dev/null && C report --campaign rep --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null; check "report works after close (Deliver closes first)" $?
+printf 'tampered\n' >> "$RD/report.md"
+C verify rep >/dev/null 2>&1; [ $? -ne 0 ]; check "edited report.md fails verify" $?
+C report --campaign rep --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "report refuses a campaign whose state is invalid" $?
+C create rep2 --feature "ac-1|x" >/dev/null 2>&1
+C report --campaign rep2 --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null && rm -f "$CD/rep2/report.md"
+C verify rep2 >/dev/null 2>&1; [ $? -ne 0 ]; check "deleted report.md fails verify" $?
+C create rep3 --feature "ac-1|x" >/dev/null 2>&1
+C report --campaign rep3 --bytes 999 --check "$SHA" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]; check "byte count mismatch refused, nothing written" $?
+C report --campaign rep3 --bytes 4 --check "$SHA" --base64 '!!!!' >/dev/null 2>&1; [ $? -ne 0 ]; check "bad base64 refused" $?
+C report --campaign rep3 --bytes "$NB" --check 00000000 --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]
+check "check mismatch refused (a same-length copy error is caught)" $?
+SWAP="$(printf '%s' "$B64" | sed 's/^\(.\)\(.\)/\2\1/')"
+C report --campaign rep3 --bytes "$NB" --check "$SHA" --base64 "$SWAP" >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$CD/rep3/report.md" ]
+check "two swapped base64 characters are caught" $?
+C report --campaign rep3 --bytes "$NB" --base64 "$B64" >/dev/null 2>&1; [ $? -ne 0 ]; check "--check is required" $?
+# The temp file is never a planted link: report.md.tmp pointing outside is neither followed nor needed.
+C create rep4 --feature "ac-1|x" >/dev/null 2>&1; ln -s "$WORK/victim" "$CD/rep4/report.md.tmp"
+C report --campaign rep4 --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null; [ $? -eq 0 ] && [ ! -e "$WORK/victim" ]
+check "a planted report.md.tmp link is not written through" $?
+BIG="$(head -c 70000 /dev/zero | tr '\0' x | openssl base64 -A)"
+C report --campaign rep3 --bytes 70000 --check "$SHA" --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
+C verify rep3 >/dev/null 2>&1; check "campaign without a report still verifies" $?
+
+# --- archive-evidence (E7, Q13): the verification bundle + the setup list, once per delivery, signed ---
+# Run from a git repo, as the write-back step does; the evidence must be signed and green for --head,
+# and at least one task of the campaign's graph must have been closed on exactly this evidence.
+C create arc --feature "ac-1|x" >/dev/null 2>&1
+AD="$CD/arc"
+RP="$WORK/repo"; mkdir -p "$RP"; git -C "$RP" init -q; git -C "$RP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m i
+RHEAD="$(git -C "$RP" rev-parse HEAD)"
+# mkev DIR [PYCODE]: signed green verify-work evidence for RHEAD (temp test key), PYCODE edits ev first.
+mkev() { mkdir -p "$1"; python3 - "$1/evidence.json" "$HOME/.claude/vajra/.hmac-key" "$RHEAD" "${2:-}" <<'PY'
+import hashlib, hmac, json, sys
+p, kf, head, code = sys.argv[1:5]
+ev = {"allPassed": True, "commandsTotal": 1, "commandsFailed": 0,
+      "commands": [{"cmd": "test -f x", "exit": 0, "passed": True}], "git": {"head": head, "treeStable": True}}
+exec(code)
+key = bytes.fromhex(open(kf).read().strip())
+ev["hmac"] = hmac.new(key, json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+json.dump(ev, open(p, "w"))
+PY
+}
+esha() { openssl dgst -sha256 -r < "$1/evidence.json" | awk '{print $1}'; }
+WK="$RP/data/walkthroughs"; SRC="$WK/deliver-20261105-1200"
+mkev "$SRC"; printf 'diff\n' > "$SRC/diff.patch"; printf ' 1 file\n' > "$SRC/diff.stat"
+: > "$SRC/untracked.txt"; printf 'ok\n' > "$SRC/cmd-1.log"; printf 'ok2\n' > "$SRC/cmd-12.log"; printf 'nope\n' > "$SRC/secret.txt"
+# Each fixture's evidence is distinct (its own check command), so its sha256 names only its own task.
+for d in unsigned red oldhead slink hlink other lnk; do mkev "$WK/$d" "ev['commands'][0]['cmd'] = 'test -f $d'"; done
+jq 'del(.hmac)' "$WK/unsigned/evidence.json" > "$WK/u.tmp" && mv "$WK/u.tmp" "$WK/unsigned/evidence.json"
+mkev "$WK/red" 'ev["commands"][0]["exit"] = 1; ev["commandsFailed"] = 1; ev["allPassed"] = False'
+mkev "$WK/oldhead" 'ev["git"]["head"] = "f" * 40'
+ln -s /etc/hosts "$WK/slink/cmd-2.log"
+printf 'other\n' > "$WORK/hl-target"; ln "$WORK/hl-target" "$WK/hlink/cmd-3.log"
+# tasks.json as close leaves it: run-prefixed ids, each done task records the evidence sha256 it closed on.
+jq -n --arg s "$(esha "$SRC")" --arg o "$(esha "$WK/other")" --arg u "$(esha "$WK/unsigned")" --arg r "$(esha "$WK/red")" \
+  --arg sl "$(esha "$WK/slink")" --arg hl "$(esha "$WK/hlink")" --arg ln "$(esha "$WK/lnk")" \
+  '{schema: "vajra.tasks/v1", tasks: [
+    {id: "r1.t1", status: "done", evidence: {sha256: $s}}, {id: "r1.t2", status: "in_progress", evidence: null},
+    {id: "r1.t3", status: "done", evidence: {sha256: $s}}, {id: "r1.t4", status: "done", evidence: {sha256: $o}},
+    {id: "x.u", status: "done", evidence: {sha256: $u}}, {id: "x.r", status: "done", evidence: {sha256: $r}},
+    {id: "x.s", status: "done", evidence: {sha256: $sl}}, {id: "x.h", status: "done", evidence: {sha256: $hl}},
+    {id: "x.l", status: "done", evidence: {sha256: $ln}}]}' > "$AD/tasks.json"
+A() { ( cd "$RP" && C archive-evidence "$@" ); }
+SETUP='["npm ci","python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"]'
+A arc "$SRC" "$RHEAD" "$SETUP" >/dev/null; check "archive-evidence succeeds" $?
+DST="$AD/evidence/deliver-20261105-1200"
+[ -f "$DST/evidence.json" ] && [ -f "$DST/diff.patch" ] && [ -f "$DST/diff.stat" ] && [ -f "$DST/untracked.txt" ] && [ -f "$DST/cmd-1.log" ] && [ -f "$DST/cmd-12.log" ]
+check "bundle files copied to evidence/<slug>" $?
+cmp -s "$SRC/evidence.json" "$DST/evidence.json"; check "evidence.json is copied byte-exact" $?
+[ ! -e "$DST/secret.txt" ]; check "only allowlisted names are copied" $?
+[ "$(jq -c . "$DST/setup.json")" = "$(printf '%s' "$SETUP" | jq -c .)" ]; check "setup.json is the exact list, untruncated" $?
+jq -e --arg h "$RHEAD" '.files["setup.json"] and .files["evidence.json"] and .campaign == "arc" and .evidence == "deliver-20261105-1200"
+  and .head == $h and .tasks == ["r1.t1", "r1.t3"] and (.hmac | test("^[0-9a-f]{64}$"))' "$DST/manifest.json" >/dev/null
+check "manifest names campaign, evidence, head, the tasks closed on it and every file, with an hmac" $?
+python3 - "$DST/manifest.json" "$HOME/.claude/vajra/.hmac-key" <<'PY'
+import hashlib, hmac, json, sys
+m = json.load(open(sys.argv[1])); key = bytes.fromhex(open(sys.argv[2]).read().strip()); h = m.pop("hmac")
+sys.exit(h != hmac.new(key, json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest())
+PY
+check "manifest hmac is the signed-evidence convention (key bytes, canonical JSON)" $?
+[ "$(jq -r '.files["cmd-1.log"]' "$DST/manifest.json")" = "$(openssl dgst -sha256 -r < "$DST/cmd-1.log" | awk '{print $1}')" ]; check "manifest sha256 matches the file" $?
+[ "$(stat -c %a "$DST/evidence.json" 2>/dev/null || stat -f %Lp "$DST/evidence.json")" = 600 ]; check "archived files mode 600" $?
+! grep -rqF "$KEY" "$AD/evidence"; check "key never written into the archive" $?
+[ "$(ls -A "$AD/evidence")" = deliver-20261105-1200 ]; check "no scratch files left in the archive dir" $?
+grep -q 'evidence archived: deliver-20261105-1200 (r1.t1, r1.t3)' "$AD/progress.md"; check "progress names the archive and its tasks" $?
+C verify arc >/dev/null 2>&1; check "campaign state still valid after the archive" $?
+A arc "$SRC" "$RHEAD" "$SETUP" >/dev/null 2>&1; [ $? -ne 0 ]; check "an archive is written once (no overwrite)" $?
+A arc "$WK/other" "$RHEAD" '["a","b","c","d","e","f"]' >/dev/null 2>&1; [ $? -ne 0 ]; check "more than 5 setup commands refused" $?
+A arc "$WK/other" "$RHEAD" "[\"$(head -c 1001 /dev/zero | tr '\0' a)\"]" >/dev/null 2>&1; [ $? -ne 0 ]; check "setup command over 1000 chars refused" $?
+A arc "$WK/other" "$RHEAD" '{"cmd":1}' >/dev/null 2>&1; [ $? -ne 0 ]; check "setup must be an array of strings" $?
+A arc "$WK/other" zzz '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "an invalid head refused" $?
+A arc "$WK" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a dir without evidence.json refused" $?
+# Review #2: only signed, green evidence for --head, and only evidence a task of the graph closed on.
+A arc "$WK/unsigned" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/unsigned" ]; check "unsigned evidence refused" $?
+A arc "$WK/red" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "red evidence refused" $?
+A arc "$WK/oldhead" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "evidence for another commit refused" $?
+mkev "$WK/noclose" 'ev["commands"][0]["cmd"] = "test -f noclose"'; A arc "$WK/noclose" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/noclose" ]
+check "evidence no closed task was closed on is refused" $?
+# Review #2/#3: never through a planted link.
+A arc "$WK/slink" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/slink" ]; check "a symlinked bundle file refuses the archive" $?
+A arc "$WK/hlink" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/hlink" ]; check "a hard-linked bundle file refuses the archive" $?
+ln -s "$WK/other" "$WK/lnkdir"; A arc "$WK/lnkdir" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ]; check "a symlinked bundle dir is refused" $?
+mkdir -p "$WORK/elsewhere"; ln -s "$WORK/elsewhere" "$AD/evidence/lnk"
+A arc "$WK/lnk" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ -z "$(ls -A "$WORK/elsewhere")" ]; check "a planted evidence/<slug> link is refused" $?
+C create arc2 --feature "ac-1|x" >/dev/null 2>&1; cp "$AD/tasks.json" "$CD/arc2/tasks.json"; ln -s "$WORK/elsewhere" "$CD/arc2/evidence"
+A arc2 "$WK/other" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ -z "$(ls -A "$WORK/elsewhere")" ]; check "a symlinked evidence dir is refused" $?
+A arc "$WK/other" "$RHEAD" '[]' >/dev/null; check "an empty setup list is fine" $?
+printf 'x' >> "$AD/campaign.json"; mkev "$WK/late" 'ev["commands"][0]["cmd"] = "test -f late"'
+jq --arg s "$(esha "$WK/late")" '.tasks += [{id: "r2.t1", status: "done", evidence: {sha256: $s}}]' "$AD/tasks.json" > "$AD/t.tmp" && mv "$AD/t.tmp" "$AD/tasks.json"
+A arc "$WK/late" "$RHEAD" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/late" ]; check "refused when the campaign state is invalid" $?
+
+# --- an option given without its value is refused, never a hang ---
+bounded() { # run C "$@" for at most 5 s; 0 if it exited non-zero in time
+  C "$@" >/dev/null 2>&1 & local p=$! i=0
+  while kill -0 "$p" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  if kill -0 "$p" 2>/dev/null; then kill "$p"; wait "$p" 2>/dev/null; return 1; fi
+  wait "$p"; [ $? -ne 0 ]
+}
+for args in "report --campaign" "report --bytes" "report --check" "close --status" "resume --from-checkpoint" "create nogoal-1 --goal" "fail --campaign"; do
+  bounded $args; check "$args with no value exits with an error" $?
+done
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
