@@ -49,9 +49,9 @@ describe("Button", () => {
     fireEvent.click(b);
     expect(f).not.toHaveBeenCalled();
   });
-  it("busy swaps the label and ignores clicks", () => {
+  it("busy is announced and ignores clicks", () => {
     const f = vi.fn();
-    render(<Button busy busyLabel="Stopping" onClick={f}>Stop worker</Button>);
+    render(<Button busy onClick={f}>Stopping</Button>);
     const b = screen.getByRole("button", { name: "Stopping" });
     expect(b.getAttribute("aria-busy")).toBe("true");
     fireEvent.click(b);
@@ -71,12 +71,11 @@ describe("Input", () => {
     const described = c.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)!.textContent);
     expect(described).toEqual(["A branch or commit", "Not found"]);
   });
-  it("covers text, number, textarea and select", () => {
+  it("covers text, textarea and select", () => {
     const f = vi.fn();
-    render(<><Input label="A" value="" onChange={f} /><Input label="B" type="number" value="1" onChange={f} /><Input label="C" type="textarea" value="" onChange={f} />
+    render(<><Input label="A" value="" onChange={f} /><Input label="C" type="textarea" value="" onChange={f} />
       <Input label="D" type="select" value="x" options={[{ value: "x", label: "X" }]} onChange={f} /></>);
     expect(screen.getByRole("textbox", { name: "A" })).toBeTruthy();
-    expect(screen.getByRole("spinbutton", { name: "B" })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "C" }).tagName).toBe("TEXTAREA");
     expect(screen.getByRole("combobox", { name: "D" })).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: "A" }), { target: { value: "q" } });
@@ -85,21 +84,23 @@ describe("Input", () => {
 });
 
 describe("ListRow, SegmentedControl, Switch", () => {
-  it("ListRow is an option, selected state is exposed, Enter selects", () => {
+  it("ListRow is a tabbable option; selected is exposed only when given; Enter selects", () => {
     const f = vi.fn();
     render(<div role="listbox" aria-label="Runs"><ListRow selected meta="3 of 7">Run one</ListRow><ListRow onSelect={f}>Run two</ListRow></div>);
     expect(screen.getAllByRole("option")).toHaveLength(2);
     expect(screen.getByRole("option", { name: /Run one/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("option", { name: "Run two" }).hasAttribute("aria-selected")).toBe(false);
+    expect(screen.getAllByRole("option").every((o) => o.tabIndex === 0)).toBe(true);
     fireEvent.keyDown(screen.getByRole("option", { name: "Run two" }), { key: "Enter" });
     expect(f).toHaveBeenCalledOnce();
   });
-  it("SegmentedControl is a named radio group with one checked radio", () => {
+  it("SegmentedControl is a named fieldset of radios with one checked", () => {
     function Host() {
       const [v, setV] = useState<"2" | "3">("3");
       return <SegmentedControl label="Max rounds" value={v} onChange={setV} options={[{ value: "2", label: "2" }, { value: "3", label: "3" }]} />;
     }
     render(<Host />);
-    expect(screen.getByRole("radiogroup", { name: "Max rounds" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Max rounds" })).toBeTruthy();
     expect((screen.getByRole("radio", { name: "3" }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole("radio", { name: "2" }));
     expect((screen.getByRole("radio", { name: "2" }) as HTMLInputElement).checked).toBe(true);
@@ -125,10 +126,23 @@ describe("Sheet and AlertDialog", () => {
     expect(d.getAttribute("aria-labelledby")).toBeTruthy();
     expect(document.getElementById(d.getAttribute("aria-labelledby")!)!.textContent).toBe("Message Backend");
     fireEvent(d, new Event("cancel", { cancelable: true }));
+    fireEvent.mouseDown(d);
     fireEvent.click(d);
     expect(f).toHaveBeenCalledTimes(2);
     rerender(<Sheet open={false} onClose={f} title="Message Backend">body</Sheet>);
     expect(d.hasAttribute("open")).toBe(false);
+  });
+  it("Sheet tells the parent when the browser closes it, and the backdrop needs press and release", () => {
+    const f = vi.fn();
+    render(<Sheet open onClose={f} title="T">body</Sheet>);
+    const d = document.querySelector("dialog")!;
+    fireEvent(d, new Event("close"));
+    expect(f).toHaveBeenCalledTimes(1);
+    fireEvent.click(d);                       // release without a press on the backdrop (a drag that began inside)
+    expect(f).toHaveBeenCalledTimes(1);
+    fireEvent.mouseDown(d);
+    fireEvent.click(d);
+    expect(f).toHaveBeenCalledTimes(2);
   });
   it("AlertDialog is an alertdialog and focuses the safe button first", () => {
     const [yes, no] = [vi.fn(), vi.fn()];
@@ -157,6 +171,15 @@ describe("Toast and Skeleton", () => {
     fireEvent.mouseLeave(toast);
     act(() => { vi.advanceTimersByTime(5000); });
     expect(screen.queryByText("Stopped Backend at 14:22")).toBeNull();
+  });
+  it("an error toast is an alert and stays until dismissed", () => {
+    vi.useFakeTimers();
+    function Err() { const { toasts, push, dismiss } = useToasts(); return <><Button onClick={() => push("danger", "Could not write the queue entry")}>Go</Button><ToastRegion toasts={toasts} onDismiss={dismiss} /></>; }
+    render(<Err />);
+    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+    expect(screen.getByRole("alert").textContent).toContain("Could not write the queue entry");
+    act(() => { vi.advanceTimersByTime(60000); });
+    expect(screen.queryByText("Could not write the queue entry")).toBeTruthy();
   });
   it("can be dismissed with its button", () => {
     render(<Host />);

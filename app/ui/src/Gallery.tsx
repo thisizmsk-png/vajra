@@ -27,7 +27,7 @@ export function Gallery() {
           <Button variant="ghost">Cancel</Button>
           <Button variant="danger" onClick={() => setStop(true)}>Stop worker</Button>
           <Button disabled>Disabled</Button>
-          <Button busy busyLabel="Stopping">Stop worker</Button>
+          <Button busy>Stopping</Button>
           <Button size="sm">Small</Button>
         </div>
       </Section>

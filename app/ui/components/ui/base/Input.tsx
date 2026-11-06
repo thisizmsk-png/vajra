@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 
 type Common = { label: string; error?: string; hint?: string; id?: string };
 type Props =
-  | (Common & { type?: "text" | "number"; value: string; onChange: (v: string) => void; placeholder?: string })
-  | (Common & { type: "textarea"; value: string; onChange: (v: string) => void; rows?: number })
+  | (Common & { type?: "text"; value: string; onChange: (v: string) => void; placeholder?: string })
+  | (Common & { type: "textarea"; value: string; onChange: (v: string) => void; rows?: number; placeholder?: string })
   | (Common & { type: "select"; value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> });
 
 /** Label, control, hint and error wired together: `<label>`, aria-invalid, aria-describedby. */
@@ -21,7 +21,7 @@ export function Input(props: Props) {
   } as const;
   let control: ReactNode;
   if (props.type === "textarea") {
-    control = <textarea {...common} rows={props.rows} value={props.value} onChange={(e) => props.onChange(e.target.value)} />;
+    control = <textarea {...common} rows={props.rows} placeholder={props.placeholder} value={props.value} onChange={(e) => props.onChange(e.target.value)} />;
   } else if (props.type === "select") {
     control = (
       <select {...common} value={props.value} onChange={(e) => props.onChange(e.target.value)}>
@@ -49,7 +49,7 @@ export function Input(props: Props) {
         </span>
       )}
       {props.error && (
-        <span id={errId} className="v-field__error">
+        <span id={errId} className="v-field__error" role="alert">
           {props.error}
         </span>
       )}

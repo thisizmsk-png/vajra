@@ -24,6 +24,7 @@ export function Sheet({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const pressedBackdrop = useRef(false);
   const titleId = useId();
   useEffect(() => {
     const d = ref.current;
@@ -45,8 +46,14 @@ export function Sheet({
         e.preventDefault();
         onClose();
       }}
+      // A close the parent did not ask for (form method=dialog, programmatic close) still reaches the parent.
+      onClose={() => open && onClose()}
+      // Press and release both on the backdrop: a text selection dragged out of the dialog must not close it.
+      onMouseDown={(e) => {
+        pressedBackdrop.current = e.target === ref.current;
+      }}
       onClick={(e) => {
-        if (e.target === ref.current) onClose();
+        if (e.target === ref.current && pressedBackdrop.current) onClose();
       }}
     >
       <h2 id={titleId} className="v-text v-text--headline-md">

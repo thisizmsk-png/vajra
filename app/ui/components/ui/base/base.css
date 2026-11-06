@@ -61,19 +61,19 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-section__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-sm); }
 
 .v-seg { display: inline-flex; width: fit-content; border: 1px solid var(--c-border-strong); border-radius: var(--radius-md); overflow: hidden; margin: 0; padding: 0; }
-.v-seg label { display: inline-flex; align-items: center; min-width: var(--target-min); height: calc(var(--row-h) - 2px); padding: 0 var(--space-md); color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); }
+.v-seg label { position: relative; display: inline-flex; align-items: center; min-width: var(--target-min); height: calc(var(--row-h) - 2px); padding: 0 var(--space-md); color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); }
 .v-seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .v-seg label:has(input:checked) { background: var(--c-accent); color: var(--c-text); }
 .v-seg label:has(input:focus-visible) { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
 
-.v-switch { position: relative; width: 36px; height: 20px; padding: 0; border: 1px solid var(--c-border-strong); border-radius: 10px; background: var(--c-surface); }
-.v-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 7px; background: var(--c-text-secondary); transition: transform var(--t-fast) ease-out; }
+.v-switch { position: relative; width: 40px; height: var(--target-min); padding: 0; border: 1px solid var(--c-border-strong); border-radius: 12px; background: var(--c-surface); }
+.v-switch::after { content: ""; position: absolute; top: 4px; left: 4px; width: 14px; height: 14px; border-radius: 7px; background: var(--c-text-secondary); transition: transform var(--t-fast) ease-out; }
 .v-switch[aria-checked="true"] { background: var(--c-primary); border-color: var(--c-primary); }
 .v-switch[aria-checked="true"]::after { background: var(--c-text-on-primary); transform: translateX(16px); }
 
 .v-dialog { padding: var(--space-lg); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); box-shadow: var(--shadow-floating); max-width: min(480px, calc(100vw - 32px)); }
 .v-dialog::backdrop { background: color-mix(in srgb, var(--c-background) 60%, transparent); }
-.v-dialog--right { margin: 0 0 0 auto; height: 100vh; max-height: none; width: 360px; border-radius: 0; }
+.v-dialog--right { margin: 0 0 0 auto; height: 100vh; max-height: none; width: 360px; border-radius: 0; overflow-y: auto; }
 .v-dialog__actions { display: flex; justify-content: flex-end; gap: var(--space-sm); margin-top: var(--space-lg); }
 
 .v-toasts { position: fixed; right: var(--space-lg); bottom: var(--space-lg); display: flex; flex-direction: column; gap: var(--space-sm); }
@@ -97,3 +97,7 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-status--blocked, .v-status--question, .v-status--needs_approval { color: var(--c-warning); }
 .v-status--failed, .v-status--fail { color: var(--c-danger); }
 .v-status--unknown { color: var(--c-text-muted); }
+
+.v-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.v-toasts { pointer-events: none; }
+.v-toast { pointer-events: auto; }

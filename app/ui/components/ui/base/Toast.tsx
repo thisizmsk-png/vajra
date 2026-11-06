@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { S } from "../../../strings";
+import type { StatusKey } from "../../../strings";
 import { cn } from "../cn";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
@@ -7,21 +8,26 @@ import { StatusDot } from "./StatusDot";
 export type ToastItem = { id: number; kind: "info" | "success" | "danger"; text: string };
 
 const SHOWN_MS = 5000;
+const DOT: Record<ToastItem["kind"], StatusKey> = { info: "ready", success: "done", danger: "failed" };
 
 function ToastView({ item, onDismiss }: { item: ToastItem; onDismiss: (id: number) => void }) {
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  const start = useCallback(() => {
-    timer.current = setTimeout(() => onDismiss(item.id), SHOWN_MS);
-  }, [item.id, onDismiss]);
-  const pause = () => clearTimeout(timer.current);
+  const [paused, setPaused] = useState(false);
+  // Info and success go after 5 s unless hovered or focused. An error stays until the user dismisses it (WCAG 2.2.1).
   useEffect(() => {
-    start();
-    return pause;
-  }, [start]);
-  const dot = item.kind === "danger" ? "failed" : item.kind === "success" ? "done" : "ready";
+    if (paused || item.kind === "danger") return;
+    const t = setTimeout(() => onDismiss(item.id), SHOWN_MS);
+    return () => clearTimeout(t);
+  }, [paused, item.id, item.kind, onDismiss]);
   return (
-    <div className={cn("v-toast", `v-toast--${item.kind}`)} onMouseEnter={pause} onMouseLeave={start} onFocus={pause} onBlur={start}>
-      <StatusDot status={dot} label="" />
+    <div
+      className={cn("v-toast", `v-toast--${item.kind}`)}
+      role={item.kind === "danger" ? "alert" : undefined}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocus={() => setPaused(true)}
+      onBlur={(e) => !e.currentTarget.contains(e.relatedTarget) && setPaused(false)}
+    >
+      <StatusDot status={DOT[item.kind]} />
       <span>{item.text}</span>
       <Button size="sm" variant="ghost" onClick={() => onDismiss(item.id)}>
         {S.dismiss}

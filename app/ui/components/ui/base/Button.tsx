@@ -7,15 +7,14 @@ type Base = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "disabled" | "children
   size?: "sm" | "md";
   /** Uses aria-disabled so the button stays focusable and announced. */
   disabled?: boolean;
-  /** The label changes while busy (for example "Stopping"); the click is ignored. */
+  /** While busy the click is ignored; pass the busy wording as children (for example "Stopping"). */
   busy?: boolean;
-  busyLabel?: string;
 };
 
 // An icon-only button must carry an accessible name.
 type Props = Base & ({ children: ReactNode } | { children?: undefined; "aria-label": string });
 
-export function Button({ variant = "secondary", size = "md", disabled, busy, busyLabel, onClick, className, children, ...rest }: Props) {
+export function Button({ variant = "secondary", size = "md", disabled, busy, onClick, className, children, ...rest }: Props) {
   const off = disabled || busy;
   const click = (e: MouseEvent<HTMLButtonElement>) => {
     if (off) e.preventDefault();
@@ -30,7 +29,7 @@ export function Button({ variant = "secondary", size = "md", disabled, busy, bus
       className={cn("v-button", `v-button--${variant}`, size === "sm" && "v-button--sm", className)}
       onClick={click}
     >
-      {busy && busyLabel ? busyLabel : children}
+      {children}
     </button>
   );
 }

@@ -3,9 +3,12 @@ import type { StatusKey } from "../../../strings";
 import { cn } from "../cn";
 
 // One SVG shape per status (DESIGN.md "Status vocabulary"): the shape and the text carry the meaning, color backs it up.
+const RING = <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />;
+const CHECK = <path d="M1.5 5.5l2.5 2.5 4.5-5.5" fill="none" stroke="currentColor" strokeWidth="1.6" />;
+const CROSS = <path d="M1.8 1.8l6.4 6.4M8.2 1.8L1.8 8.2" fill="none" stroke="currentColor" strokeWidth="1.6" />;
 const SHAPES: Record<StatusKey, JSX.Element> = {
-  pending: <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />,
-  unknown: <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />,
+  pending: RING,
+  unknown: RING,
   ready: <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2 2" />,
   claimed: (
     <>
@@ -14,12 +17,12 @@ const SHAPES: Record<StatusKey, JSX.Element> = {
     </>
   ),
   in_progress: <circle cx="5" cy="5" r="4" fill="currentColor" />,
-  done: <path d="M1.5 5.5l2.5 2.5 4.5-5.5" fill="none" stroke="currentColor" strokeWidth="1.6" />,
-  pass: <path d="M1.5 5.5l2.5 2.5 4.5-5.5" fill="none" stroke="currentColor" strokeWidth="1.6" />,
+  done: CHECK,
+  pass: CHECK,
   blocked: <rect x="1.5" y="1.5" width="7" height="7" fill="currentColor" />,
   question: <path d="M5 .8L9.2 5 5 9.2.8 5z" fill="currentColor" />,
-  failed: <path d="M1.8 1.8l6.4 6.4M8.2 1.8L1.8 8.2" fill="none" stroke="currentColor" strokeWidth="1.6" />,
-  fail: <path d="M1.8 1.8l6.4 6.4M8.2 1.8L1.8 8.2" fill="none" stroke="currentColor" strokeWidth="1.6" />,
+  failed: CROSS,
+  fail: CROSS,
   needs_approval: <path d="M5 1L9.2 8.6H.8z" fill="currentColor" />,
 };
 
