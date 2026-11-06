@@ -57,8 +57,8 @@ fn start_run(
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, run_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &run_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd)
 }
 
 #[tauri::command(async)]

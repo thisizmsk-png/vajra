@@ -88,7 +88,7 @@ fn one_active_run_at_a_time() {
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    assert_eq!(code(&app.resume_run(other, "20261105-1231", "c2", &cwd).unwrap_err()), "run_active");
+    assert_eq!(code(&app.resume_run(other, "c2", &cwd).unwrap_err()), "run_active");
     // A past run's crew view never retargets the control service.
     let before = lock(&app.control).nonce().map(str::to_string);
     let _ = app.crew("c-old", "20261101-0000");
@@ -155,11 +155,9 @@ fn resume_run_validates_ids() {
     let t = Tmp::new();
     let app = t.app();
     let cwd = t.0.to_string_lossy().into_owned();
-    let e = app.resume_run("bad id;rm", "20261105-1810", "deliver-x", &cwd).unwrap_err();
+    let e = app.resume_run("bad id;rm", "deliver-x", &cwd).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
-    let e = app.resume_run("abc-12345678", "2026", "deliver-x", &cwd).unwrap_err();
-    assert_eq!(code(&e), "invalid_args");
-    let e = app.resume_run("abc-12345678", "20261105-1810", "../x", &cwd).unwrap_err();
+    let e = app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "../x", &cwd).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
 }
 
@@ -550,4 +548,17 @@ fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
     assert!(lines.iter().any(|l| l.contains("FINAL-UNIQUE-QUESTION")), "the newest line is returned: {lines:?}");
     assert!(!lines.iter().any(|l| l.contains("older line 0000")), "and not the oldest retained output");
     app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn two_resumes_of_one_campaign_get_distinct_run_ids() {
+    // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
+    let t = Tmp::new();
+    let app = t.app();
+    let a = app.fresh_run_id(1_794_000_000).1;
+    // The first resume's run entry is replaced by the second; the issued set still remembers it.
+    lock(&app.runs).clear();
+    let b = app.fresh_run_id(1_794_000_000).1;
+    assert_ne!(a, b);
+    assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
 }

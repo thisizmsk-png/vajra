@@ -13,7 +13,7 @@ use crate::bus::{self, Bus, Config, Event, Subscriber};
 use crate::control::service::{Actor, ControlError, Service, WorkerInfo};
 use crate::adapter::{Engine, adapter_for};
 use crate::control::ledger::Ledger;
-use crate::ids::{self, valid_run_id};
+use crate::ids;
 use crate::lock;
 use crate::crew::record::{JournalEntry, Meta, parse_journal, parse_meta};
 use crate::crew::redact::Redactor;
@@ -81,6 +81,8 @@ pub struct App {
     /// Held from the one-active-run check until the run is recorded, so two
     /// Start clicks cannot both pass the check.
     launching: Mutex<()>,
+    /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
+    issued: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -106,6 +108,7 @@ impl App {
             runs: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            issued: Mutex::new(Default::default()),
             log,
         })
     }
@@ -138,8 +141,10 @@ impl App {
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
     fn fresh_run_id(&self, now: u64) -> (u64, String) {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
-        (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)))
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
+        lock(&self.issued).insert(pick.1.clone());
+        pick
     }
 
     // ---------------------------------------------------------------- start
@@ -286,17 +291,17 @@ impl App {
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
-    pub fn resume_run(&self, session_id: &str, run_id: &str, campaign: &str, cwd: &str) -> Res {
+    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
         }
-        if !valid_run_id(run_id) {
-            return Err(invalid("run_id", "must be YYYYMMDD-HHMM"));
-        }
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
+        // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
+        let (_, run_id) = self.fresh_run_id(ids::unix_now());
+        let run_id = run_id.as_str();
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
             claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
