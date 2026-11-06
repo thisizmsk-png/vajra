@@ -35,6 +35,8 @@ use crate::logging::Logger;
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
+/// An ack record is a few hundred bytes; anything larger in `acks/` is not one.
+pub const MAX_ACK_BYTES: u64 = 16 * 1024;
 pub const INFLIGHT_UNKNOWN: Duration = Duration::from_secs(60);
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_REASON: usize = 500;
@@ -723,7 +725,7 @@ impl Service {
         // A stop already in force stays as it is: rewriting it would let a failed ledger write roll the file back
         // away, lifting the stop with no resume record. The human sees the existing action.
         if fs::symlink_metadata(&path).is_ok() {
-            let existing = fsx::read_nofollow(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let existing = fsx::read_nofollow_capped(&path, MAX_ACK_BYTES).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
             let id = existing.as_ref().map_or("", |v| str_field(v, "action_id")).to_string();
             return Ok(json!({"action_id": id, "state": State::Queued.as_str(), "already_stopped": true}));
         }
@@ -784,7 +786,7 @@ impl Service {
         }
         let w = self.resolve(worker)?.clone();
         let path = self.session()?.dir.stop_path(w.key());
-        let stop: Value = match fsx::read_nofollow(&path) {
+        let stop: Value = match fsx::read_nofollow_capped(&path, MAX_ACK_BYTES) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or(Value::Null),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ControlError::NotStopped),
             Err(e) => return Err(e.into()),
@@ -837,8 +839,25 @@ impl Service {
 
     fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
-        if let Ok(b) = fsx::read_nofollow(&dir.ack_path(id)) {
-            let ack: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+        let ack_read = fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES);
+        if let Err(e) = &ack_read {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                // Oversized: never parsed. The hook consumed the message but its ack cannot be trusted, so the
+                // honest state is "unknown", not "delivered".
+                self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
+                self.pending.remove(id);
+                return Ok(());
+            }
+        }
+        if let Ok(b) = ack_read {
+            let ack = match serde_json::from_slice::<Value>(&b) {
+                Ok(v) if v.is_object() => v,
+                _ => {
+                    self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
+                    self.pending.remove(id);
+                    return Ok(());
+                }
+            };
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
             self.record(&a, State::Delivered, json!({"audit_ref": audit_ref}), now)?;
             self.pending.remove(id);

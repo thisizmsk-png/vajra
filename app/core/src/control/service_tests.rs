@@ -178,3 +178,31 @@ fn a_queued_record_with_no_file_settles_as_not_delivered() {
     assert!(!s.pending.contains_key(&id), "settled once clearly lost");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_oversized_or_malformed_ack_is_never_parsed_and_settles_as_unknown() {
+    // Review (Required): a worker running as the same user can write acks/<id>.json. It used to be read whole into
+    // memory and parsed every tick.
+    let (mut s, dir) = svc();
+    let acks = dir.join("control").join(SID).join("acks");
+    fs::create_dir_all(&acks).unwrap();
+    for (i, make) in [
+        (0, Box::new(|p: &Path| { fs::File::create(p).unwrap().set_len(MAX_ACK_BYTES + 1).unwrap(); }) as Box<dyn Fn(&Path)>),
+        (1, Box::new(|p: &Path| fs::write(p, b"[1,2,3]").unwrap())),
+        (2, Box::new(|p: &Path| fs::write(p, b"not json").unwrap())),
+    ] {
+        let id = s.message_worker(Actor::Human, "bhima", &format!("m{i}")).unwrap()["action_id"].as_str().unwrap().to_string();
+        make(&acks.join(format!("{id}.json")));
+        s.tick_at(SystemTime::now());
+        assert!(!s.pending.contains_key(&id), "case {i}: settled");
+        let rec = super::super::ledger::Ledger::read_all(s.ledger.path()).unwrap();
+        let last = rec.iter().rev().find(|r| r["action_id"] == id.as_str()).unwrap();
+        assert_eq!(last["state"], "delivery_unknown", "case {i}: {last}");
+    }
+    // A sparse file of 1 GiB is refused by its length, without being read.
+    let id = s.message_worker(Actor::Human, "bhima", "big").unwrap()["action_id"].as_str().unwrap().to_string();
+    fs::File::create(acks.join(format!("{id}.json"))).unwrap().set_len(1 << 30).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(!s.pending.contains_key(&id));
+    let _ = fs::remove_dir_all(&dir);
+}
