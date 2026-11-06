@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 type Common = { label: string; error?: string; hint?: string; id?: string };
 type Props =
-  | (Common & { type?: "text"; value: string; onChange: (v: string) => void; placeholder?: string })
+  | (Common & { type?: "text" | "number"; value: string; onChange: (v: string) => void; placeholder?: string })
   | (Common & { type: "textarea"; value: string; onChange: (v: string) => void; rows?: number; placeholder?: string })
   | (Common & { type: "select"; value: string; onChange: (v: string) => void; options: Array<{ value: string; label: string }> });
 

@@ -71,6 +71,14 @@ describe("Input", () => {
     const described = c.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)!.textContent);
     expect(described).toEqual(["A branch or commit", "Not found"]);
   });
+  it("number is a native number input with the same label and error wiring", () => {
+    const f = vi.fn();
+    render(<Input label="Max in flight" type="number" error="1 to 16" value="4" onChange={f} />);
+    const c = screen.getByRole("spinbutton", { name: "Max in flight" });
+    expect(c.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.change(c, { target: { value: "8" } });
+    expect(f).toHaveBeenCalledWith("8");
+  });
   it("covers text, textarea and select", () => {
     const f = vi.fn();
     render(<><Input label="A" value="" onChange={f} /><Input label="C" type="textarea" value="" onChange={f} />
@@ -93,6 +101,12 @@ describe("ListRow, SegmentedControl, Switch", () => {
     expect(screen.getAllByRole("option").every((o) => o.tabIndex === 0)).toBe(true);
     fireEvent.keyDown(screen.getByRole("option", { name: "Run two" }), { key: "Enter" });
     expect(f).toHaveBeenCalledOnce();
+  });
+  it("ListRow can be a grid row with cells and no aria-selected", () => {
+    render(<div role="grid" aria-label="Criteria"><ListRow role="row" selected meta="exit 0">ac-1</ListRow></div>);
+    const row = screen.getByRole("row");
+    expect(row.hasAttribute("aria-selected")).toBe(false);
+    expect(screen.getAllByRole("gridcell").map((c) => c.textContent)).toEqual(["ac-1", "exit 0"]);
   });
   it("SegmentedControl is a named fieldset of radios with one checked", () => {
     function Host() {
