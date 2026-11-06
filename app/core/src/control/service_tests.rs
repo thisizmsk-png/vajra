@@ -94,3 +94,54 @@ fn a_second_stop_never_rewrites_or_loses_the_first() {
     assert_eq!(files(&dir, "stops"), 1, "an enforced stop must survive a failed second stop");
     let _ = fs::remove_dir_all(&dir);
 }
+
+fn ledger_states(dir: &Path) -> Vec<String> {
+    Ledger::read_all(&dir.join("control/ledger.jsonl")).unwrap().iter().map(|r| str_field(r, "state").to_string()).collect()
+}
+
+#[test]
+fn nothing_is_visible_to_the_hook_before_the_ledger_has_recorded_it() {
+    // A hook that polls the queue and the stops dir while a message and a stop are attempted with a failing ledger
+    // never sees an entry: publication happens only after a successful record.
+    let (mut s, dir) = svc();
+    s.ledger.break_for_test();
+    let (q, st) = (dir.join("control").join(SID).join("queue"), dir.join("control").join(SID).join("stops"));
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (d2, s2) = (done.clone(), seen.clone());
+    let watcher = std::thread::spawn(move || {
+        while !d2.load(Ordering::SeqCst) {
+            for p in [&q, &st] {
+                let n = fs::read_dir(p).map(|r| r.filter_map(|e| e.ok()).filter(|e| !e.file_name().to_string_lossy().starts_with('.')).count()).unwrap_or(0);
+                s2.fetch_add(n, Ordering::SeqCst);
+            }
+        }
+    });
+    for _ in 0..50 {
+        assert!(s.message_worker(Actor::Human, "bhima", "hello").is_err());
+        assert!(s.stop_worker(Actor::Human, "bhima", None).is_err());
+    }
+    done.store(true, Ordering::SeqCst);
+    watcher.join().unwrap();
+    assert_eq!(seen.load(Ordering::SeqCst), 0, "the hook must never see an action the ledger does not hold");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_publication_is_recorded_not_silent() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut s, dir) = svc();
+    let q = dir.join("control").join(SID).join("queue");
+    fs::set_permissions(&q, fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(s.message_worker(Actor::Human, "bhima", "hello").is_err());
+    fs::set_permissions(&q, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ledger_states(&dir), vec!["queued", "not_delivered"], "recorded first, then the failed publication");
+    assert!(s.pending.is_empty());
+    let st = dir.join("control").join(SID).join("stops");
+    fs::set_permissions(&st, fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(s.stop_worker(Actor::Human, "bhima", None).is_err());
+    fs::set_permissions(&st, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ledger_states(&dir), vec!["queued", "not_delivered", "queued", "refused"]);
+    assert_eq!(files(&dir, "stops"), 0);
+    let _ = fs::remove_dir_all(&dir);
+}

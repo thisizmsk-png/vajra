@@ -650,13 +650,15 @@ impl Service {
         let dir = self.session()?.dir.dir("queue");
         self.seq += 1;
         let name = format!("{:06}-{}.json", self.seq, a.id);
-        let queued = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes())?;
         a.state = State::Queued;
         let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
-        // The hook delivers whatever is in the queue, so an entry the ledger does not know must not stay.
-        if let Err(e) = self.record(&a, State::Queued, extra, now) {
-            let _ = std::fs::remove_file(&queued);
-            return Err(e);
+        // Record first, publish second: the hook delivers whatever is in the queue the moment it appears, and a
+        // delivery cannot be taken back, so the ledger must already know the action. If it cannot record, nothing is
+        // published; if publishing then fails, that is recorded too.
+        self.record(&a, State::Queued, extra, now)?;
+        if let Err(e) = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
         }
         self.pending.insert(a.id.clone(), a.clone());
         self.log("control_queued", &[("seq", self.seq)]);
@@ -720,14 +722,15 @@ impl Service {
             return Ok(json!({"action_id": id, "state": State::Queued.as_str(), "already_stopped": true}));
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        let written = fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
+        let stops = s.dir.dir("stops");
         // A confirmed stop is the human's action from here on.
         a.actor = Actor::Human;
         a.state = State::Queued;
-        // Same rule as a message: a stop the ledger cannot record is not enforced.
-        if let Err(e) = self.record(&a, State::Queued, json!({}), now) {
-            let _ = std::fs::remove_file(&written);
-            return Err(e);
+        // Same rule as a message: record first, then make the stop visible to the hook (which enforces it at once).
+        self.record(&a, State::Queued, json!({}), now)?;
+        if let Err(e) = fsx::write_atomic(&stops, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::Refused, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
         }
         self.pending.insert(a.id.clone(), a.clone());
         Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))

@@ -299,7 +299,7 @@ impl App {
         }
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
-            claude.resume_argv(session_id, campaign, n).map_err(invalid_input)
+            claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
         }, true)?;
         self.note("run_resumed", &[]);
         Ok(r)
@@ -323,9 +323,10 @@ impl App {
             workers
                 .iter()
                 .map(|w| {
-                    let t = self.bus.tail(&worker_stream(&w.agent_id), 0, INSPECT_BYTES);
+                    // The newest retained output, not the oldest: an inspector needs the current failure or question.
+                    let recent = self.bus.recent(&worker_stream(&w.agent_id), INSPECT_BYTES);
                     let cwd = tr.get(&w.agent_id).and_then(|t| t.cwd()).map(str::to_string);
-                    (w.agent_id.clone(), (cwd, t.lines.iter().map(|l| l.text.to_string()).collect()))
+                    (w.agent_id.clone(), (cwd, recent.iter().map(|l| l.text.to_string()).collect()))
                 })
                 .collect()
         } else {

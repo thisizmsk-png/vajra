@@ -518,3 +518,36 @@ fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
     lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
     assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
 }
+
+#[test]
+fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+    for f in ["agent-aa870dd40540481f0.jsonl", "agent-aa870dd40540481f0.meta.json"] {
+        fs::copy(fx.join(f), sub.join(f)).unwrap();
+    }
+    let stream = format!("run-{sid}");
+    app.sup
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    // 40 KiB of older output, then a unique final line: the oldest 16 KiB must not be what the Lead sees.
+    for i in 0..400 {
+        app.bus.push("w-aa870dd40540481f0", &format!("older line {i:04} {}", "x".repeat(90))).unwrap();
+    }
+    app.bus.push("w-aa870dd40540481f0", "FINAL-UNIQUE-QUESTION: which branch?").unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).unwrap();
+    let lines: Vec<&str> = i["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+    assert!(lines.iter().any(|l| l.contains("FINAL-UNIQUE-QUESTION")), "the newest line is returned: {lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("older line 0000")), "and not the oldest retained output");
+    app.sup.kill(&stream).unwrap();
+}

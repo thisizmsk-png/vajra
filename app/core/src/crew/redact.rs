@@ -42,10 +42,77 @@ impl Redactor {
     }
 
     /// Only the nonce replacement (whole, and a fragment a terminal wrap left
-    /// at either end), for text that keeps its colours: the PTY view.
+    /// at either end), for text that keeps its colours: the PTY view. The terminal still shows a nonce that an SGR
+    /// sequence or an invisible character splits, so the match runs on the visible text.
     pub fn redact(&self, s: String) -> String {
-        self.nonces.iter().fold(s, |s, n| redact_wrapped(s.replace(n.as_str(), REDACTED), n))
+        self.nonces.iter().fold(s, |s, n| {
+            if s.contains('\u{1b}') || s.chars().any(is_format) {
+                redact_keeping_escapes(&s, n)
+            } else {
+                redact_wrapped(s.replace(n.as_str(), REDACTED), n)
+            }
+        })
     }
+}
+
+/// The nonce replaced in text that keeps its escapes. Escape sequences and invisible format characters are skipped
+/// when matching (they are not drawn), the matched visible characters are dropped from the original and replaced by
+/// one marker per match, and the escapes inside a match are kept (they carry colour only), so the output has no
+/// nonce characters left and colours do not change.
+fn redact_keeping_escapes(s: &str, n: &str) -> String {
+    // Every character of `s` is either visible (part of `plain`) or an escape/format character.
+    let mut toks: Vec<(usize, usize, bool)> = Vec::new();
+    let mut plain = String::with_capacity(s.len());
+    let mut plain_at: Vec<usize> = Vec::new(); // byte offset in `plain` of each visible token
+    let mut it = s.char_indices();
+    while let Some((i, c)) = it.next() {
+        if c == '\u{1b}' {
+            let mut end = i + 1;
+            for (j, d) in it.by_ref() {
+                end = j + d.len_utf8();
+                if ('\u{40}'..='\u{7e}').contains(&d) && d != '[' {
+                    break;
+                }
+            }
+            toks.push((i, end, false));
+        } else if is_format(c) {
+            toks.push((i, i + c.len_utf8(), false));
+        } else {
+            toks.push((i, i + c.len_utf8(), true));
+            plain_at.push(plain.len());
+            plain.push(c);
+        }
+    }
+    let mut cut: Vec<(usize, usize)> = plain.match_indices(n).map(|(a, m)| (a, a + m.len())).collect();
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain.ends_with(&n[..k])) {
+        cut.push((plain.len() - k, plain.len()));
+    }
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain.starts_with(&n[n.len() - k..])) {
+        cut.push((0, k));
+    }
+    if cut.is_empty() {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let (mut v, mut in_cut) = (0, false);
+    for &(a, b, visible) in &toks {
+        if !visible {
+            out.push_str(&s[a..b]);
+            continue;
+        }
+        let p = plain_at[v];
+        v += 1;
+        if cut.iter().any(|&(x, y)| p >= x && p < y) {
+            if !in_cut {
+                out.push_str(REDACTED);
+                in_cut = true;
+            }
+        } else {
+            in_cut = false;
+            out.push_str(&s[a..b]);
+        }
+    }
+    out
 }
 
 /// A terminal wrap can cut the nonce across two lines: a prefix of at least
