@@ -1,0 +1,101 @@
+/* Vajra Desktop tokens (docs/desktop/DESIGN.md). The only file besides tokens.ts allowed to hold raw colors.
+   Dark is the default; the light theme is selected with data-theme="light" on the root element. */
+:root,
+[data-theme="dark"] {
+  --c-background: #0d1117;
+  --c-surface: #161b22;
+  --c-surface-elevated: #1c2128;
+  --c-accent: #21262d;
+  --c-border: #30363d;
+  --c-border-strong: #768390;
+  --c-text: #e6edf3;
+  --c-text-secondary: #c9d1d9;
+  --c-text-muted: #9da7b3;
+  --c-primary: #d97757;
+  --c-text-on-primary: #0d1117;
+  --c-success: #7ee787;
+  --c-warning: #e3b341;
+  --c-danger: #ff7b72;
+  --c-info: #79c0ff;
+  --c-focus-ring: #79c0ff;
+  --shadow-floating: 0 8px 24px rgb(0 0 0 / 0.4);
+
+  --ansi-black: #7d8590;
+  --ansi-red: #ff7b72;
+  --ansi-green: #3fb950;
+  --ansi-yellow: #d29922;
+  --ansi-blue: #58a6ff;
+  --ansi-magenta: #bc8cff;
+  --ansi-cyan: #39c5cf;
+  --ansi-white: #b1bac4;
+  --ansi-bright-black: #8b949e;
+  --ansi-bright-red: #ffa198;
+  --ansi-bright-green: #56d364;
+  --ansi-bright-yellow: #e3b341;
+  --ansi-bright-blue: #79c0ff;
+  --ansi-bright-magenta: #d2a8ff;
+  --ansi-bright-cyan: #56d4dd;
+  --ansi-bright-white: #f0f6fc;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --c-background: #f6f8fa;
+  --c-surface: #fdfdfe;
+  --c-surface-elevated: #ffffff;
+  --c-accent: #eaeef2;
+  --c-border: #d8dee4;
+  --c-border-strong: #6e7781;
+  --c-text: #1f2328;
+  --c-text-secondary: #424a53;
+  --c-text-muted: #59636e;
+  --c-primary: #a84a29;
+  --c-text-on-primary: #ffffff;
+  --c-success: #116329;
+  --c-warning: #7d4e00;
+  --c-danger: #b42318;
+  --c-info: #0550ae;
+  --c-focus-ring: #0550ae;
+  --shadow-floating: 0 8px 24px rgb(31 35 40 / 0.12);
+
+  --ansi-black: #24292f;
+  --ansi-red: #cf222e;
+  --ansi-green: #116329;
+  --ansi-yellow: #4d2d00;
+  --ansi-blue: #0969da;
+  --ansi-magenta: #8250df;
+  --ansi-cyan: #1b7c83;
+  --ansi-white: #636c76;
+  --ansi-bright-black: #57606a;
+  --ansi-bright-red: #a40e26;
+  --ansi-bright-green: #1a7f37;
+  --ansi-bright-yellow: #633c01;
+  --ansi-bright-blue: #0550ae;
+  --ansi-bright-magenta: #6639ba;
+  --ansi-bright-cyan: #0f6270;
+  --ansi-bright-white: #59636e;
+  color-scheme: light;
+}
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --row-h: 28px;
+  --target-min: 24px;
+  --t-fast: 120ms;
+  --t-panel: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-panel: 0ms;
+  }
+}

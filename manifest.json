@@ -332,6 +332,11 @@
     "workflows/vajra-feature-build.js": "7c80902765472a66e76d07fa9d0eed8fe65cecce5f91d3fa38c900d2bac84974",
     "workflows/vajra-incident-response.js": "dd95c795eeb43884e87ac8961f79692457d8947c35c7d2bb144e5c23d1f4e94e",
     "workflows/vajra-sabha.js": "1321836bd9c80dd94d8907509f816b1ee0bfcf31d429c6b9e07006da21e04dcf",
-    "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de"
+    "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
+    "docs/design/after/kit-dark-1280.png": "0afe2f635878cac289ddcb0169950410ad0399e915c210e1611fb32bec0aa5f9",
+    "docs/design/after/kit-light-1280.png": "5416bba76b1d1976d878acb7547e437c0f873f196456c3040c181d8f33ba4156",
+    "docs/design/changed-strings.md": "c5a8cb9de22a46f8d956c1d394c2d2726899c805c6ef2a1d1422785843d86e21",
+    "docs/design/m3-kit-notes.md": "8bcafa89e7ef6452e0f059a78e682aa81ab252746b36727ec7c00174fcf0247a",
+    "tests/ui/run-ui.sh": "0d5d7552d65986733e2d092844d4e9e4bd9e2c4d1dbb24af79bee98a68797b66"
   }
 }
