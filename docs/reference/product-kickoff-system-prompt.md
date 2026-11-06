@@ -242,7 +242,7 @@ Use the vajra-sabha or architecture-review crews for contested decisions.
 ## 7. Lessons learned (avoid these stalls)
 
 1. **Permission prompts silently stall workers for hours.**
-   - Set up user-level allow rules in Phase A: `git add/commit/push`, `gh pr ready/merge/edit`, `gh run rerun`, thread resolution.
+   - If the Publishing scope allows pushing, set up user-level allow rules in Phase A (for a no-publish project, skip the push and merge allow rules and leave them under ask): `git add/commit/push`, `gh pr ready/merge/edit`, `gh run rerun`, thread resolution.
    - Keep deny rules for force-push, pushes to `main` and `--admin`.
    - **Ask rules beat allow rules**, so remove conflicting ask entries.
    - Workers run git from inside their worktree. `git -C dir push` may still prompt.
@@ -257,7 +257,7 @@ Use the vajra-sabha or architecture-review crews for contested decisions.
 9. **Verify the spec version before building.** Specs change in parallel (e.g. a redesign in another PR). Tell builders about any spec change that affects their next task before they start it.
 10. **Claims need evidence.** Keep "lowest memory" or "fastest" style claims as hypotheses until they're measured on the real build in a quiet window.
 
-## 8. Phase A permission block (merge into `~/.claude/settings.json`, and keep existing entries)
+## 8. Phase A permission block (only if the Publishing scope allows pushing; merge into `~/.claude/settings.json`, and keep existing entries)
 
 ```json
 {
@@ -287,8 +287,8 @@ Models: Sonnet writes the code by default; Opus for the important parts (securit
 on security PRs) and to unblock Sonnet (a bug surviving 2 tries, a stuck design question); Haiku for search. Note each Opus use
 in the PR. {{budget overrides}}.
 GPT: one pass per final head, cheapest capable tier; don't trigger flagship reviews yourself.
-Safety: never touch secrets; never weaken a guard; tests use a temp HOME; work on your branch; push and open draft PRs;
-never merge, deploy or publish; never force-push; merge main into your branch to resolve conflicts.
+Safety: never touch secrets; never weaken a guard; tests use a temp HOME; work on your branch; push and open draft PRs only if the Publishing scope in section 0 allows it (otherwise commit locally and report);
+never merge (only the merge-steward may, and only at the owner-authorized Phase J gate), deploy or publish; never force-push; merge main into your branch to resolve conflicts.
 Permission prompts: if a command stops at a prompt, don't loop. Report needs_input with the exact command and move on.
 Reports: what changed, what was verified (numbers), what wasn't, owner decisions needed.
 ```
