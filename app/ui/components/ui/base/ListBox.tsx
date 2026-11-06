@@ -3,22 +3,27 @@ import type { KeyboardEvent, ReactNode } from "react";
 
 /**
  * A listbox of `ListRow` options. One tab stop: the listbox itself, which keeps focus and points at the active option
- * with `aria-activedescendant`. Up/Down/Home/End move the active option, Enter or Space selects it.
+ * with `aria-activedescendant`. Up/Down/Home/End move the active option, Enter or Space selects it. When there is no
+ * valid active option (first focus, or the active row was removed) the selected option, else the first, becomes active.
  */
 export function ListBox({ label, children }: { label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<string | undefined>();
   const options = () => Array.from(ref.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+  const initial = () => options().find((o) => o.getAttribute("aria-selected") === "true") ?? options()[0];
+  const show = (o: HTMLElement | undefined) => {
+    setActive(o?.id);
+    o?.scrollIntoView?.({ block: "nearest" });
+  };
   useEffect(() => {
-    for (const o of options()) o.toggleAttribute("data-active", o.id === active);
+    const all = options();
+    if (active && !all.some((o) => o.id === active)) show(initial()); // the active row went away
+    for (const o of all) o.toggleAttribute("data-active", o.id === active);
   });
   const go = (to: (i: number, n: number) => number) => {
     const all = options();
-    if (!all.length) return;
-    const now = Math.max(0, all.findIndex((o) => o.id === active));
-    const next = all[Math.min(all.length - 1, Math.max(0, to(now, all.length)))];
-    setActive(next.id);
-    next.scrollIntoView?.({ block: "nearest" });
+    const now = all.findIndex((o) => o.id === active);
+    show(now < 0 ? initial() : all[Math.min(all.length - 1, Math.max(0, to(now, all.length)))]);
   };
   const key = (e: KeyboardEvent) => {
     if (e.key === "ArrowDown") go((i) => i + 1);
@@ -47,7 +52,7 @@ export function ListBox({ label, children }: { label: string; children: ReactNod
         }
       }}
       onFocus={() => {
-        if (!active) setActive((options().find((o) => o.getAttribute("aria-selected") === "true") ?? options()[0])?.id);
+        if (!options().some((o) => o.id === active)) show(initial());
       }}
     >
       {children}
