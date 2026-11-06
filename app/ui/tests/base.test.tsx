@@ -134,8 +134,35 @@ describe("ListRow, SegmentedControl, Switch", () => {
     expect(a).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(box);
   });
+  it("lands on the first option when the list was empty at focus, and recovers when the active row is removed", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    function Host({ rows }: { rows: string[] }) {
+      return <ListBox label="Runs">{rows.map((r) => <ListRow key={r}>{r}</ListRow>)}</ListBox>;
+    }
+    const { rerender } = render(<Host rows={[]} />);
+    const box = screen.getByRole("listbox", { name: "Runs" });
+    fireEvent.focus(box);
+    expect(box.hasAttribute("aria-activedescendant")).toBe(false);
+    rerender(<Host rows={["one", "two", "three"]} />);
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[0].id).toBe(box.getAttribute("aria-activedescendant")); // not row 1
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[1].id).toBe(box.getAttribute("aria-activedescendant"));
+    rerender(<Host rows={["two-new", "three"]} />);                     // the active row was removed
+    expect(screen.getAllByRole("option")[0].id).toBe(box.getAttribute("aria-activedescendant"));
+    expect(scroll).toHaveBeenCalled();
+  });
+  it("scrolls the initial option into view on focus", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    render(<ListBox label="Runs"><ListRow>a</ListRow><ListRow selected>b</ListRow></ListBox>);
+    fireEvent.focus(screen.getByRole("listbox"));
+    expect(scroll).toHaveBeenCalledOnce();
+    expect(screen.getByRole("listbox").getAttribute("aria-activedescendant")).toBe(screen.getAllByRole("option")[1].id);
+  });
   it("ListRow can be a grid row with cells and no aria-selected", () => {
-    render(<div role="grid" aria-label="Criteria"><ListRow role="row" selected meta="exit 0">ac-1</ListRow></div>);
+    render(<div role="grid" aria-label="Criteria"><ListRow role="row" meta="exit 0">ac-1</ListRow></div>);
     const row = screen.getByRole("row");
     expect(row.hasAttribute("aria-selected")).toBe(false);
     expect(screen.getAllByRole("gridcell").map((c) => c.textContent)).toEqual(["ac-1", "exit 0"]);

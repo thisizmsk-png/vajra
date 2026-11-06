@@ -56,6 +56,7 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-row:hover { background: var(--c-accent); }
 .v-row[aria-selected="true"] { background: var(--c-accent); }
 .v-listbox:focus-visible { outline: none; }
+.v-listbox:focus-visible:not(:has([role="option"])) { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-listbox:focus-visible .v-row[data-active] { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
 .v-row__meta { margin-left: auto; color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
