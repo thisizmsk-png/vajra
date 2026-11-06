@@ -59,17 +59,17 @@ impl SessionDir {
     }
 
     /// The queue file for `action_id`, if still queued.
-    pub fn queued(&self, action_id: &str) -> Option<PathBuf> {
+    pub fn queued(&self, action_id: &str) -> io::Result<Option<PathBuf>> {
         find(&self.dir("queue"), |n| n.ends_with(&format!("-{action_id}.json")))
     }
 
     /// An inflight claim for `action_id`, if one exists.
-    pub fn inflight(&self, action_id: &str) -> Option<PathBuf> {
+    pub fn inflight(&self, action_id: &str) -> io::Result<Option<PathBuf>> {
         find(&self.dir("inflight"), |n| n.starts_with(&format!("{action_id}.")))
     }
 
     /// The expired copy of `action_id`'s queue file, if the app moved it there.
-    pub fn expired(&self, action_id: &str) -> Option<PathBuf> {
+    pub fn expired(&self, action_id: &str) -> io::Result<Option<PathBuf>> {
         find(&self.dir("expired"), |n| n.ends_with(&format!("-{action_id}.json")))
     }
 
@@ -85,8 +85,19 @@ impl SessionDir {
     }
 }
 
-fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> Option<PathBuf> {
-    fs::read_dir(dir).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| {
-        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && pred(n))
-    })
+/// The first entry of `dir` that `pred` accepts. A scan that fails is an error, never "not found": settling on a
+/// failed scan would call a file absent that is still there. A directory that does not exist has no entries.
+fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for e in rd {
+        let p = e?.path();
+        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && pred(n)) {
+            return Ok(Some(p));
+        }
+    }
+    Ok(None)
 }

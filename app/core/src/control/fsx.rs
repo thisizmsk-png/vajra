@@ -48,13 +48,21 @@ pub fn open_append(path: &Path) -> io::Result<File> {
     Ok(f)
 }
 
-/// Read a regular file without following a symlink.
-pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+/// Open for reading without following a symlink and without blocking, then require a regular file on the descriptor
+/// itself. O_NONBLOCK matters: a worker (same user) can plant a FIFO in the control directory, and a blocking open of
+/// it would hang the caller (the watcher, which holds the service mutex) until some writer appeared.
+fn open_regular(path: &Path) -> io::Result<fs::File> {
+    let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     if !f.metadata()?.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
     }
+    Ok(f)
+}
+
+/// Read a regular file without following a symlink.
+pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = open_regular(path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     Ok(buf)
@@ -64,11 +72,8 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
 /// ever read. For files a worker (same user) can write into the control directory.
 pub fn read_nofollow_capped(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
-    let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let f = open_regular(path)?;
     let meta = f.metadata()?;
-    if !meta.is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
-    }
     if meta.len() > cap {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
     }

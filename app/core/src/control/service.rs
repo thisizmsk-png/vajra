@@ -839,13 +839,13 @@ impl Service {
     fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
         let stop = a.kind == Kind::Stop;
-        if !stop && dir.queued(id).is_some() {
+        if !stop && dir.queued(id)?.is_some() {
             if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
                 self.expire(id, now, "expired");
             }
             return Ok(());
         }
-        let claimed = dir.inflight(id).is_some();
+        let claimed = dir.inflight(id)?.is_some();
         let (delivered, invalid) = match fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES) {
             Ok(b) => match serde_json::from_slice::<Value>(&b) {
                 Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
@@ -868,9 +868,14 @@ impl Service {
             }
             self.record(&a, State::DeliveryUnknown, json!({"reason": "claim_stale"}), now)?;
         } else {
-            // Nothing queued, claimed or acked: it was expired (rename done, record lost) or never published.
-            let why = if dir.expired(id).is_some() { "expired" } else { "not_published" };
-            self.record(&a, State::NotDelivered, json!({"reason": why}), now)?;
+            // Nothing queued, claimed or acked. expired/ is the app's own rename, so that is a firm not_delivered. Plain
+            // absence is not: after power loss an ack and a claim removal that were never made durable look exactly
+            // like a message that was never published, so it settles as unknown, not as a terminal not_delivered.
+            if dir.expired(id)?.is_some() {
+                self.record(&a, State::NotDelivered, json!({"reason": "expired"}), now)?;
+            } else {
+                self.record(&a, State::DeliveryUnknown, json!({"reason": "no_evidence"}), now)?;
+            }
         }
         self.pending.remove(id);
         Ok(())
@@ -882,7 +887,7 @@ impl Service {
     fn expire(&mut self, id: &str, now: SystemTime, reason: &str) {
         let Some(a) = self.pending.get(id).cloned() else { return };
         let dir = SessionDir { root: self.control_root.join(&a.session_id) };
-        let Some(q) = dir.queued(id) else { return };
+        let Ok(Some(q)) = dir.queued(id) else { return };
         let dst = dir.dir("expired").join(q.file_name().unwrap_or_default());
         if fs::rename(&q, &dst).is_err() {
             return;
