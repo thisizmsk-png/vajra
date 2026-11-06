@@ -1,1 +1,1 @@
-{"idle_mib": null, "note": "Recorded from the first green perf run on main. Until then the gate only enforces the absolute budgets (idle <= 200 MiB, slope <= 1 MiB/min)."}
+{"idle_mib": 170.9, "measured": "macos-latest, run 42312511166 on #17 (3 launches, median of medians; spread 166.5 to 174.8)", "update": "Manual bump PR, reviewed by the owner: take median_of_medians_mib from the idle.json artifact of a green main run and edit idle_mib. Never written by CI."}
