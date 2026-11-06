@@ -163,68 +163,124 @@ fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_queued_record_with_no_file_settles_as_not_delivered() {
-    // Review: the ledger is written before the queue file, so a crash between them leaves "queued" with no file.
-    // Nothing can deliver it, and check() used to leave it pending forever.
-    let (mut s, dir) = svc();
-    let id = s.message_worker(Actor::Human, "bhima", "lost in a crash").unwrap()["action_id"].as_str().unwrap().to_string();
-    let q = fs::read_dir(dir.join("control").join(SID).join("queue")).unwrap().next().unwrap().unwrap().path();
-    fs::remove_file(q).unwrap();
-    let now = SystemTime::now();
-    s.tick_at(now + Duration::from_secs(5));
-    assert!(s.pending.contains_key(&id), "not settled while it may still be mid-publish");
-    s.tick_at(now + INFLIGHT_UNKNOWN + Duration::from_secs(5));
-    assert!(!s.pending.contains_key(&id), "settled once clearly lost");
-    let _ = fs::remove_dir_all(&dir);
+// ---- delivery state machine (Opus design, ADR note on #5) -------------------------------------------------------
+// The hook claims queue/ -> inflight/, writes acks/, then removes inflight/. check() observes in the order
+// queue, inflight, ack, expired: an "all absent" reading then proves the file was never published, because a hook that
+// ran between the reads would have left an ack behind. Q = queue/, I = inflight/, A = acks/, E = expired/.
+
+#[derive(Clone, Copy)]
+enum Ack { None, Valid, Big, Array, Text, Symlink }
+
+struct Case {
+    name: &'static str,
+    q: bool,
+    i: bool,
+    a: Ack,
+    e: bool,
+    /// Seconds after the first tick at which the case is checked (first tick is always at 0).
+    at: u64,
+    /// `None`: still pending. `Some((state, reason))`: settled.
+    want: Option<(&'static str, Option<&'static str>)>,
 }
 
-#[test]
-fn an_oversized_or_malformed_ack_is_never_parsed_and_settles_as_unknown() {
-    // Review (Required): a worker running as the same user can write acks/<id>.json. It used to be read whole into
-    // memory and parsed every tick.
-    let (mut s, dir) = svc();
-    let acks = dir.join("control").join(SID).join("acks");
-    fs::create_dir_all(&acks).unwrap();
-    for (i, make) in [
-        (0, Box::new(|p: &Path| { fs::File::create(p).unwrap().set_len(MAX_ACK_BYTES + 1).unwrap(); }) as Box<dyn Fn(&Path)>),
-        (1, Box::new(|p: &Path| fs::write(p, b"[1,2,3]").unwrap())),
-        (2, Box::new(|p: &Path| fs::write(p, b"not json").unwrap())),
-    ] {
-        let id = s.message_worker(Actor::Human, "bhima", &format!("m{i}")).unwrap()["action_id"].as_str().unwrap().to_string();
-        make(&acks.join(format!("{id}.json")));
-        s.tick_at(SystemTime::now());
-        assert!(!s.pending.contains_key(&id), "case {i}: settled");
-        let rec = super::super::ledger::Ledger::read_all(s.ledger.path()).unwrap();
-        let last = rec.iter().rev().find(|r| r["action_id"] == id.as_str()).unwrap();
-        assert_eq!(last["state"], "delivery_unknown", "case {i}: {last}");
-    }
-    // A sparse file of 1 GiB is refused by its length, without being read.
-    let id = s.message_worker(Actor::Human, "bhima", "big").unwrap()["action_id"].as_str().unwrap().to_string();
-    fs::File::create(acks.join(format!("{id}.json"))).unwrap().set_len(1 << 30).unwrap();
-    s.tick_at(SystemTime::now());
-    assert!(!s.pending.contains_key(&id));
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn an_ack_that_appears_after_check_first_looked_is_not_called_lost() {
-    // Review: the hook writes the ack before it drops its claim, so check() can find no ack, no queue file and no
-    // claim although the message was delivered. The final decision looks at the ack again.
-    let (mut s, dir) = svc();
-    let id = s.message_worker(Actor::Human, "bhima", "delivered").unwrap()["action_id"].as_str().unwrap().to_string();
-    let root = dir.join("control").join(SID);
-    let q = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
-    fs::remove_file(q).unwrap(); // the hook claimed it and has since dropped the claim
-    let sd = SessionDir { root: root.clone() };
-    let late = SystemTime::now() + INFLIGHT_UNKNOWN + Duration::from_secs(5);
-    fs::create_dir_all(root.join("acks")).unwrap();
-    fs::write(sd.ack_path(&id), br#"{"consumed_at":"2026-11-06T00:00:00Z","tool_name":"Bash"}"#).unwrap();
-    s.settle_lost(&id, &sd, late).unwrap();
-    assert!(s.pending.contains_key(&id), "an ack is present, so it is not settled as lost");
-    s.tick_at(late);
-    assert!(!s.pending.contains_key(&id));
+fn last_record(s: &Service, id: &str) -> Value {
     let rec = super::super::ledger::Ledger::read_all(s.ledger.path()).unwrap();
-    assert_eq!(rec.iter().rev().find(|r| r["action_id"] == id.as_str()).unwrap()["state"], "delivered");
+    rec.into_iter().rev().find(|r| r["action_id"] == id).unwrap()
+}
+
+#[test]
+fn every_delivery_crash_point_settles_as_the_table_says() {
+    use Ack::*;
+    let cases = [
+        Case { name: "recorded, crashed before publish", q: false, i: false, a: None, e: false, at: 0, want: Some(("not_delivered", Some("not_published"))) },
+        Case { name: "published, not yet claimed", q: true, i: false, a: None, e: false, at: 5, want: Option::None },
+        Case { name: "forged ack beside a queued file", q: true, i: false, a: Valid, e: false, at: 5, want: Option::None },
+        Case { name: "queued past the ttl", q: true, i: false, a: None, e: false, at: 31 * 60, want: Some(("not_delivered", Some("expired"))) },
+        Case { name: "claimed, hook alive", q: false, i: true, a: None, e: false, at: 5, want: Option::None },
+        Case { name: "claimed, no ack for 60s", q: false, i: true, a: None, e: false, at: 61, want: Some(("delivery_unknown", Some("claim_stale"))) },
+        Case { name: "claimed and acked", q: false, i: true, a: Valid, e: false, at: 0, want: Some(("delivered", Option::None)) },
+        Case { name: "acked, claim removed", q: false, i: false, a: Valid, e: false, at: 0, want: Some(("delivered", Option::None)) },
+        Case { name: "acked long after the claim timer", q: false, i: false, a: Valid, e: false, at: 600, want: Some(("delivered", Option::None)) },
+        Case { name: "oversized ack", q: false, i: false, a: Big, e: false, at: 0, want: Some(("delivery_unknown", Some("ack_invalid"))) },
+        Case { name: "ack that is a json array", q: false, i: true, a: Array, e: false, at: 0, want: Some(("delivery_unknown", Some("ack_invalid"))) },
+        Case { name: "ack that is not json", q: false, i: false, a: Text, e: false, at: 0, want: Some(("delivery_unknown", Some("ack_invalid"))) },
+        Case { name: "ack planted as a symlink", q: false, i: false, a: Symlink, e: false, at: 0, want: Some(("delivery_unknown", Some("ack_invalid"))) },
+        Case { name: "expired by rename, crashed before the record", q: false, i: false, a: None, e: true, at: 0, want: Some(("not_delivered", Some("expired"))) },
+    ];
+    for c in cases {
+        let (mut s, dir) = svc();
+        let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+        let root = dir.join("control").join(SID);
+        let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+        let name = qf.file_name().unwrap().to_owned();
+        if c.e {
+            fs::rename(&qf, root.join("expired").join(&name)).unwrap();
+        } else if c.i {
+            fs::rename(&qf, root.join("inflight").join(format!("{id}.4242"))).unwrap();
+        } else if !c.q {
+            fs::remove_file(&qf).unwrap();
+        }
+        let ack = root.join("acks").join(format!("{id}.json"));
+        fs::create_dir_all(root.join("acks")).unwrap();
+        match c.a {
+            None => {}
+            Valid => fs::write(&ack, format!(r#"{{"action_id":"{id}","consumed_at":"2026-11-06T00:00:00Z","tool_name":"Bash"}}"#)).unwrap(),
+            Big => fs::File::create(&ack).unwrap().set_len(MAX_ACK_BYTES + 1).unwrap(),
+            Array => fs::write(&ack, b"[1,2]").unwrap(),
+            Text => fs::write(&ack, b"nope").unwrap(),
+            Symlink => std::os::unix::fs::symlink("/nonexistent/ack", &ack).unwrap(),
+        }
+        let t0 = SystemTime::now();
+        s.tick_at(t0);
+        if c.at > 0 {
+            s.tick_at(t0 + Duration::from_secs(c.at));
+        }
+        match c.want {
+            Option::None => assert!(s.pending.contains_key(&id), "{}: should still be pending", c.name),
+            Some((state, reason)) => {
+                assert!(!s.pending.contains_key(&id), "{}: should have settled", c.name);
+                let r = last_record(&s, &id);
+                assert_eq!(r["state"], state, "{}: {r}", c.name);
+                if let Some(reason) = reason {
+                    assert_eq!(r["reason"], reason, "{}: {r}", c.name);
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_claimed_message_is_still_settled_after_its_session_ended() {
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::rename(&qf, root.join("inflight").join(format!("{id}.4242"))).unwrap();
+    s.end_session();
+    assert!(s.pending.contains_key(&id), "a claimed message outlives the session");
+    fs::create_dir_all(root.join("acks")).unwrap();
+    fs::write(root.join("acks").join(format!("{id}.json")), format!(r#"{{"action_id":"{id}"}}"#)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert_eq!(last_record(&s, &id)["state"], "delivered");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_ack_arriving_between_two_ticks_wins_over_the_claim_timer() {
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    let claim = root.join("inflight").join(format!("{id}.4242"));
+    fs::rename(&qf, &claim).unwrap();
+    let t0 = SystemTime::now();
+    s.tick_at(t0);
+    // The laptop slept: the hook acked and dropped its claim, then the app woke past the 60 s mark.
+    fs::create_dir_all(root.join("acks")).unwrap();
+    fs::write(root.join("acks").join(format!("{id}.json")), format!(r#"{{"action_id":"{id}"}}"#)).unwrap();
+    fs::remove_file(claim).unwrap();
+    s.tick_at(t0 + INFLIGHT_UNKNOWN + Duration::from_secs(30));
+    assert_eq!(last_record(&s, &id)["state"], "delivered");
     let _ = fs::remove_dir_all(&dir);
 }

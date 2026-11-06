@@ -396,7 +396,7 @@ impl Service {
         let ids: Vec<String> =
             self.pending.values().filter(|a| a.kind.queued_text()).map(|a| a.id.clone()).collect();
         for id in ids {
-            self.expire(&id, now);
+            self.expire(&id, now, "session_ended");
         }
         let asks: Vec<Action> =
             self.pending.values().filter(|a| a.state == State::AwaitingHumanConfirm).cloned().collect();
@@ -437,7 +437,7 @@ impl Service {
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
-            self.expire(&id, now);
+            self.expire(&id, now, "worker_finished");
         }
         for w in self.workers.iter_mut().filter(|w| w.key() == key) {
             w.live = false;
@@ -824,86 +824,70 @@ impl Service {
             let _ = self.record(&a, State::Refused, json!({"reason": "expired"}), now);
             self.pending.remove(&a.id);
         }
-        let Some(s) = &self.session else { return };
-        let (sid, dir) = (s.id.clone(), s.dir.clone());
-        let ids: Vec<String> = self
-            .pending
-            .values()
-            .filter(|a| a.session_id == sid && a.state == State::Queued)
-            .map(|a| a.id.clone())
-            .collect();
+        // Every unsettled message, in the session dir it was published to: a claimed message outlives its session.
+        let ids: Vec<String> = self.pending.values().filter(|a| a.state == State::Queued).map(|a| a.id.clone()).collect();
         for id in ids {
-            let _ = self.check(&id, &dir, now);
+            let Some(sid) = self.pending.get(&id).map(|a| a.session_id.clone()) else { continue };
+            let _ = self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now);
         }
     }
 
+    /// Settle one queued action from file evidence alone. The hook moves queue/ -> inflight/, writes the ack, then
+    /// removes inflight/, so reading in the order queue, inflight, ack makes "all absent" proof that the file was never
+    /// published (a hook that ran in between would have left an ack). Queue wins over everything: an honest hook cannot
+    /// ack before it claims. A stop has no queue file; only its ack settles it.
     fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
-        // Oversized or non-object acks are never trusted: unknown, not delivered.
-        let ack_read = fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES);
-        let too_big = ack_read.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::InvalidData);
-        if too_big || ack_read.as_ref().is_ok_and(|b| !serde_json::from_slice::<Value>(b).is_ok_and(|v| v.is_object())) {
-            self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
-            self.pending.remove(id);
+        let stop = a.kind == Kind::Stop;
+        if !stop && dir.queued(id).is_some() {
+            if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
+                self.expire(id, now, "expired");
+            }
             return Ok(());
         }
-        if let Ok(b) = ack_read {
-            let ack: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+        let claimed = dir.inflight(id).is_some();
+        let (delivered, invalid) = match fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES) {
+            Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
+                _ => (None, true),
+            },
+            Err(e) => (None, e.kind() != std::io::ErrorKind::NotFound),
+        };
+        if let Some(ack) = delivered {
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
             self.record(&a, State::Delivered, json!({"audit_ref": audit_ref}), now)?;
-            self.pending.remove(id);
+        } else if invalid {
+            self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
+        } else if stop {
             return Ok(());
-        }
-        if a.kind == Kind::Stop {
-            return Ok(());
-        }
-        if dir.queued(id).is_some() {
-            if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
-                self.expire(id, now);
-            }
-            return Ok(());
-        }
-        if dir.inflight(id).is_some() {
+        } else if claimed {
             let Some(p) = self.pending.get_mut(id) else { return Ok(()) };
             let seen = *p.inflight_seen.get_or_insert(now);
-            if now.duration_since(seen).unwrap_or_default() >= INFLIGHT_UNKNOWN {
-                self.record(&a, State::DeliveryUnknown, json!({}), now)?;
-                self.pending.remove(id);
+            if now.duration_since(seen).unwrap_or_default() < INFLIGHT_UNKNOWN {
+                return Ok(());
             }
-            return Ok(());
+            self.record(&a, State::DeliveryUnknown, json!({"reason": "claim_stale"}), now)?;
+        } else {
+            // Nothing queued, claimed or acked: it was expired (rename done, record lost) or never published.
+            let why = if dir.expired(id).is_some() { "expired" } else { "not_published" };
+            self.record(&a, State::NotDelivered, json!({"reason": why}), now)?;
         }
-        // Queued in the ledger but no file, claim or ack: the app died between record and publish. Settle it.
-        self.settle_lost(id, dir, now)
-    }
-
-    /// Last step of `check`: nothing queued or claimed. The hook acks before it drops its claim, so look at the ack
-    /// again here and leave a delivered message to the next tick.
-    fn settle_lost(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
-        let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
-        if dir.ack_path(id).exists() || dir.queued(id).is_some() || dir.inflight(id).is_some() {
-            return Ok(());
-        }
-        if now.duration_since(a.created).unwrap_or_default() >= INFLIGHT_UNKNOWN {
-            self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now)?;
-            self.pending.remove(id);
-        }
+        self.pending.remove(id);
         Ok(())
     }
 
-    /// Move a still-queued message to expired/ and record not_delivered. If
-    /// the hook already claimed it, leave it for the ack watcher.
-    fn expire(&mut self, id: &str, now: SystemTime) {
+    /// Move a still-queued message to expired/ and record not_delivered. The rename is the referee against the hook:
+    /// if it fails the hook claimed the file, and `check` settles it from the ack. A lost record is re-derived by
+    /// `check` from expired/.
+    fn expire(&mut self, id: &str, now: SystemTime, reason: &str) {
         let Some(a) = self.pending.get(id).cloned() else { return };
         let dir = SessionDir { root: self.control_root.join(&a.session_id) };
-        if let Some(q) = dir.queued(id) {
-            let dst = dir.dir("expired").join(q.file_name().unwrap_or_default());
-            if fs::rename(&q, &dst).is_err() {
-                return; // claimed by the hook in the meantime
-            }
-        } else if dir.inflight(id).is_some() || dir.ack_path(id).exists() {
+        let Some(q) = dir.queued(id) else { return };
+        let dst = dir.dir("expired").join(q.file_name().unwrap_or_default());
+        if fs::rename(&q, &dst).is_err() {
             return;
         }
-        if self.record(&a, State::NotDelivered, json!({}), now).is_ok() {
+        if self.record(&a, State::NotDelivered, json!({"reason": reason}), now).is_ok() {
             self.pending.remove(id);
         }
     }
