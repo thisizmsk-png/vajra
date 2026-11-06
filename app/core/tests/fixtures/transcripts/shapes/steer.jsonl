@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u1","sessionId":"s1","message":{"role":"user","content":"Steering nonce for this session: N0nce-Fixture-0123456789"}}
+{"type":"assistant","uuid":"u2","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"I echo N0nce-Fixture-0123456789 and N0nce-Fixture-\u001b[31m0123456789 split by SGR \u001b]8;;http://x\u0007link\u001b]8;;\u0007 and N0nce-Fixture-​0123456789"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"echo N0nce-Fixture-0123456789"}}]}}
+{"type":"user","uuid":"u3","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"N0nce-Fixture-0123456789\n"}]}}
+{"type":"attachment","uuid":"u4","sessionId":"s1","attachment":{"type":"hook_additional_context","content":["<vajra-steer nonce=\"N0nce-Fixture-0123456789\" source=\"human\">hi</vajra-steer>"]}}
+{"type":"file-history-snapshot","uuid":"u5","sessionId":"s1","snapshot":{}}

@@ -1,0 +1,9 @@
+{
+  "schema": "vajra.campaign/v1",
+  "slug": "deliver-empty-worktree",
+  "goal": "Fixture goal for deliver-empty-worktree",
+  "status": "active",
+  "created": "2026-11-01T09:00:00Z",
+  "updated": "2026-11-01T09:30:00Z",
+  "featuresDefSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}
