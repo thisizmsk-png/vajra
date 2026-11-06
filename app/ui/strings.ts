@@ -19,6 +19,14 @@ export const S = {
     unknown: "Not run",
     needs_approval: "Needs approval",
   },
+  nav: { home: "Home", run: "Run", crew: "Crew", chat: "Chat", inbox: "Inbox", history: "History", settings: "Settings" },
+  shell: {
+    navLabel: "Main",
+    notBuilt: "This screen is not built yet.",
+    errorTitle: "This screen hit a problem",
+    errorBody: "The rest of the app is fine. You can try again or go to another screen.",
+    retry: "Try again",
+  },
 } as const;
 
 export type StatusKey = keyof typeof S.status;

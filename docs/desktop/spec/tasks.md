@@ -81,6 +81,8 @@ K2 and K3 run in parallel (disjoint folders, so `vajra_tasks.py waves` puts them
 
 ### M4 Screens
 
+> **Owner ruling, 2026-11-06:** M4 ships without S7 (Memory). S7 is deferred until C9 (the Memory service) lands, in slice 2. The M4 nav has no Memory entry. M4.0 adds the shell, typed IPC and router; per-merge perf CI (`.github/workflows/perf.yml`) records idle RSS and a growth slope for every merge to main.
+
 | Id | Task | Owner | Files | Deps | Acceptance |
 |---|---|---|---|---|---|
 | S1 | Home: start run, resume, preflight | nakula [Frontend] | `app/ui/screens/home/*` | C3, C3b, C4, K2, C7, C8 | US-1.1 to US-1.3 |

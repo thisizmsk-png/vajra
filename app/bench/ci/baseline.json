@@ -1,0 +1,1 @@
+{"idle_mib": null, "note": "Recorded from the first green perf run on main. Until then the gate only enforces the absolute budgets (idle <= 200 MiB, slope <= 1 MiB/min)."}
