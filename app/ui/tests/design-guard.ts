@@ -5,12 +5,18 @@ import { join, relative } from "node:path";
 export type Violation = { file: string; line: number; rule: string; text: string };
 
 const NAMED = "red|green|blue|white|black|gray|grey|orange|yellow|purple|pink|teal|cyan|magenta|navy|maroon|olive|lime|aqua|silver|gold|brown|crimson|coral|salmon|indigo|violet";
+// A named colour as a whole word, not part of a token such as `--c-red` or `border-gray`.
+const NAMED_WORD = `(?<![-\\w])(?:${NAMED})(?![-\\w])`;
 const RULES: Array<[string, RegExp]> = [
   ["raw hex color", /#[0-9a-fA-F]{3,8}\b(?![\w-])/],
-  ["rgb()/hsl() value", /\b(?:rgba?|hsla?)\(/],
+  // Every css colour function; `color-mix` is allowed on purpose, but only between tokens (see "color-mix literal").
+  ["rgb()/hsl() value", /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(|\bcolor\(\s*(?:srgb(?:-linear)?|display-p3|a98-rgb|prophoto-rgb|rec2020|xyz(?:-d50|-d65)?)\b/i],
+  ["color-mix literal", new RegExp(`color-mix\\([^;{}\\n]*${NAMED_WORD}`, "i")],
   ["letter-spacing", /letter-spacing|\btracking-[a-z0-9\[]/],
   // kebab-case in css, camelCase (`backgroundColor: "red"`) in a style object, with or without quotes around the value.
   ["named css color", new RegExp(`\\b(?:color|background(?:-color)?|border(?:-[a-z]+)?-color|fill|stroke|[a-z]+Color)\\s*:\\s*["']?(?:${NAMED})\\b`, "i")],
+  // Shorthands that carry a colour among other values (`border: 1px solid red`), in css and in a style object.
+  ["named colour in shorthand", new RegExp(`\\b(?:border(?:-[a-z]+)?|outline|box-shadow|boxShadow|text-decoration|textDecoration|column-rule|border[A-Z]\\w*|outline[A-Z]\\w*)\\s*:[^;{}\\n]*${NAMED_WORD}`, "i")],
   ["gradient", /gradient\(/],
   ["banned webfont", /\b(?:Inter|Geist|Space Grotesk)\b/],
   ["ALL-CAPS transform", /text-transform\s*:\s*uppercase|\buppercase\b/],
