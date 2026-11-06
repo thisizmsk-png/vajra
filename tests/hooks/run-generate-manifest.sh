@@ -12,10 +12,13 @@ mkdir -p "$VS" "$SKILL/scripts" "$WT/scripts"
 for d in "$SKILL" "$WT"; do cp "$REPO/scripts/generate-manifest.sh" "$d/scripts/"; echo x > "$d/a.txt"; done
 P=0; F=0; check() { if [ "$2" -eq 0 ]; then P=$((P+1)); else F=$((F+1)); echo "FAIL :: $1"; fi; }
 
+mkdir -p "$WT/app/ui/src"; echo x > "$WT/app/ui/package.json"; echo x > "$WT/app/ui/src/App.tsx"
 touch "$VS/.integrity-violation"
 out="$(bash "$WT/scripts/generate-manifest.sh" < /dev/null 2>&1)"; rc=$?
 check "worktree copy exits 0" "$rc"
 [ -f "$WT/manifest.json" ]; check "worktree copy still writes its manifest.json" $?
+jq -e '.files["a.txt"]' "$WT/manifest.json" >/dev/null; check "manifest lists the skill's own files" $?
+[ -z "$(jq -r '.files | keys[] | select(startswith("app/"))' "$WT/manifest.json")" ]; check "manifest does not list app/ (the desktop product is not part of the skill)" $?
 [ ! -e "$VS/manifest.sig" ]; check "worktree copy does not sign the real signature" $?
 [ -e "$VS/.integrity-violation" ]; check "worktree copy does not clear the tamper flag" $?
 printf '%s' "$out" | grep -q "not signed"; check "worktree copy says it did not sign" $?
