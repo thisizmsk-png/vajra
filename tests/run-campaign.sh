@@ -10,7 +10,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$REPO/scripts/vajra-campaign.sh"
 BASH_BIN="${BASH:-bash}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vajra-campaign-XXXXXX")"
-trap 'pkill -f "sleep 7919" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap '[ -s "$WORK/hang.pid" ] && kill "$(cat "$WORK/hang.pid")" 2>/dev/null; rm -rf "$WORK"' EXIT
 export HOME="$WORK"
 C() { "$BASH_BIN" "$SCRIPT" "$@"; }
 CD="$HOME/.claude/vajra/campaigns"
@@ -264,11 +264,10 @@ bounded_cmd() {
 }
 bounded() { bounded_cmd 5 "$BASH_BIN" "$SCRIPT" "$@"; }
 
-# a hung case is reaped: the stub and the child it spawned are both gone after bounded_cmd returns 1
-STUB="$WORK/hang.sh"; printf '#!/bin/bash\nsleep 7919 &\nwait\n' > "$STUB"
+# a hung case is reaped: the stub and the child it spawned (its pid is recorded, never found by pattern) are gone
+STUB="$WORK/hang.sh"; printf '#!/bin/bash\nsleep 300 &\necho $! > "%s/hang.pid"\nwait\n' "$WORK" > "$STUB"
 bounded_cmd 1 "$BASH_BIN" "$STUB"; [ $? -eq 1 ]; check "bounded_cmd reports a timeout" $?
-sleep 0.3; ! pgrep -f "sleep 7919" >/dev/null; check "bounded_cmd reaps a hung case and its children" $?
-pkill -f "sleep 7919" 2>/dev/null
+sleep 0.3; [ -s "$WORK/hang.pid" ] && ! kill -0 "$(cat "$WORK/hang.pid")" 2>/dev/null; check "bounded_cmd reaps a hung case and its children" $?
 bounded_cmd 1 "$BASH_BIN" -c 'exit 3'; check "bounded_cmd returns 0 for a fast non-zero exit" $?
 ! bounded_cmd 1 "$BASH_BIN" -c 'exit 0'; check "bounded_cmd returns non-zero for a fast success" $?
 for args in "report --campaign" "report --bytes" "report --check" "close --status" "resume --from-checkpoint" "create nogoal-1 --goal" "fail --campaign"; do
