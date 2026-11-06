@@ -935,6 +935,9 @@ def desktop_state():
     contains the newest desktop event the anchor names (truncated or replaced)."""
     events, _st = Store("global").read_events()
     anchor = read_json(_anchor_path())
+    # No anchor is fine only before any desktop event was ever recorded; otherwise deleting it would disable the check.
+    if anchor is None and any(str(e.get("op", "")).startswith("desktop_") for e in events):
+        raise Refused("the desktop key ledger anchor is missing or unreadable; run vajra_kb.py doctor")
     if anchor is not None:
         key = load_key()
         try:

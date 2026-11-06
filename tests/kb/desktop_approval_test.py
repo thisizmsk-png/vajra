@@ -416,6 +416,18 @@ rcz = run(["approve", rid_z, "--desktop-approval", fz], PROJ)[0]
 check("a truncated key ledger is refused, the revoked key is not revived",
       rcz != 0 and show(rid_z).get("status") == "pending")
 open(gev, "w").write("".join(lines))
+anc = kb._anchor_path()
+anc_txt = open(anc).read()
+os.remove(anc)
+open(gev, "w").write("".join(lines[:-1]))   # truncate again AND delete the anchor
+rid_y, store_y, sha_y = propose("Anchor deletion target")
+fy, _ = approval(KEY3, "approve", store_y, rid_y, sha_y, applies="on_topic")
+check("deleting the anchor does not disable the truncation check",
+      run(["approve", rid_y, "--desktop-approval", fy], PROJ)[0] != 0 and show(rid_y).get("status") == "pending")
+open(gev, "w").write("".join(lines))
+open(anc, "w").write("{not json")
+check("a malformed anchor fails closed", run(["approve", rid_y, "--desktop-approval", fy], PROJ)[0] != 0)
+open(anc, "w").write(anc_txt)
 check("restoring the ledger restores a working state", run(["desktop-enroll", K.pub], PROJ, HUMAN)[0] == 0)
 
 # ---------------------------------------------------------------- audit: two logs, no text
