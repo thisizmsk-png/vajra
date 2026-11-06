@@ -305,3 +305,59 @@ fn sessions_redact_the_steer_nonce_from_pty_lines() {
     assert!(all.contains("steer_nonce: [redacted] ok"), "{all}");
     assert!(all.contains(&format!("commit {sha}")), "unrelated hex stays: {all}");
 }
+
+#[test]
+fn sessions_redact_a_nonce_split_by_an_sgr_sequence() {
+    // Review P2: `ansi::sanitize` keeps SGR, and the terminal draws the whole nonce even though the bytes between its
+    // halves are an escape. The literal replace used to miss it.
+    let n = "0123456789abcdef0123456789abcdef";
+    let sha = "b".repeat(40);
+    let (sup, bus, dir) = setup("redact-sgr");
+    let script = format!(
+        "printf 'steer {}\\033[31m{} ok\\n{}\\033[1m{}\\n\\033[32mgreen text\\033[0m\\ncommit {sha}\\n'",
+        &n[..16], &n[16..], &n[..20], &n[20..]
+    );
+    let mut sp = spec(&["/bin/sh", "-c", &script], &dir);
+    sp.redact = Redactor::new(Some(n));
+    sup.spawn("s-redact-sgr", sp).unwrap();
+    sup.wait("s-redact-sgr", WAIT).unwrap();
+    let l = wait_lines(&bus, "s-redact-sgr", |l| l.iter().any(|x| x.starts_with("commit")));
+    let all = l.join("\n");
+    // Strip the escapes to ask what a terminal would show: no nonce, and no run of its characters.
+    let shown = crate::sessions::ansi::sanitize(&all);
+    let visible: String = {
+        let mut o = String::new();
+        let mut it = shown.chars();
+        while let Some(c) = it.next() {
+            if c == '\u{1b}' {
+                for d in it.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&d) && d != '[' {
+                        break;
+                    }
+                }
+            } else {
+                o.push(c);
+            }
+        }
+        o
+    };
+    assert!(!visible.contains(n) && !visible.contains(&n[..16]) && !visible.contains(&n[16..]), "{visible}");
+    assert!(visible.contains("steer [redacted] ok"), "{visible}");
+    assert!(all.contains("\u{1b}[32mgreen text"), "colours of unrelated text are kept: {all:?}");
+    assert!(visible.contains(&format!("commit {sha}")), "unrelated hex stays: {visible}");
+}
+
+#[test]
+fn redact_handles_escapes_and_invisible_characters_inside_a_nonce() {
+    let n = "0123456789abcdef0123456789abcdef";
+    let r = Redactor::new(Some(n));
+    let with = |mid: &str| format!("a {}{}{} b", &n[..10], mid, &n[10..]);
+    for mid in ["\u{1b}[31m", "\u{1b}[0m\u{1b}[1;32m", "\u{200b}", "\u{202e}", "\u{1b}[31m\u{200b}\u{1b}[0m"] {
+        let out = r.redact(with(mid));
+        let flat: String = out.chars().filter(|c| c.is_ascii_hexdigit() || c.is_alphabetic()).collect();
+        assert!(!flat.contains(&n[..10]) && !flat.contains(&n[10..]), "{mid:?} -> {out:?}");
+        assert!(out.contains("[redacted]") && out.starts_with("a ") && out.ends_with(" b"), "{mid:?} -> {out:?}");
+    }
+    // No nonce: nothing changes, escapes included.
+    assert_eq!(r.redact("x \u{1b}[31mred\u{1b}[0m y".to_string()), "x \u{1b}[31mred\u{1b}[0m y");
+}

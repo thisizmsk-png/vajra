@@ -88,7 +88,7 @@ fn one_active_run_at_a_time() {
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    assert_eq!(code(&app.resume_run(other, "20261105-1231", "c2", &cwd).unwrap_err()), "run_active");
+    assert_eq!(code(&app.resume_run(other, "c2", &cwd).unwrap_err()), "run_active");
     // A past run's crew view never retargets the control service.
     let before = lock(&app.control).nonce().map(str::to_string);
     let _ = app.crew("c-old", "20261101-0000");
@@ -155,11 +155,9 @@ fn resume_run_validates_ids() {
     let t = Tmp::new();
     let app = t.app();
     let cwd = t.0.to_string_lossy().into_owned();
-    let e = app.resume_run("bad id;rm", "20261105-1810", "deliver-x", &cwd).unwrap_err();
+    let e = app.resume_run("bad id;rm", "deliver-x", &cwd).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
-    let e = app.resume_run("abc-12345678", "2026", "deliver-x", &cwd).unwrap_err();
-    assert_eq!(code(&e), "invalid_args");
-    let e = app.resume_run("abc-12345678", "20261105-1810", "../x", &cwd).unwrap_err();
+    let e = app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "../x", &cwd).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
 }
 
@@ -517,4 +515,133 @@ fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
     assert_eq!(t2, now + 60);
     lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
     assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
+}
+
+#[test]
+fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+    for f in ["agent-aa870dd40540481f0.jsonl", "agent-aa870dd40540481f0.meta.json"] {
+        fs::copy(fx.join(f), sub.join(f)).unwrap();
+    }
+    let stream = format!("run-{sid}");
+    app.sup
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    // 40 KiB of older output, then a unique final line: the oldest 16 KiB must not be what the Lead sees.
+    for i in 0..400 {
+        app.bus.push("w-aa870dd40540481f0", &format!("older line {i:04} {}", "x".repeat(90))).unwrap();
+    }
+    app.bus.push("w-aa870dd40540481f0", "FINAL-UNIQUE-QUESTION: which branch?").unwrap();
+    app.crew("c", "20261105-1230").unwrap();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).unwrap();
+    let lines: Vec<&str> = i["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+    assert!(lines.iter().any(|l| l.contains("FINAL-UNIQUE-QUESTION")), "the newest line is returned: {lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("older line 0000")), "and not the oldest retained output");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn two_resumes_of_one_campaign_get_distinct_run_ids() {
+    // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
+    let t = Tmp::new();
+    let app = t.app();
+    let a = app.fresh_run_id(1_794_000_000).1;
+    // The first resume's run entry is replaced by the second; the issued set still remembers it.
+    lock(&app.runs).clear();
+    let b = app.fresh_run_id(1_794_000_000).1;
+    assert_ne!(a, b);
+    assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
+}
+
+#[test]
+fn a_reap_in_progress_blocks_a_launch_until_it_finishes() {
+    // Review P1: the launching guard used to drop before `reap_locked`, so a launch could install its session while an
+    // earlier reap was still about to end "the old one". Hold the control lock so the reap stalls inside `reap_locked`,
+    // and check the launch guard is still taken.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let cwd = t.0.to_string_lossy().into_owned();
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    let held = lock(&app.control);
+    std::thread::scope(|sc| {
+        let reaper = sc.spawn(|| app.reap_runs());
+        let mut blocked = false;
+        for _ in 0..200 {
+            if matches!(app.launching.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                blocked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(blocked, "the reap released the launch guard before it finished");
+        drop(held);
+        reaper.join().unwrap();
+    });
+    assert!(app.launching.try_lock().is_ok(), "the guard is released once the reap is done");
+}
+
+#[test]
+fn the_core_refreshes_workers_and_transcripts_without_a_crew_view() {
+    // Review P2: discovery and tailing used to run only when the UI asked for the crew tree, so a run nobody was
+    // looking at had no steerable workers and stale inspect output.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let (path, first) = seed_worker(&t, &cwd, sid);
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_err(), "unknown before any refresh");
+    app.refresh_workers();
+    assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_ok(), "discovered without crew()");
+    // New transcript output shows up on the next refresh, still without crew().
+    let echo = first.replace("Run these Bash commands", "FRESH-MARKER then run these Bash commands");
+    let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut f, format!("{echo}\n").as_bytes()).unwrap();
+    app.refresh_workers();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).unwrap();
+    assert!(i.to_string().contains("FRESH-MARKER"), "{i}");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
+    // Review P2: every discovered worker used to publish task_id/round = None, so `t1` never resolved.
+    assert_eq!(task_meta("20261105-1810", "task.t1.r2"), (Some("20261105-1810.t1".into()), Some(2)));
+    assert_eq!(task_meta("20261105-1810", "verify.r1"), (None, None));
+    assert_eq!(task_meta("20261105-1810", "kb.search"), (None, None));
+    assert_eq!(task_meta("20261105-1810", "task."), (None, None));
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(sub.join("workflows/wf_1")).unwrap();
+    fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
+    fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r2\",\"phase\":\"Execute\"}\n").unwrap();
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1810").unwrap();
+    app.refresh_workers();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "t1", 10).unwrap();
+    assert_eq!(i["task_id"], "20261105-1810.t1", "{i}");
+    assert_eq!(i["round"], 2, "{i}");
+    app.sup.kill(&stream).unwrap();
 }

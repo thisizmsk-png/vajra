@@ -68,6 +68,11 @@ impl SessionDir {
         find(&self.dir("inflight"), |n| n.starts_with(&format!("{action_id}.")))
     }
 
+    /// The expired copy of `action_id`'s queue file, if the app moved it there.
+    pub fn expired(&self, action_id: &str) -> Option<PathBuf> {
+        find(&self.dir("expired"), |n| n.ends_with(&format!("-{action_id}.json")))
+    }
+
     /// The highest `<seq>` prefix in queue/ and expired/.
     pub fn max_seq(&self) -> u64 {
         ["queue", "expired"]

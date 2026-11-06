@@ -60,6 +60,26 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Like `read_nofollow`, but a file longer than `cap` bytes is an `InvalidData` error and at most `cap + 1` bytes are
+/// ever read. For files a worker (same user) can write into the control directory.
+pub fn read_nofollow_capped(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.len() > cap {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+    }
+    let mut buf = Vec::new();
+    f.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+    }
+    Ok(buf)
+}
+
 /// Write `bytes` to `dir/name` atomically: a 0600 temp file created with
 /// O_EXCL | O_NOFOLLOW, then rename. Readers (the hook) see all or nothing.
 /// The temp name starts with a dot so the hook's `*.json` glob skips it.

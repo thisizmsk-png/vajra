@@ -35,6 +35,8 @@ use crate::logging::Logger;
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
+/// Cap for files a worker can write in the control dir (acks, stops).
+pub const MAX_ACK_BYTES: u64 = 16 * 1024;
 pub const INFLIGHT_UNKNOWN: Duration = Duration::from_secs(60);
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_REASON: usize = 500;
@@ -394,7 +396,7 @@ impl Service {
         let ids: Vec<String> =
             self.pending.values().filter(|a| a.kind.queued_text()).map(|a| a.id.clone()).collect();
         for id in ids {
-            self.expire(&id, now);
+            self.expire(&id, now, "session_ended");
         }
         let asks: Vec<Action> =
             self.pending.values().filter(|a| a.state == State::AwaitingHumanConfirm).cloned().collect();
@@ -414,8 +416,14 @@ impl Service {
         Redactor::new(self.nonce())
     }
 
+    /// Discovery's view of the run's workers. A worker that is no longer live has its queued messages expired here,
+    /// the one production path that learns of completion (AC-3.2.5); it is idempotent, so every refresh may repeat it.
     pub fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
+        let finished: Vec<String> = workers.iter().filter(|w| !w.live).map(|w| w.key().to_string()).collect();
         self.workers = workers;
+        for k in finished {
+            self.worker_finished(&k);
+        }
     }
 
     /// The worker's transcript ended: its queued messages expire now so they
@@ -429,7 +437,7 @@ impl Service {
             .map(|a| a.id.clone())
             .collect();
         for id in ids {
-            self.expire(&id, now);
+            self.expire(&id, now, "worker_finished");
         }
         for w in self.workers.iter_mut().filter(|w| w.key() == key) {
             w.live = false;
@@ -650,13 +658,15 @@ impl Service {
         let dir = self.session()?.dir.dir("queue");
         self.seq += 1;
         let name = format!("{:06}-{}.json", self.seq, a.id);
-        let queued = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes())?;
         a.state = State::Queued;
         let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
-        // The hook delivers whatever is in the queue, so an entry the ledger does not know must not stay.
-        if let Err(e) = self.record(&a, State::Queued, extra, now) {
-            let _ = std::fs::remove_file(&queued);
-            return Err(e);
+        // Record first, publish second: the hook delivers whatever is in the queue the moment it appears, and a
+        // delivery cannot be taken back, so the ledger must already know the action. If it cannot record, nothing is
+        // published; if publishing then fails, that is recorded too.
+        self.record(&a, State::Queued, extra, now)?;
+        if let Err(e) = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
         }
         self.pending.insert(a.id.clone(), a.clone());
         self.log("control_queued", &[("seq", self.seq)]);
@@ -715,19 +725,20 @@ impl Service {
         // A stop already in force stays as it is: rewriting it would let a failed ledger write roll the file back
         // away, lifting the stop with no resume record. The human sees the existing action.
         if fs::symlink_metadata(&path).is_ok() {
-            let existing = fsx::read_nofollow(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let existing = fsx::read_nofollow_capped(&path, MAX_ACK_BYTES).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
             let id = existing.as_ref().map_or("", |v| str_field(v, "action_id")).to_string();
             return Ok(json!({"action_id": id, "state": State::Queued.as_str(), "already_stopped": true}));
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        let written = fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
+        let stops = s.dir.dir("stops");
         // A confirmed stop is the human's action from here on.
         a.actor = Actor::Human;
         a.state = State::Queued;
-        // Same rule as a message: a stop the ledger cannot record is not enforced.
-        if let Err(e) = self.record(&a, State::Queued, json!({}), now) {
-            let _ = std::fs::remove_file(&written);
-            return Err(e);
+        // Same rule as a message: record first, then make the stop visible to the hook (which enforces it at once).
+        self.record(&a, State::Queued, json!({}), now)?;
+        if let Err(e) = fsx::write_atomic(&stops, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::Refused, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
         }
         self.pending.insert(a.id.clone(), a.clone());
         Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
@@ -775,7 +786,7 @@ impl Service {
         }
         let w = self.resolve(worker)?.clone();
         let path = self.session()?.dir.stop_path(w.key());
-        let stop: Value = match fsx::read_nofollow(&path) {
+        let stop: Value = match fsx::read_nofollow_capped(&path, MAX_ACK_BYTES) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or(Value::Null),
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ControlError::NotStopped),
             Err(e) => return Err(e.into()),
@@ -813,62 +824,70 @@ impl Service {
             let _ = self.record(&a, State::Refused, json!({"reason": "expired"}), now);
             self.pending.remove(&a.id);
         }
-        let Some(s) = &self.session else { return };
-        let (sid, dir) = (s.id.clone(), s.dir.clone());
-        let ids: Vec<String> = self
-            .pending
-            .values()
-            .filter(|a| a.session_id == sid && a.state == State::Queued)
-            .map(|a| a.id.clone())
-            .collect();
+        // Every unsettled message, in the session dir it was published to: a claimed message outlives its session.
+        let ids: Vec<String> = self.pending.values().filter(|a| a.state == State::Queued).map(|a| a.id.clone()).collect();
         for id in ids {
-            let _ = self.check(&id, &dir, now);
+            let Some(sid) = self.pending.get(&id).map(|a| a.session_id.clone()) else { continue };
+            let _ = self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now);
         }
     }
 
+    /// Settle one queued action from file evidence alone. The hook moves queue/ -> inflight/, writes the ack, then
+    /// removes inflight/, so reading in the order queue, inflight, ack makes "all absent" proof that the file was never
+    /// published (a hook that ran in between would have left an ack). Queue wins over everything: an honest hook cannot
+    /// ack before it claims. A stop has no queue file; only its ack settles it.
     fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
-        if let Ok(b) = fsx::read_nofollow(&dir.ack_path(id)) {
-            let ack: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+        let stop = a.kind == Kind::Stop;
+        if !stop && dir.queued(id).is_some() {
+            if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
+                self.expire(id, now, "expired");
+            }
+            return Ok(());
+        }
+        let claimed = dir.inflight(id).is_some();
+        let (delivered, invalid) = match fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES) {
+            Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
+                _ => (None, true),
+            },
+            Err(e) => (None, e.kind() != std::io::ErrorKind::NotFound),
+        };
+        if let Some(ack) = delivered {
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
             self.record(&a, State::Delivered, json!({"audit_ref": audit_ref}), now)?;
-            self.pending.remove(id);
+        } else if invalid {
+            self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
+        } else if stop {
             return Ok(());
-        }
-        if a.kind == Kind::Stop {
-            return Ok(());
-        }
-        if dir.queued(id).is_some() {
-            if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
-                self.expire(id, now);
-            }
-            return Ok(());
-        }
-        if dir.inflight(id).is_some() {
+        } else if claimed {
             let Some(p) = self.pending.get_mut(id) else { return Ok(()) };
             let seen = *p.inflight_seen.get_or_insert(now);
-            if now.duration_since(seen).unwrap_or_default() >= INFLIGHT_UNKNOWN {
-                self.record(&a, State::DeliveryUnknown, json!({}), now)?;
-                self.pending.remove(id);
+            if now.duration_since(seen).unwrap_or_default() < INFLIGHT_UNKNOWN {
+                return Ok(());
             }
+            self.record(&a, State::DeliveryUnknown, json!({"reason": "claim_stale"}), now)?;
+        } else {
+            // Nothing queued, claimed or acked: it was expired (rename done, record lost) or never published.
+            let why = if dir.expired(id).is_some() { "expired" } else { "not_published" };
+            self.record(&a, State::NotDelivered, json!({"reason": why}), now)?;
         }
+        self.pending.remove(id);
         Ok(())
     }
 
-    /// Move a still-queued message to expired/ and record not_delivered. If
-    /// the hook already claimed it, leave it for the ack watcher.
-    fn expire(&mut self, id: &str, now: SystemTime) {
+    /// Move a still-queued message to expired/ and record not_delivered. The rename is the referee against the hook:
+    /// if it fails the hook claimed the file, and `check` settles it from the ack. A lost record is re-derived by
+    /// `check` from expired/.
+    fn expire(&mut self, id: &str, now: SystemTime, reason: &str) {
         let Some(a) = self.pending.get(id).cloned() else { return };
         let dir = SessionDir { root: self.control_root.join(&a.session_id) };
-        if let Some(q) = dir.queued(id) {
-            let dst = dir.dir("expired").join(q.file_name().unwrap_or_default());
-            if fs::rename(&q, &dst).is_err() {
-                return; // claimed by the hook in the meantime
-            }
-        } else if dir.inflight(id).is_some() || dir.ack_path(id).exists() {
+        let Some(q) = dir.queued(id) else { return };
+        let dst = dir.dir("expired").join(q.file_name().unwrap_or_default());
+        if fs::rename(&q, &dst).is_err() {
             return;
         }
-        if self.record(&a, State::NotDelivered, json!({}), now).is_ok() {
+        if self.record(&a, State::NotDelivered, json!({"reason": reason}), now).is_ok() {
             self.pending.remove(id);
         }
     }

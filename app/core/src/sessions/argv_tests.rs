@@ -184,21 +184,21 @@ fn build_run_argv_public_fn_uses_fresh_uuid_and_now() {
 }
 
 #[test]
-fn resume_argv_carries_the_rotated_nonce() {
-    let a = build_resume_argv(SID, "deliver-20261105-1230", NONCE).unwrap();
+fn resume_argv_carries_the_rotated_nonce_and_the_runs_own_id() {
+    let a = build_resume_argv(SID, "20261105-1230", "deliver-20261105-1230", NONCE).unwrap();
     assert_eq!(
         a,
         [
             "claude",
             "--resume",
             SID,
-            "/vajra-deliver {\"campaign\":\"deliver-20261105-1230\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\
+            "/vajra-deliver {\"campaign\":\"deliver-20261105-1230\",\"run_id\":\"20261105-1230\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\
              \"steer_nonce\":\"0123456789abcdef0123456789abcdef\"}"
         ]
     );
-    assert_eq!(build_resume_argv(SID, "../x", NONCE).unwrap_err().field, "campaign");
-    assert_eq!(build_resume_argv(SID, "deliver-1", "short").unwrap_err().field, "steer_nonce");
-    assert_eq!(build_resume_argv("--last", "deliver-1", NONCE).unwrap_err().field, "session_id");
+    assert_eq!(build_resume_argv(SID, "20261105-1230", "../x", NONCE).unwrap_err().field, "campaign");
+    assert_eq!(build_resume_argv(SID, "20261105-1230", "deliver-1", "short").unwrap_err().field, "steer_nonce");
+    assert_eq!(build_resume_argv("--last", "20261105-1230", "deliver-1", NONCE).unwrap_err().field, "session_id");
 }
 
 #[test]
@@ -209,4 +209,19 @@ fn contract_matches_vajra_deliver_js() {
     // campaign: any value is a resume; a fresh run is named deliver-<run_id> by the workflow.
     assert!(js.contains("const RESUME = given(A.campaign)"));
     assert!(js.contains("const CAMPAIGN = RESUME || `deliver-${RUN}`"));
+}
+
+#[test]
+fn resume_without_a_valid_run_id_is_refused_and_the_json_names_the_workflows_run() {
+    for bad in ["", "d123abc", "2026-11-05", "20261105-12300", "../x"] {
+        assert_eq!(build_resume_argv(SID, bad, "deliver-1", NONCE).unwrap_err().field, "run_id", "{bad:?}");
+    }
+    // vajra-deliver.js: `RUN = given(A.run_id) ? A.run_id : 'd' + fnv(...)`. A resume that omitted run_id would make
+    // the workflow name tasks and branches after a hash of the campaign instead of the run the app tracks.
+    let js = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../workflows/vajra-deliver.js")).unwrap();
+    assert!(js.contains("const RUN = given(A.run_id) ? A.run_id : 'd' + fnv(ASK || RESUME)"));
+    let a = build_resume_argv(SID, "20261105-1230", "deliver-20261105-1230", NONCE).unwrap();
+    let json: serde_json::Value = serde_json::from_str(a[3].strip_prefix("/vajra-deliver ").unwrap()).unwrap();
+    assert_eq!(json["run_id"], "20261105-1230", "given(A.run_id) is true, so RUN is the app's run id");
+    assert_eq!(json["campaign"], "deliver-20261105-1230");
 }

@@ -57,8 +57,8 @@ fn start_run(
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, run_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &run_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd)
 }
 
 #[tauri::command(async)]
@@ -195,6 +195,7 @@ fn main() {
                     if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
                         let _ = handle.emit(CHANGED, payload);
                     }
+                    handle.state::<App>().refresh_workers();
                     // ADR-9 item 7: no App Nap while a run is active.
                     #[cfg(target_os = "macos")]
                     {

@@ -68,7 +68,7 @@ pub trait AgentAdapter: Send + Sync {
     fn run_argv(&self, input: &RunInput, steer_nonce: &str) -> Result<Vec<String>, InvalidInput>;
     /// `session_id` is the session being resumed; for an engine with a steer
     /// channel the rotated `steer_nonce` goes into the resumed prompt.
-    fn resume_argv(&self, session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput>;
+    fn resume_argv(&self, session_id: &str, run_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput>;
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing;
 }
 
@@ -110,8 +110,8 @@ impl AgentAdapter for Claude {
     fn run_argv(&self, input: &RunInput, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
         argv::build_run_argv(input, steer_nonce)
     }
-    fn resume_argv(&self, session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
-        argv::build_resume_argv(session_id, campaign, steer_nonce)
+    fn resume_argv(&self, session_id: &str, run_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+        argv::build_resume_argv(session_id, run_id, campaign, steer_nonce)
     }
     fn billing(&self, env: &dyn Fn(&str) -> Option<OsString>) -> Billing {
         billing(&CLAUDE_KEYS, env)
@@ -140,7 +140,7 @@ impl AgentAdapter for Codex {
         argv::check_ask(&input.ask)?;
         Ok(vec!["codex".into(), "--".into(), input.ask.clone()])
     }
-    fn resume_argv(&self, session_id: &str, _campaign: &str, _steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+    fn resume_argv(&self, session_id: &str, _run_id: &str, _campaign: &str, _steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
         if !crate::ids::valid_session_id(session_id) {
             return Err(InvalidInput { field: "session_id", reason: "must be a canonical uuid" });
         }
