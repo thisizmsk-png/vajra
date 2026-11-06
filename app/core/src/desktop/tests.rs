@@ -645,3 +645,70 @@ fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
     assert_eq!(i["round"], 2, "{i}");
     app.sup.kill(&stream).unwrap();
 }
+
+// ---- verify_campaign (AC-1.2.1, AC-1.2.2) ------------------------------------------------------------------------
+
+/// Plant a stand-in `vajra-campaign.sh` under the temp home; it records its argv and exits `code`.
+fn fake_campaign_script(t: &Tmp, code: i32, stderr: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let log = t.0.join("argv.log");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\necho \"$@\" >> '{}'\necho '{stderr}' >&2\nexit {code}\n", log.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    log
+}
+
+#[test]
+fn verify_campaign_exit_0_is_ok_and_runs_verify_with_the_slug() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    let v = t.app().verify_campaign("my-camp").unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["slug"], "my-camp");
+    assert_eq!(fs::read_to_string(log).unwrap().trim(), "verify my-camp");
+}
+
+#[test]
+fn verify_campaign_exit_3_is_blocked_with_the_restore_command_for_the_latest_checkpoint() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 3, "signature INVALID");
+    let ck = t.home().join(".claude/vajra/campaigns/my-camp/checkpoints");
+    fs::create_dir_all(&ck).unwrap();
+    for n in ["0001.json", "0002.json", "0010.json"] {
+        fs::write(ck.join(n), "{}").unwrap();
+    }
+    let v = t.app().verify_campaign("my-camp").unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert_eq!(v["restore"], "vajra-campaign.sh resume my-camp --from-checkpoint 10", "{v}");
+}
+
+#[test]
+fn verify_campaign_exit_3_without_checkpoints_has_no_restore_command() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 3, "signature INVALID");
+    let v = t.app().verify_campaign("my-camp").unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    assert!(v["restore"].is_null(), "{v}");
+}
+
+#[test]
+fn verify_campaign_other_exit_codes_are_an_error_not_a_pass() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 1, "no such campaign");
+    let e = t.app().verify_campaign("my-camp").unwrap_err();
+    assert_eq!(code(&e), "verify_failed", "{e}");
+    assert!(e["detail"].as_str().unwrap().contains("no such campaign"), "{e}");
+}
+
+#[test]
+fn verify_campaign_refuses_a_bad_slug_without_running_anything() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    for bad in ["../x", "-rf", "", "a b", ".hidden"] {
+        let e = t.app().verify_campaign(bad).unwrap_err();
+        assert_eq!(code(&e), "invalid_args", "{bad}: {e}");
+    }
+    assert!(!log.exists(), "the script must not run for a bad slug");
+}

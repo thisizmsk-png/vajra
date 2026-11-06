@@ -573,6 +573,36 @@ impl App {
         Ok(json!({"hits": hits, "code": o.code}))
     }
 
+    /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature
+    /// invalid) is `ok: false` with the restore command for the newest checkpoint listed; any other result is an
+    /// error, never a pass. Read-only: it never touches the HMAC key itself, the script does the check.
+    pub fn verify_campaign(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let o = self
+            .bridge
+            .run(&Request::CampaignVerify { slug: slug.into() })
+            .map_err(|e| match e {
+                crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
+                e => fail("verify_failed", e),
+            })?;
+        match o.code {
+            Some(0) => Ok(json!({"slug": slug, "ok": true})),
+            Some(3) => {
+                let newest = self
+                    .with_reader(|r| r.checkpoints(slug).map_err(|e| fail("io_error", e)))
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|n| n.strip_suffix(".json")?.parse::<u32>().ok())
+                    .max();
+                let restore = newest.map(|n| format!("vajra-campaign.sh resume {slug} --from-checkpoint {n}"));
+                Ok(json!({"slug": slug, "ok": false, "restore": restore}))
+            }
+            code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        }
+    }
+
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
         self.sup.set_take_over(stream, on).map_err(|e| fail("session_error", e))?;
         Ok(json!({"stream": stream, "take_over": on}))
