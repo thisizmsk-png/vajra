@@ -4,6 +4,8 @@ import { Text } from "../../components/ui/base";
 import { S } from "../../strings";
 import type { Screen } from "../router";
 import { Home } from "./home/Home";
+import { History } from "./history/History";
+import { Settings } from "./settings/Settings";
 
 const notBuilt = (screen: Screen): ComponentType => function NotBuilt() {
   return (
@@ -20,6 +22,6 @@ export const REGISTRY: Record<Screen, ComponentType> = {
   crew: notBuilt("crew"),
   chat: notBuilt("chat"),
   inbox: notBuilt("inbox"),
-  history: notBuilt("history"),
-  settings: notBuilt("settings"),
+  history: History,
+  settings: Settings,
 };
