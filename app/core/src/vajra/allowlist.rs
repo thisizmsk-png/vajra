@@ -102,7 +102,49 @@ impl Allowlist {
     }
 
     pub fn open_allowlisted(&self, path: &Path) -> Result<File, Denied> {
-        self.open_with(path, |p| File::open(p))
+        let real = self.resolve(path)?;
+        self.open_resolved(&real)
+    }
+
+    /// Open an already-resolved path, then check what was actually opened. `resolve()` validated a path *name*; by
+    /// the time the file is opened a component may have been swapped for a symlink (a worker can write under
+    /// `~/.claude/projects`), so the name is resolved again by the kernel. So: the final component is never followed,
+    /// nothing blocks on a FIFO, the open descriptor is asked which path it really is (that path must be allowlisted),
+    /// and the file itself must be a plain single-link regular file that is not the protected key (a hard link to the
+    /// key placed inside an allowed directory has an allowed *name* but the key's data).
+    pub fn open_resolved(&self, real: &Path) -> Result<File, Denied> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(real)
+            .map_err(Denied::Io)?;
+        let at = fd_path(&file).map_err(Denied::Io)?; // fails closed where the OS cannot say
+        if at.file_name().is_some_and(|n| n == DENIED_NAME) {
+            return Err(Denied::SecretKey);
+        }
+        if !self.permits(&at) {
+            return Err(Denied::NotAllowed);
+        }
+        let md = file.metadata().map_err(Denied::Io)?;
+        if !md.is_file() || md.nlink() != 1 {
+            return Err(Denied::NotAllowed);
+        }
+        if let Ok(key) = std::fs::symlink_metadata(self.claude.join("vajra").join(DENIED_NAME))
+            && (key.dev(), key.ino()) == (md.dev(), md.ino())
+        {
+            return Err(Denied::SecretKey);
+        }
+        // Reads are ordinary blocking reads from here on.
+        // SAFETY: F_GETFL/F_SETFL on a descriptor this function owns.
+        unsafe {
+            let fl = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+            if fl == -1 || libc::fcntl(file.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK) == -1 {
+                return Err(Denied::Io(io::Error::last_os_error()));
+            }
+        }
+        Ok(file)
     }
 
     /// `real` is canonical, so it can be matched against canonical roots.
@@ -138,4 +180,30 @@ impl Allowlist {
 
 fn safe_name(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && s != DENIED_NAME
+}
+
+/// The path an open descriptor refers to, as the OS reports it (not the name it was opened by).
+#[cfg(target_os = "macos")]
+fn fd_path(f: &File) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes into `buf`.
+    let rc = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n])))
+}
+
+#[cfg(target_os = "linux")]
+fn fd_path(f: &File) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn fd_path(_: &File) -> io::Result<PathBuf> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "cannot verify an open descriptor on this platform"))
 }
