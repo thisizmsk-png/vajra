@@ -198,9 +198,12 @@ impl App {
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
         // A launch in flight owns the session it just took; it reaps itself.
-        if let Err(std::sync::TryLockError::WouldBlock) = self.launching.try_lock() {
-            return;
-        }
+        // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
+        let _guard = match self.launching.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        };
         self.reap_locked();
     }
 
@@ -340,12 +343,22 @@ impl App {
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
         if running {
-            lock(&self.control).set_workers(
-            workers
-                .iter()
-                .map(|w| {
-                    let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
-                    WorkerInfo {
+            self.publish_workers(&workers, &ctx);
+        }
+        let run_status = if running { Status::InProgress } else { Status::Unknown };
+        let lead = run.as_ref().map(|_| run_status);
+        let node = self.with_reader(|r| {
+            Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
+        })?;
+        Ok(node_json(&node))
+    }
+
+    fn publish_workers(&self, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+        let infos = workers
+            .iter()
+            .map(|w| {
+                let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
+                WorkerInfo {
                     worker: w.clone(),
                     task_id: None,
                     title: Some(w.label.clone()),
@@ -354,16 +367,30 @@ impl App {
                     last_activity: None,
                     cwd,
                     lines,
-                }})
-                .collect(),
-            );
-        }
-        let run_status = if running { Status::InProgress } else { Status::Unknown };
-        let lead = run.as_ref().map(|_| run_status);
-        let node = self.with_reader(|r| {
-            Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
-        })?;
-        Ok(node_json(&node))
+                }
+            })
+            .collect();
+        lock(&self.control).set_workers(infos);
+    }
+
+    /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
+    /// asking: steering and MCP inspect must work while the crew view is closed. Called by the core's own poll loop.
+    pub fn refresh_workers(&self) {
+        let live = lock(&self.runs).iter().find(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone());
+        let Some(run) = live else { return };
+        let Ok(workers) = self.discover_workers(&run) else { return };
+        let ctx: HashMap<String, (Option<String>, Vec<String>)> = {
+            let tr = lock(&self.transcripts);
+            workers
+                .iter()
+                .map(|w| {
+                    let recent = self.bus.recent(&worker_stream(&w.agent_id), INSPECT_BYTES);
+                    let cwd = tr.get(&w.agent_id).and_then(|t| t.cwd()).map(str::to_string);
+                    (w.agent_id.clone(), (cwd, recent.iter().map(|l| l.text.to_string()).collect()))
+                })
+                .collect()
+        };
+        self.publish_workers(&workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {

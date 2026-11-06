@@ -562,3 +562,59 @@ fn two_resumes_of_one_campaign_get_distinct_run_ids() {
     assert_ne!(a, b);
     assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
 }
+
+#[test]
+fn a_reap_in_progress_blocks_a_launch_until_it_finishes() {
+    // Review P1: the launching guard used to drop before `reap_locked`, so a launch could install its session while an
+    // earlier reap was still about to end "the old one". Hold the control lock so the reap stalls inside `reap_locked`,
+    // and check the launch guard is still taken.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let cwd = t.0.to_string_lossy().into_owned();
+    app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+    let held = lock(&app.control);
+    std::thread::scope(|sc| {
+        let reaper = sc.spawn(|| app.reap_runs());
+        let mut blocked = false;
+        for _ in 0..200 {
+            if matches!(app.launching.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                blocked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(blocked, "the reap released the launch guard before it finished");
+        drop(held);
+        reaper.join().unwrap();
+    });
+    assert!(app.launching.try_lock().is_ok(), "the guard is released once the reap is done");
+}
+
+#[test]
+fn the_core_refreshes_workers_and_transcripts_without_a_crew_view() {
+    // Review P2: discovery and tailing used to run only when the UI asked for the crew tree, so a run nobody was
+    // looking at had no steerable workers and stale inspect output.
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let (path, first) = seed_worker(&t, &cwd, sid);
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_err(), "unknown before any refresh");
+    app.refresh_workers();
+    assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_ok(), "discovered without crew()");
+    // New transcript output shows up on the next refresh, still without crew().
+    let echo = first.replace("Run these Bash commands", "FRESH-MARKER then run these Bash commands");
+    let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut f, format!("{echo}\n").as_bytes()).unwrap();
+    app.refresh_workers();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).unwrap();
+    assert!(i.to_string().contains("FRESH-MARKER"), "{i}");
+    app.sup.kill(&stream).unwrap();
+}

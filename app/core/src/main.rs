@@ -195,6 +195,7 @@ fn main() {
                     if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
                         let _ = handle.emit(CHANGED, payload);
                     }
+                    handle.state::<App>().refresh_workers();
                     // ADR-9 item 7: no App Nap while a run is active.
                     #[cfg(target_os = "macos")]
                     {
