@@ -209,6 +209,17 @@ A arc t3 "$SRC" '[]' >/dev/null; check "an empty setup list is fine" $?
 printf 'x' >> "$AD/campaign.json"
 A arc t7 "$SRC" '[]' >/dev/null 2>&1; [ $? -ne 0 ] && [ ! -e "$AD/evidence/t7" ]; check "refused when the campaign state is invalid" $?
 
+# --- an option given without its value is refused, never a hang ---
+bounded() { # run C "$@" for at most 5 s; 0 if it exited non-zero in time
+  C "$@" >/dev/null 2>&1 & local p=$! i=0
+  while kill -0 "$p" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  if kill -0 "$p" 2>/dev/null; then kill "$p"; wait "$p" 2>/dev/null; return 1; fi
+  wait "$p"; [ $? -ne 0 ]
+}
+for args in "report --campaign" "report --bytes" "close --status" "resume --from-checkpoint" "create nogoal-1 --goal" "fail --campaign"; do
+  bounded $args; check "$args with no value exits with an error" $?
+done
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

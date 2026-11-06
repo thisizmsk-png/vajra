@@ -158,9 +158,9 @@ cmd_create() {
   local goal="" feats="[]" spec id desc
   while [ $# -gt 0 ]; do
     case "$1" in
-      --goal) goal="$(clean_line "${2:-}" 1000)"; shift 2 ;;
+      --goal) goal="$(clean_line "${2:-}" 1000)"; shift 2 || die "missing value for $1" ;;
       --feature)
-        spec="${2:-}"; shift 2
+        spec="${2:-}"; shift 2 || die "missing value for $1"
         id="${spec%%|*}"; desc=""
         [ "$id" != "$spec" ] && desc="${spec#*|}"
         valid_feature_id "$id" || die "invalid feature id: '$id' (letters, digits, . _ -; max 64)"
@@ -254,8 +254,8 @@ cmd_pass() {
   local slug="" ev="" revoke=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --campaign) slug="${2:-}"; shift 2 ;;
-      --evidence) ev="$(clean_line "${2:-}" 300)"; shift 2 ;;
+      --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;;
+      --evidence) ev="$(clean_line "${2:-}" 300)"; shift 2 || die "missing value for $1" ;;
       --revoke) revoke=1; shift ;;
       *) die "unknown option: $1" ;;
     esac
@@ -276,7 +276,7 @@ cmd_pass() {
 cmd_progress() {
   local text="${1:-}"; [ -n "$text" ] || usage; shift
   local slug=""
-  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 ;; *) die "unknown option: $1" ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;; *) die "unknown option: $1" ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   append_progress "$text"; touch_updated; sign_state "$DIR"
   echo "progress recorded for $SLUG"
@@ -286,7 +286,7 @@ checkpoint_hmac() { jq -cS 'del(.hmac)' "$1" | tr -d '\n' | hmac_stdin; }
 
 cmd_checkpoint() {
   local label="" slug=""
-  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) label="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) label="$1"; shift ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   mkdir -p "$DIR/checkpoints"
   local last seq prev f
@@ -322,7 +322,7 @@ latest_valid_checkpoint() {
 
 cmd_resume() {
   local slug="" from=""
-  while [ $# -gt 0 ]; do case "$1" in --from-checkpoint) from="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --from-checkpoint) from="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   resolve "$slug"; load_key; lock "$DIR"
   if [ -n "$from" ]; then
     printf '%s' "$from" | grep -Eq '^[0-9]{1,4}$' || die "invalid checkpoint number: $from"
@@ -365,7 +365,7 @@ cmd_verify() {
 
 cmd_close() {
   local slug="" st="done"
-  while [ $# -gt 0 ]; do case "$1" in --status) st="${2:-}"; shift 2 ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --status) st="${2:-}"; shift 2 || die "missing value for $1" ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
   case "$st" in done|abandoned) ;; *) die "--status must be done or abandoned" ;; esac
   resolve "$slug"; load_key; lock "$DIR"
   # An abandoned campaign may be closed even if its signature is broken.
@@ -384,10 +384,10 @@ REPORT_MAX=65536
 cmd_report() {
   local slug="" nb="" b64="" sha="" tmp got
   while [ $# -gt 0 ]; do case "$1" in
-    --campaign) slug="${2:-}"; shift 2 ;;
-    --bytes) nb="${2:-}"; shift 2 ;;
-    --sha256) sha="${2:-}"; shift 2 ;;
-    --base64) b64="${2:-}"; shift 2 ;;
+    --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --bytes) nb="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --sha256) sha="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --base64) b64="${2:-}"; shift 2 || die "missing value for $1" ;;
     *) die "unknown option: $1" ;;
   esac; done
   case "$nb" in ""|*[!0-9]*) die "--bytes must be a number" ;; esac
