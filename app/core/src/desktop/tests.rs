@@ -324,7 +324,7 @@ fn an_exited_run_ends_its_control_session() {
     assert_eq!(app.active_run_count(), 0);
     assert_eq!(app.active_runs().unwrap()["count"], 0);
     // The finished run is still known, so its crew view keeps its workers.
-    assert!(app.run_by_id("20261105-1230").is_some(), "an exited run stays viewable");
+    assert!(app.run_by_id("c", "20261105-1230").is_some(), "an exited run stays viewable");
 }
 
 #[test]
@@ -492,4 +492,29 @@ fn oversized_worker_meta_and_journal_are_skipped_not_loaded() {
     assert_eq!(ids, vec!["aa870dd40540481f0"], "the normal worker is found; the oversized meta is skipped: {ids:?}");
     assert_ne!(workers[0].label, "journal.only.label", "an over-limit journal is not loaded");
     app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
+    let t = Tmp::new();
+    let app = t.app();
+    let mk = |sid: &str, rid: &str, camp: &str| Run { session_id: sid.into(), run_id: rid.into(), campaign: camp.into(), cwd: t.0.clone(), nonces: Redactor::default() };
+    let a = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let b = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    // Same minute, different campaigns (for example a resume and a fresh run): the lookup keys on both.
+    lock(&app.runs).insert(format!("run-{a}"), mk(a, "20261105-1230", "deliver-old"));
+    lock(&app.runs).insert(format!("run-{b}"), mk(b, "20261105-1230", "deliver-new"));
+    for _ in 0..20 {
+        assert_eq!(app.run_by_id("deliver-old", "20261105-1230").unwrap().1.session_id, a);
+        assert_eq!(app.run_by_id("deliver-new", "20261105-1230").unwrap().1.session_id, b);
+    }
+    assert!(app.run_by_id("deliver-other", "20261105-1230").is_none());
+    // A fresh run in a minute that is taken moves to the next free minute.
+    let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC
+    assert_eq!(ids::run_id_at(now), "20261105-1230");
+    let (t2, id2) = app.fresh_run_id(now);
+    assert_eq!(id2, "20261105-1231");
+    assert_eq!(t2, now + 60);
+    lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
+    assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
 }

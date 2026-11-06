@@ -128,8 +128,18 @@ impl App {
         f(g.as_mut().expect("reader set above"))
     }
 
-    fn run_by_id(&self, run_id: &str) -> Option<(String, Run)> {
-        lock(&self.runs).iter().find(|(_, r)| r.run_id == run_id).map(|(k, r)| (k.clone(), r.clone()))
+    /// The run a UI view names. A minute-level run id alone is not an identity, so the campaign must match too: two
+    /// runs can never be confused for one another here.
+    fn run_by_id(&self, slug: &str, run_id: &str) -> Option<(String, Run)> {
+        lock(&self.runs).iter().find(|(_, r)| r.run_id == run_id && r.campaign == slug).map(|(k, r)| (k.clone(), r.clone()))
+    }
+
+    /// The first minute at or after `now` that no known run and no campaign on disk uses. The workflow takes a
+    /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
+    fn fresh_run_id(&self, now: u64) -> (u64, String) {
+        let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)))
     }
 
     // ---------------------------------------------------------------- start
@@ -264,9 +274,8 @@ impl App {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let now = ids::unix_now();
+        let (now, run_id) = self.fresh_run_id(ids::unix_now());
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
-        let run_id = ids::run_id_at(now);
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
             argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
@@ -303,7 +312,7 @@ impl App {
     /// the session; the control service is told about them so steering can
     /// address them.
     pub fn crew(&self, slug: &str, run_id: &str) -> Res {
-        let run = self.run_by_id(run_id);
+        let run = self.run_by_id(slug, run_id);
         let running = run.as_ref().is_some_and(|(s, _)| self.sup.is_running(s).unwrap_or(false));
         let workers = match &run {
             Some((_, r)) => self.discover_workers(r)?,
