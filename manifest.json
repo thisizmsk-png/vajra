@@ -12,7 +12,7 @@
     "SECURITY.md": "4312f9d89a6e79b939c0e4b5ed021e717cc67f200dfa313093867f04ee04aeea",
     "SKILL.md": "a303fd1f3b5a145b492194fec1444b33e3399cd8d422b2db6869c64925b92f0a",
     "atman/ATMAN.md": "1a53789e485b812cd214d9d7f9dc888a0b22b687b5f749bb29f524e2ae19f865",
-    "atman/atman.py": "997bbdddb4a8b7d2878bf28d1b29ceee020d35c3343cae1b26b6f6a809a29e87",
+    "atman/atman.py": "dfe12abdddcf903ce10880fa144626368f752a6fa369cdff69c350304291c859",
     "atman/muscle-memory.md": "8816d3adc86b5eca23855c13e0fa6d100a5d82c7d1f1e9109fe16de4312b62f5",
     "atman/oracle.md": "dce5a11f0ad2fef2853ff8b483bbc29343617dfeebf72756d4b22c0432fc8651",
     "atman/practice-observer.md": "7a99ffce7afdbc3d55610770523240761c91afab83e3b4133348d0551124bab9",
@@ -248,7 +248,7 @@
     "scripts/vajra-replay.sh": "1da671e19b550647a1c4d28eecbf1a4b41c08110af87553c69837cefbd76d359",
     "scripts/vajra-verify-work.sh": "e15d33e51d62704948e85d1b19148cdbae21bfdccfc54a991d605b6053606033",
     "scripts/vajra-worktree-clean.sh": "3b5a2a66c85a39353523bfd70b350f17ee9f1dba9cc780911e0912107ee72110",
-    "scripts/vajra_kb.py": "d5b7c6c4725a9de3fc10415f56d45c8f4cee50115705142396fc0592ef37f767",
+    "scripts/vajra_kb.py": "489d24ceac664bc42bdf31db161f256f7e3d11148aafe2218c2556481c593c3c",
     "scripts/vajra_repomap.py": "6f8ba78a7e508e73f2c3bee84ce12af19745fd9cdf40ceb3192fc7554cc737c9",
     "scripts/vajra_route.py": "c2de7facfb029943055021d7939ff35f59a3a480dc419bebaa979c736ffc049e",
     "scripts/vajra_skills.py": "1166826a18c94c1a69c60323ff6f2a398a29624bf70076892a105e3857b4a597",
@@ -335,6 +335,6 @@
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
     "scripts/desktop_approval.py": "501c383c390526daa9a41b957ae507dc50c4aaccc105c50c096cc901d78c9f45",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
-    "tests/kb/desktop_approval_test.py": "6893bc88f5027a3125270e305e996effa7df7ac71eb71b23acbcc049d1d9fb0f"
+    "tests/kb/desktop_approval_test.py": "2bcbaedb6a7617507d5bef3af5a5384b139abb7d722c15083d5e8e5c2fe118f7"
   }
 }

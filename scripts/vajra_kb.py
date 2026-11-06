@@ -893,10 +893,34 @@ def pending_bytes(store, rid):
     return sha256_hex(raw), raw
 
 
+def _anchor_path():
+    return os.path.join(Store("global").dir, "desktop-anchor.json")
+
+
+def desktop_append(body):
+    """Append a desktop event to the global chain (caller holds its lock) and re-sign the anchor: the
+    newest desktop event's seq and hmac. read_events accepts any valid prefix of the chain, so without
+    the anchor cutting the last lines would silently undo a revoke, a key replacement or a used id."""
+    e = Store("global").append(body)
+    a = {"seq": e["seq"], "head": e["hmac"]}
+    atomic_write(_anchor_path(), canon(dict(a, mac=sign(load_key(), a))))
+
+
 def desktop_state():
     """(enrolled key or None, used approval ids) from the global store's HMAC chain. The latest enrolled
-    key is the only one accepted; a revoke of that key leaves none."""
+    key is the only one accepted; a revoke of that key leaves none. Refuses if the chain no longer
+    contains the newest desktop event the anchor names (truncated or replaced)."""
     events, _st = Store("global").read_events()
+    anchor = read_json(_anchor_path())
+    if anchor is not None:
+        key = load_key()
+        try:
+            body = {"seq": anchor["seq"], "head": anchor["head"]}
+            ok = key is not None and _hmac.compare_digest(str(anchor.get("mac")), sign(key, body))
+        except (KeyError, TypeError):
+            ok = False
+        if not ok or not any(e.get("seq") == body["seq"] and e.get("hmac") == body["head"] for e in events):
+            raise Refused("the desktop key ledger was truncated or its anchor is invalid; run vajra_kb.py doctor")
     cur, used = None, set()
     for e in events:
         if e.get("op") == "desktop_key":
@@ -947,7 +971,7 @@ def desktop_use(store, op, rid, main, conf):
             store.audit("refused", op=op, id=rid, reason="desktop approval: already used", approval=main["id"])
             raise Refused("approval was already used")
         for i in ids:
-            g.append({"op": "desktop_used", "approval": i, "action": op, "store": store.pid, "target": rid})
+            desktop_append({"op": "desktop_used", "approval": i, "action": op, "store": store.pid, "target": rid})
     if store.pid == "global":
         mark()
     else:
@@ -965,10 +989,29 @@ def cmd_desktop_consume(a, out):
     g = Store("global")
     with Lock(g.lock_path):
         # Atman read the proposal and computed the sha256 itself; the kb only checks it equals the signed one.
-        main, conf, _ = desktop_take(a.desktop_approval or [], g, a.action, a.record, lambda: (a.sha256, None), use=True)
+        main, conf, _ = desktop_take(a.desktop_approval or [], g, a.action, a.record, lambda: (a.sha256, None), True)
+        # Routes are global scope: approving one needs the second, separately signed confirmation.
+        need = {"global"} if a.action == "approve" else set()
+        if set(conf) != need or (main.get("reason") or "") != (a.reason or ""):
+            g.audit("refused", op=a.action, id=a.record, reason="desktop approval: scope confirmation or reason differs",
+                    approval=main["id"])
+            raise Refused("an Atman %s needs %s and the signed reason" % (a.action, "its global confirmation" if need else "no confirmation"))
+        desktop_use(g, a.action, a.record, main, conf)
     desktop_audit(a.action, main, g)
     out.emit({"result": "consumed", "approval": main["id"]}, "approval %s used" % main["id"])
     return 0
+
+
+def tty_gate(action, ident, hint):
+    """A human at a terminal, with no environment override: an enrolled key outlives any one approval, so
+    VAJRA_ATMAN_ASSUME_HUMAN (a test switch an agent can build with string tricks) does not count here."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        sys.stderr.write("vajra_kb: '%s' needs a human at a terminal. Run it yourself:\n  %s\n" % (action, hint))
+        return False
+    try:
+        return input("%s %s? [y/N] " % (action, ident)).strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def _fingerprint(fp):
@@ -983,11 +1026,11 @@ def cmd_desktop_enroll(a, out):
         raise KbError(str(e))
     print("Vajra Desktop key fingerprint: %s" % _fingerprint(fp))
     print("Compare it with the fingerprint the app shows. Enroll only if they match.")
-    if not human_gate("desktop-enroll", fp[:16], "python3 vajra_kb.py desktop-enroll <pubkey-file>"):
+    if not tty_gate("desktop-enroll", fp[:16], "python3 vajra_kb.py desktop-enroll <pubkey-file>"):
         return 3
     g = Store("global")
     with Lock(g.lock_path):
-        g.append({"op": "desktop_key", "pem": pem, "fingerprint": fp})
+        desktop_append({"op": "desktop_key", "pem": pem, "fingerprint": fp})
         g.audit("desktop_enrolled", fingerprint=fp)
     out.emit({"result": "enrolled", "fingerprint": fp}, "enrolled the desktop key %s" % _fingerprint(fp))
     return 0
@@ -998,11 +1041,11 @@ def cmd_desktop_revoke(a, out):
     if not key:
         raise KbError("no desktop key is enrolled")
     print("Revoking the Vajra Desktop key %s" % _fingerprint(key["fingerprint"]))
-    if not human_gate("desktop-revoke", key["fingerprint"][:16], "python3 vajra_kb.py desktop-revoke"):
+    if not tty_gate("desktop-revoke", key["fingerprint"][:16], "python3 vajra_kb.py desktop-revoke"):
         return 3
     g = Store("global")
     with Lock(g.lock_path):
-        g.append({"op": "desktop_revoke", "fingerprint": key["fingerprint"]})
+        desktop_append({"op": "desktop_revoke", "fingerprint": key["fingerprint"]})
         g.audit("desktop_revoked", fingerprint=key["fingerprint"])
     out.emit({"result": "revoked", "fingerprint": key["fingerprint"]}, "revoked the desktop key")
     return 0
@@ -1656,8 +1699,11 @@ def cmd_reject(a, out):
         return 3
     with Lock(store.lock_path):
         if a.desktop_approval:
-            main, _c, _raw = desktop_take(a.desktop_approval, store, "reject", rid,
-                                          lambda: pending_bytes(store, rid), use=True)
+            main, _c, _raw = desktop_take(a.desktop_approval, store, "reject", rid, lambda: pending_bytes(store, rid))
+            if (main.get("reason") or "") != " ".join(a.reason or []):
+                store.audit("refused", op="reject", id=rid, reason="desktop approval: reason differs", approval=main["id"])
+                raise Refused("the approval does not carry the reason given on the command line")
+            desktop_use(store, "reject", rid, main, {})
         rej_dir = os.path.join(store.pending_dir, "rejected")
         ensure_dir(rej_dir)
         os.replace(store.pending_path(rid), os.path.join(rej_dir, rid + ".json"))
@@ -1994,6 +2040,7 @@ def build_parser():
     s.add_argument("--action", choices=("approve", "reject"), required=True)
     s.add_argument("--record", required=True)
     s.add_argument("--sha256", required=True)
+    s.add_argument("--reason", default="")
     s.add_argument("--desktop-approval", action="append", metavar="FILE")
     s.set_defaults(fn=cmd_desktop_consume)
     s = sub.add_parser("desktop-revoke", parents=[common], help="human only: revoke the enrolled Vajra Desktop key")

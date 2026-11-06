@@ -71,6 +71,10 @@ def approval(key, action, store, record, sha, **kw):
 def run(argv, cwd, env=None):
     old, old_env = os.getcwd(), dict(os.environ)
     os.chdir(cwd)
+    real_gate = kb.tty_gate
+    if env and "__tty__" in env:
+        kb.tty_gate = lambda *a, **k: True
+        env = {}
     os.environ.update(env or {})
     buf, err = io.StringIO(), io.StringIO()
     try:
@@ -80,13 +84,15 @@ def run(argv, cwd, env=None):
             except SystemExit as e:
                 rc = e.code
     finally:
+        kb.tty_gate = real_gate
         os.chdir(old)
         os.environ.clear()
         os.environ.update(old_env)
     return rc, buf.getvalue(), err.getvalue()
 
 
-HUMAN = {"VAJRA_ATMAN_ASSUME_HUMAN": "1"}
+HUMAN = {"__tty__": "1"}   # run() stubs kb.tty_gate (a human at a terminal)
+ENVONLY = {"VAJRA_ATMAN_ASSUME_HUMAN": "1"}
 PROJ = os.path.join(HOME, "work", "proj")
 os.makedirs(PROJ)
 subprocess.run(["git", "init", "-q", PROJ], check=True)
@@ -125,6 +131,8 @@ check("no key enrolled: a validly signed approval is refused", rc == 3 and "no d
 rc, out, err = run(["desktop-enroll", KEY.pub], PROJ)
 check("desktop-enroll without a human at a terminal: exit 3, nothing enrolled",
       rc == 3 and kb.desktop_state()[0] is None and "fingerprint: " in out)
+check("the test env override does not enroll a key (a real TTY is required)",
+      run(["desktop-enroll", KEY.pub], PROJ, ENVONLY)[0] == 3 and kb.desktop_state()[0] is None)
 bad = os.path.join(WORK, "bad.pem")
 open(bad, "w").write("not a key")
 check("desktop-enroll refuses a file that is not a public key", run(["desktop-enroll", bad], PROJ, HUMAN)[0] != 0)
@@ -301,6 +309,12 @@ f6, _ = approval(K, "reject", store, rid6, psha6)
 rc, _, err = run(["reject", rid6, "--desktop-approval", f6], PROJ)
 check("desktop reject: moved to rejected/ (%s)" % err,
       rc == 0 and os.path.exists(os.path.join(kb.KB_ROOT, store, "pending", "rejected", rid6 + ".json")))
+rid6b, store, psha6b = propose("Reject reason is signed")
+f6b, _ = approval(K, "reject", store, rid6b, psha6b, reason="signed reason")
+check("reject with a reason the approval does not carry: refused",
+      run(["reject", rid6b, "other reason", "--desktop-approval", f6b], PROJ)[0] == 3)
+check("reject with the signed reason: accepted",
+      run(["reject", rid6b, "signed", "reason", "--desktop-approval", f6b], PROJ)[0] == 0)
 rid7, store, psha7 = propose("Approval for approve cannot reject")
 f7, _ = approval(K, "approve", store, rid7, psha7, applies="on_topic")
 check("an approve approval cannot reject", run(["reject", rid7, "--desktop-approval", f7], PROJ)[0] == 3)
@@ -327,6 +341,21 @@ r5 = show(rid5)
 ffo, afo = approval(K, "forget", store, rid5, r5["sha256"])
 rc, _, err = run(["forget", rid5, "--desktop-approval", ffo], PROJ)
 check("desktop forget (%s)" % err, rc == 0 and show(rid5).get("forgotten") is True)
+
+# ---------------------------------------------------------------- truncating the ledger cannot undo a revoke
+gev = kb.Store("global").events
+KEY3 = Key()
+run(["desktop-enroll", KEY3.pub], PROJ, HUMAN)
+run(["desktop-revoke"], PROJ, HUMAN)
+lines = open(gev).read().splitlines(True)
+open(gev, "w").write("".join(lines[:-1]))   # cut the revoke (and the used-id marks after it) off
+rid_z, store_z, sha_z = propose("Truncation target")
+fz, _ = approval(KEY3, "approve", store_z, rid_z, sha_z, applies="on_topic")
+rcz = run(["approve", rid_z, "--desktop-approval", fz], PROJ)[0]
+check("a truncated key ledger is refused, the revoked key is not revived",
+      rcz != 0 and show(rid_z).get("status") == "pending")
+open(gev, "w").write("".join(lines))
+check("restoring the ledger restores a working state", run(["desktop-enroll", K.pub], PROJ, HUMAN)[0] == 0)
 
 # ---------------------------------------------------------------- audit: two logs, no text
 with open(os.path.join(HOME, ".claude", "vajra", "audit.log")) as fh:
@@ -359,7 +388,12 @@ with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.St
 check("atman route: a forged approval is refused", rc0 != 0 and not os.path.exists(atman.LEARNED_ROUTES))
 fa, aa = approval(K, "approve", "global", route["id"], rsha)
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-    rc = atman.cmd_approve([route["id"], "--desktop-approval", fa])
+    rc1 = atman.cmd_approve([route["id"], "--desktop-approval", fa])
+check("atman route without the global confirmation: refused", rc1 != 0 and not os.path.exists(atman.LEARNED_ROUTES))
+fa, aa = approval(K, "approve", "global", route["id"], rsha)
+cfa, _ = approval(K, "approve", "global", route["id"], rsha, confirms=aa["id"], widen="global")
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    rc = atman.cmd_approve([route["id"], "--desktop-approval", fa, "--desktop-approval", cfa])
 learned = json.load(open(atman.LEARNED_ROUTES))
 check("atman route approved through the desktop path", rc == 0 and any(x["word"] == "deploy" for x in learned["routes"]))
 check("the atman approval id is used in the chain", aa["id"] in used_ids())
@@ -368,8 +402,12 @@ atman.save_proposal(route2)
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     rc = atman.cmd_approve([route2["id"], "--desktop-approval", fa])
 check("atman: replaying a used approval on another route: refused", rc != 0)
-fr2, _ = approval(K, "reject", "global", route2["id"], hashlib.sha256(
-    atman.canon(atman.load_proposals()[route2["id"]]).encode("utf-8")).hexdigest())
+r2sha = hashlib.sha256(atman.canon(atman.load_proposals()[route2["id"]]).encode("utf-8")).hexdigest()
+frx, _ = approval(K, "reject", "global", route2["id"], r2sha, reason="other")
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    rcx = atman.cmd_reject([route2["id"], "--desktop-approval", frx, "not now"])
+check("atman reject with a different reason than signed: refused", rcx != 0)
+fr2, _ = approval(K, "reject", "global", route2["id"], r2sha, reason="not now")
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     rc = atman.cmd_reject([route2["id"], "--desktop-approval", fr2, "not now"])
 check("atman reject consumes a desktop approval", rc == 0 and atman.load_proposals()[route2["id"]]["status"] == "rejected")

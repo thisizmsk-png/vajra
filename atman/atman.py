@@ -945,10 +945,11 @@ def split_desk(args):
     return rest, files
 
 
-def desk_gate(action, p, files):
+def desk_gate(action, p, files, reason=""):
     """E9: stand in for human_gate with Vajra Desktop's signed approval. The kb checks the signature, the
     5 minute age, the action/record binding and the sha256 of this proposal, and marks it used."""
-    cmd = ["desktop-consume", "--action", action, "--record", p["id"], "--sha256", sha256_hex(canon(p))]
+    cmd = ["desktop-consume", "--action", action, "--record", p["id"], "--sha256", sha256_hex(canon(p)),
+           "--reason=" + reason]
     for f in files:
         cmd += [DESK, f]
     return kb_call(cmd)[0] == 0
@@ -1033,7 +1034,7 @@ def cmd_reject(args):
         print("atman: no pending proposal %s" % args[0], file=sys.stderr)
         return 1
     if files:
-        if not desk_gate("reject", p, files):
+        if not desk_gate("reject", p, files, " ".join(args[1:])):
             return 3
     elif not human_gate("reject", p["id"]):
         return 3
