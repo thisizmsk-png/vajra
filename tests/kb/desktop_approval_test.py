@@ -281,6 +281,22 @@ fo_, _ = approval(K, "approve", store_o, rid_o, hashlib.sha256(open(po, "rb").re
 check("an oversized pending file is refused", run(["approve", rid_o, "--desktop-approval", fo_], PROJ)[0] == 3 and os.path.exists(po))
 os.remove(po)
 
+# What the app shows is what it signs: show/pending derive the record and its sha256 from one read.
+rid_s, store_s, sha_s = propose("Single read target")
+ps_ = os.path.join(kb.KB_ROOT, store_s, "pending", rid_s + ".json")
+shown = show(rid_s)
+check("show --json sha256 is the sha256 of the bytes it displayed",
+      shown["sha256"] == hashlib.sha256(open(ps_, "rb").read()).hexdigest() == sha_s and shown["title"] == "Single read target")
+real_pb = kb.pending_bytes
+calls_ = []
+def counting(store, rid):
+    calls_.append(rid)
+    return real_pb(store, rid)
+kb.pending_bytes = counting
+show(rid_s)
+kb.pending_bytes = real_pb
+check("show reads the pending file once", calls_.count(rid_s) == 1)
+
 # race: four processes use one approval at once; exactly one wins.
 rid_c, store_c, sha_c = propose("Race target")
 fc, ac = approval(K, "approve", store_c, rid_c, sha_c, applies="on_topic")

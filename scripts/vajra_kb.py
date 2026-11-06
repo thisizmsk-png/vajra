@@ -908,6 +908,19 @@ def desktop_append(body):
     atomic_write(_anchor_path(), canon(dict(a, mac=sign(load_key(), a))))
 
 
+def pending_view(store, rid):
+    """(record, sha256) of a pending file, both from one read: what the app shows is what it signs."""
+    sha, raw = pending_bytes(store, rid)
+    try:
+        r = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise Refused("pending kb record %s is malformed" % rid)
+    if not isinstance(r, dict) or r.get("id") != rid:
+        raise Refused("pending kb record %s is malformed" % rid)
+    r["status"] = "pending"
+    return r, sha
+
+
 def desktop_state():
     """(enrolled key or None, used approval ids) from the global store's HMAC chain. The latest enrolled
     key is the only one accepted; a revoke of that key leaves none. Refuses if the chain no longer
@@ -1400,7 +1413,10 @@ def cmd_show(a, out):
     store, r, _pend = _find_anywhere(rid)
     if not r:
         raise KbError("no record %s" % rid)
-    sha = pending_bytes(store, rid)[0] if _pend else record_sha(r)
+    if _pend:
+        r, sha = pending_view(store, rid)
+    else:
+        sha = record_sha(r)
     r = dict(r)
     r["_stale"] = is_stale(r, repo_root()) if store.pid == project_id() else False
     if out.as_json:
@@ -1579,7 +1595,8 @@ def cmd_pending(a, out):
         for s in stores:
             for p in s.pending():
                 try:
-                    listed.append(dict(public(p), project=s.pid, sha256=pending_bytes(s, p["id"])[0]))
+                    rec, sha = pending_view(s, p["id"])
+                    listed.append(dict(public(rec), project=s.pid, sha256=sha))
                 except Refused:
                     continue  # vanished or replaced by a link since the listing: not offered for approval
         out.emit({"pending": listed}, None)
