@@ -234,6 +234,23 @@ describe("CrewTree", () => {
     const [sel, setSel] = useState("lead");
     return <CrewTree label="Crew" nodes={nodes} selected={sel} onSelect={setSel} />;
   }
+  it("expands and collapses a branch with the pointer, and still selects the row", () => {
+    render(<Host />);
+    expect(screen.getAllByRole("treeitem")).toHaveLength(1);
+    const twisty = () => document.querySelector(".v-tree__twisty") as HTMLElement;
+    fireEvent.click(twisty());
+    let items = screen.getAllByRole("treeitem");
+    expect(items).toHaveLength(3);
+    expect(items[0].getAttribute("aria-expanded")).toBe("true");
+    expect(items[0].getAttribute("aria-selected")).toBe("true"); // the Lead was already selected; clicking the arrow does not change selection
+    fireEvent.click(items[1]); // the row itself still selects and does not toggle
+    items = screen.getAllByRole("treeitem");
+    expect(items).toHaveLength(3);
+    expect(items[1].getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(twisty());
+    expect(screen.getAllByRole("treeitem")).toHaveLength(1);
+    expect(screen.getAllByRole("treeitem")[0].getAttribute("aria-expanded")).toBe("false");
+  });
   it("is a tree with levels, expanded state, one tab stop and full keyboard navigation", () => {
     render(<Host />);
     expect(screen.getByRole("tree", { name: "Crew" })).toBeTruthy();
@@ -317,6 +334,33 @@ describe("DiffView", () => {
     cleanup();
     render(<DiffView diff={[quoted, "@@ -0,0 +1 @@", "+payload"].join("\n")} />);
     expect(screen.queryByText("No changes against the base.")).toBeNull();
+  });
+  it("reads a path with spaces from the real path fields, not the last ' b/'", () => {
+    const sp = ["diff --git a/dir b/file.ts b/dir b/file.ts", "--- a/dir b/file.ts\t", "+++ b/dir b/file.ts\t", "@@ -1 +1 @@", "-a", "+b"].join("\n");
+    expect(parseDiff(sp).map((x) => x.path)).toEqual(["dir b/file.ts"]);
+    // The header alone is enough when both sides are the same path.
+    expect(parseDiff(["diff --git a/dir b/file.ts b/dir b/file.ts", "@@ -1 +1 @@", "+b"].join("\n"))[0].path).toBe("dir b/file.ts");
+    // A rename takes its new name from the header lines, even with a space and ' b/' in it.
+    const rn = ["diff --git a/old.ts b/new b/name.ts", "similarity index 90%", "rename from old.ts", "rename to new b/name.ts", "@@ -1 +1 @@", "+x"].join("\n");
+    expect(parseDiff(rn)[0].path).toBe("new b/name.ts");
+    // A deleted file has no +++ path: the --- side names it.
+    const del = ["diff --git a/gone b/x.ts b/gone b/x.ts", "--- a/gone b/x.ts", "+++ /dev/null", "@@ -1 +0,0 @@", "-x"].join("\n");
+    expect(parseDiff(del)[0].path).toBe("gone b/x.ts");
+    // A hunk line that looks like a header never renames the file.
+    const fake = ["diff --git a/ok.ts b/ok.ts", "@@ -1 +1 @@", "+++ b/evil.ts", " ctx"].join("\n");
+    expect(parseDiff(fake)[0].path).toBe("ok.ts");
+  });
+  it("selects the second of two files that show the same label", () => {
+    const two = ["diff --cc one", "@@ -0,0 +1 @@", "+first-file-line", "diff --cc two", "@@ -0,0 +1 @@", "+second-file-line"].join("\n");
+    const { container } = render(<DiffView diff={two} />);
+    const rows = screen.getAllByRole("option");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.textContent)).toEqual([rows[0].textContent, rows[0].textContent]);
+    expect(container.textContent).toContain("first-file-line");
+    fireEvent.click(rows[1]);
+    expect(container.textContent).toContain("second-file-line");
+    expect(container.textContent).not.toContain("first-file-line");
+    expect(screen.getAllByRole("option")[1].getAttribute("aria-selected")).toBe("true");
   });
   it("marks a line that was cut instead of dropping the rest silently", () => {
     const { container } = render(<DiffView diff={["diff --git a/a b/a", "@@ -0,0 +1 @@", "+ok();" + " ".repeat(9000) + "evil()"].join("\n")} />);

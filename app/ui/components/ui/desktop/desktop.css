@@ -41,6 +41,7 @@
 
 .v-tree { list-style: none; margin: 0; padding: 0; }
 .v-tree [role="treeitem"] { cursor: default; }
+.v-tree__twisty { display: inline-block; min-width: var(--target-min); text-align: center; color: var(--c-text-muted); }
 .v-tree [role="treeitem"][aria-selected="true"] { background: var(--c-accent); }
 
 .v-evidence th, .v-evidence td { padding: 0 var(--space-sm); height: var(--row-h); border-bottom: 1px solid var(--c-border); text-align: left; font-weight: 400; }

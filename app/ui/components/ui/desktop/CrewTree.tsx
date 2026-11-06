@@ -49,10 +49,23 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
           aria-expanded={r.node.children?.length ? open.has(r.node.id) : undefined}
           tabIndex={i === idx ? 0 : -1}
           className="v-row"
-          style={{ paddingLeft: 8 + (r.level - 1) * 16 }}
+          style={{ paddingLeft: 4 + (r.level - 1) * 16 }}
           onClick={() => { setFocus(r.node.id); onSelect(r.node.id); }}
           onKeyDown={(e) => key(e, r, i)}
         >
+          {/* Pointer-only: the keyboard already has Right/Left, so this is hidden from the accessibility tree. */}
+          <span
+            aria-hidden="true"
+            className="v-tree__twisty"
+            onClick={(e) => {
+              if (!r.node.children?.length) return;
+              e.stopPropagation();
+              setFocus(r.node.id);
+              toggle(r.node.id, !open.has(r.node.id));
+            }}
+          >
+            {r.node.children?.length ? (open.has(r.node.id) ? "▾" : "▸") : ""}
+          </span>
           <span>{r.node.label}</span>
           <span className="v-row__meta"><StatusDot status={r.node.status} /></span>
         </li>

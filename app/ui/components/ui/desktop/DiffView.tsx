@@ -36,12 +36,29 @@ function unquote(body: string): string {
   return new TextDecoder("utf-8", { fatal: false }).decode(Uint8Array.from(bytes));
 }
 
-/** The b-side path of a `diff --git` header (plain or quoted), or "(unnamed file)" if it cannot be read. */
+/**
+ * The b-side path of a `diff --git` header (plain or quoted), or "" if it cannot be read. Git does not quote a path
+ * that merely contains spaces, so `a/dir b/f.ts b/dir b/f.ts` cannot be split at the last " b/": when a file is not
+ * renamed both halves are the same path, which fixes where the middle is. A rename's real names come from the
+ * `rename to` / `+++` header lines (see `refine`).
+ */
 function headerPath(line: string): string {
   const quoted = /"b\/((?:[^"\\]|\\.)*)"\s*$/.exec(line);
+  if (quoted) return unquote(quoted[1]);
+  const rest = line.replace(/^diff --git /, "");
+  const n = (rest.length - 5) / 2; // "a/" + P + " b/" + P
+  if (Number.isInteger(n) && n > 0 && rest.startsWith("a/") && rest.slice(2 + n, 2 + n + 3) === " b/" && rest.slice(2, 2 + n) === rest.slice(2 + n + 3)) {
+    return rest.slice(2 + n + 3);
+  }
   const at = line.lastIndexOf(" b/");
-  const path = quoted ? unquote(quoted[1]) : at >= 0 ? line.slice(at + 3) : "";
-  return plain(path).text || "(unnamed file)";
+  return at >= 0 ? line.slice(at + 3) : "";
+}
+
+/** A path from a `rename to`, `+++ b/` or `--- a/` header line (git adds a tab after a path with spaces). */
+function refine(raw: string): string | null {
+  if (raw.startsWith("rename to ")) return raw.slice(10).split("\t")[0];
+  const m = /^(?:\+\+\+|---) (?:"[ab]\/((?:[^"\\]|\\.)*)"|[ab]\/(.*))$/.exec(raw);
+  return m ? (m[1] !== undefined ? unquote(m[1]) : m[2].split("\t")[0]) : null;
 }
 
 /**
@@ -56,7 +73,7 @@ export function parseDiff(diff: string): FileDiff[] {
   let inHunk = false;
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff ")) { // a hunk line starts with space, + or -, so this can only be a file header
-      cur = { path: headerPath(raw), added: 0, removed: 0, lines: [] };
+      cur = { path: plain(headerPath(raw)).text || "(unnamed file)", added: 0, removed: 0, lines: [] };
       files.push(cur);
       inHunk = false;
       continue;
@@ -66,7 +83,10 @@ export function parseDiff(diff: string): FileDiff[] {
       inHunk = true;
       cur.lines.push({ kind: "hunk", ...plain(raw) });
     } else if (!inHunk) {
-      continue; // header lines (index, ---, +++, modes, renames) before the first hunk
+      // header lines (index, ---, +++, modes, renames) before the first hunk: the real path fields refine the name
+      const p = refine(raw);
+      if (p) cur.path = plain(p).text || cur.path;
+      continue;
     } else if (raw.startsWith("+")) {
       cur.added++;
       cur.lines.push({ kind: "add", ...plain(raw.slice(1)) });
@@ -86,20 +106,23 @@ const SAYS: Record<Kind, string> = { add: "added", del: "removed", ctx: "unchang
 /** File list plus the selected file's lines, virtualized. Added and removed lines carry a +/- glyph and a screen-reader word, not only color. */
 export function DiffView({ diff, height = 360 }: { diff: string; height?: number }) {
   const files = useMemo(() => parseDiff(diff), [diff]);
-  const [sel, setSel] = useState("");
-  const f = files.find((x) => x.path === sel) ?? files[0];
+  // Files are selected by position, never by name: two files can show the same label (`(unnamed file)`, or names that
+  // differ only in removed control characters).
+  const [sel, setSel] = useState(0);
+  const fi = sel < files.length ? sel : 0;
+  const f = files[fi];
   if (!f) return <p className="v-text v-text--body-sm">No changes against the base.</p>;
   return (
     <div className="v-diff">
       <ListBox label="Changed files">
         {files.map((x, i) => (
-          <ListRow key={`${i}-${x.path}`} selected={x === f} onSelect={() => setSel(x.path)} meta={`+${x.added} -${x.removed}`}>
+          <ListRow key={i} selected={i === fi} onSelect={() => setSel(i)} meta={`+${x.added} -${x.removed}`}>
             {x.path}
           </ListRow>
         ))}
       </ListBox>
       <VirtualList
-        key={f.path}
+        key={fi}
         className="v-difflines"
         role="region"
         aria-label={`Diff of ${f.path}`}
