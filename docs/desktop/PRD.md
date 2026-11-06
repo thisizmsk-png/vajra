@@ -112,7 +112,7 @@ campaigns, a task graph, a verified knowledge ledger) to put a product over it.
 | J4 Run view | Follow the phase timeline (route, recall, understand, plan, execute, verify, fix, deliver), the task graph with owners, and every acceptance criterion with pass/fail evidence | US-4.1 to US-4.3 |
 | J5 Approvals inbox | See every plan waiting for them (push, PR, deploy) and questions from the run; approve or reject | US-5.1 to US-5.3 |
 | J6 History and knowledge | Browse past campaigns and delivery reports; search the knowledge ledger | US-6.1, US-6.2 |
-| J7 Project memory | See what the system proposes to learn (rules, lessons, routes) with the evidence behind it; approve it with Touch ID, edit or reject it; see which rules applied where; search everything locally. Built on the ledger and Atman, no second store (ADR-12). claude-mem: a one-shot import later (ADR-13) | US-7.1 to US-7.4 |
+| J7 Project memory | See what the system proposes to learn (rules, lessons, routes) with the evidence behind it; approve it with Touch ID, edit or reject it; see which rules apply where (which rules primed which session is post-MVP, E10); search everything locally. Built on the ledger and Atman, no second store (ADR-12). claude-mem: a one-shot import later (ADR-13) | US-7.1 to US-7.4 |
 
 Names: the app shows generic role names (Lead, Architect, Backend, Frontend, Verifier, Security, ...),
 not the engine's agent ids. The engine id is visible only in a worker's inspector. Mapping table:
