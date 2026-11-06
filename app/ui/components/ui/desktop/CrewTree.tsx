@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { StatusKey } from "../../../strings";
 import { StatusDot } from "../base/StatusDot";
@@ -19,12 +19,13 @@ function flatten(nodes: CrewNode[], open: ReadonlySet<string>, level = 1, parent
 export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }: { label: string; nodes: CrewNode[]; selected: string; onSelect: (id: string) => void; defaultOpen?: string[] }) {
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set(defaultOpen));
   const [focus, setFocus] = useState(selected);
+  const refs = useRef(new Map<string, HTMLLIElement>());
   const rows = flatten(nodes, open);
   const idx = Math.max(0, rows.findIndex((r) => r.node.id === focus));
   const toggle = (id: string, to: boolean) => setOpen((s) => { const n = new Set(s); if (to) n.add(id); else n.delete(id); return n; });
   const key = (e: KeyboardEvent, r: Flat, i: number) => {
     const has = !!r.node.children?.length;
-    const go = (j: number) => { e.preventDefault(); const t = rows[Math.min(rows.length - 1, Math.max(0, j))]; setFocus(t.node.id); document.getElementById(`crew-${t.node.id}`)?.focus(); };
+    const go = (j: number) => { e.preventDefault(); const t = rows[Math.min(rows.length - 1, Math.max(0, j))]; setFocus(t.node.id); refs.current.get(t.node.id)?.focus(); };
     if (e.key === "ArrowDown") go(i + 1);
     else if (e.key === "ArrowUp") go(i - 1);
     else if (e.key === "Home") go(0);
@@ -41,7 +42,7 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
       {rows.map((r, i) => (
         <li
           key={r.node.id}
-          id={`crew-${r.node.id}`}
+          ref={(el) => { if (el) refs.current.set(r.node.id, el); else refs.current.delete(r.node.id); }}
           role="treeitem"
           aria-level={r.level}
           aria-selected={r.node.id === selected}

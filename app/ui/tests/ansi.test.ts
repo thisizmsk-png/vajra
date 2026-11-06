@@ -61,6 +61,23 @@ describe("ANSI sanitizer (NFR-SEC-3)", () => {
     expect(text("a​b﻿c⁦d")).toBe("a\\u200bb\\ufeffc\\u2066d");
   });
 
+  it("escapes more invisible and bidi characters, including those outside the BMP", () => {
+    const cp = (n: number) => String.fromCodePoint(n);
+    expect(text("x" + cp(0xe0041) + cp(0xe0042) + "y")).toBe("x\\u{e0041}\\u{e0042}y"); // tag characters (hidden ASCII)
+    for (const n of [0x061c, 0x00ad, 0x034f, 0x3164, 0xfe0f, 0x2028, 0x2029, 0x180e, 0xe0100]) {
+      const out = text("a" + cp(n) + "b");
+      expect(out.startsWith("a\\u") && out.endsWith("b"), n.toString(16)).toBe(true);
+    }
+  });
+
+  it("never splits a surrogate pair at the line cap", () => {
+    const r = sanitizeLine("a".repeat(MAX_LINE - 1) + String.fromCodePoint(0x1f600) + "tail");
+    const out = r.segments.map((s) => s.text).join("");
+    expect(r.truncated).toBe(true);
+    expect([...out].length).toBe(MAX_LINE);
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(out)).toBe(false);
+  });
+
   it("does not draw 256-color, true-color or background codes, and does not let them eat later codes", () => {
     const r = sanitizeLine(`${E}[38;5;196mA${E}[38;2;1;2;3mB${E}[48;5;21mC${E}[1;38;5;9;31mD`);
     expect(r.segments.map((s) => [s.text, s.style.fg, s.style.bold])).toEqual([["A", null, false], ["B", null, false], ["C", null, false], ["D", 1, true]]);

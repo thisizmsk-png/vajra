@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
 /**
  * Renders only the rows in view (plus `overscan`) of a fixed-row-height list, so a 100,000-line scrollback costs
@@ -14,7 +14,7 @@ export function VirtualList({
   renderRow,
   className,
   ...aria
-}: {
+}: Omit<HTMLAttributes<HTMLDivElement>, "children" | "style" | "onScroll"> & {
   count: number;
   rowHeight: number;
   height: number;
@@ -22,13 +22,6 @@ export function VirtualList({
   /** Stay pinned to the last row while the user is at the bottom (a live log). */
   followEnd?: boolean;
   renderRow: (index: number) => ReactNode;
-  className?: string;
-  role?: string;
-  tabIndex?: number;
-  "aria-label"?: string;
-  "aria-live"?: "off" | "polite";
-  "aria-readonly"?: boolean;
-  onKeyDown?: (e: React.KeyboardEvent) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);

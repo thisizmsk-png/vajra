@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { PointerEvent, ReactNode } from "react";
+import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 
 const STEP = 16;
 
@@ -25,17 +25,20 @@ export function ResizablePanes({
   second: ReactNode;
 }) {
   const [size, setSize] = useState(Math.min(max, Math.max(min, initial)));
+  const [dragging, setDragging] = useState(false);
   const drag = useRef<{ from: number; start: number } | null>(null);
   const horiz = orientation === "horizontal";
   const clamp = (n: number) => Math.min(max, Math.max(min, n));
   const down = (e: PointerEvent) => {
     drag.current = { from: horiz ? e.clientX : e.clientY, start: size };
+    setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
   };
   const move = (e: PointerEvent) => {
     if (drag.current) setSize(clamp(drag.current.start + (horiz ? e.clientX : e.clientY) - drag.current.from));
   };
-  const key = (e: React.KeyboardEvent) => {
+  const end = () => { drag.current = null; setDragging(false); };
+  const key = (e: KeyboardEvent) => {
     const back = horiz ? "ArrowLeft" : "ArrowUp";
     const fwd = horiz ? "ArrowRight" : "ArrowDown";
     const to = e.key === back ? clamp(size - STEP) : e.key === fwd ? clamp(size + STEP) : e.key === "Home" ? min : e.key === "End" ? max : null;
@@ -44,7 +47,7 @@ export function ResizablePanes({
     setSize(to);
   };
   return (
-    <div className={`v-panes v-panes--${orientation}`}>
+    <div className={`v-panes v-panes--${orientation}${dragging ? " v-panes--dragging" : ""}`}>
       <div className="v-pane" style={horiz ? { width: size } : { height: size }}>
         {first}
       </div>
@@ -59,7 +62,9 @@ export function ResizablePanes({
         className="v-handle"
         onPointerDown={down}
         onPointerMove={move}
-        onPointerUp={() => { drag.current = null; }}
+        onPointerUp={end}
+        onPointerCancel={end}
+        onLostPointerCapture={end}
         onKeyDown={key}
       />
       <div className="v-pane v-pane--grow">{second}</div>

@@ -1,6 +1,5 @@
-import { useMemo } from "react";
 import { cn } from "../cn";
-import { sanitizeLines } from "./ansi";
+import { sanitizeLine } from "./ansi";
 import { VirtualList } from "./VirtualList";
 
 const ROW = 18;
@@ -8,11 +7,10 @@ const NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "wh
 
 /**
  * Read-only view of a run session (or a worker stream). Lines are raw terminal output; they are sanitized (no links,
- * no clipboard or title sequences, no cursor control, no controls) and only the visible rows are rendered.
+ * no clipboard or title sequences, no cursor control, no controls) and only the visible rows are sanitized and rendered.
  * `takenOver` is a label change only: keyboard input is the host's job (Cmd chords only), never this component's.
  */
 export function TerminalPane({ lines, height = 360, takenOver, label }: { lines: readonly string[]; height?: number; takenOver?: boolean; label?: string }) {
-  const clean = useMemo(() => sanitizeLines(lines), [lines]);
   const name = label ?? (takenOver ? "Run terminal, taken over" : "Run terminal, read only");
   return (
     <VirtualList
@@ -20,15 +18,18 @@ export function TerminalPane({ lines, height = 360, takenOver, label }: { lines:
       role="log"
       aria-label={name}
       aria-live="off"
-      aria-readonly={!takenOver}
       tabIndex={0}
-      count={clean.length}
+      count={lines.length}
       rowHeight={ROW}
       height={height}
       followEnd
-      renderRow={(i) => (
+      renderRow={(i) => {
+        // Only the rows in view are sanitized (cost does not grow with the scrollback), so each line starts with plain
+        // style: a color that a program leaves on across lines is not carried over.
+        const line = sanitizeLine(lines[i]);
+        return (
         <span className="v-term-line">
-          {clean[i].segments.map((s, k) => (
+          {line.segments.map((s, k) => (
             <span
               key={k}
               className={cn(
@@ -42,9 +43,10 @@ export function TerminalPane({ lines, height = 360, takenOver, label }: { lines:
               {s.text}
             </span>
           ))}
-          {clean[i].truncated && <span className="v-ansi-dim"> [line cut]</span>}
+          {line.truncated && <span className="v-ansi-dim"> [line cut]</span>}
         </span>
-      )}
+        );
+      }}
     />
   );
 }

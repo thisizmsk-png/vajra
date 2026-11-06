@@ -7,14 +7,21 @@ export type Style = { fg: number | null; bold: boolean; dim: boolean; italic: bo
 export type Segment = { text: string; style: Style };
 
 export const PLAIN: Style = { fg: null, bold: false, dim: false, italic: false, underline: false };
-export const MAX_LINE = 8192; // characters kept per line; the rest is cut and marked
+export const MAX_LINE = 8192; // code points kept per line; the rest is cut and marked
 export const MAX_SEQ = 4096; // an escape sequence longer than this is dropped (and scanning resumes after it)
 
 const ESC = 0x1b;
 const BEL = 0x07;
-const INVISIBLE = /[​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
+// Characters that change how text reads, or hide data, without being drawn: shown as visible escapes. A table of code point
+// ranges (not a regex over source characters), matched per code point, so characters outside the BMP are covered too.
+const INVISIBLE: ReadonlyArray<readonly [number, number]> = [
+  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x061c, 0x061c], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180e],
+  [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0], [0xe0000, 0xe007f], [0xe0100, 0xe01ef],
+];
+const isInvisible = (cp: number) => INVISIBLE.some(([a, b]) => cp >= a && cp <= b);
 
-const visible = (ch: string) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0");
+const visible = (cp: number) => (cp > 0xffff ? "\\u{" + cp.toString(16) + "}" : "\\u" + cp.toString(16).padStart(4, "0"));
 
 function applySgr(style: Style, params: string): Style {
   let s = { ...style };
@@ -91,13 +98,14 @@ export function sanitizeLine(raw: string, start: Style = PLAIN): { segments: Seg
       i++;
       continue;
     }
-    const ch = raw[i];
-    i++;
+    const cp = raw.codePointAt(i)!; // a whole code point: a surrogate pair is never split
+    const ch = String.fromCodePoint(cp);
+    i += ch.length;
     if (kept >= MAX_LINE) {
       truncated = true;
       break;
     }
-    buf += INVISIBLE.test(ch) ? visible(ch) : c === 0x09 ? "    " : ch;
+    buf += isInvisible(cp) ? visible(cp) : c === 0x09 ? "    " : ch;
     kept++;
   }
   flush();

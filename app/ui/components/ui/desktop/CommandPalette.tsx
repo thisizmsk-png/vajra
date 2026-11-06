@@ -31,6 +31,7 @@ export function CommandPalette({ open, onClose, commands, title = "Command palet
   );
   useEffect(() => { if (open) { setQ(""); setActive(0); } }, [open]);
   useEffect(() => setActive(0), [q]);
+  useEffect(() => { document.getElementById(`${base}-${shown[active]?.id}`)?.scrollIntoView?.({ block: "nearest" }); }, [active, base, shown]);
   const run = (c: Command | undefined) => { if (c) { onClose(); c.run(); } };
   return (
     <Sheet open={open} onClose={onClose} title={title}>
@@ -38,6 +39,7 @@ export function CommandPalette({ open, onClose, commands, title = "Command palet
         autoFocus
         role="combobox"
         aria-expanded="true"
+        aria-autocomplete="list"
         aria-controls={`${base}-list`}
         aria-activedescendant={shown[active] ? `${base}-${shown[active].id}` : undefined}
         aria-label="Search commands"
@@ -47,18 +49,18 @@ export function CommandPalette({ open, onClose, commands, title = "Command palet
         onKeyDown={(e) => {
           if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, shown.length - 1)); }
           else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
-          else if (e.key === "Enter") { e.preventDefault(); run(shown[active]); }
+          else if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); run(shown[active]); }
         }}
       />
       <div role="listbox" id={`${base}-list`} aria-label="Commands">
         {shown.map((c, i) => (
-          <div key={c.id} role="option" id={`${base}-${c.id}`} aria-selected={i === active} className="v-row" onMouseEnter={() => setActive(i)} onClick={() => run(c)}>
+          <div key={c.id} role="option" id={`${base}-${c.id}`} aria-selected={i === active} className="v-row" onMouseMove={() => setActive(i)} onClick={() => run(c)}>
             <span>{c.label}</span>
             {c.hint && <span className="v-row__meta">{c.hint}</span>}
           </div>
         ))}
-        {shown.length === 0 && <p className="v-text v-text--body-sm">No command matches "{q}".</p>}
       </div>
+      <p role="status" className="v-text v-text--body-sm">{shown.length === 0 ? `No command matches "${q}".` : `${shown.length} commands`}</p>
     </Sheet>
   );
 }

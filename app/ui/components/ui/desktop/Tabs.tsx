@@ -25,7 +25,7 @@ export function Tabs<V extends string>({ label, value, tabs, onChange }: { label
             role="tab"
             id={`${base}-tab-${t.id}`}
             aria-selected={t.id === value}
-            aria-controls={`${base}-panel-${t.id}`}
+            aria-controls={t.id === value ? `${base}-panel-${t.id}` : undefined}
             tabIndex={t.id === value ? 0 : -1}
             className="v-tab"
             onClick={() => onChange(t.id)}

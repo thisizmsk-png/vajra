@@ -1,5 +1,6 @@
 /* K3 desktop kit styles. Variables only; the design guard enforces it. */
-.v-vrow { position: absolute; left: 0; right: 0; white-space: pre; overflow: hidden; }
+/* Rows are as wide as their text: the list scrolls sideways, so nothing past the pane edge is hidden. */
+.v-vrow { position: absolute; left: 0; min-width: 100%; width: max-content; white-space: pre; }
 
 .v-terminal { background: var(--c-background); color: var(--c-text); font: 400 12px/18px var(--font-mono); padding: var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); }
 .v-terminal:focus-visible, .v-difflines:focus-visible, .v-tabpanel:focus-visible, .v-handle:focus-visible, .v-tree [role="treeitem"]:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
@@ -29,7 +30,11 @@
 .v-panes--vertical { flex-direction: column; }
 .v-pane { overflow: auto; flex: none; }
 .v-pane--grow { flex: 1 1 0; min-width: 0; min-height: 0; }
-.v-handle { flex: none; background: var(--c-border); }
+.v-handle { flex: none; position: relative; background: var(--c-border); }
+.v-handle::before { content: ""; position: absolute; inset: 0; }
+.v-panes--horizontal > .v-handle::before { inset: 0 -2px; }
+.v-panes--vertical > .v-handle::before { inset: -2px 0; }
+.v-panes--dragging { user-select: none; }
 .v-panes--horizontal > .v-handle { width: 4px; cursor: col-resize; }
 .v-panes--vertical > .v-handle { height: 4px; cursor: row-resize; }
 .v-handle:hover { background: var(--c-border-strong); }
@@ -44,7 +49,13 @@
 .v-diff { display: grid; grid-template-columns: 240px 1fr; gap: var(--space-md); }
 .v-difflines { background: var(--c-background); border: 1px solid var(--c-border); border-radius: var(--radius-md); font: 400 12px/18px var(--font-mono); color: var(--c-text); }
 .v-dl { display: flex; gap: var(--space-sm); padding: 0 var(--space-sm); }
+.v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
+.v-dl__cut { color: var(--c-text-muted); }
 .v-dl__glyph { width: 1ch; color: var(--c-text-muted); flex: none; }
-.v-dl--add .v-dl__glyph { color: var(--c-success); }
-.v-dl--del .v-dl__glyph { color: var(--c-danger); }
+.v-dl--add .v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
+.v-dl__cut { color: var(--c-text-muted); }
+.v-dl__glyph { color: var(--c-success); }
+.v-dl--del .v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
+.v-dl__cut { color: var(--c-text-muted); }
+.v-dl__glyph { color: var(--c-danger); }
 .v-dl--hunk { color: var(--c-info); }
