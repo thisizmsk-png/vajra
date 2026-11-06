@@ -206,3 +206,25 @@ fn an_oversized_or_malformed_ack_is_never_parsed_and_settles_as_unknown() {
     assert!(!s.pending.contains_key(&id));
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_ack_that_appears_after_check_first_looked_is_not_called_lost() {
+    // Review: the hook writes the ack before it drops its claim, so check() can find no ack, no queue file and no
+    // claim although the message was delivered. The final decision looks at the ack again.
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "delivered").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let q = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(q).unwrap(); // the hook claimed it and has since dropped the claim
+    let sd = SessionDir { root: root.clone() };
+    let late = SystemTime::now() + INFLIGHT_UNKNOWN + Duration::from_secs(5);
+    fs::create_dir_all(root.join("acks")).unwrap();
+    fs::write(sd.ack_path(&id), br#"{"consumed_at":"2026-11-06T00:00:00Z","tool_name":"Bash"}"#).unwrap();
+    s.settle_lost(&id, &sd, late).unwrap();
+    assert!(s.pending.contains_key(&id), "an ack is present, so it is not settled as lost");
+    s.tick_at(late);
+    assert!(!s.pending.contains_key(&id));
+    let rec = super::super::ledger::Ledger::read_all(s.ledger.path()).unwrap();
+    assert_eq!(rec.iter().rev().find(|r| r["action_id"] == id.as_str()).unwrap()["state"], "delivered");
+    let _ = fs::remove_dir_all(&dir);
+}

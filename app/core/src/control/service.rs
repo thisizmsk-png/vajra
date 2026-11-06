@@ -35,7 +35,7 @@ use crate::logging::Logger;
 /// How long a queued message waits for the worker's next tool call.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 /// An inflight claim with no ack after this is "delivery unknown" (5.4 step 6).
-/// An ack record is a few hundred bytes; anything larger in `acks/` is not one.
+/// Cap for files a worker can write in the control dir (acks, stops).
 pub const MAX_ACK_BYTES: u64 = 16 * 1024;
 pub const INFLIGHT_UNKNOWN: Duration = Duration::from_secs(60);
 pub const MAX_TEXT: usize = 4000;
@@ -839,25 +839,16 @@ impl Service {
 
     fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
+        // Oversized or non-object acks are never trusted: unknown, not delivered.
         let ack_read = fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES);
-        if let Err(e) = &ack_read {
-            if e.kind() == std::io::ErrorKind::InvalidData {
-                // Oversized: never parsed. The hook consumed the message but its ack cannot be trusted, so the
-                // honest state is "unknown", not "delivered".
-                self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
-                self.pending.remove(id);
-                return Ok(());
-            }
+        let too_big = ack_read.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::InvalidData);
+        if too_big || ack_read.as_ref().is_ok_and(|b| !serde_json::from_slice::<Value>(b).is_ok_and(|v| v.is_object())) {
+            self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
+            self.pending.remove(id);
+            return Ok(());
         }
         if let Ok(b) = ack_read {
-            let ack = match serde_json::from_slice::<Value>(&b) {
-                Ok(v) if v.is_object() => v,
-                _ => {
-                    self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
-                    self.pending.remove(id);
-                    return Ok(());
-                }
-            };
+            let ack: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
             self.record(&a, State::Delivered, json!({"audit_ref": audit_ref}), now)?;
             self.pending.remove(id);
@@ -881,8 +872,17 @@ impl Service {
             }
             return Ok(());
         }
-        // Recorded as queued but no file, no claim and no ack: the app died between the record and the publish (the
-        // ledger is written first). Nothing can deliver it now, so settle it once it is clearly not mid-publish.
+        // Queued in the ledger but no file, claim or ack: the app died between record and publish. Settle it.
+        self.settle_lost(id, dir, now)
+    }
+
+    /// Last step of `check`: nothing queued or claimed. The hook acks before it drops its claim, so look at the ack
+    /// again here and leave a delivered message to the next tick.
+    fn settle_lost(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
+        let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
+        if dir.ack_path(id).exists() || dir.queued(id).is_some() || dir.inflight(id).is_some() {
+            return Ok(());
+        }
         if now.duration_since(a.created).unwrap_or_default() >= INFLIGHT_UNKNOWN {
             self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now)?;
             self.pending.remove(id);
