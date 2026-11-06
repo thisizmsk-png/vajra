@@ -619,6 +619,9 @@ await scenario('E7: write-back archives the evidence bundle and the exact setup 
   const fa = await go(ARGS, { writeback: { ...base.writeback, archive_ok: false } })
   assert.equal(fa.result.artifacts.knowledge.tasks_closed, true)
   assert.match(fa.result.report, /evidence archive for this delivery was not written/)
+  // The write-back worktree holds the only bundle, so cleanup must not be allowed to remove it.
+  assert.ok(!fa.result.artifacts.cleanup.command.includes('data/walkthroughs'))
+  assert.match((await go(ARGS)).result.artifacts.cleanup.command, /data\/walkthroughs/)
   // No archive when there is nothing verified to archive: the proposed range is unchanged.
   const plain = own(call(await go(ARGS), 'writeback').prompt)
   assert.match(plain, /Otherwise set verified=false and run commands 7 to 8 in order instead/)
