@@ -458,3 +458,38 @@ fn start_run_resolves_a_branch_to_a_sha_through_git() {
         assert_eq!(code(&app.resolve_base(&t.0, bad).unwrap_err()), "invalid_args", "{bad}");
     }
 }
+
+#[test]
+fn oversized_worker_meta_and_journal_are_skipped_not_loaded() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(&sub).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts/session/subagents");
+    for f in ["agent-aa870dd40540481f0.jsonl", "agent-aa870dd40540481f0.meta.json"] {
+        fs::copy(fx.join(f), sub.join(f)).unwrap();
+    }
+    // A journal over the cap with a VALID entry for the worker at its start: if it were read, the worker would take
+    // the journal's label. It must be skipped by its size alone, so the label stays the meta file's.
+    let journal = sub.join("journal.jsonl");
+    fs::write(&journal, "{\"type\":\"started\",\"agentId\":\"aa870dd40540481f0\",\"label\":\"journal.only.label\",\"phase\":\"Execute\"}\n").unwrap();
+    fs::OpenOptions::new().write(true).open(&journal).unwrap().set_len(9 * 1024 * 1024).unwrap();
+    // A second worker whose meta file is over the cap is skipped.
+    let big = sub.join("agent-bb870dd40540481f0.meta.json");
+    fs::File::create(&big).unwrap().set_len(1024 * 1024).unwrap();
+    let stream = format!("run-{sid}");
+    app.sup
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    let run = lock(&app.runs).get(&stream).map(|r| (r.session_id.clone(), r.run_id.clone(), r.campaign.clone(), r.cwd.clone())).unwrap();
+    let r = Run { session_id: run.0, run_id: run.1, campaign: run.2, cwd: run.3, nonces: Redactor::default() };
+    let workers = app.discover_workers(&r).unwrap();
+    let ids: Vec<&str> = workers.iter().map(|w| w.agent_id.as_str()).collect();
+    assert_eq!(ids, vec!["aa870dd40540481f0"], "the normal worker is found; the oversized meta is skipped: {ids:?}");
+    assert_ne!(workers[0].label, "journal.only.label", "an over-limit journal is not loaded");
+    app.sup.kill(&stream).unwrap();
+}

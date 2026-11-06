@@ -35,6 +35,9 @@ pub type Res = Result<Value, Value>;
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
+/// Largest worker meta file and workflow journal read whole (both are Claude Code files; over-limit ones are skipped).
+const MAX_META_BYTES: u64 = 64 * 1024;
+const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -356,10 +359,18 @@ impl App {
             .join(project_slug(&run.cwd))
             .join(&run.session_id)
             .join("subagents");
-        let read = |p: &Path| -> Option<String> {
+        // These files are Claude Code's, outside our control, and journals grow during a run: an over-limit file is
+        // skipped (and counted), never loaded; the read itself is also bounded in case it grows after the size check.
+        let read = |p: &Path, cap: u64| -> Option<String> {
+            use std::io::Read;
+            let f = allow.open_allowlisted(p).ok()?;
+            if f.metadata().ok()?.len() > cap {
+                self.note("worker_file_too_large", &[("limit", cap)]);
+                return None;
+            }
             let mut s = String::new();
-            std::io::Read::read_to_string(&mut allow.open_allowlisted(p).ok()?, &mut s).ok()?;
-            Some(s)
+            f.take(cap + 1).read_to_string(&mut s).ok()?;
+            (s.len() as u64 <= cap).then_some(s)
         };
         let mut dirs = vec![dir.clone()];
         if let Ok(rd) = std::fs::read_dir(dir.join("workflows")) {
@@ -374,14 +385,14 @@ impl App {
         }
         let mut out = Vec::new();
         for d in dirs {
-            let journal = read(&d.join("journal.jsonl")).map(|s| parse_journal(&s)).unwrap_or_default();
+            let journal = read(&d.join("journal.jsonl"), MAX_JOURNAL_BYTES).map(|s| parse_journal(&s)).unwrap_or_default();
             let Ok(rd) = std::fs::read_dir(&d) else { continue };
             let mut metas: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             metas.sort();
             for p in metas {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let Some(id) = name.strip_prefix("agent-").and_then(|n| n.strip_suffix(".meta.json")) else { continue };
-                let Some(meta) = read(&p).and_then(|s| parse_meta(&s)) else { continue };
+                let Some(meta) = read(&p, MAX_META_BYTES).and_then(|s| parse_meta(&s)) else { continue };
                 let j = journal.iter().rev().find(|j| j.agent_id == id);
                 out.push(self.pump_worker(&allow, &red, &d.join(format!("agent-{id}.jsonl")), id, &meta, j));
             }
