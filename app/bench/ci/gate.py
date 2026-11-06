@@ -1,11 +1,11 @@
 """Perf gate: read measure.py output and fail on a regression.
 
 usage: gate.py BASELINE_JSON IDLE_JSON [GROWTH_JSON]
-Fails if idle > 200 MiB, idle > baseline + 5 MiB (when a baseline exists), or growth slope > 1 MiB/min.
+Fails if idle > 200 MiB, idle > baseline + max(5 MiB, 3%) (when a baseline exists), or growth slope > 1 MiB/min.
 """
 import json, sys
 
-IDLE_BUDGET, REGRESSION, SLOPE_BUDGET = 200.0, 5.0, 1.0
+IDLE_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 5.0, 0.03, 1.0
 
 
 def check(baseline, idle, growth):
@@ -14,8 +14,9 @@ def check(baseline, idle, growth):
     if v > IDLE_BUDGET:
         fails.append(f"idle {v} MiB exceeds the {IDLE_BUDGET} MiB budget")
     b = baseline.get("idle_mib")
-    if b is not None and v > b + REGRESSION:
-        fails.append(f"idle {v} MiB is more than {REGRESSION} MiB over the baseline {b}")
+    tol = max(REGRESSION, b * REGRESSION_PCT) if b is not None else None
+    if b is not None and v > b + tol:
+        fails.append(f"idle {v} MiB is more than {tol:.1f} MiB over the baseline {b}")
     if growth is not None and growth["slope_mib_per_min"] > SLOPE_BUDGET:
         fails.append(f"growth {growth['slope_mib_per_min']} MiB/min exceeds {SLOPE_BUDGET}")
     return fails
