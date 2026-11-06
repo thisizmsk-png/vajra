@@ -214,6 +214,7 @@ bash_case BLOCK "kb test override env var"                "VAJRA_ATMAN_ASSUME_HU
 # E9: an agent may not enrol a desktop key or name a desktop approval, in any spelling of the command.
 bash_case BLOCK "kb desktop-enroll"                       "$KBPY desktop-enroll /tmp/k.pem"
 bash_case BLOCK "kb desktop-revoke"                       "$KBPY desktop-revoke"
+bash_case BLOCK "kb desktop-repair"                       "$KBPY desktop-repair"
 bash_case BLOCK "kb desktop-consume"                      "$KBPY desktop-consume --action approve --record x --sha256 y"
 bash_case BLOCK "kb retire with --desktop-approval"       "$KBPY retire kb-abc123 --desktop-approval /tmp/a.json"
 bash_case BLOCK "atman approve with --desktop-approval"   "bash ~/.claude/skills/vajra/scripts/atman.sh reject kb-abc123 --desktop-approval /tmp/a.json"

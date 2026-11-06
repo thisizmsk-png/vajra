@@ -214,7 +214,7 @@
     "hooks/hooks.json": "745910011c534d68f06b91a98a939aa932ebd8c36a3ac6022e9cfa945ca60966",
     "hooks/post-tool-use.sh": "1364549c567be17a7c8eab9cfccc30be4ab2fda9d226d8941f0aaa4eea1dcded",
     "hooks/pre-compact.sh": "b0dbd73d252f456acaba73402ed72d638bd441245b765ff0042c14f90e106439",
-    "hooks/pre-tool-use.sh": "b9fb2a3af9827a847e6ec6f7889f2bd1be1c86cb59c03d178e312d9c001a5f87",
+    "hooks/pre-tool-use.sh": "3ce828ab979ad0ad6d0d486a5111a2d46aee50e0e5a66206b25bb5a48eb6c96e",
     "hooks/session-start.sh": "9e858673453bc700087c25e47002cedfe78ef31fc5770620103dd1e6fb150066",
     "hooks/user-prompt-submit.sh": "a05bf238517353d18e56d528b5494c710ae1962b622d772cf3c173c2f046d18d",
     "memory/tiered-memory.md": "ea167ac3f0a43aba07d25bc6db4e5f90511187c3d50053b8c557608db73f6b0e",
@@ -248,7 +248,7 @@
     "scripts/vajra-replay.sh": "1da671e19b550647a1c4d28eecbf1a4b41c08110af87553c69837cefbd76d359",
     "scripts/vajra-verify-work.sh": "e15d33e51d62704948e85d1b19148cdbae21bfdccfc54a991d605b6053606033",
     "scripts/vajra-worktree-clean.sh": "3b5a2a66c85a39353523bfd70b350f17ee9f1dba9cc780911e0912107ee72110",
-    "scripts/vajra_kb.py": "df030519868dfa09c0b26d3fb5806d70f4ca8a0ce0f0eccc8a9399405c126775",
+    "scripts/vajra_kb.py": "a19a6b2669032a322a6685adbe38cb8a17214c005b3d1d1f650d0a8bd556f9be",
     "scripts/vajra_repomap.py": "6f8ba78a7e508e73f2c3bee84ce12af19745fd9cdf40ceb3192fc7554cc737c9",
     "scripts/vajra_route.py": "c2de7facfb029943055021d7939ff35f59a3a480dc419bebaa979c736ffc049e",
     "scripts/vajra_skills.py": "1166826a18c94c1a69c60323ff6f2a398a29624bf70076892a105e3857b4a597",
@@ -288,7 +288,7 @@
     "tests/hmac-contract.sh": "ce29bed4b2cd9d80206151d6e4d43f5e389a173f9359d4c4755e916480d32def",
     "tests/hooks/run-desktop-control.sh": "8d6ab0eac7e667118e1deb350039c3ef05726fa832798072482f80f19892b008",
     "tests/hooks/run-generate-manifest.sh": "f8cc939a0cc1876dc3f77093ccd841f031b521551561e0e222ba7c057d9563a4",
-    "tests/hooks/run-guard-text.sh": "5efde408f744a91596b65bc0bac4f5cc99b6fd209042e563a87f74de3f620b32",
+    "tests/hooks/run-guard-text.sh": "0f33437bd5b7571f7a9fe62137ff9aa70bf4d92e29087a89afcf9773b7144b7a",
     "tests/hooks/run-home-isolation.sh": "fb4ee353cb2756314782e51c0079eec843d7e76338b21b5f9146d306417803bd",
     "tests/hooks/run-hooks-json.sh": "0657e0d18019d0025d891d5c63017080f606b8a8bb3ebba14da06ba211bbe763",
     "tests/hooks/run-install-agents.sh": "0aecbc2e4214012a201242fb99399981c0df79bd0144b06114859e57cc413a79",
@@ -335,6 +335,6 @@
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
     "scripts/desktop_approval.py": "e629d9d07a4d7d16d92ad03842d57829791e2f9b5c1d04e0213c397dc0d21a52",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
-    "tests/kb/desktop_approval_test.py": "055679307776ee7cbd1901e04dafe40787a46dd81cc82fc78b859bac0094a833"
+    "tests/kb/desktop_approval_test.py": "1d09f74121f9fd17f1aa6524121d0040eb734df5fe55d1e028d4493d25ab89fc"
   }
 }

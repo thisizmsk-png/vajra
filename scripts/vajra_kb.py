@@ -443,6 +443,16 @@ class Store(object):
 
     def append(self, body):
         """Append one event (caller holds the lock). Returns the event."""
+        entry = self.prepare(body)
+        self.commit(entry)
+        return entry
+
+    def commit(self, entry):
+        append_line(self.events, canon(entry))
+        self._cache = None
+
+    def prepare(self, body):
+        """The next signed event, not yet written (caller holds the lock)."""
         key = load_key()
         if not key:
             raise KbError("no valid HMAC key at %s (run scripts/install.sh)" % KEY_FILE)
@@ -456,8 +466,6 @@ class Store(object):
         entry.update(body)
         entry["prevHmac"] = prev
         entry["hmac"] = sign(key, entry)
-        append_line(self.events, canon(entry))
-        self._cache = None
         return entry
 
     def audit(self, action, **fields):
@@ -911,8 +919,14 @@ def desktop_append(body):
     """Append a desktop event to the global chain (caller holds its lock) and re-sign the anchor: the
     newest desktop event's seq and hmac. read_events accepts any valid prefix of the chain, so without
     the anchor cutting the last lines would silently undo a revoke, a key replacement or a used id."""
-    e = Store("global").append(body)
-    a = {"seq": e["seq"], "head": e["hmac"]}
+    g = Store("global")
+    e = g.prepare(body)
+    _write_anchor(e["seq"], e["hmac"])  # first: a crash before the append leaves it ahead of the chain (refused, repairable)
+    g.commit(e)
+
+
+def _write_anchor(seq, head):
+    a = {"seq": seq, "head": head}
     atomic_write(_anchor_path(), canon(dict(a, mac=sign(load_key(), a))))
 
 
@@ -935,9 +949,9 @@ def desktop_state():
     contains the newest desktop event the anchor names (truncated or replaced)."""
     events, _st = Store("global").read_events()
     anchor = read_json(_anchor_path())
-    # No anchor is fine only before any desktop event was ever recorded; otherwise deleting it would disable the check.
-    if anchor is None and any(str(e.get("op", "")).startswith("desktop_") for e in events):
-        raise Refused("the desktop key ledger anchor is missing or unreadable; run vajra_kb.py doctor")
+    last = [e for e in events if str(e.get("op", "")).startswith("desktop_")][-1:]
+    if anchor is None and last:
+        raise Refused("the desktop key ledger anchor is missing or unreadable; a human runs vajra_kb.py desktop-repair")
     if anchor is not None:
         key = load_key()
         try:
@@ -945,8 +959,11 @@ def desktop_state():
             ok = key is not None and _hmac.compare_digest(str(anchor.get("mac")), sign(key, body))
         except (KeyError, TypeError):
             ok = False
-        if not ok or not any(e.get("seq") == body["seq"] and e.get("hmac") == body["head"] for e in events):
-            raise Refused("the desktop key ledger was truncated or its anchor is invalid; run vajra_kb.py doctor")
+        # It must name exactly the newest desktop event: older means an unanchored tail (a crash), newer or
+        # absent means a truncated chain. Both fail closed until a human repairs it.
+        if not ok or not last or (last[0].get("seq"), last[0].get("hmac")) != (body["seq"], body["head"]):
+            raise Refused("the desktop key ledger and its anchor disagree (truncated, replaced or interrupted); "
+                          "a human runs vajra_kb.py desktop-repair")
     cur, used = None, set()
     for e in events:
         if e.get("op") == "desktop_key":
@@ -1064,6 +1081,29 @@ def cmd_desktop_enroll(a, out):
         desktop_append({"op": "desktop_key", "pem": pem, "fingerprint": fp})
         g.audit("desktop_enrolled", fingerprint=fp)
     out.emit({"result": "enrolled", "fingerprint": fp}, "enrolled the desktop key %s" % _fingerprint(fp))
+    return 0
+
+
+def cmd_desktop_repair(a, out):
+    """Human only: after an interrupted write or a suspected truncation, re-anchor the ledger to its newest
+    desktop event. The chain itself is HMAC-verified, so nothing forged can enter by this path; what it cannot
+    undo is a truncation, which is why a person looks at the key list first."""
+    g = Store("global")
+    events, _st = g.read_events()
+    last = [e for e in events if str(e.get("op", "")).startswith("desktop_")][-1:]
+    print("Newest desktop event in the chain: %s" % (("seq %s %s" % (last[0].get("seq"), last[0].get("op"))) if last else "none"))
+    if not tty_gate("desktop-repair", "the ledger anchor", "python3 vajra_kb.py desktop-repair"):
+        return 3
+    with Lock(g.lock_path):
+        if last:
+            _write_anchor(last[0]["seq"], last[0]["hmac"])
+        else:
+            try:
+                os.remove(_anchor_path())
+            except OSError:
+                pass
+        g.audit("desktop_repaired", head=last[0]["hmac"] if last else None)
+    out.emit({"result": "repaired"}, "re-anchored the desktop key ledger")
     return 0
 
 
@@ -2081,6 +2121,8 @@ def build_parser():
     s.add_argument("--reason", default="")
     s.add_argument("--desktop-approval", action="append", metavar="FILE")
     s.set_defaults(fn=cmd_desktop_consume)
+    s = sub.add_parser("desktop-repair", parents=[common], help="human only: re-anchor the desktop key ledger")
+    s.set_defaults(fn=cmd_desktop_repair)
     s = sub.add_parser("desktop-revoke", parents=[common], help="human only: revoke the enrolled Vajra Desktop key")
     s.set_defaults(fn=cmd_desktop_revoke)
 

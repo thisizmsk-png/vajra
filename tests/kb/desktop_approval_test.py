@@ -430,6 +430,35 @@ check("a malformed anchor fails closed", run(["approve", rid_y, "--desktop-appro
 open(anc, "w").write(anc_txt)
 check("restoring the ledger restores a working state", run(["desktop-enroll", K.pub], PROJ, HUMAN)[0] == 0)
 
+# ---------------------------------------------------------------- an interrupted write fails closed and a human repairs it
+rid_i, store_i, sha_i = propose("Interrupted write target")
+fi_, ai_ = approval(K, "approve", store_i, rid_i, sha_i, applies="on_topic")
+real_commit = kb.Store.commit
+def boom(self, entry):
+    raise OSError("simulated crash after the anchor was written")
+kb.Store.commit = boom
+try:
+    run(["approve", rid_i, "--desktop-approval", fi_], PROJ)
+except OSError:
+    pass
+kb.Store.commit = real_commit
+rid_i2, store_i2, sha_i2 = propose("After the crash target")
+fi2, _ = approval(K, "approve", store_i2, rid_i2, sha_i2, applies="on_topic")
+check("after the crash every desktop approval is refused (anchor ahead of the chain)",
+      run(["approve", rid_i2, "--desktop-approval", fi2], PROJ)[0] != 0 and show(rid_i2).get("status") == "pending")
+check("desktop-repair needs a human at a terminal", run(["desktop-repair"], PROJ, ENVONLY)[0] == 3)
+check("desktop-repair by the human re-anchors", run(["desktop-repair"], PROJ, HUMAN)[0] == 0)
+check("approvals work again after the repair", run(["approve", rid_i2, "--desktop-approval", fi2], PROJ)[0] == 0)
+# an unanchored tail (the event was appended but the anchor was not updated) is refused too
+g_ = kb.Store("global")
+with kb.Lock(g_.lock_path):
+    g_.append({"op": "desktop_used", "approval": secrets.token_hex(16), "action": "approve", "store": "x", "target": "kb-000000"})
+rid_t, store_t2, sha_t = propose("Unanchored tail target")
+ft2, _ = approval(K, "approve", store_t2, rid_t, sha_t, applies="on_topic")
+check("an event newer than the anchor is refused, not ignored", run(["approve", rid_t, "--desktop-approval", ft2], PROJ)[0] != 0)
+run(["desktop-repair"], PROJ, HUMAN)
+check("repair accepts the HMAC-verified tail", run(["approve", rid_t, "--desktop-approval", ft2], PROJ)[0] == 0)
+
 # ---------------------------------------------------------------- audit: two logs, no text
 with open(os.path.join(HOME, ".claude", "vajra", "audit.log")) as fh:
     log = fh.read()

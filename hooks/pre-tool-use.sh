@@ -1008,7 +1008,7 @@ eval_segment_body() { # uses SEG array
         if [ -z "$kbsub" ]; then
           case "$tok" in -*) continue ;; *) kbsub="$tok" ;; esac
           case "$kbsub" in
-            desktop-enroll|desktop-revoke|desktop-consume) block "vajra_kb.py ${kbsub} is for the user's own terminal and the Vajra Desktop app, not the agent" ;;
+            desktop-enroll|desktop-revoke|desktop-consume|desktop-repair) block "vajra_kb.py ${kbsub} is for the user's own terminal and the Vajra Desktop app, not the agent" ;;
             approve|reject|forget) block "vajra_kb.py ${kbsub} is a user decision and needs a TTY; ask the user to run it in their own terminal: python3 ~/.claude/skills/vajra/scripts/vajra_kb.py ${kbsub} <id>" ;;
           esac
           kprev="$tok"
