@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  AlertDialog, Badge, Button, Card, Input, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
+  AlertDialog, Badge, Button, Card, Input, ListBox, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
   useToasts,
 } from "../components/ui/base";
 import { S } from "../strings";
@@ -52,11 +52,11 @@ export function Gallery() {
         </div>
       </Section>
       <Section title="List">
-        <div role="listbox" aria-label="Runs">
+        <ListBox label="Runs">
           {["Add dark mode", "Fix export flag", "Refactor bridge"].map((r, i) => (
             <ListRow key={r} selected={sel === i} onSelect={() => setSel(i)} meta={`${i + 1} of 7`}>{r}</ListRow>
           ))}
-        </div>
+        </ListBox>
         <Separator />
         <Card><Text variant="body">Plain card</Text><Text variant="body-sm">Secondary text</Text></Card>
         <div style={{ marginTop: 8 }}><Card interactive onClick={() => push("info", "Opened run")}><Text variant="label">Interactive card</Text></Card></div>

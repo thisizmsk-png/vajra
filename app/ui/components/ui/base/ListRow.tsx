@@ -1,9 +1,10 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import { useId } from "react";
+import type { ReactNode } from "react";
 import { cn } from "../cn";
 
 /**
- * A 28 px row. The parent decides the role: `option` inside a `listbox` (default; `selected` is exposed), or `row`
- * inside a grid or table (the content is wrapped in a `gridcell`, and no `aria-selected` is set).
+ * A 28 px row. The parent decides the role: `option` inside a `ListBox` (default; the ListBox owns focus and the
+ * keys, `selected` is exposed), or `row` inside a grid or table (content wrapped in `gridcell`s, no `aria-selected`).
  */
 export function ListRow({
   role = "option",
@@ -20,23 +21,17 @@ export function ListRow({
   className?: string;
   children: ReactNode;
 }) {
-  const key = (e: KeyboardEvent) => {
-    if (onSelect && (e.key === "Enter" || e.key === " ")) {
-      e.preventDefault();
-      onSelect();
-    }
-  };
+  const id = useId();
   const isRow = role === "row";
-  const label = <span role={isRow ? "gridcell" : undefined}>{children}</span>;
-  const extra = meta != null && (
-    <span role={isRow ? "gridcell" : undefined} className="v-row__meta">
-      {meta}
-    </span>
-  );
+  const cell = isRow ? "gridcell" : undefined;
   return (
-    <div role={role} aria-selected={isRow ? undefined : selected} tabIndex={0} className={cn("v-row", className)} onClick={onSelect} onKeyDown={key}>
-      {label}
-      {extra}
+    <div id={id} role={role} aria-selected={isRow ? undefined : selected} className={cn("v-row", className)} onClick={onSelect}>
+      <span role={cell}>{children}</span>
+      {meta != null && (
+        <span role={cell} className="v-row__meta">
+          {meta}
+        </span>
+      )}
     </div>
   );
 }
