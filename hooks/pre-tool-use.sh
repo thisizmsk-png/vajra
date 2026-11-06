@@ -582,6 +582,7 @@ shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
 [[ "$N" == *VAJRA_ATMAN_ASSUME_HUMAN* || "$CMD" == *VAJRA_ATMAN_ASSUME_HUMAN* ]] && block "VAJRA_ATMAN_ASSUME_HUMAN is for a human at a terminal, not the agent"
+[[ "$N" == *--desktop-approval* || "$CMD" == *--desktop-approval* ]] && block "--desktop-approval is for the Vajra Desktop app, not the agent"
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
@@ -1007,6 +1008,7 @@ eval_segment_body() { # uses SEG array
         if [ -z "$kbsub" ]; then
           case "$tok" in -*) continue ;; *) kbsub="$tok" ;; esac
           case "$kbsub" in
+            desktop-enroll|desktop-revoke|desktop-consume|desktop-repair) block "vajra_kb.py ${kbsub} is for the user's own terminal and the Vajra Desktop app, not the agent" ;;
             approve|reject|forget) block "vajra_kb.py ${kbsub} is a user decision and needs a TTY; ask the user to run it in their own terminal: python3 ~/.claude/skills/vajra/scripts/vajra_kb.py ${kbsub} <id>" ;;
           esac
           kprev="$tok"
