@@ -618,3 +618,30 @@ fn the_core_refreshes_workers_and_transcripts_without_a_crew_view() {
     assert!(i.to_string().contains("FRESH-MARKER"), "{i}");
     app.sup.kill(&stream).unwrap();
 }
+
+#[test]
+fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
+    // Review P2: every discovered worker used to publish task_id/round = None, so `t1` never resolved.
+    assert_eq!(task_meta("20261105-1810", "task.t1.r2"), (Some("20261105-1810.t1".into()), Some(2)));
+    assert_eq!(task_meta("20261105-1810", "verify.r1"), (None, None));
+    assert_eq!(task_meta("20261105-1810", "kb.search"), (None, None));
+    assert_eq!(task_meta("20261105-1810", "task."), (None, None));
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(sub.join("workflows/wf_1")).unwrap();
+    fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
+    fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r2\",\"phase\":\"Execute\"}\n").unwrap();
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1810").unwrap();
+    app.refresh_workers();
+    let i = lock(&app.control).inspect_worker(Actor::Lead, "t1", 10).unwrap();
+    assert_eq!(i["task_id"], "20261105-1810.t1", "{i}");
+    assert_eq!(i["round"], 2, "{i}");
+    app.sup.kill(&stream).unwrap();
+}

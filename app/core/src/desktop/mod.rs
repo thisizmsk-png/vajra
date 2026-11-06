@@ -343,7 +343,7 @@ impl App {
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
         if running {
-            self.publish_workers(&workers, &ctx);
+            self.publish_workers(run_id, &workers, &ctx);
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
@@ -353,16 +353,17 @@ impl App {
         Ok(node_json(&node))
     }
 
-    fn publish_workers(&self, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+    fn publish_workers(&self, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
         let infos = workers
             .iter()
             .map(|w| {
                 let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
+                let (task_id, round) = task_meta(run_id, &w.label);
                 WorkerInfo {
                     worker: w.clone(),
-                    task_id: None,
+                    task_id,
                     title: Some(w.label.clone()),
-                    round: None,
+                    round,
                     live: !matches!(w.status, Status::Done | Status::Failed),
                     last_activity: None,
                     cwd,
@@ -390,7 +391,7 @@ impl App {
                 })
                 .collect()
         };
-        self.publish_workers(&workers, &ctx);
+        self.publish_workers(&run.run_id, &workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {
@@ -658,3 +659,15 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 #[cfg(test)]
 mod tests;
+
+/// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
+/// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.
+fn task_meta(run_id: &str, label: &str) -> (Option<String>, Option<u32>) {
+    let mut parts = label.split('.');
+    if parts.next() != Some("task") {
+        return (None, None);
+    }
+    let Some(id) = parts.next().filter(|t| !t.is_empty()) else { return (None, None) };
+    let round = parts.rev().find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()));
+    (Some(format!("{run_id}.{id}")), round)
+}
