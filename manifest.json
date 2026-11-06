@@ -248,7 +248,7 @@
     "scripts/vajra-replay.sh": "1da671e19b550647a1c4d28eecbf1a4b41c08110af87553c69837cefbd76d359",
     "scripts/vajra-verify-work.sh": "e15d33e51d62704948e85d1b19148cdbae21bfdccfc54a991d605b6053606033",
     "scripts/vajra-worktree-clean.sh": "3b5a2a66c85a39353523bfd70b350f17ee9f1dba9cc780911e0912107ee72110",
-    "scripts/vajra_kb.py": "a19a6b2669032a322a6685adbe38cb8a17214c005b3d1d1f650d0a8bd556f9be",
+    "scripts/vajra_kb.py": "0e7488bb8af1dbc24e5d72dd5abc44c69980e7274794002ead51bb5d45a8c877",
     "scripts/vajra_repomap.py": "6f8ba78a7e508e73f2c3bee84ce12af19745fd9cdf40ceb3192fc7554cc737c9",
     "scripts/vajra_route.py": "c2de7facfb029943055021d7939ff35f59a3a480dc419bebaa979c736ffc049e",
     "scripts/vajra_skills.py": "1166826a18c94c1a69c60323ff6f2a398a29624bf70076892a105e3857b4a597",
@@ -335,6 +335,6 @@
     "workflows/vajra-security-audit.js": "344d4d35c86b6b251060a3b880cb20d1bbaba34e1f6e7e2f6f5e76047d7b55de",
     "scripts/desktop_approval.py": "e629d9d07a4d7d16d92ad03842d57829791e2f9b5c1d04e0213c397dc0d21a52",
     "tests/kb/run-desktop-approval.sh": "1b339168c02919e2379db22f417049db886a9925725ae65c48fe894e9333924f",
-    "tests/kb/desktop_approval_test.py": "1d09f74121f9fd17f1aa6524121d0040eb734df5fe55d1e028d4493d25ab89fc"
+    "tests/kb/desktop_approval_test.py": "f2b391b9906083b63f4b838f722e0beaa48a597568ad3b4833ec680611894399"
   }
 }

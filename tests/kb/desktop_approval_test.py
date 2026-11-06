@@ -447,7 +447,13 @@ fi2, _ = approval(K, "approve", store_i2, rid_i2, sha_i2, applies="on_topic")
 check("after the crash every desktop approval is refused (anchor ahead of the chain)",
       run(["approve", rid_i2, "--desktop-approval", fi2], PROJ)[0] != 0 and show(rid_i2).get("status") == "pending")
 check("desktop-repair needs a human at a terminal", run(["desktop-repair"], PROJ, ENVONLY)[0] == 3)
-check("desktop-repair by the human re-anchors", run(["desktop-repair"], PROJ, HUMAN)[0] == 0)
+check("desktop-repair refuses to overwrite an anchor that is ahead of the chain (possible rollback)",
+      run(["desktop-repair"], PROJ, HUMAN)[0] != 0 and kb._read_anchor() is not None)
+check("the refusal left every approval refused", run(["approve", rid_i2, "--desktop-approval", fi2], PROJ)[0] != 0)
+check("--accept-rollback also needs a real TTY", run(["desktop-repair", "--accept-rollback"], PROJ, ENVONLY)[0] == 3)
+check("desktop-repair --accept-rollback by the human re-anchors (audited as accepted)",
+      run(["desktop-repair", "--accept-rollback"], PROJ, HUMAN)[0] == 0
+      and '"accepted_rollback":true' in open(kb.Store("global").audit_log).read())
 check("approvals work again after the repair", run(["approve", rid_i2, "--desktop-approval", fi2], PROJ)[0] == 0)
 # an unanchored tail (the event was appended but the anchor was not updated) is refused too
 g_ = kb.Store("global")
@@ -456,7 +462,7 @@ with kb.Lock(g_.lock_path):
 rid_t, store_t2, sha_t = propose("Unanchored tail target")
 ft2, _ = approval(K, "approve", store_t2, rid_t, sha_t, applies="on_topic")
 check("an event newer than the anchor is refused, not ignored", run(["approve", rid_t, "--desktop-approval", ft2], PROJ)[0] != 0)
-run(["desktop-repair"], PROJ, HUMAN)
+check("a plain repair keeps an HMAC-verified unanchored tail (nothing is lost)", run(["desktop-repair"], PROJ, HUMAN)[0] == 0)
 check("repair accepts the HMAC-verified tail", run(["approve", rid_t, "--desktop-approval", ft2], PROJ)[0] == 0)
 
 # ---------------------------------------------------------------- audit: two logs, no text

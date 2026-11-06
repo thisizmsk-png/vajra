@@ -1084,26 +1084,63 @@ def cmd_desktop_enroll(a, out):
     return 0
 
 
+def _read_anchor():
+    """The verified anchor (seq, head), or None when it is missing, unreadable or its MAC is wrong."""
+    anchor = read_json(_anchor_path())
+    key = load_key()
+    try:
+        body = {"seq": anchor["seq"], "head": anchor["head"]}
+        if key is not None and _hmac.compare_digest(str(anchor.get("mac")), sign(key, body)):
+            return body
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
 def cmd_desktop_repair(a, out):
-    """Human only: after an interrupted write or a suspected truncation, re-anchor the ledger to its newest
-    desktop event. The chain itself is HMAC-verified, so nothing forged can enter by this path; what it cannot
-    undo is a truncation, which is why a person looks at the key list first."""
+    """Human only. Two different situations look alike from the outside:
+    - an interrupted write: the chain holds desktop events NEWER than the anchor. They are HMAC-verified, so the
+      anchor is moved forward over them; nothing is lost. This needs only the terminal confirmation.
+    - a rollback: the anchor is AHEAD of the chain, missing or invalid. Events may be gone (a revoke, used approval
+      ids), and moving the anchor would make that rollback permanent. It is refused unless the person passes
+      --accept-rollback after reading what is missing, and the audit says so."""
     g = Store("global")
     events, _st = g.read_events()
-    last = [e for e in events if str(e.get("op", "")).startswith("desktop_")][-1:]
-    print("Newest desktop event in the chain: %s" % (("seq %s %s" % (last[0].get("seq"), last[0].get("op"))) if last else "none"))
+    desk = [e for e in events if str(e.get("op", "")).startswith("desktop_")]
+    last = desk[-1] if desk else None
+    anchor = _read_anchor()
+    pos = next((k for k, e in enumerate(desk) if anchor and (e.get("seq"), e.get("hmac")) == (anchor["seq"], anchor["head"])), None)
+    if anchor is not None and pos is not None and pos == len(desk) - 1:
+        out.emit({"result": "consistent"}, "the desktop key ledger and its anchor agree; nothing to repair")
+        return 0
+    if pos is not None:  # anchor present in the chain with newer desktop events after it
+        tail = desk[pos + 1:]
+        print("Desktop events after the anchor (HMAC-verified, kept): %s" % ", ".join("seq %s %s" % (e.get("seq"), e.get("op")) for e in tail))
+        accepted = False
+    else:
+        missing = (int(anchor["seq"]) - int(events[-1]["seq"])) if anchor and events else None
+        print("The anchor is not in the ledger chain: %s." % (
+            ("the anchor is at seq %s, the chain ends at seq %s (%s event(s) missing; one missing event is consistent with an "
+             "interrupted write, more suggests a truncation)" % (anchor["seq"], events[-1]["seq"] if events else "none", missing))
+            if anchor else "the anchor is missing or invalid"))
+        print("Events a rollback can undo: a revoke, a key replacement, used approval ids. Restore the ledger if you can.")
+        if not a.accept_rollback:
+            raise Refused("refusing to overwrite the anchor; restore events.jsonl, or re-run with --accept-rollback "
+                          "after reading the above")
+        accepted = True
     if not tty_gate("desktop-repair", "the ledger anchor", "python3 vajra_kb.py desktop-repair"):
         return 3
     with Lock(g.lock_path):
         if last:
-            _write_anchor(last[0]["seq"], last[0]["hmac"])
+            _write_anchor(last["seq"], last["hmac"])
         else:
             try:
                 os.remove(_anchor_path())
             except OSError:
                 pass
-        g.audit("desktop_repaired", head=last[0]["hmac"] if last else None)
-    out.emit({"result": "repaired"}, "re-anchored the desktop key ledger")
+        g.audit("desktop_repaired", head=last["hmac"] if last else None, accepted_rollback=accepted,
+                old_anchor_seq=anchor["seq"] if anchor else None)
+    out.emit({"result": "repaired", "accepted_rollback": accepted}, "re-anchored the desktop key ledger")
     return 0
 
 
@@ -2122,6 +2159,7 @@ def build_parser():
     s.add_argument("--desktop-approval", action="append", metavar="FILE")
     s.set_defaults(fn=cmd_desktop_consume)
     s = sub.add_parser("desktop-repair", parents=[common], help="human only: re-anchor the desktop key ledger")
+    s.add_argument("--accept-rollback", action="store_true", help="the anchor is ahead of the chain: accept that events may be lost")
     s.set_defaults(fn=cmd_desktop_repair)
     s = sub.add_parser("desktop-revoke", parents=[common], help="human only: revoke the enrolled Vajra Desktop key")
     s.set_defaults(fn=cmd_desktop_revoke)
