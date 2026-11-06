@@ -165,10 +165,19 @@ reach_check() { # canonical dir, label -> block if a recursive read there reache
 # only through scripts/vajra_kb.py and scripts/vajra_tasks.py; reading is fine.
 
 PKIND=""
+# The shortcut above is valid only while no protected root was moved by a symlink under HOME.
+CLASSIFY_FAST=""
+if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
+   && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
 classify() { shopt -s nocasematch; classify_ "$1"; shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
   PKIND=""
+  # Every protected path is under the Claude dir or ~/Library, or is a settings file in a Claude dir:
+  # anything else is decided here, once, instead of by the loops below (a 4 KB command has ~4,000 words).
+  if [ -n "$CLASSIFY_FAST" ]; then
+    case "$p" in *.claude*|"$CHOME"/Library*) ;; *) return 0 ;; esac
+  fi
   if [[ "$p" == "$KEY" ]]; then PKIND=key; return 0; fi
   for r in "${ROOTS[@]}"; do
     if [[ "$p" == "$r" || "$p" == "$r"/* ]]; then PKIND=core; return 0; fi
