@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "../src/Shell";
+import { useRoute } from "../src/router";
 import { REGISTRY } from "../src/screens/registry";
 import { S } from "../strings";
 
@@ -34,6 +35,27 @@ describe("Shell", () => {
     fireEvent.click(screen.getByRole("link", { name: S.nav.home }));
     window.location.hash = "#/home";
     REGISTRY.crew = orig;
+    err.mockRestore();
+  });
+
+  it("resets a failed screen when only the params change", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const orig = REGISTRY.run;
+    REGISTRY.run = function Run() {
+      const [r] = useRoute();
+      if (r.params.slug === "a") throw new Error("boom");
+      return <p>run {r.params.slug}</p>;
+    };
+    window.location.hash = "#/run?slug=a";
+    render(<Shell />);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    act(() => {
+      window.location.hash = "#/run?slug=b";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("run b")).toBeTruthy();
+    REGISTRY.run = orig;
     err.mockRestore();
   });
 });

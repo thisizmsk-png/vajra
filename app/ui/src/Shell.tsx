@@ -18,7 +18,7 @@ export function Shell() {
         ))}
       </nav>
       <main className="v-shell__main">
-        <ErrorBoundary resetKey={route.screen}>
+        <ErrorBoundary resetKey={toHash(route.screen, route.params)}>
           <Screen />
         </ErrorBoundary>
       </main>
