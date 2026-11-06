@@ -8,7 +8,7 @@ export type Segment = { text: string; style: Style };
 
 export const PLAIN: Style = { fg: null, bold: false, dim: false, italic: false, underline: false };
 export const MAX_LINE = 8192; // code points kept per line; the rest is cut and marked
-export const MAX_SEQ = 4096; // an escape sequence longer than this is dropped (and scanning resumes after it)
+export const MAX_SEQ = 4096; // an escape sequence longer than this is dropped whole, through its real terminator, and never applied
 
 const ESC = 0x1b;
 const BEL = 0x07;
@@ -46,27 +46,31 @@ function applySgr(style: Style, params: string): Style {
   return s;
 }
 
-/** Skip an escape sequence that starts at `i` (a control string ends at BEL or ST). Returns [next index, sgr params|null]. */
+/**
+ * Skip an escape sequence that starts at `i` (a control string ends at BEL or ST). Returns [next index, sgr params|null].
+ * The scan is never cut at MAX_SEQ: a sequence that long is dropped through its real terminator (so no payload is drawn
+ * as text), just not applied. With no terminator in the line, everything to the end of the line is dropped.
+ */
 function skipEscape(raw: string, i: number): [number, string | null] {
   const next = raw[i + 1];
-  const limit = Math.min(raw.length, i + MAX_SEQ);
   if (next === "[") {
     let j = i + 2;
-    while (j < limit && raw.charCodeAt(j) >= 0x30 && raw.charCodeAt(j) <= 0x3f) j++; // parameter bytes
-    while (j < limit && raw.charCodeAt(j) >= 0x20 && raw.charCodeAt(j) <= 0x2f) j++; // intermediate bytes
-    if (j < limit && raw.charCodeAt(j) >= 0x40 && raw.charCodeAt(j) <= 0x7e) {
-      return [j + 1, raw[j] === "m" ? raw.slice(i + 2, j) : null];
+    while (j < raw.length && raw.charCodeAt(j) >= 0x30 && raw.charCodeAt(j) <= 0x3f) j++; // parameter bytes
+    while (j < raw.length && raw.charCodeAt(j) >= 0x20 && raw.charCodeAt(j) <= 0x2f) j++; // intermediate bytes
+    if (j < raw.length && raw.charCodeAt(j) >= 0x40 && raw.charCodeAt(j) <= 0x7e) {
+      const sgr = raw[j] === "m" && j + 1 - i <= MAX_SEQ ? raw.slice(i + 2, j) : null;
+      return [j + 1, sgr];
     }
-    return [Math.max(j, i + 2), null]; // malformed or too long: drop what was scanned
+    return [Math.max(j, i + 2), null]; // malformed (or cut off by the end of the line): drop what was scanned
   }
   if (next === "]" || next === "P" || next === "X" || next === "^" || next === "_") {
     // OSC (incl. OSC 8 hyperlinks and OSC 52 clipboard), DCS, SOS, PM, APC: dropped through BEL or ST.
-    for (let j = i + 2; j < limit; j++) {
+    for (let j = i + 2; j < raw.length; j++) {
       const c = raw.charCodeAt(j);
       if (c === BEL) return [j + 1, null];
       if (c === ESC && raw[j + 1] === "\\") return [j + 2, null];
     }
-    return [limit, null]; // unterminated: everything to the limit is dropped
+    return [raw.length, null]; // unterminated: the rest of the line is the payload
   }
   return [Math.min(raw.length, i + 2), null]; // a two-character escape (ESC c, ESC =, ...)
 }

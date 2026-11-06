@@ -32,11 +32,26 @@ describe("ANSI sanitizer (NFR-SEC-3)", () => {
 
   it("drops an unterminated control string instead of printing it", () => {
     expect(text(`before${E}]52;c;AAAA`)).toBe("before");
-    // A control string longer than the cap is cut at the cap; the rest is shown as plain, harmless text.
-    const long = text(`before${E}]52;c;${"A".repeat(MAX_SEQ * 2)}tail`);
-    expect(long.startsWith("before")).toBe(true);
-    expect(long.length).toBeLessThan(MAX_SEQ * 2);
-    expect(long.includes(E)).toBe(false);
+    // No terminator in the line: the rest of the line is the payload and nothing of it is drawn.
+    expect(text(`before${E}]52;c;${"A".repeat(MAX_SEQ * 2)}tail`)).toBe("before");
+  });
+
+  it("drops an over-limit sequence through its real terminator, drawing none of the payload", () => {
+    const payload = "X".repeat(MAX_SEQ + 904);
+    expect(text(`${E}]0;${payload}\u0007ok`)).toBe("ok");
+    expect(text(`${E}]0;${payload}${E}\\ok`)).toBe("ok");
+    expect(text(`a${E}P${payload}${E}\\b`)).toBe("ab");
+    // An over-long CSI is dropped to its final byte; an over-long SGR is not applied.
+    expect(text(`${E}[${"1;".repeat(MAX_SEQ)}Hok`)).toBe("ok");
+    const sgr = sanitizeLine(`${E}[${"0;".repeat(MAX_SEQ)}31mred`);
+    expect(sgr.segments.map((x) => [x.text, x.style.fg])).toEqual([["red", null]]);
+  });
+
+  it("stays linear on many unterminated or over-long sequences", () => {
+    const t0 = Date.now();
+    text(`${E}]`.repeat(20000));
+    text(`${E}[1;`.repeat(20000));
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   it("drops cursor movement, erase, mode and other CSI sequences", () => {
