@@ -887,9 +887,11 @@ def pending_bytes(store, rid):
     try:
         fd = os.open(store.pending_path(rid), os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as f:
-            raw = f.read(1_000_000)
+            raw = f.read(1_000_001)
     except OSError:
         raise Refused("no pending kb record %s" % rid)
+    if len(raw) > 1_000_000:  # an approval may only bind a complete file
+        raise Refused("pending kb record %s is too large" % rid)
     return sha256_hex(raw), raw
 
 

@@ -262,6 +262,15 @@ check("a key revoked between verification and use: refused, approval not consume
       rcw != 0 and aw["id"] not in used_ids() and show(rid_w).get("status") == "pending")
 run(["desktop-enroll", K.pub], PROJ, HUMAN)
 
+# An oversized pending file is refused, never approved from its first megabyte.
+rid_o, store_o, _s = propose("Oversized pending target")
+po = os.path.join(kb.KB_ROOT, store_o, "pending", rid_o + ".json")
+with open(po, "a") as fo:
+    fo.write(" " * 1_100_000)
+fo_, _ = approval(K, "approve", store_o, rid_o, hashlib.sha256(open(po, "rb").read(1_000_000)).hexdigest(), applies="on_topic")
+check("an oversized pending file is refused", run(["approve", rid_o, "--desktop-approval", fo_], PROJ)[0] == 3 and os.path.exists(po))
+os.remove(po)
+
 # race: four processes use one approval at once; exactly one wins.
 rid_c, store_c, sha_c = propose("Race target")
 fc, ac = approval(K, "approve", store_c, rid_c, sha_c, applies="on_topic")
