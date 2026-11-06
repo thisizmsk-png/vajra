@@ -452,6 +452,11 @@ impl App {
         let path = PathBuf::from(ev.get("path")?.as_str()?);
         let head = ev.get("head").and_then(Value::as_str).map(String::from);
         let archive_dir = self.allow().ok()?.campaigns_dir().join(slug).join("evidence");
+        // `starts_with` is lexical: a path that climbs out with `..` is never treated as archived.
+        let climbs = path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+        if climbs {
+            return None;
+        }
         if path.starts_with(&archive_dir) {
             return Some(Request::CheckEvidence { path, head, archived: Some(slug.into()), repo: None });
         }

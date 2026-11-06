@@ -80,3 +80,17 @@ fn a_stop_without_a_resume_survives_a_restart() {
     assert_eq!(again.last_stop.len(), 1);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_second_stop_never_rewrites_or_loses_the_first() {
+    let (mut s, dir) = svc();
+    let first = s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert_eq!(files(&dir, "stops"), 1);
+    // With the ledger broken, a repeated stop must neither fail by deleting the stop nor replace it.
+    s.ledger.break_for_test();
+    let again = s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert_eq!(again["action_id"], first["action_id"], "the existing stop is reported, not a new one");
+    assert_eq!(again["already_stopped"], true);
+    assert_eq!(files(&dir, "stops"), 1, "an enforced stop must survive a failed second stop");
+    let _ = fs::remove_dir_all(&dir);
+}
