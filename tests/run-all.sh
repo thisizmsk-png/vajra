@@ -32,6 +32,21 @@ SUITES="$(find tests -type f -name 'run-*.sh' ! -name 'run-all.sh' ! -path '*/no
 [ -f tests/hmac-contract.sh ] && SUITES="$SUITES
 tests/hmac-contract.sh"
 
+# Tripwire: shell suites get a decoy HOME, and the real home's protected files are
+# fingerprinted before and after. Any change fails the run (tests/lib/home-guard.sh).
+. "$REPO/tests/lib/home-guard.sh"
+REAL_HOME="$HOME"
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) export PLAYWRIGHT_BROWSERS_PATH="$REAL_HOME/Library/Caches/ms-playwright" ;;
+    *) export PLAYWRIGHT_BROWSERS_PATH="${XDG_CACHE_HOME:-$REAL_HOME/.cache}/ms-playwright" ;;
+  esac
+fi
+HOME_BEFORE="$(home_fp "$REAL_HOME")"
+DECOY_HOME="$(mktemp -d)"
+trap 'rm -rf "$DECOY_HOME"' EXIT
+export HOME="$DECOY_HOME"
+
 for t in $SUITES; do
   case "$t" in *"$FILTER"*) ;; *) continue ;; esac
   section "$t"
@@ -43,6 +58,13 @@ for t in $SUITES; do
     *) FAILED=1; FAILED_SUITES="$FAILED_SUITES $t" ;;
   esac
 done
+
+export HOME="$REAL_HOME"
+if [ "$HOME_BEFORE" != "$(home_fp "$REAL_HOME")" ]; then
+  echo "FAIL: a test changed the real home (Vajra state, Claude settings or agents):"
+  diff <(printf '%s\n' "$HOME_BEFORE") <(home_fp "$REAL_HOME")
+  FAILED=1; FAILED_SUITES="$FAILED_SUITES real-home-tripwire"
+fi
 
 printf '\n========================================\n'
 echo "suites run: $RAN"

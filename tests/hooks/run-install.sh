@@ -28,7 +28,7 @@ mkdir -p "$SKILL"
 for d in hooks scripts config workflows atman; do [ -d "$REPO/$d" ] && cp -R "$REPO/$d" "$SKILL/"; done
 cp "$REPO/SKILL.md" "$SKILL/"
 find "$SKILL" -name '__pycache__' -type d -prune -exec rm -r {} + 2>/dev/null
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 [ -f "$SKILL/manifest.json" ]; check "generate-manifest writes manifest.json" $?
 [ ! -f "$SKILL/manifest.json.sig" ]; check "generate-manifest ships no manifest.json.sig" $?
 
@@ -66,8 +66,14 @@ jq -e '.hooks.PreToolUse[] | .hooks[] | select(.command == "/usr/local/bin/my-gu
 jq -e '.hooks.Stop[0].hooks[0].command == "say done"' "$SETTINGS" >/dev/null; check "user's Stop hook kept" $?
 for ev in PreToolUse PostToolUse PostToolUseFailure SessionStart PreCompact UserPromptSubmit; do
   n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("/.claude/skills/vajra/hooks/"))] | length' "$SETTINGS")"
-  [ "$n" = 1 ]; check "registered once: $ev" $?
+  want=1; case "$ev" in PreToolUse|PostToolUse|PostToolUseFailure) want=2 ;; esac  # + desktop-control.sh
+  [ "$n" = "$want" ]; check "registered once: $ev" $?
 done
+for ev in PreToolUse PostToolUse PostToolUseFailure; do
+  n="$(jq --arg ev "$ev" '[.hooks[$ev][]?.hooks[]? | select(.command | contains("desktop-control.sh"))] | length' "$SETTINGS")"
+  [ "$n" = 1 ]; check "desktop-control.sh registered once: $ev" $?
+done
+[ -x "$SKILL/hooks/desktop-control.sh" ]; check "desktop-control.sh installed and executable" $?
 jq -e '[.hooks.PreToolUse[].hooks[] | select(.command | contains("pre-tool-use.sh"))][0].onFailure == "block"' "$SETTINGS" >/dev/null; check "guard registered with onFailure: block" $?
 jq -e '[.hooks.PostToolUse[].hooks[]][0].async == true' "$SETTINGS" >/dev/null; check "PostToolUse registered async" $?
 [ -s "$VS/manifest.sig" ]; check "manifest signed locally" $?
@@ -146,7 +152,7 @@ printf '%s' "$out" | grep -q "NOT signed"; check "install refuses to sign a mism
 [ ! -s "$VS/manifest.sig" ]; check "no signature after refused sign" $?
 [ "$(cat "$VS/.hmac-key")" = "$KEY1" ]; check "re-install keeps the existing key" $?
 # Operator accepts the change: regenerate (signs) and the flag clears.
-bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
+VAJRA_OPERATOR_SIGN=1 bash "$SKILL/scripts/generate-manifest.sh" >/dev/null 2>&1
 bash "$SKILL/hooks/session-start.sh" --check >/dev/null 2>&1; check "regenerated manifest verifies" $?
 
 # --- empty key is replaced ---

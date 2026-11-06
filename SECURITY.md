@@ -90,7 +90,11 @@ entry for the key in `config/sandbox.json`; see "What is not guaranteed".
 `scripts/*.js` (with `bash`, `python3` or `node`) is allowed, with these
 exceptions that only the operator may run, in their own terminal (approve and
 reject need a TTY): `install.sh`, `install-skills.sh`, `generate-manifest.sh`,
-and `atman.sh approve|reject`. Setting `VAJRA_ATMAN_ASSUME_HUMAN` from a tool call is
+and `atman.sh approve|reject`. These are matched by file name, so a copy in a
+worktree or clone is blocked too, however it is invoked (`bash`, `sh`, `./`, `env`).
+`generate-manifest.sh` also signs only the installed skill and only with a TTY on
+stdin or `VAJRA_OPERATOR_SIGN=1`; any other copy writes its `manifest.json` and stops.
+Setting `VAJRA_ATMAN_ASSUME_HUMAN` or `VAJRA_OPERATOR_SIGN` from a tool call is
 blocked. Running hook scripts directly is blocked.
 
 **Dangerous commands.** Recursive deletes of `/`, system roots, HOME or the
