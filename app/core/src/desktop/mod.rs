@@ -241,9 +241,26 @@ impl App {
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
-    pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
+    /// The workflow takes only a commit sha, so a branch or ref is resolved
+    /// through the read-only git bridge first.
+    fn resolve_base(&self, cwd: &Path, base: &str) -> Result<String, Value> {
+        if argv::is_sha(base) {
+            return Ok(base.to_string());
+        }
+        let args = vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), format!("{base}^{{commit}}")];
+        let out = self.bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).map_err(|e| fail("io_error", e))?;
+        let sha = out.stdout.trim();
+        if out.code == Some(0) && sha.len() == 40 && argv::is_sha(sha) {
+            Ok(sha.to_string())
+        } else {
+            Err(invalid("base", "is not a branch or commit in this repository"))
+        }
+    }
+
+    pub fn start_run(&self, mut input: RunInput, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
+        input.base = self.resolve_base(&cwd, &input.base)?;
         let now = ids::unix_now();
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let run_id = ids::run_id_at(now);
@@ -417,11 +434,29 @@ impl App {
             .and_then(|ts| ts.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(task_id)))
             .cloned();
         let Some(task) = found else { return Err(fail("task_not_found", task_id)) };
-        let evidence = match self.bridge.run(&Request::CheckEvidence { slug: slug.into(), task_id: task_id.into() }) {
-            Ok(o) => json!({"code": o.code, "result": serde_json::from_str::<Value>(o.stdout.trim()).ok()}),
-            Err(e) => json!({"code": null, "error": e.to_string()}),
+        let evidence = match self.evidence_request(slug, &task) {
+            None => Value::Null,
+            Some(req) => match self.bridge.run(&req) {
+                Ok(o) => json!({"code": o.code, "result": serde_json::from_str::<Value>(o.stdout.trim()).ok()}),
+                Err(e) => json!({"code": null, "error": e.to_string()}),
+            },
         };
         Ok(json!({"task": task, "stale": snap.stale, "evidence": evidence}))
+    }
+
+    /// An archived bundle (under the campaign's evidence dir) is checked
+    /// without a repo; live evidence is checked in the repo of the run that
+    /// made it. `None` when the task has no evidence path or no repo is known.
+    fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
+        let ev = task.get("evidence")?;
+        let path = PathBuf::from(ev.get("path")?.as_str()?);
+        let head = ev.get("head").and_then(Value::as_str).map(String::from);
+        let archive_dir = self.allow().ok()?.campaigns_dir().join(slug).join("evidence");
+        if path.starts_with(&archive_dir) {
+            return Some(Request::CheckEvidence { path, head, archived: Some(slug.into()), repo: None });
+        }
+        let repo = lock(&self.runs).values().find(|r| r.campaign == slug)?.cwd.clone();
+        Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
     pub fn diff(&self, cwd: &str, base: &str) -> Res {

@@ -275,7 +275,7 @@ fn sessions_build_run_argv_spawns_as_argv() {
     let input = argv::RunInput {
         ask: "fix it; rm -rf / $(whoami)".into(),
         max_rounds: 1,
-        base: "main".into(),
+        base: "ea73cb05d639b945e21c667e17103e56404861a8".into(),
         max_in_flight: 2,
         campaign: None,
     };

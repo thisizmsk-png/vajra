@@ -47,8 +47,17 @@ fn argv_for_each_fixed_request() {
     let p = b.run(&Request::CampaignProgress { slug: "deliver-1".into(), text: "hi; rm -rf /".into() }).unwrap();
     assert_eq!(p.stdout, "[progress]\n[hi; rm -rf /]\n[--campaign]\n[deliver-1]\n");
 
-    let e = b.run(&Request::CheckEvidence { slug: "c1".into(), task_id: "c1.t4".into() }).unwrap();
-    assert!(e.stdout.contains("vajra_tasks.py]\n[check-evidence]\n[c1.t4]\n[--campaign]\n[c1]"));
+    let ev = |head: Option<&str>, archived: Option<&str>, path: &str| Request::CheckEvidence {
+        path: path.into(), head: head.map(Into::into), archived: archived.map(Into::into), repo: None,
+    };
+    let e = b.run(&ev(Some("abc1234"), None, "/r/evidence.json")).unwrap();
+    assert!(e.stdout.contains("vajra_tasks.py]\n[check-evidence]\n[/r/evidence.json]\n[--head]\n[abc1234]\n[--json]\n"), "{}", e.stdout);
+    let h40 = "ea73cb05d639b945e21c667e17103e56404861a8";
+    let e = b.run(&ev(Some(h40), Some("c1"), "/r/c1/evidence/e1/evidence.json")).unwrap();
+    assert!(e.stdout.contains(&format!("[--head]\n[{h40}]\n[--archived]\n[c1]\n[--json]\n")), "{}", e.stdout);
+    for bad in [ev(None, None, "relative.json"), ev(Some("--evil"), None, "/r/e.json"), ev(None, Some("../x"), "/r/e.json")] {
+        assert!(matches!(b.run(&bad), Err(BridgeError::Invalid(_))));
+    }
 
     let repo = tmp();
     let k = b.run(&Request::KbSearch { query: "--help $(x)".into(), k: 5, repo: repo.clone() }).unwrap();
@@ -278,4 +287,25 @@ fn preflight_missing_tool_row_fails() {
     assert!(!get(&rows, "jq").ok);
     assert_eq!(get(&rows, "jq").fix, "brew install jq");
     assert!(!start_enabled(&rows));
+}
+
+/// The real checker, not a fake python. Skipped on a base without
+/// `check-evidence` (it arrives with the M1 engine).
+#[test]
+fn check_evidence_runs_against_the_real_vajra_tasks() {
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let src = fs::read_to_string(scripts.join("vajra_tasks.py")).unwrap();
+    if !src.contains("def cmd_check_evidence") {
+        eprintln!("skipped: this tree's vajra_tasks.py has no check-evidence");
+        return;
+    }
+    let d = tmp();
+    let ev = d.join("evidence.json");
+    fs::write(&ev, "{}").unwrap();
+    let b = Bridge::new(scripts);
+    let o = b.run(&Request::CheckEvidence { path: ev, head: None, archived: None, repo: Some(d.clone()) }).unwrap();
+    let v: serde_json::Value = serde_json::from_str(o.stdout.trim()).unwrap_or_else(|_| panic!("{} / {}", o.stdout, o.stderr));
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert_eq!(v["green"], false);
+    assert!(v["reasons"].as_array().is_some_and(|r| !r.is_empty()));
 }

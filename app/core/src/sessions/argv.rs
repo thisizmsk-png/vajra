@@ -17,7 +17,8 @@ pub struct RunInput {
     pub ask: String,
     /// 1..=3
     pub max_rounds: u32,
-    /// Branch or commit to build on.
+    /// Branch or commit to build on. `start_run` resolves it to a sha; the argv
+    /// builder takes only a sha.
     pub base: String,
     /// 1..=16, sent as `maxInFlight`.
     pub max_in_flight: u32,
@@ -101,8 +102,10 @@ pub fn build_run_argv_at(
     validate(input)?;
     check_nonce(steer_nonce)?;
     check_session_id(session_id)?;
+    if !is_sha(&input.base) {
+        return Err(bad("base", "must be a commit sha (7 to 40 hex); resolve a branch first"));
+    }
     let run_id = ids::run_id_at(unix_secs);
-    let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
 
     let mut json = String::with_capacity(input.ask.len() + 256);
     json.push_str("{\"ask\":");
@@ -115,8 +118,11 @@ pub fn build_run_argv_at(
     json.push_str(",\"base\":");
     push_json_str(&mut json, &input.base);
     json.push_str(&format!(",\"maxInFlight\":{}", input.max_in_flight));
-    json.push_str(",\"campaign\":");
-    push_json_str(&mut json, &campaign);
+    // vajra-deliver.js treats any `campaign` as a resume; a fresh run names it itself.
+    if let Some(c) = &input.campaign {
+        json.push_str(",\"campaign\":");
+        push_json_str(&mut json, c);
+    }
     json.push_str(",\"steer_nonce\":");
     push_json_str(&mut json, steer_nonce);
     json.push('}');
@@ -127,6 +133,11 @@ pub fn build_run_argv_at(
         session_id.to_string(),
         format!("/vajra-deliver {json}"),
     ])
+}
+
+/// What vajra-deliver.js accepts as `base`: `/^[0-9a-f]{7,40}$/`.
+pub fn is_sha(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A git ref or commit: ref-safe chars, no leading `-` (would read as an

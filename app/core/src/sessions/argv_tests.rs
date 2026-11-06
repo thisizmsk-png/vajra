@@ -3,13 +3,14 @@ use super::*;
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 // 2026-11-05 12:30:59 UTC
+const SHA: &str = "ea73cb05d639b945e21c667e17103e56404861a8";
 const T: u64 = 1_793_881_859;
 
 fn input() -> RunInput {
     RunInput {
         ask: "add a dark mode toggle".into(),
         max_rounds: 2,
-        base: "main".into(),
+        base: SHA.into(),
         max_in_flight: 4,
         campaign: None,
     }
@@ -34,9 +35,15 @@ fn build_run_argv_exact_shape() {
         argv[3],
         "/vajra-deliver {\"ask\":\"add a dark mode toggle\",\"run_id\":\"20261105-1230\",\
          \"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"max_rounds\":2,\
-         \"base\":\"main\",\"maxInFlight\":4,\"campaign\":\"deliver-20261105-1230\",\
+         \"base\":\"ea73cb05d639b945e21c667e17103e56404861a8\",\"maxInFlight\":4,\
          \"steer_nonce\":\"0123456789abcdef0123456789abcdef\"}"
     );
+}
+
+#[test]
+fn build_run_argv_fresh_start_omits_campaign() {
+    // Any `campaign` key is a resume to vajra-deliver.js; it must name a fresh run itself.
+    assert!(!build(&input()).unwrap()[3].contains("campaign"));
 }
 
 #[test]
@@ -112,17 +119,13 @@ fn build_run_argv_empty_ask_names_field() {
 
 #[test]
 fn build_run_argv_bad_base_names_field() {
-    for bad in ["", "-x", "--upload-pack=evil", "a b", "a\nb", "a;b"] {
+    // validate() accepts refs for the form; the argv takes only what the workflow accepts.
+    for bad in ["", "-x", "--upload-pack=evil", "a b", "a\nb", "a;b", "main", "origin/main", "abc123", "EA73CB0", &"a".repeat(41)] {
         let mut i = input();
         i.base = bad.into();
         assert_eq!(field(&i), "base", "base {bad:?}");
     }
-    for ok in [
-        "main",
-        "feature/x-1.2",
-        "origin/main",
-        "ea73cb05d639b945e21c667e17103e56404861a8",
-    ] {
+    for ok in ["abcdef0", SHA] {
         let mut i = input();
         i.base = ok.into();
         assert!(build(&i).is_ok(), "base {ok:?}");
@@ -196,4 +199,14 @@ fn resume_argv_carries_the_rotated_nonce() {
     assert_eq!(build_resume_argv(SID, "../x", NONCE).unwrap_err().field, "campaign");
     assert_eq!(build_resume_argv(SID, "deliver-1", "short").unwrap_err().field, "steer_nonce");
     assert_eq!(build_resume_argv("--last", "deliver-1", NONCE).unwrap_err().field, "session_id");
+}
+
+#[test]
+fn contract_matches_vajra_deliver_js() {
+    let js = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../workflows/vajra-deliver.js")).unwrap();
+    // base: the workflow accepts exactly 7 to 40 lowercase hex.
+    assert!(js.contains("const SHA_RE = /^[0-9a-f]{7,40}$/"));
+    // campaign: any value is a resume; a fresh run is named deliver-<run_id> by the workflow.
+    assert!(js.contains("const RESUME = given(A.campaign)"));
+    assert!(js.contains("const CAMPAIGN = RESUME || `deliver-${RUN}`"));
 }

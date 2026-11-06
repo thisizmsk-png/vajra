@@ -213,7 +213,9 @@ fn aggregate(children: &[Node]) -> Status {
 pub fn build(input: &CrewInput) -> Node {
     let mut tasks: Vec<(Node, Vec<(u32, Node)>)> = Vec::new();
     for t in input.tasks.and_then(|v| v.get("tasks")).and_then(Value::as_array).into_iter().flatten() {
-        let Some(tid) = t.get("id").and_then(Value::as_str) else { continue };
+        let Some(gid) = t.get("id").and_then(Value::as_str) else { continue };
+        // Graph ids are `<run_id>.t1`; worker labels and branches carry the run-local `t1`.
+        let tid = gid.strip_prefix(input.run_id).and_then(|r| r.strip_prefix('.')).unwrap_or(gid);
         let owner = t.get("owner_agent").and_then(Value::as_str).unwrap_or("");
         let mut n = Node::group(format!("task:{tid}"), NodeKind::Task, format!("{} · {tid}", ui_name(owner)));
         n.engine_id = Some(owner.to_string());

@@ -17,7 +17,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum Request {
     CampaignVerify { slug: String },
     CampaignProgress { slug: String, text: String },
-    CheckEvidence { slug: String, task_id: String },
+    /// `check-evidence <path> [--head SHA] --json`, run in `repo`; or, for an
+    /// archived bundle, `--archived <slug> --head <40-hex>` with no repo.
+    CheckEvidence { path: PathBuf, head: Option<String>, archived: Option<String>, repo: Option<PathBuf> },
     KbSearch { query: String, k: u32, repo: PathBuf },
     Doctor,
     /// `args` starts with a read-only subcommand.
@@ -86,17 +88,27 @@ impl Bridge {
                 vec!["progress".into(), text.clone(), "--campaign".into(), name(slug)?],
                 None,
             ),
-            Request::CheckEvidence { slug, task_id } => (
-                self.python.clone(),
-                vec![
+            Request::CheckEvidence { path, head, archived, repo } => {
+                if !path.is_absolute() {
+                    return Err(BridgeError::Invalid("evidence path must be absolute".into()));
+                }
+                let mut argv = vec![
                     script("vajra_tasks.py").to_string_lossy().into_owned(),
                     "check-evidence".into(),
-                    name(task_id)?,
-                    "--campaign".into(),
-                    name(slug)?,
-                ],
-                None,
-            ),
+                    path.to_string_lossy().into_owned(),
+                ];
+                if let Some(h) = head {
+                    if !(7..=40).contains(&h.len()) || !h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                        return Err(BridgeError::Invalid(format!("bad head: {h:?}")));
+                    }
+                    argv.extend(["--head".into(), h.clone()]);
+                }
+                if let Some(slug) = archived {
+                    argv.extend(["--archived".into(), name(slug)?]);
+                }
+                argv.push("--json".into());
+                (self.python.clone(), argv, repo.clone())
+            }
             Request::KbSearch { query, k, repo } => {
                 if query.trim().is_empty() {
                     return Err(BridgeError::Invalid("empty query".into()));

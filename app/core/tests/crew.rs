@@ -331,6 +331,19 @@ mod crew {
     // ---- tree ----
 
     #[test]
+    fn crew_tree_matches_run_prefixed_graph_ids() {
+        let tasks = json!({"tasks": [{"id": format!("{RUN}.t1"), "owner_agent": "bhima", "status": "in_progress"}]});
+        let workers = vec![worker("a1", "bhima", "task.t1.r1", Status::InProgress)];
+        let signals = Signals::default();
+        let root = tree::build(&CrewInput {
+            run_id: RUN, lead: None, run_status: Status::InProgress, tasks: Some(&tasks), workers: &workers, signals: &signals,
+        });
+        let all = format!("{root:?}");
+        assert_eq!(all.matches("kind: Task").count(), 1, "one task node, not a status-less duplicate: {all}");
+        assert!(all.contains("in_progress") || all.contains("InProgress"));
+    }
+
+    #[test]
     fn crew_tree_shape_lead_run_tasks_rounds_verification_run_steps() {
         let tasks = json!({"tasks": [
             {"id": "t1", "owner_agent": "bhima", "status": "in_progress"},

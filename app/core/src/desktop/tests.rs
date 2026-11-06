@@ -85,7 +85,7 @@ fn one_active_run_at_a_time() {
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let cwd = t.0.to_string_lossy().to_string();
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None };
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     assert_eq!(code(&app.resume_run(other, "20261105-1231", "c2", &cwd).unwrap_err()), "run_active");
@@ -437,4 +437,24 @@ fn a_resumed_pty_redacts_the_launch_nonce_too() {
     let l = app.bus.tail(&format!("run-{sid}"), 0, MAX_PAGE);
     assert!(l.lines.iter().any(|x| x.text.contains("replay")), "{:?}", l.lines);
     assert!(l.lines.iter().all(|x| !x.text.contains(&old)), "old nonce shown on resume");
+}
+
+#[test]
+fn start_run_resolves_a_branch_to_a_sha_through_git() {
+    let t = Tmp::new();
+    let app = t.app();
+    let git = |a: &[&str]| {
+        let o = std::process::Command::new("/usr/bin/git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"]).args(a).current_dir(&t.0).output().unwrap();
+        assert!(o.status.success(), "{a:?}");
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let sha = git(&["rev-parse", "HEAD"]);
+    assert_eq!(app.resolve_base(&t.0, "main").unwrap(), sha);
+    assert_eq!(app.resolve_base(&t.0, &sha).unwrap(), sha);
+    for bad in ["nope", "main..x", "-x"] {
+        assert_eq!(code(&app.resolve_base(&t.0, bad).unwrap_err()), "invalid_args", "{bad}");
+    }
 }
