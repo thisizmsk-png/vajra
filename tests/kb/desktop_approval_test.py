@@ -242,8 +242,8 @@ d["title"] = 5
 json.dump(d, open(pt, "w"))
 ft_, _ = approval(K, "approve", store_t, rid_t, hashlib.sha256(open(pt, "rb").read()).hexdigest(), applies="on_topic")
 check("non-string title in a pending file: refused, not a crash", run(["approve", rid_t, "--desktop-approval", ft_], PROJ)[0] == 3)
-for field, bad in (("tags", 7), ("scope", {"paths": 7})):
-    rid_m, store_m, _s = propose("Quokka harbor ledger" if field == "tags" else "Violet anvil sparrow")
+for field, bad in (("tags", 7), ("scope", {"paths": 7}), ("scope", 7), ("source", [1])):
+    rid_m, store_m, _s = propose("Quokka harbor ledger %s %s" % (field, repr(bad)[:4]) if True else "")
     pm = os.path.join(kb.KB_ROOT, store_m, "pending", rid_m + ".json")
     dm = json.load(open(pm))
     dm[field] = bad
@@ -296,6 +296,16 @@ kb.pending_bytes = counting
 show(rid_s)
 kb.pending_bytes = real_pb
 check("show reads the pending file once", calls_.count(rid_s) == 1)
+
+# A FIFO in place of a pending file neither hangs a listing nor an approval.
+rid_f, store_f, _s = propose("Named pipe plant target")
+pf = os.path.join(kb.KB_ROOT, store_f, "pending", rid_f + ".json")
+os.remove(pf)
+os.mkfifo(pf)
+check("pending --json with a FIFO planted does not hang", run(["pending", "--json"], PROJ)[0] == 0)
+ffi, _ = approval(K, "approve", store_f, rid_f, "0" * 64, applies="on_topic")
+check("approving a FIFO is refused, not blocked", run(["approve", rid_f, "--desktop-approval", ffi], PROJ)[0] != 0)
+os.remove(pf)
 
 # race: four processes use one approval at once; exactly one wins.
 rid_c, store_c, sha_c = propose("Race target")

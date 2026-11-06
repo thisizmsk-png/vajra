@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -262,7 +263,11 @@ def append_line(path, line):
 
 def read_json(path, default=None):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # Regular files only, never blocking: a FIFO planted in a pending dir must not hang a listing.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return default
             return json.load(f)
     except (OSError, ValueError):
         return default
@@ -885,8 +890,11 @@ def record_sha(r):
 def pending_bytes(store, rid):
     """(sha256, bytes) of a pending record file, read once (no link followed)."""
     try:
-        fd = os.open(store.pending_path(rid), os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK so a FIFO planted in place of the file cannot block the open or the read.
+        fd = os.open(store.pending_path(rid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise Refused("pending kb record %s is not a regular file" % rid)
             raw = f.read(1_000_001)
     except OSError:
         raise Refused("no pending kb record %s" % rid)
@@ -1618,6 +1626,9 @@ def approved_record(store, p, rid, applies, edit=None):
     """The active record built from a pending one, re-gated: pending files are not signed, and edited
     text (E9) goes through the write gate like any new text."""
     title, body = (edit["title"], edit["body"]) if edit else (p.get("title", ""), p.get("body", ""))
+    if not all(isinstance(p.get(k) or {}, dict) for k in ("scope", "source")):
+        store.audit("refused", op="approve", id=rid, reason="malformed record", sha256=sha256_hex(canon(p)))
+        raise Refused("pending record failed the write gate: malformed")
     scope = dict(p.get("scope") or {})
     if edit:
         scope["paths"] = edit["paths"]
