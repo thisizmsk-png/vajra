@@ -13,7 +13,7 @@ use crate::bus::{self, Bus, Config, Event, Subscriber};
 use crate::control::service::{Actor, ControlError, Service, WorkerInfo};
 use crate::adapter::{Engine, adapter_for};
 use crate::control::ledger::Ledger;
-use crate::ids::{self, valid_run_id};
+use crate::ids;
 use crate::lock;
 use crate::crew::record::{JournalEntry, Meta, parse_journal, parse_meta};
 use crate::crew::redact::Redactor;
@@ -81,6 +81,8 @@ pub struct App {
     /// Held from the one-active-run check until the run is recorded, so two
     /// Start clicks cannot both pass the check.
     launching: Mutex<()>,
+    /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
+    issued: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -106,6 +108,7 @@ impl App {
             runs: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            issued: Mutex::new(Default::default()),
             log,
         })
     }
@@ -138,8 +141,10 @@ impl App {
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
     fn fresh_run_id(&self, now: u64) -> (u64, String) {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
-        (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)))
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
+        lock(&self.issued).insert(pick.1.clone());
+        pick
     }
 
     // ---------------------------------------------------------------- start
@@ -193,9 +198,12 @@ impl App {
     /// its crew view still reads its workers.
     pub fn reap_runs(&self) {
         // A launch in flight owns the session it just took; it reaps itself.
-        if let Err(std::sync::TryLockError::WouldBlock) = self.launching.try_lock() {
-            return;
-        }
+        // The guard stays bound until `reap_locked` returns, so a launch cannot install a session in between.
+        let _guard = match self.launching.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        };
         self.reap_locked();
     }
 
@@ -286,20 +294,20 @@ impl App {
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
-    pub fn resume_run(&self, session_id: &str, run_id: &str, campaign: &str, cwd: &str) -> Res {
+    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
         }
-        if !valid_run_id(run_id) {
-            return Err(invalid("run_id", "must be YYYYMMDD-HHMM"));
-        }
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
+        // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
+        let (_, run_id) = self.fresh_run_id(ids::unix_now());
+        let run_id = run_id.as_str();
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
-            claude.resume_argv(session_id, campaign, n).map_err(invalid_input)
+            claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
         }, true)?;
         self.note("run_resumed", &[]);
         Ok(r)
@@ -323,9 +331,10 @@ impl App {
             workers
                 .iter()
                 .map(|w| {
-                    let t = self.bus.tail(&worker_stream(&w.agent_id), 0, INSPECT_BYTES);
+                    // The newest retained output, not the oldest: an inspector needs the current failure or question.
+                    let recent = self.bus.recent(&worker_stream(&w.agent_id), INSPECT_BYTES);
                     let cwd = tr.get(&w.agent_id).and_then(|t| t.cwd()).map(str::to_string);
-                    (w.agent_id.clone(), (cwd, t.lines.iter().map(|l| l.text.to_string()).collect()))
+                    (w.agent_id.clone(), (cwd, recent.iter().map(|l| l.text.to_string()).collect()))
                 })
                 .collect()
         } else {
@@ -334,23 +343,7 @@ impl App {
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
         if running {
-            lock(&self.control).set_workers(
-            workers
-                .iter()
-                .map(|w| {
-                    let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
-                    WorkerInfo {
-                    worker: w.clone(),
-                    task_id: None,
-                    title: Some(w.label.clone()),
-                    round: None,
-                    live: !matches!(w.status, Status::Done | Status::Failed),
-                    last_activity: None,
-                    cwd,
-                    lines,
-                }})
-                .collect(),
-            );
+            self.publish_workers(run_id, &workers, &ctx);
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
@@ -358,6 +351,47 @@ impl App {
             Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
         })?;
         Ok(node_json(&node))
+    }
+
+    fn publish_workers(&self, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+        let infos = workers
+            .iter()
+            .map(|w| {
+                let (cwd, lines) = ctx.get(&w.agent_id).cloned().unwrap_or_default();
+                let (task_id, round) = task_meta(run_id, &w.label);
+                WorkerInfo {
+                    worker: w.clone(),
+                    task_id,
+                    title: Some(w.label.clone()),
+                    round,
+                    live: !matches!(w.status, Status::Done | Status::Failed),
+                    last_activity: None,
+                    cwd,
+                    lines,
+                }
+            })
+            .collect();
+        lock(&self.control).set_workers(infos);
+    }
+
+    /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
+    /// asking: steering and MCP inspect must work while the crew view is closed. Called by the core's own poll loop.
+    pub fn refresh_workers(&self) {
+        let live = lock(&self.runs).iter().find(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone());
+        let Some(run) = live else { return };
+        let Ok(workers) = self.discover_workers(&run) else { return };
+        let ctx: HashMap<String, (Option<String>, Vec<String>)> = {
+            let tr = lock(&self.transcripts);
+            workers
+                .iter()
+                .map(|w| {
+                    let recent = self.bus.recent(&worker_stream(&w.agent_id), INSPECT_BYTES);
+                    let cwd = tr.get(&w.agent_id).and_then(|t| t.cwd()).map(str::to_string);
+                    (w.agent_id.clone(), (cwd, recent.iter().map(|l| l.text.to_string()).collect()))
+                })
+                .collect()
+        };
+        self.publish_workers(&run.run_id, &workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {
@@ -625,3 +659,15 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 #[cfg(test)]
 mod tests;
+
+/// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
+/// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.
+fn task_meta(run_id: &str, label: &str) -> (Option<String>, Option<u32>) {
+    let mut parts = label.split('.');
+    if parts.next() != Some("task") {
+        return (None, None);
+    }
+    let Some(id) = parts.next().filter(|t| !t.is_empty()) else { return (None, None) };
+    let round = parts.rev().find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()));
+    (Some(format!("{run_id}.{id}")), round)
+}

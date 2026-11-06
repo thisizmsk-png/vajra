@@ -161,16 +161,23 @@ fn check_nonce(n: &str) -> Result<(), InvalidInput> {
 }
 
 /// ADR-9 resume: `claude --resume <id>` continuing the campaign through
-/// `/vajra-deliver {campaign}` (what `/vajra continue` runs) with the rotated
+/// `/vajra-deliver {campaign, run_id}` (what `/vajra continue` runs) with the rotated
 /// nonce, so new worker briefs carry the nonce the hook now uses.
-pub fn build_resume_argv(session_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
+pub fn build_resume_argv(session_id: &str, run_id: &str, campaign: &str, steer_nonce: &str) -> Result<Vec<String>, InvalidInput> {
     check_session_id(session_id)?;
+    // The workflow derives its task ids and branches from `run_id`, and without one it invents `d<hash of the campaign>`.
+    // The app and the workflow must name the run the same way, so a resume always carries the run's own id.
+    if !crate::ids::valid_run_id(run_id) {
+        return Err(bad("run_id", "must be YYYYMMDD-HHMM"));
+    }
     if !crate::bus::valid_stream_id(campaign) {
         return Err(bad("campaign", "must be 1 to 128 of [A-Za-z0-9._-], not starting with a dot"));
     }
     check_nonce(steer_nonce)?;
     let mut json = String::from("{\"campaign\":");
     push_json_str(&mut json, campaign);
+    json.push_str(",\"run_id\":");
+    push_json_str(&mut json, run_id);
     json.push_str(",\"session_id\":");
     push_json_str(&mut json, session_id);
     json.push_str(",\"steer_nonce\":");

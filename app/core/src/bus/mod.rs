@@ -468,6 +468,26 @@ impl Bus {
         tail
     }
 
+    /// The newest lines of the ring that fit in `max_bytes` of text, oldest first (always at least one line when the
+    /// ring is not empty). `tail` walks forward from the oldest retained line; an inspector wants the other end.
+    pub fn recent(&self, stream: &str, max_bytes: usize) -> Vec<Line> {
+        let inner = lock(&self.inner);
+        let Some(s) = inner.streams.get(stream) else {
+            return Vec::new();
+        };
+        let mut bytes = 0;
+        let mut out: Vec<Line> = Vec::new();
+        for line in s.ring.iter().rev() {
+            if !out.is_empty() && bytes + line.text.len() > max_bytes {
+                break;
+            }
+            bytes += line.text.len();
+            out.push(line.clone());
+        }
+        out.reverse();
+        out
+    }
+
     /// Read spilled lines from logical `offset` (start with `Tail::spill_start`),
     /// up to `max_bytes` of text (at least one line when any remain).
     pub fn read_spill(&self, stream: &str, offset: u64, max_bytes: usize) -> io::Result<SpillPage> {
