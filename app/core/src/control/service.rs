@@ -414,8 +414,14 @@ impl Service {
         Redactor::new(self.nonce())
     }
 
+    /// Discovery's view of the run's workers. A worker that is no longer live has its queued messages expired here,
+    /// the one production path that learns of completion (AC-3.2.5); it is idempotent, so every refresh may repeat it.
     pub fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
+        let finished: Vec<String> = workers.iter().filter(|w| !w.live).map(|w| w.key().to_string()).collect();
         self.workers = workers;
+        for k in finished {
+            self.worker_finished(&k);
+        }
     }
 
     /// The worker's transcript ended: its queued messages expire now so they

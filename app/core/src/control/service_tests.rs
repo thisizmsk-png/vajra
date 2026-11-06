@@ -145,3 +145,20 @@ fn a_failed_publication_is_recorded_not_silent() {
     assert_eq!(files(&dir, "stops"), 0);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
+    // Review P2: completion arrives only through set_workers, which used to leave the message queued until the TTL.
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "late note").unwrap()["action_id"].as_str().unwrap().to_string();
+    assert_eq!(files(&dir, "queue"), 1);
+    let mut ws = s.workers.clone();
+    ws[0].live = false;
+    ws[0].worker.status = Status::Done;
+    s.set_workers(ws.clone());
+    assert_eq!(files(&dir, "queue"), 0, "a finished worker never receives it later");
+    assert!(!s.pending.contains_key(&id));
+    // Repeating the same refresh is harmless.
+    s.set_workers(ws);
+    let _ = fs::remove_dir_all(&dir);
+}
