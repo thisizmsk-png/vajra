@@ -242,7 +242,7 @@ Use the vajra-sabha or architecture-review crews for contested decisions.
 ## 7. Lessons learned (avoid these stalls)
 
 1. **Permission prompts silently stall workers for hours.**
-   - If the Publishing scope allows pushing, set up user-level allow rules in Phase A (for a no-publish project, skip the push and merge allow rules and leave them under ask): `git add/commit/push`, `gh pr ready/merge/edit`, `gh run rerun`, thread resolution.
+   - If the Publishing scope allows pushing, set up user-level allow rules in Phase A (for a no-publish project, skip the push and merge allow rules and leave them under ask): `git add/commit/push`, `gh pr ready/edit` (and `gh pr merge` only if section 0 allows auto-merge), `gh run rerun`, thread resolution.
    - Keep deny rules for force-push, pushes to `main` and `--admin`.
    - **Ask rules beat allow rules**, so remove conflicting ask entries.
    - Workers run git from inside their worktree. `git -C dir push` may still prompt.
@@ -263,7 +263,7 @@ Use the vajra-sabha or architecture-review crews for contested decisions.
 {
   "permissions": {
     "allow": ["Bash(git add *)", "Bash(git commit *)", "Bash(git push *)",
-              "Bash(gh pr ready *)", "Bash(gh pr merge *)", "Bash(gh pr edit *)",
+              "Bash(gh pr ready *)", "Bash(gh pr edit *)",
               "Bash(gh run rerun *)", "Bash(ao pr resolve-comments *)"],
     "deny":  ["Bash(git push --force *)", "Bash(git push -f *)", "Bash(git push --force-with-lease *)",
               "Bash(git push * --force*)", "Bash(git push * -f *)", "Bash(git push * +*)",
@@ -272,7 +272,7 @@ Use the vajra-sabha or architecture-review crews for contested decisions.
   }
 }
 ```
-Remove `Bash(git push *)` and `Bash(gh pr merge *)` from any `ask` list. Keep `Bash(git * push *)` there.
+Remove `Bash(git push *)` from any `ask` list. Keep `Bash(git * push *)` there. Add `Bash(gh pr merge *)` to `allow` (and remove it from `ask`) only if section 0 allows auto-merge; otherwise leave it under `ask`.
 
 ## 9. Standing rules file (append it to every worker brief)
 
