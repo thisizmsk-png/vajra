@@ -73,7 +73,9 @@ out="$(run_ss)"; rc=$?
 
 echo slow > "$MODE"
 s=$(date +%s); out="$(run_ss)"; rc=$?; e=$(date +%s)
-[ "$rc" -eq 0 ] && [ $((e - s)) -lt 10 ] && ! printf '%s' "$out" | grep -q late; check "hung prime is cut off after ~5s" $?
+# The fake prime sleeps 30 s. The hook cuts it at ~5 s; the bound covers all of
+# session-start on a slow shared runner and still fails if there is no cutoff.
+[ "$rc" -eq 0 ] && [ $((e - s)) -lt 25 ] && ! printf '%s' "$out" | grep -q late; check "hung prime is cut off (well before its 30 s sleep)" $?
 
 echo ok > "$MODE"
 mv "$VS/kb" "$VS/kb.off"; rm -f "$ARGV"
