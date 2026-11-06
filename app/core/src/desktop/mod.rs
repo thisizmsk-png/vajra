@@ -35,6 +35,9 @@ pub type Res = Result<Value, Value>;
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
+/// Largest worker meta file and workflow journal read whole (both are Claude Code files; over-limit ones are skipped).
+const MAX_META_BYTES: u64 = 64 * 1024;
+const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -125,8 +128,18 @@ impl App {
         f(g.as_mut().expect("reader set above"))
     }
 
-    fn run_by_id(&self, run_id: &str) -> Option<(String, Run)> {
-        lock(&self.runs).iter().find(|(_, r)| r.run_id == run_id).map(|(k, r)| (k.clone(), r.clone()))
+    /// The run a UI view names. A minute-level run id alone is not an identity, so the campaign must match too: two
+    /// runs can never be confused for one another here.
+    fn run_by_id(&self, slug: &str, run_id: &str) -> Option<(String, Run)> {
+        lock(&self.runs).iter().find(|(_, r)| r.run_id == run_id && r.campaign == slug).map(|(k, r)| (k.clone(), r.clone()))
+    }
+
+    /// The first minute at or after `now` that no known run and no campaign on disk uses. The workflow takes a
+    /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
+    fn fresh_run_id(&self, now: u64) -> (u64, String) {
+        let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)))
     }
 
     // ---------------------------------------------------------------- start
@@ -261,9 +274,8 @@ impl App {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let now = ids::unix_now();
+        let (now, run_id) = self.fresh_run_id(ids::unix_now());
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
-        let run_id = ids::run_id_at(now);
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
             argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
@@ -300,7 +312,7 @@ impl App {
     /// the session; the control service is told about them so steering can
     /// address them.
     pub fn crew(&self, slug: &str, run_id: &str) -> Res {
-        let run = self.run_by_id(run_id);
+        let run = self.run_by_id(slug, run_id);
         let running = run.as_ref().is_some_and(|(s, _)| self.sup.is_running(s).unwrap_or(false));
         let workers = match &run {
             Some((_, r)) => self.discover_workers(r)?,
@@ -356,10 +368,18 @@ impl App {
             .join(project_slug(&run.cwd))
             .join(&run.session_id)
             .join("subagents");
-        let read = |p: &Path| -> Option<String> {
+        // These files are Claude Code's, outside our control, and journals grow during a run: an over-limit file is
+        // skipped (and counted), never loaded; the read itself is also bounded in case it grows after the size check.
+        let read = |p: &Path, cap: u64| -> Option<String> {
+            use std::io::Read;
+            let f = allow.open_allowlisted(p).ok()?;
+            if f.metadata().ok()?.len() > cap {
+                self.note("worker_file_too_large", &[("limit", cap)]);
+                return None;
+            }
             let mut s = String::new();
-            std::io::Read::read_to_string(&mut allow.open_allowlisted(p).ok()?, &mut s).ok()?;
-            Some(s)
+            f.take(cap + 1).read_to_string(&mut s).ok()?;
+            (s.len() as u64 <= cap).then_some(s)
         };
         let mut dirs = vec![dir.clone()];
         if let Ok(rd) = std::fs::read_dir(dir.join("workflows")) {
@@ -374,14 +394,14 @@ impl App {
         }
         let mut out = Vec::new();
         for d in dirs {
-            let journal = read(&d.join("journal.jsonl")).map(|s| parse_journal(&s)).unwrap_or_default();
+            let journal = read(&d.join("journal.jsonl"), MAX_JOURNAL_BYTES).map(|s| parse_journal(&s)).unwrap_or_default();
             let Ok(rd) = std::fs::read_dir(&d) else { continue };
             let mut metas: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             metas.sort();
             for p in metas {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let Some(id) = name.strip_prefix("agent-").and_then(|n| n.strip_suffix(".meta.json")) else { continue };
-                let Some(meta) = read(&p).and_then(|s| parse_meta(&s)) else { continue };
+                let Some(meta) = read(&p, MAX_META_BYTES).and_then(|s| parse_meta(&s)) else { continue };
                 let j = journal.iter().rev().find(|j| j.agent_id == id);
                 out.push(self.pump_worker(&allow, &red, &d.join(format!("agent-{id}.jsonl")), id, &meta, j));
             }
@@ -452,6 +472,11 @@ impl App {
         let path = PathBuf::from(ev.get("path")?.as_str()?);
         let head = ev.get("head").and_then(Value::as_str).map(String::from);
         let archive_dir = self.allow().ok()?.campaigns_dir().join(slug).join("evidence");
+        // `starts_with` is lexical: a path that climbs out with `..` is never treated as archived.
+        let climbs = path.components().any(|c| matches!(c, std::path::Component::ParentDir));
+        if climbs {
+            return None;
+        }
         if path.starts_with(&archive_dir) {
             return Some(Request::CheckEvidence { path, head, archived: Some(slug.into()), repo: None });
         }

@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "dev.vajra.desktop",
   "build": {
-    "frontendDist": "../ui/dist"
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": "sh -c 'cd \"$(git rev-parse --show-toplevel)/app/ui\" && npm ci --no-audit --no-fund && npm run build'",
+    "beforeDevCommand": "sh -c 'cd \"$(git rev-parse --show-toplevel)/app/ui\" && npm run dev'",
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "withGlobalTauri": false,
@@ -24,7 +27,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/icon.png"]
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ]
   }
 }

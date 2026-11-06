@@ -1,5 +1,6 @@
 use super::synthetic;
 use super::*;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -386,4 +387,23 @@ fn bus_synthetic_producer_pushes_at_rate() {
     assert!((300..=900).contains(&pushed), "pushed {pushed}");
     assert_eq!(bus.streams().len(), 10);
     assert!(synthetic::burst(&bus, 2, 10, 20) < Duration::from_secs(1));
+}
+
+#[test]
+fn bus_spill_never_follows_or_truncates_a_planted_link() {
+    use std::os::unix::fs::symlink;
+    let tmp = TmpDir::new("plant");
+    let dir = tmp.0.join("spill");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let victim = tmp.0.join("victim.txt");
+    fs::write(&victim, "precious").unwrap();
+    symlink(&victim, dir.join("sym.log")).unwrap();
+    fs::hard_link(&victim, dir.join("hard.log")).unwrap();
+    let bus = Bus::open(&dir, cfg(200, u64::MAX, 16)).unwrap();
+    for i in 0..50 {
+        let _ = bus.push("sym", &format!("line {i}"));
+        let _ = bus.push("hard", &format!("line {i}"));
+    }
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "precious", "a link at the spill name must not be written through");
 }

@@ -301,6 +301,15 @@ impl Service {
             let (Some(kind), id) = (Kind::parse(str_field(r, "kind")), str_field(r, "action_id")) else { continue };
             let state = State::parse(str_field(r, "state"));
             let worker = str_field(r, "worker").to_string();
+            if kind == Kind::Resume {
+                // A resume clears the stop it names (and any still-pending record of it), exactly as resume_worker does live.
+                let stopped = str_field(r, "stop_id");
+                if self.last_stop.get(&worker).is_some_and(|(sid, _)| sid == stopped) {
+                    self.last_stop.remove(&worker);
+                }
+                self.pending.remove(stopped);
+                continue;
+            }
             if kind == Kind::Stop {
                 self.last_stop.insert(worker.clone(), (id.to_string(), state));
             }
@@ -703,6 +712,13 @@ impl Service {
             entry["reason"] = json!(r);
         }
         let path = s.dir.stop_path(&a.worker);
+        // A stop already in force stays as it is: rewriting it would let a failed ledger write roll the file back
+        // away, lifting the stop with no resume record. The human sees the existing action.
+        if fs::symlink_metadata(&path).is_ok() {
+            let existing = fsx::read_nofollow(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let id = existing.as_ref().map_or("", |v| str_field(v, "action_id")).to_string();
+            return Ok(json!({"action_id": id, "state": State::Queued.as_str(), "already_stopped": true}));
+        }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         let written = fsx::write_atomic(&s.dir.dir("stops"), &name, entry.to_string().as_bytes())?;
         // A confirmed stop is the human's action from here on.

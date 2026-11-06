@@ -57,3 +57,40 @@ fn a_failed_resume_leaves_the_stop_in_force() {
     assert_eq!(files(&dir, "stops"), 1, "a resume that could not be recorded must not clear the stop");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_resume_survives_a_restart() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert!(s.last_stop.is_empty());
+    drop(s);
+    let again = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+    assert!(again.last_stop.is_empty(), "replay must apply the resume record: {:?}", again.last_stop);
+    assert!(again.pending.is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stop_without_a_resume_survives_a_restart() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    drop(s);
+    let again = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+    assert_eq!(again.last_stop.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_second_stop_never_rewrites_or_loses_the_first() {
+    let (mut s, dir) = svc();
+    let first = s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert_eq!(files(&dir, "stops"), 1);
+    // With the ledger broken, a repeated stop must neither fail by deleting the stop nor replace it.
+    s.ledger.break_for_test();
+    let again = s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert_eq!(again["action_id"], first["action_id"], "the existing stop is reported, not a new one");
+    assert_eq!(again["already_stopped"], true);
+    assert_eq!(files(&dir, "stops"), 1, "an enforced stop must survive a failed second stop");
+    let _ = fs::remove_dir_all(&dir);
+}

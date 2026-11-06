@@ -211,15 +211,21 @@ pub struct Subscriber {
 use crate::lock;
 
 fn open_spill(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    // Truncate: a file with this name is from a previous process, whose seqs
-    // do not match this one's.
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    // Never follow a link and never truncate in open(): a planted symlink or hard link at this name must not make
+    // the app destroy another file. Open (create if absent), check it is a private single-link regular file, then
+    // truncate: a file with this name is from a previous process, whose seqs do not match this one's.
     let file = OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
+    let md = file.metadata()?;
+    if !md.is_file() || md.nlink() != 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "spill path is not a plain single-link file"));
+    }
+    file.set_len(0)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(file)
 }
