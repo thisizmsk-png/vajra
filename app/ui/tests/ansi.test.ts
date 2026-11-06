@@ -1,0 +1,100 @@
+import { describe, expect, it } from "vitest";
+import { MAX_LINE, MAX_SEQ, PLAIN, sanitizeLine, sanitizeLines } from "../components/ui/desktop/ansi";
+
+const E = "\u001b";
+const text = (raw: string) => sanitizeLine(raw).segments.map((s) => s.text).join("");
+
+describe("ANSI sanitizer (NFR-SEC-3)", () => {
+  it("keeps plain text and the 16 SGR colors, bold, dim, italic and underline", () => {
+    const r = sanitizeLine(`${E}[1;31merror${E}[0m ok ${E}[94mblue${E}[4munder${E}[24m`);
+    expect(r.segments.map((s) => [s.text, s.style.fg, s.style.bold, s.style.underline])).toEqual([
+      ["error", 1, true, false],
+      [" ok ", null, false, false],
+      ["blue", 12, false, false],
+      ["under", 12, false, true],
+    ]);
+  });
+
+  it("drops OSC 8 hyperlinks but keeps the visible label as plain text", () => {
+    expect(text(`${E}]8;;https://evil.example/x${E}\\click me${E}]8;;${E}\\`)).toBe("click me");
+    expect(text(`${E}]8;;https://evil.example/x\u0007click me${E}]8;;\u0007`)).toBe("click me");
+  });
+
+  it("drops OSC 52 clipboard writes, titles and other OSC, BEL and ST terminated", () => {
+    expect(text(`a${E}]52;c;ZWNobyBwd25lZA==\u0007b`)).toBe("ab");
+    expect(text(`a${E}]52;c;ZWNobyBwd25lZA==${E}\\b`)).toBe("ab");
+    expect(text(`a${E}]0;pwned title\u0007b`)).toBe("ab");
+  });
+
+  it("drops DCS, APC, PM and SOS strings", () => {
+    for (const intro of ["P", "_", "^", "X"]) expect(text(`a${E}${intro}payload${E}\\b`)).toBe("ab");
+  });
+
+  it("drops an unterminated control string instead of printing it", () => {
+    expect(text(`before${E}]52;c;AAAA`)).toBe("before");
+    // A control string longer than the cap is cut at the cap; the rest is shown as plain, harmless text.
+    const long = text(`before${E}]52;c;${"A".repeat(MAX_SEQ * 2)}tail`);
+    expect(long.startsWith("before")).toBe(true);
+    expect(long.length).toBeLessThan(MAX_SEQ * 2);
+    expect(long.includes(E)).toBe(false);
+  });
+
+  it("drops cursor movement, erase, mode and other CSI sequences", () => {
+    for (const seq of ["[2J", "[H", "[10;20H", "[K", "[?1049h", "[?25l", "[5n", "[6n", "[>c", "[1;1R", "[ q", "[?2004h"]) {
+      expect(text(`a${E}${seq}b`), seq).toBe("ab");
+    }
+  });
+
+  it("drops two-character escapes (reset, keypad, charset)", () => {
+    for (const seq of ["c", "=", ">", "7", "8", "M", "(0"]) expect(text(`a${E}${seq}b`).startsWith("a"), seq).toBe(true);
+    expect(text(`a${E}cb`)).toBe("ab");
+  });
+
+  it("drops control characters, C1 introducers, carriage returns and backspaces", () => {
+    expect(text("a\u0000b\u0007c\u0008d\u001fe\u007ff\u009bg\u009dh\u0085i")).toBe("abcdefghi");
+    expect(text("fake prompt\rreal output")).toBe("fake promptreal output");
+    expect(text("a\tb")).toBe("a    b");
+  });
+
+  it("shows bidi overrides and zero-width characters as visible escapes", () => {
+    expect(text("a‮b")).toBe("a\\u202eb");
+    expect(text("a​b﻿c⁦d")).toBe("a\\u200bb\\ufeffc\\u2066d");
+  });
+
+  it("does not draw 256-color, true-color or background codes, and does not let them eat later codes", () => {
+    const r = sanitizeLine(`${E}[38;5;196mA${E}[38;2;1;2;3mB${E}[48;5;21mC${E}[1;38;5;9;31mD`);
+    expect(r.segments.map((s) => [s.text, s.style.fg, s.style.bold])).toEqual([["A", null, false], ["B", null, false], ["C", null, false], ["D", 1, true]]);
+  });
+
+  it("carries SGR state across lines", () => {
+    const l = sanitizeLines([`${E}[32mgreen`, "still green", `${E}[0mplain`]);
+    expect(l.map((x) => x.segments[0].style.fg)).toEqual([2, 2, null]);
+  });
+
+  it("cuts an oversized line and says so", () => {
+    const r = sanitizeLine("x".repeat(MAX_LINE + 500));
+    expect(r.truncated).toBe(true);
+    expect(r.segments.map((s) => s.text).join("").length).toBe(MAX_LINE);
+  });
+
+  it("never throws, always terminates, and never emits a control character (fuzz)", () => {
+    const alphabet = [E, "[", "]", "P", "\\", "\u0007", "\u009b", "0", "1", ";", "m", "H", "?", "8", " ", "a", "\r", "\n", "‮", "52", "c"];
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+    for (let n = 0; n < 3000; n++) {
+      let raw = "";
+      const len = Math.floor(rnd() * 60);
+      for (let i = 0; i < len; i++) raw += alphabet[Math.floor(rnd() * alphabet.length)];
+      const out = sanitizeLine(raw, PLAIN).segments.map((s) => s.text).join("");
+      expect(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/.test(out), JSON.stringify(raw)).toBe(false);
+      expect(out.includes(E)).toBe(false);
+    }
+  });
+
+  it("handles a worst-case input of 1 MB of escape introducers in bounded time", () => {
+    const t = Date.now();
+    sanitizeLine(`${E}[`.repeat(500000));
+    sanitizeLine(`${E}]`.repeat(500000));
+    expect(Date.now() - t).toBeLessThan(2000);
+  });
+});

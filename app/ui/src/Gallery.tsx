@@ -4,6 +4,7 @@ import {
   useToasts,
 } from "../components/ui/base";
 import { S } from "../strings";
+import { GalleryDesktop } from "./GalleryDesktop";
 
 /** Every base component in its states, for review and the click crawl (open with #kit). Not an app screen. */
 export function Gallery() {
@@ -75,6 +76,7 @@ export function Gallery() {
       <AlertDialog open={stop} destructive title="Stop Backend?" confirmLabel="Stop worker" onCancel={() => setStop(false)} onConfirm={() => { setStop(false); push("success", "Stopped Backend at 14:22"); }}>
         <Text variant="body">It stops at its next tool call.</Text>
       </AlertDialog>
+      <GalleryDesktop />
       <ToastRegion toasts={toasts} onDismiss={dismiss} />
     </main>
   );
