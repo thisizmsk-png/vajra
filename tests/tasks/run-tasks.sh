@@ -34,6 +34,7 @@ mkdir -p "$CD/$C"
 [ "$(rc T add t1 --title a --owner 'Bad Agent')" = 2 ]; check "invalid owner -> exit 2" $?
 [ "$(rc T add t1 --title a --owner bhima --files '../etc')" = 2 ]; check "path traversal in files -> exit 2" $?
 [ "$(rc T add t1 --title a --owner bhima --files '/abs')" = 2 ]; check "absolute path in files -> exit 2" $?
+[ "$(rc T add t1 --title a --owner bhima --worktree relative/dir)" = 2 ]; check "add: relative --worktree -> exit 2 (one policy with claim)" $?
 [ "$(rc T add t1 --title a --owner bhima --deps t1)" = 2 ]; check "self dependency -> exit 2" $?
 [ ! -e "$CD/$C/tasks.json" ]; check "refused adds write nothing" $?
 

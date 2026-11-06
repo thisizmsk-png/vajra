@@ -8,8 +8,8 @@
 #   state.sig       HMAC-SHA256 over the three files above (written by this script only)
 #   checkpoints/    NNNN.json snapshots, each HMAC-signed and chained to the previous one
 #   report.md       the delivery report (E4); its sha256 is recorded in the signed campaign.json
-#   evidence/       <task>/data/walkthroughs/<slug>/: archived verification bundle + setup.json, with a
-#                   manifest.json (sha256 per file) signed with the HMAC key (E7)
+#   evidence/       <slug>/: one archived verification bundle per delivery + setup.json, with a
+#                   manifest.json (tasks closed on it, sha256 per file) signed with the HMAC key (E7)
 #
 # The HMAC key (~/.claude/vajra/.hmac-key) is read by this script and never printed,
 # so it never enters model context. Signing uses openssl.
@@ -25,8 +25,8 @@
 #   vajra-campaign.sh resume [slug] [--from-checkpoint N]
 #   vajra-campaign.sh verify [slug]
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
-#   vajra-campaign.sh report --campaign slug --bytes N --sha256 HEX --base64 B64
-#   vajra-campaign.sh archive-evidence <slug> <task> <evidence-dir> <setup-json>
+#   vajra-campaign.sh report --campaign slug --bytes N --check FNV32 --base64 B64
+#   vajra-campaign.sh archive-evidence <slug> <evidence-dir> <head> <setup-json>
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -381,12 +381,18 @@ cmd_close() {
 # Any agent can run this, as with every campaign command: reportSha256 binds the file to the
 # signed state; it is not proof that the workflow wrote it.
 REPORT_MAX=65536
+# FNV-1a 32 of $1 (ASCII), as the workflow's fnv(): a copy check, not a security property.
+fnv32() { python3 -I -c 'import sys
+h = 0x811c9dc5
+for b in sys.argv[1].encode(): h = ((h ^ b) * 0x01000193) & 0xffffffff
+print("%08x" % h)' "$1"; }
+
 cmd_report() {
-  local slug="" nb="" b64="" sha="" tmp got
+  local slug="" nb="" b64="" chk="" tmp got
   while [ $# -gt 0 ]; do case "$1" in
     --campaign) slug="${2:-}"; shift 2 || die "missing value for $1" ;;
     --bytes) nb="${2:-}"; shift 2 || die "missing value for $1" ;;
-    --sha256) sha="${2:-}"; shift 2 || die "missing value for $1" ;;
+    --check) chk="${2:-}"; shift 2 || die "missing value for $1" ;;
     --base64) b64="${2:-}"; shift 2 || die "missing value for $1" ;;
     *) die "unknown option: $1" ;;
   esac; done
@@ -394,15 +400,15 @@ cmd_report() {
   [ "$nb" -ge 1 ] && [ "$nb" -le "$REPORT_MAX" ] || die "report must be 1 to $REPORT_MAX bytes"
   [ -n "$b64" ] && [ "${#b64}" -le $(( (REPORT_MAX / 3 + 2) * 4 )) ] || die "--base64 missing or too long"
   printf '%s' "$b64" | grep -Eq '^[A-Za-z0-9+/]+={0,2}$' || die "--base64 is not base64"
-  printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$' || die "--sha256 must be the 64-hex sha256 of the report"
+  printf '%s' "$chk" | grep -Eq '^[0-9a-f]{8}$' || die "--check must be the 8-hex FNV-1a 32 of the base64 text"
+  # The base64 is copied by an agent: a copy error is caught here, not saved and signed.
+  [ "$(fnv32 "$b64")" = "$chk" ] || die "--base64 does not match --check (a copy error)"
   [ -n "$slug" ] || die "--campaign is required"
   resolve "$slug"; load_key; lock "$DIR"; require_valid
-  tmp="$DIR/report.md.tmp"
-  ( umask 077; printf '%s' "$b64" | openssl base64 -d -A > "$tmp" ) 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
+  tmp="$(umask 077; mktemp "$DIR/.report.XXXXXX")" || die "cannot create a temp file"
+  printf '%s' "$b64" | openssl base64 -d -A > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
   got="$(wc -c < "$tmp" | tr -d ' ')"
   [ "$got" = "$nb" ] || { rm -f "$tmp"; die "decoded report is $got bytes, expected $nb"; }
-  # The base64 is copied by an agent: a same-length copy error is caught here, not saved and signed.
-  [ "$(sha256_file "$tmp")" = "$sha" ] || { rm -f "$tmp"; die "decoded report does not match --sha256"; }
   mv -f "$tmp" "$DIR/report.md"
   jqw "$DIR/campaign.json" --arg h "$(sha256_file "$DIR/report.md")" '.reportSha256 = $h' "$DIR/campaign.json"
   touch_updated; sign_state "$DIR"
@@ -412,69 +418,16 @@ cmd_report() {
 # E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
 # the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
 # manifest is HMAC-signed so the app can check it through E3 check-evidence --archived.
-manifest_hmac() { jq -cS 'del(.hmac)' "$1" | tr -d '\n' | hmac_stdin; }
 cmd_archive_evidence() {
-  local slug="${1:-}" task="${2:-}" src="${3:-}" setup="${4:-}" eslug dst f tmp
+  local slug="${1:-}" src="${2:-}" head="${3:-}" setup="${4:-}" out
   [ $# -eq 4 ] || usage
-  printf '%s' "$task" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "invalid task id"
-  [ -d "$src" ] && [ ! -L "$src" ] && [ -f "$src/evidence.json" ] && [ ! -L "$src/evidence.json" ] || die "not an evidence dir (no evidence.json)"
-  eslug="$(basename "$src")"
-  printf '%s' "$eslug" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' || die "invalid evidence slug"
-  printf '%s' "$setup" | jq -e 'type == "array" and length <= 5 and all(.[]; type == "string" and length >= 1 and length <= 1000)' >/dev/null 2>&1 \
-    || die "setup must be a JSON array of at most 5 strings, each 1-1000 characters"
   resolve "$slug"; load_key; lock "$DIR"; require_valid
-  # Only a task the graph closed (on green evidence), and only signed green evidence for this
-  # repository's HEAD: the same check close used (vajra_tasks.py read_evidence).
-  jq -e --arg t "$task" '[.tasks[]? | select(.id == $t and .status == "done")] | length == 1' "$DIR/tasks.json" >/dev/null 2>&1 \
-    || die "task $task is not closed in this campaign's task graph"
-  python3 -I "$SCRIPT_DIR/vajra_tasks.py" check-evidence "$src/evidence.json" --json 2>/dev/null | jq -e '.green == true' >/dev/null 2>&1 \
-    || die "evidence in $src is not signed green evidence for HEAD"
-  [ ! -L "$DIR/evidence" ] && [ ! -L "$DIR/evidence/$task" ] || die "refusing a symlinked evidence dir"
-  dst="$DIR/evidence/$task/data/walkthroughs/$eslug"
-  [ ! -e "$dst" ] || die "evidence for $task/$eslug is already archived"
-  tmp="$DIR/evidence/.tmp-$task-$$"
-  rm -rf "$tmp"; ( umask 077; mkdir -p "$tmp" ) || die "cannot create the archive dir"
-  # Copy without following links: O_NOFOLLOW, a single-link regular file, capped size.
-  python3 -I -c '
-import os, re, stat, sys
-src, dst = sys.argv[1], sys.argv[2]
-ok = re.compile(r"^(evidence\.json|diff\.patch|diff\.stat|untracked\.txt|cmd-[0-9]{1,3}\.log)$")
-CAP = 8 * 1024 * 1024
-for n in sorted(os.listdir(src)):
-    if not ok.match(n):
-        continue
-    try:
-        fd = os.open(os.path.join(src, n), os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        sys.exit("refused: %s is a link or unreadable" % n)
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > CAP:
-        sys.exit("refused: %s is not a single-link regular file under 8 MiB" % n)
-    out = os.open(os.path.join(dst, n), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    left = CAP + 1
-    while True:
-        b = os.read(fd, 65536)
-        if not b:
-            break
-        left -= len(b)
-        if left <= 0:
-            sys.exit("refused: %s grew past 8 MiB" % n)
-        os.write(out, b)
-    os.close(out); os.close(fd)
-' "$src" "$tmp" || { rm -rf "$tmp"; die "bundle copy refused"; }
-  ( umask 077; printf '%s' "$setup" | jq -c . > "$tmp/setup.json" ) || { rm -rf "$tmp"; die "cannot write setup.json"; }
-  chmod 600 "$tmp"/*
-  local mu="$DIR/evidence/.manifest-$task-$$"
-  ( cd "$tmp" && for f in *; do printf '%s\t%s\n' "$f" "$(sha256_file "$f")"; done ) \
-    | jq -R -s --arg t "$task" --arg e "$eslug" --arg c "$SLUG" --arg now "$(now)" \
-        '{schema: "vajra-evidence-archive-v1", campaign: $c, task: $t, evidence: $e, created: $now,
-          files: (split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add), hmac: ""}' > "$mu" \
-    || { rm -rf "$tmp" "$mu"; die "cannot build the manifest"; }
-  jq --arg h "$(manifest_hmac "$mu")" '.hmac = $h' "$mu" > "$tmp/manifest.json"; rm -f "$mu"
-  chmod 600 "$tmp/manifest.json"
-  mkdir -p "$(dirname "$dst")" && mv "$tmp" "$dst" || { rm -rf "$tmp"; die "cannot place the archive"; }
-  append_progress "evidence archived: $task $eslug"; touch_updated; sign_state "$DIR"
-  echo "evidence archived for $SLUG: $task/$eslug"
+  # vajra_tasks.py judges the bundle (signed, green for head, a task closed on it), copies exactly
+  # those bytes without following links, and signs the manifest; this keeps the state signed.
+  out="$(python3 -I "$SCRIPT_DIR/vajra_tasks.py" archive-evidence --campaign "$SLUG" "$src" --head "$head" --setup "$setup")" \
+    || die "evidence archive refused"
+  append_progress "evidence archived: ${out#evidence archived for "$SLUG": }"; touch_updated; sign_state "$DIR"
+  echo "$out"
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift

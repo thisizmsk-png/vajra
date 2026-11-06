@@ -21,6 +21,8 @@ Usage (every command takes --json, and all but check-evidence take --campaign <s
                            [--base-commit SHA] [--changed f1,f2] [--head SHA]
   vajra_tasks.py status <id>
   vajra_tasks.py check-evidence <evidence.json> [--head SHA]   (read-only; --campaign not needed)
+  vajra_tasks.py check-evidence <campaign>/evidence/<slug>/evidence.json --archived <slug> --head <40-hex SHA>
+  vajra_tasks.py archive-evidence <evidence-dir> --head SHA --setup JSON   (E7; vajra-campaign.sh runs it locked)
   vajra_tasks.py list
   vajra_tasks.py waves [--max-in-flight N]
   vajra_tasks.py graph
@@ -54,6 +56,8 @@ import hmac
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -304,6 +308,7 @@ def cmd_add(a):
     acc = [one_line(x, 300) for x in (a.acceptance or []) if one_line(x, 300)]
     if a.branch and not BRANCH_RE.match(a.branch):
         raise Fail(2, "invalid branch %r" % a.branch)
+    wt = valid_worktree(a.worktree)
     defn = {"title": title, "owner_agent": a.owner, "deps": deps, "files": files, "acceptance": acc}
     with Store(a.campaign, write=True) as s:
         old = next((t for t in s.data["tasks"] if t["id"] == a.id), None)
@@ -314,8 +319,8 @@ def cmd_add(a):
             old.update(defn)
             if a.branch:
                 old["branch"] = a.branch
-            if a.worktree:
-                old["worktree"] = one_line(a.worktree, 300)
+            if wt:
+                old["worktree"] = wt
             if changed:
                 note(old, "definition updated")
             s.save()
@@ -323,7 +328,7 @@ def cmd_add(a):
         if len(s.data["tasks"]) >= MAX_TASKS:
             raise Fail(3, "campaign already has %d tasks" % MAX_TASKS)
         t = dict(defn, id=a.id, status="pending", attempts=0, evidence=None,
-                 branch=a.branch or "", worktree=one_line(a.worktree, 300) if a.worktree else "")
+                 branch=a.branch or "", worktree=wt)
         s.data["tasks"].append(t)
         s.save()
         return {"ok": True, "id": a.id, "result": "added", "status": t["status"]}
@@ -393,13 +398,18 @@ def cmd_ready(a):
     return {"ok": True, "ready": [t["id"] for t in tasks if t["status"] == "ready"]}
 
 
+def valid_worktree(wt):
+    """E6: the worker's own worktree, recorded so the app can show and diff it: one absolute path, never cut."""
+    wt = wt or ""
+    if wt and (not wt.startswith("/") or len(wt) > 300 or wt != one_line(wt, 300)):
+        raise Fail(2, "--worktree must be one absolute path of at most 300 characters")
+    return wt
+
+
 def cmd_claim(a):
     if not AGENT_RE.match(a.worker or "") and not ID_RE.match(a.worker or ""):
         raise Fail(2, "invalid worker name %r" % a.worker)
-    # E6: the worker's own worktree, recorded so the app can show and diff it.
-    wt = a.worktree or ""
-    if wt and (not wt.startswith("/") or len(wt) > 300 or wt != one_line(wt, 300)):
-        raise Fail(2, "--worktree must be one absolute path of at most 300 characters")
+    wt = valid_worktree(a.worktree)
     with Store(a.campaign, write=True) as s:
         derive_ready(s.data["tasks"])
         t = s.task(a.id)
@@ -488,6 +498,12 @@ def git(args, cwd=None):
     return r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else None
 
 
+def sign(body, key):
+    """HMAC-SHA256 hex of the canonical JSON of body (sort_keys, separators (',', ':'), UTF-8)."""
+    c = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hmac.new(key, c, hashlib.sha256).hexdigest()
+
+
 def evidence_hmac_ok(ev, key):
     """Signed-evidence contract: hmac = HMAC-SHA256(key, canonical JSON of the object without hmac), canonical =
     sort_keys, separators (',', ':'), UTF-8. Both ensure_ascii spellings of that JSON are accepted: they encode
@@ -515,32 +531,31 @@ class Unreadable(Fail):
     """read_evidence() could not read or parse the file (exit 3 for close, exit 1 for check-evidence)."""
 
 
-def read_evidence(path, want_head=None, root=None, repo=None):
+def read_evidence(path, want_head=None, raw=None, archived=False):
     """Accept only green, signed verify-work evidence for this repository. This is the shared green rule (the
     same check as vajra_kb.py check_evidence): every command exited 0, git.treeStable is true, git.head is the
     current HEAD of the repository this runs in (or want_head, a commit the caller names), the file is
-    <root>/data/walkthroughs/<slug>/evidence.json, the hmac verifies, and not every command is trivial.
-    E7: `root` is the dir the path rule applies to (default: the repo top level; an evidence archive dir for
-    archived bundles) and `repo` is the repository the --head check runs in (default: the one this runs in)."""
+    <repo_root>/data/walkthroughs/<slug>/evidence.json, the hmac verifies, and not every command is trivial.
+    `raw`: the file's bytes, already read (the archive judges exactly the bytes it writes).
+    E7 `archived`: the caller checked the archive location; no repository is used and git.head must equal
+    want_head, a full sha."""
     def refuse(why):
         raise Fail(3, "evidence %s refused: %s" % (path, why))
-    repo = repo or git(["rev-parse", "--show-toplevel"])
-    if not repo:
+    repo = None if archived else git(["rev-parse", "--show-toplevel"])
+    if not archived and not repo:
         refuse("not run inside a git repository")
-    root = root or repo
     try:
         real = os.path.realpath(path)
-        with open(real, "rb") as f:
-            raw = f.read(5_000_000)
+        if raw is None:
+            with open(real, "rb") as f:
+                raw = f.read(5_000_000)
         ev = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as e:
         raise Unreadable(3, "evidence %s unreadable: %s" % (path, e))
-    base = os.path.join(os.path.realpath(root), "data", "walkthroughs")
-    rel = os.path.relpath(real, base)
-    parts = rel.split(os.sep)
-    if len(parts) != 2 or parts[1] != "evidence.json" or parts[0] in ("", ".", ".."):
-        refuse("it must be <repo_root>/data/walkthroughs/<slug>/evidence.json" if root == repo
-               else "it must be <campaign>/evidence/<task>/data/walkthroughs/<slug>/evidence.json")
+    if not archived:
+        rel = os.path.relpath(real, os.path.join(os.path.realpath(repo), "data", "walkthroughs")).split(os.sep)
+        if len(rel) != 2 or rel[1] != "evidence.json" or rel[0] in ("", ".", ".."):
+            refuse("it must be <repo_root>/data/walkthroughs/<slug>/evidence.json")
     if not isinstance(ev, dict) or not isinstance(ev.get("commands"), list):
         refuse("not a verify-work evidence.json")
     cmds = ev["commands"]
@@ -557,7 +572,7 @@ def read_evidence(path, want_head=None, root=None, repo=None):
     head = g.get("head")
     if not isinstance(head, str) or not re.match(r"^[0-9a-f]{40}$", head):
         refuse("no head commit recorded")
-    want = git(["rev-parse", "--verify", "-q", (want_head or "HEAD") + "^{commit}"], cwd=repo)
+    want = want_head if archived else git(["rev-parse", "--verify", "-q", (want_head or "HEAD") + "^{commit}"], cwd=repo)
     if not want or want != head:
         refuse("head %s is not %s" % (head[:12], want_head or "the current HEAD"))
     key = vajra_key()
@@ -571,54 +586,132 @@ def read_evidence(path, want_head=None, root=None, repo=None):
 ARCHIVE_FILE_RE = re.compile(r"^(evidence\.json|diff\.patch|diff\.stat|untracked\.txt|setup\.json|cmd-[0-9]{1,3}\.log)$")
 
 
-def archive_root(slug, path):
-    """E7: (the <campaign>/evidence/<task> dir that holds `path`, task, evidence slug), or None when `path` is
-    not in that campaign's archive."""
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+EV_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+ARCHIVE_CAP = 8 * 1024 * 1024
+ARCHIVE_SCHEMA = "vajra-evidence-archive-v1"
+
+
+def archive_dir(slug):
+    """<campaign>/evidence, refused when it (or the campaign dir) resolves anywhere else, a planted link."""
+    d = campaign_dir(slug)
+    ev = os.path.join(d, "evidence")
+    if os.path.islink(ev) or os.path.realpath(ev) != os.path.join(os.path.realpath(d), "evidence"):
+        raise Fail(3, "refusing a symlinked evidence dir in campaign %s" % slug)
+    return ev
+
+
+def read_bundle(src):
+    """The allowlisted files of a verify-work bundle, as bytes: no link is followed (O_NOFOLLOW), and each is one
+    single-link regular file under 8 MiB."""
+    if os.path.islink(src) or not os.path.isdir(src):
+        raise Fail(3, "%s is not an evidence dir" % src)
+    out = {}
+    for n in sorted(os.listdir(src)):
+        if n == "setup.json" or not ARCHIVE_FILE_RE.match(n):
+            continue
+        try:
+            fd = os.open(os.path.join(src, n), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            raise Fail(3, "refused: %s is a link or unreadable" % n)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise Fail(3, "refused: %s is not a single-link regular file" % n)
+            out[n] = f.read(ARCHIVE_CAP + 1)
+        if len(out[n]) > ARCHIVE_CAP:
+            raise Fail(3, "refused: %s is over 8 MiB" % n)
+    if "evidence.json" not in out:
+        raise Fail(3, "%s is not an evidence dir (no evidence.json)" % src)
+    return out
+
+
+def cmd_archive_evidence(a):
+    """E7 (Q13): keep the verification bundle and the exact setup list of a delivery in its campaign, before
+    cleanup removes the worktree. The bytes judged green are the bytes written; the manifest names the tasks the
+    graph closed on this evidence and is signed with the Vajra key. Run by vajra-campaign.sh under its lock."""
+    if not SHA_RE.match(a.head):
+        raise Fail(2, "invalid --head")
+    try:
+        setup = json.loads(a.setup)
+    except ValueError:
+        setup = None
+    if not isinstance(setup, list) or len(setup) > 5 or not all(isinstance(c, str) and 1 <= len(c) <= 1000 for c in setup):
+        raise Fail(2, "--setup must be a JSON array of at most 5 strings, each 1-1000 characters")
+    src = a.evidence_dir.rstrip("/")
+    eslug = os.path.basename(src)
+    if not EV_SLUG_RE.match(eslug):
+        raise Fail(2, "invalid evidence slug %r" % eslug)
+    files = read_bundle(src)
+    ev = read_evidence(os.path.join(src, "evidence.json"), a.head, raw=files["evidence.json"])
+    with Store(a.campaign) as s:
+        tasks = sorted(t["id"] for t in s.data["tasks"]
+                       if t["status"] == "done" and (t.get("evidence") or {}).get("sha256") == ev["sha256"])
+    if not tasks:
+        raise Fail(3, "no task of campaign %s was closed on this evidence" % a.campaign)
+    key = vajra_key()
+    if key is None:
+        raise Fail(3, "no Vajra key to sign the archive")
+    base = archive_dir(a.campaign)
+    os.makedirs(base, 0o700, exist_ok=True)
+    base = archive_dir(a.campaign)
+    dst = os.path.join(base, eslug)
+    if os.path.lexists(dst):
+        raise Fail(3, "evidence %s is already archived" % eslug)
+    files["setup.json"] = (json.dumps(setup, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    m = {"schema": ARCHIVE_SCHEMA, "campaign": a.campaign, "evidence": eslug, "head": ev["head"], "tasks": tasks,
+         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+         "files": {n: hashlib.sha256(b).hexdigest() for n, b in files.items()}}
+    m["hmac"] = sign(m, key)
+    files["manifest.json"] = (json.dumps(m, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    tmp = tempfile.mkdtemp(dir=base, prefix=".tmp-")
+    try:
+        for n, b in files.items():
+            with os.fdopen(os.open(os.path.join(tmp, n), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as f:
+                f.write(b)
+        os.rename(tmp, dst)
+    except OSError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise Fail(1, "cannot place the archive: %s" % e)
+    return {"ok": True, "campaign": a.campaign, "evidence": eslug, "tasks": tasks}
+
+
+def check_archive(path, slug, head):
+    """E7: `path` is <campaign>/evidence/<slug>/evidence.json of campaign `slug`, green for `head`, and its
+    manifest is signed with the Vajra key, is for this campaign, evidence and head, and lists exactly the
+    files in the dir, each matching."""
+    def refuse(why):
+        raise Fail(3, "evidence archive %s refused: %s" % (path, why))
     base = os.path.realpath(os.path.join(campaign_dir(slug), "evidence"))
     rel = os.path.relpath(os.path.realpath(path), base).split(os.sep)
-    if len(rel) != 5 or rel[0] in ("", ".", "..") or rel[1:3] != ["data", "walkthroughs"] or rel[4] != "evidence.json":
-        return None
-    return os.path.join(base, rel[0]), rel[0], rel[3]
-
-
-ARCHIVE_CAP = 8 * 1024 * 1024
-
-
-def check_archive_manifest(evdir, slug, task, eslug):
-    """E7: manifest.json is signed with the Vajra key (HMAC over its canonical JSON without hmac, the key's hex
-    text as the HMAC key, as vajra-campaign.sh signs) and lists exactly the files in the dir, each matching."""
-    def refuse(why):
-        raise Fail(3, "evidence archive %s refused: manifest %s" % (evdir, why))
+    if len(rel) != 2 or rel[1] != "evidence.json" or not EV_SLUG_RE.match(rel[0]):
+        refuse("it must be <campaign>/evidence/<slug>/evidence.json in campaign %s" % slug)
+    evdir = os.path.join(base, rel[0])
+    read_evidence(path, head, archived=True)
     try:
         with open(os.path.join(evdir, "manifest.json"), "rb") as f:
             m = json.loads(f.read(1_000_000).decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
-        refuse("missing or unreadable")
-    if not isinstance(m, dict) or not isinstance(m.get("files"), dict) or not isinstance(m.get("hmac"), str):
-        refuse("malformed")
-    kf = os.path.join(os.environ.get("HOME") or os.path.expanduser("~"), ".claude", "vajra", ".hmac-key")
-    try:
-        with open(kf, "r", encoding="utf-8") as f:
-            ktext = f.read().strip()
-    except OSError:
-        refuse("cannot be checked without the Vajra key")
-    body = json.dumps({k: v for k, v in m.items() if k != "hmac"}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    if not hmac.compare_digest(m["hmac"], hmac.new(ktext.encode(), body.encode("utf-8"), hashlib.sha256).hexdigest()):
-        refuse("signature (hmac) invalid")
-    # A signed archive copied to another task or campaign keeps a valid hmac; its own fields say where it belongs.
-    if (m.get("schema"), m.get("campaign"), m.get("task"), m.get("evidence")) != ("vajra-evidence-archive-v1", slug, task, eslug):
-        refuse("is for %s/%s/%s, not %s/%s/%s" % (m.get("campaign"), m.get("task"), m.get("evidence"), slug, task, eslug))
+        refuse("manifest missing or unreadable")
+    key = vajra_key()
+    if key is None:
+        refuse("manifest cannot be checked without the Vajra key")
+    if not isinstance(m, dict) or not isinstance(m.get("files"), dict) or not evidence_hmac_ok(m, key):
+        refuse("manifest signature (hmac) missing or invalid")
+    # A signed archive copied to another name or campaign keeps a valid hmac; its own fields say where it belongs.
+    if (m.get("schema"), m.get("campaign"), m.get("evidence"), m.get("head")) != (ARCHIVE_SCHEMA, slug, rel[0], head):
+        refuse("manifest is for %s/%s at %s" % (m.get("campaign"), m.get("evidence"), str(m.get("head"))[:12]))
     present = sorted(n for n in os.listdir(evdir) if n != "manifest.json")
     if present != sorted(m["files"]):
-        refuse("does not list exactly the archived files")
+        refuse("manifest does not list exactly the archived files")
     for n in present:
         fp = os.path.join(evdir, n)
         if not ARCHIVE_FILE_RE.match(n) or os.path.islink(fp) or not os.path.isfile(fp):
-            refuse("lists an unexpected file %s" % n)
+            refuse("manifest lists an unexpected file %s" % n)
         with open(fp, "rb") as f:
             data = f.read(ARCHIVE_CAP + 1)
         if len(data) > ARCHIVE_CAP or hashlib.sha256(data).hexdigest() != m["files"][n]:
-            refuse("sha256 mismatch for %s" % n)
+            refuse("manifest sha256 mismatch for %s" % n)
 
 
 def cmd_check_evidence(a):
@@ -627,15 +720,11 @@ def cmd_check_evidence(a):
         raise Fail(2, "invalid --head")
     if a.archived and not SLUG_RE.match(a.archived):
         raise Fail(2, "invalid --archived campaign slug")
+    if a.archived and not FULL_SHA_RE.match(a.head):
+        raise Fail(2, "--archived needs --head, the full 40-hex commit the archive was made for")
     try:
         if a.archived:
-            found = archive_root(a.archived, a.evidence)
-            if found is None:
-                raise Fail(3, "evidence %s refused: it must be <campaign>/evidence/<task>/data/walkthroughs/<slug>/evidence.json "
-                              "in campaign %s" % (a.evidence, a.archived))
-            root, task, eslug = found
-            read_evidence(a.evidence, a.head or None, root=root)
-            check_archive_manifest(os.path.dirname(os.path.realpath(a.evidence)), a.archived, task, eslug)
+            check_archive(a.evidence, a.archived, a.head)
         else:
             read_evidence(a.evidence, a.head or None)
     except Unreadable as e:
@@ -742,6 +831,8 @@ def human(cmd, res):
         return "\n".join(res["ready"])
     if cmd == "check-evidence":
         return "green" if res["green"] else "not green: " + "; ".join(res["reasons"])
+    if cmd == "archive-evidence":
+        return "evidence archived for %s: %s (%s)" % (res["campaign"], res["evidence"], ", ".join(res["tasks"]))
     if cmd == "validate":
         return "ok: %d task(s), graph valid" % res["tasks"]
     return "%s %s%s" % (res.get("id", ""), res.get("result", res.get("status", "ok")),
@@ -793,11 +884,17 @@ def main(argv):
     s = sub.add_parser("waves", parents=[common], allow_abbrev=False)
     s.add_argument("--max-in-flight", type=int, default=None)
     sub.add_parser("graph", parents=[common], allow_abbrev=False)
+    s = sub.add_parser("archive-evidence", parents=[common], allow_abbrev=False,
+                       help="E7: archive a verify-work bundle into the campaign (run by vajra-campaign.sh)")
+    s.add_argument("evidence_dir")
+    s.add_argument("--head", required=True, help="commit the evidence must be for")
+    s.add_argument("--setup", required=True, help="JSON array of the setup commands write-back ran")
     s = sub.add_parser("check-evidence", allow_abbrev=False,
                        help="read-only: is this verify-work evidence green? (no --campaign needed)")
     s.add_argument("evidence")
     s.add_argument("--head", default="", help="commit the evidence must be for (default: the current HEAD)")
-    s.add_argument("--archived", default="", help="campaign slug: the evidence is archived in it (E7); also checks the manifest")
+    s.add_argument("--archived", default="", help="campaign slug: the evidence is archived in it (E7, needs the full --head); "
+                   "also checks the manifest. No git repository is used")
     s.add_argument("--json", action="store_true", help="JSON output")
     try:
         a = p.parse_args(argv)

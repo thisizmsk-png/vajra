@@ -94,13 +94,15 @@ await scenario('happy path: done, one integration branch, evidence per criterion
 await scenario('E4: the delivery report is saved into the campaign, byte-exact, as one base64 argument', async () => {
   const r = await go(ARGS)
   const p = call(r, 'campaign.report').prompt
-  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --sha256 ([0-9a-f]{64}) --base64 ([A-Za-z0-9+/]+=*)/)
+  const m = own(p).match(/vajra-campaign\.sh report --campaign deliver-20261011-0930 --bytes (\d+) --check ([0-9a-f]{8}) --base64 ([A-Za-z0-9+/]+=*)/)
   assert.ok(m, own(p))
   const raw = Buffer.from(m[3], 'base64'), text = raw.toString('utf8')
   assert.equal(text, r.result.report + '\n')
   assert.equal(Number(m[1]), raw.length)
-  const { createHash } = await import('node:crypto')
-  assert.equal(m[2], createHash('sha256').update(raw).digest('hex'), 'the workflow sha256 matches node crypto')
+  // FNV-1a 32 of the base64 text: catches a copy error by the agent (the script re-computes it).
+  let h = 0x811c9dc5
+  for (const c of m[3]) { h ^= c.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0 }
+  assert.equal(m[2], h.toString(16).padStart(8, '0'))
   assert.equal(call(r, 'campaign.report').agentType, 'abhimanyu')
   assert.ok(own(p).length < 32 * 1024, 'the command stays under the guard analysis limit')
 })
@@ -597,19 +599,22 @@ await scenario('write-back: verify-work evidence, tasks closed on it, delivery +
   assert.equal(r.result.artifacts.knowledge.tasks_closed, true)
   assert.match(r.result.report, /## Knowledge recorded\n- 2 record\(s\) \(1 delivery, 1 decision\(s\), 0 lesson\(s\)\) saved as verified/)
 })
-await scenario('E7: write-back archives the evidence bundle and the exact setup list per task, only when verified', async () => {
+await scenario('E7: write-back archives the evidence bundle and the exact setup list once per delivery, only when verified', async () => {
   const long = 'pip install ' + 'x'.repeat(980)
   const r = await go(ARGS, { verify: realVerifier('id', { setup_cmds: ['npm ci', long, "echo 'q' \"d\""] }) })
   const w = call(r, 'writeback'), p = own(w.prompt), q = wrapped(w.prompt, 'quoted_arguments')
-  const m = [...p.matchAll(/^(\d+)\. bash \S+vajra-campaign\.sh archive-evidence deliver-20261011-0930 (t\d) data\/walkthroughs\/deliver-20261011-0930 \{\{a(\d+)\}\}$/gm)]
-  assert.deepEqual(m.map((x) => x[2]), ['t1', 't2'])
-  const total = Number(m.at(-1)[1])
-  assert.match(p, new RegExp(`If verified is true, then also run commands ${m[0][1]} to ${total} \\(archive the evidence`))
+  // One archive per delivery, no task id: the script archives it for every task closed on this evidence
+  // (a bare t1 here was refused, as the graph holds run-prefixed ids).
+  const m = [...p.matchAll(/^(\d+)\. bash \S+vajra-campaign\.sh archive-evidence (.*)$/gm)]
+  assert.equal(m.length, 1)
+  const am = m[0][2].match(/^deliver-20261011-0930 data\/walkthroughs\/deliver-20261011-0930 d1111111 \{\{a(\d+)\}\}$/)
+  assert.ok(am, m[0][2])
+  assert.match(p, new RegExp(`If verified is true, then also run command ${m[0][1]} \\(archive the evidence\\)`))
   // The argument is the exact JSON of the setup commands that ran, untruncated (the 1,000-char one included).
-  const arg = q.match(new RegExp(`\\{\\{a${m[0][3]}\\}\\} = (.*)`))[1]
+  const arg = q.match(new RegExp(`\\{\\{a${am[1]}\\}\\} = (.*)`))[1]
   const unq = arg.slice(1, -1).replace(/'\\''/g, "'")
   assert.deepEqual(JSON.parse(unq), ['npm ci', long, "echo 'q' \"d\""])
-  assert.match(p, /archive_ok=false if any of them exits non-zero .* These do not count toward ok\./)
+  assert.match(p, /archive_ok=false if it exits non-zero .* It does not count toward ok\./)
   // A failed archive is reported on its own and does not reopen the tasks.
   const fa = await go(ARGS, { writeback: { ...base.writeback, archive_ok: false } })
   assert.equal(fa.result.artifacts.knowledge.tasks_closed, true)
