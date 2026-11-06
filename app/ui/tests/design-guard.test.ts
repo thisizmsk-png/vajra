@@ -22,6 +22,18 @@ describe("design guard", () => {
     }
   });
 
+  it("catches multiline style objects and camelCase colour properties", () => {
+    const multi = ["<div style={{", '  backgroundColor: "red"', "}} />"].join("\n");
+    const vs = scanText("x", multi);
+    expect(vs.map((v) => v.rule)).toEqual(expect.arrayContaining(["inline style color", "named css color"]));
+    expect(vs.find((v) => v.rule === "inline style color")?.line).toBe(2);
+    for (const prop of ["borderColor", "color", "fill", "stroke", "outlineColor"]) {
+      const text = `<i style={{\n  padding: 4,\n  ${prop}: "x",\n}} />`;
+      expect(scanText("x", text).map((v) => v.rule), prop).toContain("inline style color");
+    }
+    expect(scanText("x", '<i style={{ padding: 4, display: "flex" }} />')).toEqual([]);
+  });
+
   it("does not flag tokens, ids or ordinary css", () => {
     for (const ok of ["a { color: var(--c-text); }", "#root { margin: 0 }", "color-mix(in srgb, var(--c-a) 60%, transparent)", "const x = `#${id}`"]) {
       expect(scanText("x", ok), ok).toEqual([]);
