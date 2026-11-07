@@ -690,3 +690,19 @@ fn start_session_sweeps_stale_temp_files_from_queue() {
     assert!(keep.exists(), "a real queue file stays");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 C4-4: queue/ swapped for a symlink (to a directory the worker controls) is not listed. The check fails and is
+/// retried instead of settling from whatever the link points at.
+#[test]
+fn a_queue_dir_swapped_for_a_symlink_is_not_trusted() {
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let elsewhere = dir.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::rename(root.join("queue"), dir.join("moved-queue")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("queue")).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "a symlinked queue/ settles nothing");
+    let _ = fs::remove_dir_all(&dir);
+}

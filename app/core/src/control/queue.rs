@@ -76,7 +76,7 @@ impl SessionDir {
     /// Remove the `.<name>.<pid>.tmp` files a crash between `write_atomic`'s write and rename left in queue/. The hook
     /// skips dot files, so none is live when a session starts. Best effort: a file that will not go is left for next time.
     pub fn sweep_temp(&self) {
-        let Ok(rd) = fs::read_dir(self.dir("queue")) else { return };
+        let Ok(rd) = fsx::read_dir_nofollow(&self.dir("queue")) else { return };
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(n) = name.to_str() else { continue };
@@ -127,7 +127,7 @@ impl Listing {
 }
 
 fn names(dir: &Path) -> io::Result<Vec<String>> {
-    let rd = match fs::read_dir(dir) {
+    let rd = match fsx::read_dir_nofollow(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -142,7 +142,7 @@ fn names(dir: &Path) -> io::Result<Vec<String>> {
 }
 
 fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
-    let rd = match fs::read_dir(dir) {
+    let rd = match fsx::read_dir_nofollow(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),

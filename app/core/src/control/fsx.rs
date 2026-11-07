@@ -59,6 +59,19 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
     Ok(f)
 }
 
+/// List a directory that must be a real directory: a symlink in its place (a worker can swap one in) is an
+/// `InvalidInput` error, not followed. The check opens with O_DIRECTORY | O_NOFOLLOW; the listing then reads the path.
+pub fn read_dir_nofollow(path: &Path) -> io::Result<fs::ReadDir> {
+    OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).map_err(|e| {
+        if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
+            io::Error::new(io::ErrorKind::InvalidInput, "control subdirectory is not a directory")
+        } else {
+            e
+        }
+    })?;
+    fs::read_dir(path)
+}
+
 /// Read a regular file without following a symlink.
 pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     use std::io::Read;
