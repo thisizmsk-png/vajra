@@ -72,6 +72,11 @@ fn read_report(app: State<'_, App>, slug: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn resume_targets(app: State<'_, App>) -> Res {
+    app.resume_targets()
+}
+
+#[tauri::command(async)]
 fn crew(app: State<'_, App>, slug: String, run_id: String) -> Res {
     app.crew(&slug, &run_id)
 }
@@ -231,6 +236,7 @@ fn main() {
             resume_run,
             verify_campaign,
             read_report,
+            resume_targets,
             crew,
             tail,
             read_spill,
