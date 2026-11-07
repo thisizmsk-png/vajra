@@ -58,7 +58,23 @@ def sample(proc, before):
         parts["webkit"] += rows[pid][1] / KB
     parts["total_mib"] = round(sum(parts.values()), 1)
     parts["helpers"] = len(helpers)
+    parts["helper_detail"] = helper_detail(helpers)
     return {k: round(v, 1) if isinstance(v, float) else v for k, v in parts.items()}
+
+
+def helper_detail(pids):
+    """Name, RSS, age and command line of each counted helper, so a surprising helper count can be explained."""
+    if not pids:
+        return []
+    out = subprocess.run(["ps", "-o", "pid=,rss=,etime=,args=", "-p", ",".join(str(p) for p in sorted(pids))],
+                         capture_output=True, text=True).stdout
+    rows = []
+    for line in out.splitlines():
+        p = line.split(None, 3)
+        if len(p) == 4:
+            rows.append({"pid": int(p[0]), "rss_mib": round(int(p[1]) / KB, 1), "etime": p[2],
+                         "name": os.path.basename(p[3].split(" ")[0]), "args": p[3][:300]})
+    return rows
 
 
 def stop(proc):
@@ -77,6 +93,41 @@ def load():
 
 
 LAUNCHES = 5
+
+
+def identity_key(macos_build, webkit):
+    """What decides the helper count and the WebKit footprint. The runner image version is recorded but not part of
+    the key: it rotates weekly without changing either, and a key that rotated with it would fail the gate every week."""
+    return f"{macos_build}|{webkit}"
+
+
+def flavour_summary(runs):
+    """(helper count, median of that flavour's launch medians, launches in it).
+
+    A launch belongs to the smallest helper count it saw. The reported number and the reported flavour must describe the
+    same launches, or a mixed run (one 2-helper launch among 3-helper ones) would pair 175 MiB's baseline with 201 MiB.
+    The flavour with the most launches wins; on a tie the larger helper count, which is the conservative reading."""
+    by = {}
+    for r in runs:
+        by.setdefault(min(r["helpers"]), []).append(r["median_mib"])
+    n = max(by, key=lambda k: (len(by[k]), k))
+    return n, statistics.median(by[n]), len(by[n])
+
+
+def launch_flavours(runs):
+    """Every distinct helper count (smallest seen per launch) across all launches, so the gate can reject unknown ones
+    instead of letting the majority flavour hide them."""
+    return sorted({min(r["helpers"]) for r in runs})
+
+
+def runner_identity():
+    def sh(*a):
+        return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+    build = sh("sw_vers", "-buildVersion")
+    webkit = sh("defaults", "read", "/System/Library/Frameworks/WebKit.framework/Resources/Info", "CFBundleVersion") \
+        or sh("defaults", "read", "/System/Library/Frameworks/WebKit.framework/Versions/A/Resources/Info", "CFBundleVersion")
+    return {"key": identity_key(build, webkit), "macos_build": build, "webkit": webkit,
+            "macos": sh("sw_vers", "-productVersion"), "image_version": os.environ.get("ImageVersion", "")}
 
 
 def clean_median(samples):
@@ -106,7 +157,10 @@ def idle(binary, out):
                      "helpers": sorted({s["helpers"] for s in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
     meds = [r["median_mib"] for r in runs]
-    json.dump({"runs": runs, "median_of_medians_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
+    helpers, flavour_median, in_flavour = flavour_summary(runs)
+    ident = runner_identity()
+    json.dump({"identity": ident["key"], "runner": ident, "helpers": helpers, "launch_flavours": launch_flavours(runs), "flavour_launches": in_flavour, "runs": runs,
+               "median_of_medians_mib": flavour_median, "all_launches_median_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
 
 
 def slope(points):  # least squares, MiB per minute
