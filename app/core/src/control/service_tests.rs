@@ -336,3 +336,26 @@ fn a_failed_directory_scan_is_retried_not_settled() {
     assert!(s.pending.contains_key(&id), "readable again: it is simply still queued");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn signals_show_a_queued_message_and_a_stop_in_force_until_resumed() {
+    let (mut s, dir) = svc();
+    let key = "aa870dd40540481f0".to_string();
+    assert!(s.signals().message_pending.is_empty() && s.signals().stopped.is_empty());
+    s.message_worker(Actor::Human, "bhima", "hello").unwrap();
+    assert!(s.signals().message_pending.contains(&key), "a queued message is pending");
+    assert!(s.signals().stopped.is_empty());
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert!(s.signals().stopped.contains(&key), "a confirmed stop is in force");
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert!(!s.signals().stopped.contains(&key), "a resume lifts it");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lead_stop_request_that_awaits_confirmation_is_not_yet_a_stop() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Lead, "bhima", None).unwrap();
+    assert!(s.signals().stopped.is_empty(), "only the human's confirmed stop is enforced");
+    let _ = fs::remove_dir_all(&dir);
+}
