@@ -69,6 +69,8 @@
 .v-palette__field { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); color: var(--c-text-muted); }
 .v-palette__field > .v-input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 16px; }
 .v-palette__field > .v-input:focus-visible { outline: none; }
+/* The field has no box, so its focus is a 2 px line under it (WCAG 2.4.7). */
+.v-palette__field:focus-within { box-shadow: inset 0 -2px 0 var(--c-focus-ring); }
 .v-palette [role="listbox"] { max-height: min(420px, 50vh); overflow: auto; padding: 6px; }
 .v-palette .v-row { min-height: 34px; padding: 0 10px; }
 .v-palette .v-row > .v-kbd-group { margin-left: auto; }

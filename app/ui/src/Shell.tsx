@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
 import type { IconName } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -16,6 +16,16 @@ const ICON: Record<Screen, IconName> = { home: "home", run: "run", crew: "crew",
 /** Graphite shell: a 240 px sidebar with the screens, the current screen beside it, and the ⌘K palette over both. Every screen sits inside an error boundary. */
 export function Shell() {
   const [route, go] = useRoute();
+  const main = useRef<HTMLElement>(null);
+  // The window title names the screen, so a screen reader and the window menu say where you are (WCAG 2.4.2).
+  useEffect(() => { document.title = S.shell.title(S.nav[route.screen]); }, [route.screen]);
+  // The hash is the router, so the skip link moves focus itself: into the screen's first control, else the screen.
+  const skip = () => {
+    const m = main.current;
+    if (!m) return;
+    const first = m.querySelector<HTMLElement>('input, textarea, select, button, a[href], [tabindex="0"]');
+    (first ?? m).focus();
+  };
   const Screen = REGISTRY[route.screen];
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -34,6 +44,7 @@ export function Shell() {
   return (
     <PaletteHost commands={commands}>
       <div className="v-shell">
+        <a className="v-skip" href="#v-main" onClick={(e) => { e.preventDefault(); skip(); }}>{S.shell.skip}</a>
         <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
           <div className="v-shell__brand">{S.shell.brand}</div>
           <PaletteButton label={S.shell.search} />
@@ -45,7 +56,7 @@ export function Shell() {
             </a>
           ))}
         </nav>
-        <main className="v-shell__main">
+        <main className="v-shell__main" id="v-main" tabIndex={-1} ref={main}>
           <ErrorBoundary resetKey={toHash(route.screen, route.params)}>
             <Screen />
           </ErrorBoundary>

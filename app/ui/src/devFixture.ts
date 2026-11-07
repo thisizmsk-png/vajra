@@ -107,6 +107,7 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     const after = Number(a?.afterSeq ?? 0);
     return { lines: stream.filter((l) => l.seq > after), gap: false, head_seq: stream.length, spill_start: null, spill_end: null };
   },
+  start_run: () => ({ stream: "s-new", session_id: "u-new", run_id: RUN, campaign: SLUG }),
   read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
   kb_search: () => ({ code: 0, hits: [

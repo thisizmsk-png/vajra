@@ -424,6 +424,17 @@ presses every visible control and records crashes, page errors, console errors, 
 and dead buttons; target 0 of each. Shots go to `docs/design/after/`. Then `vidura` checks
 accessibility independently.
 
+**Rendered audit (PR #39, dev fixture, 1440x900).** An in-page check measured every visible text
+against its real composited background on Home, Crew, History (with the report open), Settings, the
+palette, and the empty and core-down states, in both themes: 0 below AA, lowest 4.85:1. It found 0
+interactive elements without an accessible name. Tabbing with real key presses: the skip link
+("Skip to the screen") is the first stop and lands in the screen's first control; then the sidebar,
+the screen in reading order, and the action bar. Every stop shows a ring: the ask and the palette
+field, which have no box of their own, ring their frame (2 px). ⌘K moves focus into the palette, and
+Esc gives it back to where it was. A run starts from the keyboard alone (skip link, ask, Tab,
+repository, ⌘↵). With reduced motion, every transition is 0 s. The window title names the screen.
+Not done yet: 960x600, the click crawl and a real screen reader pass.
+
 design-md-lint: last run on the previous palette (`npx @google/design.md lint`, CLI 0.4.0: 0 errors,
 0 warnings). Not re-run on this version; the front matter keeps the same shape, and every colour
 token is still referenced by a component.

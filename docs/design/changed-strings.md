@@ -110,3 +110,10 @@ Empty, loading and error states (PR #39).
 | Every run you start, here or from the terminal, is listed here with its report. | History with no campaigns | new, under "No campaigns yet.", with Go to Home |
 | Open the crew for this run | Run view right after a start | new; the Run view is not built, so it points at the crew |
 | The run is under way. Its timeline is not built yet; the crew shows each worker as it goes. | same | new |
+
+Accessibility pass (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Skip to the screen | first Tab stop | new; out of sight until it has focus |
+| SCREEN - Vajra | window title | was "Vajra Desktop" on every screen |

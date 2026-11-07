@@ -1,9 +1,12 @@
 /* Graphite shell (DESIGN.md "Layout"): 240 px sidebar on the surface, the screen on the background. */
-.v-shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
+.v-shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; position: relative; }
 .v-shell__nav { display: flex; flex-direction: column; gap: 2px; padding: 10px var(--space-sm) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); min-height: 0; }
 .v-shell__brand { display: flex; align-items: center; height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 13px/16px var(--font-ui); color: var(--c-text); }
 .v-shell__link { display: flex; align-items: center; gap: 10px; height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
 .v-shell__label { flex: 1; min-width: 0; text-align: left; }
+/* Skip link: the first Tab stop, out of sight until it has focus. */
+.v-skip { position: absolute; left: var(--space-sm); top: var(--space-sm); z-index: 10; padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-md); background: var(--c-primary); color: var(--c-text-on-primary); font: 500 13px/16px var(--font-ui); text-decoration: none; transform: translateY(-200%); }
+.v-skip:focus-visible { transform: none; outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-shell__link .v-icon { color: var(--c-text-muted); transition: color var(--t-fast) var(--ease-out); }
 .v-shell__link:hover .v-icon, .v-shell__link[aria-current="page"] .v-icon { color: var(--c-text); }
 /* The palette for the mouse: reads as a field, so it is inset like one. */
@@ -15,6 +18,7 @@
 .v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-shell__main:focus { outline: none; }
 .v-shell__main { min-width: 0; min-height: 0; padding: var(--space-xl); overflow: auto; background: var(--c-background); }
 /* A screen that owns its layout (header, panes, action bar) fills the main area edge to edge. */
 .v-shell__main:has(> .v-screen) { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -31,7 +35,8 @@
 .v-launch__ask .v-field__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: 16px; line-height: 25px; resize: none; }
 .v-launch__ask textarea.v-input:focus-visible { outline: none; }
-.v-launch:focus-within { border-color: var(--c-focus-ring); }
+/* The ask has no edge of its own, so while it has focus the launcher draws a 2 px ring (WCAG 2.4.7); the other fields ring themselves. */
+.v-launch:has(.v-launch__ask textarea:focus) { border-color: var(--c-focus-ring); box-shadow: 0 0 0 1px var(--c-focus-ring); }
 .v-launch__row { display: flex; align-items: flex-start; gap: var(--space-md); padding: var(--space-md) var(--space-lg) 0; border-top: 1px solid var(--c-border); margin-top: var(--space-md); }
 .v-launch__row .v-field__label { font-size: 12px; line-height: 16px; color: var(--c-text-muted); }
 .v-launch__rounds { display: flex; flex-direction: column; gap: var(--space-xs); }

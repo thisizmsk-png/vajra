@@ -96,3 +96,19 @@ describe("Command palette in the shell", () => {
     await waitFor(() => expect(row.getAttribute("aria-selected")).toBe("true"));
   });
 });
+
+describe("Shell keyboard and screen-reader basics", () => {
+  it("the skip link moves focus into the screen, past the sidebar", async () => {
+    boot();
+    await screen.findByRole("heading", { name: S.home.start });
+    const skip = screen.getByRole("link", { name: S.shell.skip });
+    fireEvent.click(skip);
+    expect(document.activeElement?.closest("main")).toBeTruthy();
+    expect(document.activeElement?.tagName).toBe("TEXTAREA"); // the ask, Home's first control
+  });
+
+  it("names the screen in the window title", async () => {
+    boot("#/history");
+    await waitFor(() => expect(document.title).toBe(S.shell.title(S.nav.history)));
+  });
+});
