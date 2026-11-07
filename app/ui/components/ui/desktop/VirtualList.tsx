@@ -12,6 +12,7 @@ export function VirtualList({
   overscan = 8,
   followEnd,
   renderRow,
+  onRange,
   className,
   ...aria
 }: Omit<HTMLAttributes<HTMLDivElement>, "children" | "style" | "onScroll"> & {
@@ -22,6 +23,8 @@ export function VirtualList({
   /** Stay pinned to the last row while the user is at the bottom (a live log). */
   followEnd?: boolean;
   renderRow: (index: number) => ReactNode;
+  /** The rows in view (first inclusive, end exclusive, no overscan) and whether the view is at the bottom; called when any changes. */
+  onRange?: (start: number, end: number, atBottom: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
@@ -32,8 +35,19 @@ export function VirtualList({
 
   useEffect(() => {
     const el = ref.current;
-    if (followEnd && atEnd.current && el) el.scrollTop = Math.max(0, total - height);
+    if (followEnd && atEnd.current && el) {
+      const pin = Math.max(0, total - height);
+      el.scrollTop = pin;
+      setTop(pin); // the scroll event follows in a browser; setting it here keeps the rows in step without waiting for one
+    }
   }, [followEnd, total, height]);
+
+  const [bottom, setBottom] = useState(true);
+  const start = Math.min(Math.max(0, count - 1), Math.floor(top / rowHeight));
+  const end = Math.min(count, Math.ceil((top + height) / rowHeight));
+  const report = useRef(onRange);
+  report.current = onRange;
+  useEffect(() => { report.current?.(start, end, bottom); }, [start, end, bottom]);
 
   const rows: ReactNode[] = [];
   for (let i = first; i < last; i++) {
@@ -51,6 +65,7 @@ export function VirtualList({
       onScroll={(e) => {
         const el = e.currentTarget;
         atEnd.current = el.scrollTop + height >= total - rowHeight;
+        setBottom(atEnd.current);
         setTop(el.scrollTop);
       }}
       {...aria}
