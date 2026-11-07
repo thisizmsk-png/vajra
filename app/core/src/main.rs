@@ -147,6 +147,21 @@ fn take_over(app: State<'_, App>, stream: String, on: bool) -> Res {
 }
 
 #[tauri::command(async)]
+fn ask_lead(app: State<'_, App>, run_id: String, text: String) -> Res {
+    app.ask_lead(&run_id, &text)
+}
+
+#[tauri::command(async)]
+fn cancel_ask(app: State<'_, App>, ask_id: String) -> Res {
+    app.cancel_ask(&ask_id)
+}
+
+#[tauri::command(async)]
+fn lead_status(app: State<'_, App>, run_id: String) -> Res {
+    app.lead_status(&run_id)
+}
+
+#[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
 }
@@ -252,6 +267,9 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            ask_lead,
+            cancel_ask,
+            lead_status,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
@@ -270,7 +288,11 @@ fn main() {
                 let _ = w.set_focus();
             }
         }
-        RunEvent::Exit => handle.state::<App>().sup.shutdown(),
+        RunEvent::Exit => {
+            let app = handle.state::<App>();
+            app.shutdown_lead();
+            app.sup.shutdown();
+        }
         _ => {}
     });
 }

@@ -97,6 +97,7 @@ const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct App {
     data: PathBuf,
+    home: PathBuf,
     claude: PathBuf,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
@@ -120,6 +121,8 @@ pub struct App {
     launching: Mutex<()>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
+    /// ADR-13: the Lead chat (asks, the guard, the claude binary).
+    lead: lead::LeadState,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -136,6 +139,8 @@ impl App {
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
         Ok(Self {
             data: data.to_path_buf(),
+            home: home.to_path_buf(),
+            lead: lead::LeadState::new(home),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verdicts: Mutex::new(HashMap::new()),
@@ -185,7 +190,9 @@ impl App {
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
     fn fresh_run_id(&self, now: u64) -> (u64, String) {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
+        let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
         let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
         lock(&self.issued).insert(pick.1.clone());
         pick
@@ -333,9 +340,14 @@ impl App {
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf() };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
+        }
+        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
+        // refused for this run after a restart, but the launch itself goes on.
+        if self.record_run_cwd(run_id, cwd).is_err() {
+            self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
@@ -437,9 +449,9 @@ impl App {
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
-        let node = self.with_reader(|r| {
-            Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
-        })?;
+        // Overlays come from the live control session only; a past run shows none.
+        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
         Ok(node_json(&node))
     }
 
@@ -951,6 +963,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod lead;
 mod runindex;
 
 #[cfg(test)]

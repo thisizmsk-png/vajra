@@ -25,17 +25,27 @@ pub trait Forward {
 /// does not break the Lead session.
 pub struct SocketClient {
     path: PathBuf,
+    /// The run this Lead was started for; sent with every call (see `Service::call_tool_for_run`).
+    run: Option<String>,
 }
+
+/// The environment variable the app's per-run `mcp.json` sets for the Lead's MCP server.
+pub const RUN_ENV: &str = "VAJRA_LEAD_RUN";
 
 impl SocketClient {
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf() }
+        Self { path: path.to_path_buf(), run: None }
+    }
+
+    /// A client whose calls are served only while `run` is the app's current run.
+    pub fn bound(path: &Path, run: &str) -> Self {
+        Self { path: path.to_path_buf(), run: Some(run.to_string()) }
     }
 }
 
 impl Forward for SocketClient {
     fn call(&mut self, tool: &str, args: &Value) -> Result<Value, Value> {
-        match socket::request(&self.path, tool, args) {
+        match socket::request_for(&self.path, self.run.as_deref(), tool, args) {
             Ok(mut v) => match v.get_mut("ok") {
                 Some(ok) => Ok(ok.take()),
                 None => Err(v),
@@ -185,5 +195,13 @@ pub fn serve(mut input: impl BufRead, mut out: impl Write, fwd: &mut impl Forwar
 /// The `--mcp` entry point: stdin/stdout, forwarding to `socket_path`.
 pub fn run_stdio(socket_path: &Path) -> io::Result<()> {
     let stdin = io::stdin();
-    serve(stdin.lock(), io::stdout().lock(), &mut SocketClient::new(socket_path))
+    // A Lead the app started carries its run in the environment; a bad value is a refusal to start, not "unbound".
+    let mut client = match std::env::var_os(RUN_ENV) {
+        None => SocketClient::new(socket_path),
+        Some(r) => match r.to_str().filter(|r| crate::ids::valid_run_id(r)) {
+            Some(r) => SocketClient::bound(socket_path, r),
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{RUN_ENV} is not a run id"))),
+        },
+    };
+    serve(stdin.lock(), io::stdout().lock(), &mut client)
 }

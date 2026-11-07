@@ -3,7 +3,7 @@ import type { KeyboardEvent } from "react";
 import type { StatusKey } from "../../../strings";
 import { StatusDot } from "../base/StatusDot";
 
-export type CrewNode = { id: string; label: string; status: StatusKey; children?: CrewNode[] };
+export type CrewNode = { id: string; label: string; status: StatusKey; statusLabel?: string; children?: CrewNode[] };
 
 type Flat = { node: CrewNode; level: number; parent: string | null };
 
@@ -67,7 +67,7 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
             {r.node.children?.length ? (open.has(r.node.id) ? "▾" : "▸") : ""}
           </span>
           <span>{r.node.label}</span>
-          <span className="v-row__meta"><StatusDot status={r.node.status} /></span>
+          <span className="v-row__meta"><StatusDot status={r.node.status} label={r.node.statusLabel} /></span>
         </li>
       ))}
     </ul>
