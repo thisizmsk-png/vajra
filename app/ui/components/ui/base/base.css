@@ -1,5 +1,5 @@
 /* K2 base kit styles, Graphite (docs/desktop/DESIGN.md). Variables from theme/tokens.css only; the design guard enforces it.
-   Azure (--c-primary) marks the primary action, the current selection's live state and the live line, nothing else. */
+   The primary action is ink (--c-action). Azure (--c-primary) marks focus, the current selection's live state and the live line, nothing else. */
 body { margin: 0; background: var(--c-background); color: var(--c-text); font: 400 13px/19px var(--font-ui); caret-color: var(--c-primary); -webkit-font-smoothing: antialiased; }
 ::selection { background: var(--c-selection); }
 :root { scrollbar-color: var(--c-border-strong) transparent; scrollbar-width: thin; }
@@ -28,16 +28,16 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
   transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
 }
 .v-button--sm { height: var(--ctl-sm); padding: 0 var(--space-sm); font-size: 12px; }
-.v-button--primary { background: var(--c-primary); color: var(--c-text-on-primary); }
-.v-button--primary:hover:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }
-.v-button--secondary { background: var(--c-surface-elevated); color: var(--c-text); border-color: var(--c-border); }
+.v-button--primary { background: var(--c-action); color: var(--c-text-on-action); font-weight: 600; }
+.v-button--primary:hover:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-action) 86%, var(--c-background)); }
+.v-button--secondary { background: var(--c-panel); color: var(--c-text); border-color: var(--c-border); box-shadow: 0 1px 0 var(--c-border); }
 .v-button--ghost { background: transparent; color: var(--c-text-secondary); }
 .v-button--danger { background: var(--c-surface-elevated); color: var(--c-danger); border-color: var(--c-border); }
 .v-button--secondary:hover:not([aria-disabled="true"]),
 .v-button--danger:hover:not([aria-disabled="true"]) { background: var(--c-accent); border-color: var(--c-border-strong); }
 .v-button--ghost:hover:not([aria-disabled="true"]) { background: var(--c-accent); color: var(--c-text); }
 .v-button:active:not([aria-disabled="true"]) { background: var(--c-accent); }
-.v-button--primary:active:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-primary) 80%, var(--c-text)); }
+.v-button--primary:active:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-action) 76%, var(--c-background)); }
 .v-button[aria-disabled="true"] { opacity: 0.55; }
 
 .v-card { background: var(--c-surface); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: var(--space-md); }
@@ -45,11 +45,13 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
 .v-card--interactive:hover { background: var(--c-accent); }
 
 /* Badges are a quiet fill with status-coloured text (every status colour passes 4.5:1 on accent). */
-.v-badge { display: inline-flex; align-items: center; gap: var(--space-xs); height: 20px; padding: 0 6px; border-radius: var(--radius-sm); background: var(--c-accent); font: 500 11px/14px var(--font-ui); color: var(--c-text-secondary); white-space: nowrap; }
-.v-badge--success { color: var(--c-success); }
-.v-badge--warning { color: var(--c-warning); }
-.v-badge--danger { color: var(--c-danger); }
-.v-badge--info { color: var(--c-info); }
+/* Status badges are pills: a faint tint and edge of their own colour behind status-coloured text (4.5:1, tests/contrast). */
+.v-badge { display: inline-flex; align-items: center; gap: var(--space-xs); height: 20px; padding: 0 8px; border: 1px solid var(--c-border); border-radius: var(--radius-pill); background: var(--c-accent); font: 500 11px/14px var(--font-ui); color: var(--c-text-secondary); white-space: nowrap; }
+.v-badge--success { --v-tone: var(--c-success); }
+.v-badge--warning { --v-tone: var(--c-warning); }
+.v-badge--danger { --v-tone: var(--c-danger); }
+.v-badge--info { --v-tone: var(--c-info); }
+.v-badge:is(.v-badge--success, .v-badge--warning, .v-badge--danger, .v-badge--info) { color: var(--v-tone); background: color-mix(in srgb, var(--v-tone) 10%, var(--c-panel)); border-color: color-mix(in srgb, var(--v-tone) 35%, var(--c-panel)); }
 
 /* Inputs are inset: darker than their surface, with the 3:1 edge that identifies them. */
 .v-field { display: flex; flex-direction: column; gap: var(--space-xs); }
@@ -70,6 +72,14 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-listbox:focus-visible:not(:has([role="option"])) { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-listbox:focus-visible .v-row[data-active] { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
 .v-row__meta { margin-left: auto; color: var(--c-text-muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+
+/* A panel holds one list or table: a raised, bordered sheet, the way native list views sit in their window. */
+.v-panel { background: var(--c-panel); border: 1px solid var(--c-border); border-radius: var(--radius-lg); overflow: hidden; }
+.v-panel__bar { display: flex; align-items: center; gap: var(--space-sm); min-height: 44px; padding: 0 var(--space-md); border-bottom: 1px solid var(--c-border); }
+.v-panel__title { font: 600 13px/16px var(--font-ui); color: var(--c-text); }
+.v-panel__meta { color: var(--c-text-muted); font: 400 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; }
+.v-panel__end { margin-left: auto; display: flex; align-items: center; gap: var(--space-sm); }
+.v-panel__body { padding: var(--space-md); }
 
 .v-section { margin: 0 0 var(--space-lg); }
 .v-section__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-sm); }
@@ -127,4 +137,4 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 
 .v-kbd-group { display: inline-flex; gap: 3px; font: inherit; }
 .v-kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font: 500 11px/16px var(--font-ui); text-align: center; }
-.v-button--primary .v-kbd { background: transparent; border-color: var(--c-kbd-on-primary); color: inherit; }
+.v-button--primary .v-kbd { background: transparent; border-color: var(--c-kbd-on-action); color: inherit; }
