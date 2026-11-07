@@ -730,3 +730,56 @@ fn the_newest_workflow_is_found_among_more_than_200_result_files() {
     assert_eq!(app.inbox().unwrap()["count"], 0);
     app.sup.kill(&format!("run-{SID}")).unwrap();
 }
+
+#[test]
+fn a_newer_unreadable_or_malformed_result_blocks_an_older_completed_plan() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    t.live(&app);
+    let dir = t.wf_dir();
+    let set_mtime = |p: &std::path::Path, secs: u64| {
+        fs::File::options().write(true).open(p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start_of(RUN) as u64 + secs)).unwrap()
+    };
+    // Each way a newer file can be unusable: half written, empty, loose mode, an extra hard link, a symlink.
+    type Make = Box<dyn Fn(&std::path::Path)>;
+    let cases: Vec<(&str, Make)> = vec![
+        ("half written", Box::new(|p| fs::write(p, "{\"workflowName\":\"vajra-deliver\",\"status\":\"runn").unwrap())),
+        ("empty", Box::new(|p| fs::write(p, "").unwrap())),
+        ("loose mode", Box::new(|p| {
+            fs::write(p, done(CAMP, pushes()).to_string()).unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o644)).unwrap();
+        })),
+        ("second hard link", Box::new(|p| {
+            fs::write(p, done(CAMP, pushes()).to_string()).unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::hard_link(p, p.with_extension("twin")).unwrap();
+        })),
+    ];
+    for (what, make) in cases {
+        let newer = dir.join("wf_newer.json");
+        let _ = fs::remove_file(&newer);
+        let _ = fs::remove_file(newer.with_extension("twin"));
+        make(&newer);
+        set_mtime(&newer, 600);
+        assert_eq!(app.inbox().unwrap()["count"], 0, "{what}: the current workflow is unknown, so no older approval");
+        assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "plan_changed", "{what}");
+    }
+    let newer = dir.join("wf_newer.json");
+    let _ = fs::remove_file(&newer);
+    let _ = fs::remove_file(newer.with_extension("twin"));
+    symlink(dir.join("wf_a.json"), &newer).unwrap();
+    assert_eq!(app.inbox().unwrap()["count"], 0, "a symlink newer than the plan");
+    // A valid file of another workflow is set aside, and an unusable file from before the run is ignored.
+    fs::remove_file(&newer).unwrap();
+    let mut other = done(CAMP, json!([]));
+    other["workflowName"] = json!("architecture-review");
+    t.result_at("wf_newer.json", &other, RUN, 600);
+    assert_eq!(app.inbox().unwrap()["count"], 2, "an unrelated newer workflow does not hide the plan");
+    let stale = dir.join("wf_stale.json");
+    fs::write(&stale, "{ not json").unwrap();
+    set_mtime(&stale, 0);
+    fs::File::options().write(true).open(&stale).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start_of(RUN) as u64 - 100)).unwrap();
+    assert_eq!(app.inbox().unwrap()["count"], 2, "damage from before the launch is not this run's workflow");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}

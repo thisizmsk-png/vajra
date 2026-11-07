@@ -201,13 +201,33 @@ struct Env {
     result: Option<Value>,
 }
 
-fn envelope(bytes: &[u8], modified: i64) -> Option<Env> {
-    let v: Value = serde_json::from_slice(bytes).ok()?;
+enum Class {
+    /// Not JSON (a file still being written, or damaged): the current workflow cannot be known.
+    Unknown,
+    /// Valid JSON of another workflow (or not an envelope at all): not this campaign's concern.
+    Unrelated,
+    Deliver(Env),
+}
+
+fn envelope(bytes: &[u8], modified: i64) -> Class {
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Class::Unknown };
     if v.get("workflowName").and_then(Value::as_str) != Some("vajra-deliver") {
-        return None;
+        return Class::Unrelated;
     }
     let result = v.get("result").filter(|r| r.is_object()).cloned();
-    Some(Env { modified, terminal: v.get("status").and_then(Value::as_str) == Some("completed") && result.is_some(), result })
+    Class::Deliver(Env { modified, terminal: v.get("status").and_then(Value::as_str) == Some("completed") && result.is_some(), result })
+}
+
+/// mtime of a directory entry without opening it or following a symlink, so even an entry that cannot be opened safely
+/// is placed in time.
+fn entry_mtime(dir: &OwnedFd, name: &str) -> Option<i64> {
+    let c = CString::new(name).ok()?;
+    let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `dir` is a live directory fd, `c` a valid NUL-terminated relative name, `st` a valid out-pointer.
+    let rc = unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    // SAFETY: fstatat returned 0, so it filled `st`.
+    #[allow(clippy::unnecessary_cast)] // time_t is i64 here but not on every target
+    (rc == 0).then(|| unsafe { st.assume_init() }.st_mtime as i64)
 }
 
 /// What a finished result asks of the human. The campaign comes from the run's guarded record, not from the result:
@@ -258,18 +278,25 @@ pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) ->
     if names.len() > MAX_NAMES {
         return Ok(None);
     }
-    let mut dated: Vec<(i64, String)> = names
-        .into_iter()
-        // An unsafe or unreadable file is skipped, never trusted.
-        .filter_map(|n| open_checked(&held, &n).ok().map(|(_, mtime)| (mtime, n)))
-        .filter(|(mtime, _)| *mtime >= since)
-        .collect();
+    // Every entry at or after the run's launch is a candidate for "the current workflow", readable or not. Fail closed:
+    // one that cannot be placed in time, opened safely or parsed means the current workflow is unknown, so an older
+    // completed plan must not be offered in its place. Only valid JSON of another workflow is set aside.
+    let mut dated: Vec<(i64, String)> = Vec::new();
+    for n in names {
+        let Some(mtime) = entry_mtime(&held, &n) else { return Ok(None) };
+        if mtime >= since {
+            dated.push((mtime, n));
+        }
+    }
     dated.sort_by(|a, b| b.cmp(a));
+    // Entries older than the newest 200 cannot be the current workflow (a newer finished or running one decides first).
     let mut files: Vec<Env> = Vec::new();
     for (_, n) in dated.into_iter().take(MAX_FILES) {
-        let Ok((bytes, mtime)) = read_held(&held, &n) else { continue };
-        if let Some(env) = envelope(&bytes, mtime).filter(|e| e.modified >= since) {
-            files.push(env);
+        let Ok((bytes, mtime)) = read_held(&held, &n) else { return Ok(None) };
+        match envelope(&bytes, mtime) {
+            Class::Unknown => return Ok(None),
+            Class::Unrelated => {}
+            Class::Deliver(env) => files.push(env),
         }
     }
     let Some(newest) = files.iter().map(|e| e.modified).max() else { return Ok(None) };
