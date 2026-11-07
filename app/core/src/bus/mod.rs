@@ -584,6 +584,11 @@ impl Bus {
     /// the in-memory ring, so they are adjacent to a reader whose window starts at `before_seq`. Starts at the nearest
     /// index entry at or before `before_seq - max_lines`, so the cost is about `max_lines` lines, not the spill's size.
     pub fn read_spill_before(&self, stream: &str, before_seq: u64, max_lines: usize) -> io::Result<SpillBefore> {
+        self.read_spill_before_with(stream, before_seq, max_lines, &|| {})
+    }
+
+    /// `between` runs after the ring and index were captured and before the spill is read (tests force an eviction there).
+    pub(crate) fn read_spill_before_with(&self, stream: &str, before_seq: u64, max_lines: usize, between: &dyn Fn()) -> io::Result<SpillBefore> {
         let max_lines = max_lines.max(1);
         let (base, start, ring): (u64, u64, Vec<Line>) = {
             let inner = lock(&self.inner);
@@ -597,6 +602,7 @@ impl Bus {
         };
         // Keep the lines nearest `before_seq`: when their text outgrows the byte budget the OLDEST are dropped (never the
         // newest), so the result is always adjacent to the reader's window, with fewer lines if they are long.
+        between();
         let mut lines: std::collections::VecDeque<Line> = std::collections::VecDeque::new();
         let mut held = 0usize;
         let mut trimmed = false;
@@ -604,7 +610,10 @@ impl Bus {
         loop {
             let page = self.read_spill(stream, offset, 64 * 1024)?;
             if page.gap && offset != base {
-                return Ok(SpillBefore { gap: true, ..SpillBefore::default() });
+                // The spill was evicted while we read. The lines the ring still holds are real and adjacent to the
+                // window: return them (the reader marks the hole), and say `gap` so it knows to retry.
+                let skip = ring.len().saturating_sub(max_lines);
+                return Ok(SpillBefore { lines: ring.into_iter().skip(skip).collect(), at_start: false, gap: true });
             }
             let mut reached = false;
             for l in page.lines {

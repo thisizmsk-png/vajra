@@ -483,6 +483,31 @@ fn bus_read_spill_before_keeps_the_lines_adjacent_to_the_target_when_long_lines_
 }
 
 #[test]
+fn bus_read_spill_before_keeps_the_ring_lines_when_the_spill_is_evicted_mid_read() {
+    let tmp = TmpDir::new("beforeevict");
+    // "old" spills ~6 KB under an 8 KB cap; a burst on another stream (inside the read) evicts it, least-recently-used first.
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    let burst = || {
+        for i in 0..400 {
+            bus.push("other", &format!("other line {i:04}")).unwrap();
+        }
+    };
+    let p = bus.read_spill_before_with("old", 299, 5, &burst).unwrap();
+    assert!(p.gap, "the eviction is reported");
+    assert!(!p.at_start);
+    let seqs: Vec<u64> = p.lines.iter().map(|l| l.seq).collect();
+    assert!(!seqs.is_empty(), "the ring lines captured for this request are kept, not discarded");
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1) && *seqs.last().unwrap() == 298, "{seqs:?}");
+    assert!(seqs.len() <= 5);
+    // A retry now starts from the new spill base and succeeds without a gap.
+    let again = bus.read_spill_before("old", 299, 5).unwrap();
+    assert!(!again.gap && again.lines.last().map(|l| l.seq) == Some(298), "{again:?}");
+}
+
+#[test]
 fn bus_read_spill_before_on_an_unknown_stream_or_nothing_before_is_empty_at_start() {
     let tmp = TmpDir::new("beforenone");
     let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();

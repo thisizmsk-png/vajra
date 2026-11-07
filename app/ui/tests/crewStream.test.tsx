@@ -216,6 +216,32 @@ describe("Stream tab (S2b, US-2.2)", () => {
     expect(earlierButton()?.hasAttribute("disabled")).toBe(false);
   });
 
+  it("keeps Load earlier available after an empty page that reports a gap (spill evicted mid-read), and stops only when the core says nothing is older", async () => {
+    let calls = 0;
+    const f = await openBackend({
+      tail: tail(lines(5001, 5003), { spill_start: 0, spill_end: 1024 }),
+      read_spill_before: () => (++calls === 1 ? { lines: [], at_start: false, gap: true } : { lines: [], at_start: true, gap: false }),
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(calls).toBe(1));
+    await waitFor(() => expect(earlierButton()?.hasAttribute("disabled") ?? false).toBe(false));
+    expect(earlierButton()).toBeTruthy(); // gap: retry is still offered
+    fireEvent.click(earlierButton()!);
+    await waitFor(() => expect(calls).toBe(2));
+    await waitFor(() => expect(earlierButton()).toBeNull()); // confirmed: nothing older
+  });
+
+  it("hides Load earlier when the core says a non-empty page is the start, even if that page begins after line 1", async () => {
+    const f = await openBackend({
+      tail: tail(lines(1001, 1003), { spill_start: 0, spill_end: 1024 }),
+      // Lines 1..499 were dropped from the core; the oldest it has is 500, and it says so.
+      read_spill_before: { lines: lines(500, 1000), at_start: true, gap: false },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "read_spill_before")).toBe(true));
+    await waitFor(() => expect(earlierButton()).toBeNull());
+  });
+
   it("offers no 'load earlier' when nothing was spilled", async () => {
     await openBackend({ tail: tail(lines(1, 3), { spill_start: 0, spill_end: 0 }) });
     await screen.findByRole("log");
