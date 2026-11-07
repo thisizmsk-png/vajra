@@ -82,7 +82,7 @@ export const S = {
     diffFailed: (code: number | null) => `Could not read the diff (git exit code ${code ?? "none"}).`,
     loadEarlier: "Load earlier output",
     loadingEarlier: "Loading",
-    earlierLimit: "This is as far back as the view keeps. Older output is in the run log.",
+    historyView: "Showing older output. Newer lines are held back until you jump to latest.",
     jumpLatest: "Jump to latest",
     noStream: "No output yet.",
     streamFailed: "Could not read the output.",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EARLIER_PAGE, RING, appendTail, emptyRing, prependEarlier } from "../src/screens/crew/streamRing";
+import { EARLIER_PAGE, MAX_BYTES, MAX_ROWS, RING, appendTail, emptyRing, prependEarlier } from "../src/screens/crew/streamRing";
 
 const lines = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => ({ seq: from + i, text: `l${from + i}` }));
 const tail = (ls: { seq: number; text: string }[], gap = false) => ({ lines: ls, gap, head_seq: ls.at(-1)?.seq ?? 0, spill_start: null, spill_end: null });
@@ -48,9 +48,40 @@ describe("stream ring (S2b)", () => {
   it("keeps the cap with earlier lines loaded: the oldest rows go first", () => {
     let r = appendTail(emptyRing, tail(lines(5001, 5000 + RING)), RING);
     r = prependEarlier(r, lines(1, EARLIER_PAGE), RING + EARLIER_PAGE);
-    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_PAGE);
+    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_PAGE + 1); // +1: the "skipped" marker row is not a line
     r = appendTail(r, tail(lines(5001 + RING, 5000 + RING + 600)), RING + EARLIER_PAGE);
     expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_PAGE);
     expect(r.rows.at(-1)?.text).toBe(`l${5000 + RING + 600}`);
+  });
+
+  it("slides past the cap: the newest rows are dropped, the oldest kept, and live output waits", () => {
+    let r = appendTail(emptyRing, tail(lines(100001, 100003)), RING);
+    let from = 100001;
+    for (let k = 0; k < 25; k++) { r = prependEarlier(r, lines(from - EARLIER_PAGE, from - 1), MAX_ROWS); from -= EARLIER_PAGE; }
+    expect(r.rows.length).toBe(MAX_ROWS);
+    expect(r.rows[0].seq).toBe(from);
+    expect(r.detached).toBe(true);
+    expect(r.last).toBe(r.rows.at(-1)?.seq);
+    expect(appendTail(r, tail(lines(100004, 100005)), MAX_ROWS)).toBe(r);
+  });
+
+  const big = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => ({ seq: from + i, text: "x".repeat(64 * 1024) }));
+  const bytes = (r: { rows: { text: string }[] }) => r.rows.reduce((n, x) => n + x.text.length, 0);
+
+  it("bounds retained text by bytes: 64 KiB lines arriving over and over stay within MAX_BYTES, newest kept", () => {
+    let r = emptyRing;
+    for (let i = 0; i < 40; i++) r = appendTail(r, tail(big(i * 100 + 1, (i + 1) * 100)), RING);
+    expect(bytes(r)).toBeLessThanOrEqual(MAX_BYTES);
+    expect(r.rows.length).toBeLessThan(RING);
+    expect(r.rows.at(-1)?.seq).toBe(4000);
+  });
+
+  it("bounds repeated earlier reads of long lines by bytes, and keeps the oldest as the window slides", () => {
+    let r = appendTail(emptyRing, tail(big(30001, 30010)), RING);
+    let from = 30001;
+    for (let k = 0; k < 20; k++) { r = prependEarlier(r, big(from - 100, from - 1), MAX_ROWS); from -= 100; }
+    expect(bytes(r)).toBeLessThanOrEqual(MAX_BYTES);
+    expect(r.rows[0].seq).toBe(from);
+    expect(r.detached).toBe(true);
   });
 });

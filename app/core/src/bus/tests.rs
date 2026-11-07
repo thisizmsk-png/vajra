@@ -454,6 +454,35 @@ fn bus_read_spill_before_reads_only_near_the_target_not_the_whole_spill() {
 }
 
 #[test]
+fn bus_read_spill_before_keeps_the_lines_adjacent_to_the_target_when_long_lines_exceed_the_byte_budget() {
+    let tmp = TmpDir::new("beforelong");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    // 600 lines of ~60 KiB: 1,000 of them would be far over the page budget, and the target is deep in the spill.
+    let body = "x".repeat(60 * 1024);
+    for i in 1..=600u64 {
+        bus.push("s", &format!("{i} {body}")).unwrap();
+    }
+    let mut before = 500u64;
+    let mut seen: Vec<u64> = Vec::new();
+    loop {
+        let p = bus.read_spill_before("s", before, 1_000).unwrap();
+        assert!(!p.gap);
+        let seqs: Vec<u64> = p.lines.iter().map(|l| l.seq).collect();
+        assert!(!seqs.is_empty());
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "contiguous");
+        assert_eq!(*seqs.last().unwrap(), before - 1, "the lines just before the window, never an older prefix");
+        assert!(p.lines.iter().map(|l| l.text.len()).sum::<usize>() <= 4 * 1024 * 1024 + 64 * 1024);
+        seen.splice(0..0, seqs.clone());
+        before = seqs[0];
+        if p.at_start {
+            break;
+        }
+        assert!(seqs.len() < 1_000, "long lines make a page shorter than the line count asked for");
+    }
+    assert_eq!(seen, (1..=499).collect::<Vec<_>>(), "every line exactly once, in order, nothing skipped");
+}
+
+#[test]
 fn bus_read_spill_before_on_an_unknown_stream_or_nothing_before_is_empty_at_start() {
     let tmp = TmpDir::new("beforenone");
     let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();

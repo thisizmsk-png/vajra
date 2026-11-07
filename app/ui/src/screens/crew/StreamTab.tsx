@@ -12,8 +12,7 @@ const EVENT_MIN_GAP_MS = 500;
 /** One worker's output: a bounded window that follows the tail, with older output fetched on request. */
 export function StreamTab({ stream }: { stream: string }) {
   const [ring, setRing] = useState<Ring>(emptyRing);
-  const [spill, setSpill] = useState<{ start: number; end: number } | null>(null);
-  const [earlier, setEarlier] = useState<"idle" | "busy" | "done" | "limit">("idle");
+  const [earlier, setEarlier] = useState<"idle" | "busy" | "done">("idle");
   const [err, setErr] = useState("");
   const [pin, setPin] = useState(0);
   const ringRef = useRef<Ring>(emptyRing);
@@ -31,7 +30,6 @@ export function StreamTab({ stream }: { stream: string }) {
       const t = await api.tail(stream, ringRef.current.last);
       setErr("");
       put(appendTail(ringRef.current, t, capRef.current));
-      if (t.spill_start != null && t.spill_end != null) setSpill({ start: t.spill_start, end: t.spill_end });
     } catch (e) {
       setErr(errorText(e));
     } finally {
@@ -62,26 +60,38 @@ export function StreamTab({ stream }: { stream: string }) {
       const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
-      setEarlier(p.at_start ? "done" : capRef.current >= MAX_ROWS ? "limit" : "idle");
+      setEarlier(p.at_start || p.lines.length === 0 ? "done" : "idle");
     } catch (e) {
       setErr(errorText(e));
       setEarlier("idle");
     }
   };
 
+  /** Back to the live tail: forget the paged history and re-read the newest rows. */
+  const jumpLatest = () => {
+    capRef.current = RING;
+    put(emptyRing);
+    setEarlier("idle");
+    setPin((n) => n + 1);
+    void load();
+  };
+
   const text = useMemo(() => ring.rows.map((r) => r.text), [ring]);
-  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done" && earlier !== "limit";
+  // Older output may exist whenever the oldest line shown is not the first one: in the core's own buffer, on disk, or
+  // just evicted from this window (by rows or bytes) even though nothing was spilled.
+  const firstSeq = ring.rows.find((r) => r.seq !== null)?.seq;
+  const canLoad = firstSeq != null && firstSeq > 1 && earlier !== "done";
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}
-      {earlier === "limit" && <Text variant="body-sm" muted>{S.crew.earlierLimit}</Text>}
+      {ring.detached && <Text variant="body-sm" muted>{S.crew.historyView}</Text>}
       <div className="v-crew__actions">
         {canLoad && (
           <Button size="sm" onClick={() => void loadEarlier()} busy={earlier === "busy"}>
             {earlier === "busy" ? S.crew.loadingEarlier : S.crew.loadEarlier}
           </Button>
         )}
-        <Button size="sm" variant="ghost" onClick={() => setPin((n) => n + 1)}>{S.crew.jumpLatest}</Button>
+        <Button size="sm" variant="ghost" onClick={jumpLatest}>{S.crew.jumpLatest}</Button>
       </div>
       {text.length === 0 && !err ? (
         <Text variant="body-sm" muted>{S.crew.noStream}</Text>
