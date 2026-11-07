@@ -60,3 +60,18 @@ S2b Stream (worker output).
 | Showing older output. Newer lines are held back until you jump to latest. | notice | shown once the window has slid back past its row cap |
 | No output yet. / Could not read the output. | empty / failure | failure is followed by the core's error text |
 | 1 line was skipped / N lines were skipped | marker row | shown where output fell off the core's buffer |
+
+Graphite shell, Home and Crew (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Vajra | sidebar top | the app name |
+| ⌘1 to ⌘7 | sidebar links | each link shows its key on hover and on focus; screen readers get `aria-keyshortcuts` |
+| Start a run | Home heading | was "Home"; the sidebar still says Home |
+| The crew builds in its own worktrees and reports back. This app never pushes. | Home, under the heading | new |
+| N of M checks pass / All checks | Home checks line | new; replaces the "Checks" heading, opens when a check fails |
+| Check again | Home action bar | moved from the checks section |
+| ⌘↵ | Start run button | the key shown beside the label; not part of the button's name |
+| No repository chosen | Home action bar | shown until a folder is entered; then the folder's name |
+| Actions on Home / Actions for the selection | action bar names | screen readers only |
+| Stopped by you / Message pending / Active now | node overlays | the separator changes from " · " to ", " (no middle dots) |

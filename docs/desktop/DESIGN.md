@@ -128,8 +128,9 @@ lights (green, amber, red, teal). Everything else is structure.
 **Signature.** The **action bar**, 40 px, at the foot of every screen. Left: the selection, in words
 ("Backend, t2 Token bucket middleware"). Right: its actions, each with its keys, the primary first
 ("Approve plan ⌘↵"). People learn the shortcuts by reading the bar. It replaces the 24 px status bar
-in UX.md section 2; the run health that sat there (guard, engine, memory) moves to the sidebar foot.
-UX.md is updated when the shell migrates (follow-up, tracked on PR #39).
+in UX.md section 2; the run health that sat there (guard, engine, memory) moves to the sidebar foot
+(not built yet). UX.md sections 2 and 3 record the change. The bar lists only actions the screen can
+run today: Check again on Home, none yet on Crew until Message, Redirect and Stop are wired.
 
 **What azure means.** Only three things: the one primary action on a view, the live line (the run
 that is running, the stream line being written), and a working status *inside the selected row*. A
@@ -329,16 +330,20 @@ The kit folder owns the source. Screens compose these and never restyle them inl
 | Command palette | default | ⌘K: actions, runs and files in one field; 720 px, 34 px rows | `combobox` + `listbox` |
 | Resizable panes | horizontal, vertical | List/pane/review, list/detail | Handle `role="separator"` with `aria-valuenow` |
 | Terminal pane | read-only, taken over | Run session PTY; ANSI 16 palette, virtualized scrollback | Label "Run terminal, read only"; Cmd chords only |
-| Crew tree | default | Lead, run, agents, sub-workers | `tree`/`treeitem`, `aria-expanded`, roving tabindex |
+| Crew tree | default | Lead, run, agents, sub-workers; a drawn chevron (never a Unicode arrow) opens a group; long names truncate with a tooltip | `tree`/`treeitem`, `aria-expanded`, roving tabindex |
 | StatusDot | per status below | Shape + colour + text label, never a dot alone | Label in accessible name |
 | EvidenceRow | pass, fail, not run | Criterion, command, exit code, evidence file, commit | Row header is criterion id |
 | ActionCard | message, redirect, stop request; queued, delivered, acknowledged, failed | Lead or human control action, links to worker and audit line | `article` with heading; status in live region |
 | Diff view | unified, file list | Worktree vs base, virtualized; + and − glyphs in success and danger | Glyphs, not colour only |
 
-**Planned, not built yet** (they arrive with the shell migration after PRs #31 and #32; the mockups
-in `mockups/a2/` are their reference): `Kbd` (a key, 18 px, radius 4), `ActionBar` (the signature,
-with `Act` items: label plus keys, primary first), `Launcher` (the ask field with inline tokens and
-@-mentions), `Banner` (the approval band on `--c-warn-tint`) and the authored icon set.
+**Built with the shell** (PR #39): `Kbd` (a key, 18 px, radius 4; `decorative` inside a control,
+which then carries `aria-keyshortcuts`) and `ActionBar` (the signature: the selection in words, then
+actions with label and keys, primary first; chords bind on the window while it is mounted, and a
+chord without a modifier never fires while typing in a field).
+
+**Planned, not built yet** (the mockups in `mockups/a2/` are their reference): `Launcher` (the ask
+field with inline tokens and @-mentions), `Banner` (the approval band on `--c-warn-tint`), the ⌘K
+command palette and the authored icon set.
 
 ### Status vocabulary
 
