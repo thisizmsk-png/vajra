@@ -122,6 +122,9 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-toast { pointer-events: auto; }
 
 /* Keys: 18 px, radius 4. On a primary fill the key takes an outline from --c-kbd-on-primary. */
+/* Icons: the authored 16 px set (Icon.tsx). They take the colour of their text; a 12 px icon keeps a 1.5 px line. */
+.v-icon { flex: none; display: block; }
+
 .v-kbd-group { display: inline-flex; gap: 3px; font: inherit; }
 .v-kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font: 500 11px/16px var(--font-ui); text-align: center; }
 .v-button--primary .v-kbd { background: transparent; border-color: var(--c-kbd-on-primary); color: inherit; }

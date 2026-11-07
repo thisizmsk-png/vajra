@@ -54,6 +54,18 @@ describe("Command palette in the shell", () => {
     expect(dialogOpen()).toBe(false);
   });
 
+  it("opens from the sidebar button too; icons leave the nav names exact", () => {
+    boot();
+    const btn = screen.getByRole("button", { name: S.shell.search });
+    expect(btn.getAttribute("aria-keyshortcuts")).toBe("Meta+K");
+    fireEvent.click(btn);
+    expect(dialogOpen()).toBe(true);
+    expect(screen.getByRole("link", { name: S.nav.history })).toBeTruthy();
+    const icons = document.querySelectorAll(".v-shell__nav svg.v-icon");
+    expect(icons.length).toBe(8); // seven screens and the search button
+    icons.forEach((i) => expect(i.getAttribute("aria-hidden")).toBe("true"));
+  });
+
   it("runs the chosen command: type, Enter, and the screen changes", async () => {
     boot();
     cmdK();

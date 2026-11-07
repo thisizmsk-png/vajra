@@ -8,3 +8,5 @@
 .v-gallery__stack--tight { gap: 8px; }
 .v-gallery__gap { margin-top: 8px; }
 .v-gallery__panel { height: 160px; }
+.v-gallery__icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--space-sm); margin: 0; padding: 0; list-style: none; }
+.v-gallery__icons li { display: flex; align-items: center; gap: var(--space-sm); color: var(--c-text-secondary); }

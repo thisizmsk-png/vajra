@@ -3,7 +3,13 @@
 .v-shell__nav { display: flex; flex-direction: column; gap: 2px; padding: 10px var(--space-sm) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); min-height: 0; }
 .v-shell__brand { display: flex; align-items: center; height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 13px/16px var(--font-ui); color: var(--c-text); }
 .v-shell__link { display: flex; align-items: center; gap: 10px; height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
-.v-shell__label { flex: 1; min-width: 0; }
+.v-shell__label { flex: 1; min-width: 0; text-align: left; }
+.v-shell__link .v-icon { color: var(--c-text-muted); transition: color var(--t-fast) var(--ease-out); }
+.v-shell__link:hover .v-icon, .v-shell__link[aria-current="page"] .v-icon { color: var(--c-text); }
+/* The palette for the mouse: reads as a field, so it is inset like one. */
+.v-shell__search { display: flex; align-items: center; gap: 10px; height: var(--row-h); margin-bottom: var(--space-md); padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); cursor: default; transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
+.v-shell__search:hover { border-color: var(--c-border-strong); color: var(--c-text-secondary); }
+.v-shell__search:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-shell__link .v-kbd-group { opacity: 0; transition: opacity var(--t-fast) var(--ease-out); }
 .v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { opacity: 1; }
 .v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }

@@ -32,6 +32,7 @@ export const S = {
   shell: {
     navLabel: "Main",
     brand: "Vajra",
+    search: "Search or run",
     notBuilt: "This screen is not built yet.",
     errorTitle: "This screen hit a problem",
     errorBody: "The rest of the app is fine. You can try again or go to another screen.",

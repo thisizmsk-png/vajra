@@ -1,18 +1,20 @@
-import { createContext, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { MutableRefObject, ReactNode } from "react";
+import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
 import { CommandPalette } from "../components/ui/desktop";
 import type { Command } from "../components/ui/desktop";
 
 type Source = MutableRefObject<readonly Command[]>;
 type Register = (key: string, source: Source | null) => void;
-const Ctx = createContext<Register>(() => {});
+const Ctx = createContext<{ register: Register; open: () => void }>({ register: () => {}, open: () => {} });
+const KEYS = ["⌘", "K"];
 
 /**
  * Adds a screen's commands to the ⌘K palette while the screen is mounted. Only commands the screen can really run
  * belong here. The palette reads the latest list when it opens, so `run` may close over fresh state.
  */
 export function useCommands(commands: readonly Command[]) {
-  const register = useContext(Ctx);
+  const { register } = useContext(Ctx);
   const key = useId();
   const ref = useRef(commands);
   ref.current = commands;
@@ -51,6 +53,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
       window.removeEventListener("hashchange", onRoute);
     };
   }, []);
+  const ctx = useMemo(() => ({ register, open: () => setOpen(true) }), [register]);
   // Screen commands first (they are about what is on screen), then the shell's. Ids are namespaced per source.
   const all: Command[] = [];
   let i = 0;
@@ -60,9 +63,21 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
   }
   for (const c of commands) all.push({ ...c, id: `shell-${c.id}` });
   return (
-    <Ctx.Provider value={register}>
+    <Ctx.Provider value={ctx}>
       {children}
       <CommandPalette open={open} onClose={() => setOpen(false)} commands={all} />
     </Ctx.Provider>
+  );
+}
+
+/** The palette for the mouse: a field-like button at the top of the sidebar that opens ⌘K. */
+export function PaletteButton({ label }: { label: string }) {
+  const { open } = useContext(Ctx);
+  return (
+    <button type="button" className="v-shell__search" onClick={open} aria-keyshortcuts={ariaShortcut(KEYS)}>
+      <Icon name="search" />
+      <span className="v-shell__label">{label}</span>
+      <Kbd keys={KEYS} decorative />
+    </button>
   );
 }

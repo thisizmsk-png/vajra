@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { StatusKey } from "../../../strings";
 import { StatusDot } from "../base/StatusDot";
+import { Icon } from "../base/Icon";
 
 export type CrewNode = { id: string; label: string; status: StatusKey; statusLabel?: string; children?: CrewNode[] };
 
@@ -65,9 +66,7 @@ export function CrewTree({ label, nodes, selected, onSelect, defaultOpen = [] }:
             }}
           >
             {r.node.children?.length ? (
-              <svg viewBox="0 0 12 12" width="12" height="12" focusable="false" className={open.has(r.node.id) ? "v-tree__chev v-tree__chev--open" : "v-tree__chev"}>
-                <path d="M4.5 3 7.5 6l-3 3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <Icon name="chevron" size={12} className={open.has(r.node.id) ? "v-tree__chev v-tree__chev--open" : "v-tree__chev"} />
             ) : null}
           </span>
           <span className="v-tree__label" title={r.node.label}>{r.node.label}</span>

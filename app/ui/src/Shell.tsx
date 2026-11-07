@@ -1,14 +1,17 @@
 import { useEffect } from "react";
-import { Kbd, ariaShortcut } from "../components/ui/base";
+import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
+import type { IconName } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { PaletteHost } from "./palette";
+import { PaletteButton, PaletteHost } from "./palette";
 import { SCREENS, toHash, useRoute } from "./router";
+import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { S } from "../strings";
 import "./shell.css";
 
 /** ⌘1 to ⌘7 open the screens in nav order; each link shows its chord. */
 const chord = (i: number) => ["⌘", String(i + 1)];
+const ICON: Record<Screen, IconName> = { home: "home", run: "run", crew: "crew", chat: "chat", inbox: "inbox", history: "history", settings: "settings" };
 
 /** Graphite shell: a 240 px sidebar with the screens, the current screen beside it, and the ⌘K palette over both. Every screen sits inside an error boundary. */
 export function Shell() {
@@ -33,8 +36,10 @@ export function Shell() {
       <div className="v-shell">
         <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
           <div className="v-shell__brand">{S.shell.brand}</div>
+          <PaletteButton label={S.shell.search} />
           {SCREENS.map((s, i) => (
             <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
+              <Icon name={ICON[s]} />
               <span className="v-shell__label">{S.nav[s]}</span>
               <Kbd keys={chord(i)} decorative />
             </a>

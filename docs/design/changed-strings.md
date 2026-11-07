@@ -80,6 +80,7 @@ Command palette (PR #39).
 
 | String | Where | Note |
 |---|---|---|
+| Search or run | sidebar button, with ⌘K | opens the palette; a search icon before it |
 | Search commands | palette field | placeholder and the field's name |
 | Go to Home … Go to Settings | palette rows | every screen but the current one, with its ⌘ key |
 | Go to worker NAME | palette rows on Crew | the worker's status beside it |

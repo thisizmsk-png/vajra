@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { Sheet } from "../base/Sheet";
 import { Kbd, ariaShortcut } from "../base/Kbd";
+import { Icon } from "../base/Icon";
 import { S } from "../../../strings";
 
 /** `keys` is the chord that also runs it elsewhere, shown so people learn it; the palette does not bind it. */
@@ -41,24 +42,27 @@ export function CommandPalette({ open, onClose, commands, title = S.palette.titl
   const run = (c: Command | undefined) => { if (c) { onClose(); c.run(); } };
   return (
     <Sheet open={open} onClose={onClose} title={title} className="v-palette">
-      <input
-        autoFocus
-        role="combobox"
-        aria-expanded="true"
-        aria-autocomplete="list"
-        aria-controls={`${base}-list`}
-        aria-activedescendant={shown[active] ? `${base}-${shown[active].id}` : undefined}
-        aria-label={S.palette.search}
-        placeholder={S.palette.search}
-        className="v-input"
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, shown.length - 1)); }
-          else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
-          else if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); run(shown[active]); }
-        }}
-      />
+      <div className="v-palette__field">
+        <Icon name="search" />
+        <input
+          autoFocus
+          role="combobox"
+          aria-expanded="true"
+          aria-autocomplete="list"
+          aria-controls={`${base}-list`}
+          aria-activedescendant={shown[active] ? `${base}-${shown[active].id}` : undefined}
+          aria-label={S.palette.search}
+          placeholder={S.palette.search}
+          className="v-input"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, shown.length - 1)); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+            else if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); run(shown[active]); }
+          }}
+        />
+      </div>
       <div role="listbox" id={`${base}-list`} aria-label={S.palette.list}>
         {shown.map((c, i) => (
           <div key={c.id} role="option" id={`${base}-${c.id}`} aria-selected={i === active} aria-keyshortcuts={c.keys ? ariaShortcut(c.keys) : undefined} className="v-row" onMouseMove={() => setActive(i)} onClick={() => run(c)}>

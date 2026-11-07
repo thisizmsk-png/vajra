@@ -342,11 +342,18 @@ actions with label and keys, primary first; chords bind on the window while it i
 chord without a modifier never fires while typing in a field). The ⌘K command palette is wired into
 the shell: it lists the other screens with their keys, and each screen adds what it can really run
 (`useCommands` in `src/palette.tsx`): Crew adds "Go to worker" for each worker with its status, Home
-adds Check again. Runs, tasks, criteria and files join as their screens land.
+adds Check again. Runs, tasks, criteria and files join as their screens land. The sidebar's
+"Search or run ⌘K" button opens the same palette for the mouse.
+
+`Icon` (`components/ui/base/Icon.tsx`) is the authored set: 16 px grid, 1.5 px stroke, round caps and
+joins, `currentColor`, always `aria-hidden` (the text beside it or the control's label names the
+thing). A 12 px icon draws a 2 px line on the 16 grid, so it still renders at 1.5 px. It holds only
+icons in use: the seven screens, search, chevron (the tree), check, redirect, stop, terminal, file and
+branch. Icons sit in muted text and take the text colour on hover and on the current item. The Gallery
+shows the set at both sizes.
 
 **Planned, not built yet** (the mockups in `mockups/a2/` are their reference): `Launcher` (the ask
-field with inline tokens and @-mentions), `Banner` (the approval band on `--c-warn-tint`) and the authored
-icon set.
+field with inline tokens and @-mentions) and `Banner` (the approval band on `--c-warn-tint`).
 
 ### Status vocabulary
 

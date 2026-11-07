@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Section, Button, Kbd, Text } from "../components/ui/base";
+import { Section, Button, Icon, ICONS, Kbd, Text } from "../components/ui/base";
+import type { IconName } from "../components/ui/base";
 import { ActionBar, ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip } from "../components/ui/desktop";
 import type { CrewNode } from "../components/ui/desktop";
 
@@ -54,6 +55,13 @@ export function GalleryDesktop() {
           <Tooltip text="Open the command palette (Cmd K)"><Button onClick={() => setPalette(true)}>Commands</Button></Tooltip>
           <Text variant="body-sm" muted>{note}</Text>
         </div>
+      </Section>
+      <Section title="Icons">
+        <ul className="v-gallery__icons">
+          {(Object.keys(ICONS) as IconName[]).map((n) => (
+            <li key={n}><Icon name={n} /><Icon name={n} size={12} /><Text variant="body-sm">{n}</Text></li>
+          ))}
+        </ul>
       </Section>
       <Section title="Keys and action bar">
         <div className="v-gallery__flex v-gallery__center"><Kbd keys={["⌘", "K"]} /><Kbd keys={["⌘", "↵"]} /><Kbd keys={["M"]} /></div>
