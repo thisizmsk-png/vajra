@@ -204,6 +204,25 @@ chmod +x "$WORK/shim/cat"
 PATH="$WORK/shim:$PATH" C verify rq1 --print-report > "$WORK/out" 2>/dev/null; rc=$?
 ! grep -q FORGED "$WORK/out"; check "a report.md swapped in the snapshot is never printed (rc=$rc)" $?
 rm -rf "$WORK/shim"
+# TOCTOU on the metadata: a signed campaign with NO recorded report and a planted report.md. If campaign.json in the
+# snapshot is swapped (here: gains a matching reportSha256) as the hash is first read, nothing downstream may trust it:
+# the recorded hash comes from the bytes that were copied once, so the planted text must never be printed.
+C create tu --feature "ac-1|x" >/dev/null 2>&1; printf 'PLANTED\n' > "$CD/tu/report.md"
+mkdir -p "$WORK/shim"; REALJQ="$(command -v jq)"; PLANTED_SHA="$(printf 'PLANTED\n' | openssl dgst -sha256 -r | awk '{print $1}')"
+cat > "$WORK/shim/jq" <<SHIM
+#!/bin/bash
+hit=0; file=""
+for a in "\$@"; do [ "\$a" = '.reportSha256 // ""' ] && hit=1; case "\$a" in */vajra-verify.*/campaign.json) file="\$a" ;; esac; done
+if [ "\$hit" = 1 ] && [ -n "\$file" ] && [ ! -e "$WORK/jq-swapped" ]; then
+  : > "$WORK/jq-swapped"; "$REALJQ" --arg h "$PLANTED_SHA" '.reportSha256 = \$h' "\$file" > "\$file.n" && mv "\$file.n" "\$file"
+fi
+exec "$REALJQ" "\$@"
+SHIM
+chmod +x "$WORK/shim/jq"
+PATH="$WORK/shim:$PATH" C verify tu --print-report > "$WORK/out" 2>/dev/null; rc=$?
+[ -e "$WORK/jq-swapped" ]; check "the swap hook fired (test is live)" $?
+[ "$rc" -ne 0 ] && ! grep -q PLANTED "$WORK/out"; check "campaign.json swapped after the copy cannot authorize a planted report (rc=$rc)" $?
+rm -rf "$WORK/shim" "$WORK/jq-swapped" "$CD/tu"
 
 # --- archive-evidence (E7, Q13): the verification bundle + the setup list, once per delivery, signed ---
 # Run from a git repo, as the write-back step does; the evidence must be signed and green for --head,

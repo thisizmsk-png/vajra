@@ -366,26 +366,47 @@ cmd_verify() {
   if verify_state "$DIR"; then echo "$SLUG: signature ok"; else echo "$SLUG: signature INVALID" >&2; exit 3; fi
 }
 
-# verify --print-report: check the signature and print report.md, taken from one private snapshot.
-# report.md is read ONCE into a variable before the check; the text printed is that variable, and its sha256 must equal
-# the reportSha256 recorded in the snapshot's campaign.json, so what is printed is exactly what the recorded hash covers
-# (a file swapped in the snapshot afterwards cannot change the output; a NUL byte, which a shell variable cannot hold,
-# makes the hash differ and fails closed). The recorded hash itself is the one verify_state checked in the snapshot;
-# rewriting campaign.json and state.sig as well would need the HMAC key.
+# verify --print-report: check the signature and print report.md, from bytes read exactly once.
+# Every input (campaign.json, features.json, progress.md, state.sig, report.md) is read from the live campaign dir ONCE
+# into memory; nothing reads the live dir after that. A private 0700 copy written from those bytes is what verify_state
+# checks, and afterwards the copy must still hash to the bytes held in memory (a file swapped in it while it was
+# being verified fails closed). The recorded reportSha256 and the text printed come from the in-memory bytes, never
+# from a second read of any file, so metadata replaced after the signature was checked cannot authorize anything.
+# (Rewriting a held copy as well as state.sig would need the HMAC key.)
 # Exit 0 = verified, report on stdout; 3 = signature or report hash invalid; 4 = no report recorded in the signed state
 # (a report.md on disk without a recorded hash is unsigned and is never printed).
+slurp() { # $1 = variable name, $2 = file: the bytes of the file (trailing newlines kept) in the variable
+  local v; v="$(cat "$2" 2>/dev/null; printf x)" || return 1
+  printf -v "$1" '%s' "${v%x}"
+}
+
 verify_print_report() {
-  local f snap rpt="" want
+  local snap name var have_report=0 CJ="" FJ="" PM="" SG="" rpt="" want
   snap="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/vajra-verify.XXXXXX")" || die "cannot create a temp dir"
   SNAP="$snap"   # global: the EXIT trap runs after this function's locals are gone
   trap 'rm -rf "${SNAP:-}"' EXIT
-  for f in "$DIR"/*; do
-    [ -f "$f" ] && [ ! -L "$f" ] && cp "$f" "$snap/" 2>/dev/null
+  # one read of each input; a symlink is never followed, as before
+  for name in campaign.json features.json progress.md state.sig; do
+    [ -f "$DIR/$name" ] && [ ! -L "$DIR/$name" ] || { echo "$SLUG: signature INVALID" >&2; exit 3; }
   done
-  if [ -f "$snap/report.md" ]; then rpt="$(cat "$snap/report.md"; printf x)"; rpt="${rpt%x}"; fi
+  slurp CJ "$DIR/campaign.json"; slurp FJ "$DIR/features.json"; slurp PM "$DIR/progress.md"; slurp SG "$DIR/state.sig"
+  if [ -f "$DIR/report.md" ] && [ ! -L "$DIR/report.md" ]; then slurp rpt "$DIR/report.md"; have_report=1; fi
+  printf '%s' "$CJ" > "$snap/campaign.json"; printf '%s' "$FJ" > "$snap/features.json"
+  printf '%s' "$PM" > "$snap/progress.md"; printf '%s' "$SG" > "$snap/state.sig"
+  [ "$have_report" -eq 1 ] && printf '%s' "$rpt" > "$snap/report.md"
   if ! verify_state "$snap"; then echo "$SLUG: signature INVALID" >&2; exit 3; fi
-  want="$(jq -r '.reportSha256 // ""' "$snap/campaign.json")"
-  { [ -n "$want" ] && [ -f "$snap/report.md" ]; } || { echo "$SLUG: no signed report" >&2; exit 4; }
+  # the verified copy must still be the bytes we hold
+  for name in campaign.json features.json progress.md state.sig; do
+    case "$name" in campaign.json) var="$CJ" ;; features.json) var="$FJ" ;; progress.md) var="$PM" ;; *) var="$SG" ;; esac
+    [ -f "$snap/$name" ] && [ ! -L "$snap/$name" ] && [ "$(sha256_file "$snap/$name")" = "$(sha256_str "$var")" ] \
+      || { echo "$SLUG: signature INVALID" >&2; exit 3; }
+  done
+  if [ "$have_report" -eq 1 ]; then
+    [ -f "$snap/report.md" ] && [ ! -L "$snap/report.md" ] && [ "$(sha256_file "$snap/report.md")" = "$(sha256_str "$rpt")" ] \
+      || { echo "$SLUG: signature INVALID" >&2; exit 3; }
+  fi
+  want="$(printf '%s' "$CJ" | jq -r '.reportSha256 // ""')"
+  { [ -n "$want" ] && [ "$have_report" -eq 1 ]; } || { echo "$SLUG: no signed report" >&2; exit 4; }
   [ "$(sha256_str "$rpt")" = "$want" ] || { echo "$SLUG: signature INVALID" >&2; exit 3; }
   printf '%s' "$rpt"
 }
