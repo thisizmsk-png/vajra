@@ -184,6 +184,46 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths left out),
+    /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
+    /// The repo's own index and working tree are never touched (only loose tree objects are written). `None` if any step fails
+    /// or the total `timeout` runs out. Same git hardening as `Request::Git`.
+    pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
+        let start = Instant::now();
+        let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
+        std::fs::create_dir(&dir).ok()?;
+        let idx = dir.join("index");
+        let result = (|| {
+            let git = |args: &[&str], with_index: bool| -> Option<Output> {
+                let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
+                let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-C"].map(String::from).into_iter()
+                    .chain([repo.to_string_lossy().into_owned()])
+                    .chain(args.iter().map(|a| a.to_string()))
+                    .collect();
+                let env: Vec<(&str, &Path)> = if with_index { vec![("GIT_INDEX_FILE", idx.as_path())] } else { vec![] };
+                run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| !o.timed_out && o.code == Some(0))
+            };
+            if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {
+                let head = head.stdout.trim().to_string();
+                git(&["read-tree", &head], true)?;
+            }
+            let mut add = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
+            add.extend(exclude.iter().map(|d| format!(":(exclude){d}")));
+            let add: Vec<&str> = add.iter().map(String::as_str).collect();
+            git(&add, true)?;
+            let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
+            (tree.len() >= 40).then_some(tree)
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+}
+
+fn rand_tag() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
 fn find_jq() -> Option<PathBuf> {
     ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).find(|p| p.is_file())
 }
@@ -257,9 +297,26 @@ pub fn run_process_full(
     home: Option<&Path>,
     stdin: Option<&[u8]>,
 ) -> Result<Output, BridgeError> {
+    run_process_env(program, argv, cwd, timeout, home, stdin, &[])
+}
+
+/// As `run_process_full`, with extra environment variables on top of the scrubbed environment.
+#[allow(clippy::too_many_arguments)]
+pub fn run_process_env(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    home: Option<&Path>,
+    stdin: Option<&[u8]>,
+    env: &[(&str, &Path)],
+) -> Result<Output, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(argv).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     scrubbed_env(&mut cmd, home);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

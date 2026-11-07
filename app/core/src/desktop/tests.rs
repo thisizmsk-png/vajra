@@ -1420,34 +1420,83 @@ fn status_of(app: &App, slug: &str) -> String {
     app.evidence_list(slug).unwrap()["rows"][0]["status"].as_str().unwrap().to_string()
 }
 
-#[test]
-fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
-    let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
-    assert_eq!(status_of(&app, &slug), "pass");
-    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
-    let git = |args: &[&str]| { std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap(); };
-    git(&["checkout", "--", "f.txt"]);
-    assert_eq!(status_of(&app, &slug), "pass", "clean again");
-    fs::write(repo.join("new.txt"), b"x").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
-    fs::remove_file(repo.join("new.txt")).unwrap();
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "two"]);
-    assert_eq!(status_of(&app, &slug), "stale", "the branch moved past the evidence's head");
+fn have_jq() -> bool {
+    ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().any(|p| Path::new(p).is_file())
+}
+
+fn git_in(repo: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git").current_dir(repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+/// Run the REAL `vajra-verify-work.sh` in `repo` (so `git.worktreeTree` is what production records) under slug `green-run`.
+fn verify_work(repo: &Path) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-verify-work.sh");
+    let o = std::process::Command::new("bash").current_dir(repo).arg(&script).args(["green-run", "true"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A repo with one commit, verified by the real script: its evidence is at `<repo>/data/walkthroughs/green-run/evidence.json`
+/// (untracked, as in production), and a task points at it.
+fn verified_repo(t: &Tmp) -> (App, String, std::path::PathBuf) {
+    let (app, slug, repo, _head) = live_evidence_repo(t, true, false);
+    verify_work(&repo);
+    let ev = repo.join("data/walkthroughs/green-run/evidence.json");
+    set_evidence_path(t, &slug, &ev);
+    (app, slug, repo)
+}
+
+/// Point the campaign's only task at `path` (rewrites tasks.json).
+fn set_evidence_path(t: &Tmp, slug: &str, path: &Path) {
+    let f = t.home().join(".claude/vajra/campaigns").join(slug).join("tasks.json");
+    let mut doc: Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
+    doc["tasks"][0]["evidence"]["path"] = json!(path.to_string_lossy());
+    fs::write(&f, serde_json::to_vec(&doc).unwrap()).unwrap();
 }
 
 #[test]
-fn the_runs_own_untracked_output_does_not_make_its_evidence_stale() {
+fn evidence_is_stale_when_the_working_tree_differs_from_the_tree_it_was_verified_on() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
-    // The real layout: <repo>/data/walkthroughs/<slug>/evidence.json, untracked, with its logs beside it.
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
-    fs::write(repo.join("data/walkthroughs/deliver-20261105-1810/cmd-1.log"), b"ok").unwrap();
-    fs::create_dir_all(repo.join(".claude/worktrees/w1")).unwrap();
-    fs::write(repo.join(".claude/worktrees/w1/x"), b"crew worktree").unwrap();
-    assert_eq!(status_of(&app, &slug), "pass", "the run's own output is not an edit");
-    fs::write(repo.join("unrelated.txt"), b"x").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "an unrelated untracked file still counts");
+    let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass", "unchanged since verification");
+    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
+    git_in(&repo, &["checkout", "--", "f.txt"]);
+    assert_eq!(status_of(&app, &slug), "pass", "back to the verified tree");
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
+    fs::remove_file(repo.join("new.txt")).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    // The run's own output and crew worktrees under the walkthrough dir are not edits.
+    fs::write(repo.join("data/walkthroughs/green-run/extra.log"), b"ok").unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+}
+
+#[test]
+fn evidence_verified_on_an_uncommitted_tree_is_pass_and_survives_committing_that_same_tree() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo) = verified_repo(&t);
+    // Typical: the agent edits, verifies, then commits. Evidence is for the dirty tree T1.
+    fs::write(repo.join("f.txt"), b"work in progress").unwrap();
+    verify_work(&repo);
+    assert_eq!(status_of(&app, &slug), "pass", "verified on this dirty tree: current, not stale");
+    git_in(&repo, &["commit", "-qam", "same tree, new commit"]);
+    assert_eq!(status_of(&app, &slug), "pass", "HEAD moved but the tree is the verified one: still current");
+    // The branch moves on to different content with the evidence bytes unchanged: stale.
+    fs::write(repo.join("f.txt"), b"later change").unwrap();
+    git_in(&repo, &["commit", "-qam", "different tree"]);
+    assert_eq!(status_of(&app, &slug), "stale", "a different tree under unchanged evidence");
+}
+
+#[test]
+fn evidence_with_no_recorded_tree_falls_back_to_its_commit() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    assert_eq!(status_of(&app, &slug), "pass");
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "stale", "no worktreeTree in the file: the commit decides");
 }
 
 #[test]
@@ -1457,9 +1506,9 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     // Deadline already passed: git is not even started, nothing is remembered.
     assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
     assert!(lock(&app.worktree_state).is_empty());
-    let (head, dirty) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    let (head, tree) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
     assert_eq!(head.len(), 40);
-    assert!(!dirty);
+    assert_eq!(tree.map(|t| t.len()), Some(40));
 }
 
 #[test]
@@ -1472,8 +1521,9 @@ fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered
 
 #[test]
 fn a_big_untracked_tree_does_not_blow_the_budget() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let (app, slug, repo) = verified_repo(&t);
     let big = repo.join("node_modules_like");
     fs::create_dir_all(&big).unwrap();
     for i in 0..3000 {
