@@ -48,7 +48,7 @@ export const S = {
     campaignsFailed: "Could not read the campaigns.",
     resume: "Resume",
     resuming: "Resuming",
-    resumeNeedsRepo: "Enter the repository folder above to resume.",
+    resumeElsewhere: "Started outside this app. Continue it from your terminal.",
     passing: (n: number, m: number) => `${n} of ${m} passing`,
     errRepo: "Enter the repository folder.",
     errAsk: "Describe what the crew should do.",

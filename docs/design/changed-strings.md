@@ -26,6 +26,7 @@ S1 Home.
 | Checks / Check again | preflight section | |
 | Start a run, Repository folder, What should the crew do?, Base branch or commit, Fix rounds, Workers at once (1 to 16), Advanced, Start run / Starting | start form | plain labels; hints say what the value is |
 | Campaigns, Resume / Resuming, "N of M passing", No campaigns yet. Start a run and it appears here. | campaign list | |
+| Started outside this app. Continue it from your terminal. | campaign row without a recorded session | no Resume button for it |
 | Enter the repository folder., Describe what the crew should do., Enter a branch or commit., Fix rounds must be 1, 2 or 3., Use a number from 1 to 16. | inline field errors | each names the field |
 | Could not run the checks. / Could not read the campaigns. | load failures | followed by the core's error text |
 
