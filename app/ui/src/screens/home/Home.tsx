@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Input, Kbd, SegmentedControl, StatusDot, Text, ariaShortcut } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
@@ -45,7 +45,11 @@ export function Home() {
   const errs = validate(d);
   const ready = pre.state === "ok" && pre.data.start_enabled;
 
+  // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
+  const inFlight = useRef(false);
   const launch = async (key: string, begin: () => Promise<{ campaign: string; run_id: string; stream: string }>) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(key);
     setFail("");
     try {
@@ -54,6 +58,7 @@ export function Home() {
     } catch (e) {
       setFail(errorText(e));
       setBusy(null);
+      inFlight.current = false;
     }
   };
 
@@ -82,7 +87,7 @@ export function Home() {
 
           <form className="v-launch" aria-label={S.home.start} noValidate
             onSubmit={(e) => { e.preventDefault(); start(); }}
-            onKeyDown={(e) => { if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); start(); } }}>
+            onKeyDown={(e) => { if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) start(); } }}>
             <div className="v-launch__ask">
               <Input type="textarea" rows={3} label={S.home.ask} placeholder={S.home.ask} value={d.ask} onChange={set("ask")} error={err("ask")} />
             </div>
