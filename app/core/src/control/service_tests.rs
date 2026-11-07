@@ -647,3 +647,30 @@ fn a_stop_with_no_file_and_no_ack_settles_as_unknown_after_the_ttl() {
     assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("stop_file_missing")));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 C4-3: an ack the app cannot open for a reason that says nothing about its content (here a permission error, as
+/// EMFILE or EIO would be) is not an invalid ack. It used to settle terminally as `ack_invalid`; now the check fails, is
+/// retried like any other failed scan, and delivers once the file reads.
+#[test]
+fn an_ack_that_cannot_be_opened_for_now_is_retried_not_settled_invalid() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads any file
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(&qf).unwrap();
+    let ack = root.join("acks").join(format!("{id}.json"));
+    fs::write(&ack, json!({"action_id": id, "consumed_at": "2026-11-07T10:00:00Z", "tool_name": "Bash"}).to_string()).unwrap();
+    fs::set_permissions(&ack, fs::Permissions::from_mode(0o000)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "an unreadable ack is not an invalid one");
+    fs::set_permissions(&ack, fs::Permissions::from_mode(0o600)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(!s.pending.contains_key(&id));
+    let r = last_record(&s, &id);
+    assert_eq!(r["state"].as_str(), Some("delivered"), "{r}");
+    let _ = fs::remove_dir_all(&dir);
+}

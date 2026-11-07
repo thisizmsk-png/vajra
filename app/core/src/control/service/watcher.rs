@@ -87,7 +87,11 @@ impl Service {
                 Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
                 _ => (None, true),
             },
-            Err(e) => (None, e.kind() != std::io::ErrorKind::NotFound),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, false),
+            // The file itself is bad: too large, not a regular file, or a symlink. That is the hook's doing and final.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput) || e.raw_os_error() == Some(libc::ELOOP) => (None, true),
+            // Anything else (EACCES, EMFILE, EIO) says nothing about the ack: fail the check so it is retried.
+            Err(e) => return Err(e.into()),
         };
         if let Some(ack) = delivered {
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
