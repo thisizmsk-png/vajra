@@ -502,11 +502,13 @@ impl App {
             let bare = lead_settings::settings_no_hooks(&self.home, repo, &self.data)?;
             let bare_path = fsx::write_atomic(dir, "selftest-settings.json", bare.as_bytes()).map_err(io)?;
             verify_settings_file(&bare_path, &bare)?;
-            let sid = ids::uuid_v4()?;
-            let argv = build_lead_argv(&LeadArgv { claude: bin, lead_session_id: &sid, resume: false, settings: &bare_path, mcp_config: &dir.join("mcp.json") })
-                .map_err(|e| LeadError::Invalid(e.to_string()))?;
             // Two tries: the model may answer without touching the file, which proves nothing.
             for _ in 0..2 {
+                // A fresh session id per attempt: the CLI refuses an id whose transcript already exists, and the
+                // first attempt leaves one even when the model never touched the file.
+                let sid = ids::uuid_v4()?;
+                let argv = build_lead_argv(&LeadArgv { claude: bin, lead_session_id: &sid, resume: false, settings: &bare_path, mcp_config: &dir.join("mcp.json") })
+                    .map_err(|e| LeadError::Invalid(e.to_string()))?;
                 let ask = lead::new_ulid(SystemTime::now())?;
                 let framed = frame(&ask, run_id, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
                 let child = lead_run::spawn(&argv, dir, env, &framed, h)?;

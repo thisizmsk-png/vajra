@@ -21,6 +21,12 @@ S=""; for a in "$@"; do [ "$P" = --settings ] && S="$a"; P="$a"; done
 cp "$(cat "$D/ledger.path")" "$D/ledger-at-spawn.$N" 2>/dev/null
 if grep -q 'Read the file' "$D/stdin.$N"; then
   echo x >> "$D/selftest.count"
+  # The real CLI refuses a session id whose transcript exists already.
+  SIDARG=""; P2=""; for a in "$@"; do [ "$P2" = --session-id ] && SIDARG="$a"; P2="$a"; done
+  if [ -n "$SIDARG" ]; then
+    if [ -e "$D/sid.$SIDARG" ]; then echo "Session ID $SIDARG is already in use" >&2; exit 1; fi
+    : > "$D/sid.$SIDARG"
+  fi
   cat "$D/init.json"
   P=$(sed -n 's/.*Read the file \(.*\) and show its content\..*/\1/p' "$D/stdin.$N")
   case "$(cat "$D/selftest")" in
@@ -36,6 +42,15 @@ if grep -q 'Read the file' "$D/stdin.$N"; then
       echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
       echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"File does not exist."}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+    retry)
+      if [ "$(wc -l < "$D/selftest.count")" -le 1 ]; then
+        echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
+        echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}'
+      else
+        echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
+        echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+        echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}'
+      fi;;
     notry)
       echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
@@ -712,4 +727,17 @@ fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
     assert!(!serde_json::to_string(&t.ledger()).unwrap().contains(&disk), "ledger");
     let lines = stream_text(&app);
     assert!(lines.iter().any(|l| l.contains("[redacted]")) && lines.iter().all(|l| !l.contains(&disk)), "bus: {lines:?}");
+}
+
+#[test]
+fn the_selftest_retry_uses_a_new_session_id() {
+    // The first probe never tries the read (and leaves a transcript behind); the fake CLI rejects a reused
+    // `--session-id` and denies only on the second attempt.
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("selftest", "retry");
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.count("selftest.count"), 2);
+    assert_eq!(t.files("sid.").len(), 2, "two distinct session ids");
 }
