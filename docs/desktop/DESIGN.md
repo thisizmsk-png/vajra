@@ -339,11 +339,14 @@ The kit folder owns the source. Screens compose these and never restyle them inl
 **Built with the shell** (PR #39): `Kbd` (a key, 18 px, radius 4; `decorative` inside a control,
 which then carries `aria-keyshortcuts`) and `ActionBar` (the signature: the selection in words, then
 actions with label and keys, primary first; chords bind on the window while it is mounted, and a
-chord without a modifier never fires while typing in a field).
+chord without a modifier never fires while typing in a field). The ⌘K command palette is wired into
+the shell: it lists the other screens with their keys, and each screen adds what it can really run
+(`useCommands` in `src/palette.tsx`): Crew adds "Go to worker" for each worker with its status, Home
+adds Check again. Runs, tasks, criteria and files join as their screens land.
 
 **Planned, not built yet** (the mockups in `mockups/a2/` are their reference): `Launcher` (the ask
-field with inline tokens and @-mentions), `Banner` (the approval band on `--c-warn-tint`), the ⌘K
-command palette and the authored icon set.
+field with inline tokens and @-mentions), `Banner` (the approval band on `--c-warn-tint`) and the authored
+icon set.
 
 ### Status vocabulary
 

@@ -15,13 +15,14 @@ const boot = () =>
   );
 
 // Dev server only: `?fixture` answers every command from src/devFixture.ts, for screenshots and the click crawl.
-// `?theme=light` picks the theme for the same reason. Production builds drop both branches.
+// `?theme=light` picks the theme and `?palette` opens the ⌘K palette, for the same reason. Production builds drop all three.
 const q = new URLSearchParams(location.search);
 if (import.meta.env.DEV && q.has("fixture")) {
   if (q.get("theme") === "light" || q.get("theme") === "dark") document.documentElement.dataset.theme = q.get("theme")!;
   void import("./devFixture").then((m) => {
     m.installFixture();
     boot();
+    if (q.has("palette")) setTimeout(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true })), 800);
   });
 } else {
   boot();

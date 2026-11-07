@@ -75,3 +75,13 @@ Graphite shell, Home and Crew (PR #39).
 | No repository chosen | Home action bar | shown until a folder is entered; then the folder's name |
 | Actions on Home / Actions for the selection | action bar names | screen readers only |
 | Stopped by you / Message pending / Active now | node overlays | the separator changes from " · " to ", " (no middle dots) |
+
+Command palette (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Search commands | palette field | placeholder and the field's name |
+| Go to Home … Go to Settings | palette rows | every screen but the current one, with its ⌘ key |
+| Go to worker NAME | palette rows on Crew | the worker's status beside it |
+| Check again | palette row on Home | the same action as the action bar |
+| N commands / 1 command / No command matches "Q". | palette foot | "1 command" was "1 commands" |

@@ -5,6 +5,7 @@ import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
+import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { PreflightList } from "../PreflightList";
 import { toInput, validate } from "./validate";
@@ -74,6 +75,8 @@ export function Home() {
     if (t) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd));
   };
   const err = (k: keyof Draft) => (shown ? errs[k] : undefined);
+
+  useCommands([{ id: "recheck", label: S.home.preflightRetry, run: recheck }]);
 
   const failing = pre.state === "ok" ? pre.data.rows.filter((r) => !r.ok).length : 0;
   const repoName = basename(d.repo);

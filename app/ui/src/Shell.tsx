@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Kbd, ariaShortcut } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { PaletteHost } from "./palette";
 import { SCREENS, toHash, useRoute } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { S } from "../strings";
@@ -9,7 +10,7 @@ import "./shell.css";
 /** ⌘1 to ⌘7 open the screens in nav order; each link shows its chord. */
 const chord = (i: number) => ["⌘", String(i + 1)];
 
-/** Graphite shell: a 240 px sidebar with the screens, the current screen beside it. Every screen sits inside an error boundary. */
+/** Graphite shell: a 240 px sidebar with the screens, the current screen beside it, and the ⌘K palette over both. Every screen sits inside an error boundary. */
 export function Shell() {
   const [route, go] = useRoute();
   const Screen = REGISTRY[route.screen];
@@ -25,22 +26,26 @@ export function Shell() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [go]);
+  // The screen you are on is not a place to go to.
+  const commands = SCREENS.flatMap((s, i) => (s === route.screen ? [] : [{ id: s, label: S.palette.goScreen(S.nav[s]), keys: chord(i), run: () => go(s) }]));
   return (
-    <div className="v-shell">
-      <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
-        <div className="v-shell__brand">{S.shell.brand}</div>
-        {SCREENS.map((s, i) => (
-          <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
-            <span className="v-shell__label">{S.nav[s]}</span>
-            <Kbd keys={chord(i)} decorative />
-          </a>
-        ))}
-      </nav>
-      <main className="v-shell__main">
-        <ErrorBoundary resetKey={toHash(route.screen, route.params)}>
-          <Screen />
-        </ErrorBoundary>
-      </main>
-    </div>
+    <PaletteHost commands={commands}>
+      <div className="v-shell">
+        <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
+          <div className="v-shell__brand">{S.shell.brand}</div>
+          {SCREENS.map((s, i) => (
+            <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
+              <span className="v-shell__label">{S.nav[s]}</span>
+              <Kbd keys={chord(i)} decorative />
+            </a>
+          ))}
+        </nav>
+        <main className="v-shell__main">
+          <ErrorBoundary resetKey={toHash(route.screen, route.params)}>
+            <Screen />
+          </ErrorBoundary>
+        </main>
+      </div>
+    </PaletteHost>
   );
 }

@@ -70,6 +70,9 @@
 .v-palette > .v-input:focus-visible { outline: none; border-bottom-color: var(--c-border); }
 .v-palette [role="listbox"] { max-height: min(420px, 50vh); overflow: auto; padding: 6px; }
 .v-palette .v-row { min-height: 34px; padding: 0 10px; }
+.v-palette .v-row > .v-kbd-group { margin-left: auto; }
+.v-palette .v-row__meta + .v-kbd-group { margin-left: var(--space-sm); }
+.v-palette .v-row[aria-selected="true"] .v-kbd { color: var(--c-text-secondary); }
 .v-palette > p { padding: var(--space-sm) var(--space-lg); border-top: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-text-muted); }
 
 /* Action bar (the Graphite signature): selection on the left, its actions with keys on the right, primary first. */

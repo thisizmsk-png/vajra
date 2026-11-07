@@ -19,6 +19,15 @@ export const S = {
     unknown: "Not run",
     needs_approval: "Needs approval",
   },
+  palette: {
+    title: "Command palette",
+    search: "Search commands",
+    list: "Commands",
+    none: (q: string) => `No command matches "${q}".`,
+    count: (n: number) => (n === 1 ? "1 command" : `${n} commands`),
+    goScreen: (screen: string) => `Go to ${screen}`,
+    goWorker: (name: string) => `Go to worker ${name}`,
+  },
   nav: { home: "Home", run: "Run", crew: "Crew", chat: "Chat", inbox: "Inbox", history: "History", settings: "Settings" },
   shell: {
     navLabel: "Main",

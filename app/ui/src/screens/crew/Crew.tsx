@@ -6,6 +6,7 @@ import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { CrewNodeDto } from "../../ipc";
+import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { WorkerPane } from "./WorkerPane";
 
@@ -46,6 +47,12 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
     if (f !== undefined) return f;
   }
   return undefined;
+};
+/** Every worker in the tree, in tree order. */
+const agents = (n: CrewNodeDto, out: CrewNodeDto[] = []): CrewNodeDto[] => {
+  if (n.id.startsWith("agent:")) out.push(n);
+  n.children.forEach((c) => agents(c, out));
+  return out;
 };
 const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
   if (n.children.length) out.push(n.id);
@@ -118,6 +125,9 @@ export function Crew() {
     });
     return () => { clearInterval(poll); clearTimeout(later); off(); };
   }, [target, load]);
+
+  // ⌘K: go to any worker of this run by name.
+  useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
 
   if (target === null && !err) {
     return (
