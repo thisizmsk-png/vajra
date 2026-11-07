@@ -585,11 +585,14 @@ impl App {
                 if probe.raw.contains(&secret) {
                     return Err(fail("the canary was readable"));
                 }
-                if done.permission_denied {
+                // Only a denial that names the canary proves its rule works: a denial of any other path says nothing.
+                let canary = std::fs::canonicalize(&file).ok();
+                let names_canary = |p: &String| Path::new(p) == file || canary.is_some() && std::fs::canonicalize(p).ok() == canary;
+                if done.denied_paths.iter().any(names_canary) {
                     return Ok(());
                 }
                 if done.tool_attempted {
-                    return Err(fail("the read failed, but not because a permission rule denied it"));
+                    return Err(fail("the canary was not denied by a permission rule (the read failed for another reason, or another path was denied)"));
                 }
             }
             Err(fail("the model never tried the read"))

@@ -119,6 +119,11 @@ pub struct Done {
     pub permission_denied: bool,
     /// The model called some tool.
     pub tool_attempted: bool,
+    /// The `file_path` of every Read that a permission rule refused (matched through the call's id, or taken from the
+    /// result's `permission_denials`). The self-test accepts a denial only if it names the canary.
+    pub denied_paths: Vec<String>,
+    /// `tool_use` id to the Read's `file_path`, for matching a denied result back to its call.
+    read_paths: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -315,6 +320,9 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
                     Some("tool_use") => {
                         done.tool_attempted = true;
                         let name = c.get("name").and_then(Value::as_str).unwrap_or("?");
+                        if let (Some(id), Some(path)) = (c.get("id").and_then(Value::as_str), c["input"].get("file_path").and_then(Value::as_str)) {
+                            done.read_paths.insert(id.to_string(), path.to_string());
+                        }
                         sink.event(Tag::Tool, &format!("{name} {}", short(&c.get("input").map(Value::to_string).unwrap_or_default(), 200)));
                     }
                     _ => {}
@@ -330,6 +338,9 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
                         let msg = text_of(&c["content"]);
                         if msg.contains("denied by your permission settings") {
                             done.permission_denied = true;
+                            if let Some(p) = c.get("tool_use_id").and_then(Value::as_str).and_then(|id| done.read_paths.get(id)).cloned() {
+                                done.denied_paths.push(p);
+                            }
                         }
                         sink.event(Tag::Error, &format!("tool error: {}", short(&msg, 200)));
                     } else {
@@ -343,8 +354,11 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
             done.is_error = ev.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             if let Some(a) = ev.get("permission_denials").and_then(Value::as_array).filter(|a| !a.is_empty()) {
                 done.denied = true;
-                if a.iter().any(|d| d.get("tool_name").and_then(Value::as_str) == Some("Read")) {
+                for d in a.iter().filter(|d| d.get("tool_name").and_then(Value::as_str) == Some("Read")) {
                     done.permission_denied = true;
+                    if let Some(p) = d["tool_input"].get("file_path").and_then(Value::as_str) {
+                        done.denied_paths.push(p.to_string());
+                    }
                 }
             }
             let res = ev.get("result").and_then(Value::as_str).unwrap_or("");

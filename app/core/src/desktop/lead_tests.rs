@@ -47,25 +47,29 @@ if grep -q 'Read the file' "$D/stdin.$N"; then
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
     wait)
       while [ ! -e "$D/release" ]; do sleep 0.05; done
-      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
-      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
-      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}';;
+      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"%s"}}]}}\n' "$P"
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+      printf '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read","tool_use_id":"t1","tool_input":{"file_path":"%s"}}]}\n' "$P";;
     retry)
       if [ "$(wc -l < "$D/selftest.count")" -le 1 ]; then
         echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
         echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}'
       else
-        echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
-        echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
-        echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}'
+        printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"%s"}}]}}\n' "$P"
+        echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+        printf '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read","tool_use_id":"t1","tool_input":{"file_path":"%s"}}]}\n' "$P"
       fi;;
+    otherdeny)
+      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/etc/some-other-protected-file"}}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read","tool_use_id":"t1","tool_input":{"file_path":"/etc/some-other-protected-file"}}]}';;
     notry)
       echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
     *)
-      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
-      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
-      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}';;
+      printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"%s"}}]}}\n' "$P"
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+      printf '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read","tool_use_id":"t1","tool_input":{"file_path":"%s"}}]}\n' "$P";;
   esac
   exit 0
 fi
@@ -957,4 +961,20 @@ fn a_run_launched_but_never_asked_about_can_be_asked_after_a_restart() {
     let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None };
     runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
     assert_eq!(code(&app2.ask_lead(other.0, "hi").unwrap_err()), "read_only");
+}
+
+#[test]
+fn a_selftest_denied_on_a_different_file_does_not_pass_and_is_not_cached() {
+    let t = Tmp::new();
+    let app = t.app();
+    // The probe reads (and is denied on) some other protected file and never touches the canary.
+    t.set("selftest", "otherdeny");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing", "a failure is not cached");
+    assert_eq!(t.count("selftest.count"), 2);
+    assert!(t.ledger().is_empty() && t.count("ask.count") == 0, "no real ask ran");
+    // A denial that names the canary passes.
+    t.set("selftest", "deny");
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
 }
