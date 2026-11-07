@@ -111,7 +111,7 @@ impl App {
 
     /// An ended session continues from the approval: `claude --resume <sid> "Execute approved plan <id>"` in a new PTY.
     fn resume_with_turn(&self, e: &runindex::Entry, turn: &ApprovedPlanTurn) -> Result<(), Value> {
-        let (_, run_id) = self.fresh_run_id(crate::ids::unix_now());
+        let (_, run_id) = self.fresh_run_id(crate::ids::unix_now())?;
         self.launch_kind(&e.session_id, &run_id, &e.campaign, &e.cwd, |_| argv::build_approve_resume_argv(&e.session_id, turn).map_err(super::invalid_input), true, false).map(|_| ())
     }
 
