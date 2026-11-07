@@ -101,3 +101,53 @@ describe("Settings", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(S.settings.failed));
   });
 });
+
+describe("History report and integrity (S6)", () => {
+  const list = (integrity: string) => ({ campaigns: [{ slug: "a-camp", goal: "first", status: "done", passing: 4, total: 4, updated: "2026-11-05", integrity }] });
+  const open = async (replies: Record<string, unknown>) => {
+    const f = fakeIpc({ list_campaigns: list("ok"), ...replies });
+    setTransport(f.transport);
+    render(<History />);
+    fireEvent.click(await screen.findByRole("button", { name: S.history.report("a-camp") }));
+    return f;
+  };
+
+  it("shows each campaign's integrity badge, and a failed one says so", async () => {
+    setTransport(fakeIpc({ list_campaigns: list("failed") }).transport);
+    render(<History />);
+    expect(await screen.findByText(S.history.integrityFailed)).toBeTruthy();
+  });
+
+  it("renders the stored report as text with control characters escaped", async () => {
+    const f = await open({ read_report: { slug: "a-camp", integrity: "ok", text: "Branch b\u0000\u001b[31mred\nline 2\ttab" } });
+    const pre = await screen.findByRole("region", { name: S.history.reportTitle("a-camp") });
+    expect(pre.textContent).toContain("Branch b\\u0000\\u001b[31mred");
+    expect(pre.textContent).toContain("line 2\ttab");
+    expect(f.calls.find((c) => c.cmd === "read_report")?.args).toEqual({ slug: "a-camp" });
+  });
+
+  it.each([
+    ["no_report", S.history.noReport],
+    ["integrity_failed", S.history.reportFailed],
+    ["not_text", S.history.notText],
+    ["unknown", S.history.reportUnknown],
+  ])("says %s and shows no text", async (integrity, message) => {
+    await open({ read_report: { slug: "a-camp", integrity, text: "should never be shown" } });
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByText(/should never be shown/)).toBeNull();
+  });
+
+  it("verifies now and offers the restore command when the signature fails", async () => {
+    const f = fakeIpc({ list_campaigns: list("ok"), verify_campaign: { slug: "a-camp", ok: false, restore: "vajra-campaign.sh resume a-camp --from-checkpoint 2" } });
+    setTransport(f.transport);
+    render(<History />);
+    fireEvent.click(await screen.findByRole("button", { name: S.history.verify("a-camp") }));
+    expect(await screen.findByText(/--from-checkpoint 2/)).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "verify_campaign" && c.args?.slug === "a-camp")).toBe(true);
+  });
+
+  it("shows a read error as an alert", async () => {
+    await open({ read_report: new Error("x") });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+  });
+});
