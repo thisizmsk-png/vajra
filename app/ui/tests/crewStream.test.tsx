@@ -196,6 +196,26 @@ describe("Stream tab (S2b, US-2.2)", () => {
     await waitFor(() => expect(earlierButton()).toBeTruthy());
   });
 
+  it("drops an earlier-page answer that arrives after Jump to latest (stale history never enters the new window)", async () => {
+    let release: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => { release = r; });
+    const f = await openBackend({
+      tail: tail(lines(30001, 30003), { spill_start: 0, spill_end: 10 * 1024 * 1024 }),
+      read_spill_before: () => slow,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "read_spill_before")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: S.crew.jumpLatest })); // while the request is in flight
+    await act(async () => { release({ lines: lines(29001, 30000), at_start: false, gap: false }); await Promise.resolve(); });
+    await new Promise((r) => setTimeout(r, 50));
+    const text = screen.getByRole("log").textContent ?? "";
+    expect(text).not.toContain("out 29001");
+    expect(text).toContain("out 30001");
+    expect(screen.queryByText(S.crew.historyView)).toBeNull();
+    expect(earlierButton()).toBeTruthy(); // still usable, not stuck busy
+    expect(earlierButton()?.hasAttribute("disabled")).toBe(false);
+  });
+
   it("offers no 'load earlier' when nothing was spilled", async () => {
     await openBackend({ tail: tail(lines(1, 3), { spill_start: 0, spill_end: 0 }) });
     await screen.findByRole("log");
