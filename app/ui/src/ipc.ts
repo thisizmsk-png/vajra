@@ -52,6 +52,7 @@ export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start:
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
+export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
 export const api = {
@@ -63,6 +64,8 @@ export const api = {
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   readSpill: (stream: string, offset: number, maxBytes = 65536) => call<Json>("read_spill", { stream, offset, maxBytes }),
   task: (slug: string, taskId: string) => call<Json>("task", { slug, taskId }),
+  /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
+  worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),

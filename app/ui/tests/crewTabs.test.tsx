@@ -1,0 +1,122 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { setTransport } from "../src/ipc";
+import { Crew } from "../src/screens/crew/Crew";
+import { S } from "../strings";
+import { fakeIpc } from "./fakeIpc";
+
+afterEach(() => {
+  cleanup();
+  setTransport();
+  window.location.hash = "";
+  vi.restoreAllMocks();
+});
+
+const node = (id: string, kind: string, title: string, status: string, children: unknown[] = []) =>
+  ({ id, kind, title, engine_id: "backend-dev", status, overlays: [], children });
+const tree = node("lead", "lead", "Lead", "in_progress", [
+  node("run", "run", "Run r1", "in_progress", [node("agent:a1", "worker", "task.t2.r1", "in_progress")]),
+]);
+const info = { worker: "a1", worktree: "/repo/.claude/worktrees/w1", branch: "worker-1", base: "abc123" };
+const DIFF = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n one\n+two\n";
+const task = {
+  task: { id: "r1.t2", title: "Add the thing", owner_agent: "backend", deps: ["r1.t1"], files: ["src/a.ts"], acceptance: ["it works"], attempts: 2, report: { status: "done", summary: "all green" } },
+  stale: false, evidence: null,
+};
+const base = { active_runs: { count: 0, runs: [] }, crew: tree, tail: { lines: [], gap: false, head_seq: 0, spill_start: null, spill_end: null }, worktree_info: info };
+
+async function open(replies: Record<string, unknown> = {}) {
+  window.location.hash = "#/crew?slug=camp&id=r1";
+  const f = fakeIpc({ ...base, ...replies });
+  setTransport(f.transport);
+  render(<Crew />);
+  fireEvent.click((await screen.findByText("task.t2.r1")).closest("[role=treeitem]") as HTMLElement);
+  return f;
+}
+const tab = (name: string) => screen.findByRole("tab", { name });
+
+describe("Worker tabs (S2c, US-2.3)", () => {
+  it("offers Stream, Diff, Task and Worktree, Stream first", async () => {
+    await open();
+    const names = (await screen.findAllByRole("tab")).map((t) => t.textContent);
+    expect(names).toEqual([S.crew.tabs.stream, S.crew.tabs.diff, S.crew.tabs.task, S.crew.tabs.worktree]);
+  });
+
+  it("Diff shows the worktree's git diff against its base, read only", async () => {
+    const f = await open({ diff: { code: 0, diff: DIFF, truncated: false, timed_out: false } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    await waitFor(() => expect(screen.getAllByText(/two/).length).toBeGreaterThan(0));
+    expect(f.calls.find((c) => c.cmd === "diff")?.args).toEqual({ cwd: info.worktree, base: info.base });
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("Diff says when there is nothing to show, was cut off, or failed", async () => {
+    await open({ diff: { code: 0, diff: "", truncated: false, timed_out: false } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    expect(await screen.findByText(S.crew.noChanges)).toBeTruthy();
+  });
+
+  it("Diff reports a truncated diff", async () => {
+    await open({ diff: { code: 0, diff: DIFF, truncated: true, timed_out: false } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    expect(await screen.findByText(S.crew.diffTruncated)).toBeTruthy();
+  });
+
+  it("Diff reports a git failure as an alert", async () => {
+    await open({ diff: { code: 128, diff: "", truncated: false, timed_out: false } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+  });
+
+  it("Task shows owner, deps, files, acceptance, attempts and the last report from the task graph id", async () => {
+    const f = await open({ task });
+    fireEvent.click(await tab(S.crew.tabs.task));
+    const facts = await screen.findByRole("group", { name: S.crew.taskFacts });
+    for (const t of ["backend", "r1.t1", "src/a.ts", "it works", "2", "all green"]) expect(facts.textContent).toContain(t);
+    expect(f.calls.find((c) => c.cmd === "task")?.args).toEqual({ slug: "camp", taskId: "r1.t2" });
+  });
+
+  it("Task says so when the worker has no task", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    setTransport(fakeIpc({ ...base, crew: node("lead", "lead", "Lead", "in_progress", [node("agent:a1", "worker", "Reviewer", "in_progress")]) }).transport);
+    render(<Crew />);
+    fireEvent.click((await screen.findByText("Reviewer")).closest("[role=treeitem]") as HTMLElement);
+    fireEvent.click(await tab(S.crew.tabs.task));
+    const panel = await screen.findByRole("tabpanel");
+    expect(panel.textContent).toContain(S.crew.noTask);
+  });
+
+  it("Worktree shows path, branch and base, each copyable to the clipboard only", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const f = await open();
+    fireEvent.click(await tab(S.crew.tabs.worktree));
+    const facts = await screen.findByRole("group", { name: S.crew.worktreeFacts });
+    for (const t of [info.worktree, info.branch, info.base]) expect(facts.textContent).toContain(t);
+    fireEvent.click(within(facts).getByRole("button", { name: S.crew.copy(S.crew.worktreePath) }));
+    expect(writeText).toHaveBeenCalledWith(info.worktree);
+    expect(f.calls.map((c) => c.cmd)).not.toContain("reveal");
+  });
+
+  it("Worktree says when the worker has no crew worktree", async () => {
+    await open({ worktree_info: new Error("x") });
+    fireEvent.click(await tab(S.crew.tabs.worktree));
+    expect(await screen.findByText(S.crew.noWorktree)).toBeTruthy();
+  });
+
+  it("the header names the worker's task and copyable worktree and branch", async () => {
+    await open({ task });
+    const head = await screen.findByRole("group", { name: S.crew.header });
+    await waitFor(() => expect(head.textContent).toContain("worker-1"));
+    expect(head.textContent).toContain("Add the thing");
+    expect(head.textContent).toContain(info.worktree);
+  });
+
+  it("arrow keys move between tabs", async () => {
+    await open();
+    const first = await tab(S.crew.tabs.stream);
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowRight" });
+    expect(document.activeElement?.textContent).toBe(S.crew.tabs.diff);
+  });
+});
