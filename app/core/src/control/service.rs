@@ -81,6 +81,8 @@ pub enum ControlError {
     ControlDisabled,
     NotPermitted,
     NotStopped,
+    /// A Lead bound to a run called a tool while that run is not the current control session.
+    RunNotCurrent,
     ActionNotFound,
     UnknownTool,
     InvalidArgs(String),
@@ -96,6 +98,7 @@ impl ControlError {
             Self::ControlDisabled => "control_disabled",
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
+            Self::RunNotCurrent => "run_not_current",
             Self::ActionNotFound => "action_not_found",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
@@ -976,6 +979,22 @@ impl Service {
     /// id=<action_id>"`: evidence, not protection (ADR-13 6). Reconcile joins the Lead's calls by that id, and a
     /// call with no guard line beside it means the Lead ran unguarded.
     pub fn call_tool(&mut self, tool: &str, args: &Value) -> Result<Value> {
+        self.call_tool_for_run(None, tool, args)
+    }
+
+    /// `call_tool` for a Lead that was started for one run (`VAJRA_LEAD_RUN` in its MCP config, sent with every
+    /// request). The service has one control session, so the run id in the prompt proves nothing: the call is
+    /// refused unless that run is the current session's run, checked here on every call under the service lock.
+    /// A Lead asked about a finished run, or one that outlives its run, can never see or steer another run's workers.
+    pub fn call_tool_for_run(&mut self, run: Option<&str>, tool: &str, args: &Value) -> Result<Value> {
+        if let Some(r) = run {
+            if !crate::ids::valid_run_id(r) {
+                return Err(ControlError::InvalidArgs("run".into()));
+            }
+            if self.session.as_ref().is_none_or(|s| s.run_id != r) {
+                return Err(ControlError::RunNotCurrent);
+            }
+        }
         self.last_recorded = None;
         let out = self.dispatch_tool(tool, args)?;
         let id = out.get("action_id").and_then(Value::as_str).map(str::to_string).or_else(|| self.last_recorded.take());

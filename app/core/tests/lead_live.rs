@@ -114,7 +114,7 @@ impl Live {
         // The real MCP server entry: the app's own binary in --mcp mode (answers the init check's five tool names).
         let mcp = data.join("lead/mcp.json");
         let exe = env!("CARGO_BIN_EXE_vajra-desktop");
-        fs::write(&mcp, serde_json::json!({"mcpServers": {"vajra-desktop": {"command": exe, "args": ["--mcp"], "env": {"VAJRA_DESKTOP_DATA": data.to_string_lossy()}}}}).to_string()).unwrap();
+        fs::write(&mcp, serde_json::json!({"mcpServers": {"vajra-desktop": {"command": exe, "args": ["--mcp"], "env": {"VAJRA_DESKTOP_DATA": data.to_string_lossy(), "VAJRA_LEAD_RUN": RUN_ID}}}}).to_string()).unwrap();
         Self { root, home, repo, data, key, secret, bin, mcp }
     }
 

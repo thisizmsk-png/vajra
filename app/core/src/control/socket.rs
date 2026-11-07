@@ -6,8 +6,9 @@
 //!   read; any other uid gets `{"error":"peer_uid"}` and is closed.
 //! - Newline-delimited JSON, one request per line, at most 65536 bytes per
 //!   request (newline excluded). A longer line gets `request_too_large`.
-//! - Request `{"tool": "...", "args": {...}}`, reply `{"ok": ...}` or
-//!   `{"error": "<code>", ...}`. Every request runs as the Lead.
+//! - Request `{"tool": "...", "args": {...}, "run": "<run_id>"?}`, reply `{"ok": ...}` or
+//!   `{"error": "<code>", ...}`. Every request runs as the Lead. A request with `run` is served only while that
+//!   run is the current control session (ADR-13: a Lead is bound to the run it was asked about).
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -126,7 +127,16 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, allowed_uid: u32) -> io::R
                 Some(tool) => {
                     let args = v.get("args").cloned().unwrap_or(Value::Null);
                     let mut s = crate::lock(svc);
-                    match s.call_tool(tool, &args) {
+                    let run = match v.get("run") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(r)) => Some(r.as_str()),
+                        Some(_) => {
+                            drop(s);
+                            reply(&mut conn, &json!({"error": "invalid_args", "detail": "run"}))?;
+                            continue;
+                        }
+                    };
+                    match s.call_tool_for_run(run, tool, &args) {
                         Ok(r) => json!({"ok": r}),
                         Err(e) => e.to_json(),
                     }
@@ -141,9 +151,18 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, allowed_uid: u32) -> io::R
 
 /// Client side: one request, one reply line.
 pub fn request(path: &Path, tool: &str, args: &Value) -> io::Result<Value> {
+    request_for(path, None, tool, args)
+}
+
+/// Like `request`, bound to `run` when given.
+pub fn request_for(path: &Path, run: Option<&str>, tool: &str, args: &Value) -> io::Result<Value> {
     let mut s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(READ_TIMEOUT))?;
-    let mut line = json!({"tool": tool, "args": args}).to_string();
+    let mut req = json!({"tool": tool, "args": args});
+    if let Some(r) = run {
+        req["run"] = json!(r);
+    }
+    let mut line = req.to_string();
     line.push('\n');
     if line.len() > MAX_REQUEST + 1 {
         return Ok(json!({"error": "request_too_large"}));

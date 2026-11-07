@@ -293,7 +293,7 @@ fn ask_lead_busy_second_call_and_cancel_kills_group() {
     t.set("mode", "slow");
     let first = app.ask_lead(RUN_ID, "take your time").unwrap();
     let ask_id = first["ask_id"].as_str().unwrap().to_string();
-    wait_until("the Lead to be running", || t.bin("slow.child").exists() && t.ask_states().contains(&"delivered:".to_string()));
+    wait_until("the Lead to be running", || std::fs::read_to_string(t.bin("slow.child")).is_ok_and(|s| !s.trim().is_empty()) && t.ask_states().contains(&"delivered:".to_string()));
     // One ask in flight per Lead session.
     assert_eq!(code(&app.ask_lead(RUN_ID, "me too").unwrap_err()), "lead_busy");
     let s = app.lead_status(RUN_ID).unwrap();
@@ -419,6 +419,8 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left");
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"]["vajra-desktop"]["args"], json!(["--mcp"]));
+    // The Lead's MCP server is bound to this run: it is refused if another run is current.
+    assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_RUN"], RUN_ID);
     // The argv names exactly those files.
     let argv = std::fs::read_to_string(t.files("argv.").pop().unwrap()).unwrap();
     assert!(argv.contains(&format!("--settings\n{}\n", dir.join("settings.json").display())), "{argv}");
@@ -581,6 +583,8 @@ fn two_runs_asking_at_once_each_get_their_own_settings() {
     assert!(checked >= 4, "two self-tests and two asks: {checked}");
     for id in [RUN_ID, run_b] {
         assert!(t.data().join("lead").join(id).join("settings.json").is_file());
+        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(t.data().join("lead").join(id).join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_RUN"], id, "each Lead is bound to its own run");
     }
     for h in lock(&app.lead.active).values() {
         h.handle.cancel();
@@ -595,7 +599,7 @@ fn cancel_reaches_the_selftest_and_ask_lead_returns_cancelled() {
     t.set("selftest", "hang");
     let res = std::thread::scope(|s| {
         let h = s.spawn(|| app.ask_lead(RUN_ID, "hi"));
-        wait_until("the self-test to be running", || t.bin("selftest.child").exists());
+        wait_until("the self-test to be running", || std::fs::read_to_string(t.bin("selftest.child")).is_ok_and(|s| !s.trim().is_empty()));
         let ask_id = lock(&app.lead.active).values().next().map(|a| a.ask_id.clone()).expect("reserved ask");
         app.cancel_ask(&ask_id).unwrap();
         h.join().unwrap()

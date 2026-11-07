@@ -295,7 +295,7 @@ impl App {
         // (the busy lock is per run). A shared file would let run B rewrite it before run A's CLI reads it.
         fsx::private_dir(&self.data.join("lead")).map_err(io)?;
         let dir = self.data.join("lead").join(&t.run_id);
-        let settings = self.write_lead_files(&dir, &t.cwd)?;
+        let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id)?;
         self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id, handle)?;
 
         let (lead_sid, resume) = match &t.lead_session_id {
@@ -420,7 +420,7 @@ impl App {
     /// Write `<data>/lead/<run_id>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
-    fn write_lead_files(&self, dir: &Path, repo: &Path) -> Result<String, LeadError> {
+    fn write_lead_files(&self, dir: &Path, repo: &Path, run_id: &str) -> Result<String, LeadError> {
         if !self.data.is_absolute() {
             return Err(LeadError::GuardMissing("the data dir must be an absolute path".into()));
         }
@@ -429,7 +429,7 @@ impl App {
         let mcp = json!({"mcpServers": {"vajra-desktop": {
             "command": self.lead.exe.to_string_lossy(),
             "args": ["--mcp"],
-            "env": {"VAJRA_DESKTOP_DATA": self.data.to_string_lossy()},
+            "env": {"VAJRA_DESKTOP_DATA": self.data.to_string_lossy(), crate::control::mcp::RUN_ENV: run_id},
         }}});
         fsx::write_atomic(dir, "mcp.json", mcp.to_string().as_bytes()).map_err(io)?;
         let path = fsx::write_atomic(dir, "settings.json", want.as_bytes()).map_err(io)?;
