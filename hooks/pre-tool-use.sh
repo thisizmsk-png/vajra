@@ -63,11 +63,11 @@ TOOL=""
 command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
 
 PAYLOAD="$(cat)"
-CWD_IN="" CMD="" P1="" P2="" P3="" AID=""
+CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
 PARSED="$(jq -r '
   def s: if type == "string" then . elif . == null then "" else tostring end;
   (.tool_input | if type == "object" then . else {} end) as $i
-  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) AID=\(.agent_id | s)"
+  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) PAT=\($i.pattern | s) AID=\(.agent_id | s)"
 ' <<<"$PAYLOAD" 2>/dev/null)" || block "unparseable hook payload (fail-closed)"
 eval "$PARSED"
 [ -n "$TOOL" ] || block "payload has no tool_name (fail-closed)"
@@ -222,6 +222,24 @@ inside() { # path dir -> 0 if path is dir or below it (case-insensitive)
 # it (~/.claude, HOME, /Users, /): a recursive read or copy there reaches the key.
 key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 
+same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
+  inside "$1" "$2" && inside "$2" "$1"
+}
+# A Glob pattern can name the state directory itself ("<state>/*", "~/.claude/vajra/.*") or the key. The literal
+# part of the pattern, up to its first glob character, is resolved against the search root.
+glob_pattern_check() { # canonical search root
+  local lit dir root="$1"
+  [ -n "$PAT" ] || return 0
+  shopt -s nocasematch
+  case "$PAT" in *.hmac-key*) shopt -u nocasematch; block "Glob pattern names the Vajra HMAC key" ;; esac
+  shopt -u nocasematch
+  lit="${PAT%%[*?[{]*}"
+  case "$lit" in */*) dir="${lit%/*}"; [ -n "$dir" ] || dir="/" ;; *) return 0 ;; esac
+  canon "$dir" "$root"
+  same_dir "$CANON" "$VS_C" && block "Glob pattern would list the Vajra state directory ($VS_C), including the HMAC key and audit log file names"
+  return 0
+}
+
 TAMPER=0
 [ -f "$VS/.integrity-violation" ] && TAMPER=1
 
@@ -255,6 +273,11 @@ case "$TOOL" in
       # Grep reads file contents recursively: an ancestor of the key (~/.claude,
       # HOME, /) or of a worker-unreadable root would include it.
       [ "$TOOL" = Grep ] && reach_check "$CANON" "Grep over $CANON"
+      # Glob lists names, not contents, but the state directory's names include the signing key's file and the audit log.
+      if [ "$TOOL" = Glob ]; then
+        same_dir "$CANON" "$VS_C" && block "Glob of the Vajra state directory would list the HMAC key and audit log file names; give a path below it (for example $VS_C/campaigns)"
+        glob_pattern_check "$CANON"
+      fi
     done
     allow
     ;;

@@ -202,7 +202,30 @@ path_case BLOCK "Grep no path, cwd=HOME"    Grep "" "$H"
 path_case ALLOW "Grep no path, cwd=project" Grep "" "$PROJ"
 path_case ALLOW "Grep path=project"         Grep "$PROJ/src"
 path_case ALLOW "Grep campaigns dir"        Grep "$VS/campaigns"
-path_case ALLOW "Glob no path, cwd=state"   Glob "" "$VS"
+path_case BLOCK "Glob no path, cwd=state"   Glob "" "$VS"
+path_case BLOCK "Glob path=vajra state"     Glob "$VS"
+path_case BLOCK "Glob path=~/.claude/vajra" Glob "~/.claude/vajra"
+path_case BLOCK "Glob path=state/."         Glob "$VS/."
+path_case BLOCK "Glob path=state via .."    Glob "$VS/campaigns/.."
+path_case BLOCK "Glob path=state, trailing /" Glob "$VS/"
+path_case ALLOW "Glob path=campaigns"       Glob "$VS/campaigns"
+path_case ALLOW "Glob path=project"         Glob "$PROJ/src"
+glob_case() { # expect desc pattern [path] [cwd]
+  local json rc
+  json="$(jq -nc --arg pat "$3" --arg p "${4:-}" --arg d "${5:-$PROJ}" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Glob",tool_input:({pattern:$pat} + (if $p == "" then {} else {path:$p} end))}')"
+  printf '%s' "$json" | bash "$HOOK" >/dev/null 2>&1; rc=$?
+  judge "$1" "$2" "$rc"
+}
+glob_case BLOCK "Glob pattern <state>/*"            "$VS/*"
+glob_case BLOCK "Glob pattern ~/.claude/vajra/.*"   "~/.claude/vajra/.*"
+glob_case BLOCK "Glob pattern <state>/**"           "$VS/**"
+glob_case BLOCK "Glob pattern ../ from campaigns"   "../*" "$VS/campaigns"
+glob_case BLOCK "Glob pattern names the key file"   "**/.hm""ac-key" "$H"
+glob_case BLOCK "Glob pattern key file, any case"   "$H/.claude/vajra/.HM""AC-KEY"
+glob_case ALLOW "Glob pattern campaigns/*"          "$VS/campaigns/*"
+glob_case ALLOW "Glob pattern campaigns/*/tasks.json" "$VS/campaigns/*/tasks.json"
+glob_case ALLOW "Glob pattern src/**/*.ts"          "src/**/*.ts" "$PROJ"
+glob_case ALLOW "Glob pattern **/*.md in project"   "**/*.md"
 path_case ALLOW "Glob path=HOME"            Glob "$H"
 bash_case BLOCK "grep -r on state dir"      'grep -r "" ~/.claude/vajra'
 bash_case BLOCK "grep -rn on ~/.claude"     'grep -rn . ~/.claude'
