@@ -187,13 +187,17 @@ impl Bridge {
 impl Bridge {
     /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths left out),
     /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
-    /// The repo's own index and working tree are never touched (only loose tree objects are written). `None` if any step fails
-    /// or the total `timeout` runs out. Same git hardening as `Request::Git`.
+    /// The repo's index, working tree and object store are never written: every new object (a blob per modified or untracked
+    /// file, then the trees) goes to a temp object dir (`GIT_OBJECT_DIRECTORY`) that is removed afterwards, while the repo's
+    /// own objects are read through `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The tree id is the same as if they were written
+    /// there. `None` if any step fails or the total `timeout` runs out. Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
         let start = Instant::now();
         let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
         std::fs::create_dir(&dir).ok()?;
         let idx = dir.join("index");
+        let objects = dir.join("objects");
+        let repo_objects: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
         let result = (|| {
             let git = |args: &[&str], with_index: bool| -> Option<Output> {
                 let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
@@ -201,9 +205,18 @@ impl Bridge {
                     .chain([repo.to_string_lossy().into_owned()])
                     .chain(args.iter().map(|a| a.to_string()))
                     .collect();
-                let env: Vec<(&str, &Path)> = if with_index { vec![("GIT_INDEX_FILE", idx.as_path())] } else { vec![] };
+                let alt = repo_objects.borrow().clone();
+                let env: Vec<(&str, &Path)> = match (with_index, alt.as_deref()) {
+                    (true, Some(alt)) => vec![("GIT_INDEX_FILE", idx.as_path()), ("GIT_OBJECT_DIRECTORY", objects.as_path()), ("GIT_ALTERNATE_OBJECT_DIRECTORIES", alt)],
+                    _ => vec![],
+                };
                 run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| !o.timed_out && o.code == Some(0))
             };
+            // The repo's object dir as an absolute path (`--git-path` answers relative to the repo for a plain checkout).
+            let found = git(&["rev-parse", "--git-path", "objects"], false)?.stdout.trim().to_string();
+            let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { repo.join(found) };
+            *repo_objects.borrow_mut() = Some(found.canonicalize().ok()?);
+            std::fs::create_dir(&objects).ok()?;
             if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {
                 let head = head.stdout.trim().to_string();
                 git(&["read-tree", &head], true)?;

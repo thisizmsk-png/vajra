@@ -1511,6 +1511,28 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     assert_eq!(tree.map(|t| t.len()), Some(40));
 }
 
+#[test]
+fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // A modified tracked file and an untracked one: `add -A` hashes both.
+    fs::write(repo.join("f.txt"), b"changed").unwrap();
+    fs::write(repo.join("new.txt"), vec![b'x'; 200_000]).unwrap();
+    let before = git_in(&repo, &["count-objects", "-v"]);
+    let tree = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree id");
+    assert_eq!(tree.len(), 40);
+    assert_eq!(git_in(&repo, &["count-objects", "-v"]), before, "loose objects or packs changed in the user's repo");
+    // The id is real: the same content, written for real by `git add` into a temp index, gives the same tree.
+    let idx = t.home().join("probe-index");
+    let run = |args: &[&str]| {
+        let o = std::process::Command::new("git").current_dir(&repo).env("GIT_INDEX_FILE", &idx).args(args).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    run(&["read-tree", "HEAD"]);
+    run(&["add", "-A", "--", ".", ":(exclude)data/walkthroughs"]);
+    assert_eq!(run(&["write-tree"]), tree);
+}
+
 /// A "git" that never answers, to stand in for a slow repo.
 fn slow_git(t: &Tmp) -> std::path::PathBuf {
     let p = t.home().join("slow-git.sh");
