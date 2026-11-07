@@ -2,12 +2,12 @@
  "identities": {
   "25G332|21624.5.1.11.3": {
    "flavours": {
-    "2": {
+    "Networking+WebContent": {
      "idle_mib": 175.0,
      "provisional": false,
      "measured": "macOS 26.7.2 (25G332), WebKit 21624.5.1.11.3, image 20261102.0473.1; 2 helpers (Networking, WebContent): medians 174.5, 175.4, 174.9, 175.4 from 4 CI attempts of runs 42323420368 and 42328381675 on #26; consistent with the earlier pooled clean mean 174.8"
     },
-    "3": {
+    "GPU+Networking+WebContent": {
      "idle_mib": 201.1,
      "provisional": true,
      "measured": "same identity; 3 helpers (GPU, Networking, WebContent): median 201.1 of one attempt (launches 209.2, 213.1, 200.8, 201.1, 200.9) of run 42328381675 on #26. PROVISIONAL: one run only; refine with the bump procedure as more 3-helper runs land"
@@ -16,7 +16,7 @@
   },
   "25G83|21624.5.1.11.3": {
    "flavours": {
-    "2": {
+    "Networking+WebContent": {
      "idle_mib": 174.7,
      "provisional": true,
      "measured": "image 20261026.0455.2; 2 helpers: median 174.7 of one attempt of run 42328381675 on #26. PROVISIONAL: one run only"
@@ -24,5 +24,5 @@
    }
   }
  },
- "update": "Manual bump PR, reviewed by the owner, following the procedure in README.md. Never written by CI. identity key = '<macOS build>|<WebKit version>' (idle.json `identity`); flavour key = WebKit helper count (2 = Networking + WebContent, 3 = plus the GPU process)."
+ "update": "Manual bump PR, reviewed by the owner, following the procedure in README.md. Never written by CI. identity key = '<macOS build>|<WebKit version>' (idle.json `identity`); flavour key = the WebKit helper TYPE set, sorted and joined with '+' (Networking+WebContent, or GPU+Networking+WebContent when the GPU process is present)."
 }

@@ -38,6 +38,12 @@ pub(super) const SANDBOX_NEEDED: &str = "Ask the Lead needs the Claude Code sand
 const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
 /// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
 const CWD_FILE: &str = "cwd";
+const SESSION_FILE: &str = "session";
+const CAMPAIGN_FILE: &str = "campaign";
+/// Present for a run that started no new workflow (the approval-only resume).
+const APPROVAL_ONLY_FILE: &str = "approval_only";
+/// Unix seconds when the app launched the run. The run id is only a uniqueness label (it can name a future minute).
+const STARTED_FILE: &str = "started";
 /// `read_only` detail for a run this app did not launch.
 const NOT_OURS: &str = "run not launched by this app";
 /// How long a passing `vajra-doctor.sh` answer is reused.
@@ -331,16 +337,40 @@ impl App {
     /// Record the run's directory under the guarded control dir. Called from the launch/resume path, where the app
     /// itself has just chosen the directory, so a finished run that was never asked about can still be asked after a
     /// restart. A failure only means the Lead is refused for that run later (fail closed); the launch is unaffected.
-    pub(super) fn record_run_cwd(&self, run_id: &str, cwd: &Path) -> std::io::Result<()> {
+    ///
+    /// It also records the run's session id and campaign (ADR-14): `runs.jsonl` is worker-writable, so a plan approval
+    /// or reject trusts only an index line whose directory, session and campaign all equal this record.
+    pub(super) fn record_run(&self, run_id: &str, cwd: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
         let dir = self.lead_sid_dir(run_id);
         fsx::private_dir(&dir)?;
+        fsx::write_atomic(&dir, SESSION_FILE, session_id.as_bytes())?;
+        fsx::write_atomic(&dir, CAMPAIGN_FILE, campaign.as_bytes())?;
+        fsx::write_atomic(&dir, STARTED_FILE, started.to_string().as_bytes())?;
+        if !workflow {
+            fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
+        }
+        // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
 
-    fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
+    /// The guarded (cwd, session id, campaign) of a run, or `None` if any part is missing (a run from before this
+    /// record existed is not trusted for plan decisions).
+    pub(super) fn read_run_record(&self, run_id: &str) -> Option<(PathBuf, String, String, bool)> {
+        let text = |f: &str| fsx::read_nofollow(&self.lead_sid_dir(run_id).join(f)).ok().and_then(|b| String::from_utf8(b).ok());
+        let workflow = !self.lead_sid_dir(run_id).join(APPROVAL_ONLY_FILE).exists();
+        Some((self.read_run_cwd(run_id)?, text(SESSION_FILE)?.trim().to_string(), text(CAMPAIGN_FILE)?.trim().to_string(), workflow))
+    }
+
+    /// When the app launched the run (unix seconds), or `None` if it was not recorded.
+    pub(super) fn read_run_started(&self, run_id: &str) -> Option<i64> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(STARTED_FILE)).ok()?;
+        String::from_utf8(body).ok()?.trim().parse::<i64>().ok().filter(|t| *t > 0)
+    }
+
+    pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)

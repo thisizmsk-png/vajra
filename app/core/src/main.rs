@@ -38,6 +38,16 @@ fn inbox(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
+    app.approve_plan(&id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
+    app.reject_plan(&id, &reason)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -97,8 +107,18 @@ fn read_spill(app: State<'_, App>, stream: String, offset: u64, max_bytes: usize
 }
 
 #[tauri::command(async)]
+fn read_spill_before(app: State<'_, App>, stream: String, before_seq: u64, max_lines: usize) -> Res {
+    app.read_spill_before(&stream, before_seq, max_lines)
+}
+
+#[tauri::command(async)]
 fn task(app: State<'_, App>, slug: String, task_id: String) -> Res {
     app.task(&slug, &task_id)
+}
+
+#[tauri::command(async)]
+fn worktree_info(app: State<'_, App>, worker: String) -> Res {
+    app.worktree_info(&worker)
 }
 
 #[tauri::command(async)]
@@ -260,8 +280,10 @@ fn main() {
             crew,
             tail,
             read_spill,
+            read_spill_before,
             task,
             diff,
+            worktree_info,
             control_message,
             control_redirect,
             control_stop,
@@ -276,6 +298,8 @@ fn main() {
             cancel_ask,
             lead_status,
             inbox,
+            approve_plan,
+            reject_plan,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {

@@ -361,3 +361,29 @@ fn redact_handles_escapes_and_invisible_characters_inside_a_nonce() {
     // No nonce: nothing changes, escapes included.
     assert_eq!(r.redact("x \u{1b}[31mred\u{1b}[0m y".to_string()), "x \u{1b}[31mred\u{1b}[0m y");
 }
+
+#[test]
+fn take_over_changes_are_serialised_with_delivery() {
+    // A delivery holds the writer lock around its mode check. Turning Take over on must wait for it, so an approval
+    // turn that passed its check is fully written before the human has the keyboard, and a later one sees the new mode.
+    let (sup, _bus, dir) = setup("toggle-lock");
+    sup.spawn("s-cat", spec(&["cat"], &dir)).unwrap();
+    let held = sup.get("s-cat").unwrap();
+    let guard = lock(&held.writer);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let t = sc.spawn(|| {
+            sup.set_take_over("s-cat", true).unwrap();
+            done.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!done.load(Ordering::SeqCst), "the toggle waited for the delivery in progress");
+        assert!(!sup.take_over("s-cat").unwrap(), "and the mode did not change under it");
+        drop(guard);
+        t.join().unwrap();
+    });
+    assert!(sup.take_over("s-cat").unwrap());
+    let turn = ApprovedPlanTurn::new("20261106-0911", 0).unwrap();
+    assert_eq!(sup.submit_fixed_turn("s-cat", &turn), Err(SessionError::TakeOverActive));
+    sup.kill("s-cat").unwrap();
+}

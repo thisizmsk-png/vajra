@@ -187,6 +187,13 @@ pub fn build_resume_argv(session_id: &str, run_id: &str, campaign: &str, steer_n
     Ok(vec!["claude".into(), "--resume".into(), session_id.into(), format!("/vajra-deliver {json}")])
 }
 
+/// ADR-14: continue an ended run session with the one fixed turn, `claude --resume <sid> "Execute approved plan
+/// <run_id>.<index>"`. The plan is named by id only; permission prompts are answered by the human through Take over.
+pub fn build_approve_resume_argv(session_id: &str, turn: &super::ApprovedPlanTurn) -> Result<Vec<String>, InvalidInput> {
+    check_session_id(session_id)?;
+    Ok(vec!["claude".into(), "--resume".into(), session_id.into(), turn.text().into()])
+}
+
 /// JSON string escaping for the slash-command argument. Not serde_json: it
 /// sorts keys (the argv tests pin the field order) and leaves U+2028/2029 raw,
 /// which older JS parsers read as line breaks.

@@ -212,6 +212,9 @@ enum Kind {
     Resume,
     /// ADR-13: the human asked the Lead a question. Always actor human, via ui; it reaches no worker.
     Ask,
+    /// ADR-14: the human approved or rejected a plan item. Always actor human, via ui.
+    Approve,
+    Reject,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -230,7 +233,7 @@ enum State {
 }
 
 impl Kind {
-    const ALL: [Kind; 7] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask];
+    const ALL: [Kind; 9] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject];
     fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -240,6 +243,8 @@ impl Kind {
             Kind::Stop => "stop",
             Kind::Resume => "resume",
             Kind::Ask => "ask",
+            Kind::Approve => "approve",
+            Kind::Reject => "reject",
         }
     }
     fn parse(k: &str) -> Option<Kind> {
@@ -304,6 +309,37 @@ pub struct AskRecord<'a> {
     pub lead_session_id: &'a str,
     pub state: AskState,
     pub text: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
+/// A human decision on a plan item (ADR-14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Approve,
+    Reject,
+}
+
+/// Where a decision is. `Requested` is written before anything is delivered; `Final` is `delivered` for an approve
+/// (the fixed turn was typed or the resumed session was started) and `done` for a reject (the progress line was signed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecisionState {
+    Requested,
+    Final,
+    Failed,
+}
+
+/// One ledger line for a decision. `reason` is the reject reason (cleaned, bounded) or a failure note.
+#[derive(Clone, Copy, Debug)]
+pub struct DecisionRecord<'a> {
+    pub decision: Decision,
+    /// Names the action across its lines; `None` on the first line, which mints it.
+    pub action_id: Option<&'a str>,
+    pub item: &'a str,
+    pub run_id: &'a str,
+    pub session_id: &'a str,
+    pub campaign: &'a str,
+    pub plan_sha256: Option<&'a str>,
+    pub state: DecisionState,
     pub reason: Option<&'a str>,
 }
 
@@ -417,6 +453,52 @@ impl Service {
             extra["text_sha256"] = json!(sha256::hex_digest(t.as_bytes()));
         }
         self.record(&a, r.state.state(), extra, now)
+    }
+
+    /// The action that already decided `item` with exactly this plan (`plan_sha256`), if any: an approve or reject whose newest line is `requested`,
+    /// `delivered` or `done`. A `requested` with no outcome (a crash mid-delivery) counts as decided: delivery is
+    /// unknown, so the plan is never run twice. Only `failed` frees the item.
+    pub fn decided(&self, item: &str, plan_sha256: &str) -> io::Result<Option<String>> {
+        let records = Ledger::read_all(&self.control_root.join("ledger.jsonl"))?;
+        let mut last: Vec<(String, String)> = Vec::new();
+        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item && str_field(r, "plan_sha256") == plan_sha256) {
+            let (id, state) = (str_field(r, "action_id").to_string(), str_field(r, "state").to_string());
+            match last.iter_mut().find(|(i, _)| *i == id) {
+                Some(e) => e.1 = state,
+                None => last.push((id, state)),
+            }
+        }
+        Ok(last.into_iter().find(|(_, st)| st != "failed").map(|(id, _)| id))
+    }
+
+    /// Append one decision line and return the action id. The final line also appends the `audit.log` line
+    /// (`approve id=<action_id> item=<item>` or `reject ...`) that reconcile joins on. A failed audit append is logged,
+    /// not hidden: reconcile reports the action as a ledger line without an audit line.
+    pub fn record_decision(&mut self, r: &DecisionRecord<'_>) -> Result<String> {
+        let now = SystemTime::now();
+        let kind = if r.decision == Decision::Approve { Kind::Approve } else { Kind::Reject };
+        let mut a = self.new_action(kind, Actor::Human, None, now)?;
+        if let Some(id) = r.action_id {
+            a.id = id.to_string();
+        }
+        a.run_id = r.run_id.to_string();
+        a.session_id = r.session_id.to_string();
+        a.reason = r.reason.map(str::to_string);
+        let mut extra = json!({"item": r.item, "campaign": r.campaign});
+        if let Some(h) = r.plan_sha256 {
+            extra["plan_sha256"] = json!(h);
+        }
+        let (state, verb) = match (r.state, r.decision) {
+            (DecisionState::Requested, _) => (State::Requested, ""),
+            (DecisionState::Failed, _) => (State::Failed, ""),
+            (DecisionState::Final, Decision::Approve) => (State::Delivered, "approve"),
+            (DecisionState::Final, Decision::Reject) => (State::Done, "reject"),
+        };
+        self.record(&a, state, extra, now)?;
+        if !verb.is_empty() && audit::append_line(&self.audit_log, "ALLOW", &format!("{verb} id={} item={}", a.id, r.item), now).is_err() {
+            self.log("control_audit_failed", &[]);
+        }
+        Ok(a.id)
     }
 
     // ------------------------------------------------------------ session

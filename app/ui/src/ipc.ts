@@ -49,19 +49,30 @@ export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
 };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
+export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
-  id: string; kind: "task"; campaign: string; origin: "app" | "terminal"; status: string; created: string; age_s: number;
-  title: string; body: string; context: string[]; actions: string[];
-  /** What `created` and `age_s` measure: when the app first saw the task waiting (tasks.json has no per-task time). */
+  id: string; kind: "task" | "plan" | "question"; campaign: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
+  title: string; body: string; context?: string[]; actions: string[];
+  /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
+  source?: string;
+  /** B2 plan items: what `approve_plan` must be given back, the hash of exactly what was shown. */
+  plan_sha256?: string; action?: string;
+  /** The deploy plan as the workflow wrote it (`S.DeployPlan`), unabridged; unsafe characters appear as visible `\u{..}` escapes. */
+  plan?: { target: string; commands: string[]; rollback: string[]; health_checks: string[]; risk: "low" | "medium" | "high" } | null;
+  /** The whole pending_approval entry, unabridged: what `plan_sha256` covers. */
+  entry?: Record<string, unknown>;
+  /** Set when the entry cannot be approved (only `reject` is offered). */
+  invalid?: string | null;
+  /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
@@ -73,9 +84,13 @@ export const api = {
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
+  /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
+  readSpillBefore: (stream: string, beforeSeq: number, maxLines: number) => call<{ lines: Line[]; at_start: boolean; gap: boolean }>("read_spill_before", { stream, beforeSeq, maxLines }),
   readSpill: (stream: string, offset: number, maxBytes = 65536) => call<Json>("read_spill", { stream, offset, maxBytes }),
   task: (slug: string, taskId: string) => call<Json>("task", { slug, taskId }),
-  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean }>("diff", { cwd, base }),
+  /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
+  worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
+  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
   controlStop: (worker: string, reason?: string) => call<Json>("control_stop", { worker, reason: reason ?? null }),
@@ -93,6 +108,10 @@ export const api = {
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
+  /** Approve plan `id` as shown: starts the approved action as a new turn. Refused (`plan_changed`) if the plan changed since `inbox` showed it. */
+  approvePlan: (id: string, planSha256: string) => call<{ action_id: string; state: string; via: string }>("approve_plan", { id, planSha256 }),
+  /** Reject plan `id` with a reason (1 to 500 characters). */
+  rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
 };
 
