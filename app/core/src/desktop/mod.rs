@@ -100,7 +100,10 @@ struct Run {
 
 /// Untracked file names `diff` lists.
 const UNTRACKED_MAX: usize = 200;
-const LIST_VERIFY_WORKERS: usize = 4;
+/// Most integrity verifies running at once, across every `campaign_integrity` call.
+const VERIFY_SLOTS: usize = 4;
+/// Longest a verify waits for a free slot (the total budget for a call); past it the call reads "unknown" and starts nothing.
+const VERIFY_QUEUE_BUDGET: Duration = Duration::from_secs(15);
 /// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
 /// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
 const VERDICT_TTL: Duration = Duration::from_secs(5);
@@ -120,6 +123,9 @@ enum Verdict {
 struct Verdicts {
     by_slug: HashMap<String, Verdict>,
     last: HashMap<String, u64>,
+    /// A forced list refresh asked for a verify that starts after this ticket. Until one settles, nothing older may
+    /// answer for the campaign: not a kept verdict, not a verify that was already running when the refresh was asked.
+    floor: HashMap<String, u64>,
 }
 
 /// Ends a flight even if the verify panics, so waiters are never left hanging.
@@ -143,6 +149,14 @@ impl Drop for FlightGuard<'_> {
         }
     }
 }
+/// A taken verify slot; freed when dropped, even if the verify panics.
+struct VerifySlot<'a>(&'a (Mutex<usize>, Condvar));
+impl Drop for VerifySlot<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0 .0) += 1;
+        self.0 .1.notify_one();
+    }
+}
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum Outcome {
@@ -163,6 +177,9 @@ pub struct App {
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
+    /// Free verify slots (see `VERIFY_SLOTS`) and the longest a call waits for one.
+    verify_slots: (Mutex<usize>, Condvar),
+    verify_queue_budget: Duration,
     /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
     verdicts: Mutex<Verdicts>,
     /// Integrity-check tickets, taken when a check starts (see `Verdicts`).
@@ -221,6 +238,8 @@ impl App {
             deciding: Mutex::new(Default::default()),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
+            verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
+            verify_queue_budget: VERIFY_QUEUE_BUDGET,
             verdicts: Mutex::new(Verdicts::default()),
             tickets: std::sync::atomic::AtomicU64::new(0),
             verdict_ttl: VERDICT_TTL,
@@ -272,14 +291,23 @@ impl App {
 
     /// The first minute at or after `now` that no known run and no campaign on disk uses. The workflow takes a
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
-    fn fresh_run_id(&self, now: u64) -> (u64, String) {
+    /// If the next 120 minutes are all taken (a forged index can fill them) nothing is issued: there is no fallback to
+    /// a used id, because reusing one would hand a new run another run's guarded record.
+    fn fresh_run_id(&self, now: u64) -> Result<(u64, String), Value> {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
         // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
         let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
-        let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
+        // The guarded run record (`control/lead/<id>/`) counts too: the index is worker-writable and can be emptied, and
+        // reusing an id would keep that record's Lead session and approval-only marker for a different run.
+        let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
+        let pick = (0..120u64)
+            .map(|k| now + 60 * k)
+            .map(|t| (t, ids::run_id_at(t)))
+            .find(|(_, id)| !used(id))
+            .ok_or_else(|| fail("run_id_exhausted", "no unused run id in the next 120 minutes; check runs.jsonl"))?;
         lock(&self.issued).insert(pick.1.clone());
-        pick
+        Ok(pick)
     }
 
     // ---------------------------------------------------------------- start
@@ -318,27 +346,16 @@ impl App {
                 })
                 .collect())
         })?;
-        // Every listing verifies every campaign afresh (the verdict depends on the campaign files, the links they
-        // follow and the signing key, so nothing is remembered between listings), on a few worker threads.
-        let todo: Vec<(usize, String)> = list
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, c["slug"].as_str().unwrap_or_default().to_string()))
-            .collect();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let verdicts: Mutex<Vec<(usize, &'static str)>> = Mutex::new(Vec::new());
-        std::thread::scope(|s| {
-            for _ in 0..todo.len().min(LIST_VERIFY_WORKERS) {
-                s.spawn(|| loop {
-                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((i, slug)) = todo.get(n) else { break };
-                    let v = self.integrity_of(slug, refresh);
-                    lock(&verdicts).push((*i, v));
-                });
+        // The listing never verifies: a campaign whose last verdict is still fresh shows it, every other one reads
+        // "checking" and the UI asks `campaign_integrity` for it (so one slow verify cannot hold the list up).
+        for c in list.iter_mut() {
+            let slug = c["slug"].as_str().unwrap_or_default().to_string();
+            if refresh {
+                // The follow-up `campaign_integrity` calls carry no refresh flag, so the forced refresh has to reach them
+                // through the cache: drop the kept verdict (a verify already running stays, and is waited for).
+                self.forget_fresh(&slug);
             }
-        });
-        for (i, v) in lock(&verdicts).iter() {
-            list[*i]["integrity"] = json!(*v);
+            c["integrity"] = json!(if refresh { "checking" } else { self.cached_integrity(&slug).unwrap_or("checking") });
         }
         Ok(json!({"campaigns": list}))
     }
@@ -484,7 +501,7 @@ impl App {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let (now, run_id) = self.fresh_run_id(ids::unix_now());
+        let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
@@ -505,7 +522,7 @@ impl App {
             return Err(invalid("campaign", "not a campaign slug"));
         }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
-        let (_, run_id) = self.fresh_run_id(ids::unix_now());
+        let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
@@ -708,6 +725,25 @@ impl App {
             },
         };
         Ok(json!({"task": task, "stale": snap.stale, "evidence": evidence}))
+    }
+
+    /// S4c: the Run view's phase timeline and task graph in one read-only call (AC-4.1.x, AC-4.2.x).
+    pub fn run_overview(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let (snap, progress) = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default())))?;
+        let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
+        // `tasks.json` holds every run's tasks: the graph and the Crew link are for the current run only.
+        let (run_id, scoped) = runview::scope(&progress, tasks);
+        let tl = runview::timeline(&progress, tasks);
+        Ok(json!({
+            "slug": slug,
+            "run_id": run_id,
+            "stale": snap.stale,
+            "timeline": runview::timeline_json(&tl),
+            "graph": runview::graph(&run_id, scoped.as_deref().unwrap_or(&[])),
+        }))
     }
 
     /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
@@ -1130,6 +1166,40 @@ impl App {
         Ok(json!({"hits": hits, "code": o.code}))
     }
 
+    /// A real verdict still inside `verdict_ttl`, or `None` (a verify running, none taken, expired, or "unknown").
+    /// Forget a kept verdict so the next check of `slug` verifies again. A verify in flight is left alone.
+    fn forget_fresh(&self, slug: &str) {
+        let floor = self.ticket();
+        let mut m = lock(&self.verdicts);
+        if matches!(m.by_slug.get(slug), Some(Verdict::Fresh(..))) {
+            m.by_slug.remove(slug);
+        }
+        m.floor.insert(slug.to_string(), floor);
+    }
+
+    fn cached_integrity(&self, slug: &str) -> Option<&'static str> {
+        let m = lock(&self.verdicts);
+        // A forced refresh is pending: whatever an older verify left behind is not shown (see `Verdicts::floor`).
+        if m.floor.contains_key(slug) {
+            return None;
+        }
+        match m.by_slug.get(slug) {
+            Some(&Verdict::Fresh(at, v)) if (self.clock)().saturating_sub(at) < self.verdict_ttl => Some(v),
+            _ => None,
+        }
+    }
+
+    /// #28: one campaign's badge, `{slug, integrity}` with integrity `ok`, `failed` or `unknown`. The UI asks once per
+    /// listed campaign. At most `VERIFY_SLOTS` verifies run at once across all calls, one per campaign (a second call
+    /// for the same campaign waits for the first); a call that cannot get a slot within the budget, a verify that
+    /// fails to run and one that overruns its timeout all read `unknown`, which is never kept as a verdict.
+    pub fn campaign_integrity(&self, slug: &str, refresh: bool) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        Ok(json!({"slug": slug, "integrity": self.integrity_of(slug, refresh)}))
+    }
+
     /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
     /// `verify_timeout`). A real verdict is reused for `verdict_ttl`; callers that arrive while a verify for the same
     /// campaign is running wait for it instead of starting another. `refresh` skips the reuse and, if a verify is
@@ -1147,6 +1217,8 @@ impl App {
         }
         let flight: Flight = loop {
             let mut m = lock(&self.verdicts);
+            // A pending forced list refresh makes this call a refresh too (the follow-up calls carry no flag).
+            let refresh = refresh || m.floor.contains_key(slug);
             let waiting = match m.by_slug.get(slug) {
                 Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return (v, None),
                 Some(Verdict::Flying(f)) => Some(f.clone()),
@@ -1158,7 +1230,7 @@ impl App {
                 while got.is_none() {
                     got = f.1.wait(got).unwrap_or_else(|e| e.into_inner());
                 }
-                if !refresh {
+                if !refresh && !lock(&self.verdicts).floor.contains_key(slug) {
                     return (got.unwrap_or("unknown"), None);
                 }
                 continue;
@@ -1167,8 +1239,11 @@ impl App {
             m.by_slug.insert(slug.to_string(), Verdict::Flying(f.clone()));
             break f;
         };
-        let ticket = self.ticket();
         let mut guard = FlightGuard { app: self, slug, flight, done: false };
+        // Only the call that owns the flight takes a slot; a budget overrun drops the guard, which ends the flight as
+        // "unknown" and keeps nothing.
+        let Some(_slot) = self.take_verify_slot() else { return ("unknown", None) };
+        let ticket = self.ticket();
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
         let res = bridge.run(&Request::CampaignVerify { slug: slug.into() });
@@ -1184,6 +1259,17 @@ impl App {
         (verdict, Some(res))
     }
 
+    fn take_verify_slot(&self) -> Option<VerifySlot<'_>> {
+        let deadline = std::time::Instant::now() + self.verify_queue_budget;
+        let mut free = lock(&self.verify_slots.0);
+        while *free == 0 {
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            free = self.verify_slots.1.wait_timeout(free, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        *free -= 1;
+        Some(VerifySlot(&self.verify_slots))
+    }
+
     /// A fresh ticket for an integrity check that is about to read the campaign (strictly increasing).
     fn ticket(&self) -> u64 {
         self.tickets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -1195,6 +1281,9 @@ impl App {
     /// worst it shows for one TTL after a repair, and an explicit verify or `refresh` clears it.
     fn settle(&self, slug: &str, verdict: &'static str, ticket: u64) {
         let mut m = lock(&self.verdicts);
+        if m.floor.get(slug).is_some_and(|f| ticket > *f) {
+            m.floor.remove(slug); // this check read the campaign after the refresh was asked for
+        }
         let last = m.last.get(slug).copied().unwrap_or(0);
         if ticket < last && verdict != "failed" {
             return;
@@ -1432,6 +1521,7 @@ mod wfresult;
 mod decide;
 mod lead;
 mod runindex;
+mod runview;
 
 #[cfg(test)]
 mod tests;

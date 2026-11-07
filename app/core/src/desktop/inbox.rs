@@ -167,9 +167,9 @@ impl App {
             for p in &w.plans {
                 let id = format!("plan:{}.{}", e.run_id, p.index);
                 let sha = plan_sha(&p.raw);
-                // Decided plans are not offered again (the same entry; a different entry at this index is new); a ledger
-                // that cannot be read fails closed (the plan is hidden).
-                if !matches!(lock(&self.control).decided(&id, &sha), Ok(None)) {
+                // A decided plan id is not offered again, even with a different entry at its index: the approval turn
+                // names only the id. A ledger that cannot be read fails closed (the plan is hidden).
+                if !matches!(lock(&self.control).decided(&id), Ok(None)) {
                     continue;
                 }
                 lock(&self.shown).insert(id.clone(), sha.clone());

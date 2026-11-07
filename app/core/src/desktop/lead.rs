@@ -752,8 +752,15 @@ fn strip_header(text: &str) -> &str {
 
 /// The last `cap` bytes of a file as text, from the first full line.
 fn read_tail(path: &Path, cap: u64) -> Option<String> {
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
+    use std::os::unix::fs::OpenOptionsExt;
+    // The transcript sits in worker-writable `projects/`: never follow a symlink there, never block on a FIFO (this runs
+    // inside `lead_status` and the ask's busy slot), and read only a plain file.
+    let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    let meta = f.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let len = meta.len();
     let start = len.saturating_sub(cap);
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
