@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   memory:
+    # A label change must not re-run the idle gate; only the postload job reacts to the "perf" label.
+    if: github.event.action != 'labeled'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -94,6 +96,7 @@ jobs:
   # does not run on every PR. It runs on push to main, nightly, on a PR that changes app/ui/** or app/bench/**, or when the
   # PR has the "perf" label. Reported only (warnings and the job summary); it never fails the check.
   postload:
+    if: github.event.action != 'labeled' || github.event.label.name == 'perf'
     runs-on: macos-latest
     timeout-minutes: 75
     steps:
