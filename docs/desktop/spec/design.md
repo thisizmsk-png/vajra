@@ -217,7 +217,7 @@ sequenceDiagram
   Note over H,AUD: Approve a plan (US-5.2)
   H->>UI: open plan, read full text, Approve
   UI->>UI: require run status terminal (done/need_input)
-  UI->>SUP: write one visible human turn "Execute approved plan <id>" to Run PTY
+  UI->>SUP: write one visible human turn "Execute approved plan <run>.<idx> (<action>)" to Run PTY
   RUN-->>H: Claude Code permission prompt for push/PR/deploy (human answers in terminal)
   UI->>CS: ledger "approved" (plan id, who, time)
 ```
@@ -655,7 +655,7 @@ Reconciliation (AC-3.4.3):
 
 - **Approve** (US-5.2). Enabled only when the full plan text is shown (AC-5.2.1) and the run's workflow has
   ended (status terminal), so the turn cannot be relayed into running workflow agents. The app writes the
-  visible turn `Execute approved plan <id>` followed by the plan id reference to the run session PTY. The
+  visible turn `Execute approved plan <run>.<idx> (<action>)` to the run session PTY: the plan id plus the approved entry's fixed-vocabulary action, so a planted or mismatched result is visible to the session. The
   plan body is already in that session's context from the result. Claude Code's permission prompt fires for
   each protected command. The app runs no push, PR or deploy. The ledger records `approve`. The audit line
   comes from the guard on the resulting Bash calls.

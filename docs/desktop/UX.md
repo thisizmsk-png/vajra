@@ -319,7 +319,7 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 **F7 Approve a push plan** (US-5.1, US-5.2)
 1. Notification or Cmd-5. Select the row; the detail shows the exact steps.
 2. A, then the confirm dialog repeats the steps; Enter on "Approve plan".
-3. The app opens the run session and submits a visible human turn "Execute approved plan <id>".
+3. The app opens the run session and submits a visible human turn "Execute approved plan <run>.<idx> (<action>)". The action is the approved plan's (push, pull_request, deploy, ...), so a session that holds a different plan at that index shows the mismatch.
    Claude Code's permission prompt still fires for each protected command; the terminal is focused.
 
 **F8 Reject with reason** (US-5.3)
