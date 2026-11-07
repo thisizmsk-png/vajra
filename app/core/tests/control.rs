@@ -972,3 +972,51 @@ fn an_ended_session_lists_no_workers() {
     assert_eq!(s.list_workers(Actor::Lead, None).unwrap()["workers"], json!([]));
     assert!(matches!(s.inspect_worker(Actor::Lead, AID, 5), Err(ControlError::WorkerNotFound)));
 }
+
+#[test]
+fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
+    // Run B is the active control session; a Lead started for the (finished) run A shares the same socket.
+    let h = Home::new();
+    let svc = Arc::new(Mutex::new(started(&h)));
+    let sock = short_sock();
+    let listener = socket::bind(&sock).unwrap();
+    let srv = svc.clone();
+    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    let finished_run = "20261104-0900";
+    let call = |bound: Option<&str>, tool: &str, args: Value| -> Value {
+        let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}));
+        let mut out = Vec::new();
+        let mut c = match bound {
+            Some(r) => SocketClient::bound(&sock, r),
+            None => SocketClient::new(&sock),
+        };
+        mcp::serve(Cursor::new(input), &mut out, &mut c).unwrap();
+        serde_json::from_str::<Value>(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap()["result"].clone()
+    };
+    let ledger_len = || Ledger::read_all(&h.data().join("control/ledger.jsonl")).unwrap().len();
+    let before = ledger_len();
+    // Bound to A: every tool is refused, and nothing is read, queued or recorded.
+    for (tool, args) in [
+        ("list_workers", json!({})),
+        ("inspect_worker", json!({"worker": AID})),
+        ("message_worker", json!({"worker": AID, "text": "hi"})),
+        ("redirect_worker", json!({"worker": AID, "text": "go"})),
+        ("stop_worker", json!({"worker": AID})),
+    ] {
+        let r = call(Some(finished_run), tool, args);
+        assert_eq!(r["isError"], true, "{tool}: {r}");
+        assert_eq!(r["structuredContent"]["error"], "run_not_current", "{tool}: {r}");
+        assert!(!r.to_string().contains("bhima"), "{tool} must not show run B's workers: {r}");
+    }
+    assert_eq!(ledger_len(), before, "refused calls leave no record");
+    assert!(fs::read_dir(h.data().join("control").join(SID).join("queue")).map(|d| d.count()).unwrap_or(0) == 0);
+    // Bound to B (the current run): served.
+    let r = call(Some(RUN), "list_workers", json!({}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["workers"].as_array().unwrap().len(), 2);
+    // After B ends, a Lead bound to B is refused too (an ask that outlives its run).
+    svc.lock().unwrap().end_session();
+    assert_eq!(call(Some(RUN), "list_workers", json!({}))["structuredContent"]["error"], "run_not_current");
+    // A malformed binding is refused, not ignored.
+    assert_eq!(call(Some("../x"), "list_workers", json!({}))["structuredContent"]["error"], "invalid_args");
+}

@@ -38,6 +38,15 @@ const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
   }
   return null;
 };
+/** The nearest ancestor of `id` that is a task group (`task:<tid>`), whose run-local id the worker's task is. */
+const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): string | null | undefined => {
+  if (n.id === id) return task;
+  for (const c of n.children) {
+    const f = taskGroupOf(c, id, n.id.startsWith("task:") ? n.id.slice("task:".length) : task);
+    if (f !== undefined) return f;
+  }
+  return undefined;
+};
 const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
   if (n.children.length) out.push(n.id);
   n.children.forEach((c) => withChildren(c, out));
@@ -113,7 +122,7 @@ export function Crew() {
           {picked && (
             <div className="v-crew__side">
             {picked.id.startsWith("agent:") ? (
-              target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} status={statusLabel(picked)} />
+              target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={root ? taskGroupOf(root, picked.id) ?? null : null} status={statusLabel(picked)} />
             ) : (
               <Section title={S.crew.details}>
                 <dl className="v-crew__facts" aria-label={S.crew.details}>

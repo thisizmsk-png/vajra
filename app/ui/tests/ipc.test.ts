@@ -16,6 +16,43 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
+    setTransport(f.transport);
+    await api.askLead("20261106-0911", "what is bhima doing?");
+    await api.cancelAsk("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    await api.leadStatus("20261106-0911");
+    expect(f.calls).toEqual([
+      { cmd: "ask_lead", args: { runId: "20261106-0911", text: "what is bhima doing?" } },
+      { cmd: "cancel_ask", args: { askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
+      { cmd: "lead_status", args: { runId: "20261106-0911" } },
+    ]);
+  });
+
+  it("maps approve and reject to their commands with camelCase arguments", async () => {
+    const f = fakeIpc({ approve_plan: { action_id: "a1", state: "delivered", via: "session" }, reject_plan: { action_id: "a2", state: "rejected" } });
+    setTransport(f.transport);
+    await api.approvePlan("plan:20261106-0911.0", "ab".repeat(32));
+    await api.rejectPlan("plan:20261106-0911.0", "too risky");
+    expect(f.calls).toEqual([
+      { cmd: "approve_plan", args: { id: "plan:20261106-0911.0", planSha256: "ab".repeat(32) } },
+      { cmd: "reject_plan", args: { id: "plan:20261106-0911.0", reason: "too risky" } },
+    ]);
+  });
+
+  it("maps inbox to the inbox command", async () => {
+    const f = fakeIpc({ inbox: { count: 0, items: [] } });
+    setTransport(f.transport);
+    expect(await api.inbox()).toEqual({ count: 0, items: [] });
+    expect(f.calls).toEqual([{ cmd: "inbox", args: undefined }]);
+  });
+
+  it("shows the sandbox message as one friendly line", () => {
+    const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+    expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);
+    expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
+  });
+
   it("rejects with the core's {error, detail} and errorText reads it", async () => {
     setTransport(fakeIpc({ preflight: () => { throw { error: "no_claude", detail: "not on PATH" }; } }).transport);
     const e = await api.preflight().catch((x) => x);

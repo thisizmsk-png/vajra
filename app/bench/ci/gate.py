@@ -1,56 +1,78 @@
 """Perf gate: read measure.py output and fail on a regression.
 
 usage: gate.py BASELINE_JSON IDLE_JSON [GROWTH_JSON]
-Fails closed on an unknown runner identity or a WebKit helper count other than 2 or 3. Otherwise fails if
-growth slope > 1 MiB/min, idle > baseline for that (identity, helper count) + max(5 MiB, 3%), or (2-helper
-flavour only) idle > the 200 MiB ceiling. In the 3-helper (GPU process) flavour the ceiling is reported as a warning,
-not a failure, until the owner rules on it (see README "Owner question").
+A launch is classified by the SET of WebKit helper types it ran (Networking, WebContent, GPU), not by their count.
+Fails closed on an unknown runner identity, an unknown helper type, or a flavour with no baseline entry. Otherwise fails
+if growth slope > 1 MiB/min, idle > the budget, or idle > baseline for that (identity, flavour) + max(5 MiB, 3%).
+Budget: 200 MiB; 212 MiB only on CI (GITHUB_ACTIONS set) when the flavour includes the GPU process (owner ruling, see
+README "GPU-flavour ceiling").
 """
-import json
-import os
-import sys
+import json, os, sys
 
-IDLE_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 5.0, 0.03, 1.0
-FLAVOURS = {2, 3}
+IDLE_BUDGET, GPU_CI_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 212.0, 5.0, 0.03, 1.0
+KNOWN_TYPES = {"Networking", "WebContent", "GPU"}
 
 
-def evaluate(baseline, idle, growth):
-    """(failures, warnings)."""
+def on_ci():
+    return bool(os.environ.get("GITHUB_ACTIONS"))
+
+
+def flavour_types(flavour):
+    return set(flavour.split("+")) if flavour else set()
+
+
+def budget_for(flavour, ci):
+    return GPU_CI_BUDGET if ci and "GPU" in flavour_types(flavour) else IDLE_BUDGET
+
+
+def evaluate(baseline, idle, growth, ci=None):
+    """(failures, warnings). ci=None reads GITHUB_ACTIONS."""
+    ci = on_ci() if ci is None else ci
     fails, warns = [], []
-    v = idle["median_of_medians_mib"]
-    n = idle.get("helpers")
+    v = idle.get("median_of_medians_mib")
+    flavour = idle.get("flavour")
     if growth is not None and growth["slope_mib_per_min"] > SLOPE_BUDGET:
         fails.append(f"growth {growth['slope_mib_per_min']} MiB/min exceeds {SLOPE_BUDGET}")
-    if v > IDLE_BUDGET:
-        fails.append(f"idle {v} MiB exceeds the {IDLE_BUDGET} MiB budget")
-    odd = [f for f in idle.get("launch_flavours", []) if f not in FLAVOURS]
-    if odd:
-        fails.append(f"launch(es) with WebKit helper count {odd}; only 2 or 3 are known flavours (fails closed)")
+    churn = idle.get("churn_launches") or 0
+    if churn:
+        warns.append(f"{churn} launch(es) saw respawn churn (duplicate helpers of a known type); churned samples and "
+                     f"launches are excluded from the median ({idle.get('excluded_launches', 0)} launch(es) excluded entirely)")
+    unknown = sorted(set(idle.get("unknown_types") or []))
+    if unknown:
+        fails.append(f"unknown WebKit helper type(s) {unknown}; only {sorted(KNOWN_TYPES)} are known (fails closed)")
         return fails, warns
-    if n not in FLAVOURS:
-        fails.append(f"WebKit helper count is {n}; only 2 or 3 are known flavours (fails closed)")
+    if v is None or not flavour:
+        fails.append("no usable launch: every launch was excluded or saw no WebKit helper (fails closed)")
         return fails, warns
+    odd = [f for f in idle.get("launch_flavours", []) if not flavour_types(f) or not flavour_types(f) <= KNOWN_TYPES]
+    if odd or not flavour_types(flavour) <= KNOWN_TYPES:
+        fails.append(f"launch flavour(s) {odd or [flavour]} contain a helper type outside {sorted(KNOWN_TYPES)} (fails closed)")
+        return fails, warns
+    budget = budget_for(flavour, ci)
+    if v > budget:
+        fails.append(f"idle {v} MiB exceeds the {budget} MiB budget"
+                     + (" (GPU flavour on CI)" if budget == GPU_CI_BUDGET else ""))
     key = idle.get("identity")
     entry = baseline.get("identities", {}).get(key) if key else None
     if entry is None:
         fails.append(f"no baseline for runner identity {key!r}: measure it with the procedure in app/bench/ci/README.md "
                      "and add it to baseline.json in a reviewed PR (the gate fails closed on an unknown runner)")
         return fails, warns
-    missing = [f for f in idle.get("launch_flavours", []) if str(f) not in entry.get("flavours", {})]
+    missing = [f for f in idle.get("launch_flavours", []) if f not in entry.get("flavours", {})]
     if missing:
-        fails.append(f"launch(es) with {missing} helpers have no baseline entry for runner identity {key!r} (fails closed)")
+        fails.append(f"launch flavour(s) {missing} have no baseline entry for runner identity {key!r} in baseline.json (fails closed)")
         return fails, warns
-    flavour = entry.get("flavours", {}).get(str(n))
-    if flavour is None:
-        fails.append(f"baseline.json has no {n}-helper entry for runner identity {key!r}: add it with the procedure in "
+    fl = entry.get("flavours", {}).get(flavour)
+    if fl is None:
+        fails.append(f"baseline.json has no {flavour!r} entry for runner identity {key!r}: add it with the procedure in "
                      "app/bench/ci/README.md (fails closed)")
         return fails, warns
-    warns.extend(post_load_warnings(idle.get("post_load"), flavour))
-    b = flavour["idle_mib"]
+    warns.extend(post_load_warnings(idle.get("post_load"), fl))
+    b = fl["idle_mib"]
     tol = max(REGRESSION, b * REGRESSION_PCT)
     if v > b + tol:
-        msg = f"idle {v} MiB is more than {tol:.1f} MiB over the baseline {b} for runner {key}, {n} helpers"
-        if flavour.get("provisional"):
+        msg = f"idle {v} MiB is more than {tol:.1f} MiB over the baseline {b} for runner {key}, flavour {flavour}"
+        if fl.get("provisional"):
             warns.append(f"{msg} (baseline is provisional, one run: warning only until refined)")
         else:
             fails.append(msg)
@@ -81,14 +103,14 @@ def summary(idle):
             f"| {post['pre_load_mib']} | {post['peak_mib']} | {post['plus2_mib']} | {post['plus10_mib']} | {post['retained_mib']} MiB |\n")
 
 
-def check(baseline, idle, growth):
-    return evaluate(baseline, idle, growth)[0]
+def check(baseline, idle, growth, ci=None):
+    return evaluate(baseline, idle, growth, ci)[0]
 
 
 def post_only(baseline, post_json):
     """(warnings, summary) for a postload.json on its own; looks up the flavour baseline when the identity is known."""
     entry = baseline.get("identities", {}).get(post_json.get("identity", ""), {})
-    flavour = entry.get("flavours", {}).get(str(post_json.get("helpers")), {})
+    flavour = entry.get("flavours", {}).get(post_json.get("flavour", ""), {})
     return post_load_warnings(post_json.get("post_load"), flavour), summary(post_json)
 
 
