@@ -18,14 +18,20 @@ pub struct Entry {
     pub session_id: String,
     pub run_id: String,
     pub cwd: PathBuf,
+    /// The per-run Lead chat session (ADR-13). Optional: lines written before it existed, and every launch or resume
+    /// line, carry none. A line that does carry one names the same run, so a newer launch line supersedes it.
+    pub lead_session_id: Option<String>,
 }
 
 /// Append one entry (file mode 0600, created on first use).
 pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "campaign": e.campaign, "session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(),
     });
+    if let Some(l) = &e.lead_session_id {
+        line["lead_session_id"] = serde_json::json!(l);
+    }
     let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
     f.write_all(format!("{line}\n").as_bytes())
 }
@@ -52,7 +58,9 @@ pub fn latest(path: &Path) -> HashMap<String, Entry> {
         if !ids::valid_session_id(&session_id) || !Path::new(&cwd).is_absolute() {
             continue;
         }
-        out.insert(campaign.clone(), Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd) });
+        // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
+        let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
+        out.insert(campaign.clone(), Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id });
     }
     out
 }
@@ -72,7 +80,7 @@ mod tests {
     }
 
     fn entry(c: &str, s: &str, r: &str) -> Entry {
-        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo") }
+        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo"), lead_session_id: None }
     }
 
     #[test]
@@ -103,6 +111,34 @@ mod tests {
         }
         let m = latest(&p);
         assert_eq!(m.keys().collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    #[test]
+    fn lead_session_id_round_trips_and_old_lines_still_read() {
+        let p = tmp("lead");
+        // A line written before the field existed.
+        append(&p, &entry("old", S1, "r0")).unwrap();
+        assert_eq!(latest(&p)["old"].lead_session_id, None);
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("lead_session_id"), "absent stays absent on disk");
+        // The Lead line carries it, and the newest line wins.
+        let mut e = entry("c", S1, "r1");
+        e.lead_session_id = Some(S2.into());
+        append(&p, &e).unwrap();
+        assert_eq!(latest(&p)["c"].lead_session_id.as_deref(), Some(S2));
+        assert_eq!(latest(&p)["c"].session_id, S1);
+        // A later launch line (no Lead id) supersedes it.
+        append(&p, &entry("c", S1, "r2")).unwrap();
+        assert_eq!(latest(&p)["c"].lead_session_id, None);
+    }
+
+    #[test]
+    fn a_malformed_lead_session_id_reads_as_absent() {
+        let p = tmp("lead-bad");
+        let mut f = OpenOptions::new().create(true).append(true).open(&p).unwrap();
+        f.write_all(b"{\"campaign\":\"x\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"run_id\":\"r\",\"cwd\":\"/r\",\"lead_session_id\":\"--last\"}\n").unwrap();
+        let m = latest(&p);
+        assert_eq!(m["x"].lead_session_id, None);
+        assert_eq!(m["x"].run_id, "r");
     }
 
     #[test]

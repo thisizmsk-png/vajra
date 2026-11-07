@@ -260,7 +260,7 @@ impl App {
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf() };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
