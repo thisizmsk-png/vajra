@@ -20,7 +20,7 @@ const q = new URLSearchParams(location.search);
 if (import.meta.env.DEV && q.has("fixture")) {
   if (q.get("theme") === "light" || q.get("theme") === "dark") document.documentElement.dataset.theme = q.get("theme")!;
   void import("./devFixture").then((m) => {
-    m.installFixture();
+    m.installFixture(q.get("fixture") ?? "");
     boot();
     if (q.has("palette")) setTimeout(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true })), 800);
   });

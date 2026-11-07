@@ -19,6 +19,7 @@ export const ICONS = {
   check: <path d="m3.5 8.3 2.8 2.7 6.2-6.5" />,
   redirect: <><path d="M3 12.5V9a3 3 0 0 1 3-3h7" /><path d="m10.5 3.5 2.5 2.5-2.5 2.5" /></>,
   stop: <rect x="4" y="4" width="8" height="8" rx="1.5" />,
+  close: <path d="m4.5 4.5 7 7m0-7-7 7" />,
   terminal: <><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.5" /><path d="m4.5 6.3 2 1.7-2 1.7M8 10h3.5" /></>,
   file: <><path d="M4 1.8h5l3 3v9.4H4Z" /><path d="M9 1.8v3h3" /></>,
   branch: <><circle cx="4.5" cy="3.8" r="1.5" /><circle cx="4.5" cy="12.2" r="1.5" /><circle cx="11.5" cy="5.5" r="1.5" /><path d="M4.5 5.3v5.4M11.5 7c0 2.5-3 2.6-6.4 4.1" /></>,

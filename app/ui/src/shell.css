@@ -92,3 +92,47 @@
 .v-crew__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--c-text-secondary); }
 .v-crew__side { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; }
 .v-crew__actions { display: flex; gap: var(--space-sm); }
+
+/* Shared screen frame: a 48 px head (title, then quiet meta), a scrolling body, the action bar at the foot. */
+.v-screen__head { display: flex; align-items: center; gap: 10px; height: 48px; flex: none; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); white-space: nowrap; }
+.v-screen__meta { color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* History: the campaigns and the search in one scrolling column; a report opens in a pane on the right. */
+.v-history__body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.v-history__body--open { grid-template-columns: minmax(0, 1fr) 400px; }
+/* Fixed columns; the goal takes what is left and truncates (the full goal is its tooltip). */
+.v-history .v-table { table-layout: fixed; }
+.v-history .v-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v-history .v-table th:nth-child(1) { width: 190px; }
+.v-history .v-table th:nth-child(3) { width: 80px; }
+.v-history .v-table th:nth-child(4) { width: 76px; }
+.v-history .v-table th:nth-child(5) { width: 136px; }
+.v-history .v-table th:nth-child(6) { width: 164px; }
+.v-history .v-table th:nth-child(7) { width: 128px; }
+.v-history__goal { display: block; overflow: hidden; text-overflow: ellipsis; }
+/* With the report open, Status and Updated give their room to the goal (the report names its status). */
+.v-history__body--open .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
+.v-history__main { padding: var(--space-lg) var(--space-lg) var(--space-xl); }
+.v-history__h { margin: 0 0 var(--space-sm); }
+.v-history__slug { font: 12px/16px var(--font-mono); color: var(--c-text-secondary); margin-left: calc(-1 * var(--space-sm)); }
+.v-history__muted { color: var(--c-text-secondary); }
+.v-history__acts { display: inline-flex; gap: 2px; margin-left: calc(-1 * var(--space-sm)); }
+.v-history .v-table td { height: 36px; }
+.v-history__search { margin-top: 40px; max-width: 960px; }
+.v-history__form { display: flex; align-items: flex-start; gap: var(--space-md); }
+.v-history__q { flex: 3; min-width: 0; }
+.v-history__repo { flex: 2; min-width: 0; }
+.v-history__q .v-field, .v-history__repo .v-field { width: 100%; }
+.v-history__go { margin-top: 20px; }
+.v-history__search .v-home__list { margin-top: var(--space-md); }
+.v-history__pane { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--c-border); background: var(--c-surface); }
+.v-history__panehead { display: flex; align-items: center; gap: 10px; height: 40px; flex: none; padding: 0 var(--space-sm) 0 var(--space-lg); border-bottom: 1px solid var(--c-border); }
+.v-history__paneslug { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 12px/16px var(--font-mono); color: var(--c-text-muted); }
+.v-history__panebody { flex: 1; min-height: 0; overflow: auto; padding: var(--space-md) var(--space-lg); display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-md); }
+.v-history__panebody > section { align-self: stretch; }
+.v-history__panebody .v-home__report { border: 0; padding: 0; max-height: none; color: var(--c-text); font-size: 12px; line-height: 18px; background: transparent; }
+
+/* Settings: one column, the checks with their fixes. */
+.v-settings__checks { margin-top: var(--space-md); display: flex; flex-direction: column; gap: var(--space-xs); }
+.v-settings__checks .v-home__checks { margin: 0; padding: 0; list-style: none; }
+.v-settings__checks .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }

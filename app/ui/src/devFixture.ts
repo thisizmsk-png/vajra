@@ -65,6 +65,20 @@ diff --git a/src/middleware/rateLimit.ts b/src/middleware/rateLimit.ts
 +};
 `;
 
+const REPORT = `# Delivery report: Fix login redirect loop on expired sessions
+
+Campaign deliver-20261105-1610, run 20261105-1610. 6 of 6 criteria pass.
+
+## What changed
+- src/auth/session.ts: an expired session now clears the cookie before the redirect.
+- src/routes/login.ts: the return URL is checked against the allow list once.
+- test/auth/redirect.test.ts: 4 new cases, including the loop from the bug report.
+
+## Evidence
+AC-1 pass  npm test -- redirect  exit 0
+AC-2 pass  npm run lint          exit 0
+`;
+
 const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   preflight: () => ({
     rows: [
@@ -77,11 +91,11 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   }),
   list_campaigns: () => ({
     campaigns: [
-      { slug: SLUG, goal: "Add per-key rate limiting", status: "active", passing: 0, total: 5 },
-      { slug: "deliver-20261105-1610", goal: "Fix login redirect loop on expired sessions", status: "done", passing: 6, total: 6 },
-      { slug: "deliver-20261104-0930", goal: "Move invoice export to a background job", status: "stopped", passing: 3, total: 5 },
-      { slug: "deliver-20261103-1120", goal: "Upgrade to Node 22 and fix the test runner", status: "done", passing: 4, total: 4 },
-      { slug: "deliver-20261102-1505", goal: "Add an audit log for admin actions", status: "failed", passing: 2, total: 7 },
+      { slug: SLUG, goal: "Add per-key rate limiting", status: "active", passing: 0, total: 5, updated: "2026-11-06 22:05", integrity: "unknown" },
+      { slug: "deliver-20261105-1610", goal: "Fix login redirect loop on expired sessions", status: "done", passing: 6, total: 6, updated: "2026-11-05 17:10", integrity: "ok" },
+      { slug: "deliver-20261104-0930", goal: "Move invoice export to a background job", status: "stopped", passing: 3, total: 5, updated: "2026-11-04 10:30", integrity: "ok" },
+      { slug: "deliver-20261103-1120", goal: "Upgrade to Node 22 and fix the test runner", status: "done", passing: 4, total: 4, updated: "2026-11-03 12:20", integrity: "ok" },
+      { slug: "deliver-20261102-1505", goal: "Add an audit log for admin actions", status: "failed", passing: 2, total: 7, updated: "2026-11-02 16:05", integrity: "failed" },
     ],
   }),
   resume_targets: () => ({ targets: { "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api" } } }),
@@ -93,14 +107,23 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     const after = Number(a?.afterSeq ?? 0);
     return { lines: stream.filter((l) => l.seq > after), gap: false, head_seq: stream.length, spill_start: null, spill_end: null };
   },
+  read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
+  verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
+  kb_search: () => ({ code: 0, hits: [
+    { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
+    { id: "k2", kind: "lesson", title: "Redis MULTI in tests needs the ioredis-mock pipeline shim" },
+  ] }),
   read_spill_before: () => ({ lines: [], at_start: true, gap: false }),
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 
-export function installFixture() {
+/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
+export function installFixture(mode = "") {
+  const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }) };
   const t: Transport = {
     async call(cmd, args) {
-      const r = replies[cmd];
+      if (mode === "down") throw { error: "core_unreachable", detail: "the Vajra core did not answer" };
+      const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },

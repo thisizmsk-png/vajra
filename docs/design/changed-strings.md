@@ -86,3 +86,15 @@ Command palette (PR #39).
 | Go to worker NAME | palette rows on Crew | the worker's status beside it |
 | Check again | palette row on Home | the same action as the action bar |
 | N commands / 1 command / No command matches "Q". | palette foot | "1 command" was "1 commands" |
+
+History, Settings and the report on Graphite (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| N campaigns / 1 campaign | History head | new, beside the title |
+| Report / Verify | History row buttons | the visible word; the button's name still reads "Report SLUG" and "Verify SLUG" |
+| Report, Close the report | History report pane | new; the pane opens beside the table instead of under it |
+| Signature verified. | report pane | now a success badge, same words |
+| Actions on History / Actions on Settings | action bar names | screen readers only |
+| The app has no preferences yet. These checks decide whether a run can start. | Settings, under the heading | new |
+| Check again | Settings action bar and palette | moved from the Checks section head |

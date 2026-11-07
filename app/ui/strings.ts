@@ -147,12 +147,20 @@ export const S = {
     errQuery: "Enter something to search for.",
     errRepo: "Enter the repository folder.",
     hitKind: "Kind",
+    count: (n: number) => (n === 1 ? "1 campaign" : `${n} campaigns`),
+    reportShort: "Report",
+    verifyShort: "Verify",
+    panel: "Report",
+    closeReport: "Close the report",
+    barLabel: "Actions on History",
   },
   settings: {
     title: "Settings",
     checks: "Checks",
     recheck: "Check again",
     failed: "Could not run the checks.",
+    lede: "The app has no preferences yet. These checks decide whether a run can start.",
+    barLabel: "Actions on Settings",
   },
 } as const;
 

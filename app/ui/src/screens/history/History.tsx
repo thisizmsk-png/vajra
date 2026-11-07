@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, Input, Section, Text } from "../../../components/ui/base";
-import { Table } from "../../../components/ui/desktop";
+import { Badge, Button, Icon, Input, Text } from "../../../components/ui/base";
+import { ActionBar, Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
@@ -32,21 +32,22 @@ const REPORT_MESSAGE: Record<string, string> = {
 
 const text = (a?: string, b?: string) => (a ?? "").localeCompare(b ?? "");
 const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, verify: (c: Campaign) => void): Column<Campaign>[] => [
-  { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => <Button size="sm" variant="ghost" onClick={() => open(c)}>{c.slug}</Button> },
-  { key: "goal", header: S.history.colGoal, sort: (a, b) => text(a.goal, b.goal), cell: (c) => c.error ? <Badge status="danger">{S.history.unreadable}: {c.error}</Badge> : c.goal ?? "" },
-  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => c.status ?? "" },
+  { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => <Button size="sm" variant="ghost" className="v-history__slug" onClick={() => open(c)}>{c.slug}</Button> },
+  { key: "goal", header: S.history.colGoal, sort: (a, b) => text(a.goal, b.goal), cell: (c) => c.error ? <Badge status="danger">{S.history.unreadable}: {c.error}</Badge> : <span className="v-history__goal" title={c.goal}>{c.goal ?? ""}</span> },
+  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => <span className="v-history__muted">{c.status ?? ""}</span> },
   { key: "passing", header: S.history.colPassing, numeric: true, sort: (a, b) => (a.passing ?? 0) - (b.passing ?? 0), cell: (c) => (c.total != null ? `${c.passing ?? 0}/${c.total}` : "") },
-  { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => c.updated ?? "" },
+  { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => <span className="v-history__muted v-num">{c.updated ?? ""}</span> },
   { key: "integrity", header: S.history.colIntegrity, sort: (a, b) => text(a.integrity, b.integrity), cell: (c) => (
     c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
       : c.integrity === "ok" ? <Badge status="success">{S.history.integrityOk}</Badge>
       : <Badge>{S.history.integrityUnknown}</Badge>
   ) },
   { key: "actions", header: S.history.colActions, cell: (c) => c.error ? null : (
-    <>
-      <Button size="sm" variant="ghost" onClick={() => report(c)}>{S.history.report(c.slug)}</Button>
-      <Button size="sm" variant="ghost" onClick={() => verify(c)}>{S.history.verify(c.slug)}</Button>
-    </>
+    // The visible word starts the accessible name, which adds the campaign (WCAG 2.5.3).
+    <span className="v-history__acts">
+      <Button size="sm" variant="ghost" aria-label={S.history.report(c.slug)} onClick={() => report(c)}>{S.history.reportShort}</Button>
+      <Button size="sm" variant="ghost" aria-label={S.history.verify(c.slug)} onClick={() => verify(c)}>{S.history.verifyShort}</Button>
+    </span>
   ) },
 ];
 
@@ -101,45 +102,62 @@ export function History() {
   };
 
   return (
-    <div className="v-home">
-      <Text as="h1" variant="headline-lg">{S.history.title}</Text>
-      <Section title={S.history.campaigns}>
-        {loadErr && <div role="alert"><Text variant="body-sm">{S.history.failed} {loadErr}</Text></div>}
-        {camps && camps.length === 0 && <Text variant="body-sm" muted>{S.history.empty}</Text>}
-        {camps && camps.length > 0 && (
-          <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
-        )}
+    <div className="v-screen v-history">
+      <header className="v-screen__head">
+        <Text as="h1" variant="label">{S.history.title}</Text>
+        {camps && <span className="v-screen__meta">{S.history.count(camps.length)}</span>}
+      </header>
+      <div className={view ? "v-history__body v-history__body--open" : "v-history__body"}>
+        <div className="v-screen__body v-history__main">
+          <section aria-labelledby="v-history-camps">
+            <h2 id="v-history-camps" className="v-text v-text--headline-md v-history__h">{S.history.campaigns}</h2>
+            {loadErr && <div role="alert"><Text variant="body-sm">{S.history.failed} {loadErr}</Text></div>}
+            {camps && camps.length === 0 && <Text variant="body-sm" muted>{S.history.empty}</Text>}
+            {camps && camps.length > 0 && (
+              <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
+            )}
+          </section>
+          <section aria-labelledby="v-history-search" className="v-history__search">
+            <h2 id="v-history-search" className="v-text v-text--headline-md v-history__h">{S.history.search}</h2>
+            <form className="v-history__form" onSubmit={(e) => { e.preventDefault(); void search(); }} noValidate>
+              <div className="v-history__q"><Input label={S.history.query} hint={S.history.queryHint} value={q} onChange={setQ} error={shown && !q.trim() ? S.history.errQuery : undefined} /></div>
+              <div className="v-history__repo"><Input label={S.history.repo} value={repo} onChange={setRepo} error={shown && !repo.trim() ? S.history.errRepo : undefined} /></div>
+              <Button variant="primary" className="v-history__go" onClick={() => void search()} busy={res.state === "busy"}>{res.state === "busy" ? S.history.searching : S.history.go}</Button>
+            </form>
+            {res.state === "ok" && res.hits.length === 0 && <Text variant="body-sm" muted>{S.history.none}</Text>}
+            {res.state === "ok" && res.hits.length > 0 && (
+              <ul className="v-home__list" aria-label={S.history.search}>
+                {res.hits.map((h) => (
+                  <li key={h.id}><span>{h.title}</span><Badge>{h.kind}</Badge></li>
+                ))}
+              </ul>
+            )}
+            {res.state === "unavailable" && <div role="alert"><Text variant="body-sm">{S.history.unavailable(res.code)}</Text></div>}
+            {res.state === "error" && <div role="alert"><Text variant="body-sm">{res.text}</Text></div>}
+          </section>
+        </div>
         {view && (
-          <div aria-live="polite">
-            {view.state === "busy" && <Text variant="body-sm" muted>{S.history.reportLoading}</Text>}
-            {view.state === "error" && <div role="alert"><Text variant="body-sm">{view.text}</Text></div>}
-            {view.state === "verified" && (view.ok
-              ? <Text variant="body-sm">{S.history.verifyOk}</Text>
-              : <div role="alert"><Text variant="body-sm">{view.restore ? S.history.verifyFailed : S.history.verifyFailedNoCheckpoint}</Text>{view.restore && <pre className="v-home__report">{view.restore}</pre>}</div>)}
-            {view.state === "done" && reportBadge(view.report.integrity)}
-            {view.state === "done" && (view.report.integrity === "ok" && view.report.text != null
-              ? <section aria-label={S.history.reportTitle(view.slug)}><pre className="v-home__report">{escapeControls(view.report.text)}</pre></section>
-              : <div role="status"><Text variant="body-sm">{REPORT_MESSAGE[view.report.integrity] ?? S.history.reportUnknown}</Text></div>)}
-          </div>
+          <aside className="v-history__pane" aria-label={S.history.panel}>
+            <div className="v-history__panehead">
+              <Text as="h2" variant="label">{S.history.panel}</Text>
+              <span className="v-history__paneslug">{view.slug}</span>
+              <Button size="sm" variant="ghost" aria-label={S.history.closeReport} onClick={() => setView(null)}><Icon name="close" /></Button>
+            </div>
+            <div className="v-history__panebody" aria-live="polite">
+              {view.state === "busy" && <Text variant="body-sm" muted>{S.history.reportLoading}</Text>}
+              {view.state === "error" && <div role="alert"><Text variant="body-sm">{view.text}</Text></div>}
+              {view.state === "verified" && (view.ok
+                ? <Badge status="success">{S.history.verifyOk}</Badge>
+                : <div role="alert"><Text variant="body-sm">{view.restore ? S.history.verifyFailed : S.history.verifyFailedNoCheckpoint}</Text>{view.restore && <pre className="v-home__report">{view.restore}</pre>}</div>)}
+              {view.state === "done" && reportBadge(view.report.integrity)}
+              {view.state === "done" && (view.report.integrity === "ok" && view.report.text != null
+                ? <section aria-label={S.history.reportTitle(view.slug)}><pre className="v-home__report">{escapeControls(view.report.text)}</pre></section>
+                : <div role="status"><Text variant="body-sm">{REPORT_MESSAGE[view.report.integrity] ?? S.history.reportUnknown}</Text></div>)}
+            </div>
+          </aside>
         )}
-      </Section>
-      <Section title={S.history.search}>
-        <form className="v-home__form" onSubmit={(e) => { e.preventDefault(); void search(); }} noValidate>
-          <Input label={S.history.query} hint={S.history.queryHint} value={q} onChange={setQ} error={shown && !q.trim() ? S.history.errQuery : undefined} />
-          <Input label={S.history.repo} value={repo} onChange={setRepo} error={shown && !repo.trim() ? S.history.errRepo : undefined} />
-          <Button variant="primary" onClick={() => void search()} busy={res.state === "busy"}>{res.state === "busy" ? S.history.searching : S.history.go}</Button>
-        </form>
-        {res.state === "ok" && res.hits.length === 0 && <Text variant="body-sm" muted>{S.history.none}</Text>}
-        {res.state === "ok" && res.hits.length > 0 && (
-          <ul className="v-home__list" aria-label={S.history.search}>
-            {res.hits.map((h) => (
-              <li key={h.id}><span>{h.title}</span><Badge>{h.kind}</Badge></li>
-            ))}
-          </ul>
-        )}
-        {res.state === "unavailable" && <div role="alert"><Text variant="body-sm">{S.history.unavailable(res.code)}</Text></div>}
-        {res.state === "error" && <div role="alert"><Text variant="body-sm">{res.text}</Text></div>}
-      </Section>
+      </div>
+      <ActionBar label={S.history.barLabel} context={view ? <span>{S.history.reportTitle(view.slug)}</span> : undefined} />
     </div>
   );
 }
