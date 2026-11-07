@@ -5,8 +5,10 @@ import type { Line, Tail } from "../../ipc";
 
 /** Rows kept for live output. */
 export const RING = 2000;
-/** Extra rows allowed once earlier output has been loaded. */
-export const EARLIER_CAP = 1000;
+/** Lines fetched by one "Load earlier"; the row cap grows by this much per click. */
+export const EARLIER_PAGE = 1000;
+/** The most rows ever held, however far back the user goes. */
+export const MAX_ROWS = RING + 19 * EARLIER_PAGE;
 
 /** `seq` is null for a marker row (output that was skipped), which is never a real line. */
 export type Row = { seq: number | null; text: string };

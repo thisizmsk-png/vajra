@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EARLIER_CAP, RING, appendTail, emptyRing, prependEarlier } from "../src/screens/crew/streamRing";
+import { EARLIER_PAGE, RING, appendTail, emptyRing, prependEarlier } from "../src/screens/crew/streamRing";
 
 const lines = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => ({ seq: from + i, text: `l${from + i}` }));
 const tail = (ls: { seq: number; text: string }[], gap = false) => ({ lines: ls, gap, head_seq: ls.at(-1)?.seq ?? 0, spill_start: null, spill_end: null });
@@ -35,22 +35,22 @@ describe("stream ring (S2b)", () => {
 
   it("puts earlier lines before the ring, drops any that overlap it, and marks a hole", () => {
     let r = appendTail(emptyRing, tail(lines(100, 102)), RING);
-    r = prependEarlier(r, lines(10, 14).concat(lines(100, 101)), RING + EARLIER_CAP);
+    r = prependEarlier(r, lines(10, 14).concat(lines(100, 101)), RING + EARLIER_PAGE);
     expect(texts(r)).toEqual(["l10", "l11", "l12", "l13", "l14", expect.stringMatching(/85 lines were skipped/), "l100", "l101", "l102"]);
   });
 
   it("earlier lines that are contiguous with the ring get no marker", () => {
     let r = appendTail(emptyRing, tail(lines(5, 6)), RING);
-    r = prependEarlier(r, lines(1, 4), RING + EARLIER_CAP);
+    r = prependEarlier(r, lines(1, 4), RING + EARLIER_PAGE);
     expect(texts(r)).toEqual(["l1", "l2", "l3", "l4", "l5", "l6"]);
   });
 
   it("keeps the cap with earlier lines loaded: the oldest rows go first", () => {
     let r = appendTail(emptyRing, tail(lines(5001, 5000 + RING)), RING);
-    r = prependEarlier(r, lines(1, EARLIER_CAP), RING + EARLIER_CAP);
-    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_CAP);
-    r = appendTail(r, tail(lines(5001 + RING, 5000 + RING + 600)), RING + EARLIER_CAP);
-    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_CAP);
+    r = prependEarlier(r, lines(1, EARLIER_PAGE), RING + EARLIER_PAGE);
+    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_PAGE);
+    r = appendTail(r, tail(lines(5001 + RING, 5000 + RING + 600)), RING + EARLIER_PAGE);
+    expect(r.rows.length).toBeLessThanOrEqual(RING + EARLIER_PAGE);
     expect(r.rows.at(-1)?.text).toBe(`l${5000 + RING + 600}`);
   });
 });
