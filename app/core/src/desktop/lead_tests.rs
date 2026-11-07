@@ -934,3 +934,27 @@ fn a_run_loaded_from_the_index_with_no_cwd_record_is_read_only() {
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "read_only");
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], false);
 }
+
+#[test]
+fn a_run_launched_but_never_asked_about_can_be_asked_after_a_restart() {
+    let t = Tmp::new();
+    // Life 1: the app launches the run (the real launch path) and the run finishes. Nobody asks the Lead anything.
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.launch(SID, RUN_ID, "deliver-x", &t.repo(), |_| Ok(vec!["sleep".to_string(), "5".to_string()]), false).unwrap();
+    let rec = t.data().join("control/lead").join(RUN_ID).join("cwd");
+    assert_eq!(std::fs::read_to_string(&rec).unwrap(), t.repo().to_string_lossy(), "the launch wrote the guarded record");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+    drop(app);
+    // Life 2: only the index (and the guarded record) remember it. The first ask works.
+    let app2 = App::open(&t.data(), &t.home()).unwrap();
+    app2.lead.set_bin(Some(t.bin("claude")));
+    app2.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    assert_eq!(app2.lead_status(RUN_ID).unwrap()["available"], true);
+    assert!(app2.ask_lead(RUN_ID, "how did it go?").is_ok());
+    wait_until("the ask", || idle(&app2) && t.ask_states().len() == 3);
+    // An index line with no guarded record (a legacy or forged entry) is still refused.
+    let other = ("20261106-0912", "2b8fad5b-d9cb-469f-a165-70867728950e");
+    let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
+    assert_eq!(code(&app2.ask_lead(other.0, "hi").unwrap_err()), "read_only");
+}

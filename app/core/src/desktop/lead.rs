@@ -325,6 +325,18 @@ impl App {
         self.data.join("control").join("lead").join(run_id)
     }
 
+    /// Record the run's directory under the guarded control dir. Called from the launch/resume path, where the app
+    /// itself has just chosen the directory, so a finished run that was never asked about can still be asked after a
+    /// restart. A failure only means the Lead is refused for that run later (fail closed); the launch is unaffected.
+    pub(super) fn record_run_cwd(&self, run_id: &str, cwd: &Path) -> std::io::Result<()> {
+        let control = self.data.join("control");
+        fsx::private_dir(&control)?;
+        fsx::private_dir(&control.join("lead"))?;
+        let dir = self.lead_sid_dir(run_id);
+        fsx::private_dir(&dir)?;
+        fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
+    }
+
     fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());

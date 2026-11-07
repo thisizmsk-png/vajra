@@ -344,6 +344,11 @@ impl App {
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
+        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
+        // refused for this run after a restart, but the launch itself goes on.
+        if self.record_run_cwd(run_id, cwd).is_err() {
+            self.note("lead_cwd_record_failed", &[]);
+        }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
