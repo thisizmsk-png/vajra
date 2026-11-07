@@ -140,6 +140,33 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(wins(f).filter((c) => c.args?.from !== null).length).toBe(n);
   });
 
+  it("reaches line 1 of a stream much longer than the window by scrolling up", async () => {
+    const f = await openBackend({ stream_window: core(5000) });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(0);
+    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 1"));
+    expect(wins(f).some((c) => c.args?.from === 1)).toBe(true);
+    expect(screen.getByRole("log").textContent).toContain("out 1");
+  });
+
+  it("keeps the same lines in view when first_seq advances under a reader who scrolled up", async () => {
+    let first = 1;
+    const f = await openBackend({ stream_window: (a?: Record<string, unknown>) => core(5000, first)(a) });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(2000); // top row is seq 2001
+    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 2001"));
+    const n = wins(f).length;
+    first = 501; // the core evicted 500 lines
+    await new Promise((r) => setTimeout(r, 600));
+    act(() => f.emit("changed", { streams: ["w-a1"], snapshot_needed: false }));
+    await waitFor(() => expect(wins(f).length).toBeGreaterThan(n));
+    // seq 2001 is now row 1500, not row 2000
+    await waitFor(() => expect((screen.getByRole("log") as HTMLElement).scrollTop).toBe(1500 * 18));
+    expect(screen.getByRole("log").textContent).toContain("out 2001");
+  });
+
   it("keeps one request in flight", async () => {
     let inflight = 0, peak = 0;
     await openBackend({

@@ -118,7 +118,7 @@ export function StreamTab({ stream }: { stream: string }) {
       {text.length === 0 && !err ? (
         <Text variant="body-sm" muted>{S.crew.noStream}</Text>
       ) : (
-        <TerminalPane key={pin} lines={text} total={total} windowStart={windowStart} onRange={onRange} label={S.crew.streamLabel} height={HEIGHT} />
+        <TerminalPane key={pin} lines={text} total={total} windowStart={windowStart} origin={win?.first_seq} onRange={onRange} label={S.crew.streamLabel} height={HEIGHT} />
       )}
     </Section>
   );

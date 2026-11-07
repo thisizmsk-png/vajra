@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { HTMLAttributes, ReactNode } from "react";
 
 /**
@@ -13,6 +13,7 @@ export function VirtualList({
   followEnd,
   renderRow,
   onRange,
+  origin,
   className,
   ...aria
 }: Omit<HTMLAttributes<HTMLDivElement>, "children" | "style" | "onScroll"> & {
@@ -25,6 +26,8 @@ export function VirtualList({
   renderRow: (index: number) => ReactNode;
   /** The rows in view (first inclusive, end exclusive, no overscan) and whether the view is at the bottom; called when any changes. */
   onRange?: (start: number, end: number, atBottom: boolean) => void;
+  /** An id for row 0 that rows are anchored to (a stream's first seq). When it moves, a reader who is not at the bottom keeps the same lines in view. */
+  origin?: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
@@ -41,6 +44,17 @@ export function VirtualList({
       setTop(pin); // the scroll event follows in a browser; setting it here keeps the rows in step without waiting for one
     }
   }, [followEnd, total, height]);
+
+  const prevOrigin = useRef(origin);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const was = prevOrigin.current;
+    prevOrigin.current = origin;
+    if (!el || origin === undefined || was === undefined || origin === was || atEnd.current) return;
+    const next = Math.max(0, el.scrollTop - (origin - was) * rowHeight);
+    el.scrollTop = next;
+    setTop(next);
+  }, [origin, rowHeight]);
 
   const [bottom, setBottom] = useState(true);
   const start = Math.min(Math.max(0, count - 1), Math.floor(top / rowHeight));

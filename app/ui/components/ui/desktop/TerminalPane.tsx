@@ -10,7 +10,7 @@ const NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "wh
  * no clipboard or title sequences, no cursor control, no controls) and only the visible rows are sanitized and rendered.
  * `takenOver` is a label change only: keyboard input is the host's job (Cmd chords only), never this component's.
  */
-export function TerminalPane({ lines, height = 360, takenOver, label, total, windowStart = 0, onRange }: {
+export function TerminalPane({ lines, height = 360, takenOver, label, total, windowStart = 0, origin, onRange }: {
   /** The rows held in memory. With `total` they are a window onto a longer stream: row `windowStart + k` is `lines[k]`. */
   lines: readonly string[];
   height?: number;
@@ -19,6 +19,8 @@ export function TerminalPane({ lines, height = 360, takenOver, label, total, win
   /** Rows the scrollbar stands for (default: `lines.length`). Rows outside the held window render blank at the same height. */
   total?: number;
   windowStart?: number;
+  /** Id of row 0 (the stream's first seq): when it advances the view stays on the same lines. */
+  origin?: number;
   /** Rows in view (start inclusive, end exclusive) and whether the view is at the bottom. */
   onRange?: (start: number, end: number, atBottom: boolean) => void;
 }) {
@@ -32,6 +34,7 @@ export function TerminalPane({ lines, height = 360, takenOver, label, total, win
       tabIndex={0}
       count={Math.max(total ?? 0, windowStart + lines.length)}
       onRange={onRange}
+      origin={origin}
       rowHeight={ROW}
       height={height}
       followEnd
