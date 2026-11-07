@@ -272,14 +272,23 @@ impl App {
 
     /// The first minute at or after `now` that no known run and no campaign on disk uses. The workflow takes a
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
-    fn fresh_run_id(&self, now: u64) -> (u64, String) {
+    /// If the next 120 minutes are all taken (a forged index can fill them) nothing is issued: there is no fallback to
+    /// a used id, because reusing one would hand a new run another run's guarded record.
+    fn fresh_run_id(&self, now: u64) -> Result<(u64, String), Value> {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
         // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
         let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
-        let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
+        // The guarded run record (`control/lead/<id>/`) counts too: the index is worker-writable and can be emptied, and
+        // reusing an id would keep that record's Lead session and approval-only marker for a different run.
+        let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
+        let pick = (0..120u64)
+            .map(|k| now + 60 * k)
+            .map(|t| (t, ids::run_id_at(t)))
+            .find(|(_, id)| !used(id))
+            .ok_or_else(|| fail("run_id_exhausted", "no unused run id in the next 120 minutes; check runs.jsonl"))?;
         lock(&self.issued).insert(pick.1.clone());
-        pick
+        Ok(pick)
     }
 
     // ---------------------------------------------------------------- start
@@ -484,7 +493,7 @@ impl App {
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let (now, run_id) = self.fresh_run_id(ids::unix_now());
+        let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
@@ -505,7 +514,7 @@ impl App {
             return Err(invalid("campaign", "not a campaign slug"));
         }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
-        let (_, run_id) = self.fresh_run_id(ids::unix_now());
+        let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
         let claude = adapter_for(Engine::Claude);
         let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
