@@ -27,7 +27,7 @@ use crate::ids;
 use crate::lock;
 use crate::sessions::argv::{LeadArgv, build_lead_argv};
 use crate::sessions::scrubbed_env;
-use crate::vajra::bridge::{Request, run_process};
+use crate::vajra::bridge::Request;
 use crate::vajra::preflight::find_on_path;
 
 /// `read_only` detail for a run this app did not launch.
@@ -318,6 +318,8 @@ impl App {
         }
         let env = lock(&self.lead.env).clone();
         self.guard_preconditions(&env)?;
+        // Same environment for the version probe, the self-test and the ask, with the CLI's own directory on PATH.
+        let env = cli_env(env, bin);
         // Per-run files: the settings hold the run repo's deny rules, and asks for two different runs can overlap
         // (the busy lock is per run). A shared file would let run B rewrite it before run A's CLI reads it.
         fsx::private_dir(&self.data.join("lead")).map_err(io)?;
@@ -474,7 +476,7 @@ impl App {
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
     fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
-        let version = self.claude_version(bin)?;
+        let version = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
             return Ok(());
@@ -520,16 +522,6 @@ impl App {
         Ok(())
     }
 
-    /// `claude --version`, asked of the executable on every ask. Never cached by path: a CLI updated in place must
-    /// get its own self-test, because deny-rule semantics depend on the version.
-    fn claude_version(&self, bin: &Path) -> Result<String, LeadError> {
-        let out = run_process(bin, &["--version".to_string()], None, Duration::from_secs(10)).map_err(io)?;
-        if out.code != Some(0) {
-            return Err(LeadError::GuardMissing("claude --version failed".into()));
-        }
-        Ok(out.stdout.trim().to_string())
-    }
-
     // ---------------------------------------------------------------- history after a restart
 
     /// If the stream is empty but the Lead has a transcript, put its history back on the stream. The transcript is
@@ -562,6 +554,66 @@ impl App {
             }
         }
     }
+}
+
+/// The Lead's environment plus the directory the claude executable lives in, appended to `PATH`. `resolve_claude` also
+/// finds npm installs (`~/.nvm/versions/node/*/bin`), whose `#!/usr/bin/env node` shebang needs `node` from that same
+/// directory, which a GUI app's own PATH may not have. Appended, so it never shadows `bash` or `jq`.
+fn cli_env(mut env: Vec<(&'static str, OsString)>, bin: &Path) -> Vec<(&'static str, OsString)> {
+    let Some(dir) = bin.parent() else { return env };
+    match env.iter_mut().find(|(k, _)| *k == "PATH") {
+        Some((_, v)) => {
+            let mut dirs: Vec<PathBuf> = std::env::split_paths(v).collect();
+            if !dirs.iter().any(|d| d == dir) {
+                dirs.push(dir.to_path_buf());
+            }
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                *v = joined;
+            }
+        }
+        None => env.push(("PATH", dir.as_os_str().to_owned())),
+    }
+    env
+}
+
+/// `claude --version` under the Lead's own environment, asked of the executable on every ask. Never cached by path: a
+/// CLI updated in place must get its own self-test, because deny-rule semantics depend on the version.
+fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String, LeadError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let bad = || LeadError::GuardMissing("claude --version failed".into());
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (*k, v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(io)?;
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                // SAFETY: the child is its own process-group leader and has not been reaped.
+                unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+                let _ = child.wait();
+                return Err(bad());
+            }
+        }
+    };
+    if !status.success() {
+        return Err(bad());
+    }
+    let mut out = String::new();
+    if let Some(so) = child.stdout.take() {
+        let _ = so.take(4096).read_to_string(&mut out);
+    }
+    Ok(out.trim().to_string())
 }
 
 /// The settings file on disk must be exactly what the core generated (and private). Anything else is a tamper.

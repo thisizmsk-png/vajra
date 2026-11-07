@@ -662,3 +662,27 @@ fn a_delayed_lead_init_does_not_roll_the_campaign_back_to_an_older_run() {
     let latest = &runindex::latest(&path)["deliver-x"];
     assert_eq!((latest.run_id.as_str(), latest.lead_session_id.clone()), ("20261106-1000", None), "B stays the campaign's newest run");
 }
+
+#[test]
+fn an_nvm_style_claude_runs_with_node_from_its_own_directory() {
+    // `claude` is `#!/usr/bin/env fakenode`, and fakenode exists only beside it: not on the Lead's PATH, not on a system path.
+    let t = Tmp::new();
+    let nvm = t.0.join("nvm/bin");
+    std::fs::create_dir_all(&nvm).unwrap();
+    let script = FAKE_CLAUDE
+        .replace("#!/bin/sh\n", "")
+        .replace(r#"D="$(cd "$(dirname "$0")" && pwd)""#, &format!("D={}", t.0.join("bin").display()));
+    let claude = nvm.join("claude");
+    std::fs::write(&claude, format!("#!/usr/bin/env fakenode\n{script}")).unwrap();
+    let node = nvm.join("fakenode");
+    std::fs::write(&node, "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    for p in [&claude, &node] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let app = t.app();
+    app.lead.set_bin(Some(claude));
+    let r = app.ask_lead(RUN_ID, "hello").unwrap();
+    assert_eq!(r["state"], "queued");
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+}
