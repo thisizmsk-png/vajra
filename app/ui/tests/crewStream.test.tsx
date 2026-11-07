@@ -54,8 +54,8 @@ describe("Stream tab (S2b, US-2.2)", () => {
     // Several pages from ONE load (the 1 s poll has not fired): the cursor walks 0 -> ... -> the newest line.
     await waitFor(() => expect(tails(f).length).toBeGreaterThanOrEqual(5));
     const after = tails(f).map((c) => c.args?.afterSeq as number);
-    expect(after.slice(0, 5)).toEqual([0, 64, 128, 192, 256]);
-    expect(Math.max(...after)).toBeGreaterThanOrEqual(256);
+    expect(after.slice(0, 5)).toEqual([0, 65, 130, 195, 260]);
+    expect(Math.max(...after)).toBeGreaterThanOrEqual(260);
   });
 
   it("shows no stream for the Lead or the run (they have no worker stream)", async () => {
