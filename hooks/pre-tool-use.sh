@@ -63,11 +63,11 @@ TOOL=""
 command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
 
 PAYLOAD="$(cat)"
-CWD_IN="" CMD="" P1="" P2="" P3="" AID=""
+CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
 PARSED="$(jq -r '
   def s: if type == "string" then . elif . == null then "" else tostring end;
   (.tool_input | if type == "object" then . else {} end) as $i
-  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) AID=\(.agent_id | s)"
+  | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) PAT=\($i.pattern | s) AID=\(.agent_id | s)"
 ' <<<"$PAYLOAD" 2>/dev/null)" || block "unparseable hook payload (fail-closed)"
 eval "$PARSED"
 [ -n "$TOOL" ] || block "payload has no tool_name (fail-closed)"
@@ -222,6 +222,105 @@ inside() { # path dir -> 0 if path is dir or below it (case-insensitive)
 # it (~/.claude, HOME, /Users, /): a recursive read or copy there reaches the key.
 key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 
+same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
+  inside "$1" "$2" && inside "$2" "$1"
+}
+# A Glob pattern can reach the state directory's file names (the HMAC key, the audit log) however it is written:
+# "<state>/*", "~/.claude/vaj?a/.h*", "~/.claude/{vajra,x}/*", "~/**/.h*", "../*" from campaigns/. The pattern is read
+# one path component at a time. Its leading components without a glob character are resolved (symlinks, "..") against
+# the search root; if that directory is the state directory or an ancestor of it, the glob components after it are
+# matched against the state directory's own components, then the next one against the names that must stay hidden.
+# A brace alternation is assumed to match (not expanded). "**" may stand for any number of directories.
+GLOB_R=() GLOB_S=() GLOB_K=0 GLOB_N=0 PNAMES=()
+glob_pat_has() { case "$1" in *[*?[{]*) return 0 ;; *) return 1 ;; esac; }
+glob_comp_match() { # pattern-component state-component -> 0 if the component can match the name
+  case "$1" in *{*) return 0 ;; esac
+  # shellcheck disable=SC2053
+  [[ "$2" == $1 ]]
+}
+glob_leaf() { # pattern-component (glob or literal) -> 0 if it can match a protected name directly inside the state dir
+  local nm
+  # A literal here follows a glob component, so it is reached through a glob: an exact match on a protected name counts.
+  case "$1" in *{*) return 0 ;; esac
+  for nm in ${PNAMES[@]+"${PNAMES[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$nm" == $1 ]] && return 0
+  done
+  return 1
+}
+glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can list the state dir's protected names
+  local ri="$1" si="$2" c
+  if [ "$si" -ge "$GLOB_K" ]; then
+    [ "$ri" -lt "$GLOB_N" ] || return 1
+    c="${GLOB_R[$ri]}"
+    case "$c" in
+      *\*\**) [ $((ri + 1)) -lt "$GLOB_N" ] || return 0; glob_chain $((ri + 1)) "$si"; return $? ;;
+    esac
+    glob_leaf "$c"; return $?
+  fi
+  [ "$ri" -lt "$GLOB_N" ] || return 1
+  c="${GLOB_R[$ri]}"
+  case "$c" in
+    *\*\**) glob_chain $((ri + 1)) "$si" && return 0; glob_chain "$ri" $((si + 1)); return $? ;;
+  esac
+  glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
+  glob_chain $((ri + 1)) $((si + 1))
+}
+glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
+  # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
+  # Each other component descends one level, "**" none (it may match zero directories).
+  local IFS=/ a b common=0 depth min c
+  set -f; a=($1); b=($VS_C); set +f
+  while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
+  depth=${#a[@]}; min=$depth
+  for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
+    case "$c" in ..) depth=$((depth - 1)) ;; *\*\**) ;; *) depth=$((depth + 1)) ;; esac
+    [ "$depth" -lt "$min" ] && min=$depth
+  done
+  [ "$min" -le "$common" ]
+}
+glob_pattern_check() { # canonical search root
+  local root="$1" pat="$PAT" lit="" c r rel i
+  [ -n "$pat" ] || return 0
+  shopt -s nocasematch
+  case "$pat" in *.hmac-key*) shopt -u nocasematch; block "Glob pattern names the Vajra HMAC key" ;; esac
+  case "$pat" in "~") pat="$HOME" ;; "~/"*) pat="$HOME/${pat#??}" ;; esac
+  # Split into components: the leading literal ones, then the rest from the first with a glob character.
+  GLOB_R=() GLOB_N=0
+  local IFS=/ rest_started=0 dotdot=0
+  set -f
+  for c in $pat; do
+    [ -n "$c" ] || continue
+    if [ "$rest_started" = 0 ] && ! glob_pat_has "$c"; then lit="$lit/$c"; continue; fi
+    rest_started=1
+    # After the first glob character the filesystem walks the pattern: "." is a no-op, ".." steps back out of whatever
+    # the glob matched, which cannot be followed statically.
+    case "$c" in .) continue ;; ..) dotdot=1 ;; esac
+    GLOB_R[$GLOB_N]="$c"; GLOB_N=$((GLOB_N + 1))
+  done
+  set +f
+  unset IFS
+  case "$pat" in /*) ;; *) lit="${lit#/}" ;; esac
+  if [ "$GLOB_N" -eq 0 ]; then shopt -u nocasematch; return 0; fi # no glob character: a plain path, judged as a path
+  [ -n "$lit" ] || lit="."
+  canon "$lit" "$root"
+  if [ "$dotdot" = 1 ] && glob_dotdot_reaches "$CANON"; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character far enough to reach a directory that holds the Vajra state directory"; fi
+  if ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi # the literal part is not at or above the state dir
+  rel="${VS_C:${#CANON}}"; rel="${rel#/}"
+  GLOB_S=() GLOB_K=0
+  if [ -n "$rel" ]; then
+    set -f; IFS=/
+    for r in $rel; do [ -n "$r" ] && { GLOB_S[$GLOB_K]="$r"; GLOB_K=$((GLOB_K + 1)); }; done
+    set +f; unset IFS
+  fi
+  PNAMES=()
+  for r in "${ROOTS[@]}"; do [ "${r%/*}" = "$VS_C" ] && PNAMES[${#PNAMES[@]}]="${r##*/}"; done
+  i=0
+  if glob_chain 0 0; then shopt -u nocasematch; block "Glob pattern would list the Vajra state directory ($VS_C), including the HMAC key and audit log file names"; fi
+  shopt -u nocasematch
+  return 0
+}
+
 TAMPER=0
 [ -f "$VS/.integrity-violation" ] && TAMPER=1
 
@@ -255,6 +354,11 @@ case "$TOOL" in
       # Grep reads file contents recursively: an ancestor of the key (~/.claude,
       # HOME, /) or of a worker-unreadable root would include it.
       [ "$TOOL" = Grep ] && reach_check "$CANON" "Grep over $CANON"
+      # Glob lists names, not contents, but the state directory's names include the signing key's file and the audit log.
+      if [ "$TOOL" = Glob ]; then
+        same_dir "$CANON" "$VS_C" && block "Glob of the Vajra state directory would list the HMAC key and audit log file names; give a path below it (for example $VS_C/campaigns)"
+        glob_pattern_check "$CANON"
+      fi
     done
     allow
     ;;

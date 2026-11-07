@@ -979,6 +979,37 @@ fn a_selftest_denied_on_a_different_file_does_not_pass_and_is_not_cached() {
     wait_until("the ask", || idle(&app));
 }
 
+// ---- #33 item 4: an older run of a campaign that was resumed later is still askable -----------------------------
+
+#[test]
+fn an_older_run_of_a_resumed_campaign_is_still_askable_after_a_restart() {
+    let t = Tmp::new();
+    // Life 1: run A is asked about, so the app records its directory under the guarded control dir.
+    let app = t.app();
+    app.ask_lead(RUN_ID, "first").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    drop(app);
+    // A real launch also appends its line to the index (the test app keeps the run in memory only).
+    let a = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
+    // The human resumes the same campaign into a later run B (a new minute, a new session): `latest` now names B.
+    let sid_b = "2b8fad5b-d9cb-469f-a165-70867728950e";
+    let b = runindex::Entry { campaign: "deliver-x".into(), session_id: sid_b.into(), run_id: "20261106-1000".into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &b).unwrap();
+    assert_eq!(runindex::latest(&t.data().join("runs.jsonl"))["deliver-x"].run_id, "20261106-1000");
+    // Life 2: no run in memory. A is not the campaign's newest run, but it is a run this app launched.
+    let app2 = App::open(&t.data(), &t.home()).unwrap();
+    app2.lead.set_bin(Some(t.bin("claude")));
+    app2.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    let s = app2.lead_status(RUN_ID).unwrap();
+    assert_eq!(s["available"], true, "run A is not read-only just because B is newer: {s}");
+    assert!(app2.ask_lead(RUN_ID, "and now?").is_ok());
+    wait_until("the ask", || idle(&app2));
+    // B has no guarded record (it was never asked about), so it fails closed, as before.
+    let sb = app2.lead_status("20261106-1000").unwrap();
+    assert_eq!(sb["available"], false, "{sb}");
+}
+
 // ---- red team (S1): the Lead transcript is read like every other worker-writable file ---------------------------
 
 /// A restarted app whose remembered Lead transcript path is `make(path)`.
