@@ -118,7 +118,7 @@ impl Bridge {
                     path.to_string_lossy().into_owned(),
                 ];
                 if let Some(h) = head {
-                    if !(7..=40).contains(&h.len()) || !h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                    if !crate::sessions::argv::is_sha(h) {
                         return Err(BridgeError::Invalid(format!("bad head: {h:?}")));
                     }
                     argv.extend(["--head".into(), h.clone()]);

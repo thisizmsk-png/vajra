@@ -490,7 +490,7 @@ impl App {
         let args = vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), format!("{base}^{{commit}}")];
         let out = self.bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).map_err(|e| fail("io_error", e))?;
         let sha = out.stdout.trim();
-        if out.code == Some(0) && sha.len() == 40 && argv::is_sha(sha) {
+        if out.code == Some(0) && argv::is_full_sha(sha) {
             Ok(sha.to_string())
         } else {
             Err(invalid("base", "is not a branch or commit in this repository"))
