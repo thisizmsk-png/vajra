@@ -1449,6 +1449,10 @@ impl App {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
+        // A run cut at the cap says nothing reliable about its exit code: a cut exit 3 must not record a tamper.
+        if o.truncated {
+            return unknown(output_failure(&o, home));
+        }
         match o.code {
             Some(0) => {}
             Some(3) => return bad(self),

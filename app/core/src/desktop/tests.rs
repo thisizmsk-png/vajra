@@ -2497,6 +2497,13 @@ fn report_unknown_says_oversize_when_the_scripts_output_hits_the_cap() {
 }
 
 #[test]
+fn a_cut_verify_digest_that_exits_3_is_unknown_not_a_tamper() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x'\nexit 3")) else { return };
+    assert_eq!(r["integrity"], "unknown", "a cut exit 3 is not a tamper: {r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+}
+
+#[test]
 fn report_unknown_says_oversize_when_only_stderr_hits_the_cap() {
     let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 7")) else { return };
     assert_eq!(r["reason"]["code"], "oversize", "{r}");
