@@ -1297,7 +1297,12 @@ fn evidence_list_has_a_total_budget_and_unchecked_tasks_read_checking() {
     assert!(start.elapsed() < Duration::from_millis(2500), "{:?}", start.elapsed());
     assert_eq!(row(&r, "s39", "ac")["status"], "checking", "{r}");
     assert!(r["pending"].as_u64().unwrap() > 0, "{r}");
-    assert_eq!(row(&r, "s0", "ac")["status"], "unverified", "a check that timed out is unverified, not checking");
+    assert_eq!(row(&r, "s0", "ac")["status"], "unverified", "a check that ran out its own full timeout is unverified, not checking");
+    // The second batch started with 300 ms of budget left (< the 400 ms timeout): the budget cut it, so it is checking and counted.
+    assert_eq!(row(&r, "s4", "ac")["status"], "checking", "{r}");
+    assert_eq!(r["pending"].as_u64().unwrap(), 36, "{r}");
+    // A timed-out check is never cached: the next call (budget again) runs it, it does not read a remembered "unverified".
+    assert!(app.evidence_cache.lock().unwrap().is_empty(), "timeouts must not be cached");
 }
 
 #[test]

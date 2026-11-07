@@ -746,6 +746,8 @@ impl App {
             }
             let mut bridge = self.bridge.clone();
             bridge.timeout = self.evidence_timeout.min(left);
+            // A check cut short by the remaining budget (not by its own full timeout) did not get a fair run: `checking`, not `unverified`.
+            let cut_by_budget = left < self.evidence_timeout;
             let got: Vec<(usize, Option<bool>)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = batch
                     .iter()
@@ -753,7 +755,7 @@ impl App {
                         let b = &bridge;
                         sc.spawn(move || {
                             // `None`: the check could not finish (timed out or could not start): unverified, and not cached.
-                            let done = b.run(req).ok().map(|o| {
+                            let done = b.run(req).ok().filter(|o| !o.timed_out).map(|o| {
                                 o.code == Some(0)
                                     && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true))
                             });
@@ -768,6 +770,9 @@ impl App {
                 cache.clear();
             }
             for (i, done) in got {
+                if done.is_none() && cut_by_budget {
+                    continue;
+                }
                 verdict.insert(i, done == Some(true));
                 if let (Some(v), Some(k)) = (done, jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone())) {
                     let until = k.2.is_none().then(|| std::time::Instant::now() + EVIDENCE_LIVE_TTL);
