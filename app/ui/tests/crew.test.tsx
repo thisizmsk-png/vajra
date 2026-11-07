@@ -197,17 +197,33 @@ describe("Crew tree (S2a, US-2.1)", () => {
 });
 
 describe("Crew focus from the Run view's task graph (AC-4.2.3)", () => {
-  it("selects the focused task and opens its ancestors", async () => {
-    window.location.hash = "#/crew?slug=camp&id=r1&focus=task%3At2";
-    const t = node("lead", "lead", "Lead", "in_progress", [
+  const withWorkers = () =>
+    node("lead", "lead", "Lead", "in_progress", [
       node("run", "run", "Run r1", "in_progress", [
-        node("task:t1", "task", "Backend", "in_progress"),
-        node("task:t2", "task", "Frontend", "pending"),
+        node("task:t1", "task", "Backend · t1", "in_progress", [
+          node("agent:a1", "round", "round 1", "done", [], { engine_id: "bhima" }),
+          node("agent:a2", "round", "round 2", "in_progress", [], { engine_id: "bhima" }),
+        ]),
+        node("task:t2", "task", "Frontend · t2", "pending"),
       ]),
     ]);
-    open({ crew: t });
+
+  it("opens the task's latest worker, with its stream and controls, not the task group", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1&focus=task%3At1";
+    open({ crew: withWorkers(), task: { task: {}, stale: false, evidence: null }, stream_window: { lines: [], head_seq: 0, first_seq: 1, at_start: true, at_end: true, gap: false } });
     render(<Crew />);
-    const row = (await screen.findByText("Frontend")).closest("[role=treeitem]") as HTMLElement;
+    const row = (await screen.findByText("round 2")).closest("[role=treeitem]") as HTMLElement;
     await waitFor(() => expect(row.getAttribute("aria-selected")).toBe("true"));
+    expect(await screen.findByRole("tablist", { name: S.crew.tabsLabel })).toBeTruthy();
+    expect((screen.getByText("round 1").closest("[role=treeitem]") as HTMLElement).getAttribute("aria-selected")).not.toBe("true");
+  });
+
+  it("selects the task group itself when it has no worker yet", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1&focus=task%3At2";
+    open({ crew: withWorkers() });
+    render(<Crew />);
+    const row = (await screen.findByText("Frontend · t2")).closest("[role=treeitem]") as HTMLElement;
+    await waitFor(() => expect(row.getAttribute("aria-selected")).toBe("true"));
+    expect(screen.queryByRole("tablist", { name: S.crew.tabsLabel })).toBeNull();
   });
 });
