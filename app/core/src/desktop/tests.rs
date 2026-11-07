@@ -2290,3 +2290,21 @@ fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
     let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
     assert_eq!(rec.trim(), "deliver-x");
 }
+
+/// #13 item 3: `evidence_request` decides between an archived bundle and a repo path with a lexical `starts_with`, so a
+/// path that climbs out of the archive with `..` must never be treated as archived (nor handed to the checker at all).
+#[test]
+fn evidence_request_refuses_a_path_that_climbs_out_of_the_archive() {
+    use crate::vajra::bridge::Request;
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let archive = app.allow().unwrap().campaigns_dir().join(&slug).join("evidence");
+    let task = |p: PathBuf| json!({"evidence": {"path": p, "head": "a".repeat(40)}});
+    let inside = app.evidence_request(&slug, &task(archive.join("green.json")));
+    assert!(matches!(inside, Some(Request::CheckEvidence { archived: Some(_), repo: None, .. })), "{inside:?}");
+    // Lexically under the archive, physically somewhere else.
+    for climbing in [archive.join("..").join("..").join("other").join("evidence").join("green.json"), archive.join("..").join("tasks.json")] {
+        assert!(app.evidence_request(&slug, &task(climbing.clone())).is_none(), "{}", climbing.display());
+    }
+}
