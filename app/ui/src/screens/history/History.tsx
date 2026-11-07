@@ -4,6 +4,7 @@ import { ActionBar, Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
+import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { Campaign, Report } from "../../ipc";
 import { useRoute } from "../../router";
 
@@ -62,7 +63,7 @@ export function History() {
   const [res, setRes] = useState<Result>({ state: "idle" });
 
   const load = useCallback(() => {
-    api.listCampaigns().then((r) => { setCamps(r.campaigns); setLoadErr(""); }, (e) => setLoadErr(errorText(e)));
+    api.listCampaigns().then((r) => { setCamps(r.campaigns); setLoadErr(""); }, (e) => setLoadErr(problemDetail(e)));
   }, []);
   useEffect(load, [load]);
   useEffect(() => onChanged(load), [load]);
@@ -111,8 +112,11 @@ export function History() {
         <div className="v-screen__body v-history__main">
           <section aria-labelledby="v-history-camps">
             <h2 id="v-history-camps" className="v-text v-text--headline-md v-history__h">{S.history.campaigns}</h2>
-            {loadErr && <div role="alert"><Text variant="body-sm">{S.history.failed} {loadErr}</Text></div>}
-            {camps && camps.length === 0 && <Text variant="body-sm" muted>{S.history.empty}</Text>}
+            {loadErr && <Problem title={S.history.failed} detail={loadErr} retry={load} />}
+            {!camps && !loadErr && <LoadingRows label={S.states.loading} />}
+            {camps && camps.length === 0 && (
+              <Empty title={S.history.empty} action={<Button onClick={() => go("home")}>{S.states.goHome}</Button>}>{S.history.emptyHint}</Empty>
+            )}
             {camps && camps.length > 0 && (
               <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
             )}

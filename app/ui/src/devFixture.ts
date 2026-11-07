@@ -122,7 +122,8 @@ export function installFixture(mode = "") {
   const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }) };
   const t: Transport = {
     async call(cmd, args) {
-      if (mode === "down") throw { error: "core_unreachable", detail: "the Vajra core did not answer" };
+      // A core that does not answer: Tauri rejects with a plain string, not the core's {error, detail}.
+      if (mode === "down") throw `command ${cmd} failed: the core is not running`;
       const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);

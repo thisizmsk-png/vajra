@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Section, Text } from "../../../components/ui/base";
+import { Button, Section, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
-import { api, errorText, onChanged } from "../../ipc";
+import { api, onChanged } from "../../ipc";
+import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { CrewNodeDto } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
@@ -61,7 +62,7 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 };
 
 export function Crew() {
-  const [route] = useRoute();
+  const [route, go] = useRoute();
   const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
   const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
@@ -97,7 +98,7 @@ export function Crew() {
         const r = (a.runs as { run_id?: string; campaign?: string }[])[0];
         setTarget(r?.run_id && r.campaign ? { slug: r.campaign, runId: r.run_id } : null);
       },
-      (e) => live && (setErr(errorText(e)), setTarget(null)),
+      (e) => live && (setErr(problemDetail(e)), setTarget(null)),
     );
     return () => { live = false; };
   }, [target]);
@@ -108,7 +109,7 @@ export function Crew() {
     const asked = target;
     api.crew(target.slug, target.runId).then(
       (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
-      (e) => { if (current.current === asked) setErr(errorText(e)); },
+      (e) => { if (current.current === asked) setErr(problemDetail(e)); },
     );
   }, [target]);
 
@@ -129,12 +130,28 @@ export function Crew() {
   // ⌘K: go to any worker of this run by name.
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
 
-  if (target === null && !err) {
+  const head = (title?: string) => (
+    <header className="v-crew__head">
+      <Text as="h1" variant="label" className={title ? "v-crew__title" : undefined}>{S.crew.title}</Text>
+      {title && <span className="v-crew__run">{title}</span>}
+      {target && <span className="v-crew__id">{target.runId}</span>}
+    </header>
+  );
+  // Nothing to show yet: no run, a crew that could not be read, or one on its way. Each says so in words.
+  if (!root) {
+    const retry = () => { setErr(""); if (target) load(); else setTarget(undefined); };
     return (
-      <div className="v-crew v-crew--empty">
-        <Text as="h1" variant="headline-lg">{S.crew.title}</Text>
-        <Text variant="body">{S.crew.noRun}</Text>
-        <Text variant="body-sm" muted>{S.crew.noRunHint}</Text>
+      <div className="v-screen v-crew">
+        {head()}
+        <div className="v-screen__body v-crew__state">
+          {err ? <Problem title={S.crew.failed} detail={err} retry={retry} />
+            : target === null ? (
+              <Empty title={S.crew.noRun} action={<>
+                <Button variant="primary" onClick={() => go("home")}>{S.states.goHome}</Button>
+                <Button variant="ghost" onClick={() => go("history")}>{S.states.openHistory}</Button>
+              </>}>{S.crew.noRunHint}</Empty>
+            ) : <div className="v-crew__tree v-crew__tree--loading"><LoadingRows rows={5} label={S.states.loading} /></div>}
+        </div>
       </div>
     );
   }
@@ -142,11 +159,7 @@ export function Crew() {
   const run = root?.children.find((c) => c.kind === "run");
   return (
     <div className="v-screen v-crew">
-      <header className="v-crew__head">
-        <Text as="h1" variant="label" className="v-crew__title">{S.crew.title}</Text>
-        {run && <span className="v-crew__run">{run.title}</span>}
-        {target && <span className="v-crew__id">{target.runId}</span>}
-      </header>
+      {head(run?.title)}
       {err && <div role="alert" className="v-crew__err"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
       <div className="v-crew__body">
         <div className="v-crew__tree">

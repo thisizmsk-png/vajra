@@ -98,3 +98,15 @@ History, Settings and the report on Graphite (PR #39).
 | Actions on History / Actions on Settings | action bar names | screen readers only |
 | The app has no preferences yet. These checks decide whether a run can start. | Settings, under the heading | new |
 | Check again | Settings action bar and palette | moved from the Checks section head |
+
+Empty, loading and error states (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| The app's core did not answer. It may still be starting; try again in a moment, and if it keeps happening, quit and reopen Vajra. | under any "Could not ..." title | new; shown when the core gives no answer at all (before, "unexpected error"). A core error still shows its own code and detail |
+| Try again | every load failure | new; reloads that part only |
+| Loading | loading rows | screen readers only |
+| Go to Home / Open History | Crew with no run | new buttons under "No run is active." |
+| Every run you start, here or from the terminal, is listed here with its report. | History with no campaigns | new, under "No campaigns yet.", with Go to Home |
+| Open the crew for this run | Run view right after a start | new; the Run view is not built, so it points at the crew |
+| The run is under way. Its timeline is not built yet; the crew shows each worker as it goes. | same | new |

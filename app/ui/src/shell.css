@@ -136,3 +136,15 @@
 .v-settings__checks { margin-top: var(--space-md); display: flex; flex-direction: column; gap: var(--space-xs); }
 .v-settings__checks .v-home__checks { margin: 0; padding: 0; list-style: none; }
 .v-settings__checks .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
+
+/* States: a problem (alert, plain title, the detail small, Try again), an empty place with its next step, loading rows. */
+.v-problem { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); max-width: 560px; }
+.v-problem__detail { overflow-wrap: anywhere; }
+.v-problem .v-button { margin-top: var(--space-xs); }
+.v-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); max-width: 480px; }
+.v-empty__act { display: flex; gap: var(--space-sm); margin-top: var(--space-sm); }
+.v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
+.v-loading .v-skeleton { height: 12px; max-width: 420px; }
+.v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+.v-crew__state { padding: 48px var(--space-xl); }
+.v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }

@@ -19,6 +19,15 @@ export const S = {
     unknown: "Not run",
     needs_approval: "Needs approval",
   },
+  states: {
+    noAnswer: "The app's core did not answer. It may still be starting; try again in a moment, and if it keeps happening, quit and reopen Vajra.",
+    retry: "Try again",
+    loading: "Loading",
+    goHome: "Go to Home",
+    openHistory: "Open History",
+    openCrew: "Open the crew for this run",
+    runStarted: "The run is under way. Its timeline is not built yet; the crew shows each worker as it goes.",
+  },
   palette: {
     title: "Command palette",
     search: "Search commands",
@@ -120,6 +129,7 @@ export const S = {
     title: "History",
     campaigns: "Past campaigns",
     empty: "No campaigns yet.",
+    emptyHint: "Every run you start, here or from the terminal, is listed here with its report.",
     failed: "Could not read the campaigns.",
     colSlug: "Campaign", colGoal: "Goal", colStatus: "Status", colPassing: "Passing", colUpdated: "Updated",
     unreadable: "Unreadable",

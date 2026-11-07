@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { Skeleton, Text } from "../../../components/ui/base";
+import { Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
-import { api, errorText } from "../../ipc";
+import { api } from "../../ipc";
+import { LoadingRows, Problem, problemDetail } from "../states";
 import type { Preflight } from "../../ipc";
 import { useCommands } from "../../palette";
 import { PreflightList } from "../PreflightList";
@@ -12,7 +13,7 @@ export function Settings() {
   const [pre, setPre] = useState<Preflight | null>(null);
   const [err, setErr] = useState("");
   const run = useCallback(() => {
-    api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(errorText(e)));
+    api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e)));
   }, []);
   useEffect(run, [run]);
   useCommands([{ id: "recheck", label: S.settings.recheck, run }]);
@@ -24,8 +25,8 @@ export function Settings() {
           <Text variant="body" muted className="v-home__lede">{S.settings.lede}</Text>
           <section aria-labelledby="v-settings-checks" className="v-settings__checks">
             <h2 id="v-settings-checks" className="v-text v-text--headline-md">{S.settings.checks}</h2>
-            {err && <div role="alert"><Text variant="body-sm">{S.settings.failed} {err}</Text></div>}
-            {!pre && !err && <Skeleton />}
+            {err && <Problem title={S.settings.failed} detail={err} retry={run} />}
+            {!pre && !err && <LoadingRows rows={4} label={S.states.loading} />}
             {pre && <PreflightList rows={pre.rows} />}
           </section>
         </div>

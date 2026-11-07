@@ -3,7 +3,8 @@ import { Badge, Button, Input, Kbd, SegmentedControl, StatusDot, Text, ariaShort
 import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
-import { api, errorText, onChanged } from "../../ipc";
+import { api, onChanged } from "../../ipc";
+import { LoadingRows, Problem, problemDetail } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
@@ -16,7 +17,7 @@ type Load<T> = { state: "loading" } | { state: "ok"; data: T } | { state: "error
 function useLoad<T>(fetch: () => Promise<T>, refreshOnChange = false): [Load<T>, () => void] {
   const [v, setV] = useState<Load<T>>({ state: "loading" });
   const run = useCallback(() => {
-    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: errorText(e) }));
+    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: problemDetail(e) }));
   }, [fetch]);
   useEffect(run, [run]);
   useEffect(() => (refreshOnChange ? onChanged(run) : undefined), [refreshOnChange, run]);
@@ -36,7 +37,7 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 export function Home() {
   const [, go] = useRoute();
   const [pre, recheck] = useLoad<Preflight>(fetchPreflight);
-  const [camps] = useLoad<Campaign[]>(fetchCampaigns, true);
+  const [camps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
   const [d, setD] = useState<Draft>({ repo: "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   const [shown, setShown] = useState(false); // show field errors only after the first try
@@ -57,7 +58,7 @@ export function Home() {
       const r = await begin();
       go("run", { slug: r.campaign, id: r.run_id, stream: r.stream });
     } catch (e) {
-      setFail(errorText(e));
+      setFail(problemDetail(e));
       setBusy(null);
       inFlight.current = false;
     }
@@ -118,8 +119,8 @@ export function Home() {
           </form>
 
           <section className="v-home__checks" aria-label={S.home.preflight}>
-            {pre.state === "loading" && <Text variant="body-sm" muted>{S.crew.loading}</Text>}
-            {pre.state === "error" && <div role="alert"><Text variant="body-sm">{S.home.preflightFailed} {pre.text}</Text></div>}
+            {pre.state === "loading" && <LoadingRows rows={1} label={S.states.loading} />}
+            {pre.state === "error" && <Problem title={S.home.preflightFailed} detail={pre.text} retry={recheck} />}
             {pre.state === "ok" && (
               <details open={failing > 0}>
                 <summary className="v-home__checksum">
@@ -133,7 +134,8 @@ export function Home() {
 
           <section className="v-home__runs" aria-labelledby="v-home-camps">
             <h2 id="v-home-camps" className="v-text v-text--label">{S.home.campaigns}</h2>
-            {camps.state === "error" && <div role="alert"><Text variant="body-sm">{S.home.campaignsFailed} {camps.text}</Text></div>}
+            {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
+            {camps.state === "error" && <Problem title={S.home.campaignsFailed} detail={camps.text} retry={reloadCamps} />}
             {camps.state === "ok" && camps.data.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
             {camps.state === "ok" && camps.data.length > 0 && (
               <ul className="v-home__campaigns" aria-label={S.home.campaigns}>
