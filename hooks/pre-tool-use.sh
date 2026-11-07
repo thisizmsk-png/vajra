@@ -238,9 +238,9 @@ glob_comp_match() { # pattern-component state-component -> 0 if the component ca
   # shellcheck disable=SC2053
   [[ "$2" == $1 ]]
 }
-glob_leaf() { # pattern-component -> 0 if it can match a protected name directly inside the state dir
+glob_leaf() { # pattern-component (glob or literal) -> 0 if it can match a protected name directly inside the state dir
   local nm
-  glob_pat_has "$1" || return 1 # a literal name lists nothing by itself; a literal subdirectory is judged on its own
+  # A literal here follows a glob component, so it is reached through a glob: an exact match on a protected name counts.
   case "$1" in *{*) return 0 ;; esac
   for nm in ${PNAMES[@]+"${PNAMES[@]}"}; do
     # shellcheck disable=SC2053
