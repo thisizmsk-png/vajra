@@ -152,8 +152,7 @@ fn strip(s: &str) -> String {
     out
 }
 
+/// One list of invisible characters for the whole core (tags, variation selectors, bidi, zero-width, separators, ...).
 fn is_format(c: char) -> bool {
-    matches!(c,
-        '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}')
+    crate::control::lead::invisible(c)
 }
