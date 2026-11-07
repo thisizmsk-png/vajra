@@ -500,3 +500,97 @@ fn a_lead_stop_request_that_awaits_confirmation_is_not_yet_a_stop() {
     assert!(s.signals().stopped.is_empty(), "only the human's confirmed stop is enforced");
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ------------------------------------------------------------ #13: a persistent check failure ends visible, not pending
+
+fn unreadable_queue(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let q = dir.join("control").join(SID).join("queue");
+    fs::set_permissions(&q, fs::Permissions::from_mode(0o000)).unwrap();
+    q
+}
+
+fn readable(q: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(q, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_persistent_scan_error_settles_as_delivery_unknown_scan_failed() {
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads any directory
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let q = unreadable_queue(&dir);
+    let t0 = SystemTime::now();
+    // A few failed ticks, or a long gap after one, are still just a retry (the earlier test relies on this).
+    for k in 0..4u64 {
+        s.tick_at(t0 + Duration::from_secs(10 * k));
+        assert!(s.pending.contains_key(&id), "tick {k}: not settled yet");
+    }
+    s.tick_at(t0 + Duration::from_secs(5 * 60));
+    readable(&q);
+    assert!(!s.pending.contains_key(&id), "a scan that keeps failing must not leave the item pending forever");
+    let r = last_record(&s, &id);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("scan_failed")), "{r}");
+    assert_eq!(files(&dir, "queue"), 1, "the file is untouched; only the app's view of it is unknown");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_scan_that_recovers_starts_the_count_again() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let t0 = SystemTime::now();
+    let q = unreadable_queue(&dir);
+    for k in 0..4u64 {
+        s.tick_at(t0 + Duration::from_secs(10 * k));
+    }
+    readable(&q);
+    s.tick_at(t0 + Duration::from_secs(45)); // readable: the message is simply still queued
+    let q = unreadable_queue(&dir);
+    for k in 0..4u64 {
+        s.tick_at(t0 + Duration::from_secs(60 + 10 * k)); // 4 more failures, 60 s after the first run began
+    }
+    readable(&q);
+    assert!(s.pending.contains_key(&id), "failures are consecutive: a good scan in between resets them");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_check_failure_is_logged_once_per_distinct_error() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("vajra-svc-log-{}-{}", std::process::id(), nonce::random_hex(4).unwrap()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("wt")).unwrap();
+    let logs = dir.join("logs");
+    let mut s = Service::open(&dir, dir.join("audit.log"), Some(crate::logging::Logger::open(&logs).unwrap())).unwrap();
+    s.start_session(SID, "20261105-1810").unwrap();
+    s.set_workers(vec![WorkerInfo {
+        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: "task.t1.r1".into(), prompt_first_line: None, branch: None, status: Status::InProgress },
+        task_id: Some("20261105-1810.t1".into()),
+        title: None,
+        round: Some(1),
+        live: true,
+        last_activity: None,
+        cwd: Some(dir.join("wt").to_string_lossy().into_owned()),
+        lines: vec![],
+    }]);
+    s.message_worker(Actor::Human, "bhima", "x").unwrap();
+    let q = unreadable_queue(&dir);
+    let t0 = SystemTime::now();
+    for k in 0..4u64 {
+        s.tick_at(t0 + Duration::from_secs(k));
+    }
+    readable(&q);
+    let text = fs::read_to_string(logs.join("app.log")).unwrap();
+    let n = text.lines().filter(|l| l.contains(" control_check_failed ")).count();
+    assert_eq!(n, 1, "four ticks, one error: one line\n{text}");
+    let _ = fs::remove_dir_all(&dir);
+}
