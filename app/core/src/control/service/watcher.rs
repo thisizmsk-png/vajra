@@ -95,7 +95,19 @@ impl Service {
         } else if invalid {
             self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
         } else if stop {
-            return Ok(());
+            // A stop in force waits for the ack of the first tool call it blocks, however long that takes. A stop whose
+            // file is gone (it never reached the disk, or was removed behind the app's back) has nothing in force and
+            // nothing to wait for: after the TTL it settles as unknown instead of staying queued forever.
+            if now.duration_since(a.created).unwrap_or_default() < self.ttl {
+                return Ok(());
+            }
+            match fs::symlink_metadata(dir.stop_path(&a.worker)) {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.record(&a, State::DeliveryUnknown, json!({"reason": "stop_file_missing"}), now)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         } else if claimed {
             let Some(p) = self.pending.get_mut(id) else { return Ok(()) };
             let seen = *p.inflight_seen.get_or_insert(now);

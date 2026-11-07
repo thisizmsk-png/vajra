@@ -624,3 +624,26 @@ fn a_resume_retry_after_a_failed_stop_removal_adds_a_second_record_and_lifts_the
     assert!(matches!(s.resume_worker(Actor::Human, "bhima"), Err(ControlError::NotStopped)), "a third resume finds nothing to lift");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 C3-1: a stop whose file is gone (never made it to disk, or removed behind the app's back) and that no hook ever
+/// acked stayed `queued` forever. After the TTL it settles as `delivery_unknown` (`stop_file_missing`): nothing says it is
+/// in force. A stop whose file is there is the opposite: sticky, it stays pending however long no tool call acks it.
+#[test]
+fn a_stop_with_no_file_and_no_ack_settles_as_unknown_after_the_ttl() {
+    let (mut s, dir) = svc();
+    let id = s.stop_worker(Actor::Human, "bhima", None).unwrap()["action_id"].as_str().unwrap().to_string();
+    let later = SystemTime::now() + s.ttl + Duration::from_secs(1);
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "a stop in force waits for its ack");
+    s.tick_at(later);
+    assert!(s.pending.contains_key(&id), "a stop whose file is in force stays pending past the TTL");
+    let key = s.pending[&id].worker.clone();
+    fs::remove_file(s.session().unwrap().dir.stop_path(&key)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "inside the TTL the missing file is not judged yet");
+    s.tick_at(later);
+    assert!(!s.pending.contains_key(&id), "past the TTL the stop is settled");
+    let r = last_record(&s, &id);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("stop_file_missing")));
+    let _ = fs::remove_dir_all(&dir);
+}
