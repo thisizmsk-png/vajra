@@ -57,6 +57,8 @@ export type RunHandle = { stream: string; session_id: string; run_id: string; ca
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
+/** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
+export type StreamWindow = { lines: Line[]; head_seq: number; first_seq: number; at_start: boolean; at_end: boolean; gap: boolean };
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
@@ -103,6 +105,8 @@ export const api = {
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
   readSpillBefore: (stream: string, beforeSeq: number, maxLines: number) => call<{ lines: Line[]; at_start: boolean; gap: boolean }>("read_spill_before", { stream, beforeSeq, maxLines }),
+  /** Up to `maxLines` lines starting EXACTLY at seq `from` (clamped to the oldest kept line, then `gap`), or the newest when `from` is null. */
+  streamWindow: (stream: string, from: number | null, maxLines: number, maxBytes = 1048576) => call<StreamWindow>("stream_window", { stream, from, maxLines, maxBytes }),
   readSpill: (stream: string, offset: number, maxBytes = 65536) => call<Json>("read_spill", { stream, offset, maxBytes }),
   task: (slug: string, taskId: string) => call<Json>("task", { slug, taskId }),
   /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
