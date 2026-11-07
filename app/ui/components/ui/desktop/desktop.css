@@ -42,7 +42,11 @@
 
 .v-tree { list-style: none; margin: 0; padding: 0; }
 .v-tree [role="treeitem"] { cursor: default; }
-.v-tree__twisty { display: inline-block; min-width: var(--target-min); text-align: center; color: var(--c-text-muted); }
+.v-tree__twisty { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target-min); height: var(--target-min); color: var(--c-text-muted); }
+.v-tree__chev { transition: transform var(--t-fast) var(--ease-out); }
+.v-tree__chev--open { transform: rotate(90deg); }
+.v-tree__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-tree .v-row__meta { flex: none; }
 .v-tree [role="treeitem"][aria-selected="true"] { background: var(--c-accent); }
 .v-tree .v-row { margin: 1px 0; }
 
@@ -67,3 +71,12 @@
 .v-palette [role="listbox"] { max-height: min(420px, 50vh); overflow: auto; padding: 6px; }
 .v-palette .v-row { min-height: 34px; padding: 0 10px; }
 .v-palette > p { padding: var(--space-sm) var(--space-lg); border-top: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-text-muted); }
+
+/* Action bar (the Graphite signature): selection on the left, its actions with keys on the right, primary first. */
+.v-actionbar { display: flex; align-items: center; gap: var(--space-md); height: var(--bar-h); flex: none; padding: 0 10px 0 14px; border-top: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-text-secondary); font: 400 12px/17px var(--font-ui); }
+.v-actionbar__ctx { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.v-actionbar__ctx b { color: var(--c-text); font-weight: 600; }
+.v-actionbar__acts { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.v-actionbar__act { height: 28px; color: var(--c-text-secondary); }
+.v-actionbar__act--primary { color: var(--c-primary); }
+.v-actionbar__act--primary + .v-actionbar__act { margin-left: var(--space-sm); }

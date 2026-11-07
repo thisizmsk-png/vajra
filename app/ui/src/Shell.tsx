@@ -1,19 +1,38 @@
+import { useEffect } from "react";
+import { Kbd, ariaShortcut } from "../components/ui/base";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { SCREENS, toHash, useRoute } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { S } from "../strings";
 import "./shell.css";
 
-/** Navigation on the left, the current screen on the right. Every screen sits inside an error boundary. */
+/** ⌘1 to ⌘7 open the screens in nav order; each link shows its chord. */
+const chord = (i: number) => ["⌘", String(i + 1)];
+
+/** Graphite shell: a 240 px sidebar with the screens, the current screen beside it. Every screen sits inside an error boundary. */
 export function Shell() {
-  const [route] = useRoute();
+  const [route, go] = useRoute();
   const Screen = REGISTRY[route.screen];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey || e.defaultPrevented) return;
+      const i = Number(e.key) - 1;
+      if (Number.isInteger(i) && i >= 0 && i < SCREENS.length) {
+        e.preventDefault();
+        go(SCREENS[i]);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [go]);
   return (
     <div className="v-shell">
       <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
-        {SCREENS.map((s) => (
-          <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined}>
-            {S.nav[s]}
+        <div className="v-shell__brand">{S.shell.brand}</div>
+        {SCREENS.map((s, i) => (
+          <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
+            <span className="v-shell__label">{S.nav[s]}</span>
+            <Kbd keys={chord(i)} decorative />
           </a>
         ))}
       </nav>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Section, Text } from "../../../components/ui/base";
-import { CrewTree } from "../../../components/ui/desktop";
+import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
@@ -23,7 +23,7 @@ function statusLabel(n: CrewNodeDto): string {
   const key = statusOf(n.status);
   const base = key === "unknown" ? S.crew.unknownSignal : S.status[key];
   const extra = (n.overlays as unknown[]).filter((o): o is string => typeof o === "string").map((o) => S.crew.overlay[o] ?? o);
-  return [base, ...extra].join(" · ");
+  return [base, ...extra].join(", ");
 }
 
 function toNode(n: CrewNodeDto): CrewNode {
@@ -60,7 +60,8 @@ export function Crew() {
   );
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
   const [openIds, setOpenIds] = useState<string[] | null>(null);
-  const [selected, setSelected] = useState("");
+  // `worker` in the route opens on that worker (a deep link, for example from an action card).
+  const [selected, setSelected] = useState(route.params.worker ? `agent:${route.params.worker}` : "");
   const [err, setErr] = useState("");
   const last = useRef(0);
 
@@ -104,7 +105,7 @@ export function Crew() {
 
   if (target === null && !err) {
     return (
-      <div className="v-crew">
+      <div className="v-crew v-crew--empty">
         <Text as="h1" variant="headline-lg">{S.crew.title}</Text>
         <Text variant="body">{S.crew.noRun}</Text>
         <Text variant="body-sm" muted>{S.crew.noRunHint}</Text>
@@ -112,30 +113,37 @@ export function Crew() {
     );
   }
   const picked = root && selected ? find(root, selected) : null;
+  const run = root?.children.find((c) => c.kind === "run");
   return (
-    <div className="v-crew">
-      <Text as="h1" variant="headline-lg">{S.crew.title}</Text>
-      {err && <div role="alert"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
-      {root && openIds && (
-        <div className="v-crew__body">
-          <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
-          {picked && (
-            <div className="v-crew__side">
-            {picked.id.startsWith("agent:") ? (
-              target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={root ? taskGroupOf(root, picked.id) ?? null : null} status={statusLabel(picked)} />
-            ) : (
-              <Section title={S.crew.details}>
-                <dl className="v-crew__facts" aria-label={S.crew.details}>
-                  <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
-                  <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-                  {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
-                </dl>
-              </Section>
-            )}
-            </div>
+    <div className="v-screen v-crew">
+      <header className="v-crew__head">
+        <Text as="h1" variant="label" className="v-crew__title">{S.crew.title}</Text>
+        {run && <span className="v-crew__run">{run.title}</span>}
+        {target && <span className="v-crew__id">{target.runId}</span>}
+      </header>
+      {err && <div role="alert" className="v-crew__err"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
+      <div className="v-crew__body">
+        <div className="v-crew__tree">
+          {root && openIds && (
+            <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           )}
         </div>
-      )}
+        {root && picked && (picked.id.startsWith("agent:") ? (
+          target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, picked.id) ?? null} status={statusLabel(picked)} />
+        ) : (
+          <div className="v-crew__pane v-crew__pane--facts">
+            <Section title={S.crew.details}>
+              <dl className="v-crew__facts" aria-label={S.crew.details}>
+                <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
+                <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
+                {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
+              </dl>
+            </Section>
+          </div>
+        ))}
+      </div>
+      <ActionBar label={S.crew.barLabel}
+        context={picked ? <span>{`${picked.role ?? picked.title}, ${statusLabel(picked)}`}</span> : undefined} />
     </div>
   );
 }

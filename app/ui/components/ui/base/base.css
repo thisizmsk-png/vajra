@@ -120,3 +120,8 @@ textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); res
 .v-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-toasts { pointer-events: none; }
 .v-toast { pointer-events: auto; }
+
+/* Keys: 18 px, radius 4. On a primary fill the key takes an outline from --c-kbd-on-primary. */
+.v-kbd-group { display: inline-flex; gap: 3px; font: inherit; }
+.v-kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font: 500 11px/16px var(--font-ui); text-align: center; }
+.v-button--primary .v-kbd { background: transparent; border-color: var(--c-kbd-on-primary); color: inherit; }

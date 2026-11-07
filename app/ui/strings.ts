@@ -22,6 +22,7 @@ export const S = {
   nav: { home: "Home", run: "Run", crew: "Crew", chat: "Chat", inbox: "Inbox", history: "History", settings: "Settings" },
   shell: {
     navLabel: "Main",
+    brand: "Vajra",
     notBuilt: "This screen is not built yet.",
     errorTitle: "This screen hit a problem",
     errorBody: "The rest of the app is fine. You can try again or go to another screen.",
@@ -42,6 +43,11 @@ export const S = {
     maxInFlight: "Workers at once (1 to 16)",
     advanced: "Advanced",
     startButton: "Start run",
+    lede: "The crew builds in its own worktrees and reports back. This app never pushes.",
+    checksSummary: (n: number, m: number) => `${n} of ${m} checks pass`,
+    checksAll: "All checks",
+    barLabel: "Actions on Home",
+    barNoRepo: "No repository chosen",
     starting: "Starting",
     campaigns: "Campaigns",
     campaignsEmpty: "No campaigns yet. Start a run and it appears here.",
@@ -59,6 +65,7 @@ export const S = {
   crew: {
     title: "Crew",
     treeLabel: "Crew",
+    barLabel: "Actions for the selection",
     details: "Details",
     noRun: "No run is active.",
     noRunHint: "Start a run from Home, or open a past run from History.",

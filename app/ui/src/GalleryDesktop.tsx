@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Section, Button, Text } from "../components/ui/base";
-import { ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip } from "../components/ui/desktop";
+import { Section, Button, Kbd, Text } from "../components/ui/base";
+import { ActionBar, ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip } from "../components/ui/desktop";
 import type { CrewNode } from "../components/ui/desktop";
 
 const E = "\u001b";
@@ -53,6 +53,16 @@ export function GalleryDesktop() {
         <div className="v-gallery__flex v-gallery__center v-gallery__gap">
           <Tooltip text="Open the command palette (Cmd K)"><Button onClick={() => setPalette(true)}>Commands</Button></Tooltip>
           <Text variant="body-sm" muted>{note}</Text>
+        </div>
+      </Section>
+      <Section title="Keys and action bar">
+        <div className="v-gallery__flex v-gallery__center"><Kbd keys={["⌘", "K"]} /><Kbd keys={["⌘", "↵"]} /><Kbd keys={["M"]} /></div>
+        <div className="v-gallery__gap">
+          <ActionBar label="Actions for the selection" context={<><b>Backend</b><span>t2 Token bucket middleware</span></>} actions={[
+            { id: "approve", label: "Approve plan", keys: ["⌘", "↵"], primary: true, run: () => setNote("Approve plan") },
+            { id: "message", label: "Message", keys: ["M"], run: () => setNote("Message") },
+            { id: "stop", label: "Stop worker", keys: ["⌘", "."], run: () => setNote("Stop worker") },
+          ]} />
         </div>
       </Section>
       <CommandPalette open={palette} onClose={() => setPalette(false)} commands={[
