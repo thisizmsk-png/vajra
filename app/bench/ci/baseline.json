@@ -3,9 +3,9 @@
   "25G332|21624.5.1.11.3": {
    "flavours": {
     "Networking+WebContent": {
-     "idle_mib": 175.0,
-     "provisional": false,
-     "measured": "macOS 26.7.2 (25G332), WebKit 21624.5.1.11.3, image 20261102.0473.1; 2 helpers (Networking, WebContent): medians 174.5, 175.4, 174.9, 175.4 from 4 CI attempts of runs 42323420368 and 42328381675 on #26; consistent with the earlier pooled clean mean 174.8"
+     "idle_mib": 181.5,
+     "provisional": true,
+     "measured": "Graphite redesign (#39), accepted by the owner on 2026-11-07 as the new idle (+4.3 MiB over main's 177.2). macOS 26.7.2 (25G332), WebKit 21624.5.1.11.3, image 20261102.0473.1; 2 helpers (Networking, WebContent): median_of_medians_mib 181.5 in run 42375695580 (head 139dc19) and 181.6 in run 42374742561 (head 4003d2b). PROVISIONAL: 2 runs, fewer than the 3 the README procedure asks for; refine with the bump procedure as more runs of this flavour land. Was 175.0 (runs 42323420368 and 42328381675 on #26)."
     },
     "GPU+Networking+WebContent": {
      "idle_mib": 201.1,
