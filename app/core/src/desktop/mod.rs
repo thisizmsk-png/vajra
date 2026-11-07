@@ -162,9 +162,11 @@ impl App {
     }
 
     pub fn list_campaigns(&self) -> Res {
-        self.with_reader(|r| {
+        // Summaries are read under the reader lock; the verify subprocesses run after it is released, so a slow
+        // or hung verify cannot block any other reader call.
+        let mut list: Vec<Value> = self.with_reader(|r| {
             let slugs = r.campaigns().map_err(|e| fail("io_error", e))?;
-            let list: Vec<Value> = slugs
+            Ok(slugs
                 .iter()
                 .map(|s| match r.campaign(s) {
                     Ok(c) => json!({
@@ -173,14 +175,19 @@ impl App {
                         "passing": c.passing, "total": c.total,
                         "last_integration": c.last_integration.map(|i| json!({"branch": i.branch, "sha": i.sha, "from": i.from})),
                         "checkpoints": c.checkpoints,
-                        "integrity": self.integrity_of(s),
                     }),
                     // A campaign dir the reader cannot summarise is still listed.
                     Err(e) => json!({"slug": s, "error": e.to_string()}),
                 })
-                .collect();
-            Ok(json!({"campaigns": list}))
-        })
+                .collect())
+        })?;
+        for c in &mut list {
+            if c.get("error").is_none() {
+                let verdict = self.integrity_of(c["slug"].as_str().unwrap_or_default());
+                c["integrity"] = json!(verdict);
+            }
+        }
+        Ok(json!({"campaigns": list}))
     }
 
     /// The control service steers one session, so one run is active at a time.

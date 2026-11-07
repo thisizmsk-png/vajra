@@ -825,3 +825,33 @@ fn list_campaigns_reverifies_after_an_edit_even_when_the_mtime_is_restored() {
     fake_campaign_script(&t, 3, "signature INVALID"); // the script now says the campaign is tampered
     assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
 }
+
+#[test]
+fn a_hung_verify_does_not_block_other_reader_calls() {
+    // list_campaigns runs on every `changed` event: a slow verify must not hold the reader lock.
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let go = t.0.join("go");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nexit 0\n", go.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let app = t.app();
+    let reached = std::thread::scope(|s| {
+        let lister = s.spawn(|| app.list_campaigns().unwrap());
+        std::thread::sleep(Duration::from_millis(400)); // the lister is now inside verify
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app = &app;
+        s.spawn(move || {
+            let _ = app.with_reader(|r| r.campaigns().map_err(|e| fail("io_error", e)));
+            let _ = tx.send(());
+        });
+        let reached = rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        fs::write(&go, "").unwrap(); // release the verify either way, so the test cannot hang
+        lister.join().unwrap();
+        reached
+    });
+    assert!(reached, "another reader call waited behind a running verify");
+}
