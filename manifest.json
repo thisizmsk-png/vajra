@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-07T16:38:05Z",
+  "generated": "2026-11-07T19:48:27Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
@@ -219,7 +219,7 @@
     "evals/trigger-verify-work/graders/skill-fired.md": "ff1079ed58ea7b90043e99ab8ed5a72385e8297cb4aef344f51706f97ba79938",
     "evals/trigger-verify-work/prompt.md": "8c4c1e88267bba94510699414c2ac2d2f9b69c8f5aefb377d07ae97fa9ff6ee4",
     "fleet/coordinator.md": "3191144c08aa0388311fb91bbc138d9dc9b44d88e6b730b55fcbc7f6aeba3f69",
-    "hooks/desktop-control.sh": "d84163c7b8582c93658f0fa6a8405c4749092193f4837ba5b31a86b1949574cd",
+    "hooks/desktop-control.sh": "2d2ec68730dd938e77a80c7371c61fa36e9c7e2143665e5debf0233b5d68ff97",
     "hooks/hooks.json": "745910011c534d68f06b91a98a939aa932ebd8c36a3ac6022e9cfa945ca60966",
     "hooks/post-tool-use.sh": "1364549c567be17a7c8eab9cfccc30be4ab2fda9d226d8941f0aaa4eea1dcded",
     "hooks/pre-compact.sh": "b0dbd73d252f456acaba73402ed72d638bd441245b765ff0042c14f90e106439",
@@ -296,7 +296,7 @@
     "tests/fixtures/gate-web/clean.html": "f0bc6cd2eb14940a85992ea78d8001b8c2072a53b08172996704091c2657a4a9",
     "tests/gate-web/run-gate-web.sh": "11f939857ebafcbdb3cab6c4a53bceb350f0da4955e570c6ba533a0a711f3d57",
     "tests/hmac-contract.sh": "ce29bed4b2cd9d80206151d6e4d43f5e389a173f9359d4c4755e916480d32def",
-    "tests/hooks/run-desktop-control.sh": "6fd25f98bb591111caa605fc928a53c6ee317705b21c1dcc8a06a27581d6d619",
+    "tests/hooks/run-desktop-control.sh": "ee15bf19f7823677838ee2ce005fadcd5070ee5f0a7fd5038f371282d1fe8604",
     "tests/hooks/run-generate-manifest.sh": "720e8d5e4af5e991cea830adce72a7f4b8b03236573116832933ebc8c006dcbe",
     "tests/hooks/run-guard-text.sh": "0f33437bd5b7571f7a9fe62137ff9aa70bf4d92e29087a89afcf9773b7144b7a",
     "tests/hooks/run-home-isolation.sh": "fb4ee353cb2756314782e51c0079eec843d7e76338b21b5f9146d306417803bd",

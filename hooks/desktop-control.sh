@@ -47,8 +47,10 @@ fi
 P="$HEAD$(/bin/cat)"
 FIELDS="$(jq -r '
   def s: if type == "string" then gsub("[\r\n]"; "") else "" end;
+  # A tool name with a line break must not collapse into another name (Subagent<NL>Handback): it reads "?".
+  def t: if type == "string" then gsub("[\r\n]"; "?") else "" end;
   select(type == "object")
-  | (.session_id | s), (.hook_event_name | s), (.tool_name | s),
+  | (.session_id | s), (.hook_event_name | s), (.tool_name | t),
     (.agent_id | s), (.agent_type | s), (.cwd | s)
 ' <<<"$P")" || exit 0
 {
@@ -90,14 +92,38 @@ load_nonce() {
   NONCE="$n"
 }
 # Does the payload field (.tool_input or .tool_response) contain the needle / a steer tag?
-has_nonce() { jq -e --arg n "$NONCE" '.tool_input | tostring | contains($n)' <<<"$P" >/dev/null 2>&1; }
-has_tag() { jq -e '[.tool_response, .error] | tostring | test("<\\s*/?\\s*vajra-steer"; "i")' <<<"$P" >/dev/null 2>&1; }
+# Each check is one regex test over the text (a gsub or code-point rewrite of a large result is far slower in jq).
+#
+# The nonce is lowercase hex. The pattern is its digits in order with anything that is not a hex digit allowed
+# between them, case ignored, so upper case, separators (dashes, spaces) and invisible characters inside the nonce do
+# not hide it. (A worker can still split or encode it; has_tag below is the second layer.)
+has_nonce() {
+  jq -e --arg n "$NONCE" '
+    ($n | split("") | map(. + "[^0-9a-f]*") | join("")) as $re
+    | .tool_input | tostring | test($re; "i")
+  ' <<<"$P" >/dev/null 2>&1
+}
+# A steer tag opener in a tool result or error: "<" (also fullwidth and small), or an entity form, then the tag name,
+# with invisible characters (zero-width, soft hyphen, bidi controls) and whitespace, a line break included, allowed
+# between its letters, and any dash character for the hyphen.
+has_tag() {
+  jq -e '
+    "[\\s\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]*" as $g
+    | ("(<|\uff1c|\ufe64|&lt;|&#0*60;|&#x0*3c;)" + $g + "/?" + $g + (("vajra" | split("") | join($g))) + $g + "[-\u2010-\u2015\u2212\ufe58\ufe63\uff0d]" + $g + (("steer" | split("") | join($g)))) as $re
+    | [.tool_response, .error] | [.. | strings] | join(" ") | test($re; "i")
+  ' <<<"$P" >/dev/null 2>&1
+}
 
 # The one call a stopped worker may make: its final report (SubagentHandback, or
 # StructuredOutput for workflow agents) saying it was stopped by the human.
 final_stop_report() {
   case "$TOOL" in SubagentHandback|StructuredOutput) ;; *) return 1 ;; esac
-  jq -e '.tool_input | tostring | ascii_downcase | contains("stopped by the human")' <<<"$P" >/dev/null 2>&1
+  # A workflow report (StructuredOutput) must also say status blocked: a stopped worker's "done" is a claim the
+  # engine would go on to verify and merge. The handback tool has no status field; the phrase is all it carries.
+  jq -e --arg t "$TOOL" '
+    (.tool_input | tostring | ascii_downcase | contains("stopped by the human"))
+    and ($t != "StructuredOutput" or (((.tool_input | objects | .status) // "") | tostring | ascii_downcase) == "blocked")
+  ' <<<"$P" >/dev/null 2>&1
 }
 
 stopped() { # rc 0 if a stop matches this worker; sets M_ID
