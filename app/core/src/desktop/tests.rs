@@ -2026,3 +2026,17 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
     }
 }
+
+#[test]
+fn run_overview_scopes_a_campaign_with_two_runs_to_the_current_one() {
+    let t = Tmp::new();
+    let task = |id: &str, st: &str| json!({"id": id, "title": id, "owner_agent": "bhima", "status": st, "deps": []});
+    let (app, slug) = campaign_with_tasks(&t, vec![task("r1.t1", "closed"), task("r2.t1", "in_progress"), task("r2.t2", "pending")]);
+    let camp = t.home().join(".claude/vajra/campaigns").join(&slug);
+    fs::write(camp.join("progress.md"), "- 2026-11-07T00:00:00Z run r1 round 1: 1/1 criteria passing; x\n- 2026-11-07T00:01:00Z resumed by vajra-deliver run r2\n").unwrap();
+    let o = app.run_overview(&slug).unwrap();
+    assert_eq!(o["run_id"], "r2", "the Crew link must name the run whose workers these are");
+    let ids: Vec<&str> = o["graph"]["tasks"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["r2.t1", "r2.t2"]);
+    assert_eq!(o["timeline"]["current"], "Execute", "the previous run's failed round is not carried into the resumed run");
+}

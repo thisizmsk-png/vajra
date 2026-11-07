@@ -56,9 +56,18 @@ struct Lines {
     /// Highest round named by any `round N` line.
     round: u32,
     outcome: Option<(Outcome, u32)>,
-    /// The run id that wrote `outcome`; a line from a different (later, resumed) run supersedes it.
-    outcome_run: String,
+    /// The run id of the latest progress line. A line from a different run (a resume registers a fresh id) starts the
+    /// campaign's state over: nothing a previous run recorded (rounds, limit, outcome) carries into it.
+    cur_run: String,
     max_rounds: Option<u32>,
+}
+
+impl Lines {
+    fn enter(&mut self, run: &str) {
+        if self.cur_run != run {
+            *self = Lines { cur_run: run.to_string(), ..Lines::default() };
+        }
+    }
 }
 
 fn scan(progress: &str) -> Lines {
@@ -67,8 +76,10 @@ fn scan(progress: &str) -> Lines {
         // Only the shape `append_progress` writes: `- <timestamp> <text>`, with the text starting `run <id>` (what the workflow
         // writes) or `resumed by vajra-deliver run <id>`. Free text that merely contains "run " (a note, a reject reason) is not read.
         let Some(text) = line.strip_prefix("- ").and_then(|l| l.split_once(' ')).map(|x| x.1) else { continue };
-        if text.starts_with("resumed by vajra-deliver run ") {
-            out.outcome = None; // a resume starts the campaign again
+        if let Some(r) = text.strip_prefix("resumed by vajra-deliver run ") {
+            // A resume is a new run: all run-scoped state starts over, even if the id were repeated.
+            let id = r.split(|c: char| c.is_whitespace() || c == ':').next().unwrap_or("");
+            out = Lines { cur_run: id.to_string(), ..Lines::default() };
             continue;
         }
         let Some(rest) = text.strip_prefix("run ") else { continue };
@@ -79,21 +90,19 @@ fn scan(progress: &str) -> Lines {
             continue;
         }
         let after = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
-        if out.outcome.is_some() && id != out.outcome_run {
-            out.outcome = None; // a later run (new id) starts the campaign again
-        }
+        out.enter(id);
         if let Some(r) = after.strip_prefix("round ") {
             let n: u32 = r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
             out.round = out.round.max(n);
             let body = r.split_once(':').map(|x| x.1.trim_start()).unwrap_or("");
             if body.starts_with("waiting for the user") {
                 out.outcome = Some((Outcome::NeedInput, n));
-                out.outcome_run = id.to_string();
             } else if body.starts_with("review rejected") {
                 out.outcome = Some((Outcome::Rejected, n));
-                out.outcome_run = id.to_string();
             } else if let Some((k, m)) = body.split_once(" criteria passing").and_then(|(h, _)| h.split_once('/')) {
                 if let (Ok(k), Ok(m)) = (k.trim().parse::<u32>(), m.trim().parse::<u32>()) {
+                    // The workflow writes this line only when the round's gate FAILED (criteria, suite, review or blocking
+                    // issues): a round that passes everything breaks out before writing it. So even `3/3` means rework.
                     out.verified = Some((n, k, m));
                     out.outcome = None; // a finished round supersedes an earlier stop
                 }
@@ -103,38 +112,50 @@ fn scan(progress: &str) -> Lines {
             out.max_rounds = Some(n);
             out.round = out.round.max(n);
             out.outcome = Some((Outcome::Error, n));
-            out.outcome_run = id.to_string();
         } else if after.starts_with("delivered ") && after.contains(" @ ") {
             out.outcome = Some((Outcome::Done, out.round));
-            out.outcome_run = id.to_string();
         }
     }
     out
 }
 
+fn run_of(t: &Value) -> &str {
+    t.get("id").and_then(Value::as_str).and_then(|id| id.split_once('.').map(|x| x.0)).unwrap_or("")
+}
+
+/// The run the campaign is in now and its tasks. `tasks.json` accumulates every run's tasks (`<run>.tN`; a resume adds a
+/// fresh set), so the current run is the latest one named by a progress line, else the run of the newest task.
+pub fn scope(progress: &str, tasks: Option<&[Value]>) -> (String, Option<Vec<Value>>) {
+    let cur = scan(progress).cur_run;
+    let Some(ts) = tasks else { return (cur, None) };
+    let run = if cur.is_empty() { ts.iter().rev().map(run_of).find(|r| !r.is_empty()).unwrap_or("").to_string() } else { cur };
+    let scoped = if run.is_empty() { ts.to_vec() } else { ts.iter().filter(|t| run_of(t) == run).cloned().collect() };
+    (run, Some(scoped))
+}
+
 /// Where the run is. `tasks` is `tasks.json`'s task list (`None` when the file is absent), `progress` is `progress.md`.
-/// Exactly one phase is current, always.
+/// Only the current run's tasks and lines count. Exactly one phase is current, always.
 pub fn timeline(progress: &str, tasks: Option<&[Value]>) -> Timeline {
     let l = scan(progress);
+    let (_, scoped) = scope(progress, tasks);
+    let tasks = scoped.as_deref();
     let open = tasks.is_some_and(|t| t.iter().any(|x| !matches!(status(x), "done" | "closed")));
     let have_tasks = tasks.is_some_and(|t| !t.is_empty());
-    // The Fix round after the last verification that did not pass fully.
-    let next_fix = l.verified.filter(|(_, k, m)| k < m).map(|(n, _, _)| n + 1);
+    // A recorded round line means that round's gate failed, so the next round is the Fix round.
+    let next_fix = l.verified.map(|(n, _, _)| n + 1);
     let (current, outcome, fix_round) = match l.outcome {
-        Some((Outcome::Done, _)) => (5, Outcome::Done, l.verified.map(|v| v.0).filter(|n| *n > 1)),
+        Some((Outcome::Done, _)) => (5, Outcome::Done, next_fix),
         Some((Outcome::Rejected, _)) => (3, Outcome::Rejected, None),
         Some((Outcome::NeedInput, _)) => (2, Outcome::NeedInput, None),
         Some((Outcome::Error, n)) => (4, Outcome::Error, Some(n.max(1))),
         _ => match (tasks, have_tasks, open, next_fix) {
             (None, _, _, _) => (0, Outcome::Active, None),
             (Some(_), false, _, _) => (1, Outcome::Active, None),
-            (_, true, true, Some(n)) => (4, Outcome::Active, Some(n)),
+            (_, true, _, Some(n)) => (4, Outcome::Active, Some(n)),
             (_, true, true, None) => (2, Outcome::Active, None),
-            (_, true, false, Some(n)) => (4, Outcome::Active, Some(n)),
-            (_, true, false, None) => {
-                // All tasks closed: verifying until a round reports everything passing, then delivering.
-                if l.verified.is_some_and(|(_, k, m)| k == m) { (5, Outcome::Active, None) } else { (3, Outcome::Active, None) }
-            }
+            // All tasks closed and no failed round: verifying (and, once the gate passes, delivering: the workflow records
+            // nothing between the gate and the `delivered` line, so that stretch reads as Verify).
+            (_, true, false, None) => (3, Outcome::Active, None),
         },
     };
     Timeline { current, outcome, fix_round, max_rounds: l.max_rounds }
@@ -258,9 +279,49 @@ mod tests {
         let reopened = [task("r.t1", "closed", &[]), task("r.t2", "in_progress", &["r.t1"])];
         let t = timeline(p, Some(&reopened));
         assert_eq!((PHASES[t.current], t.fix_round), ("Fix", Some(2)));
-        // Everything passing: delivering.
+        // The line is written only when the gate FAILED, so even `3/3` (the suite failed, a review asked for changes, or
+        // blocking issues remain) is rework: Fix round 2, never Deliver.
         let all = "run r round 1: 3/3 criteria passing; x\n";
-        assert_eq!(cur(all, Some(&done)), ("Deliver", Outcome::Active));
+        assert_eq!(cur(all, Some(&done)), ("Fix", Outcome::Active));
+        // A successful round writes no such line: closed tasks with no failed round read as Verify.
+        assert_eq!(cur("", Some(&done)), ("Verify", Outcome::Active));
+    }
+
+    #[test]
+    fn delivery_after_a_fix_shows_the_round_that_delivered() {
+        let t = [task("r.t1", "closed", &[])];
+        let p = "run r round 1: 3/3 criteria passing; the suite failed\nrun r delivered b @ abc\n";
+        let tl = timeline(p, Some(&t));
+        assert_eq!((PHASES[tl.current], tl.outcome, tl.fix_round), ("Deliver", Outcome::Done, Some(2)));
+    }
+
+    #[test]
+    fn a_resume_after_an_exhausted_run_starts_from_scratch_before_any_new_verification_line() {
+        // r failed rounds 1..3 and stopped; r2 is resumed and has planned its tasks, nothing verified yet.
+        let tasks = [task("r.t1", "closed", &[]), task("r2.t1", "in_progress", &[])];
+        let p = "run r round 1: 1/3 criteria passing\nrun r round 3: 1/3 criteria passing\nrun r: no verified delivery after 3 round(s)\nresumed by vajra-deliver run r2\n";
+        let tl = timeline(p, Some(&tasks));
+        assert_eq!((PHASES[tl.current], tl.outcome, tl.fix_round, tl.max_rounds), ("Execute", Outcome::Active, None, None));
+        // Same when the new run's first line is a run line rather than the resume marker.
+        let p = "run r round 3: 1/3 criteria passing\nrun r: no verified delivery after 3 round(s)\nrun r2 round 1: waiting for the user on t1\n";
+        let tl = timeline(p, Some(&tasks));
+        assert_eq!((tl.outcome, tl.fix_round, tl.max_rounds), (Outcome::NeedInput, None, None));
+        // Resumed but not yet planned: Plan, with the old run's tasks not counted.
+        let tl = timeline("run r: no verified delivery after 3 round(s)\nresumed by vajra-deliver run r2\n", Some(&[task("r.t1", "closed", &[])]));
+        assert_eq!(PHASES[tl.current], "Plan");
+    }
+
+    #[test]
+    fn a_campaign_with_two_runs_scopes_to_the_current_one() {
+        let tasks = vec![task("r1.t1", "closed", &[]), task("r2.t1", "in_progress", &[]), task("r2.t2", "pending", &["r2.t1"])];
+        let (run, scoped) = scope("run r1 round 1: 1/1 criteria passing\nresumed by vajra-deliver run r2\n", Some(&tasks));
+        assert_eq!(run, "r2");
+        let g = graph(&run, scoped.as_deref().unwrap());
+        let ids: Vec<&str> = g["tasks"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["r2.t1", "r2.t2"]);
+        assert_eq!(g["tasks"][0]["local"], "t1");
+        // No progress lines yet: the run of the newest task.
+        assert_eq!(scope("", Some(&tasks)).0, "r2");
     }
 
     #[test]
@@ -275,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_resume_after_a_stop_starts_again() {
-        let t = [task("r.t1", "in_progress", &[])];
+        let t = [task("r.t1", "in_progress", &[]), task("r2.t1", "in_progress", &[])];
         let p = "run r round 1: waiting for the user on t1\nrun r2 round 1: 0/3 criteria passing\n";
         assert_eq!(cur(p, Some(&t)), ("Fix", Outcome::Active), "the stop no longer applies once a later run writes lines");
     }
@@ -416,6 +477,7 @@ mod tests {
                 (PHASES[t.current], t.outcome, t.fix_round, t.max_rounds)
             };
             let verified = line_with("criteria passing");
+            // 1/3 in the fixture, but the writer emits this line only after a failed gate, whatever the count.
             assert_eq!(run(&[verified.clone()]), ("Fix", Outcome::Active, Some(3), None), "{verified}");
             assert_eq!(run(&[line_with("waiting for the user")]).1, Outcome::NeedInput);
             assert_eq!(run(&[line_with("review rejected")]).1, Outcome::Rejected);

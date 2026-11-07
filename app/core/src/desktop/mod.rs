@@ -717,17 +717,15 @@ impl App {
         }
         let (snap, progress) = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default())))?;
         let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
-        let run_id = tasks
-            .and_then(|t| t.iter().find_map(|x| x.get("id").and_then(Value::as_str)))
-            .and_then(|id| id.split_once('.').map(|x| x.0))
-            .unwrap_or("");
+        // `tasks.json` holds every run's tasks: the graph and the Crew link are for the current run only.
+        let (run_id, scoped) = runview::scope(&progress, tasks);
         let tl = runview::timeline(&progress, tasks);
         Ok(json!({
             "slug": slug,
             "run_id": run_id,
             "stale": snap.stale,
             "timeline": runview::timeline_json(&tl),
-            "graph": runview::graph(run_id, tasks.unwrap_or(&[])),
+            "graph": runview::graph(&run_id, scoped.as_deref().unwrap_or(&[])),
         }))
     }
 
