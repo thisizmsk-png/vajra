@@ -77,6 +77,16 @@ enum Verdict {
     Flying(Flight),
 }
 
+/// The integrity cache. Every check (a listing or explicit verify, or a report read) takes a ticket from
+/// `App::tickets` when it starts, before it reads anything, and `last` keeps the newest ticket that settled per
+/// campaign. A check that started before the newest settled one can add a failure but never replace a verdict with
+/// "ok" or clear it: an older success must not hide a newer failure, and a failure is never lost to ordering.
+#[derive(Default)]
+struct Verdicts {
+    by_slug: HashMap<String, Verdict>,
+    last: HashMap<String, u64>,
+}
+
 /// Ends a flight even if the verify panics, so waiters are never left hanging.
 struct FlightGuard<'a> {
     app: &'a App,
@@ -87,7 +97,12 @@ struct FlightGuard<'a> {
 impl Drop for FlightGuard<'_> {
     fn drop(&mut self) {
         if !self.done {
-            lock(&self.app.verdicts).remove(self.slug);
+            // Forget only this flight; a newer verdict that replaced it stays.
+            let mut m = lock(&self.app.verdicts);
+            if matches!(m.by_slug.get(self.slug), Some(Verdict::Flying(f)) if Arc::ptr_eq(f, &self.flight)) {
+                m.by_slug.remove(self.slug);
+            }
+            drop(m);
             *lock(&self.flight.0) = Some("unknown");
             self.flight.1.notify_all();
         }
@@ -106,7 +121,9 @@ pub struct App {
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
     /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
-    verdicts: Mutex<HashMap<String, Verdict>>,
+    verdicts: Mutex<Verdicts>,
+    /// Integrity-check tickets, taken when a check starts (see `Verdicts`).
+    tickets: std::sync::atomic::AtomicU64,
     verdict_ttl: Duration,
     /// Monotonic time since start; tests replace it.
     clock: Arc<dyn Fn() -> Duration + Send + Sync>,
@@ -143,7 +160,8 @@ impl App {
             lead: lead::LeadState::new(home),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
-            verdicts: Mutex::new(HashMap::new()),
+            verdicts: Mutex::new(Verdicts::default()),
+            tickets: std::sync::atomic::AtomicU64::new(0),
             verdict_ttl: VERDICT_TTL,
             clock: {
                 let t0 = std::time::Instant::now();
@@ -692,7 +710,7 @@ impl App {
         }
         let flight: Flight = loop {
             let mut m = lock(&self.verdicts);
-            let waiting = match m.get(slug) {
+            let waiting = match m.by_slug.get(slug) {
                 Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return (v, None),
                 Some(Verdict::Flying(f)) => Some(f.clone()),
                 _ => None,
@@ -709,9 +727,10 @@ impl App {
                 continue;
             }
             let f: Flight = Arc::new((Mutex::new(None), Condvar::new()));
-            m.insert(slug.to_string(), Verdict::Flying(f.clone()));
+            m.by_slug.insert(slug.to_string(), Verdict::Flying(f.clone()));
             break f;
         };
+        let ticket = self.ticket();
         let mut guard = FlightGuard { app: self, slug, flight, done: false };
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
@@ -721,34 +740,33 @@ impl App {
             Some(3) => "failed",
             _ => "unknown",
         };
-        self.settle(slug, verdict);
+        self.settle(slug, verdict, ticket);
         *lock(&guard.flight.0) = Some(verdict);
         guard.flight.1.notify_all();
         guard.done = true;
         (verdict, Some(res))
     }
 
-    #[allow(dead_code)] // read_report (#22b) settles through it
-    fn settle_code(&self, slug: &str, code: Option<i32>) {
-        let v = match code {
-            Some(0) => "ok",
-            Some(3) => "failed",
-            _ => "unknown",
-        };
-        let m = lock(&self.verdicts);
-        if !matches!(m.get(slug), Some(Verdict::Flying(_))) {
-            drop(m);
-            self.settle(slug, v);
-        }
+    /// A fresh ticket for an integrity check that is about to read the campaign (strictly increasing).
+    fn ticket(&self) -> u64 {
+        self.tickets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
     }
 
-    /// Remember a real verdict for the slug (or forget it when the check could not run).
-    fn settle(&self, slug: &str, verdict: &'static str) {
+    /// Remember the verdict of the check that took `ticket` (or forget the slug when it could not run).
+    /// A check that started before the newest one already settled may only add "failed": its "ok" or "unknown"
+    /// is dropped, so a stale success never replaces a newer failure. A "failed" always lands (fail closed): at
+    /// worst it shows for one TTL after a repair, and an explicit verify or `refresh` clears it.
+    fn settle(&self, slug: &str, verdict: &'static str, ticket: u64) {
         let mut m = lock(&self.verdicts);
+        let last = m.last.get(slug).copied().unwrap_or(0);
+        if ticket < last && verdict != "failed" {
+            return;
+        }
+        m.last.insert(slug.to_string(), last.max(ticket));
         if verdict == "unknown" {
-            m.remove(slug);
+            m.by_slug.remove(slug);
         } else {
-            m.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
+            m.by_slug.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
         }
     }
 
@@ -778,6 +796,111 @@ impl App {
                 Ok(json!({"slug": slug, "ok": false, "restore": restore}))
             }
             code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        }
+    }
+
+    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text, from held bytes. Every input is read once
+    /// (`vajra::held`); the signature, `featuresDefSha256` and `reportSha256` are all checked against those bytes,
+    /// and the text returned is exactly the held report. The script only answers "is this sig valid for these
+    /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
+    /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
+    pub fn read_report(&self, slug: &str) -> Res {
+        self.read_report_with(slug, &|_| {}, &|| {})
+    }
+
+    /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
+    /// `between` runs after the read and before the digest check (tests). A symlinked `campaigns` dir is refused by
+    /// the held reader (`O_NOFOLLOW`), so every report read there settles `failed`: that fails closed on purpose.
+    pub(crate) fn read_report_with(&self, slug: &str, seam: &dyn Fn(&str), between: &dyn Fn()) -> Res {
+        use crate::control::sha256::hex_digest;
+        use crate::vajra::held::{self, HeldError};
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let verdict = |integrity: &str, text: Option<String>| {
+            let mut v = json!({"slug": slug, "integrity": integrity});
+            if let Some(t) = text {
+                v["text"] = json!(t);
+            }
+            Ok(v)
+        };
+        // Taken before anything is read, so this check is ordered against every other one (see `Verdicts`).
+        let ticket = self.ticket();
+        let allow = self.allow().map_err(|e| fail("io_error", e))?;
+        let (dir, key) = (allow.campaigns_dir().to_path_buf(), allow.key_path());
+        let h = match held::read_campaign(&dir, slug, &key, seam) {
+            Ok(h) => h,
+            Err(HeldError::NotFound) => return Err(fail("not_found", "no such campaign")),
+            Err(HeldError::Failed(_)) | Err(HeldError::TooLarge("state.sig")) => {
+                self.settle(slug, "failed", ticket);
+                return verdict("integrity_failed", None);
+            }
+            Err(HeldError::TooLarge(_)) | Err(HeldError::Io(_)) => return verdict("unknown", None),
+        };
+        between();
+        let bad = |this: &Self| {
+            this.settle(slug, "failed", ticket);
+            verdict("integrity_failed", None)
+        };
+        if !held::json_without_duplicate_keys(&h.campaign) || !held::json_without_duplicate_keys(&h.features) {
+            return bad(self);
+        }
+        let (Ok(campaign), Ok(features)) =
+            (serde_json::from_slice::<Value>(&h.campaign), serde_json::from_slice::<Value>(&h.features))
+        else {
+            return bad(self);
+        };
+        if !features.get("features").is_some_and(Value::is_array) {
+            return bad(self);
+        }
+        let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
+        if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return bad(self);
+        }
+        let sig = String::from_utf8_lossy(&sig).into_owned();
+        let input = format!(
+            "campaign {}\nfeatures {}\nprogress {}\nsig {}\n",
+            hex_digest(&h.campaign),
+            hex_digest(&h.features),
+            hex_digest(&h.progress),
+            sig
+        );
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+            Ok(o) => o,
+            Err(_) => return verdict("unknown", None),
+        };
+        match o.code {
+            Some(0) => {}
+            Some(3) => return bad(self),
+            _ => return verdict("unknown", None),
+        }
+        // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes. Output cut at the bridge's
+        // cap would hash short and read as a tamper where plain `verify` says ok, so a truncated run is "unknown".
+        let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
+            Ok(o) if o.code == Some(0) && !o.truncated => o.stdout.replace('\n', ""),
+            _ => return verdict("unknown", None),
+        };
+        if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
+            return bad(self);
+        }
+        // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
+        // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
+        seam("check:report");
+        let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
+        if want.is_empty() {
+            self.settle(slug, "ok", ticket);
+            return verdict("no_report", None);
+        }
+        let Some(report) = h.report else { return bad(self) };
+        if hex_digest(&report) != want {
+            return bad(self);
+        }
+        self.settle(slug, "ok", ticket);
+        match String::from_utf8(report) {
+            Ok(t) => verdict("ok", Some(t)),
+            Err(_) => verdict("not_text", None),
         }
     }
 

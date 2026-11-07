@@ -1090,6 +1090,182 @@ fn a_target_whose_directory_is_gone_is_not_offered() {
     assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
 }
 
+// ---------------------------------------------------------------- read_report (held bytes)
+
+fn fnv32(s: &str) -> String {
+    let mut h: u32 = 0x811c9dc5;
+    for b in s.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x01000193);
+    }
+    format!("{h:08x}")
+}
+
+fn real_campaign_with_report(run: &impl Fn(&[&str]) -> std::process::Output, text: &str) {
+    assert!(run(&["create", "real1", "--goal", "g", "--feature", "ac-1|x"]).status.success());
+    let b64 = String::from_utf8(
+        std::process::Command::new("sh").args(["-c", &format!("printf '%s' '{text}' | openssl base64 -A")]).output().unwrap().stdout,
+    )
+    .unwrap();
+    let saved = run(&["report", "--campaign", "real1", "--bytes", &text.len().to_string(), "--check", &fnv32(&b64), "--base64", &b64]);
+    assert!(saved.status.success(), "{}", String::from_utf8_lossy(&saved.stderr));
+}
+
+fn camp_file(t: &Tmp, name: &str) -> std::path::PathBuf {
+    t.home().join(".claude/vajra/campaigns/real1").join(name)
+}
+
+#[test]
+fn read_report_returns_the_signed_report() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let r = t.app().read_report("real1").unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+}
+
+#[test]
+fn read_report_refuses_a_report_edited_after_it_was_signed() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    fs::write(camp_file(&t, "report.md"), "Delivered on branch X").unwrap();
+    let r = t.app().read_report("real1").unwrap();
+    assert_eq!(r["integrity"], "integrity_failed", "{r}");
+    assert!(r.get("text").is_none());
+}
+
+#[test]
+fn nul_in_report_breaks_hash() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "ab");
+    fs::write(camp_file(&t, "report.md"), b"a\0b").unwrap();
+    assert_eq!(t.app().read_report("real1").unwrap()["integrity"], "integrity_failed");
+}
+
+#[test]
+fn nul_in_signed_inputs_breaks_the_signature() {
+    for name in ["campaign.json", "features.json", "progress.md"] {
+        let Some((t, run)) = real_script_home() else { return };
+        real_campaign_with_report(&run, "ab");
+        let mut b = fs::read(camp_file(&t, name)).unwrap();
+        b.insert(b.len() / 2, 0);
+        fs::write(camp_file(&t, name), b).unwrap();
+        assert_ne!(t.app().read_report("real1").unwrap()["integrity"], "ok", "{name}");
+    }
+}
+
+#[test]
+fn read_report_refuses_a_planted_report_without_a_recorded_hash() {
+    let Some((t, run)) = real_script_home() else { return };
+    assert!(run(&["create", "real1", "--goal", "g", "--feature", "ac-1|x"]).status.success());
+    fs::write(camp_file(&t, "report.md"), "forged delivery report").unwrap();
+    let r = t.app().read_report("real1").unwrap();
+    assert_eq!(r["integrity"], "no_report", "{r}");
+    assert!(r.get("text").is_none());
+}
+
+#[test]
+fn report_is_symlink_to_valid_report() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let real = camp_file(&t, "report.md");
+    let moved = t.home().join("elsewhere.md");
+    fs::rename(&real, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &real).unwrap();
+    assert_eq!(t.app().read_report("real1").unwrap()["integrity"], "integrity_failed");
+}
+
+#[test]
+fn files_rewritten_after_read_leave_the_verdict_and_text_on_the_held_bytes() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let root = t.home().join(".claude/vajra/campaigns/real1");
+    let between = || {
+        for n in ["campaign.json", "features.json", "progress.md", "state.sig", "report.md"] {
+            fs::write(root.join(n), b"rewritten after the read").unwrap();
+        }
+    };
+    let r = t.app().read_report_with("real1", &|_| {}, &between).unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+}
+
+#[test]
+fn planted_report_swap_during_verify() {
+    // Live files are tampered (report changed); a genuine copy is put back only while the check runs. The verdict
+    // comes from the bytes read, so the tamper is still seen.
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let report = camp_file(&t, "report.md");
+    let genuine = fs::read(&report).unwrap();
+    fs::write(&report, "Delivered on branch X").unwrap();
+    let r2 = report.clone();
+    let between = move || fs::write(&r2, &genuine).unwrap();
+    let r = t.app().read_report_with("real1", &|_| {}, &between).unwrap();
+    assert_eq!(r["integrity"], "integrity_failed", "{r}");
+}
+
+#[test]
+fn duplicate_key_campaign_json_refused() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let f = camp_file(&t, "campaign.json");
+    let s = fs::read_to_string(&f).unwrap();
+    assert!(s.contains("\"goal\""), "fixture has a goal key");
+    fs::write(&f, s.replacen('{', "{\"goal\":\"dup\",", 1)).unwrap(); // goal now appears twice
+    assert_eq!(t.app().read_report("real1").unwrap()["integrity"], "integrity_failed");
+}
+
+#[test]
+fn held_verdict_equals_verify_over_the_tamper_corpus() {
+    type Tamper = fn(&std::path::Path);
+    let corpus: [(&str, Tamper); 6] = [
+        ("clean", |_| {}),
+        ("campaign byte", |d| { let f = d.join("campaign.json"); let mut b = fs::read(&f).unwrap(); b.push(b' '); fs::write(f, b).unwrap(); }),
+        ("features byte", |d| { let f = d.join("features.json"); let mut b = fs::read(&f).unwrap(); b.push(b' '); fs::write(f, b).unwrap(); }),
+        ("progress byte", |d| { let f = d.join("progress.md"); let mut b = fs::read(&f).unwrap_or_default(); b.push(b'x'); fs::write(f, b).unwrap(); }),
+        ("sig flipped", |d| { let f = d.join("state.sig"); let s = fs::read_to_string(&f).unwrap(); let c = if s.starts_with('0') { "1" } else { "0" }; fs::write(f, format!("{c}{}", &s[1..])).unwrap(); }),
+        ("sig removed", |d| fs::remove_file(d.join("state.sig")).unwrap()),
+    ];
+    for (name, tamper) in corpus {
+        let Some((t, run)) = real_script_home() else { return };
+        real_campaign_with_report(&run, "Delivered on branch b");
+        tamper(&camp_file(&t, "").parent().unwrap().join("real1"));
+        let app = t.app();
+        let plain = app.verify_campaign("real1").map(|v| v["ok"] == true).unwrap_or(false);
+        let held = app.read_report("real1").unwrap()["integrity"] == "ok";
+        assert_eq!(held, plain, "{name}");
+    }
+}
+
+#[test]
+fn read_report_rejects_a_bad_slug_and_reports_a_missing_campaign() {
+    let t = Tmp::new();
+    assert_eq!(code(&t.app().read_report("../x").unwrap_err()), "invalid_args");
+    assert_eq!(code(&t.app().read_report("nope").unwrap_err()), "not_found");
+}
+
+#[test]
+fn sig_over_256_bytes_is_integrity_failed() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    fs::write(camp_file(&t, "state.sig"), vec![b'a'; 300]).unwrap();
+    assert_eq!(t.app().read_report("real1").unwrap()["integrity"], "integrity_failed");
+}
+
+#[test]
+fn verify_digest_never_opens_campaign_dir() {
+    // After the read, the campaigns dir is made unreadable: the digest check and the features-def check must not
+    // need it, so the verdict and text are unchanged.
+    use std::os::unix::fs::PermissionsExt;
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let dir = t.home().join(".claude/vajra/campaigns");
+    let d2 = dir.clone();
+    let between = move || fs::set_permissions(&d2, fs::Permissions::from_mode(0o000)).unwrap();
+    let r = t.app().read_report_with("real1", &|_| {}, &between);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = r.unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+}
+
 #[test]
 fn the_crew_tree_shows_message_pending_and_stopped_by_the_human_from_the_control_ledger() {
     let t = Tmp::new();
@@ -1210,4 +1386,103 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
     let (_, id) = app.fresh_run_id(now);
     assert_ne!(id, "20261105-1230", "the persisted id is taken");
+}
+
+// ---- review #34 (P2): a report read and the shared integrity cache ----------------------------------------------
+
+#[test]
+fn an_older_report_read_cannot_overwrite_a_newer_explicit_verify() {
+    // The report-read equivalent of `an_older_listing_check_cannot_overwrite_a_newer_explicit_verify`.
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let app = t.app();
+    let report = camp_file(&t, "report.md");
+    // 1. The report read has held valid bytes. 2. While it is paused, the report is tampered with and the user
+    // verifies explicitly: that newer check fails and caches "failed".
+    let between = || {
+        fs::write(&report, "Delivered on branch X").unwrap();
+        let v = app.verify_campaign("real1").unwrap();
+        assert_eq!(v["ok"], false, "the newer explicit verify sees the tamper: {v}");
+    };
+    // 3. The older read resumes: its held bytes are genuine, so it returns them...
+    let r = app.read_report_with("real1", &|_| {}, &between).unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+    // 4. ...but its older "ok" must not replace the newer failure: the next listing keeps it.
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn a_newer_report_failure_survives_an_older_listing_check_that_finishes_ok() {
+    // The reverse order: a listing check starts against valid state and is held; a report read that starts later
+    // fails; then the older listing check finishes with exit 0. The badge must keep the newer failure.
+    let t = Tmp::new();
+    let ctl = barrier_campaign_script(&t);
+    campaign(&t, "c1", None); // only campaign.json: the held reader refuses it (required inputs missing)
+    let app = Arc::new(t.app());
+    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !ctl.join("started").exists() {
+        assert!(std::time::Instant::now() < end, "the listing check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.read_report("c1").unwrap()["integrity"], "integrity_failed");
+    fs::write(ctl.join("go"), "").unwrap();
+    assert_eq!(a.join().unwrap()["campaigns"][0]["integrity"], "ok", "the held listing check saw the old state");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn settle_orders_verdicts_by_ticket_and_never_loses_a_failure() {
+    let t = Tmp::new();
+    let app = t.app();
+    let now = |app: &App| match lock(&app.verdicts).by_slug.get("c") {
+        Some(Verdict::Fresh(_, v)) => *v,
+        Some(Verdict::Flying(_)) => "flying",
+        None => "none",
+    };
+    let (t1, t2, t3, t4) = (app.ticket(), app.ticket(), app.ticket(), app.ticket());
+    assert!(t1 < t2 && t2 < t3 && t3 < t4, "tickets increase");
+    app.settle("c", "failed", t2);
+    app.settle("c", "ok", t1); // older success after a newer failure: dropped
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "unknown", t1); // an older "could not run" cannot clear it either
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t3); // a newer success replaces it (the repair shows)
+    assert_eq!(now(&app), "ok");
+    app.settle("c", "failed", t1); // an older failure still lands: fail closed
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t4);
+    assert_eq!(now(&app), "ok");
+}
+
+#[test]
+fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
+    // review #34 (P2, 54a2df9): "ok" used to be published after the signature and features checks but before the
+    // report check, so a listing at that moment reused it for a campaign whose recorded report was edited or
+    // deleted (or cleared an already cached failure). Pause exactly there and list.
+    for (tamper, cached_failure) in [("edit", false), ("edit", true), ("delete", false), ("delete", true)] {
+        let Some((t, run)) = real_script_home() else { return };
+        real_campaign_with_report(&run, "Delivered on branch b");
+        let report = camp_file(&t, "report.md");
+        if tamper == "edit" {
+            fs::write(&report, "Delivered on branch X").unwrap();
+        } else {
+            fs::remove_file(&report).unwrap();
+        }
+        let app = t.app();
+        if cached_failure {
+            assert_eq!(app.verify_campaign("real1").unwrap()["ok"], false);
+        }
+        let seen = std::cell::RefCell::new(None);
+        let seam = |st: &str| {
+            if st == "check:report" {
+                *seen.borrow_mut() = Some(app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone());
+            }
+        };
+        let r = app.read_report_with("real1", &seam, &|| {}).unwrap();
+        let case = format!("{tamper}, cached failure {cached_failure}");
+        assert_eq!(r["integrity"], "integrity_failed", "{case}: {r}");
+        assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
+        assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
+    }
 }

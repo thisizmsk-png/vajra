@@ -66,6 +66,11 @@ impl Allowlist {
         self.vajra_dir().join("campaigns")
     }
 
+    /// Where the protected signing key lives. Only for identity checks (`stat`); nothing ever opens it.
+    pub fn key_path(&self) -> PathBuf {
+        self.claude.join("vajra").join(DENIED_NAME)
+    }
+
     pub fn workflow_path(&self) -> PathBuf {
         self.claude.join("workflows/vajra-deliver.js")
     }
@@ -131,7 +136,7 @@ impl Allowlist {
         if !md.is_file() || md.nlink() != 1 {
             return Err(Denied::NotAllowed);
         }
-        if let Ok(key) = std::fs::symlink_metadata(self.claude.join("vajra").join(DENIED_NAME))
+        if let Ok(key) = std::fs::symlink_metadata(self.key_path())
             && (key.dev(), key.ino()) == (md.dev(), md.ino())
         {
             return Err(Denied::SecretKey);
