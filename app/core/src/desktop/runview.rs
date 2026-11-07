@@ -139,7 +139,9 @@ pub fn timeline(progress: &str, tasks: Option<&[Value]>) -> Timeline {
     let l = scan(progress);
     let (_, scoped) = scope(progress, tasks);
     let tasks = scoped.as_deref();
-    let open = tasks.is_some_and(|t| t.iter().any(|x| !matches!(status(x), "done" | "closed")));
+    // A worker that finishes runs `report <id> done`, which keeps the task `in_progress` (only the Deliver write-back closes it),
+    // so "finished" is closed OR reported done. Execute lasts until every task is finished; then the verifier and reviewers run.
+    let open = tasks.is_some_and(|t| t.iter().any(|x| !finished(x)));
     let have_tasks = tasks.is_some_and(|t| !t.is_empty());
     // A recorded round line means that round's gate failed, so the next round is the Fix round.
     let next_fix = l.verified.map(|(n, _, _)| n + 1);
@@ -153,7 +155,7 @@ pub fn timeline(progress: &str, tasks: Option<&[Value]>) -> Timeline {
             (Some(_), false, _, _) => (1, Outcome::Active, None),
             (_, true, _, Some(n)) => (4, Outcome::Active, Some(n)),
             (_, true, true, None) => (2, Outcome::Active, None),
-            // All tasks closed and no failed round: verifying (and, once the gate passes, delivering: the workflow records
+            // Every task finished (closed or reported done) and no failed round: verifying (and, once the gate passes, delivering: the workflow records
             // nothing between the gate and the `delivered` line, so that stretch reads as Verify).
             (_, true, false, None) => (3, Outcome::Active, None),
         },
@@ -180,6 +182,10 @@ pub fn timeline_json(t: &Timeline) -> Value {
         })
         .collect();
     json!({"phases": phases, "current": PHASES[t.current], "status": t.outcome.as_str()})
+}
+
+fn finished(t: &Value) -> bool {
+    matches!(status(t), "done" | "closed") || (status(t) == "in_progress" && t.get("report").and_then(|r| r.get("status")).and_then(Value::as_str) == Some("done"))
 }
 
 fn status(t: &Value) -> &str {
@@ -285,6 +291,21 @@ mod tests {
         assert_eq!(cur(all, Some(&done)), ("Fix", Outcome::Active));
         // A successful round writes no such line: closed tasks with no failed round read as Verify.
         assert_eq!(cur("", Some(&done)), ("Verify", Outcome::Active));
+    }
+
+    #[test]
+    fn tasks_that_reported_done_are_verifying_even_though_their_status_stays_in_progress() {
+        let mut reported = task("r.t1", "in_progress", &[]);
+        reported["report"] = json!({"status": "done", "summary": "built"});
+        let mut working = task("r.t2", "in_progress", &["r.t1"]);
+        working["report"] = json!({"status": "progress", "summary": "part"});
+        // All reported done: the verifier and reviewers are running.
+        assert_eq!(cur("", Some(&[reported.clone()])), ("Verify", Outcome::Active));
+        // One still working: Execute.
+        assert_eq!(cur("", Some(&[reported.clone(), working])), ("Execute", Outcome::Active));
+        // A task with no report yet, or one that failed, is not finished.
+        assert_eq!(cur("", Some(&[reported.clone(), task("r.t3", "in_progress", &[])])), ("Execute", Outcome::Active));
+        assert_eq!(cur("", Some(&[reported, task("r.t3", "failed", &[])])), ("Execute", Outcome::Active));
     }
 
     #[test]
