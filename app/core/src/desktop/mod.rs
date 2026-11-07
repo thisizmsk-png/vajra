@@ -685,7 +685,7 @@ impl App {
         let flight: Flight = loop {
             let mut m = lock(&self.verdicts);
             let waiting = match m.get(slug) {
-                Some(Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(*at) < self.verdict_ttl => return v,
+                Some(Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(*at) < self.verdict_ttl => return *v,
                 Some(Verdict::Flying(f)) => Some(f.clone()),
                 _ => None,
             };
