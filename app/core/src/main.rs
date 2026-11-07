@@ -52,6 +52,16 @@ fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
 
+/// A verify blocks on a subprocess and on the four verify slots, and the History screen asks for every campaign at
+/// once. `#[tauri::command(async)]` runs the body on a runtime worker, so it would occupy workers while it waits; the
+/// blocking pool takes it instead and the runtime stays free for the other commands and for event delivery.
+#[tauri::command]
+async fn campaign_integrity(handle: tauri::AppHandle, slug: String, refresh: Option<bool>) -> Res {
+    tauri::async_runtime::spawn_blocking(move || handle.state::<App>().campaign_integrity(&slug, refresh.unwrap_or(false)))
+        .await
+        .unwrap_or_else(|e| Err(serde_json::json!({"error": "internal", "detail": e.to_string()})))
+}
+
 #[tauri::command(async)]
 fn list_campaigns(app: State<'_, App>, refresh: Option<bool>) -> Res {
     app.list_campaigns_opt(refresh.unwrap_or(false))
@@ -282,6 +292,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             preflight,
             list_campaigns,
+            campaign_integrity,
             start_run,
             resume_run,
             verify_campaign,
