@@ -15,6 +15,8 @@
 .v-shell__search:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 /* Key hints are out of layout until asked for (hover, or focus in the nav), so the idle window draws no hint glyphs (idle memory). */
 .v-shell__link .v-kbd-group { display: none; }
+.v-shell__search .v-kbd-group { display: none; }
+.v-shell__search:hover .v-kbd-group, .v-shell__search:focus-visible .v-kbd-group { display: inline-flex; }
 .v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { display: inline-flex; }
 .v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
@@ -168,7 +170,7 @@
   .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
   .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .v-shell .v-shell__nav .v-shell__link .v-kbd-group { display: none; }
+  .v-shell .v-shell__nav :is(.v-shell__link, .v-shell__search) .v-kbd-group { display: none; }
   .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
   .v-shell__search { margin-top: var(--space-xs); border-color: transparent; background: transparent; }
   .v-shell__search:hover { background: var(--c-accent); }

@@ -29,6 +29,9 @@ export function useCommands(commands: readonly Command[]) {
 /** ⌘K opens the palette on every screen, ⌘K or Esc closes it. `commands` are the shell's own; screens add theirs. */
 export function PaletteHost({ commands, children }: { commands: readonly Command[]; children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  // The palette is mounted the first time it opens and kept after, so the idle window holds none of it (idle memory).
+  const [used, setUsed] = useState(false);
+  if (open && !used) setUsed(true);
   const [sources, setSources] = useState<ReadonlyMap<string, Source>>(new Map());
   const register = useCallback<Register>((key, source) => {
     setSources((m) => {
@@ -65,7 +68,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
   return (
     <Ctx.Provider value={ctx}>
       {children}
-      <CommandPalette open={open} onClose={() => setOpen(false)} commands={all} />
+      {(open || used) && <CommandPalette open={open} onClose={() => setOpen(false)} commands={all} />}
     </Ctx.Provider>
   );
 }

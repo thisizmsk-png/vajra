@@ -36,13 +36,15 @@ const boot = (hash = "") => {
 };
 const cmdK = () => act(() => { fireEvent.keyDown(window, { key: "k", metaKey: true }); });
 const box = () => screen.getByRole("combobox", { name: S.palette.search, hidden: true });
-const dialogOpen = () => (box().closest("dialog") as HTMLDialogElement).open;
+// The palette is mounted on first open (idle memory), so no palette at all counts as closed.
+const dialogOpen = () => { const b = screen.queryByRole("combobox", { name: S.palette.search, hidden: true }); return !!b && (b.closest("dialog") as HTMLDialogElement).open; };
 const options = () => screen.getAllByRole("option", { hidden: true });
 
 describe("Command palette in the shell", () => {
   it("opens and closes with Cmd+K, and offers every other screen with its key", () => {
     boot();
     expect(dialogOpen()).toBe(false);
+    expect(document.querySelector("dialog")).toBeNull(); // nothing of the palette in the idle window
     cmdK();
     expect(dialogOpen()).toBe(true);
     const labels = options().map((o) => o.querySelector("span")?.textContent);
