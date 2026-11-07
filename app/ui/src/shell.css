@@ -1,7 +1,16 @@
 /* Graphite shell (DESIGN.md "Layout"): 240 px sidebar on the surface, the screen on the background. */
 .v-shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; position: relative; }
 .v-shell__nav { display: flex; flex-direction: column; gap: 2px; padding: 10px var(--space-sm) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); min-height: 0; }
-.v-shell__brand { display: flex; align-items: center; height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 13px/16px var(--font-ui); color: var(--c-text); }
+.v-shell__brand { display: flex; align-items: center; gap: var(--space-sm); height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 14px/16px var(--font-ui); color: var(--c-text); user-select: none; }
+/* The mark: an ink tile with a lozenge cut from it, drawn in CSS so the idle window decodes no image. */
+.v-shell__mark { position: relative; flex: none; width: 18px; height: 18px; border-radius: 5px; background: var(--c-action); }
+.v-shell__mark::after { content: ""; position: absolute; inset: 5px; background: var(--c-surface); transform: rotate(45deg) scale(0.8); border-radius: 1px; }
+/* Overlay title bar: the brand row is the window's drag handle and clears the traffic lights. */
+.v-shell--overlay .v-shell__nav { padding-top: 0; }
+.v-shell--overlay .v-shell__brand { height: var(--titlebar-h); margin: 0 calc(-1 * var(--space-sm)) var(--space-sm); padding-left: 80px; }
+.v-shell--overlay .v-shell__brand > * { pointer-events: none; }
+/* Settings sits at the foot of the sidebar, apart from the places you work in. */
+.v-shell__link:last-of-type { margin-top: auto; }
 .v-shell__link { display: flex; align-items: center; gap: 10px; height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
 .v-shell__label { flex: 1; min-width: 0; text-align: left; }
 /* Skip link: the first Tab stop, out of sight until it has focus. */
@@ -33,7 +42,8 @@
 /* Home: a launcher, then the checks line, then the campaigns (DESIGN.md "Hierarchy per screen"). */
 .v-home__col { max-width: 800px; margin: 0 auto; padding: 48px var(--space-xl) var(--space-xl); display: flex; flex-direction: column; }
 .v-home__lede { margin: var(--space-xs) 0 18px; }
-.v-launch { border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); background: var(--c-surface); }
+.v-launch { border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-panel); box-shadow: 0 1px 2px var(--c-shadow-soft); transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out); }
+.v-launch:hover { border-color: color-mix(in srgb, var(--c-border) 50%, var(--c-border-strong)); }
 .v-launch__ask { padding: var(--space-lg) var(--space-lg) 0; }
 .v-launch__ask .v-field__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: 16px; line-height: 25px; resize: none; }
@@ -75,14 +85,16 @@
 .v-home__list li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); border-bottom: 1px solid var(--c-border); }
 .v-home__list li > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.v-home__runs { margin-top: 40px; display: flex; flex-direction: column; gap: 6px; }
-.v-home__campaigns { list-style: none; margin: 0 calc(-1 * var(--space-sm)); padding: 0; display: flex; flex-direction: column; }
-.v-home__campaigns li { display: grid; grid-template-columns: 18px 1fr auto; gap: 2px 10px; align-items: center; padding: var(--space-sm); border-radius: var(--radius-md); }
+.v-home__runs { margin-top: 40px; }
+.v-home__campaigns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.v-home__campaigns li { display: grid; grid-template-columns: 18px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px var(--space-lg); border-bottom: 1px solid var(--c-border); transition: background-color var(--t-fast) var(--ease-out); }
+.v-home__campaigns li:last-child { border-bottom: 0; }
 .v-home__campaigns li:hover { background: var(--c-surface); }
+.v-home__elsewhere { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border: 1px solid var(--c-border); border-radius: var(--radius-pill); color: var(--c-text-muted); font: 500 11px/14px var(--font-ui); }
 .v-home__dot { grid-row: 1 / span 2; }
 .v-home__dot > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-home__goal { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.v-home__slug { grid-column: 2; font: 12px/16px var(--font-mono); color: var(--c-text-muted); }
+.v-home__slug { grid-column: 2; font: 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; color: var(--c-text-muted); }
 .v-home__side { grid-column: 3; grid-row: 1 / span 2; display: flex; align-items: center; gap: var(--space-md); }
 .v-home__side .v-text--body-sm { white-space: nowrap; }
 
@@ -98,7 +110,15 @@
 .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 320px minmax(0, 1fr); }
 .v-crew__tree { min-height: 0; overflow: auto; padding: 6px var(--space-sm); border-right: 1px solid var(--c-border); }
 .v-crew__pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
-.v-crew__pane--facts { padding: var(--space-lg); }
+.v-crew__pane--facts { padding: var(--space-xl); gap: var(--space-lg); max-width: 760px; }
+.v-crew__pane--facts > .v-section { margin: 0; }
+.v-crew__workers ul { list-style: none; margin: 0; padding: var(--space-xs) 0 var(--space-sm); }
+.v-crew__workers li { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding: 0 var(--space-lg); }
+.v-crew__workers li .v-status-dot { font-size: 12px; }
+.v-crew__workers li .v-num { color: var(--c-text-secondary); font-size: 12px; }
+/* One bar, one segment per status, in the status colours (currentColor from the v-status class). */
+.v-crew__meter { display: flex; gap: 2px; height: 6px; margin: var(--space-md) var(--space-lg) var(--space-xs); border-radius: var(--radius-pill); overflow: hidden; }
+.v-crew__meter > span { flex-basis: 0; background: currentColor; }
 .v-crew__panehead { display: flex; align-items: center; gap: 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
 .v-crew__task { min-width: 0; color: var(--c-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .v-crew__pane .v-tablist { padding: 6px var(--space-md) 0; }
@@ -113,30 +133,33 @@
 
 /* Shared screen frame: a 48 px head (title, then quiet meta), a scrolling body, the action bar at the foot. */
 .v-screen__head { display: flex; align-items: center; gap: 10px; height: 48px; flex: none; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); white-space: nowrap; }
+.v-screen__head > h1 { font-size: 14px; font-weight: 600; }
 .v-screen__meta { color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* History: the campaigns and the search in one scrolling column; a report opens in a pane on the right. */
 .v-history__body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .v-history__body--open { grid-template-columns: minmax(0, 1fr) 400px; }
-/* Fixed columns; the goal takes what is left and truncates (the full goal is its tooltip). */
+/* Fixed columns; the campaign takes what is left and truncates (the full goal is its tooltip). */
 .v-history .v-table { table-layout: fixed; }
 .v-history .v-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.v-history .v-table th:nth-child(1) { width: 190px; }
-.v-history .v-table th:nth-child(3) { width: 80px; }
-.v-history .v-table th:nth-child(4) { width: 76px; }
-.v-history .v-table th:nth-child(5) { width: 136px; }
-.v-history .v-table th:nth-child(6) { width: 164px; }
-.v-history .v-table th:nth-child(7) { width: 128px; }
-.v-history__goal { display: block; overflow: hidden; text-overflow: ellipsis; }
-/* With the report open, Status and Updated give their room to the goal (the report names its status). */
-.v-history__body--open .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
-.v-history__main { padding: var(--space-lg) var(--space-lg) var(--space-xl); }
-.v-history__h { margin: 0 0 var(--space-sm); }
-.v-history__slug { font: 12px/16px var(--font-mono); color: var(--c-text-secondary); margin-left: calc(-1 * var(--space-sm)); }
-.v-history__muted { color: var(--c-text-secondary); }
-.v-history__acts { display: inline-flex; gap: 2px; margin-left: calc(-1 * var(--space-sm)); }
-.v-history .v-table td { height: 36px; }
-.v-history__search { margin-top: 40px; max-width: 960px; }
+.v-history .v-table th:nth-child(2) { width: 104px; }
+.v-history .v-table th:nth-child(3) { width: 128px; }
+.v-history .v-table th:nth-child(4) { width: 120px; }
+.v-history .v-table th:nth-child(5) { width: 168px; }
+.v-history .v-table th:nth-child(6) { width: 140px; }
+.v-history__camp { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.v-history__goal { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-weight: 500; color: var(--c-text); }
+.v-history__slug { max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--c-text-muted); font: 400 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; text-align: left; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.v-history__slug:hover { color: var(--c-text); text-decoration: underline; text-underline-offset: 3px; }
+.v-history__slug:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+.v-history__pass { display: inline-flex; align-items: center; gap: var(--space-sm); color: var(--c-text-secondary); font-size: 12px; }
+.v-history__meter { position: relative; width: 48px; height: 4px; border-radius: var(--radius-pill); background: var(--c-accent); overflow: hidden; }
+.v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
+/* With the report open, Status and Updated give their room to the campaign (the report names its status). */
+.v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+.v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
+.v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
+.v-history__acts { display: inline-flex; gap: var(--space-xs); }
 .v-history__form { display: flex; align-items: flex-start; gap: var(--space-md); }
 .v-history__q { flex: 3; min-width: 0; }
 .v-history__repo { flex: 2; min-width: 0; }
@@ -151,7 +174,8 @@
 .v-history__panebody .v-home__report { border: 0; padding: 0; max-height: none; color: var(--c-text); font-size: 12px; line-height: 18px; background: transparent; }
 
 /* Settings: one column, the checks with their fixes. */
-.v-settings__checks { margin-top: var(--space-md); display: flex; flex-direction: column; gap: var(--space-xs); }
+.v-settings__checks { margin-top: var(--space-md); }
+.v-settings__checks .v-panel__end .v-checked { margin: 0; }
 .v-settings__checks .v-home__checks { margin: 0; padding: 0; list-style: none; }
 .v-settings__checks .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
 
@@ -173,6 +197,9 @@
   .v-shell { grid-template-columns: 56px 1fr; }
   .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
   .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* Folded, the traffic lights overhang the 56 px rail: the rail keeps a title-bar-high gap, and screen heads clear the lights. */
+  .v-shell--overlay .v-shell__nav { padding-top: var(--titlebar-h); }
+  .v-shell--overlay :is(.v-screen__head, .v-crew__head) { padding-left: 32px; }
   .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .v-shell .v-shell__nav :is(.v-shell__link, .v-shell__search) .v-kbd-group { display: none; }
   .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
@@ -181,8 +208,7 @@
   .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
   .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
   .v-crew__head { padding: 0 var(--space-md); }
-  .v-history .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
-  .v-history .v-table th:nth-child(1) { width: 180px; }
+  .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
   .v-history__body--open .v-history__main { display: none; }
   .v-history__pane { border-left: 0; }

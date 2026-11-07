@@ -1,7 +1,7 @@
 ---
 version: alpha
 name: Vajra Desktop
-description: Graphite. A dense, keyboard-first macOS tool in the Linear and Raycast family. Graphite neutrals in dark and light, one azure for the primary action, the selection's live state and the live line.
+description: Graphite. A dense, keyboard-first macOS tool in the Linear and Raycast family. Graphite neutrals in dark and light, an ink primary action, and one azure for focus, the selection's live state and the live line.
 colors:
   background: "#101113"
   surface: "#16171a"
@@ -14,6 +14,9 @@ colors:
   text-muted: "#8f929b"
   primary: "#7aa7ff"
   text-on-primary: "#0b1020"
+  action: "#ededef"
+  text-on-action: "#101113"
+  panel: "#141518"
   success: "#5fd38d"
   warning: "#f0b44c"
   danger: "#ff7070"
@@ -30,6 +33,9 @@ colors:
   light-text-muted: "#5f626b"
   light-primary: "#2556c8"
   light-text-on-primary: "#ffffff"
+  light-action: "#18191c"
+  light-text-on-action: "#ffffff"
+  light-panel: "#ffffff"
   light-success: "#1a7341"
   light-warning: "#855600"
   light-danger: "#c0282b"
@@ -47,7 +53,7 @@ typography:
 rounded: {none: 0px, sm: 4px, md: 6px, lg: 10px, full: 9999px}
 spacing: {xs: 4px, sm: 8px, md: 12px, lg: 16px, xl: 24px, xxl: 32px, control-sm: 24px, row: 28px, control-lg: 32px, target-min: 24px, sidebar: 240px, action-bar: 40px, dock: 320px}
 components:
-  button-primary: {backgroundColor: "{colors.primary}", textColor: "{colors.text-on-primary}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
+  button-primary: {backgroundColor: "{colors.action}", textColor: "{colors.text-on-action}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   button-secondary: {backgroundColor: "{colors.surface-elevated}", textColor: "{colors.text}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   button-danger: {backgroundColor: "{colors.surface-elevated}", textColor: "{colors.danger}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   list-row: {backgroundColor: "{colors.background}", textColor: "{colors.text}", typography: "{typography.body-md}", rounded: "{rounded.md}", height: 28px, padding: 8px}
@@ -73,7 +79,7 @@ components:
   surface-light: {backgroundColor: "{colors.light-surface}", textColor: "{colors.light-text-secondary}"}
   popover-light: {backgroundColor: "{colors.light-surface-elevated}", textColor: "{colors.light-text-muted}"}
   list-row-selected-light: {backgroundColor: "{colors.light-accent}", textColor: "{colors.light-text}"}
-  button-primary-light: {backgroundColor: "{colors.light-primary}", textColor: "{colors.light-text-on-primary}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
+  button-primary-light: {backgroundColor: "{colors.light-action}", textColor: "{colors.light-text-on-action}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   separator-light: {backgroundColor: "{colors.light-border}", width: 1px}
   input-outline-light: {backgroundColor: "{colors.light-border-strong}", width: 1px}
   focus-ring-light: {backgroundColor: "{colors.light-focus-ring}", width: 2px}
@@ -132,10 +138,24 @@ in UX.md section 2; the run health that sat there (guard, engine, memory) moves 
 (not built yet). UX.md sections 2 and 3 record the change. The bar lists only actions the screen can
 run today: Check again on Home, none yet on Crew until Message, Redirect and Stop are wired.
 
-**What azure means.** Only three things: the one primary action on a view, the live line (the run
+**The primary action is ink.** The one primary button on a view is filled with the text colour
+(`action`: near-white on dark, near-black on light), the way the native toolbars beside it are
+(polish pass, owner decision 2026-11-07). It is the loudest thing on the view without being a hue.
+
+**What azure means.** Only three things: focus, the live line (the run
 that is running, the stream line being written), and a working status *inside the selected row*. A
 busy crew must not turn blue, so working agents elsewhere are ink (`text-secondary`). Text never
 uses azure except a link or a match highlight in the palette.
+
+**Panels.** A list, table or form sits in a panel: a 1 px border, the large radius, a 44 px bar with
+its title (and quiet meta or an action at the end), then the rows edge to edge. Table headers are a
+quiet 34 px band in `surface`; rows are 52 px with two lines where there is a name and an id (goal
+over slug). Times in lists read relative ("2 days ago") with the exact time as the tooltip. Status
+badges are pills: a 10% tint and a 35% edge of the status colour behind status-coloured text.
+
+**Window.** On macOS the title bar is an overlay: the traffic lights sit in the sidebar's top row,
+beside the brand, and that row and every screen head drag the window. Settings sits at the foot of
+the sidebar.
 
 **Defaults rejected.**
 - Identical stacked cards for workers → one row per worker, grouped by what it needs from you
@@ -195,8 +215,10 @@ cast, so azure reads as the only hue in the chrome.
 | border | Separators and pane edges (never the only cue) |
 | border-strong | Input and control outlines, floating layer edges (3:1 rule) |
 | text / text-secondary / text-muted | Content / labels and working status / metadata and timestamps |
-| primary | One primary button per view, the live line, working status in the selected row |
-| text-on-primary | Label on the primary fill |
+| primary | Focus, the on switch, the live line, working status in the selected row |
+| text-on-primary | Label on an azure fill (the skip link, the on switch) |
+| action / text-on-action | The primary button's ink fill and its label |
+| panel | The raised sheet that holds a list, table or form (`.v-panel`): white on light, one step above the background on dark |
 | success / warning / danger / info | Status only, always with a shape and a label |
 | focus-ring | 2 px ring, 2 px offset |
 
@@ -235,7 +257,8 @@ Text pairs need 4.5:1; border-strong and focus-ring need 3:1.
 | border-strong #7c7f88 | 3.87 | 3.64 | 4.00 | 3.31 |
 
 The lowest text pair is light danger on accent, 4.85:1. **On primary:** #0b1020 on #7aa7ff is 7.93:1;
-white on #2556c8 is 6.47:1. Info is teal, not a second blue, so "ready" never reads as "live".
+white on #2556c8 is 6.47:1. **On action:** #101113 on #ededef is 16.16:1; white on #18191c is
+17.58:1. On a panel every text and status colour stays at 4.5:1 or more (lowest dark text-muted, 5.87:1). Info is teal, not a second blue, so "ready" never reads as "live".
 
 **Terminal ANSI 16.** Every entry is at least 4.5:1 on its theme's background (lowest 5.06 dark,
 ansi black; 4.77 light, ansi cyan), because agents print in all 16 colours.
@@ -393,7 +416,7 @@ every duration to 0.
 - Don't use ALL-CAPS tracked labels, letter-spacing, or meta strings joined with middle dots.
 - Don't mark selection with a coloured side rail; use the accent fill.
 - Don't use Unicode symbols or emoji as icons; use the SVG set and the status shapes.
-- Do keep azure to the primary action, the live line and the selected row's live state; status
+- Do keep azure to focus, the live line and the selected row's live state; status
   colours only for status.
 - Do build hierarchy from size, weight and spacing first, then colour.
 - Do show keys next to actions (the action bar, the palette, buttons with a shortcut).

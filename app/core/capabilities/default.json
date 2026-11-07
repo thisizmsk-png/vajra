@@ -1,6 +1,11 @@
 {
   "identifier": "default",
-  "description": "Core permissions for the main window only. No shell or fs plugins.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Core permissions for the main window only, plus dragging the window by its overlay title bar. No shell or fs plugins.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
 }
