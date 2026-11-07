@@ -1725,3 +1725,37 @@ fn a_forced_list_refresh_reaches_the_hooks_default_calls_with_a_new_verify() {
     // The new verdict is cached again: further default calls reuse it.
     assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
 }
+
+/// Review of #50: a forced list refresh that finds a verify already in flight must not be answered by that older
+/// flight. The hook's follow-up (default `refresh=false`) has to end in a verify that started after the refresh.
+#[test]
+fn a_forced_list_refresh_during_a_running_verify_is_answered_by_a_newer_verify() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    // Reads the key when it starts, then takes a while: the verdict reflects the key as of the start.
+    let started = t.0.join("verify-started");
+    fs::write(&sh, format!("#!/bin/bash\nk=$(cat \"$HOME/.claude/vajra/stand-in.key\" 2>/dev/null)\ntouch '{}'\nsleep 0.8\n[ \"$k\" = K1 ] && exit 0\nexit 3\n", started.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let key = t.home().join(".claude/vajra/stand-in.key");
+    fs::write(&key, "K1").unwrap();
+    let app = t.app();
+    std::thread::scope(|s| {
+        let old = s.spawn(|| app.campaign_integrity("c1", false).unwrap()["integrity"].clone());
+        for _ in 0..500 { // the first verify has read K1 and is running once it says so
+            if started.exists() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists());
+        fs::write(&key, "K2").unwrap();
+        assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "checking");
+        // What the hook does for the "checking" row.
+        assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed", "not the pre-refresh flight's ok");
+        assert_eq!(old.join().unwrap(), "ok", "the older flight itself still ends with what it saw");
+    });
+    // The newer verdict is the one kept.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
+}

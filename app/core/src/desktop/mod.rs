@@ -90,6 +90,9 @@ enum Verdict {
 struct Verdicts {
     by_slug: HashMap<String, Verdict>,
     last: HashMap<String, u64>,
+    /// A forced list refresh asked for a verify that starts after this ticket. Until one settles, nothing older may
+    /// answer for the campaign: not a kept verdict, not a verify that was already running when the refresh was asked.
+    floor: HashMap<String, u64>,
 }
 
 /// Ends a flight even if the verify panics, so waiters are never left hanging.
@@ -786,10 +789,12 @@ impl App {
     /// A real verdict still inside `verdict_ttl`, or `None` (a verify running, none taken, expired, or "unknown").
     /// Forget a kept verdict so the next check of `slug` verifies again. A verify in flight is left alone.
     fn forget_fresh(&self, slug: &str) {
+        let floor = self.ticket();
         let mut m = lock(&self.verdicts);
         if matches!(m.by_slug.get(slug), Some(Verdict::Fresh(..))) {
             m.by_slug.remove(slug);
         }
+        m.floor.insert(slug.to_string(), floor);
     }
 
     fn cached_integrity(&self, slug: &str) -> Option<&'static str> {
@@ -827,6 +832,8 @@ impl App {
         }
         let flight: Flight = loop {
             let mut m = lock(&self.verdicts);
+            // A pending forced list refresh makes this call a refresh too (the follow-up calls carry no flag).
+            let refresh = refresh || m.floor.contains_key(slug);
             let waiting = match m.by_slug.get(slug) {
                 Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return (v, None),
                 Some(Verdict::Flying(f)) => Some(f.clone()),
@@ -838,7 +845,7 @@ impl App {
                 while got.is_none() {
                     got = f.1.wait(got).unwrap_or_else(|e| e.into_inner());
                 }
-                if !refresh {
+                if !refresh && !lock(&self.verdicts).floor.contains_key(slug) {
                     return (got.unwrap_or("unknown"), None);
                 }
                 continue;
@@ -889,6 +896,9 @@ impl App {
     /// worst it shows for one TTL after a repair, and an explicit verify or `refresh` clears it.
     fn settle(&self, slug: &str, verdict: &'static str, ticket: u64) {
         let mut m = lock(&self.verdicts);
+        if m.floor.get(slug).is_some_and(|f| ticket > *f) {
+            m.floor.remove(slug); // this check read the campaign after the refresh was asked for
+        }
         let last = m.last.get(slug).copied().unwrap_or(0);
         if ticket < last && verdict != "failed" {
             return;
