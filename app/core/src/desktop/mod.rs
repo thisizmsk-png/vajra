@@ -41,6 +41,9 @@ const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 /// Evidence checks run this many at a time, each for at most `EVIDENCE_TIMEOUT`.
 const EVIDENCE_WORKERS: usize = 4;
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The whole of one `evidence_list` call (every batch together) may take this long. A campaign can hold 500 tasks, so
+/// without it a slow check per task would occupy the request for many minutes; checks not started by then read `unverified`.
+const EVIDENCE_BUDGET: Duration = Duration::from_secs(30);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -152,6 +155,8 @@ pub struct App {
     pub log: Option<Arc<Logger>>,
     /// How long one evidence check may run before its criterion reads `unverified`.
     evidence_timeout: Duration,
+    /// Total time one `evidence_list` call may spend running checks.
+    evidence_budget: Duration,
 }
 
 impl App {
@@ -187,6 +192,7 @@ impl App {
             control: Arc::new(Mutex::new(svc)),
             runs: Mutex::new(HashMap::new()),
             evidence_timeout: EVIDENCE_TIMEOUT,
+            evidence_budget: EVIDENCE_BUDGET,
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
             issued: Mutex::new(Default::default()),
@@ -661,7 +667,7 @@ impl App {
     /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
     /// `pass` = the task's signed evidence checks green; `unverified` = evidence exists but its check is red, unreadable,
     /// timed out or cannot be located (never counted as pass); `fail` = the task failed; `not_run` = no evidence yet
-    /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time.
+    /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The command text and exit codes live in the evidence file and are not read here (only the count of commands).
     pub fn evidence_list(&self, slug: &str) -> Res {
         if !bus::valid_stream_id(slug) {
@@ -677,9 +683,17 @@ impl App {
             .filter_map(|(i, t)| self.evidence_request(slug, t).map(|r| (i, r)))
             .collect();
         let mut verdict: HashMap<usize, bool> = HashMap::new();
-        let mut bridge = self.bridge.clone();
-        bridge.timeout = self.evidence_timeout;
+        let deadline = std::time::Instant::now() + self.evidence_budget;
+        let mut truncated = false;
         for batch in jobs.chunks(EVIDENCE_WORKERS) {
+            // Out of budget: the checks not yet started stay unverified (never pass), and the reply says so.
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                truncated = true;
+                break;
+            }
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = self.evidence_timeout.min(left);
             let got: Vec<(usize, bool)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = batch
                     .iter()
@@ -726,7 +740,7 @@ impl App {
                 }));
             }
         }
-        Ok(json!({"slug": slug, "stale": snap.stale, "rows": rows}))
+        Ok(json!({"slug": slug, "stale": snap.stale, "truncated": truncated, "rows": rows}))
     }
 
     /// An archived bundle (under the campaign's evidence dir) is checked

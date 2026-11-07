@@ -1282,6 +1282,22 @@ fn evidence_checks_are_bounded_and_a_slow_one_is_unverified_not_a_hang() {
 }
 
 #[test]
+fn evidence_list_has_a_total_budget_so_many_slow_checks_cannot_hold_the_request() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks: Vec<Value> = (0..40).map(|i| ev_task(&d, &format!("s{i}"), "done", &["ac"], "slow")).collect();
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_millis(700);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    // Unbounded this is 10 batches x 400 ms = 4 s.
+    assert!(start.elapsed() < Duration::from_millis(2500), "{:?}", start.elapsed());
+    assert_eq!(r["truncated"], true, "{r}");
+    assert_eq!(row(&r, "s39", "ac")["status"], "unverified");
+}
+
+#[test]
 fn evidence_list_rejects_a_bad_slug_and_reports_an_unknown_campaign() {
     let t = Tmp::new();
     let app = t.app();
