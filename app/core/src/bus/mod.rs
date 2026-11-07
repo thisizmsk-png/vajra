@@ -32,6 +32,10 @@ pub const SPILL_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 /// Events queued per subscriber before it is dropped to a snapshot.
 pub const QUEUE_CAP: usize = 1024;
 /// Longer lines are truncated (at a char boundary) on push.
+/// One index entry per this many lines (by seq).
+const INDEX_EVERY: u64 = 128;
+/// Most line text one `read_spill_before` call returns (the lines nearest the target are kept; fewer if they are long).
+const BEFORE_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// Bookkeeping charged per line on top of its text, so many tiny lines are
 /// still bounded by the budget.
@@ -81,6 +85,17 @@ pub struct Tail {
     /// Logical spill offsets for `read_spill`: [spill_start, spill_end).
     pub spill_start: u64,
     pub spill_end: u64,
+}
+
+/// Result of `read_spill_before`.
+#[derive(Debug, Default)]
+pub struct SpillBefore {
+    /// Contiguous lines ending at the line just before the requested seq, oldest first.
+    pub lines: Vec<Line>,
+    /// True when no older line exists (the first line returned, or none, is the oldest the core still holds).
+    pub at_start: bool,
+    /// True when the spill was evicted while reading.
+    pub gap: bool,
 }
 
 /// Result of `read_spill`.
@@ -173,6 +188,9 @@ struct Stream {
     spill_base: u64,
     /// Physical length of the current spill file.
     spill_len: u64,
+    /// `(seq, logical offset)` of every `INDEX_EVERY`th line in the current spill file: lets a reader that wants the
+    /// lines just before some seq start near them instead of at the start of the file.
+    spill_index: Vec<(u64, u64)>,
     spill_disabled: bool,
     spill_dropped: u64,
     last_used: u64,
@@ -329,6 +347,7 @@ impl Bus {
                         spill: None,
                         spill_base: 0,
                         spill_len: 0,
+                        spill_index: Vec::new(),
                         spill_disabled: false,
                         spill_dropped: 0,
                         last_used: 0,
@@ -385,7 +404,11 @@ impl Bus {
             return;
         }
         let mut buf = Vec::new();
+        let mut marks: Vec<(u64, u64)> = Vec::new();
         for line in lines {
+            if line.seq % INDEX_EVERY == 0 {
+                marks.push((line.seq, s.spill_base + s.spill_len + buf.len() as u64));
+            }
             encode(line, &mut buf);
         }
         let wrote = (|| -> io::Result<()> {
@@ -397,6 +420,7 @@ impl Bus {
         match wrote {
             Ok(()) => {
                 s.spill_len += buf.len() as u64;
+                s.spill_index.extend(marks);
                 inner.spill_total += buf.len() as u64;
             }
             Err(_) => {
@@ -432,6 +456,7 @@ impl Bus {
             s.spill_base += s.spill_len;
             inner.spill_total -= s.spill_len;
             s.spill_len = 0;
+            s.spill_index.clear();
         }
     }
 
@@ -553,6 +578,79 @@ impl Bus {
         page.next_offset = start + pos as u64;
         page.end = page.next_offset >= end;
         Ok(page)
+    }
+
+    /// Up to `max_lines` lines immediately before `before_seq`, oldest first, from the spill and (for the newest part)
+    /// the in-memory ring, so they are adjacent to a reader whose window starts at `before_seq`. Starts at the nearest
+    /// index entry at or before `before_seq - max_lines`, so the cost is about `max_lines` lines, not the spill's size.
+    pub fn read_spill_before(&self, stream: &str, before_seq: u64, max_lines: usize) -> io::Result<SpillBefore> {
+        self.read_spill_before_with(stream, before_seq, max_lines, &|| {})
+    }
+
+    /// `between` runs after the ring and index were captured and before the spill is read (tests force an eviction there).
+    pub(crate) fn read_spill_before_with(&self, stream: &str, before_seq: u64, max_lines: usize, between: &dyn Fn()) -> io::Result<SpillBefore> {
+        let max_lines = max_lines.max(1);
+        let (base, start, ring): (u64, u64, Vec<Line>) = {
+            let inner = lock(&self.inner);
+            let Some(s) = inner.streams.get(stream) else {
+                return Ok(SpillBefore { at_start: true, ..SpillBefore::default() });
+            };
+            let want = before_seq.saturating_sub(max_lines as u64 + 1);
+            let start = s.spill_index.iter().rev().find(|(q, _)| *q <= want).map_or(s.spill_base, |(_, o)| *o);
+            let ring = s.ring.iter().filter(|l| l.seq < before_seq).cloned().collect();
+            (s.spill_base, start, ring)
+        };
+        // Keep the lines nearest `before_seq`: when their text outgrows the byte budget the OLDEST are dropped (never the
+        // newest), so the result is always adjacent to the reader's window, with fewer lines if they are long.
+        between();
+        let mut lines: std::collections::VecDeque<Line> = std::collections::VecDeque::new();
+        let mut held = 0usize;
+        let mut trimmed = false;
+        let mut offset = start;
+        loop {
+            let page = self.read_spill(stream, offset, 64 * 1024)?;
+            if page.gap && offset != base {
+                // The spill was evicted while we read. The lines the ring still holds are real and adjacent to the
+                // window: return them (the reader marks the hole), and say `gap` so it knows to retry.
+                let skip = ring.len().saturating_sub(max_lines);
+                return Ok(SpillBefore { lines: ring.into_iter().skip(skip).collect(), at_start: false, gap: true });
+            }
+            let mut reached = false;
+            for l in page.lines {
+                if l.seq >= before_seq {
+                    reached = true;
+                    break;
+                }
+                held += l.text.len();
+                lines.push_back(l);
+                while held > BEFORE_BUDGET_BYTES && lines.len() > 1 {
+                    held -= lines.pop_front().map_or(0, |o| o.text.len());
+                    trimmed = true;
+                }
+            }
+            if reached || page.end {
+                break;
+            }
+            offset = page.next_offset;
+        }
+        // The ring continues where the spill ends.
+        let last = lines.back().map_or(0, |l| l.seq);
+        for l in ring.into_iter().filter(|l| l.seq > last) {
+            held += l.text.len();
+            lines.push_back(l);
+        }
+        while held > BEFORE_BUDGET_BYTES && lines.len() > 1 {
+            held -= lines.pop_front().map_or(0, |o| o.text.len());
+            trimmed = true;
+        }
+        // Nothing older exists only if we began at the first byte of the spill and nothing was cut off the front.
+        let began_at_start = start == base;
+        let at_start = began_at_start && !trimmed && lines.len() <= max_lines;
+        let mut lines: Vec<Line> = lines.into();
+        if lines.len() > max_lines {
+            lines.drain(..lines.len() - max_lines);
+        }
+        Ok(SpillBefore { lines, at_start, gap: false })
     }
 
     /// The last `max_lines` ring lines plus counters, for a subscriber that

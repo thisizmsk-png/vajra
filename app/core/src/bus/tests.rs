@@ -407,3 +407,113 @@ fn bus_spill_never_follows_or_truncates_a_planted_link() {
     }
     assert_eq!(fs::read_to_string(&victim).unwrap(), "precious", "a link at the spill name must not be written through");
 }
+
+#[test]
+fn bus_read_spill_before_returns_the_lines_just_before_a_seq_and_walks_back_to_the_start() {
+    let tmp = TmpDir::new("before");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=5_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let ring_first = bus.tail("s", 0, usize::MAX).lines[0].seq;
+    assert!(ring_first > 3_000, "most lines are in the spill: ring starts at {ring_first}");
+    // A window that starts a little after the core ring does (the UI keeps fewer rows than the core).
+    let mut before = ring_first + 10;
+    let mut seen: Vec<u64> = Vec::new();
+    loop {
+        let p = bus.read_spill_before("s", before, 1_000).unwrap();
+        assert!(!p.gap);
+        let seqs: Vec<u64> = p.lines.iter().map(|l| l.seq).collect();
+        assert!(!seqs.is_empty());
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "contiguous");
+        assert_eq!(*seqs.last().unwrap(), before - 1, "adjacent to the window, not to the start of the spill");
+        assert_eq!(p.lines.last().unwrap().text.as_ref(), format!("line {}", before - 1));
+        seen.splice(0..0, seqs.clone());
+        before = seqs[0];
+        if p.at_start {
+            break;
+        }
+        assert_eq!(seqs.len(), 1_000, "a page is full unless it reaches the start");
+    }
+    assert_eq!(seen, (1..=ring_first + 9).collect::<Vec<_>>(), "every line exactly once, in order, from the first");
+}
+
+#[test]
+fn bus_read_spill_before_reads_only_near_the_target_not_the_whole_spill() {
+    let tmp = TmpDir::new("beforecost");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=60_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let start = Instant::now();
+    let p = bus.read_spill_before("s", 59_000, 1_000).unwrap();
+    assert_eq!(p.lines.len(), 1_000);
+    assert_eq!(p.lines[0].seq, 58_000);
+    assert!(!p.at_start);
+    assert!(start.elapsed() < Duration::from_millis(500), "{:?}", start.elapsed());
+}
+
+#[test]
+fn bus_read_spill_before_keeps_the_lines_adjacent_to_the_target_when_long_lines_exceed_the_byte_budget() {
+    let tmp = TmpDir::new("beforelong");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    // 600 lines of ~60 KiB: 1,000 of them would be far over the page budget, and the target is deep in the spill.
+    let body = "x".repeat(60 * 1024);
+    for i in 1..=600u64 {
+        bus.push("s", &format!("{i} {body}")).unwrap();
+    }
+    let mut before = 500u64;
+    let mut seen: Vec<u64> = Vec::new();
+    loop {
+        let p = bus.read_spill_before("s", before, 1_000).unwrap();
+        assert!(!p.gap);
+        let seqs: Vec<u64> = p.lines.iter().map(|l| l.seq).collect();
+        assert!(!seqs.is_empty());
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "contiguous");
+        assert_eq!(*seqs.last().unwrap(), before - 1, "the lines just before the window, never an older prefix");
+        assert!(p.lines.iter().map(|l| l.text.len()).sum::<usize>() <= 4 * 1024 * 1024 + 64 * 1024);
+        seen.splice(0..0, seqs.clone());
+        before = seqs[0];
+        if p.at_start {
+            break;
+        }
+        assert!(seqs.len() < 1_000, "long lines make a page shorter than the line count asked for");
+    }
+    assert_eq!(seen, (1..=499).collect::<Vec<_>>(), "every line exactly once, in order, nothing skipped");
+}
+
+#[test]
+fn bus_read_spill_before_keeps_the_ring_lines_when_the_spill_is_evicted_mid_read() {
+    let tmp = TmpDir::new("beforeevict");
+    // "old" spills ~6 KB under an 8 KB cap; a burst on another stream (inside the read) evicts it, least-recently-used first.
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    let burst = || {
+        for i in 0..400 {
+            bus.push("other", &format!("other line {i:04}")).unwrap();
+        }
+    };
+    let p = bus.read_spill_before_with("old", 299, 5, &burst).unwrap();
+    assert!(p.gap, "the eviction is reported");
+    assert!(!p.at_start);
+    let seqs: Vec<u64> = p.lines.iter().map(|l| l.seq).collect();
+    assert!(!seqs.is_empty(), "the ring lines captured for this request are kept, not discarded");
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1) && *seqs.last().unwrap() == 298, "{seqs:?}");
+    assert!(seqs.len() <= 5);
+    // A retry now starts from the new spill base and succeeds without a gap.
+    let again = bus.read_spill_before("old", 299, 5).unwrap();
+    assert!(!again.gap && again.lines.last().map(|l| l.seq) == Some(298), "{again:?}");
+}
+
+#[test]
+fn bus_read_spill_before_on_an_unknown_stream_or_nothing_before_is_empty_at_start() {
+    let tmp = TmpDir::new("beforenone");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    let p = bus.read_spill_before("nope", 10, 100).unwrap();
+    assert!(p.lines.is_empty() && p.at_start);
+    bus.push("s", "only").unwrap();
+    let p = bus.read_spill_before("s", 1, 100).unwrap();
+    assert!(p.lines.is_empty() && p.at_start);
+}

@@ -3,6 +3,8 @@
 //!   desktop-control line with the same id; every resume has its resume line;
 //! - every desktop-control line carrying an id has a ledger action;
 //! - the app's own `mcp <tool> id=<action_id>` line for a Lead call is joined by id like the others (ADR-13 6);
+//! - a plan decision (ADR-14) that reached its final state (`approve` delivered, `reject` done) has an
+//!   `approve id=` / `reject id=` line; a `requested` or `failed` one has none;
 //! - an `ask` ledger action (ADR-13) has no audit line and is skipped;
 //! - every guard `ALLOW mcp__vajra-desktop__<tool>` line has a ledger
 //!   `via:"mcp"` action of that kind within 5 s, and the reverse.
@@ -61,7 +63,7 @@ fn parse_line(l: &str) -> Option<Line> {
     if tool == "desktop-control" {
         let reason = rest.strip_prefix("reason=\"")?.strip_suffix('"')?;
         let mut words = reason.split(' ');
-        if !matches!(words.next()?, "deliver" | "stop" | "resume" | "mcp") {
+        if !matches!(words.next()?, "deliver" | "stop" | "resume" | "mcp" | "approve" | "reject") {
             return None; // nonce echo, steer tag warnings: not an action
         }
         let id = words.find_map(|w| w.strip_prefix("id="))?;
@@ -137,7 +139,9 @@ pub fn run(ledger_path: &Path, audit_log: &Path) -> io::Result<Report> {
         let a = &acts[id];
         rep.checked += 1;
         let needs_control = (matches!(a.kind.as_str(), "message" | "redirect" | "stop") && a.last_state == "delivered")
-            || a.kind == "resume";
+            || a.kind == "resume"
+            || (a.kind == "approve" && a.last_state == "delivered")
+            || (a.kind == "reject" && a.last_state == "done");
         let missing_control = needs_control && !control_ids.contains(id);
         let missing_guard = a.mcp && !used.contains(id);
         if missing_control || missing_guard {

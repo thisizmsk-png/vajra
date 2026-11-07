@@ -38,6 +38,39 @@ const MAX_PAGE: usize = 64 * 1024;
 /// Largest worker meta file and workflow journal read whole (both are Claude Code files; over-limit ones are skipped).
 const MAX_META_BYTES: u64 = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Evidence checks run this many at a time, each for at most `EVIDENCE_TIMEOUT`.
+const EVIDENCE_WORKERS: usize = 4;
+const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(4);
+/// The whole of one `evidence_list` call (every batch together) may take this long. A campaign can hold 500 tasks, so
+/// without it a slow check per task would occupy the request for many minutes; checks not started by then read `checking`
+/// and the next call (the UI re-asks while any row is `checking`) continues from the cached verdicts.
+const EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
+/// Verdicts kept for unchanged evidence (cleared when it grows past this).
+const EVIDENCE_CACHE_MAX: usize = 512;
+// A check must be able to get its full timeout inside one call's budget, or "checking" could never turn into a verdict.
+const _: () = assert!(EVIDENCE_TIMEOUT.as_secs() <= EVIDENCE_BUDGET.as_secs());
+/// A check that timed out or could not start is remembered as unverified this long, so a hung check is not re-run (and the
+/// checks queued behind it starved) on every call.
+/// The evidence file read for a criterion's detail, the output tail kept per failed command, and how many commands are listed.
+const PROOF_FILE_MAX: u64 = 64 * 1024;
+const PROOF_LOG_TAIL: u64 = 4 * 1024;
+const PROOF_CMDS_MAX: usize = 50;
+const PROOF_TEXT_MAX: usize = 2000;
+/// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
+/// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
+const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
+/// What the run itself writes into its repo, so it is not an edit to the verified tree: `vajra-verify-work.sh` excludes the
+/// walkthrough dir (evidence, `cmd-N.log`, `diff.patch`, `untracked.txt`) from its own tree-stability check, and crew
+/// worktrees live under `.claude/worktrees/`. Keep in step with `EXCL` in `scripts/vajra-verify-work.sh`.
+const RUN_OWN_OUTPUT: [&str; 2] = ["data/walkthroughs", ".claude/worktrees"];
+/// A repo whose state could not be read (git failed or was slow) is not asked again for this long.
+const WORKTREE_STATE_UNKNOWN_TTL: Duration = Duration::from_secs(30);
+const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
+const EVIDENCE_FAILED_TTL: Duration = Duration::from_secs(60);
+/// Evidence files larger than this are always re-checked (their bytes are the cache key).
+const EVIDENCE_KEY_MAX: u64 = 16 * 1024;
+/// A verdict for evidence checked in a repo depends on the repo's state, which the key cannot see: it is reused this long.
+const EVIDENCE_LIVE_TTL: Duration = Duration::from_secs(5);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -65,6 +98,8 @@ struct Run {
     nonces: Redactor,
 }
 
+/// Untracked file names `diff` lists.
+const UNTRACKED_MAX: usize = 200;
 const LIST_VERIFY_WORKERS: usize = 4;
 /// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
 /// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
@@ -110,6 +145,14 @@ impl Drop for FlightGuard<'_> {
 }
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+enum Outcome {
+    Verdict(bool),
+    TimedOut,
+    Failed,
+}
+
+type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
+
 pub struct App {
     data: PathBuf,
     home: PathBuf,
@@ -140,7 +183,23 @@ pub struct App {
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
     lead: lead::LeadState,
+    /// Plan id -> the `plan_sha256` the last `inbox` call showed for it. `approve_plan` needs it to match.
+    shown: Mutex<HashMap<String, String>>,
+    /// Plan ids being decided right now: one decision per plan at a time.
+    deciding: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
+    /// How long one evidence check may run before its criterion reads `unverified`.
+    evidence_timeout: Duration,
+    /// Total time one `evidence_list` call may spend running checks.
+    evidence_budget: Duration,
+    /// Verdicts of finished checks, keyed on the evidence file's exact bytes plus head, mode and repo, so a rewritten file
+    /// (whatever it does to size or mtime) is always re-checked. Archived bundles depend on nothing else and are kept; a
+    /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
+    evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
+    /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
+    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, bool)>)>>,
+    /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
+    sweeping: Mutex<std::collections::HashSet<String>>,
 }
 
 impl App {
@@ -158,6 +217,8 @@ impl App {
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
+            shown: Mutex::new(HashMap::new()),
+            deciding: Mutex::new(Default::default()),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verdicts: Mutex::new(Verdicts::default()),
@@ -173,6 +234,11 @@ impl App {
             bus,
             control: Arc::new(Mutex::new(svc)),
             runs: Mutex::new(HashMap::new()),
+            evidence_timeout: EVIDENCE_TIMEOUT,
+            evidence_budget: EVIDENCE_BUDGET,
+            evidence_cache: Mutex::new(HashMap::new()),
+            worktree_state: Mutex::new(HashMap::new()),
+            sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
             issued: Mutex::new(Default::default()),
@@ -328,6 +394,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+    }
+
+    /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
+    /// is not a workflow identity, so plan ids keep naming the run of the workflow that produced the plan.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn launch_kind(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+        workflow: bool,
+    ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
         let nonce = {
@@ -364,7 +446,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run_cwd(run_id, cwd).is_err() {
+        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
@@ -598,6 +680,16 @@ impl App {
         Ok(json!({"lines": lines_json(&p.lines), "next_offset": p.next_offset, "gap": p.gap, "end": p.end}))
     }
 
+    /// The `max_lines` (at most 1000) lines just before `before_seq`, for "Load earlier": adjacent to the reader's window,
+    /// whatever the size of the spill.
+    pub fn read_spill_before(&self, stream: &str, before_seq: u64, max_lines: usize) -> Res {
+        if !bus::valid_stream_id(stream) {
+            return Err(invalid("stream", "not a stream id"));
+        }
+        let p = self.bus.read_spill_before(stream, before_seq, max_lines.clamp(1, 1000)).map_err(|e| fail("io_error", e))?;
+        Ok(json!({"lines": lines_json(&p.lines), "at_start": p.at_start, "gap": p.gap}))
+    }
+
     pub fn task(&self, slug: &str, task_id: &str) -> Res {
         let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
         let found = snap
@@ -618,9 +710,303 @@ impl App {
         Ok(json!({"task": task, "stale": snap.stale, "evidence": evidence}))
     }
 
+    /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
+    /// `pass` = the task's signed evidence checks green; `unverified` = evidence exists but its check is red, unreadable,
+    /// timed out or cannot be located (never counted as pass); `checking` = its check has not run yet (over the call's time
+    /// budget, or another sweep is running); `fail` = the task failed; `not_run` = no evidence yet
+    /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
+    /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
+    pub fn evidence_list(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        // The budget covers the whole call, the repo-state reads included.
+        let deadline = std::time::Instant::now() + self.evidence_budget;
+        let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
+        let Some(tasks) = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array) else {
+            return Err(fail("not_found", "no tasks for this campaign"));
+        };
+        // The key is the evidence file's exact bytes (small files only) with head, mode and repo: nothing a writer can leave
+        // unchanged while changing what the check sees. A file too large or unreadable is never cached.
+        let key = |req: &Request| -> Option<EvKey> {
+            let Request::CheckEvidence { path, head, archived, repo } = req else { return None };
+            let f = std::fs::File::open(path).ok()?;
+            if f.metadata().ok()?.len() > EVIDENCE_KEY_MAX {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(f, EVIDENCE_KEY_MAX + 1), &mut bytes).ok()?;
+            (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (path.clone(), bytes, head.clone(), archived.clone(), repo.clone()))
+        };
+        let mut verdict: HashMap<usize, bool> = HashMap::new();
+        let mut repo_of: HashMap<usize, PathBuf> = HashMap::new();
+        let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
+        {
+            let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            for (i, t) in tasks.iter().enumerate() {
+                let Some(req) = self.evidence_request(slug, t) else {
+                    // Evidence that cannot be checked here (outside the campaign, `..` path, no repo) is unverified, not pending.
+                    if t.get("evidence").is_some_and(|e| !e.is_null()) { verdict.insert(i, false); }
+                    continue;
+                };
+                if let Request::CheckEvidence { repo: Some(r), .. } = &req {
+                    repo_of.insert(i, r.clone());
+                }
+                let k = key(&req);
+                let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
+                match hit {
+                    Some((v, _)) => { verdict.insert(i, *v); }
+                    None => jobs.push((i, req, k)),
+                }
+            }
+        }
+        // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
+        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                if self.2 { self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1); }
+            }
+        }
+        let _release = Release(&self.sweeping, slug.to_string(), claimed);
+        for batch in jobs.chunks(EVIDENCE_WORKERS) {
+            if !claimed {
+                break;
+            }
+            // Out of budget: the checks not yet started read `checking` (never pass).
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = self.evidence_timeout.min(left);
+            // A check cut short by the remaining budget (not by its own full timeout) did not get a fair run: `checking`, not `unverified`.
+            let cut_by_budget = left < self.evidence_timeout;
+            let got: Vec<(usize, Outcome)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = batch
+                    .iter()
+                    .map(|(i, req, _)| {
+                        let b = &bridge;
+                        sc.spawn(move || {
+                            let out = match b.run(req) {
+                                Err(_) => Outcome::Failed,
+                                Ok(o) if o.timed_out => Outcome::TimedOut,
+                                Ok(o) => Outcome::Verdict(
+                                    o.code == Some(0)
+                                        && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true)),
+                                ),
+                            };
+                            (*i, out)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            let mut cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() > EVIDENCE_CACHE_MAX {
+                cache.clear();
+            }
+            for (i, out) in got {
+                // Cut short by the budget (not by its own full timeout): no verdict yet, so `checking`, and it is not remembered.
+                if matches!(out, Outcome::TimedOut) && cut_by_budget {
+                    continue;
+                }
+                let (green, remember) = match out {
+                    Outcome::Verdict(g) => (g, true),
+                    Outcome::TimedOut | Outcome::Failed => (false, false),
+                };
+                verdict.insert(i, green);
+                // Remember it only if the file still holds the bytes the key was made from: the script opened it after the
+                // key was read, so a swapped file would otherwise store this verdict under the wrong content.
+                let Some(k) = jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone()) else { continue };
+                let req = &jobs.iter().find(|j| j.0 == i).expect("job").1;
+                if key(req).as_ref() != Some(&k) {
+                    continue;
+                }
+                let until = if remember {
+                    k.3.is_none().then(|| std::time::Instant::now() + EVIDENCE_LIVE_TTL)
+                } else {
+                    Some(std::time::Instant::now() + EVIDENCE_FAILED_TTL)
+                };
+                cache.insert(k, (green, until));
+            }
+        }
+        // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
+        // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
+        // remembered as unknown for 30 s so a slow one is not paid for on every call.
+        let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        for (i, r) in &repo_of {
+            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
+                repos.insert(r.clone(), self.worktree_state(r, deadline));
+            }
+        }
+        let mut pending = 0usize;
+        let mut rows = Vec::new();
+        for (i, t) in tasks.iter().enumerate() {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            let has_evidence = t.get("evidence").is_some_and(|e| !e.is_null());
+            let task_status = t.get("status").and_then(Value::as_str).unwrap_or("");
+            // A task marked failed is `fail` whatever its evidence says; only then does evidence decide pass or unverified.
+            let status = if task_status == "failed" {
+                "fail"
+            } else if has_evidence {
+                match verdict.get(&i) {
+                    Some(true) => {
+                        // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
+                        // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
+                        let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
+                        let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
+                            .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
+                        if stale { "stale" } else { "pass" }
+                    }
+                    Some(false) => "unverified",
+                    None => { pending += 1; "checking" }
+                }
+            } else {
+                "not_run"
+            };
+            let ev = t.get("evidence").filter(|e| !e.is_null());
+            let report = t.get("report").and_then(|r| r.get("summary")).and_then(Value::as_str);
+            let criteria: Vec<Value> = t.get("acceptance").and_then(Value::as_array).cloned().unwrap_or_default();
+            for c in criteria {
+                rows.push(json!({
+                    "task": id,
+                    "title": t.get("title"),
+                    "owner": t.get("owner_agent"),
+                    "criterion": c,
+                    "status": status,
+                    "head": ev.and_then(|e| e.get("head")),
+                    "path": ev.and_then(|e| e.get("path")),
+                    "commands": ev.and_then(|e| e.get("commands")),
+                    "report": report,
+                }));
+            }
+        }
+        Ok(json!({"slug": slug, "stale": snap.stale, "pending": pending, "rows": rows}))
+    }
+
+    /// The proof behind one task's evidence, for the Run detail: each recorded command with its exit code and, for a failed
+    /// one, the tail of its output, plus the verifier's notes. Read from the evidence file (at most 64 KiB; a larger one is
+    /// reported `truncated` with no commands) and from `cmd-N.log` files next to it (plain sibling file names only, regular
+    /// files only, the last 4 KiB). All text is cleaned (escapes stripped) and redacted with the nonces of this campaign's
+    /// runs before it leaves the core, and is shown as plain text.
+    pub fn evidence_detail(&self, slug: &str, task_id: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
+        let task = snap
+            .value
+            .as_ref()
+            .and_then(|v| v.get("tasks"))
+            .and_then(Value::as_array)
+            .and_then(|ts| ts.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(task_id)))
+            .cloned();
+        let Some(task) = task else { return Err(fail("task_not_found", task_id)) };
+        let mut red = Redactor::default();
+        for r in lock(&self.runs).values().filter(|r| r.campaign == slug) {
+            red.absorb(&r.nonces);
+        }
+        let text = |s: &str, max: usize| -> String {
+            let cut: String = s.chars().take(max).collect();
+            cut.split('\n').map(|l| red.clean(l)).collect::<Vec<_>>().join("\n")
+        };
+        let notes = task.get("report").and_then(|r| r.get("summary")).and_then(Value::as_str).map(|n| text(n, PROOF_TEXT_MAX));
+        let mut out = json!({"task": task_id, "commands": [], "notes": notes, "truncated": false});
+        // The same path rules as the check (no `..`, an archived bundle or the run repo); anything else shows no commands.
+        let Some(Request::CheckEvidence { path, .. }) = self.evidence_request(slug, &task) else { return Ok(out) };
+        let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+        if !regular(&path) {
+            return Ok(out);
+        }
+        let read_tail = |p: &Path, max: u64| -> Option<String> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = std::fs::File::open(p).ok()?;
+            let len = f.metadata().ok()?.len();
+            f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+            let mut b = Vec::new();
+            f.take(max).read_to_end(&mut b).ok()?;
+            Some(String::from_utf8_lossy(&b).into_owned())
+        };
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
+            out["truncated"] = json!(true);
+            return Ok(out);
+        }
+        let Some(doc) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return Ok(out) };
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let cmds: Vec<Value> = doc
+            .get("commands")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .take(PROOF_CMDS_MAX)
+                    .map(|c| {
+                        let exit = c.get("exit").and_then(Value::as_i64);
+                        let passed = c.get("passed").and_then(Value::as_bool).unwrap_or(exit == Some(0));
+                        let log = c.get("log").and_then(Value::as_str).filter(|n| {
+                            !n.is_empty() && n.len() <= 64 && !n.contains(['/', '\\']) && *n != "." && *n != ".."
+                        });
+                        let tail = if passed { None } else { log.map(|n| dir.join(n)).filter(|p| regular(p)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
+                        json!({
+                            "cmd": c.get("cmd").and_then(Value::as_str).map(|s| text(s, PROOF_TEXT_MAX)),
+                            "exit_code": exit,
+                            "passed": passed,
+                            "output_tail": tail,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out["commands"] = json!(cmds);
+        Ok(out)
+    }
+
     /// An archived bundle (under the campaign's evidence dir) is checked
     /// without a repo; live evidence is checked in the repo of the run that
     /// made it. `None` when the task has no evidence path or no repo is known.
+    /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
+    /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
+    /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
+    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
+        if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
+            let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+            if at.elapsed() < ttl {
+                return st.clone();
+            }
+        }
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if budget.is_zero() {
+            return None; // no time to ask: nothing learned, nothing remembered
+        }
+        // Both git calls count against the call's deadline: each gets at most 2 s and never more than what is left.
+        let git = |args: &[&str]| {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(left);
+            bridge
+                .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
+                .ok()
+                .filter(|o| !o.timed_out && o.code == Some(0))
+        };
+        let read = || {
+            let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
+            let mut status = vec!["status".to_string(), "--porcelain".into(), "-unormal".into(), "--".into(), ".".into()];
+            status.extend(RUN_OWN_OUTPUT.iter().map(|d| format!(":(exclude){d}")));
+            let status: Vec<&str> = status.iter().map(String::as_str).collect();
+            let dirty = !git(&status)?.stdout.trim().is_empty();
+            Some((head, dirty))
+        };
+        let st = read();
+        // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
+        if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
+            lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+        }
+        st
+    }
+
     fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
         let ev = task.get("evidence")?;
         let path = PathBuf::from(ev.get("path")?.as_str()?);
@@ -638,8 +1024,42 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    pub fn diff(&self, cwd: &str, base: &str) -> Res {
-        let cwd = repo_dir(cwd)?;
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        if !bus::valid_stream_id(&worker_stream(worker)) {
+            return Err(invalid("worker", "not a worker id"));
+        }
+        let cwd = lock(&self.transcripts).get(worker).map(|t| t.cwd().map(str::to_string));
+        let Some(cwd) = cwd else { return Err(fail("not_found", "no such worker")) };
+        let refuse = || fail("not_a_crew_worktree", "the worker has no crew worktree");
+        let wt = cwd.map(PathBuf::from).and_then(|p| p.canonicalize().ok()).ok_or_else(refuse)?;
+        let repo = lock(&self.runs)
+            .values()
+            .map(|r| r.cwd.clone())
+            .find(|r| {
+                r.canonicalize().is_ok_and(|r| {
+                    wt.strip_prefix(r.join(".claude/worktrees")).is_ok_and(|rest| rest.components().next().is_some())
+                })
+            })
+            .ok_or_else(refuse)?;
+        if !wt.is_dir() {
+            return Err(refuse());
+        }
+        let git = |dir: &Path, args: &[&str]| -> Option<String> {
+            let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
+            (o.code == Some(0)).then(|| o.stdout.trim().to_string())
+        };
+        let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]).and_then(|h| git(&wt, &["merge-base", "HEAD", &h]));
+        Ok(json!({"worker": worker, "worktree": wt.to_string_lossy(), "branch": branch, "base": base}))
+    }
+
+    pub fn diff(&self, cwd_str: &str, base: &str) -> Res {
+        let cwd = repo_dir(cwd_str)?;
         if base.is_empty() || base.starts_with('-') || base.len() > 255 {
             return Err(invalid("base", "must be a ref or commit"));
         }
@@ -647,7 +1067,24 @@ impl App {
             .bridge
             .run(&Request::Git { cwd, args: vec!["diff".into(), base.into(), "--".into()] })
             .map_err(|e| fail("git_failed", e))?;
-        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out}))
+        // `git diff <base>` leaves out files git does not track yet, so a worker's brand-new files are listed apart
+        // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
+        let mut untracked: Vec<String> = Vec::new();
+        let mut untracked_truncated = false;
+        if o.code == Some(0) && !o.timed_out {
+            if let Ok(u) = self.bridge.run(&Request::Git {
+                cwd: repo_dir(cwd_str)?,
+                args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
+            }) {
+                if u.code == Some(0) {
+                    let all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                    untracked_truncated = u.truncated || all.len() > UNTRACKED_MAX;
+                    untracked = all.into_iter().take(UNTRACKED_MAX).map(String::from).collect();
+                }
+            }
+        }
+        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+                  "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
     // ---------------------------------------------------------------- control
@@ -962,6 +1399,8 @@ fn node_json(n: &Node) -> Value {
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
         "engine_id": n.engine_id,
+        // The name the UI shows for the role (AC-2.1.3); the engine id is only a secondary field.
+        "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
@@ -989,6 +1428,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod inbox;
+mod wfresult;
+mod decide;
 mod lead;
 mod runindex;
 
