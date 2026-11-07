@@ -18,9 +18,12 @@ export function Gallery() {
   const [stop, setStop] = useState(false);
   const [sel, setSel] = useState(0);
   const { toasts, push, dismiss } = useToasts();
-  document.documentElement.dataset.theme = theme;
-  // The page toggle is a demo: on leaving the gallery the root goes back to the OS theme.
+  // The page toggle is a demo: on leaving the gallery the root goes back to the OS theme. This effect is declared
+  // first; StrictMode runs effects in order (setup, cleanup, setup), so the theme effect below re-applies the choice.
   useEffect(() => () => void (document.documentElement.dataset.theme = systemTheme()), []);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
   return (
     <main className="v-gallery">
       <Text as="h1" variant="headline-lg">Kit gallery</Text>
