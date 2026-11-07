@@ -79,6 +79,26 @@ def load():
 LAUNCHES = 5
 
 
+def identity_key(macos_build, webkit):
+    """What decides the helper count and the WebKit footprint. The runner image version is recorded but not part of
+    the key: it rotates weekly without changing either, and a key that rotated with it would fail the gate every week."""
+    return f"{macos_build}|{webkit}"
+
+
+def base_helpers(runs):
+    return min(min(r["helpers"]) for r in runs)
+
+
+def runner_identity():
+    def sh(*a):
+        return subprocess.run(a, capture_output=True, text=True).stdout.strip()
+    build = sh("sw_vers", "-buildVersion")
+    webkit = sh("defaults", "read", "/System/Library/Frameworks/WebKit.framework/Resources/Info", "CFBundleVersion") \
+        or sh("defaults", "read", "/System/Library/Frameworks/WebKit.framework/Versions/A/Resources/Info", "CFBundleVersion")
+    return {"key": identity_key(build, webkit), "macos_build": build, "webkit": webkit,
+            "macos": sh("sw_vers", "-productVersion"), "image_version": os.environ.get("ImageVersion", "")}
+
+
 def clean_median(samples):
     """Median total of the samples taken while no foreign WebKit helpers were running.
 
@@ -106,7 +126,9 @@ def idle(binary, out):
                      "helpers": sorted({s["helpers"] for s in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
     meds = [r["median_mib"] for r in runs]
-    json.dump({"runs": runs, "median_of_medians_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
+    ident = runner_identity()
+    json.dump({"identity": ident["key"], "runner": ident, "helpers": base_helpers(runs), "runs": runs,
+               "median_of_medians_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
 
 
 def slope(points):  # least squares, MiB per minute
