@@ -1,6 +1,6 @@
 import unittest
 from gate import check, evaluate
-from measure import clean_median, identity_key, flavour_summary, launch_flavours
+from measure import clean_median, identity_key, flavour_summary, launch_flavours, postload_summary
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
 
@@ -164,3 +164,35 @@ class Measure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+POST = {"pre_load_mib": 150.0, "peak_mib": 210.0, "plus2_mib": 190.0, "plus10_mib": 195.0, "retained_mib": 45.0, "helpers": 2}
+
+
+class PostLoad(unittest.TestCase):
+    def idle(self, **extra):
+        return {**run(150), **extra}
+
+    def test_summary_takes_medians_and_the_peak_and_the_retained_growth(self):
+        s = postload_summary([{"total_mib": 149, "helpers": 2}, {"total_mib": 151, "helpers": 2}],
+                             [{"total_mib": 205, "helpers": 2}, {"total_mib": 212, "helpers": 2}],
+                             [{"total_mib": 188, "helpers": 2}, {"total_mib": 192, "helpers": 2}, {"total_mib": 190, "helpers": 2}],
+                             [{"total_mib": 194, "helpers": 2}, {"total_mib": 196, "helpers": 2}, {"total_mib": 195, "helpers": 2}])
+        self.assertEqual((s["pre_load_mib"], s["peak_mib"], s["plus2_mib"], s["plus10_mib"], s["retained_mib"]), (150.0, 212, 190, 195, 45.0))
+
+    def test_no_baseline_means_reported_only_never_a_failure(self):
+        fails, warns = evaluate(bl(), self.idle(post_load=POST), None)
+        self.assertEqual(fails, [])
+        self.assertTrue(any("post-load" in w and "no baseline" in w for w in warns), warns)
+
+    def test_over_the_baseline_or_the_ceiling_only_warns(self):
+        b = bl()
+        b["identities"][ID]["flavours"]["2"]["post_load_mib"] = 150
+        fails, warns = evaluate(b, self.idle(post_load={**POST, "plus10_mib": 205}), None)
+        self.assertEqual(fails, [])
+        self.assertTrue(any("post-load" in w and "200" in w for w in warns), warns)
+        self.assertTrue(any("post-load" in w and "baseline 150" in w for w in warns), warns)
+
+    def test_a_run_without_a_post_load_section_is_unchanged(self):
+        fails, warns = evaluate(bl(), self.idle(), None)
+        self.assertEqual((fails, warns), ([], []))

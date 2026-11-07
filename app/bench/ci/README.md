@@ -34,5 +34,17 @@ The 3-helper flavour reads about 201 MiB on the CI VM, over the 200 MiB ceiling,
 
 Until the owner rules, a ceiling failure is a failure: there is no rerun exception. Any retry policy is one of the owner's options above.
 
+## Post-load idle (reported, not gated)
+NFR-PERF-1 is also about what the app holds after a long run, not only the first minute. The memory job builds a second
+copy of the app with `VITE_PERF_FIXTURE=1` (the normal bundle has none of it; a CI step greps the shipped bundle). That
+build replaces the core with a scripted one: a Crew view with one worker whose Stream tab receives 10,000 lines at 170/s
+starting 20 s after launch. `measure.py postload` samples the total before the load, the peak during it, and the idle
+total 2 and 10 minutes after the load ends, and adds `post_load` to `idle.json` (pre-load, peak, +2 min, +10 min, retained =
++10 min minus pre-load). `gate.py` prints them in the job summary and as warnings: it never fails on them. The scripted
+stream drives the real renderer through a fake transport, so the core's own bus and spill file are not exercised.
+
+To start gating it, record a baseline with the bump procedure below: set `post_load_mib` on the flavour from the median
+`plus10_mib` of at least 3 green runs. Until then a run over the 200 MiB budget or over that baseline only warns.
+
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<N>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the `helpers` count and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and count (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.

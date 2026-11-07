@@ -6,7 +6,9 @@ growth slope > 1 MiB/min, idle > baseline for that (identity, helper count) + ma
 flavour only) idle > the 200 MiB ceiling. In the 3-helper (GPU process) flavour the ceiling is reported as a warning,
 not a failure, until the owner rules on it (see README "Owner question").
 """
-import json, sys
+import json
+import os
+import sys
 
 IDLE_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 5.0, 0.03, 1.0
 FLAVOURS = {2, 3}
@@ -43,6 +45,7 @@ def evaluate(baseline, idle, growth):
         fails.append(f"baseline.json has no {n}-helper entry for runner identity {key!r}: add it with the procedure in "
                      "app/bench/ci/README.md (fails closed)")
         return fails, warns
+    warns.extend(post_load_warnings(idle.get("post_load"), flavour))
     b = flavour["idle_mib"]
     tol = max(REGRESSION, b * REGRESSION_PCT)
     if v > b + tol:
@@ -54,6 +57,30 @@ def evaluate(baseline, idle, growth):
     return fails, warns
 
 
+def post_load_warnings(post, flavour):
+    """The post-load idle (+10 min after a scripted 10,000-line stream) is reported, never gated, until a baseline is
+    recorded with the bump procedure (`post_load_mib` on the flavour)."""
+    if not post:
+        return []
+    v, out = post["plus10_mib"], []
+    if v > IDLE_BUDGET:
+        out.append(f"post-load idle {v} MiB is over the {IDLE_BUDGET} MiB budget (reported only)")
+    b = flavour.get("post_load_mib")
+    if b is None:
+        out.append(f"post-load idle {v} MiB (retained {post['retained_mib']} MiB after the load, peak {post['peak_mib']} MiB): no baseline yet, reported only")
+    elif v > b + max(REGRESSION, b * REGRESSION_PCT):
+        out.append(f"post-load idle {v} MiB is over the baseline {b} MiB (reported only)")
+    return out
+
+
+def summary(idle):
+    post = idle.get("post_load")
+    if not post:
+        return ""
+    return ("### Post-load idle (scripted 10,000-line stream, reported only)\n\n| pre-load | peak | +2 min | +10 min | retained |\n|---|---|---|---|---|\n"
+            f"| {post['pre_load_mib']} | {post['peak_mib']} | {post['plus2_mib']} | {post['plus10_mib']} | {post['retained_mib']} MiB |\n")
+
+
 def check(baseline, idle, growth):
     return evaluate(baseline, idle, growth)[0]
 
@@ -63,5 +90,8 @@ if __name__ == "__main__":
     fails, warns = evaluate(load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3]) if len(sys.argv) > 3 else None)
     for w in warns:
         print(f"::warning::perf gate: {w}")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(summary(load(sys.argv[2])))
     print("\n".join(fails) or "perf gate: ok")
     sys.exit(1 if fails else 0)

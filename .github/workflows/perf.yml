@@ -19,7 +19,7 @@ concurrency:
 jobs:
   memory:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,6 +37,9 @@ jobs:
           npm run build
           cd ../core
           ../ui/node_modules/.bin/tauri build --bundles app
+      - name: The shipped bundle has no perf fixture
+        run: |
+          if grep -rl "fixture/.claude/worktrees" app/ui/dist; then echo "perf fixture leaked into the normal bundle"; exit 1; fi
       - name: Idle (3 launches)
         run: |
           BIN="$(ls -d app/core/target/release/bundle/macos/*.app | head -1)/Contents/MacOS/vajra-desktop"
@@ -45,6 +48,13 @@ jobs:
       - name: Growth (10 minutes, main only)
         if: github.event_name == 'push'
         run: python3 app/bench/ci/measure.py growth "$BIN" growth.json 10
+      - name: Post-load idle (scripted 10,000-line stream; reported, not gated)
+        run: |
+          cd app/ui && VITE_PERF_FIXTURE=1 npm run build && cd ../core
+          ../ui/node_modules/.bin/tauri build --bundles app
+          FBIN="$(ls -d target/release/bundle/macos/*.app | head -1)/Contents/MacOS/vajra-desktop"
+          cd ../..
+          python3 app/bench/ci/measure.py postload "app/core/$FBIN" idle.json
       - name: Gate
         run: |
           if [ -f growth.json ]; then python3 app/bench/ci/gate.py app/bench/ci/baseline.json idle.json growth.json

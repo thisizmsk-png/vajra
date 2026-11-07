@@ -120,6 +120,53 @@ def launch_flavours(runs):
     return sorted({min(r["helpers"]) for r in runs})
 
 
+# The fixture build (VITE_PERF_FIXTURE) starts a scripted 10,000-line stream LOAD_START_S after launch at 170 lines/s and
+# opens the worker's Stream tab; it ends at LOAD_END_S. These mirror app/ui/src/perf/fixture.ts.
+LOAD_START_S = 20
+LOAD_END_S = 20 + 60
+
+
+def postload_summary(pre, peak, plus2, plus10):
+    """Medians of each window's total, the highest sample seen during the load, and what the app kept (+10 min - pre-load)."""
+    med = lambda ss: statistics.median(s["total_mib"] for s in ss)
+    pre_m, p10 = med(pre), med(plus10)
+    return {"pre_load_mib": pre_m, "peak_mib": max(s["total_mib"] for s in peak), "plus2_mib": med(plus2),
+            "plus10_mib": p10, "retained_mib": round(p10 - pre_m, 1), "helpers": min(s["helpers"] for s in pre + plus10)}
+
+
+def window(proc, before, seconds, step=2):
+    out, end = [], time.time() + seconds
+    while True:
+        out.append(sample(proc, before))
+        if time.time() + step > end:
+            return out
+        time.sleep(step)
+
+
+def postload(binary, out):
+    """Launch the fixture build, let it load the scripted stream, and sample idle at +2 and +10 minutes after the load.
+    Adds a "post_load" section to the idle.json at `out`; reported only (gate.py warns, never fails, on it)."""
+    proc, before = launch(binary)
+    t0 = time.time()
+    at = lambda s: time.sleep(max(0.0, t0 + s - time.time()))
+    try:
+        at(LOAD_START_S - 10)
+        pre = window(proc, before, 8)
+        peak = []
+        while time.time() < t0 + LOAD_END_S + 5:
+            peak.append(sample(proc, before))
+            time.sleep(2)
+        at(LOAD_END_S + 120 - 10)
+        plus2 = window(proc, before, 20)
+        at(LOAD_END_S + 600 - 10)
+        plus10 = window(proc, before, 20)
+    finally:
+        stop(proc)
+    data = json.load(open(out))
+    data["post_load"] = postload_summary(pre, peak, plus2, plus10)
+    json.dump(data, open(out, "w"), indent=1)
+
+
 def runner_identity():
     def sh(*a):
         return subprocess.run(a, capture_output=True, text=True).stdout.strip()
@@ -192,4 +239,9 @@ def growth(binary, out, minutes):
 
 if __name__ == "__main__":
     mode, binary, out = sys.argv[1:4]
-    idle(binary, out) if mode == "idle" else growth(binary, out, float(sys.argv[4]))
+    if mode == "idle":
+        idle(binary, out)
+    elif mode == "postload":
+        postload(binary, out)
+    else:
+        growth(binary, out, float(sys.argv[4]))
