@@ -34,6 +34,10 @@ def evaluate(baseline, idle, growth):
         fails.append(f"no baseline for runner identity {key!r}: measure it with the procedure in app/bench/ci/README.md "
                      "and add it to baseline.json in a reviewed PR (the gate fails closed on an unknown runner)")
         return fails, warns
+    missing = [f for f in idle.get("launch_flavours", []) if str(f) not in entry.get("flavours", {})]
+    if missing:
+        fails.append(f"launch(es) with {missing} helpers have no baseline entry for runner identity {key!r} (fails closed)")
+        return fails, warns
     flavour = entry.get("flavours", {}).get(str(n))
     if flavour is None:
         fails.append(f"baseline.json has no {n}-helper entry for runner identity {key!r}: add it with the procedure in "

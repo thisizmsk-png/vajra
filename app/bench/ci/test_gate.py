@@ -132,10 +132,18 @@ class Measure(unittest.TestCase):
     def test_a_mixed_known_and_unknown_launch_set_fails_the_final_gate(self):
         runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(300, 4), self.r(301, 4)]
         n, med, _ = flavour_summary(runs)
-        idle = {"identity": "25G332|21624.5.1.11.3", "helpers": n, "median_of_medians_mib": med,
+        idle = {"identity": ID, "helpers": n, "median_of_medians_mib": med,
                 "launch_flavours": launch_flavours(runs)}
         fails, _ = evaluate(bl(), idle, None)
-        self.assertTrue(any("launch" in f for f in fails), fails)
+        self.assertTrue(any("launch(es) with WebKit helper count" in f for f in fails), fails)
+
+    def test_a_launch_flavour_without_a_baseline_entry_fails_even_when_the_majority_has_one(self):
+        runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(201, 3), self.r(202, 3)]
+        n, med, _ = flavour_summary(runs)
+        idle = {"identity": ID, "helpers": n, "median_of_medians_mib": med,
+                "launch_flavours": launch_flavours(runs)}
+        fails, _ = evaluate(bl(helpers=2), idle, None)  # baseline has only the 2-helper entry
+        self.assertTrue(any("no baseline entry" in f for f in fails), fails)
 
     def test_a_tie_between_flavours_reports_the_larger_helper_count(self):
         self.assertEqual(flavour_summary([self.r(175, 2), self.r(201, 3)]), (3, 201, 1))
