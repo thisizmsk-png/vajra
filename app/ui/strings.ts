@@ -77,6 +77,8 @@ export const S = {
     copy: (what: string) => `Copy ${what.toLowerCase()}`,
     loading: "Loading",
     noChanges: "No changes against the base.",
+    untracked: "New files not yet tracked by git (listed by name; their content is not in the diff above)",
+    untrackedMore: "More new files exist than are listed.",
     diffTruncated: "The diff was cut off at the size limit.",
     diffTimedOut: "The diff took too long and was stopped.",
     diffFailed: (code: number | null) => `Could not read the diff (git exit code ${code ?? "none"}).`,

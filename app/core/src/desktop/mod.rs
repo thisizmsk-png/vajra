@@ -65,6 +65,8 @@ struct Run {
     nonces: Redactor,
 }
 
+/// Untracked file names `diff` lists.
+const UNTRACKED_MAX: usize = 200;
 const LIST_VERIFY_WORKERS: usize = 4;
 /// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
 /// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
@@ -652,8 +654,8 @@ impl App {
         Ok(json!({"worker": worker, "worktree": wt.to_string_lossy(), "branch": branch, "base": base}))
     }
 
-    pub fn diff(&self, cwd: &str, base: &str) -> Res {
-        let cwd = repo_dir(cwd)?;
+    pub fn diff(&self, cwd_str: &str, base: &str) -> Res {
+        let cwd = repo_dir(cwd_str)?;
         if base.is_empty() || base.starts_with('-') || base.len() > 255 {
             return Err(invalid("base", "must be a ref or commit"));
         }
@@ -661,7 +663,24 @@ impl App {
             .bridge
             .run(&Request::Git { cwd, args: vec!["diff".into(), base.into(), "--".into()] })
             .map_err(|e| fail("git_failed", e))?;
-        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out}))
+        // `git diff <base>` leaves out files git does not track yet, so a worker's brand-new files are listed apart
+        // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
+        let mut untracked: Vec<String> = Vec::new();
+        let mut untracked_truncated = false;
+        if o.code == Some(0) && !o.timed_out {
+            if let Ok(u) = self.bridge.run(&Request::Git {
+                cwd: repo_dir(cwd_str)?,
+                args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
+            }) {
+                if u.code == Some(0) {
+                    let all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                    untracked_truncated = u.truncated || all.len() > UNTRACKED_MAX;
+                    untracked = all.into_iter().take(UNTRACKED_MAX).map(String::from).collect();
+                }
+            }
+        }
+        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+                  "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
     // ---------------------------------------------------------------- control

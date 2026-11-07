@@ -68,7 +68,7 @@ export const api = {
   task: (slug: string, taskId: string) => call<Json>("task", { slug, taskId }),
   /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
   worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
-  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean }>("diff", { cwd, base }),
+  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
   controlStop: (worker: string, reason?: string) => call<Json>("control_stop", { worker, reason: reason ?? null }),

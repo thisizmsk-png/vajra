@@ -1131,6 +1131,25 @@ fn worktree_info_returns_the_crew_worktree_its_branch_and_base() {
 }
 
 #[test]
+fn diff_lists_untracked_files_apart_and_respects_ignore_rules() {
+    let t = Tmp::new();
+    let (app, repo, wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    git(&wt, &["checkout", "-q", "--", "f.txt"]); // only new work remains: nothing tracked differs from the base
+    fs::write(wt.join("new file.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(wt.join("sub")).unwrap();
+    fs::write(wt.join("sub/also.txt"), "x").unwrap();
+    fs::write(repo.join(".git/info/exclude"), "ignored.log\n").unwrap();
+    fs::write(wt.join("ignored.log"), "x").unwrap();
+    let i = app.worktree_info("aa870dd40540481f0").unwrap();
+    let d = app.diff(i["worktree"].as_str().unwrap(), i["base"].as_str().unwrap()).unwrap();
+    assert_eq!(d["diff"].as_str().unwrap().trim(), "", "tracked files are unchanged: {d}");
+    let mut u: Vec<String> = d["untracked"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    u.sort();
+    assert_eq!(u, vec!["new file.rs".to_string(), "sub/also.txt".to_string()], "{d}");
+    assert_eq!(d["untracked_truncated"], false);
+}
+
+#[test]
 fn worktree_info_refuses_a_cwd_outside_the_crew_worktrees() {
     let t = Tmp::new();
     let (app, repo, _wt) = crew_fixture(&t, &|r| r.to_path_buf()); // the repo itself, not a worktree

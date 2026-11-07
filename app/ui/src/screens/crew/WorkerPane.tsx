@@ -21,7 +21,7 @@ function Copy({ what, text }: { what: string; text: string }) {
 }
 
 function DiffTab({ info }: { info: WorktreeInfo }) {
-  const [r, setR] = useState<{ diff: string; code: number | null; truncated: boolean; timed_out: boolean } | { err: string } | null>(null);
+  const [r, setR] = useState<{ diff: string; code: number | null; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean } | { err: string } | null>(null);
   useEffect(() => {
     let live = true;
     if (!info.base) { setR({ err: S.crew.noBase }); return; }
@@ -35,7 +35,14 @@ function DiffTab({ info }: { info: WorktreeInfo }) {
   return (
     <>
       {r.truncated && <Text variant="body-sm">{S.crew.diffTruncated}</Text>}
-      {r.diff.trim() === "" ? <Text variant="body-sm" muted>{S.crew.noChanges}</Text> : <DiffView diff={r.diff} />}
+      {r.diff.trim() === "" && !r.untracked?.length ? <Text variant="body-sm" muted>{S.crew.noChanges}</Text> : r.diff.trim() !== "" && <DiffView diff={r.diff} />}
+      {!!r.untracked?.length && (
+        <div role="group" aria-label={S.crew.untracked}>
+          <Text variant="body-sm">{S.crew.untracked}</Text>
+          <ul>{r.untracked.map((f) => (<li key={f}><code>{f}</code></li>))}</ul>
+          {r.untracked_truncated && <Text variant="body-sm" muted>{S.crew.untrackedMore}</Text>}
+        </div>
+      )}
     </>
   );
 }

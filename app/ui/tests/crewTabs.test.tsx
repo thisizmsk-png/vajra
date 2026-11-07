@@ -60,6 +60,15 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     expect(await screen.findByText(S.crew.noChanges)).toBeTruthy();
   });
 
+  it("Diff lists new untracked files instead of saying there are no changes", async () => {
+    await open({ diff: { code: 0, diff: "", truncated: false, timed_out: false, untracked: ["new file.rs", "sub/also.txt"], untracked_truncated: true } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    expect(await screen.findByText("new file.rs")).toBeTruthy();
+    expect(screen.getByText("sub/also.txt")).toBeTruthy();
+    expect(screen.getByText(S.crew.untrackedMore)).toBeTruthy();
+    expect(screen.queryByText(S.crew.noChanges)).toBeNull();
+  });
+
   it("Diff reports a truncated diff", async () => {
     await open({ diff: { code: 0, diff: DIFF, truncated: true, timed_out: false } });
     fireEvent.click(await tab(S.crew.tabs.diff));

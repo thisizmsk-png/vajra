@@ -65,7 +65,7 @@ pub struct Bridge {
     pub home: Option<PathBuf>,
 }
 
-const GIT_READ_ONLY: [&str; 6] = ["--version", "rev-parse", "merge-base", "status", "log", "diff"];
+const GIT_READ_ONLY: [&str; 7] = ["--version", "rev-parse", "merge-base", "status", "log", "diff", "ls-files"];
 const GIT_BAD_FLAGS: [&str; 6] = ["--output", "--ext-diff", "--textconv", "--exec-path", "-c", "--open-files-in-pager"];
 
 impl Bridge {
