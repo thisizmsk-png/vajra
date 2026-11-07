@@ -161,6 +161,22 @@ describe("Stream tab (S2b, US-2.2)", () => {
     await waitFor(() => expect(earlierButton()).toBeNull()); // that page reached line 1
   });
 
+  it("offers Load earlier again when live output evicts line 1 after history was fully loaded", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const live = tail(lines(1001, 1500));
+    const f = await openBackend({
+      tail: (a?: Record<string, unknown>) => ((a?.afterSeq as number) === 0 ? live : tail(lines((a?.afterSeq as number) + 1, 3500))),
+      read_spill_before: spillBefore,
+    });
+    // Load to the start: line 1 is shown, so there is nothing to load.
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(earlierButton()).toBeNull());
+    expect(screen.getByRole("log").textContent).toContain("out 1");
+    // 2,000 more lines arrive; the window (cap 3,000) drops line 1 again.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+    await waitFor(() => expect(earlierButton()).toBeTruthy());
+  });
+
   it("offers no 'load earlier' when nothing was spilled", async () => {
     await openBackend({ tail: tail(lines(1, 3), { spill_start: 0, spill_end: 0 }) });
     await screen.findByRole("log");
