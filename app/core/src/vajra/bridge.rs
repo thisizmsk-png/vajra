@@ -60,6 +60,24 @@ pub struct Output {
     pub timed_out: bool,
 }
 
+impl Output {
+    /// The run finished whole: not killed by the timeout and not cut at `OUTPUT_CAP`.
+    pub fn whole(&self) -> bool {
+        !self.truncated && !self.timed_out
+    }
+
+    /// The exit code, only when the run was whole. Read this, never `code`, to decide what a run meant: the exit
+    /// code and text of a cut or killed run say nothing reliable.
+    pub fn exit(&self) -> Option<i32> {
+        if self.whole() { self.code } else { None }
+    }
+
+    /// stdout, only when the run was whole (a cut buffer can still parse as JSON and mean the wrong thing).
+    pub fn stdout_whole(&self) -> Option<&str> {
+        self.whole().then_some(self.stdout.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Bridge {
     /// Dir holding `vajra-campaign.sh`, `vajra_tasks.py`, `vajra_kb.py`, `vajra-doctor.sh`.

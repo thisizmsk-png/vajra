@@ -11,6 +11,7 @@ const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
 /// A doctor that passes and reports the OS sandbox and its denyWrite on the app dir as active.
+const DOCTOR_OK_BODY: &str = "#!/bin/sh\necho 'PASS  OS sandbox enabled'\necho 'PASS  Vajra Desktop app dir write-protected by the OS sandbox (denyWrite active)'\n";
 const DOCTOR_OK: &str = "#!/bin/sh\necho 'PASS  OS sandbox enabled'\necho 'PASS  Vajra Desktop app dir write-protected by the OS sandbox (denyWrite active)'\nexit 0\n";
 
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
@@ -425,6 +426,17 @@ fn lead_refused_when_the_doctor_fails_or_the_env_cannot_run_the_guard() {
     app.lead.set_env(vec![("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing", "no HOME");
     assert!(t.ledger().is_empty() && t.files("stdin.").is_empty());
+}
+
+#[test]
+fn lead_refused_when_the_doctor_output_is_cut_even_if_it_printed_the_pass_line() {
+    let t = Tmp::new();
+    let app = t.app();
+    let doctor = t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh");
+    std::fs::write(&doctor, format!("{DOCTOR_OK_BODY}head -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 0\n")).unwrap();
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing", "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded or spawned");
 }
 
 #[test]

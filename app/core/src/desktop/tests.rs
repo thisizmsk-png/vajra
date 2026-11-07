@@ -2536,3 +2536,81 @@ fn evidence_says_oversize_when_the_check_output_hits_the_cap() {
     assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
     assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "oversize", "{r}");
 }
+
+// ------------------------------------------------ output cut at the cap is never interpreted
+// Every reader of a bridge `Output` goes through `Output::exit` / `stdout_whole` (or checks `truncated` first). Each test
+// below makes the tool print a plausible, parseable answer and then overflow the cap on stderr, so the kept stdout and
+// the exit code look right and only `truncated` says otherwise.
+
+/// An executable that prints `answer` on stdout, floods stderr past the cap, and exits with `code`.
+fn cut_exe(path: &Path, interpreter_line: &str, answer: &str, code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+    let body = if interpreter_line.contains("python") {
+        format!("{interpreter_line}\nimport sys\nsys.stdout.write({answer:?})\nsys.stderr.write('x' * 2200000)\nsys.exit({code})\n")
+    } else {
+        format!("{interpreter_line}\nprintf '%s' '{answer}'\nhead -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit {code}\n")
+    };
+    fs::write(path, body).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn output_exit_and_stdout_whole_hide_a_cut_or_killed_run() {
+    use crate::vajra::bridge::Output;
+    let o = |truncated, timed_out| Output { code: Some(0), stdout: "{}".into(), stderr: String::new(), truncated, timed_out };
+    assert_eq!((o(false, false).exit(), o(false, false).stdout_whole()), (Some(0), Some("{}")));
+    for cut in [o(true, false), o(false, true), o(true, true)] {
+        assert_eq!((cut.exit(), cut.stdout_whole()), (None, None), "{cut:?}");
+    }
+}
+
+#[test]
+fn a_cut_campaign_verify_that_exits_3_is_unknown_not_failed() {
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    cut_exe(&dir.join("vajra-campaign.sh"), "#!/bin/bash", "", 3);
+    let app = t.app();
+    assert_eq!(app.integrity_run("deliver-20261105-1810", true).0, "unknown");
+}
+
+#[test]
+fn a_cut_task_evidence_check_gives_no_code_and_no_result() {
+    let t = Tmp::new();
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(Path::new("/x"), "t1", "done", &["ac-1"], "green")]);
+    cut_exe(&t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py"), "#!/usr/bin/env python3", "{\"ok\": true, \"green\": true, \"reasons\": []}", 0);
+    let r = app.task(&slug, "t1").unwrap();
+    assert_eq!(r["evidence"]["truncated"], true, "{r}");
+    assert!(r["evidence"]["code"].is_null() && r["evidence"]["result"].is_null(), "a cut check has no code and no result: {r}");
+}
+
+#[test]
+fn a_cut_kb_search_returns_no_hits() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.home().join(".claude/skills/vajra/scripts")).unwrap();
+    cut_exe(&t.home().join(".claude/skills/vajra/scripts/vajra_kb.py"), "#!/usr/bin/env python3", "kb-abcdef fact a title\n", 0);
+    let app = t.app();
+    let r = app.kb_search("q", 5, t.home().to_str().unwrap()).unwrap();
+    assert_eq!(r["truncated"], true, "{r}");
+    assert!(r["hits"].as_array().unwrap().is_empty() && r["code"].is_null(), "a cut search lists nothing: {r}");
+}
+
+#[test]
+fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
+    let sha = "a".repeat(40);
+    // resolve_base: a 40-hex answer from a cut run is not trusted.
+    let t = Tmp::new();
+    let mut app = t.app();
+    app.bridge.git = t.home().join("cut-git.sh");
+    cut_exe(&app.bridge.git, "#!/bin/sh", &sha, 0);
+    assert!(app.resolve_base(&t.home(), "main").is_err());
+    // worktree_state (evidence staleness) learns nothing from a cut head or status.
+    assert_eq!(app.worktree_state(&t.home(), std::time::Instant::now() + Duration::from_secs(10)), None);
+    // worktree_info: no branch and no base from a cut run.
+    let t2 = Tmp::new();
+    let (mut app2, _repo, _wt) = crew_fixture(&t2, &|r| r.join(".claude/worktrees/w1"));
+    app2.bridge.git = t2.home().join("cut-git.sh");
+    cut_exe(&app2.bridge.git, "#!/bin/sh", &sha, 0);
+    let i = app2.worktree_info("aa870dd40540481f0").unwrap();
+    assert!(i["branch"].is_null() && i["base"].is_null(), "{i}");
+}

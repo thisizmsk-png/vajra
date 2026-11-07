@@ -495,7 +495,7 @@ impl App {
         let args = vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), format!("{base}^{{commit}}")];
         let out = self.bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).map_err(|e| fail("io_error", e))?;
         let sha = out.stdout.trim();
-        if out.code == Some(0) && sha.len() == 40 && argv::is_sha(sha) {
+        if out.exit() == Some(0) && sha.len() == 40 && argv::is_sha(sha) {
             Ok(sha.to_string())
         } else {
             Err(invalid("base", "is not a branch or commit in this repository"))
@@ -725,7 +725,8 @@ impl App {
         let evidence = match self.evidence_request(slug, &task) {
             None => Value::Null,
             Some(req) => match self.bridge.run(&req) {
-                Ok(o) => json!({"code": o.code, "result": serde_json::from_str::<Value>(o.stdout.trim()).ok()}),
+                // A cut or killed run has no result and no code: its exit code and partial text mean nothing.
+                Ok(o) => json!({"code": o.exit(), "result": o.stdout_whole().and_then(|s| serde_json::from_str::<Value>(s.trim()).ok()), "truncated": o.truncated}),
                 Err(e) => json!({"code": null, "error": e.to_string()}),
             },
         };
@@ -1055,7 +1056,7 @@ impl App {
             bridge
                 .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
                 .ok()
-                .filter(|o| !o.timed_out && o.code == Some(0))
+                .filter(|o| o.exit() == Some(0))
         };
         let read = || {
             let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
@@ -1129,7 +1130,7 @@ impl App {
         }
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
-            (o.code == Some(0)).then(|| o.stdout.trim().to_string())
+            (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
         };
         let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
         let base = git(&repo, &["rev-parse", "HEAD"]).and_then(|h| git(&wt, &["merge-base", "HEAD", &h]));
@@ -1203,9 +1204,10 @@ impl App {
             .bridge
             .run(&Request::KbSearch { query: query.into(), k: k.clamp(1, 50), repo })
             .map_err(|e| fail("kb_failed", e))?;
+        // A cut buffer is not parsed: partial JSON could name the wrong hits.
         let hits: Vec<Value> =
-            parse_kb_hits(&o.stdout).into_iter().map(|h| json!({"id": h.id, "kind": h.kind, "title": h.title})).collect();
-        Ok(json!({"hits": hits, "code": o.code}))
+            parse_kb_hits(o.stdout_whole().unwrap_or_default()).into_iter().map(|h| json!({"id": h.id, "kind": h.kind, "title": h.title})).collect();
+        Ok(json!({"hits": hits, "code": o.exit(), "truncated": o.truncated}))
     }
 
     /// A real verdict still inside `verdict_ttl`, or `None` (a verify running, none taken, expired, or "unknown").
@@ -1289,7 +1291,7 @@ impl App {
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
         let res = bridge.run(&Request::CampaignVerify { slug: slug.into() });
-        let verdict = match res.as_ref().ok().and_then(|o| o.code) {
+        let verdict = match res.as_ref().ok().and_then(|o| o.exit()) {
             Some(0) => "ok",
             Some(3) => "failed",
             _ => "unknown",
