@@ -6,6 +6,7 @@ import { useRoute } from "../router";
 import type { Screen } from "../router";
 import { Home } from "./home/Home";
 import { Crew } from "./crew/Crew";
+import { Run } from "./run/Run";
 import { History } from "./history/History";
 import { Settings } from "./settings/Settings";
 import { Empty } from "./states";
@@ -30,7 +31,7 @@ const notBuilt = (screen: Screen): ComponentType => function NotBuilt() {
 
 export const REGISTRY: Record<Screen, ComponentType> = {
   home: Home,
-  run: notBuilt("run"),
+  run: Run,
   crew: Crew,
   chat: notBuilt("chat"),
   inbox: notBuilt("inbox"),
