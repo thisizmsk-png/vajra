@@ -13,7 +13,7 @@ const EVENT_MIN_GAP_MS = 500;
 export function StreamTab({ stream }: { stream: string }) {
   const [ring, setRing] = useState<Ring>(emptyRing);
   const [spill, setSpill] = useState<{ start: number; end: number } | null>(null);
-  const [earlier, setEarlier] = useState<"idle" | "busy" | "done" | "limit">("idle");
+  const [earlier, setEarlier] = useState<"idle" | "busy" | "done">("idle");
   const [err, setErr] = useState("");
   const [pin, setPin] = useState(0);
   const ringRef = useRef<Ring>(emptyRing);
@@ -62,26 +62,35 @@ export function StreamTab({ stream }: { stream: string }) {
       const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
-      setEarlier(p.at_start ? "done" : capRef.current >= MAX_ROWS ? "limit" : "idle");
+      setEarlier(p.at_start ? "done" : "idle");
     } catch (e) {
       setErr(errorText(e));
       setEarlier("idle");
     }
   };
 
+  /** Back to the live tail: forget the paged history and re-read the newest rows. */
+  const jumpLatest = () => {
+    capRef.current = RING;
+    put(emptyRing);
+    setEarlier("idle");
+    setPin((n) => n + 1);
+    void load();
+  };
+
   const text = useMemo(() => ring.rows.map((r) => r.text), [ring]);
-  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done" && earlier !== "limit";
+  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done";
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}
-      {earlier === "limit" && <Text variant="body-sm" muted>{S.crew.earlierLimit}</Text>}
+      {ring.detached && <Text variant="body-sm" muted>{S.crew.historyView}</Text>}
       <div className="v-crew__actions">
         {canLoad && (
           <Button size="sm" onClick={() => void loadEarlier()} busy={earlier === "busy"}>
             {earlier === "busy" ? S.crew.loadingEarlier : S.crew.loadEarlier}
           </Button>
         )}
-        <Button size="sm" variant="ghost" onClick={() => setPin((n) => n + 1)}>{S.crew.jumpLatest}</Button>
+        <Button size="sm" variant="ghost" onClick={jumpLatest}>{S.crew.jumpLatest}</Button>
       </div>
       {text.length === 0 && !err ? (
         <Text variant="body-sm" muted>{S.crew.noStream}</Text>

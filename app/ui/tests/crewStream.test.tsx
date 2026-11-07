@@ -126,18 +126,27 @@ describe("Stream tab (S2b, US-2.2)", () => {
     await waitFor(() => expect(earlierButton()).toBeTruthy());
   });
 
-  it("says where the view stops when the row cap is reached", async () => {
-    await openBackend({
-      tail: tail(lines(900001, 900003), { spill_start: 0, spill_end: 10 }),
+  it("keeps paging back past the row cap until the first retained line, then Jump to latest restores the tail", async () => {
+    // 100,000 spilled lines before a window starting at 100001: 25 clicks is well past the 19-click row cap.
+    const f = await openBackend({
+      tail: tail(lines(100001, 100003), { spill_start: 0, spill_end: 10 }),
       read_spill_before: spillBefore,
     });
-    for (let k = 0; k < 19; k++) {
-      await waitFor(() => expect(earlierButton()).toBeTruthy());
-      fireEvent.click(earlierButton()!);
+    const asks = () => f.calls.filter((c) => c.cmd === "read_spill_before").map((c) => c.args);
+    for (let k = 1; k <= 25; k++) {
       await waitFor(() => expect(earlierButton()?.hasAttribute("disabled") ?? false).toBe(false));
+      fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+      await waitFor(() => expect(asks()).toHaveLength(k));
     }
-    expect(await screen.findByText(S.crew.earlierLimit)).toBeTruthy();
-    expect(earlierButton()).toBeNull();
+    // Still contiguous after the cap, and the button is still offered.
+    expect(asks()[24]).toEqual({ stream: "w-a1", beforeSeq: 100001 - 24000, maxLines: 1000 });
+    await waitFor(() => expect(earlierButton()).toBeTruthy());
+    expect(await screen.findByText(S.crew.historyView)).toBeTruthy();
+    expect(screen.getByRole("log").textContent).toContain("out 75001");
+    expect(screen.getByRole("log").textContent).not.toContain("out 100003");
+    fireEvent.click(screen.getByRole("button", { name: S.crew.jumpLatest }));
+    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 100003"));
+    expect(screen.queryByText(S.crew.historyView)).toBeNull();
   });
 
   it("offers no 'load earlier' when nothing was spilled", async () => {
