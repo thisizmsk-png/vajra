@@ -65,6 +65,8 @@ struct Run {
     nonces: Redactor,
 }
 
+/// Untracked file names `diff` lists.
+const UNTRACKED_MAX: usize = 200;
 const LIST_VERIFY_WORKERS: usize = 4;
 /// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
 /// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
@@ -670,8 +672,42 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    pub fn diff(&self, cwd: &str, base: &str) -> Res {
-        let cwd = repo_dir(cwd)?;
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        if !bus::valid_stream_id(&worker_stream(worker)) {
+            return Err(invalid("worker", "not a worker id"));
+        }
+        let cwd = lock(&self.transcripts).get(worker).map(|t| t.cwd().map(str::to_string));
+        let Some(cwd) = cwd else { return Err(fail("not_found", "no such worker")) };
+        let refuse = || fail("not_a_crew_worktree", "the worker has no crew worktree");
+        let wt = cwd.map(PathBuf::from).and_then(|p| p.canonicalize().ok()).ok_or_else(refuse)?;
+        let repo = lock(&self.runs)
+            .values()
+            .map(|r| r.cwd.clone())
+            .find(|r| {
+                r.canonicalize().is_ok_and(|r| {
+                    wt.strip_prefix(r.join(".claude/worktrees")).is_ok_and(|rest| rest.components().next().is_some())
+                })
+            })
+            .ok_or_else(refuse)?;
+        if !wt.is_dir() {
+            return Err(refuse());
+        }
+        let git = |dir: &Path, args: &[&str]| -> Option<String> {
+            let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
+            (o.code == Some(0)).then(|| o.stdout.trim().to_string())
+        };
+        let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]).and_then(|h| git(&wt, &["merge-base", "HEAD", &h]));
+        Ok(json!({"worker": worker, "worktree": wt.to_string_lossy(), "branch": branch, "base": base}))
+    }
+
+    pub fn diff(&self, cwd_str: &str, base: &str) -> Res {
+        let cwd = repo_dir(cwd_str)?;
         if base.is_empty() || base.starts_with('-') || base.len() > 255 {
             return Err(invalid("base", "must be a ref or commit"));
         }
@@ -679,7 +715,24 @@ impl App {
             .bridge
             .run(&Request::Git { cwd, args: vec!["diff".into(), base.into(), "--".into()] })
             .map_err(|e| fail("git_failed", e))?;
-        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out}))
+        // `git diff <base>` leaves out files git does not track yet, so a worker's brand-new files are listed apart
+        // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
+        let mut untracked: Vec<String> = Vec::new();
+        let mut untracked_truncated = false;
+        if o.code == Some(0) && !o.timed_out {
+            if let Ok(u) = self.bridge.run(&Request::Git {
+                cwd: repo_dir(cwd_str)?,
+                args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
+            }) {
+                if u.code == Some(0) {
+                    let all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                    untracked_truncated = u.truncated || all.len() > UNTRACKED_MAX;
+                    untracked = all.into_iter().take(UNTRACKED_MAX).map(String::from).collect();
+                }
+            }
+        }
+        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+                  "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
     // ---------------------------------------------------------------- control
@@ -994,6 +1047,8 @@ fn node_json(n: &Node) -> Value {
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
         "engine_id": n.engine_id,
+        // The name the UI shows for the role (AC-2.1.3); the engine id is only a secondary field.
+        "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),

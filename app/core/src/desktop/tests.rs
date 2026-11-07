@@ -1090,6 +1090,102 @@ fn a_target_whose_directory_is_gone_is_not_offered() {
     assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
 }
 
+// ---------------------------------------------------------------- worktree_info (S2c)
+
+fn git(cwd: &Path, args: &[&str]) {
+    let o = std::process::Command::new("git").arg("-C").arg(cwd).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A repo with one worktree under `.claude/worktrees/w1`, a registered run for it and a seeded worker whose transcript cwd is `wt_cwd`.
+fn crew_fixture(t: &Tmp, wt_cwd: &dyn Fn(&Path) -> PathBuf) -> (App, PathBuf, PathBuf) {
+    let repo = t.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("f.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let wt = repo.join(".claude/worktrees/w1");
+    git(&repo, &["worktree", "add", "-q", "-b", "worker-1", wt.to_str().unwrap()]);
+    fs::write(wt.join("f.txt"), "one\ntwo\n").unwrap();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let (path, first) = seed_worker(t, &repo, sid);
+    let cwd = wt_cwd(&repo);
+    fs::write(&path, format!("{}\n", first.replace("\"cwd\":\"/repo\"", &format!("\"cwd\":{}", serde_json::to_string(&cwd).unwrap())))).unwrap();
+    let app = t.app();
+    lock(&app.runs).insert("run-x".into(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: repo.clone(), nonces: Redactor::default() });
+    app.crew("c", "20261105-1230").unwrap();
+    (app, repo, wt)
+}
+
+#[test]
+fn worktree_info_returns_the_crew_worktree_its_branch_and_base() {
+    let t = Tmp::new();
+    let (app, _repo, wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let i = app.worktree_info("aa870dd40540481f0").unwrap();
+    assert_eq!(i["worktree"], wt.canonicalize().unwrap().to_string_lossy().as_ref(), "{i}");
+    assert_eq!(i["branch"], "worker-1", "{i}");
+    assert_eq!(i["base"].as_str().map(str::len), Some(40), "{i}");
+    let d = app.diff(i["worktree"].as_str().unwrap(), i["base"].as_str().unwrap()).unwrap();
+    assert!(d["diff"].as_str().unwrap().contains("+two"), "{d}");
+}
+
+#[test]
+fn diff_lists_untracked_files_apart_and_respects_ignore_rules() {
+    let t = Tmp::new();
+    let (app, repo, wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    git(&wt, &["checkout", "-q", "--", "f.txt"]); // only new work remains: nothing tracked differs from the base
+    fs::write(wt.join("new file.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(wt.join("sub")).unwrap();
+    fs::write(wt.join("sub/also.txt"), "x").unwrap();
+    fs::write(repo.join(".git/info/exclude"), "ignored.log\n").unwrap();
+    fs::write(wt.join("ignored.log"), "x").unwrap();
+    let i = app.worktree_info("aa870dd40540481f0").unwrap();
+    let d = app.diff(i["worktree"].as_str().unwrap(), i["base"].as_str().unwrap()).unwrap();
+    assert_eq!(d["diff"].as_str().unwrap().trim(), "", "tracked files are unchanged: {d}");
+    let mut u: Vec<String> = d["untracked"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    u.sort();
+    assert_eq!(u, vec!["new file.rs".to_string(), "sub/also.txt".to_string()], "{d}");
+    assert_eq!(d["untracked_truncated"], false);
+}
+
+#[test]
+fn worktree_info_refuses_a_cwd_outside_the_crew_worktrees() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.to_path_buf()); // the repo itself, not a worktree
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_a_crew_worktree");
+    let _ = repo;
+}
+
+#[test]
+fn worktree_info_refuses_a_symlink_that_leaves_the_worktrees_dir() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/evil"));
+    let outside = t.0.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".claude/worktrees/evil")).unwrap();
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_a_crew_worktree");
+}
+
+#[test]
+fn worktree_info_rejects_a_bad_or_unknown_worker() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.worktree_info("../x").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_found");
+}
+
+#[test]
+fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
+    use crate::crew::tree::{Node, NodeKind, Status};
+    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], children: vec![] };
+    let j = node_json(&n);
+    assert_eq!(j["role"], "Backend", "{j}");
+    assert_eq!(j["engine_id"], "bhima");
+    let g = node_json(&Node { engine_id: None, ..n });
+    assert!(g["role"].is_null());
+}
+
 // ---------------------------------------------------------------- read_report (held bytes)
 
 fn fnv32(s: &str) -> String {

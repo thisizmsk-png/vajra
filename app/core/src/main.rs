@@ -117,6 +117,11 @@ fn task(app: State<'_, App>, slug: String, task_id: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn worktree_info(app: State<'_, App>, worker: String) -> Res {
+    app.worktree_info(&worker)
+}
+
+#[tauri::command(async)]
 fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
     app.diff(&cwd, &base)
 }
@@ -278,6 +283,7 @@ fn main() {
             read_spill_before,
             task,
             diff,
+            worktree_info,
             control_message,
             control_redirect,
             control_stop,
