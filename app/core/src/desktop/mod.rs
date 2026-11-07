@@ -259,7 +259,24 @@ impl App {
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
+        // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf() };
+        if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
+            self.note("run_index_failed", &[]);
+        }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
+    }
+
+    /// The session and directory to resume each campaign this app started: `claude --resume` needs the prior session
+    /// id, and campaign state does not hold it. A campaign started elsewhere (a terminal) is simply absent, and so is
+    /// one whose directory no longer exists.
+    pub fn resume_targets(&self) -> Res {
+        let targets: serde_json::Map<String, Value> = runindex::latest(&self.data.join("runs.jsonl"))
+            .into_iter()
+            .filter(|(_, e)| e.cwd.is_dir())
+            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy()})))
+            .collect();
+        Ok(json!({"targets": targets}))
     }
 
     /// The workflow takes only a commit sha, so a branch or ref is resolved
@@ -656,6 +673,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     }
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
+
+mod runindex;
 
 #[cfg(test)]
 mod tests;
