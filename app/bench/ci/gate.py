@@ -85,8 +85,23 @@ def check(baseline, idle, growth):
     return evaluate(baseline, idle, growth)[0]
 
 
+def post_only(baseline, post_json):
+    """(warnings, summary) for a postload.json on its own; looks up the flavour baseline when the identity is known."""
+    entry = baseline.get("identities", {}).get(post_json.get("identity", ""), {})
+    flavour = entry.get("flavours", {}).get(str(post_json.get("helpers")), {})
+    return post_load_warnings(post_json.get("post_load"), flavour), summary(post_json)
+
+
 if __name__ == "__main__":
     load = lambda p: json.load(open(p))
+    if sys.argv[1] == "--post":
+        warns, md = post_only(load(sys.argv[2]), load(sys.argv[3]))
+        for w in warns:
+            print(f"::warning::perf post-load: {w}")
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(md)
+        print(md or "no post-load data")
+        sys.exit(0)
     fails, warns = evaluate(load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3]) if len(sys.argv) > 3 else None)
     for w in warns:
         print(f"::warning::perf gate: {w}")

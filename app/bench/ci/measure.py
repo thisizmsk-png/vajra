@@ -145,7 +145,7 @@ def window(proc, before, seconds, step=2):
 
 def postload(binary, out):
     """Launch the fixture build, let it load the scripted stream, and sample idle at +2 and +10 minutes after the load.
-    Adds a "post_load" section to the idle.json at `out`; reported only (gate.py warns, never fails, on it)."""
+    Writes `out` with the runner identity and a "post_load" section; reported only (gate.py --post warns, never fails)."""
     proc, before = launch(binary)
     t0 = time.time()
     at = lambda s: time.sleep(max(0.0, t0 + s - time.time()))
@@ -162,9 +162,9 @@ def postload(binary, out):
         plus10 = window(proc, before, 20)
     finally:
         stop(proc)
-    data = json.load(open(out))
-    data["post_load"] = postload_summary(pre, peak, plus2, plus10)
-    json.dump(data, open(out, "w"), indent=1)
+    ident = runner_identity()
+    json.dump({"identity": ident["key"], "runner": ident, "helpers": min(s["helpers"] for s in pre + plus10),
+               "post_load": postload_summary(pre, peak, plus2, plus10)}, open(out, "w"), indent=1)
 
 
 def runner_identity():

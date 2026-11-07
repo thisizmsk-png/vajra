@@ -35,13 +35,16 @@ The 3-helper flavour reads about 201 MiB on the CI VM, over the 200 MiB ceiling,
 Until the owner rules, a ceiling failure is a failure: there is no rerun exception. Any retry policy is one of the owner's options above.
 
 ## Post-load idle (reported, not gated)
-NFR-PERF-1 is also about what the app holds after a long run, not only the first minute. The memory job builds a second
+NFR-PERF-1 is also about what the app holds after a long run, not only the first minute. The separate `postload` job builds a second
 copy of the app with `VITE_PERF_FIXTURE=1` (the normal bundle has none of it; a CI step greps the shipped bundle). That
 build replaces the core with a scripted one: a Crew view with one worker whose Stream tab receives 10,000 lines at 170/s
 starting 20 s after launch. `measure.py postload` samples the total before the load, the peak during it, and the idle
-total 2 and 10 minutes after the load ends, and adds `post_load` to `idle.json` (pre-load, peak, +2 min, +10 min, retained =
+total 2 and 10 minutes after the load ends, and writes `postload.json` with `post_load` (pre-load, peak, +2 min, +10 min, retained =
 +10 min minus pre-load). `gate.py` prints them in the job summary and as warnings: it never fails on them. The scripted
 stream drives the real renderer through a fake transport, so the core's own bus and spill file are not exercised.
+
+It runs on push to main, nightly, on a PR that changes `app/ui/**` or `app/bench/**`, and on a PR labelled `perf`; otherwise the job
+skips with a one-line summary note. The per-PR idle gate (`memory` job) is unchanged.
 
 To start gating it, record a baseline with the bump procedure below: set `post_load_mib` on the flavour from the median
 `plus10_mib` of at least 3 green runs. Until then a run over the 200 MiB budget or over that baseline only warns.

@@ -1,5 +1,5 @@
 import unittest
-from gate import check, evaluate
+from gate import check, evaluate, post_only
 from measure import clean_median, identity_key, flavour_summary, launch_flavours, postload_summary
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
@@ -196,3 +196,14 @@ class PostLoad(unittest.TestCase):
     def test_a_run_without_a_post_load_section_is_unchanged(self):
         fails, warns = evaluate(bl(), self.idle(), None)
         self.assertEqual((fails, warns), ([], []))
+
+
+class PostOnly(unittest.TestCase):
+    def test_a_standalone_post_load_file_reports_and_never_fails(self):
+        warns, md = post_only(bl(), {"identity": ID, "helpers": 2, "post_load": POST})
+        self.assertTrue(any("no baseline" in w for w in warns), warns)
+        self.assertIn("| 150.0 | 210.0 | 190.0 | 195.0 | 45.0 MiB |", md)
+
+    def test_an_unknown_identity_still_reports(self):
+        warns, md = post_only(bl(), {"identity": "other", "helpers": 3, "post_load": POST})
+        self.assertTrue(warns and md)

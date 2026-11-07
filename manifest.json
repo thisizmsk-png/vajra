@@ -345,6 +345,6 @@
     "docs/design/after/kit-dark-desktop-1280.png": "09ece1f78e07bcea6b696a432c1590790a256de6747045809ead6b64ae8381d0",
     "docs/design/after/kit-dark-desktop2-1280.png": "ce8a24ed5e419576d1c895d457be4bca14d4c9cc0d73035795736d75923bf23a",
     "docs/design/after/kit-light-desktop-1280.png": "1939bbbb75c841df40c5a40fb78d041698ef00420cbad5d33e9f4e20154b63cf",
-    ".github/workflows/perf.yml": "aab16970c01b39ca243915db424f1e018fa43766417a6fb2a4e1227ad1ade56f"
+    ".github/workflows/perf.yml": "89377519c4e19f63c4b1c5ba81e63d3fc19f378e0f6dc5467c40fd112e38298f"
   }
 }
