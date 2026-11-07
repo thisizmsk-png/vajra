@@ -61,6 +61,8 @@ export type LeadStatus = { available: boolean; read_only_reason?: string; busy: 
 export type InboxItem = {
   id: string; kind: "task"; campaign: string; origin: "app" | "terminal"; status: string; created: string; age_s: number;
   title: string; body: string; context: string[]; actions: string[];
+  /** What `created` and `age_s` measure: when the app first saw the task waiting (tasks.json has no per-task time). */
+  since?: string;
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
