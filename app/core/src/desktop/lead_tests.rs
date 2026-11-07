@@ -52,6 +52,9 @@ case "$(cat "$D/mode")" in
         echo $! > "$D/slow.child"
         cat "$D/init.json"
         wait;;
+  late) while [ ! -e "$D/release" ]; do sleep 0.05; done
+        cat "$D/init.json"
+        echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
   bad_tools) cat "$D/init_bad.json"; sleep 30;;
   card) cat "$D/init.json"
         echo '{"type":"assistant","message":{"content":[{"type":"text","text":"{\"card\":\"stop\",\"worker\":\"bhima\"}"}]}}'
@@ -640,4 +643,22 @@ fn app_shutdown_reaches_a_self_test_in_progress() {
         assert_eq!(code(&h.join().unwrap().unwrap_err()), "cancelled");
     });
     assert!(idle(&app));
+}
+
+#[test]
+fn a_delayed_lead_init_does_not_roll_the_campaign_back_to_an_older_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    let path = t.data().join("runs.jsonl");
+    let launch = |run: &str| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&path, &launch(RUN_ID)).unwrap();
+    t.set("mode", "late");
+    app.ask_lead(RUN_ID, "first question").unwrap();
+    wait_until("the Lead to be started", || t.count("ask.count") == 1);
+    // The human resumes the campaign into run B while A's Lead is still starting.
+    runindex::append(&path, &launch("20261106-1000")).unwrap();
+    std::fs::write(t.bin("release"), "").unwrap();
+    wait_until("the ask", || idle(&app));
+    let latest = &runindex::latest(&path)["deliver-x"];
+    assert_eq!((latest.run_id.as_str(), latest.lead_session_id.clone()), ("20261106-1000", None), "B stays the campaign's newest run");
 }
