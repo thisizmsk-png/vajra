@@ -7,7 +7,10 @@ on:
     branches: [main]
     paths: ["app/**", ".github/workflows/perf.yml"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths: ["app/**", ".github/workflows/perf.yml"]
+  schedule:
+    - cron: "17 5 * * *"
 
 permissions:
   contents: read
@@ -18,6 +21,8 @@ concurrency:
 
 jobs:
   memory:
+    # A label change must not re-run the idle gate; only the postload job reacts to the "perf" label.
+    if: github.event.action != 'labeled'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -37,6 +42,9 @@ jobs:
           npm run build
           cd ../core
           ../ui/node_modules/.bin/tauri build --bundles app
+      - name: The shipped bundle has no perf fixture
+        run: |
+          if grep -rl "fixture/.claude/worktrees" app/ui/dist; then echo "perf fixture leaked into the normal bundle"; exit 1; fi
       - name: Idle (3 launches)
         run: |
           BIN="$(ls -d app/core/target/release/bundle/macos/*.app | head -1)/Contents/MacOS/vajra-desktop"
@@ -56,3 +64,59 @@ jobs:
           path: |
             idle.json
             growth.json
+
+  # Post-load idle (a scripted 10,000-line stream, then idle at +2 and +10 minutes): a second build plus ~15 minutes, so it
+  # does not run on every PR. It runs on push to main, nightly, on a PR that changes app/ui/** or app/bench/**, or when the
+  # PR has the "perf" label. Reported only (warnings and the job summary); it never fails the check.
+  postload:
+    if: github.event.action != 'labeled' || github.event.label.name == 'perf'
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          run=false
+          case "$EVENT" in
+            push|schedule) run=true ;;
+            pull_request)
+              case ",$LABELS," in *,perf,*) run=true ;; esac
+              if git diff --name-only "$BASE"...HEAD | grep -qE '^app/(ui|bench)/'; then run=true; fi ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [ "$run" = false ]; then
+            echo "Post-load idle skipped: this PR changes nothing under app/ui or app/bench and has no 'perf' label." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.decide.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - if: steps.decide.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the app with the perf fixture
+        if: steps.decide.outputs.run == 'true'
+        working-directory: app/ui
+        run: |
+          npm ci --no-audit --no-fund
+          VITE_PERF_FIXTURE=1 npm run build
+          cd ../core
+          ../ui/node_modules/.bin/tauri build --bundles app
+      - name: Post-load idle (reported, not gated)
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          BIN="$(ls -d app/core/target/release/bundle/macos/*.app | head -1)/Contents/MacOS/vajra-desktop"
+          python3 app/bench/ci/measure.py postload "$BIN" postload.json
+          python3 app/bench/ci/gate.py --post app/bench/ci/baseline.json postload.json
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.decide.outputs.run == 'true'
+        with:
+          name: perf-postload
+          path: postload.json
