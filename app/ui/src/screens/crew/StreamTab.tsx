@@ -8,6 +8,8 @@ import type { Ring } from "./streamRing";
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
+/** Pages one load may read back to back (64 KiB each); more is picked up by the next poll or event. */
+const MAX_DRAIN_PAGES = 64;
 
 /** One worker's output: a bounded window that follows the tail, with older output fetched on request. */
 export function StreamTab({ stream }: { stream: string }) {
@@ -29,9 +31,16 @@ export function StreamTab({ stream }: { stream: string }) {
     busy.current = true;
     last.current = Date.now();
     try {
-      const t = await api.tail(stream, ringRef.current.last);
-      setErr("");
-      put(appendTail(ringRef.current, t, capRef.current));
+      // The core returns the oldest lines after the cursor, one page at a time (64 KiB): keep reading until the cursor
+      // reaches head_seq, so opening a worker or Jump to latest gets to the newest lines now, not one page per poll.
+      for (let page = 0; page < MAX_DRAIN_PAGES; page++) {
+        const t = await api.tail(stream, ringRef.current.last);
+        setErr("");
+        const before = ringRef.current.last;
+        put(appendTail(ringRef.current, t, capRef.current));
+        const r = ringRef.current;
+        if (r.detached || r.last <= before || r.last >= t.head_seq) break;
+      }
     } catch (e) {
       setErr(errorText(e));
     } finally {

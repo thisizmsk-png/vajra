@@ -39,6 +39,25 @@ describe("Stream tab (S2b, US-2.2)", () => {
     expect(tails(f)[0].args).toMatchObject({ stream: "w-a1", afterSeq: 0 });
   });
 
+  it("reaches the newest lines in one load when the core returns 64 KiB pages (opening a long-running worker)", async () => {
+    // 300 lines of ~1 KiB = ~300 KiB retained: the core hands back the OLDEST lines after the cursor, ~64 per page.
+    const body = "y".repeat(1000);
+    const all = Array.from({ length: 300 }, (_, i) => ({ seq: i + 1, text: `${i + 1} ${body}` }));
+    const page = (a?: Record<string, unknown>) => {
+      const after = (a?.afterSeq as number) ?? 0;
+      const out: typeof all = [];
+      let bytes = 0;
+      for (const l of all.filter((x) => x.seq > after)) { if (bytes + l.text.length > 64 * 1024) break; out.push(l); bytes += l.text.length; }
+      return tail(out, { head_seq: 300 });
+    };
+    const f = await openBackend({ tail: page });
+    // Several pages from ONE load (the 1 s poll has not fired): the cursor walks 0 -> ... -> the newest line.
+    await waitFor(() => expect(tails(f).length).toBeGreaterThanOrEqual(5));
+    const after = tails(f).map((c) => c.args?.afterSeq as number);
+    expect(after.slice(0, 5)).toEqual([0, 65, 130, 195, 260]);
+    expect(Math.max(...after)).toBeGreaterThanOrEqual(260);
+  });
+
   it("shows no stream for the Lead or the run (they have no worker stream)", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
     const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, tail: tail([]) });
