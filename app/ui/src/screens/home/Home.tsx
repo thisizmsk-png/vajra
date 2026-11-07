@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Input, Section, SegmentedControl, StatusDot, Text } from "../../../components/ui/base";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
-import type { Campaign, Preflight } from "../../ipc";
+import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useRoute } from "../../router";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
@@ -21,11 +21,13 @@ function useLoad<T>(fetch: () => Promise<T>, refreshOnChange = false): [Load<T>,
 
 const fetchPreflight = () => api.preflight();
 const fetchCampaigns = () => api.listCampaigns().then((r) => r.campaigns);
+const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
   const [pre, recheck] = useLoad<Preflight>(fetchPreflight);
   const [camps] = useLoad<Campaign[]>(fetchCampaigns, true);
+  const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
   const [d, setD] = useState<Draft>({ repo: "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
@@ -34,11 +36,11 @@ export function Home() {
   const errs = validate(d);
   const ready = pre.state === "ok" && pre.data.start_enabled;
 
-  const launch = async (key: string, input: ReturnType<typeof toInput>) => {
+  const launch = async (key: string, begin: () => Promise<{ campaign: string; run_id: string; stream: string }>) => {
     setBusy(key);
     setFail("");
     try {
-      const r = await api.startRun(input, d.repo.trim());
+      const r = await begin();
       go("run", { slug: r.campaign, id: r.run_id, stream: r.stream });
     } catch (e) {
       setFail(errorText(e));
@@ -48,12 +50,14 @@ export function Home() {
 
   const start = () => {
     setShown(true);
-    if (Object.keys(errs).length === 0 && ready) void launch("start", toInput(d));
+    if (Object.keys(errs).length === 0 && ready) void launch("start", () => api.startRun(toInput(d), d.repo.trim()));
   };
+  // Resume continues the session that ran the campaign (claude --resume), in the directory it ran in. Only a campaign
+  // this app started has a recorded session; any other cannot be resumed from here.
+  const targetOf = (c: Campaign) => (targets.state === "ok" ? targets.data[c.slug] : undefined);
   const resume = (c: Campaign) => {
-    setShown(true);
-    if (errs.repo || errs.base || errs.maxInFlight) return;
-    void launch(c.slug, { ...toInput(d), ask: c.goal || c.slug, campaign: c.slug });
+    const t = targetOf(c);
+    if (t) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd));
   };
   const err = (k: keyof Draft) => (shown ? errs[k] : undefined);
 
@@ -101,7 +105,6 @@ export function Home() {
         {camps.state === "ok" && camps.data.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
         {camps.state === "ok" && camps.data.length > 0 && (
           <>
-            {!d.repo.trim() && <Text variant="body-sm" muted>{S.home.resumeNeedsRepo}</Text>}
             <ul className="v-home__list" aria-label={S.home.campaigns}>
               {camps.data.map((c) => (
                 <li key={c.slug}>
@@ -109,9 +112,13 @@ export function Home() {
                   {c.error ? <Badge status="danger">{c.error}</Badge> : (
                     <>
                       {c.total != null && <Text variant="body-sm" numeric>{S.home.passing(c.passing ?? 0, c.total)}</Text>}
-                      <Button size="sm" onClick={() => resume(c)} busy={busy === c.slug} disabled={!d.repo.trim()}>
-                        {busy === c.slug ? S.home.resuming : S.home.resume}
-                      </Button>
+                      {targetOf(c) ? (
+                        <Button size="sm" onClick={() => resume(c)} busy={busy === c.slug}>
+                          {busy === c.slug ? S.home.resuming : S.home.resume}
+                        </Button>
+                      ) : (
+                        <Text variant="body-sm" muted>{S.home.resumeElsewhere}</Text>
+                      )}
                     </>
                   )}
                 </li>

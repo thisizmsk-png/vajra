@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 async function open(replies: Record<string, unknown>) {
-  const f = fakeIpc(replies);
+  const f = fakeIpc({ resume_targets: { targets: {} }, ...replies });
   setTransport(f.transport);
   render(<Home />);
   await waitFor(() => expect(f.calls.map((c) => c.cmd)).toContain("list_campaigns"));
@@ -81,15 +81,44 @@ describe("Home", () => {
     expect(window.location.hash).toBe("");
   });
 
-  it("lists campaigns with N of M passing and resumes by slug, with the goal as the ask", async () => {
-    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [camp(), { slug: "bad", error: "unreadable" }] }, start_run: handle });
+  const SID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const target = { session_id: SID, run_id: "20261106-1000", cwd: "/work/repo" };
+
+  it("resumes the recorded session in its directory, with no repo field needed (claude --resume)", async () => {
+    const f = await open({
+      preflight: rows(true),
+      list_campaigns: { campaigns: [camp(), { slug: "bad", error: "unreadable" }] },
+      resume_targets: { targets: { c1: target } },
+      resume_run: handle,
+    });
     expect(await screen.findByText("2 of 5 passing")).toBeTruthy();
     expect(screen.getByText("unreadable")).toBeTruthy();
-    expect(screen.getByRole("button", { name: S.home.resume }).getAttribute("aria-disabled")).toBe("true"); // no repo yet
-    fill(S.home.repo, "/r");
-    fireEvent.click(screen.getByRole("button", { name: S.home.resume }));
+    fireEvent.click(await screen.findByRole("button", { name: S.home.resume }));
     await waitFor(() => expect(window.location.hash).toContain("#/run?"));
-    expect(f.calls.find((c) => c.cmd === "start_run")!.args).toMatchObject({ campaign: "c1", ask: "ship it", cwd: "/r" });
+    expect(f.calls.find((c) => c.cmd === "resume_run")!.args).toEqual({ sessionId: SID, campaign: "c1", cwd: "/work/repo" });
+    expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false); // never a fresh session
+  });
+
+  it("offers no Resume for a campaign this app did not start, and says why", async () => {
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [camp()] }, resume_targets: { targets: {} } });
+    expect(await screen.findByText(S.home.resumeElsewhere)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: S.home.resume })).toBeNull();
+  });
+
+  it("offers no Resume when the targets cannot be read", async () => {
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [camp()] }, resume_targets: () => { throw { error: "unknown_command" }; } });
+    expect(await screen.findByText(S.home.resumeElsewhere)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: S.home.resume })).toBeNull();
+  });
+
+  it("shows the core's refusal when resume fails and stays on Home", async () => {
+    await open({
+      preflight: rows(true), list_campaigns: { campaigns: [camp()] }, resume_targets: { targets: { c1: target } },
+      resume_run: () => { throw { error: "run_active", detail: "finish or stop the active run first" }; },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.home.resume }));
+    expect((await screen.findByRole("alert")).textContent).toContain("finish or stop the active run");
+    expect(window.location.hash).toBe("");
   });
 
   it("refreshes the campaign list when the core says something changed", async () => {

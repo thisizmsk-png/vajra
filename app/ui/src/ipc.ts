@@ -49,6 +49,7 @@ export type RunHandle = { stream: string; session_id: string; run_id: string; ca
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
+export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
@@ -72,6 +73,8 @@ export const api = {
   ledger: () => call<{ records: Json[] }>("ledger"),
   kbSearch: (query: string, k: number, repo: string) => call<{ hits: unknown; code: number | null }>("kb_search", { query, k, repo }),
   takeOver: (stream: string, on: boolean) => call<Json>("take_over", { stream, on }),
+  /** The session and directory of each campaign this app started (absent: started elsewhere). */
+  resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
 };
 
