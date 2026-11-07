@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Run } from "../src/screens/run/Run";
@@ -27,6 +27,23 @@ const open = async (rows: unknown[]) => {
 const order = () => screen.getAllByRole("listitem").map((e) => e.textContent ?? "");
 
 describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
+  it("drops a response for the previous campaign that resolves after the route changed", async () => {
+    let release: (v: unknown) => void = () => {};
+    const slowA = new Promise((r) => { release = r; });
+    window.location.hash = "#/run?slug=camp-a";
+    const f = fakeIpc({
+      evidence_list: (a?: Record<string, unknown>) => (a?.slug === "camp-a" ? slowA : list([row("tb", "from-B", "pass")])),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.args?.slug === "camp-a")).toBe(true));
+    act(() => { window.location.hash = "#/run?slug=camp-b"; });
+    await screen.findByText("from-B");
+    await act(async () => { release({ slug: "camp-a", stale: false, rows: [row("ta", "from-A", "fail")] }); await Promise.resolve(); });
+    expect(screen.queryByText("from-A")).toBeNull();
+    expect(screen.getByText("from-B")).toBeTruthy();
+  });
+
   it("shows unchecked criteria as Checking and asks again until the core has checked them all", async () => {
     let n = 0;
     window.location.hash = "#/run?slug=camp";

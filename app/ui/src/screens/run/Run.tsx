@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
@@ -23,10 +23,18 @@ export function Run() {
   const [pending, setPending] = useState(0);
   const [sel, setSel] = useState<number | null>(null);
 
+  /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
+  const current = useRef(slug);
   const load = useCallback(() => {
     if (!slug) return;
-    api.evidenceList(slug).then((r) => { setRows(r.rows); setPending(r.pending ?? 0); setErr(""); }, (e) => setErr(errorText(e)));
+    current.current = slug;
+    api.evidenceList(slug).then(
+      (r) => { if (current.current !== slug) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
+      (e) => { if (current.current === slug) setErr(errorText(e)); },
+    );
   }, [slug]);
+  // A new campaign starts empty: the previous campaign's rows, pending count, error and selection are not shown under it.
+  useEffect(() => { current.current = slug; setRows(null); setPending(0); setErr(""); setSel(null); }, [slug]);
   useEffect(load, [load]);
   useEffect(() => (slug ? onChanged(load) : undefined), [slug, load]);
   useEffect(() => {
