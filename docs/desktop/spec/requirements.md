@@ -25,7 +25,7 @@ Sources: `docs/commands/deliver.md`, `docs/commands/campaign.md`, the shared bri
 - A run is opaque: one terminal, one scrolling log. There is no way to hop between workers, see one worker's diff, or ask "what is Backend stuck on?"
 - Steering a worker means typing into the run session. deliver.md states Claude Code relays the most recent user message to every workflow agent started afterwards, so typing there can leak to all workers.
 - Approvals (`pending_approval` plans, `need_input` questions, blocked tasks) and per-criterion evidence are buried in report text.
-- Existing fleet dashboards (Agent Orchestrator desktop, Orca) are Electron apps with high memory (one snapshot: Agent Orchestrator, 13 processes, about 1.6 GB RSS) and show sessions, not per-criterion evidence.
+- Existing fleet dashboards (Competitor B desktop, Competitor F) are Electron apps with high memory (one snapshot: Competitor B, 13 processes, about 1.6 GB RSS) and show sessions, not per-criterion evidence.
 
 **Cost of inaction.** Users keep one terminal and read the end report; stuck workers are found late; people paste steering text into the run session and pollute the run.
 
@@ -65,11 +65,11 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.3.6 (VD-12, VD-31) GIVEN a fresh install with the network blocked, WHEN I start a run and use every screen, THEN everything works and no login or account screen appears; with the network open for an hour under a network monitor, the only outbound connection the app makes is the update check (Claude Code's own traffic excluded).
 - AC-1.3.7 (VD-28) GIVEN a Mac with Claude Code and Vajra installed, WHEN I open the signed DMG and launch the app, THEN I reach Home with a passing preflight in under 2 minutes, the app needs no Node or Python of its own, and it writes nothing outside `~/Library/Application Support/<app>/` and the repos I pick.
 
-**US-1.4** (owner decision, 2026-11-05) As a Dev leaving Conductor, I want my repos, worktrees and sessions found, so that I keep working in Vajra Desktop without redoing setup.
-- AC-1.4.1 GIVEN Conductor data on this Mac, WHEN I choose "Import from Conductor", THEN the app lists the repos, worktrees (from `git worktree list` in each repo) and Claude Code sessions (from transcripts whose `cwd` is one of those worktrees) it found, each with its path, branch and last activity, and selects none by default.
+**US-1.4** (owner decision, 2026-11-05) As a Dev leaving Competitor L, I want my repos, worktrees and sessions found, so that I keep working in Vajra Desktop without redoing setup.
+- AC-1.4.1 GIVEN Competitor L data on this Mac, WHEN I choose "Import from Competitor L", THEN the app lists the repos, worktrees (from `git worktree list` in each repo) and Claude Code sessions (from transcripts whose `cwd` is one of those worktrees) it found, each with its path, branch and last activity, and selects none by default.
 - AC-1.4.2 GIVEN the discovery list, WHEN I confirm items one by one (or select several and confirm once, with the list shown), THEN only the confirmed items are added to the app's own `runs.jsonl` and repo list; nothing else changes.
 - AC-1.4.3 GIVEN any import, WHEN it finishes or I cancel, THEN no file or worktree is deleted, moved, renamed or written outside the app data dir, and no git command other than read-only ones ran (fs and process trace).
-- AC-1.4.4 GIVEN Conductor's on-disk layout is unknown or changed, WHEN discovery runs, THEN it shows "Conductor data not recognised" and offers to add a repo by path, instead of guessing.
+- AC-1.4.4 GIVEN Competitor L's on-disk layout is unknown or changed, WHEN discovery runs, THEN it shows "Competitor L data not recognised" and offers to add a repo by path, instead of guessing.
 
 **US-1.5** (owner decision, 2026-11-05) As a Dev, I want to run Codex CLI agents next to Claude Code ones, so that I'm not locked into one vendor.
 - AC-1.5.1 GIVEN the agent-adapter interface (spawn, stream, PTY attach, inspect, message, stop, resume, plus capability flags), WHEN the Claude Code and Codex CLI adapters run the shared conformance suite, THEN every flag set to true passes its test and every flag set to false is hidden in the UI.
@@ -363,19 +363,19 @@ a reason at why 4, since native agent view already does it, P23)
 **POS-R4 Memory revival gates** (killed as a reason; build budgets regardless, and they only unlock wording)
 - POS-4.1 GIVEN 10 stub agents streaming at the spike's rate, WHEN measured by the spike's written method,
   THEN the app's own RSS (claude processes excluded, and also reported with them included) is within
-  NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Orca, Agent
+  NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Competitor F, Agent
   Orchestrator).
-- POS-4.2 (measurement) GIVEN Runner and Orca installed locally, WHEN each runs 10 sessions and its whole
-  process tree (Runner's daemon included, agent processes excluded) is sampled as RSS and `phys_footprint`,
+- POS-4.2 (measurement) GIVEN Competitor A and Competitor F installed locally, WHEN each runs 10 sessions and its whole
+  process tree (Competitor A's daemon included, agent processes excluded) is sampled as RSS and `phys_footprint`,
   3 or more runs each, THEN the medians and the method are published (NFR-PERF-7).
 - POS-4.3 (measurement) GIVEN 10 real `claude` agents, WHEN total RSS is measured, THEN the app's share of
   the total is reported. It sets the attribution story, not a "lighter" claim.
 - POS-4.4 GIVEN the 10-agent load on the real build for 1 hour (8 hours before launch), WHEN RSS is sampled
   every minute, THEN app-only GUI RSS grows at most 20 MiB from minute 5 to 60 with no sustained trend above
   1 MiB/min, and the 8-hour repeat stays flat (NFR-PERF-6; the prototype measured +31.1).
-- POS-4.5 (measurement) GIVEN the real build and Runner, each with 10 visible live terminals at the same
+- POS-4.5 (measurement) GIVEN the real build and Competitor A, each with 10 visible live terminals at the same
   scrollback limit, WHEN the 1-hour load runs 3 or more times, THEN the medians are recorded. Any "lighter
-  than Runner" wording is banned at launch (PRD section 1) and needs at least 10% below Runner's median plus
+  than Competitor A" wording is banned at launch (PRD section 1) and needs at least 10% below Competitor A's median plus
   an owner decision.
 - POS-4.6 GIVEN the real build idle (window open, no run, 60 s settle), WHEN RSS is summed over its process
   tree, THEN it is at most 200 MiB (NFR-PERF-1). "On par with native at idle" is allowed only if this passes.
@@ -400,7 +400,7 @@ a reason at why 4, since native agent view already does it, P23)
 
 ## 4. Scope
 
-**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only Conductor import (US-1.4), a control channel for the Lead and the human.
+**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only Competitor L import (US-1.4), a control channel for the Lead and the human.
 
 **Out of scope (non-goals).** The canonical list is [PRD section 8](../PRD.md#8-non-goals-deliberately-not-built).
 
@@ -427,7 +427,7 @@ Not inferred from the spike: marginal per-worker cost, render duration (rAF inte
 | NFR-PERF-4 | Start to usable crew view p95, process-cold and warm filesystem; true cold boot reported separately | <= 800 ms | 394.3 ms median of 3 trials (not a p95, not cold boot) | **Unmeasured** as a p95 |
 | NFR-PERF-5 | Bounded byte queues at every hop; one in-flight UI snapshot <= 64 KiB; a slow UI can't grow backend memory; slow disk pauses or fails visibly; a PTY or file reader is never blocked | as stated | met by the spike's design; its blocking writes must not be reused (review O6) | Design passes; real build untested |
 | NFR-PERF-6 | GUI RSS growth, minute 5 to 60, 10 live workers; no sustained trend > 1 MiB/min; then 8 h, and 72 h with 20 window cycles (PM-6) | <= 20 MiB | 31.1 MiB (WebContent) | **Fails** |
-| NFR-PERF-7 | Comparison method: serial runs on a quiet machine, same fixture, RSS and `phys_footprint`, method published; "lighter" only against apps beaten by that method, and only with the owner's approval (PRD section 1 bans it at launch) | as stated | Runner 201.3 idle; Orca 1,061.5 idle; Agent Orchestrator **uncontrolled** (it hosted the measurement); single busy-machine runs | **Unmeasured** (repeat runs, footprint) |
+| NFR-PERF-7 | Comparison method: serial runs on a quiet machine, same fixture, RSS and `phys_footprint`, method published; "lighter" only against apps beaten by that method, and only with the owner's approval (PRD section 1 bans it at launch) | as stated | Competitor A 201.3 idle; Competitor F 1,061.5 idle; Competitor B **uncontrolled** (it hosted the measurement); single busy-machine runs | **Unmeasured** (repeat runs, footprint) |
 | NFR-PERF-8 | Control hook cost per tool call when the app has no queue for the session | <= 10 ms p95 | not measured | **Unmeasured** |
 | NFR-PERF-9 | A run started outside the app appears; events reach the UI; control receipt | <= 2 s; <= 250 ms p95; <= 100 ms p95 | not measured | **Unmeasured** |
 | NFR-PERF-10 | Compressed installer; installed app (arm64 and universal separately) | <= 20 MiB; <= 50 MiB | 3.0 MiB DMG (unsigned, arm64) | Passes on the prototype |
@@ -556,7 +556,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P12 | VD-22 batch approvals for the crew | Won't do | It would answer Claude Code's permission prompt on the human's behalf; protected actions stay one human approval each (SKILL.md rule 2) | none |
 | P13 terminal fidelity | VD-23 proven terminal core, latency gate | MVP | xterm.js (G2); NFR-PERF-11; AC-2.2.6 | K3, H1 |
 | P14 notification noise | VD-24 notify on needs-you and finished runs only | MVP | AC-5.1.5. The ntfy webhook: deferred | S5 |
-| P15 lost context (9 sources) | Project memory that learns with human approval, on the existing ledger and Atman (owner feature) | MVP (inbox, approve, rules, search); claude-mem import later | US-7.1 to US-7.4, ADR-12, ADR-13 | S7, C9, E9 (E10 to E12 post-MVP) |
+| P15 lost context (9 sources) | Project memory that learns with human approval, on the existing ledger and Atman (owner feature) | MVP (inbox, approve, rules, search); Competitor M import later | US-7.1 to US-7.4, ADR-12, ADR-13 | S7, C9, E9 (E10 to E12 post-MVP) |
 | P15 lost context | VD-25 context meter and handoff | Deferred | Vajra's knowledge ledger and campaigns carry context across runs (POS-R3) | none |
 | P15 | VD-26 zero-cost hooks | MVP | AC-3.2.6, NFR-PERF-8 | E1 |
 | P16 silent config edits | VD-27 never edit config without consent | MVP | AC-1.3.5, AC-1.1.3; engine changes install through Vajra's own installer, run by the human | S1 |
@@ -567,7 +567,7 @@ Source: `vajra-4/pain-points.md` (23 pain points from GitHub issues, HN, X, V2EX
 | P19 telemetry, login | VD-31 no telemetry by default | MVP | AC-1.3.6 | C1 |
 | P20 Electron complaints | VD-32 stack by measurement | MVP (done) | G2, NFR-PERF-7 | G2 |
 | P21 lock-in | VD-33 agent-agnostic launch | MVP, narrowed (owner decision, 2026-11-05) | One adapter interface; Claude Code full, Codex CLI with honest capability flags; Gemini CLI and OpenCode post-MVP; no plugin system: US-1.5 | C7 |
-| P24 parallel sessions race on one OAuth login (Runner, Paseo; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C7 |
+| P24 parallel sessions race on one OAuth login (Competitor A, Competitor O; billing.md) | Never touch tokens; let the stock binary refresh | MVP | AC-1.1.5 | C7 |
 | P22 mobile breaks | Mobile app, remote hosts | Won't do (v1) | Agree with vajra-4 | none |
 | P23 why not just Claude Code | VD-34 win where native tools are weak | MVP (product rule) | Adapted: compete on evidence per criterion, the audited control channel and memory, not on mixed vendors. Every feature cites a job, a P-row or a POS reason (PRD section 8) | PRD rule |
 
@@ -658,4 +658,4 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 6. Q14: decided 2026-11-05 (E9 approved, conditions in AC-7.1.8).
 7. Q12: deferred 2026-11-05 (no request to Anthropic for now; a known launch risk, PRD section 11).
 
-Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Conductor import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
+Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Competitor L import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
