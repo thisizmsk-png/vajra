@@ -1241,3 +1241,28 @@ fn read_report_rejects_a_bad_slug_and_reports_a_missing_campaign() {
     assert_eq!(code(&t.app().read_report("../x").unwrap_err()), "invalid_args");
     assert_eq!(code(&t.app().read_report("nope").unwrap_err()), "not_found");
 }
+
+#[test]
+fn sig_over_256_bytes_is_integrity_failed() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    fs::write(camp_file(&t, "state.sig"), vec![b'a'; 300]).unwrap();
+    assert_eq!(t.app().read_report("real1").unwrap()["integrity"], "integrity_failed");
+}
+
+#[test]
+fn verify_digest_never_opens_campaign_dir() {
+    // After the read, the campaigns dir is made unreadable: the digest check and the features-def check must not
+    // need it, so the verdict and text are unchanged.
+    use std::os::unix::fs::PermissionsExt;
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let dir = t.home().join(".claude/vajra/campaigns");
+    let d2 = dir.clone();
+    let between = move || fs::set_permissions(&d2, fs::Permissions::from_mode(0o000)).unwrap();
+    let r = t.app().read_report_with("real1", &|_| {}, &between);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = r.unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+}
+

@@ -44,22 +44,27 @@ pub enum HeldError {
 /// Read the campaign `slug` under `campaigns_dir`. `seam(stage)` is called after the dir is open (`"dir"`) and
 /// before each file is opened (`"file:<name>"`); production passes a no-op, tests use it to swap files mid-read.
 pub fn read_campaign(campaigns_dir: &Path, slug: &str, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
+    read_campaign_as(campaigns_dir, slug, unsafe { libc::getuid() }, seam)
+}
+
+/// `read_campaign` with the user id files must belong to (tests pass another one).
+fn read_campaign_as(campaigns_dir: &Path, slug: &str, uid: u32, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
     if slug.is_empty() || slug.contains('/') || slug == "." || slug == ".." {
         return Err(HeldError::Failed("bad slug".into()));
     }
-    let root = open_dir(None, campaigns_dir.to_str().ok_or_else(|| HeldError::Failed("path".into()))?)?;
-    let dir = open_dir(Some(root.as_raw_fd()), slug)?;
+    let root = open_dir(None, campaigns_dir.to_str().ok_or_else(|| HeldError::Failed("path".into()))?, uid)?;
+    let dir = open_dir(Some(root.as_raw_fd()), slug, uid)?;
     seam("dir");
     let fd = dir.as_raw_fd();
-    let campaign = read_file(fd, "campaign.json", CAP_CAMPAIGN, true, seam)?.unwrap_or_default();
-    let features = read_file(fd, "features.json", CAP_FEATURES, true, seam)?.unwrap_or_default();
-    let progress = read_file(fd, "progress.md", CAP_PROGRESS, true, seam)?.unwrap_or_default();
-    let sig = read_file(fd, "state.sig", CAP_SIG, true, seam)?.unwrap_or_default();
-    let report = read_file(fd, "report.md", CAP_REPORT, false, seam)?;
+    let campaign = read_file(fd, "campaign.json", CAP_CAMPAIGN, true, uid, seam)?.unwrap_or_default();
+    let features = read_file(fd, "features.json", CAP_FEATURES, true, uid, seam)?.unwrap_or_default();
+    let progress = read_file(fd, "progress.md", CAP_PROGRESS, true, uid, seam)?.unwrap_or_default();
+    let sig = read_file(fd, "state.sig", CAP_SIG, true, uid, seam)?.unwrap_or_default();
+    let report = read_file(fd, "report.md", CAP_REPORT, false, uid, seam)?;
     Ok(Held { campaign, features, progress, sig, report })
 }
 
-fn open_dir(parent: Option<RawFd>, name: &str) -> Result<OwnedFd, HeldError> {
+fn open_dir(parent: Option<RawFd>, name: &str, uid: u32) -> Result<OwnedFd, HeldError> {
     let c = CString::new(name).map_err(|_| HeldError::Failed("nul in path".into()))?;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let fd = unsafe {
@@ -77,11 +82,11 @@ fn open_dir(parent: Option<RawFd>, name: &str) -> Result<OwnedFd, HeldError> {
         });
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    check_owner(fd.as_raw_fd(), true, name)?;
+    check_owner(fd.as_raw_fd(), true, name, uid)?;
     Ok(fd)
 }
 
-fn check_owner(fd: RawFd, want_dir: bool, name: &str) -> Result<libc::stat, HeldError> {
+fn check_owner(fd: RawFd, want_dir: bool, name: &str, uid: u32) -> Result<libc::stat, HeldError> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         return Err(HeldError::Io(std::io::Error::last_os_error().to_string()));
@@ -90,13 +95,13 @@ fn check_owner(fd: RawFd, want_dir: bool, name: &str) -> Result<libc::stat, Held
     if kind != if want_dir { libc::S_IFDIR } else { libc::S_IFREG } {
         return Err(HeldError::Failed(format!("{name}: wrong file type")));
     }
-    if st.st_uid != unsafe { libc::getuid() } {
+    if st.st_uid != uid {
         return Err(HeldError::Failed(format!("{name}: not owned by this user")));
     }
     Ok(st)
 }
 
-fn read_file(dir: RawFd, name: &'static str, cap: usize, required: bool, seam: &dyn Fn(&str)) -> Result<Option<Vec<u8>>, HeldError> {
+fn read_file(dir: RawFd, name: &'static str, cap: usize, required: bool, uid: u32, seam: &dyn Fn(&str)) -> Result<Option<Vec<u8>>, HeldError> {
     seam(&format!("file:{name}"));
     let c = CString::new(name).unwrap();
     let fd = unsafe { libc::openat(dir, c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
@@ -110,7 +115,7 @@ fn read_file(dir: RawFd, name: &'static str, cap: usize, required: bool, seam: &
         };
     }
     let mut f = unsafe { File::from_raw_fd(fd) };
-    let st = check_owner(f.as_raw_fd(), false, name)?;
+    let st = check_owner(f.as_raw_fd(), false, name, uid)?;
     if st.st_size as u64 > cap as u64 {
         return Err(HeldError::TooLarge(name));
     }
@@ -290,5 +295,51 @@ mod tests {
         assert!(!json_without_duplicate_keys(br#"{"a":1} x"#));
         assert!(!json_without_duplicate_keys(b"not json"));
         assert!(!json_without_duplicate_keys(b""));
+    }
+
+    #[test]
+    fn a_file_owned_by_someone_else_is_refused() {
+        let d = dir();
+        let other = unsafe { libc::getuid() } + 1;
+        assert!(matches!(read_campaign_as(&d, "camp", other, &nop), Err(HeldError::Failed(_))));
+    }
+
+    #[test]
+    fn a_file_growing_during_the_read_is_bounded_by_the_cap() {
+        let d = dir();
+        let report = d.join("camp/report.md");
+        fs::write(&report, vec![b'x'; CAP_REPORT - 10]).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s2, r2) = (stop.clone(), report.clone());
+        let t = std::thread::spawn(move || {
+            use std::io::Write;
+            while !s2.load(Ordering::SeqCst) {
+                if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&r2) {
+                    let _ = f.write_all(&[b'y'; 4096]);
+                }
+            }
+        });
+        for _ in 0..50 {
+            match read(&d) {
+                Ok(h) => assert!(h.report.unwrap().len() <= CAP_REPORT),
+                Err(HeldError::TooLarge("report.md")) => {}
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn the_reader_opens_only_the_five_named_files_never_the_signing_key() {
+        let d = dir();
+        let key = format!(".hmac{}", "-key");
+        fs::write(d.join("camp").join(&key), b"secret").unwrap();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let seam = |st: &str| seen.borrow_mut().push(st.to_string());
+        read_campaign(&d, "camp", &seam).unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen, ["dir", "file:campaign.json", "file:features.json", "file:progress.md", "file:state.sig", "file:report.md"]);
+        assert!(seen.iter().all(|s| !s.contains(&key)));
     }
 }

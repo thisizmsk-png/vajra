@@ -795,6 +795,10 @@ impl App {
                 self.settle_code(slug, Some(3));
                 return verdict("integrity_failed", None);
             }
+            Err(HeldError::TooLarge("state.sig")) => {
+                self.settle_code(slug, Some(3));
+                return verdict("integrity_failed", None);
+            }
             Err(HeldError::TooLarge(_)) | Err(HeldError::Io(_)) => return verdict("unknown", None),
         };
         between();
