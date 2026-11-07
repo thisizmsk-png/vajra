@@ -387,13 +387,13 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 | 2026-11-05 | Q13 approved: engine change E7 (archive each delivery's evidence bundle and executed setup list before cleanup), additive, under vidura review, every existing test passing | owner, via orchestrator | tasks E7 (vajra-6 engine work); unblocks slice 1 |
 | 2026-11-05 | Q11 approved: E5 (steer nonce and one sentence in task briefs only), the wider E2, E4 and E6, all additive, each under bhishma or vidura review, with every existing guard test passing | owner, via orchestrator | tasks M1 |
 | 2026-11-05 | H0 rule: if memory is over budget at the end of M3, the owner chooses between a written budget change, a stack change or a delay | owner, via orchestrator | tasks H0 |
-| 2026-11-05 | Agent-adapter interface with Codex CLI; read-only Competitor L import; billing hard rules | owner | ADR-10, ADR-11, section 11 |
+| 2026-11-05 | Agent-adapter interface with Codex CLI; read-only import of existing worktrees; billing hard rules | owner | ADR-10, ADR-11, section 11 |
 | 2026-11-05 | Q14 approved: E9, Touch ID approval in the app (LocalAuthentication plus a single-use approval file in the protected data dir, checked by the engine), under the conditions in AC-7.1.8; bhishma reviews, the stage D red team attacks it | owner, via orchestrator | ADR-12, E9, AC-7.1.4, AC-7.1.8 |
 | 2026-11-05 | New feature: project memory that learns with human approval (J7), built on the ledger and Atman; MVP is inbox, approve, rules view and search; Competitor M import later | owner, via orchestrator | US-7.1 to US-7.4, ADR-12, ADR-13 |
 | 2026-11-05 | Model routing: main components on Opus 5.5 (bhima, nakula, arjuna, bhishma); lighter items on Sonnet 5.5 (sepoys, abhimanyu); search and audit on Haiku; GPT 6.1 Sol reviews every PR | owner | tasks.md owners |
 
-Competitor L import is backed by the clearest live demand in the research: P6 (tool shutdown or rug-pull, 13
-sources) includes displaced Competitor L users asking in public for an alternative (`vajra-4/pain-points.md`).
+Import of existing worktrees is backed by the clearest live demand in the research: P6 (tool shutdown or rug-pull, 13
+sources) includes displaced users of a shut-down tool asking in public for an alternative (`vajra-4/pain-points.md`).
 
 ### Open questions
 

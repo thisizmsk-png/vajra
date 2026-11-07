@@ -856,15 +856,14 @@ agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`,
   later and the interface stays.
 - Gemini CLI and OpenCode come post-MVP through the same trait.
 
-**ADR-11 Competitor L import is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
+**ADR-11 Import existing worktrees is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
 worktrees (`git worktree list`) and Claude Code sessions (transcript `cwd`), let the user confirm each, and
-record only app-owned entries. Nothing is deleted, moved or rewritten. Competitor L's own layout is read only
-where G4 has confirmed it; otherwise the import says "not recognised" (AC-1.4.4).
-- Options: (a) no import; (b) full import that moves worktrees and converts Competitor L state; (c) read-only
+record only app-owned entries. Nothing is deleted, moved or rewritten. Each other tool's on-disk layout is read by its own adapter (one adapter per layout), and only once G4 has confirmed that layout; otherwise the import says "not recognised" (AC-1.4.4).
+- Options: (a) no import; (b) full import that moves worktrees and converts other tools' state; (c) read-only
   discovery with per-item confirm (chosen).
-- Evidence: P6 (13 sources) includes displaced Competitor L users asking for an alternative. (b) risks
+- Evidence: P6 (13 sources) includes displaced users of a shut-down tool asking for an alternative. (b) risks
   losing someone's work in a tool we don't control.
-- Consequences: users keep their worktrees where they are; anything Competitor L-only (its own chat history)
+- Consequences: users keep their worktrees where they are; anything held only by the other tool (its own chat history)
   isn't carried over.
 - Would change our mind: G4 finds no stable on-disk layout; then the import is git- and transcript-only.
 

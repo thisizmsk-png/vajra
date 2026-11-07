@@ -65,11 +65,11 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 - AC-1.3.6 (VD-12, VD-31) GIVEN a fresh install with the network blocked, WHEN I start a run and use every screen, THEN everything works and no login or account screen appears; with the network open for an hour under a network monitor, the only outbound connection the app makes is the update check (Claude Code's own traffic excluded).
 - AC-1.3.7 (VD-28) GIVEN a Mac with Claude Code and Vajra installed, WHEN I open the signed DMG and launch the app, THEN I reach Home with a passing preflight in under 2 minutes, the app needs no Node or Python of its own, and it writes nothing outside `~/Library/Application Support/<app>/` and the repos I pick.
 
-**US-1.4** (owner decision, 2026-11-05) As a Dev leaving Competitor L, I want my repos, worktrees and sessions found, so that I keep working in Vajra Desktop without redoing setup.
-- AC-1.4.1 GIVEN Competitor L data on this Mac, WHEN I choose "Import from Competitor L", THEN the app lists the repos, worktrees (from `git worktree list` in each repo) and Claude Code sessions (from transcripts whose `cwd` is one of those worktrees) it found, each with its path, branch and last activity, and selects none by default.
+**US-1.4** (owner decision, 2026-11-05) As a Dev with repos and worktrees made by other tools, I want my repos, worktrees and sessions found, so that I keep working in Vajra Desktop without redoing setup.
+- AC-1.4.1 GIVEN other tools' worktree data on this Mac, WHEN I choose "Import existing worktrees", THEN the app lists the repos, worktrees (from `git worktree list` in each repo) and Claude Code sessions (from transcripts whose `cwd` is one of those worktrees) it found, each with its path, branch and last activity, and selects none by default.
 - AC-1.4.2 GIVEN the discovery list, WHEN I confirm items one by one (or select several and confirm once, with the list shown), THEN only the confirmed items are added to the app's own `runs.jsonl` and repo list; nothing else changes.
 - AC-1.4.3 GIVEN any import, WHEN it finishes or I cancel, THEN no file or worktree is deleted, moved, renamed or written outside the app data dir, and no git command other than read-only ones ran (fs and process trace).
-- AC-1.4.4 GIVEN Competitor L's on-disk layout is unknown or changed, WHEN discovery runs, THEN it shows "Competitor L data not recognised" and offers to add a repo by path, instead of guessing.
+- AC-1.4.4 GIVEN a tool's on-disk layout is unknown or changed, WHEN discovery runs, THEN it shows "Layout not recognised" and offers to add a repo by path, instead of guessing.
 
 **US-1.5** (owner decision, 2026-11-05) As a Dev, I want to run Codex CLI agents next to Claude Code ones, so that I'm not locked into one vendor.
 - AC-1.5.1 GIVEN the agent-adapter interface (spawn, stream, PTY attach, inspect, message, stop, resume, plus capability flags), WHEN the Claude Code and Codex CLI adapters run the shared conformance suite, THEN every flag set to true passes its test and every flag set to false is hidden in the UI.
@@ -400,7 +400,7 @@ a reason at why 4, since native agent view already does it, P23)
 
 ## 4. Scope
 
-**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only Competitor L import (US-1.4), a control channel for the Lead and the human.
+**In scope.** The six jobs above, macOS, reading Vajra state, launching Claude Code sessions (and Codex CLI through the adapter interface, US-1.5), read-only import of existing worktrees (US-1.4), a control channel for the Lead and the human.
 
 **Out of scope (non-goals).** The canonical list is [PRD section 8](../PRD.md#8-non-goals-deliberately-not-built).
 
@@ -658,4 +658,4 @@ Sources: architecture review workflow run 20261105-1745 (Architect ADR at commit
 6. Q14: decided 2026-11-05 (E9 approved, conditions in AC-7.1.8).
 7. Q12: deferred 2026-11-05 (no request to Anthropic for now; a known launch risk, PRD section 11).
 
-Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); Competitor L import (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
+Decided 2026-11-05: Q11 approved (E5 for task briefs only and the wider E2, under Security review, every existing guard test passing); the agent-adapter interface with Codex CLI (US-1.5); import of existing worktrees (US-1.4); the billing hard rules (NFR-SEC-16, AC-1.1.6, AC-1.1.7).
