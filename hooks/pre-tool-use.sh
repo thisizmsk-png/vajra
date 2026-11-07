@@ -266,6 +266,19 @@ glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can li
   glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
   glob_chain $((ri + 1)) $((si + 1))
 }
+glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
+  # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
+  # Each other component descends one level, "**" none (it may match zero directories).
+  local IFS=/ a b common=0 depth min c
+  set -f; a=($1); b=($VS_C); set +f
+  while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
+  depth=${#a[@]}; min=$depth
+  for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
+    case "$c" in ..) depth=$((depth - 1)) ;; *\*\**) ;; *) depth=$((depth + 1)) ;; esac
+    [ "$depth" -lt "$min" ] && min=$depth
+  done
+  [ "$min" -le "$common" ]
+}
 glob_pattern_check() { # canonical search root
   local root="$1" pat="$PAT" lit="" c r rel i
   [ -n "$pat" ] || return 0
@@ -291,8 +304,8 @@ glob_pattern_check() { # canonical search root
   if [ "$GLOB_N" -eq 0 ]; then shopt -u nocasematch; return 0; fi # no glob character: a plain path, judged as a path
   [ -n "$lit" ] || lit="."
   canon "$lit" "$root"
+  if [ "$dotdot" = 1 ] && glob_dotdot_reaches "$CANON"; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character far enough to reach a directory that holds the Vajra state directory"; fi
   if ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi # the literal part is not at or above the state dir
-  if [ "$dotdot" = 1 ]; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character, from a directory that holds the Vajra state directory"; fi
   rel="${VS_C:${#CANON}}"; rel="${rel#/}"
   GLOB_S=() GLOB_K=0
   if [ -n "$rel" ]; then
