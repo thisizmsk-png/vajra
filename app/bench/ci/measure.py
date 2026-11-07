@@ -114,6 +114,12 @@ def flavour_summary(runs):
     return n, statistics.median(by[n]), len(by[n])
 
 
+def launch_flavours(runs):
+    """Every distinct helper count (smallest seen per launch) across all launches, so the gate can reject unknown ones
+    instead of letting the majority flavour hide them."""
+    return sorted({min(r["helpers"]) for r in runs})
+
+
 def runner_identity():
     def sh(*a):
         return subprocess.run(a, capture_output=True, text=True).stdout.strip()
@@ -153,7 +159,7 @@ def idle(binary, out):
     meds = [r["median_mib"] for r in runs]
     helpers, flavour_median, in_flavour = flavour_summary(runs)
     ident = runner_identity()
-    json.dump({"identity": ident["key"], "runner": ident, "helpers": helpers, "flavour_launches": in_flavour, "runs": runs,
+    json.dump({"identity": ident["key"], "runner": ident, "helpers": helpers, "launch_flavours": launch_flavours(runs), "flavour_launches": in_flavour, "runs": runs,
                "median_of_medians_mib": flavour_median, "all_launches_median_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
 
 

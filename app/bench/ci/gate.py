@@ -21,6 +21,10 @@ def evaluate(baseline, idle, growth):
         fails.append(f"growth {growth['slope_mib_per_min']} MiB/min exceeds {SLOPE_BUDGET}")
     if v > IDLE_BUDGET:
         fails.append(f"idle {v} MiB exceeds the {IDLE_BUDGET} MiB budget")
+    odd = [f for f in idle.get("launch_flavours", []) if f not in FLAVOURS]
+    if odd:
+        fails.append(f"launch(es) with WebKit helper count {odd}; only 2 or 3 are known flavours (fails closed)")
+        return fails, warns
     if n not in FLAVOURS:
         fails.append(f"WebKit helper count is {n}; only 2 or 3 are known flavours (fails closed)")
         return fails, warns

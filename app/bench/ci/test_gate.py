@@ -1,6 +1,6 @@
 import unittest
 from gate import check, evaluate
-from measure import clean_median, identity_key, flavour_summary
+from measure import clean_median, identity_key, flavour_summary, launch_flavours
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
 
@@ -114,7 +114,7 @@ class Measure(unittest.TestCase):
         return {"median_mib": median, "helpers": list(helpers)}
 
     def test_a_launch_belongs_to_the_smallest_helper_count_it_saw(self):
-        self.assertEqual(flavour_summary([self.r(201, 3, 6), self.r(202, 3), self.r(203, 4, 7)])[0], 3)
+        self.assertEqual(flavour_summary([self.r(201, 3, 6), self.r(202, 3), self.r(203, 2, 7)])[0], 3)
 
     def test_the_median_is_taken_only_over_launches_of_the_reported_flavour(self):
         # one 2-helper launch at 175 followed by four 3-helper launches: report 3 helpers and 201, never helpers=2 with 201
@@ -124,6 +124,18 @@ class Measure(unittest.TestCase):
     def test_the_majority_flavour_wins_and_the_minority_launch_is_left_out(self):
         runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(201, 3), self.r(202, 3)]
         self.assertEqual(flavour_summary(runs), (2, 175, 3))
+
+    def test_unknown_launch_flavours_are_reported_not_dropped(self):
+        runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(300, 4), self.r(301, 4), self.r(5, 0)]
+        self.assertEqual(launch_flavours(runs), [0, 2, 4])
+
+    def test_a_mixed_known_and_unknown_launch_set_fails_the_final_gate(self):
+        runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(300, 4), self.r(301, 4)]
+        n, med, _ = flavour_summary(runs)
+        idle = {"identity": "25G332|21624.5.1.11.3", "helpers": n, "median_of_medians_mib": med,
+                "launch_flavours": launch_flavours(runs)}
+        fails, _ = evaluate(bl(), idle, None)
+        self.assertTrue(any("launch" in f for f in fails), fails)
 
     def test_a_tie_between_flavours_reports_the_larger_helper_count(self):
         self.assertEqual(flavour_summary([self.r(175, 2), self.r(201, 3)]), (3, 201, 1))

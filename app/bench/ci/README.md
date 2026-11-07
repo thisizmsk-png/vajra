@@ -32,7 +32,7 @@ The 3-helper flavour reads about 201 MiB on the CI VM, over the 200 MiB ceiling,
 2. Raise a CI-only ceiling for that flavour to about 212.
 3. Make that flavour report-only and rely on the dev-Mac H0 soak.
 
-Operational rule until then: a failure whose **only** cause is the 3-helper ceiling (a GPU helper is present in `idle.json`, and the regression check passed) may get **one** rerun under the flake rule; a second failure is a real failure.
+Until the owner rules, a ceiling failure is a failure: there is no rerun exception. Any retry policy is one of the owner's options above.
 
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<N>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the `helpers` count and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and count (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.
