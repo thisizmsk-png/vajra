@@ -55,8 +55,9 @@ S2b Stream (worker output).
 | String | Where | Note |
 |---|---|---|
 | Stream, Worker output, read only | Crew details | the log region label |
-| Load earlier output / Loading | button | fetches output the live window no longer holds |
+| ~~Load earlier output / Loading~~ | button, removed (#45 UI half) | scrolling near the window edge now fetches the rows around the view, so there is no button |
 | Jump to latest | button | drops the paged history and re-reads the newest lines |
-| Showing older output. Newer lines are held back until you jump to latest. | notice | shown once the window has slid back past its row cap |
+| Showing earlier output. Jump to latest to follow new lines. | notice | reworded in #45 UI half (was "Showing older output. Newer lines are held back until you jump to latest."); shown while the view is not following the newest lines |
+| Some output in this range is no longer available. | notice, new in #45 UI half | shown when the core reports a hole in the window (output that fell off the buffer) |
 | No output yet. / Could not read the output. | empty / failure | failure is followed by the core's error text |
 | 1 line was skipped / N lines were skipped | marker row | shown where output fell off the core's buffer |
