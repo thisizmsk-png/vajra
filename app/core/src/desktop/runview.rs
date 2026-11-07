@@ -324,4 +324,65 @@ mod tests {
         assert_eq!(g["waves"], 200);
         assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
     }
+
+    /// Contract with the writer: the progress lines are taken from `workflows/vajra-deliver.js` itself, so rewording one
+    /// there breaks this test instead of silently blanking the timeline.
+    mod contract {
+        use super::*;
+
+        const WORKFLOW: &str = include_str!("../../../../workflows/vajra-deliver.js");
+
+        /// Every `sq(`run ${RUN}...`)` template in the workflow, with its placeholders filled in.
+        fn written_lines() -> Vec<String> {
+            WORKFLOW
+                .lines()
+                .filter_map(|l| {
+                    let start = l.find("sq(`run ${RUN}")? + "sq(`".len();
+                    let end = start + l[start..].find('`')?;
+                    Some(l[start..end].to_string())
+                })
+                .map(|t| {
+                    t.replace("${RUN}", "r1")
+                        .replace("${round}", "2")
+                        .replace("${CRITERIA.length - failing.length}", "1")
+                        .replace("${CRITERIA.length}", "3")
+                        .replace("${MAX_ROUNDS}", "3")
+                        .replace("${merge.branch}", "work/b")
+                        .replace("${merge.commit}", "abc1234")
+                        .replace("${asks.map((a) => a.id).join(', ')}", "t1")
+                        .replace("${integrationNote()}", "no integration yet")
+                })
+                .collect()
+        }
+
+        fn line_with(needle: &str) -> String {
+            let l = written_lines().into_iter().find(|l| l.contains(needle));
+            l.unwrap_or_else(|| panic!("vajra-deliver.js no longer writes a progress line containing {needle:?}; update runview.rs"))
+        }
+
+        #[test]
+        fn every_written_line_has_its_placeholders_filled_in() {
+            let all = written_lines();
+            assert!(all.len() >= 5, "expected the five run lines, found {all:?}");
+            for l in &all {
+                assert!(!l.contains("${"), "unhandled placeholder in {l:?}: teach this test (and the parser) the new field");
+            }
+        }
+
+        #[test]
+        fn the_workflows_own_lines_drive_the_timeline_to_each_outcome() {
+            let open = [task("r1.t1", "closed", &[])];
+            let run = |lines: &[String]| {
+                let t = timeline(&lines.join("\n"), Some(&open));
+                (PHASES[t.current], t.outcome, t.fix_round, t.max_rounds)
+            };
+            let verified = line_with("criteria passing");
+            assert_eq!(run(&[verified.clone()]), ("Fix", Outcome::Active, Some(3), None), "{verified}");
+            assert_eq!(run(&[line_with("waiting for the user")]).1, Outcome::NeedInput);
+            assert_eq!(run(&[line_with("review rejected")]).1, Outcome::Rejected);
+            assert_eq!(run(&[verified.clone(), line_with("no verified delivery")]), ("Fix", Outcome::Error, Some(3), Some(3)));
+            let done = run(&[verified, line_with(" delivered ")]);
+            assert_eq!((done.0, done.1), ("Deliver", Outcome::Done));
+        }
+    }
 }
