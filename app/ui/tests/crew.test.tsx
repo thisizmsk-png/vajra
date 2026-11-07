@@ -154,4 +154,44 @@ describe("Crew tree (S2a, US-2.1)", () => {
     expect(row.textContent).toContain(S.crew.overlay["stopped by the human"]);
     expect(row.textContent).toContain(S.crew.overlay["message pending"]);
   });
+
+  it("follows the hash to another run without remounting, dropping the old run's tree and selection", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    const f = open({
+      crew: (a?: Record<string, unknown>) =>
+        a?.runId === "r1"
+          ? node("lead", "lead", "Lead", "in_progress", [node("run", "run", "Run one", "in_progress", [node("t1", "task", "Backend", "in_progress")])])
+          : node("lead2", "lead", "Lead", "in_progress", [node("run2", "run", "Run two", "in_progress", [node("u1", "task", "Reviewer", "pending")])]),
+    });
+    render(<Crew />);
+    fireEvent.click((await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement);
+    expect(await screen.findByRole("region", { name: S.crew.details })).toBeTruthy();
+    // Same mounted component; only the hash moves.
+    act(() => { window.location.hash = "#/crew?slug=camp2&id=r2"; });
+    await screen.findByText("Reviewer");
+    expect(screen.queryByText("Backend")).toBeNull();
+    expect(f.calls.filter((c) => c.cmd === "crew").map((c) => c.args)).toEqual(
+      expect.arrayContaining([{ slug: "camp", runId: "r1" }, { slug: "camp2", runId: "r2" }]),
+    );
+    // And back again.
+    act(() => { window.location.hash = "#/crew?slug=camp&id=r1"; });
+    await screen.findByText("Backend");
+    expect(screen.queryByText("Reviewer")).toBeNull();
+  });
+
+  it("ignores a slow answer for the run the route has already left", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    let release: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => { release = r; });
+    open({
+      crew: (a?: Record<string, unknown>) =>
+        a?.runId === "r1" ? slow : node("lead2", "lead", "Lead", "in_progress", [node("u1", "task", "Reviewer", "pending")]),
+    });
+    render(<Crew />);
+    act(() => { window.location.hash = "#/crew?slug=camp2&id=r2"; });
+    await screen.findByText("Reviewer");
+    await act(async () => { release(node("lead", "lead", "Lead", "in_progress", [node("t1", "task", "Backend", "in_progress")])); await Promise.resolve(); });
+    expect(screen.queryByText("Backend")).toBeNull();
+    expect(screen.getByText("Reviewer")).toBeTruthy();
+  });
 });

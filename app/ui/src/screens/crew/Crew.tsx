@@ -7,7 +7,7 @@ import type { StatusKey } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { CrewNodeDto } from "../../ipc";
 import { useRoute } from "../../router";
-import { StreamTab } from "./StreamTab";
+import { WorkerPane } from "./WorkerPane";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -38,6 +38,15 @@ const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
   }
   return null;
 };
+/** The nearest ancestor of `id` that is a task group (`task:<tid>`), whose run-local id the worker's task is. */
+const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): string | null | undefined => {
+  if (n.id === id) return task;
+  for (const c of n.children) {
+    const f = taskGroupOf(c, id, n.id.startsWith("task:") ? n.id.slice("task:".length) : task);
+    if (f !== undefined) return f;
+  }
+  return undefined;
+};
 const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
   if (n.children.length) out.push(n.id);
   n.children.forEach((c) => withChildren(c, out));
@@ -46,14 +55,29 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 
 export function Crew() {
   const [route] = useRoute();
-  const [target, setTarget] = useState<Target | null | undefined>(
-    route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined,
-  );
+  const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
+  const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
   const [openIds, setOpenIds] = useState<string[] | null>(null);
   const [selected, setSelected] = useState("");
   const [err, setErr] = useState("");
   const last = useRef(0);
+  const current = useRef<Target | null | undefined>(target);
+  current.current = target;
+
+  // The screen stays mounted while the hash changes: follow the route's run, and drop what belonged to the old one.
+  const routeKey = routed ? `${routed.slug}\n${routed.runId}` : "";
+  const seen = useRef(routeKey);
+  useEffect(() => {
+    if (seen.current === routeKey) return;
+    seen.current = routeKey;
+    setTarget(routed);
+    setRoot(null);
+    setOpenIds(null);
+    setSelected("");
+    setErr("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeKey]);
 
   // Which run: the route's, else the first active one.
   useEffect(() => {
@@ -73,9 +97,10 @@ export function Crew() {
   const load = useCallback(() => {
     if (!target) return;
     last.current = Date.now();
+    const asked = target;
     api.crew(target.slug, target.runId).then(
-      (n) => { setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
-      (e) => setErr(errorText(e)),
+      (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
+      (e) => { if (current.current === asked) setErr(errorText(e)); },
     );
   }, [target]);
 
@@ -112,14 +137,17 @@ export function Crew() {
           <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           {picked && (
             <div className="v-crew__side">
-            <Section title={S.crew.details}>
-              <dl className="v-crew__facts" aria-label={S.crew.details}>
-                <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
-                <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-                {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
-              </dl>
-            </Section>
-            {picked.id.startsWith("agent:") && <StreamTab key={picked.id} stream={`w-${picked.id.slice("agent:".length)}`} />}
+            {picked.id.startsWith("agent:") ? (
+              target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={root ? taskGroupOf(root, picked.id) ?? null : null} status={statusLabel(picked)} />
+            ) : (
+              <Section title={S.crew.details}>
+                <dl className="v-crew__facts" aria-label={S.crew.details}>
+                  <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
+                  <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
+                  {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
+                </dl>
+              </Section>
+            )}
             </div>
           )}
         </div>

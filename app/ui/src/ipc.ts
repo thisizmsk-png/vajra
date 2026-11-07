@@ -47,9 +47,14 @@ export type PreflightRow = { name: string; ok: boolean; detail: string; fix: str
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
+  /** The signature check: ok, failed or unknown (could not run). */
+  integrity?: "ok" | "failed" | "unknown";
 };
+export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_text" | "unknown";
+export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
+export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
@@ -57,6 +62,15 @@ export type StreamWindow = { lines: Line[]; head_seq: number; first_seq: number;
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
+export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "checking" | "stale";
+export type EvidenceRow = {
+  task: string; title: string | null; owner: string | null; criterion: string; status: EvidenceStatus;
+  head: string | null; path: string | null; commands: number | null; report: string | null;
+};
+/** One recorded verification command with its exit code; `output_tail` is the end of its output for a failed one. Plain text. */
+export type ProofCommand = { cmd: string | null; exit_code: number | null; passed: boolean; output_tail: string | null };
+export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
+export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
@@ -81,6 +95,10 @@ export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlig
 export const api = {
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
+  /** The signed delivery report, verified on the bytes the core read; `text` only when integrity is "ok". */
+  readReport: (slug: string) => call<Report>("read_report", { slug }),
+  /** Run the signature check now (not the cached badge). */
+  verifyCampaign: (slug: string) => call<Verified>("verify_campaign", { slug }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
@@ -91,7 +109,12 @@ export const api = {
   streamWindow: (stream: string, from: number | null, maxLines: number, maxBytes = 1048576) => call<StreamWindow>("stream_window", { stream, from, maxLines, maxBytes }),
   readSpill: (stream: string, offset: number, maxBytes = 65536) => call<Json>("read_spill", { stream, offset, maxBytes }),
   task: (slug: string, taskId: string) => call<Json>("task", { slug, taskId }),
-  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean }>("diff", { cwd, base }),
+  /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
+  worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
+  /** Every acceptance criterion of a campaign with its proof status (bounded checks on the core side). */
+  evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
+  evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
+  diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
   controlStop: (worker: string, reason?: string) => call<Json>("control_stop", { worker, reason: reason ?? null }),

@@ -510,11 +510,11 @@ fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
     // A fresh run in a minute that is taken moves to the next free minute.
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC
     assert_eq!(ids::run_id_at(now), "20261105-1230");
-    let (t2, id2) = app.fresh_run_id(now);
+    let (t2, id2) = app.fresh_run_id(now).unwrap();
     assert_eq!(id2, "20261105-1231");
     assert_eq!(t2, now + 60);
     lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
-    assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
+    assert_eq!(app.fresh_run_id(now).unwrap().1, "20261105-1232");
 }
 
 #[test]
@@ -555,10 +555,10 @@ fn two_resumes_of_one_campaign_get_distinct_run_ids() {
     // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
     let t = Tmp::new();
     let app = t.app();
-    let a = app.fresh_run_id(1_794_000_000).1;
+    let a = app.fresh_run_id(1_794_000_000).unwrap().1;
     // The first resume's run entry is replaced by the second; the issued set still remembers it.
     lock(&app.runs).clear();
-    let b = app.fresh_run_id(1_794_000_000).1;
+    let b = app.fresh_run_id(1_794_000_000).unwrap().1;
     assert_ne!(a, b);
     assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
 }
@@ -1090,6 +1090,546 @@ fn a_target_whose_directory_is_gone_is_not_offered() {
     assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
 }
 
+// ---------------------------------------------------------------- worktree_info (S2c)
+
+fn git(cwd: &Path, args: &[&str]) {
+    let o = std::process::Command::new("git").arg("-C").arg(cwd).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A repo with one worktree under `.claude/worktrees/w1`, a registered run for it and a seeded worker whose transcript cwd is `wt_cwd`.
+fn crew_fixture(t: &Tmp, wt_cwd: &dyn Fn(&Path) -> PathBuf) -> (App, PathBuf, PathBuf) {
+    let repo = t.0.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    fs::write(repo.join("f.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let wt = repo.join(".claude/worktrees/w1");
+    git(&repo, &["worktree", "add", "-q", "-b", "worker-1", wt.to_str().unwrap()]);
+    fs::write(wt.join("f.txt"), "one\ntwo\n").unwrap();
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    let (path, first) = seed_worker(t, &repo, sid);
+    let cwd = wt_cwd(&repo);
+    fs::write(&path, format!("{}\n", first.replace("\"cwd\":\"/repo\"", &format!("\"cwd\":{}", serde_json::to_string(&cwd).unwrap())))).unwrap();
+    let app = t.app();
+    lock(&app.runs).insert("run-x".into(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: repo.clone(), nonces: Redactor::default() });
+    app.crew("c", "20261105-1230").unwrap();
+    (app, repo, wt)
+}
+
+#[test]
+fn worktree_info_returns_the_crew_worktree_its_branch_and_base() {
+    let t = Tmp::new();
+    let (app, _repo, wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let i = app.worktree_info("aa870dd40540481f0").unwrap();
+    assert_eq!(i["worktree"], wt.canonicalize().unwrap().to_string_lossy().as_ref(), "{i}");
+    assert_eq!(i["branch"], "worker-1", "{i}");
+    assert_eq!(i["base"].as_str().map(str::len), Some(40), "{i}");
+    let d = app.diff(i["worktree"].as_str().unwrap(), i["base"].as_str().unwrap()).unwrap();
+    assert!(d["diff"].as_str().unwrap().contains("+two"), "{d}");
+}
+
+#[test]
+fn diff_lists_untracked_files_apart_and_respects_ignore_rules() {
+    let t = Tmp::new();
+    let (app, repo, wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    git(&wt, &["checkout", "-q", "--", "f.txt"]); // only new work remains: nothing tracked differs from the base
+    fs::write(wt.join("new file.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir_all(wt.join("sub")).unwrap();
+    fs::write(wt.join("sub/also.txt"), "x").unwrap();
+    fs::write(repo.join(".git/info/exclude"), "ignored.log\n").unwrap();
+    fs::write(wt.join("ignored.log"), "x").unwrap();
+    let i = app.worktree_info("aa870dd40540481f0").unwrap();
+    let d = app.diff(i["worktree"].as_str().unwrap(), i["base"].as_str().unwrap()).unwrap();
+    assert_eq!(d["diff"].as_str().unwrap().trim(), "", "tracked files are unchanged: {d}");
+    let mut u: Vec<String> = d["untracked"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    u.sort();
+    assert_eq!(u, vec!["new file.rs".to_string(), "sub/also.txt".to_string()], "{d}");
+    assert_eq!(d["untracked_truncated"], false);
+}
+
+#[test]
+fn worktree_info_refuses_a_cwd_outside_the_crew_worktrees() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.to_path_buf()); // the repo itself, not a worktree
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_a_crew_worktree");
+    let _ = repo;
+}
+
+#[test]
+fn worktree_info_refuses_a_symlink_that_leaves_the_worktrees_dir() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/evil"));
+    let outside = t.0.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join(".claude/worktrees/evil")).unwrap();
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_a_crew_worktree");
+}
+
+#[test]
+fn worktree_info_rejects_a_bad_or_unknown_worker() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.worktree_info("../x").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_found");
+}
+
+// ---------------------------------------------------------------- evidence_list (S4a)
+
+/// A stand-in `vajra_tasks.py check-evidence`: the verdict comes from the evidence file's name.
+fn fake_tasks_script(t: &Tmp) {
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let body = "import json, sys\np = sys.argv[2]\n\
+        if 'slow' in p:\n    import time; time.sleep(30)\n\
+        if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
+        if 'swap' in p:\n    open(p, 'w').write('{\"a\":\"BBB\"}')\n\
+        green = 'green' in p\n\
+        try:\n    green = green and 'RED' not in open(p).read()\nexcept OSError:\n    pass\n\
+        print(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
+    fs::write(dir.join("vajra_tasks.py"), format!("#!/usr/bin/env python3\n{body}")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir.join("vajra_tasks.py"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn ev_task(slug_dir: &Path, id: &str, status: &str, acceptance: &[&str], evidence: &str) -> Value {
+    let ev = if evidence.is_empty() {
+        Value::Null
+    } else {
+        let p = slug_dir.join("evidence").join(format!("{evidence}.json"));
+        json!({"path": p, "sha256": "ab", "head": "a".repeat(40), "commands": 2})
+    };
+    json!({"id": id, "title": format!("Task {id}"), "owner_agent": "bhima", "deps": [], "acceptance": acceptance, "status": status, "attempts": 1, "evidence": ev})
+}
+
+fn campaign_with_tasks(t: &Tmp, tasks: Vec<Value>) -> (App, String) {
+    fake_tasks_script(t);
+    let slug = "deliver-20261105-1810";
+    let camp = t.home().join(".claude/vajra/campaigns").join(slug);
+    fs::create_dir_all(camp.join("evidence")).unwrap();
+    let tasks: Vec<Value> = tasks.into_iter().map(|mut x| {
+        if let Some(p) = x["evidence"]["path"].as_str().map(str::to_string).filter(|p| p.starts_with("/x/")) {
+            x["evidence"]["path"] = json!(camp.canonicalize().unwrap().join("evidence").join(Path::new(&p).file_name().unwrap()).to_string_lossy());
+        }
+        x
+    }).collect();
+    fs::write(camp.join("tasks.json"), serde_json::to_vec(&json!({"campaign": slug, "schema": "vajra.tasks/v1", "tasks": tasks})).unwrap()).unwrap();
+    (t.app(), slug.into())
+}
+
+fn row<'a>(r: &'a Value, task: &str, criterion: &str) -> &'a Value {
+    r["rows"].as_array().unwrap().iter().find(|x| x["task"] == task && x["criterion"] == criterion).unwrap_or_else(|| panic!("no row {task}/{criterion} in {r}"))
+}
+
+#[test]
+fn evidence_list_marks_each_criterion_pass_fail_not_run_or_unverified() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![
+        ev_task(&d, "t1", "done", &["ac-1", "ac-2"], "green"),
+        ev_task(&d, "t2", "done", &["ac-3"], "red"),
+        ev_task(&d, "t3", "in_progress", &["ac-4"], ""),
+        ev_task(&d, "t4", "done", &["ac-5"], "boom"),
+        ev_task(&d, "t5", "done", &["ac-6"], ""),
+    ]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "pass");
+    assert_eq!(row(&r, "t1", "ac-2")["status"], "pass");
+    assert_eq!(row(&r, "t2", "ac-3")["status"], "unverified", "evidence whose check is red is not a pass: {r}");
+    assert_eq!(row(&r, "t3", "ac-4")["status"], "not_run");
+    assert_eq!(row(&r, "t4", "ac-5")["status"], "unverified", "an unreadable check is never a pass");
+    assert_eq!(row(&r, "t5", "ac-6")["status"], "not_run", "a closed task without evidence is never pass");
+    assert_eq!(row(&r, "t1", "ac-1")["commands"], 2);
+    assert!(row(&r, "t1", "ac-1")["head"].as_str().unwrap().len() == 40);
+}
+
+#[test]
+fn a_failed_task_shows_fail_with_its_report() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut failed = ev_task(&d, "t1", "failed", &["ac-1"], "");
+    failed["report"] = json!({"status": "failed", "summary": "tests red"});
+    let (app, slug) = campaign_with_tasks(&t, vec![failed]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "fail");
+    assert_eq!(row(&r, "t1", "ac-1")["report"], "tests red");
+}
+
+#[test]
+fn a_failed_task_is_fail_even_when_its_evidence_checks_green() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut failed = ev_task(&d, "t1", "failed", &["ac-1"], "green");
+    failed["report"] = json!({"status": "failed", "summary": "green evidence, but the task failed"});
+    let (app, slug) = campaign_with_tasks(&t, vec![failed, ev_task(&d, "t2", "done", &["ac-2"], "green")]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "fail", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["report"], "green evidence, but the task failed");
+    assert_eq!(row(&r, "t2", "ac-2")["status"], "pass", "a done task with green evidence still passes");
+}
+
+#[test]
+fn evidence_checks_are_bounded_and_a_slow_one_is_unverified_not_a_hang() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut tasks: Vec<Value> = (0..9).map(|i| ev_task(&d, &format!("g{i}"), "done", &["ac"], "green")).collect();
+    tasks.push(ev_task(&d, "s1", "done", &["ac"], "slow"));
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    app.evidence_timeout = Duration::from_millis(400);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+    assert_eq!(row(&r, "s1", "ac")["status"], "unverified");
+    assert_eq!(row(&r, "g8", "ac")["status"], "pass");
+}
+
+#[test]
+fn evidence_list_has_a_total_budget_and_unchecked_tasks_read_checking() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks: Vec<Value> = (0..40).map(|i| ev_task(&d, &format!("s{i}"), "done", &["ac"], "slow")).collect();
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_millis(700);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    // Unbounded this is 10 batches x 400 ms = 4 s.
+    assert!(start.elapsed() < Duration::from_millis(2500), "{:?}", start.elapsed());
+    assert_eq!(row(&r, "s39", "ac")["status"], "checking", "{r}");
+    assert!(r["pending"].as_u64().unwrap() > 0, "{r}");
+    assert_eq!(row(&r, "s0", "ac")["status"], "unverified", "a check that ran out its own full timeout is unverified, not checking");
+    // The second batch started with 300 ms of budget left (< the 400 ms timeout): the budget cut it, so it is checking and counted.
+    assert_eq!(row(&r, "s4", "ac")["status"], "checking", "{r}");
+    assert_eq!(r["pending"].as_u64().unwrap(), 36, "{r}");
+    // Budget-cut checks are not remembered (they get a real run next call).
+    assert!(app.evidence_cache.lock().unwrap().values().all(|(_, until)| until.is_some()), "only the full-timeout failures are remembered, and only briefly");
+}
+
+#[test]
+fn a_second_call_during_a_sweep_runs_no_checks_and_unchanged_evidence_is_not_rechecked() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks: Vec<Value> = (0..3).map(|i| ev_task(&d, &format!("g{i}"), "done", &["ac"], "green")).collect();
+    let (app, slug) = campaign_with_tasks(&t, tasks);
+    // A sweep of this campaign is "running": a call (another change event) must not start a parallel one.
+    app.sweeping.lock().unwrap().insert(slug.clone());
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "checking", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300));
+    app.sweeping.lock().unwrap().remove(&slug);
+    // The verdict cache keys on the evidence file's mtime and size, so the file has to exist.
+    let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    fs::write(ev_dir.join("green.json"), b"{}").unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "pass", "{r}");
+    // Verdicts are cached: while another sweep holds the campaign, the same tasks still answer `pass`.
+    app.sweeping.lock().unwrap().insert(slug.clone());
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "pass", "{r}");
+    assert_eq!(r["pending"], 0);
+}
+
+#[test]
+fn a_rewritten_evidence_file_with_the_same_size_and_mtime_is_rechecked_not_served_from_the_cache() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "g0", "done", &["ac"], "green")]);
+    let file = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green.json");
+    fs::write(&file, br#"{"a":"GRN"}"#).unwrap();
+    assert_eq!(row(&app.evidence_list(&slug).unwrap(), "g0", "ac")["status"], "pass");
+    let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+    fs::write(&file, br#"{"a":"RED"}"#).unwrap(); // same size
+    fs::OpenOptions::new().write(true).open(&file).unwrap().set_modified(mtime).unwrap(); // utimes restores the old mtime
+    assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "unverified", "the cache must not serve the old pass: {r}");
+}
+
+#[test]
+fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_call() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks = vec![
+        ev_task(&d, "h", "done", &["ac"], "slow"),
+        ev_task(&d, "g1", "done", &["ac"], "green"),
+        ev_task(&d, "g2", "done", &["ac"], "green"),
+    ];
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    // The shipped relation: a check's own timeout fits inside the call's budget.
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_millis(500);
+    let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    fs::write(ev_dir.join("slow.json"), b"{}").unwrap();
+    fs::write(ev_dir.join("green.json"), b"{}").unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "g1", "ac")["status"], "pass", "{r}");
+    assert_eq!(r["pending"], 0, "{r}");
+    // Remembered briefly: the next call does not spend 400 ms on it again.
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+}
+
+#[test]
+fn a_verdict_is_not_cached_when_the_file_is_swapped_while_the_check_runs() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "w", "done", &["ac"], "green-swap")]);
+    let file = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green-swap.json");
+    fs::write(&file, br#"{"a":"AAA"}"#).unwrap();
+    // The check script rewrites the file to BBB after the key was read from AAA: that verdict belongs to BBB.
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "w", "ac")["status"], "pass", "{r}");
+    assert_eq!(fs::read(&file).unwrap(), br#"{"a":"BBB"}"#);
+    assert!(app.evidence_cache.lock().unwrap().is_empty(), "no cache entry for a verdict whose key bytes changed");
+}
+
+/// A task with green LIVE evidence (outside the campaign's evidence dir) whose run repo is a real git repo at `head`.
+fn live_evidence_repo(t: &Tmp, git_repo: bool, ev_in_repo: bool) -> (App, String, std::path::PathBuf, String) {
+    let repo = t.home().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git").current_dir(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let mut head = "a".repeat(40);
+    if git_repo {
+        git(&["init", "-q"]);
+        fs::write(repo.join("f.txt"), b"one").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        head = git(&["rev-parse", "HEAD"]);
+    }
+    let ev = if ev_in_repo { repo.join("data/walkthroughs/deliver-20261105-1810") } else { t.home().join("live-ev") };
+    fs::create_dir_all(&ev).unwrap();
+    fs::write(ev.join("green.json"), b"{}").unwrap();
+    let mut task = ev_task(Path::new("/x"), "t1", "done", &["ac"], "green");
+    task["evidence"]["path"] = json!(ev.join("green.json").to_string_lossy());
+    task["evidence"]["head"] = json!(head);
+    let (app, slug) = campaign_with_tasks(t, vec![task]);
+    lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: repo.clone(), nonces: Redactor::default() });
+    (app, slug, repo, head)
+}
+
+fn status_of(app: &App, slug: &str) -> String {
+    lock(&app.worktree_state).clear(); // the 5 s state cache would otherwise hide the edit
+    app.evidence_list(slug).unwrap()["rows"][0]["status"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    assert_eq!(status_of(&app, &slug), "pass");
+    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
+    let git = |args: &[&str]| { std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap(); };
+    git(&["checkout", "--", "f.txt"]);
+    assert_eq!(status_of(&app, &slug), "pass", "clean again");
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
+    fs::remove_file(repo.join("new.txt")).unwrap();
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "stale", "the branch moved past the evidence's head");
+}
+
+#[test]
+fn the_runs_own_untracked_output_does_not_make_its_evidence_stale() {
+    let t = Tmp::new();
+    // The real layout: <repo>/data/walkthroughs/<slug>/evidence.json, untracked, with its logs beside it.
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    fs::write(repo.join("data/walkthroughs/deliver-20261105-1810/cmd-1.log"), b"ok").unwrap();
+    fs::create_dir_all(repo.join(".claude/worktrees/w1")).unwrap();
+    fs::write(repo.join(".claude/worktrees/w1/x"), b"crew worktree").unwrap();
+    assert_eq!(status_of(&app, &slug), "pass", "the run's own output is not an edit");
+    fs::write(repo.join("unrelated.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an unrelated untracked file still counts");
+}
+
+#[test]
+fn the_repo_state_reads_stop_at_the_calls_deadline() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // Deadline already passed: git is not even started, nothing is remembered.
+    assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
+    assert!(lock(&app.worktree_state).is_empty());
+    let (head, dirty) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    assert_eq!(head.len(), 40);
+    assert!(!dirty);
+}
+
+/// A "git" that never answers, to stand in for a slow repo.
+fn slow_git(t: &Tmp) -> std::path::PathBuf {
+    let p = t.home().join("slow-git.sh");
+    fs::write(&p, "#!/bin/sh\nsleep 30\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn a_slow_repo_does_not_eat_a_checks_full_timeout_and_is_not_asked_again_on_the_next_call() {
+    let t = Tmp::new();
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, true, false);
+    let mut app = app;
+    app.bridge.git = slow_git(&t);
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(r["rows"][0]["status"], "pass", "the check's verdict stands when git is too slow: {r}");
+    assert!(start.elapsed() < Duration::from_millis(3500), "{:?}", start.elapsed());
+    // The second call does not pay for the slow repo again.
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(r["rows"][0]["status"], "pass", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300), "second call re-ran the slow git: {:?}", start.elapsed());
+}
+
+#[test]
+fn checks_run_before_the_repo_scan_so_a_slow_check_gets_its_full_timeout() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (_a, _s, repo, _h) = live_evidence_repo(&t, true, false);
+    let ev = t.home().join("live-ev/green.json");
+    let mut live = ev_task(&d, "t1", "done", &["ac"], "green");
+    live["evidence"]["path"] = json!(ev.to_string_lossy());
+    let (mut app, slug) = campaign_with_tasks(&t, vec![live, ev_task(&d, "t2", "done", &["ac2"], "slow")]);
+    lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: repo, nonces: Redactor::default() });
+    app.bridge.git = slow_git(&t);
+    app.evidence_timeout = Duration::from_millis(2500);
+    app.evidence_budget = Duration::from_secs(3);
+    let r = app.evidence_list(&slug).unwrap();
+    // With the scan first, the slow git would have used 2 s and left the check under 1 s of its 2.5 s: it would read "checking".
+    assert_eq!(row(&r, "t2", "ac2")["status"], "unverified", "a check that ran its full timeout is unverified, not cut by the budget: {r}");
+    assert_eq!(row(&r, "t1", "ac")["status"], "pass", "{r}");
+}
+
+#[test]
+fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered() {
+    let t = Tmp::new();
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, false, false);
+    assert_eq!(status_of(&app, &slug), "pass", "not a git repo: not stale");
+    // Git had its full time and could not read it: remembered as unknown, so it is not asked again for a while.
+    assert!(lock(&app.worktree_state).values().all(|(_, st)| st.is_none()));
+}
+
+#[test]
+fn a_big_untracked_tree_does_not_blow_the_budget() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let big = repo.join("node_modules_like");
+    fs::create_dir_all(&big).unwrap();
+    for i in 0..3000 {
+        fs::write(big.join(format!("f{i}.js")), b"x").unwrap();
+    }
+    let start = std::time::Instant::now();
+    assert_eq!(status_of(&app, &slug), "stale");
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+}
+
+fn detail_fixture(t: &Tmp, nonce: Option<&str>) -> (App, String, std::path::PathBuf) {
+    let d = std::path::PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "failed", &["ac"], "evidence");
+    task["report"] = json!({"status": "failed", "summary": format!("tests red {}", nonce.unwrap_or(""))});
+    let (app, slug) = campaign_with_tasks(t, vec![task]);
+    if let Some(n) = nonce {
+        lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: t.home().join("repo"), nonces: Redactor::new(Some(n)) });
+    }
+    let ev = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    (app, slug, ev)
+}
+
+#[test]
+fn evidence_detail_returns_each_command_its_exit_code_and_a_failed_ones_output_tail() {
+    let t = Tmp::new();
+    let (app, slug, ev) = detail_fixture(&t, None);
+    fs::write(ev.join("evidence.json"), serde_json::to_vec(&json!({"commands": [
+        {"cmd": "npm test", "exit": 1, "log": "cmd-1.log", "passed": false},
+        {"cmd": "tsc --noEmit", "exit": 0, "log": "cmd-2.log", "passed": true},
+        {"cmd": "evil", "exit": 1, "log": "../escape.log", "passed": false},
+    ]})).unwrap()).unwrap();
+    fs::write(ev.join("cmd-1.log"), format!("{}\x1b[31mFAIL src/a.test.ts\x1b[0m\n<script>alert(1)</script>\n", "noise\n".repeat(2000))).unwrap();
+    fs::write(ev.join("cmd-2.log"), "all green\n").unwrap();
+    fs::write(t.home().join(".claude/vajra/campaigns").join(&slug).join("escape.log"), "outside the evidence dir").unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    let cmds = r["commands"].as_array().unwrap();
+    assert_eq!(cmds.len(), 3, "{r}");
+    assert_eq!(cmds[0]["cmd"], "npm test");
+    assert_eq!(cmds[0]["exit_code"], 1);
+    let tail = cmds[0]["output_tail"].as_str().unwrap();
+    assert!(tail.contains("FAIL src/a.test.ts") && !tail.contains('\u{1b}'), "escapes stripped: {tail:?}");
+    assert!(tail.contains("<script>alert(1)</script>"), "kept as inert text for the UI to render as text");
+    assert!(tail.len() <= 4 * 1024 + 16, "tail is bounded: {}", tail.len());
+    assert!(cmds[1]["output_tail"].is_null(), "a passing command carries no output");
+    assert_eq!(cmds[2]["output_tail"], Value::Null, "a log name that climbs out is never read");
+    assert_eq!(r["notes"], "tests red ");
+}
+
+#[test]
+fn evidence_detail_redacts_a_planted_secret_from_commands_output_and_notes() {
+    let t = Tmp::new();
+    let secret = "STEERNONCE-9f8e7d6c5b";
+    let (app, slug, ev) = detail_fixture(&t, Some(secret));
+    fs::write(ev.join("evidence.json"), serde_json::to_vec(&json!({"commands": [
+        {"cmd": format!("curl -H 'x: {secret}' host"), "exit": 1, "log": "cmd-1.log", "passed": false},
+    ]})).unwrap()).unwrap();
+    fs::write(ev.join("cmd-1.log"), format!("token={secret}\n")).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap().to_string();
+    assert!(!r.contains(secret), "secret leaked: {r}");
+    assert!(r.contains("[redacted]"), "{r}");
+}
+
+#[test]
+fn evidence_detail_bounds_the_evidence_file_and_refuses_a_link() {
+    let t = Tmp::new();
+    let (app, slug, ev) = detail_fixture(&t, None);
+    fs::write(ev.join("evidence.json"), vec![b' '; 70 * 1024]).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    assert_eq!(r["truncated"], true, "{r}");
+    assert_eq!(r["commands"].as_array().unwrap().len(), 0);
+    fs::remove_file(ev.join("evidence.json")).unwrap();
+    fs::write(ev.join("real.json"), br#"{"commands":[{"cmd":"x","exit":0}]}"#).unwrap();
+    std::os::unix::fs::symlink(ev.join("real.json"), ev.join("evidence.json")).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    assert_eq!(r["commands"].as_array().unwrap().len(), 0, "a symlinked evidence file is not read: {r}");
+    assert_eq!(code(&app.evidence_detail("../x", "t1").unwrap_err()), "invalid_args");
+}
+
+#[test]
+fn evidence_list_rejects_a_bad_slug_and_reports_an_unknown_campaign() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.evidence_list("../x").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.evidence_list("nope").unwrap_err()), "not_found");
+}
+
+#[test]
+fn evidence_outside_the_campaign_or_with_a_dotdot_path_is_unverified_without_running_a_check() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/green.json");
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+}
+
+#[test]
+fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
+    use crate::crew::tree::{Node, NodeKind, Status};
+    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], children: vec![] };
+    let j = node_json(&n);
+    assert_eq!(j["role"], "Backend", "{j}");
+    assert_eq!(j["engine_id"], "bhima");
+    let g = node_json(&Node { engine_id: None, ..n });
+    assert!(g["role"].is_null());
+}
+
 // ---------------------------------------------------------------- read_report (held bytes)
 
 fn fnv32(s: &str) -> String {
@@ -1384,7 +1924,7 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
     runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
-    let (_, id) = app.fresh_run_id(now);
+    let (_, id) = app.fresh_run_id(now).unwrap();
     assert_ne!(id, "20261105-1230", "the persisted id is taken");
 }
 
@@ -1505,4 +2045,48 @@ fn stream_window_serves_only_the_asked_rows_with_the_streams_bounds() {
     assert_eq!(app.stream_window("w-a", Some(1), 100_000, usize::MAX).unwrap()["lines"].as_array().unwrap().len(), 500);
     assert_eq!(code(&app.stream_window("../x", None, 10, 10).unwrap_err()), "invalid_args");
     assert_eq!(app.stream_window("w-unknown", None, 10, 10).unwrap()["lines"], json!([]));
+}
+
+#[test]
+fn a_run_id_with_a_guarded_record_is_never_reissued_after_the_index_is_lost() {
+    // `runs.jsonl` is worker-writable. If it is emptied, a restarted app must still not hand out an id whose guarded
+    // record (`control/lead/<id>/`) exists: `record_run` would overwrite its session and campaign but keep the old
+    // Lead session id and approval-only marker, so the new run would resume another run's Lead.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let _ = std::fs::remove_file(t.0.join("data/runs.jsonl"));
+    let app = t.app();
+    let (_, id) = app.fresh_run_id(at).unwrap();
+    assert_ne!(id, run, "an id with a guarded record is taken");
+}
+
+#[test]
+fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
+    // Review of #46 (P1): the guarded record holds the current minute and a forged index holds every other candidate
+    // minute. The search must fail closed, never reissue the guarded id through a fallback.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let index = t.0.join("data/runs.jsonl");
+    let _ = std::fs::remove_file(&index);
+    for k in 1..120u64 {
+        let e = runindex::Entry { campaign: "deliver-forged".into(), session_id: "1f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: ids::run_id_at(at + 60 * k), cwd: t.0.clone(), lead_session_id: None };
+        runindex::append(&index, &e).unwrap();
+    }
+    let app = t.app();
+    let got = app.fresh_run_id(at);
+    assert_eq!(got.as_ref().map_err(code), Err("run_id_exhausted"), "the guarded id must not be reissued: {got:?}");
+    // A launch fails closed too: nothing is spawned and the guarded record is not overwritten.
+    assert!(!lock(&app.issued).contains(run));
+    let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
+    assert_eq!(rec.trim(), "deliver-x");
 }
