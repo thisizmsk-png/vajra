@@ -764,6 +764,101 @@ impl App {
         }
     }
 
+    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text, from held bytes. Every input is read once
+    /// (`vajra::held`); the signature, `featuresDefSha256` and `reportSha256` are all checked against those bytes,
+    /// and the text returned is exactly the held report. The script only answers "is this sig valid for these
+    /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
+    /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
+    pub fn read_report(&self, slug: &str) -> Res {
+        self.read_report_with(slug, &|_| {}, &|| {})
+    }
+
+    /// `seam` is passed to the held reader; `between` runs after the read and before the digest check (tests).
+    pub(crate) fn read_report_with(&self, slug: &str, seam: &dyn Fn(&str), between: &dyn Fn()) -> Res {
+        use crate::control::sha256::hex_digest;
+        use crate::vajra::held::{self, HeldError};
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let verdict = |integrity: &str, text: Option<String>| {
+            let mut v = json!({"slug": slug, "integrity": integrity});
+            if let Some(t) = text {
+                v["text"] = json!(t);
+            }
+            Ok(v)
+        };
+        let dir = self.allow().map_err(|e| fail("io_error", e))?.campaigns_dir().to_path_buf();
+        let h = match held::read_campaign(&dir, slug, seam) {
+            Ok(h) => h,
+            Err(HeldError::NotFound) => return Err(fail("not_found", "no such campaign")),
+            Err(HeldError::Failed(_)) => {
+                self.settle_code(slug, Some(3));
+                return verdict("integrity_failed", None);
+            }
+            Err(HeldError::TooLarge(_)) | Err(HeldError::Io(_)) => return verdict("unknown", None),
+        };
+        between();
+        let bad = |this: &Self| {
+            this.settle_code(slug, Some(3));
+            verdict("integrity_failed", None)
+        };
+        if !held::json_without_duplicate_keys(&h.campaign) || !held::json_without_duplicate_keys(&h.features) {
+            return bad(self);
+        }
+        let (Ok(campaign), Ok(features)) =
+            (serde_json::from_slice::<Value>(&h.campaign), serde_json::from_slice::<Value>(&h.features))
+        else {
+            return bad(self);
+        };
+        if !features.get("features").is_some_and(Value::is_array) {
+            return bad(self);
+        }
+        let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
+        if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return bad(self);
+        }
+        let sig = String::from_utf8_lossy(&sig).into_owned();
+        let input = format!(
+            "campaign {}\nfeatures {}\nprogress {}\nsig {}\n",
+            hex_digest(&h.campaign),
+            hex_digest(&h.features),
+            hex_digest(&h.progress),
+            sig
+        );
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+            Ok(o) => o,
+            Err(_) => return verdict("unknown", None),
+        };
+        match o.code {
+            Some(0) => {}
+            Some(3) => return bad(self),
+            _ => return verdict("unknown", None),
+        }
+        // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes.
+        let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
+            Ok(o) if o.code == Some(0) => o.stdout.replace('\n', ""),
+            _ => return verdict("unknown", None),
+        };
+        if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
+            return bad(self);
+        }
+        self.settle_code(slug, Some(0));
+        let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
+        if want.is_empty() {
+            return verdict("no_report", None);
+        }
+        let Some(report) = h.report else { return bad(self) };
+        if hex_digest(&report) != want {
+            return bad(self);
+        }
+        match String::from_utf8(report) {
+            Ok(t) => verdict("ok", Some(t)),
+            Err(_) => verdict("not_text", None),
+        }
+    }
+
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
         self.sup.set_take_over(stream, on).map_err(|e| fail("session_error", e))?;
         Ok(json!({"stream": stream, "take_over": on}))
