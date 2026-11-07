@@ -700,3 +700,35 @@ fn a_target_whose_directory_is_gone_is_not_offered() {
     fs::remove_dir_all(&cwd).unwrap();
     assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
 }
+
+#[test]
+fn the_crew_tree_shows_message_pending_and_stopped_by_the_human_from_the_control_ledger() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(sub.join("workflows/wf_1")).unwrap();
+    fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
+    fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r1\",\"phase\":\"Execute\"}\n").unwrap();
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let overlays = |tree: &Value| -> Vec<String> {
+        fn find<'a>(n: &'a Value, id: &str) -> Option<&'a Value> {
+            if n["id"] == id { return Some(n) }
+            n["children"].as_array()?.iter().find_map(|c| find(c, id))
+        }
+        find(tree, "agent:a2").map(|n| n["overlays"].as_array().unwrap().iter().map(|o| o.as_str().unwrap().to_string()).collect()).unwrap_or_else(|| panic!("worker missing: {tree}"))
+    };
+    assert!(overlays(&app.crew("c", "20261105-1230").unwrap()).is_empty());
+    app.control_message("a2", "use the kit Button").unwrap();
+    assert_eq!(overlays(&app.crew("c", "20261105-1230").unwrap()), vec!["message pending"]);
+    app.control_stop("a2", None).unwrap();
+    let o = overlays(&app.crew("c", "20261105-1230").unwrap());
+    assert!(o.contains(&"stopped by the human".to_string()), "{o:?}");
+    app.sup.kill(&stream).unwrap();
+}
+
