@@ -44,6 +44,8 @@ const MAX_PENDING: usize = bus::MAX_LINE_BYTES;
 pub enum SessionError {
     /// `write` without "Take over" (AC-2.2.4).
     ReadOnly,
+    /// `submit_fixed_turn` while the human has the keyboard (Take over is on).
+    TakeOverActive,
     NotFound,
     AlreadyRunning,
     /// Session ids are bus stream ids.
@@ -63,6 +65,7 @@ impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReadOnly => f.write_str("session is read-only; press Take over to type"),
+            Self::TakeOverActive => f.write_str("Take over is on; turn it off, then approve"),
             Self::NotFound => f.write_str("no such session"),
             Self::AlreadyRunning => f.write_str("session is already running"),
             Self::InvalidId => f.write_str("invalid session id"),
@@ -78,6 +81,23 @@ impl std::fmt::Display for SessionError {
 }
 
 impl std::error::Error for SessionError {}
+
+/// `Execute approved plan <run_id>.<index>`: the only text `submit_fixed_turn` can type. It can be built only from a
+/// run id that matches `YYYYMMDD-HHMM` and a small index, so it holds no free text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedPlanTurn(String);
+
+impl ApprovedPlanTurn {
+    pub const MAX_INDEX: usize = 99;
+
+    pub fn new(run_id: &str, index: usize) -> Option<Self> {
+        (crate::ids::valid_run_id(run_id) && index <= Self::MAX_INDEX).then(|| Self(format!("Execute approved plan {run_id}.{index}")))
+    }
+
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
@@ -299,6 +319,21 @@ impl Supervisor {
         }
         let mut w = lock(&s.writer);
         w.write_all(data)
+            .and_then(|_| w.flush())
+            .map_err(|e| SessionError::Io(e.to_string()))
+    }
+
+    /// Type one fixed turn into a running session that is NOT in Take over (ADR-14). The bytes are the turn's own
+    /// fixed text plus Enter; the caller has no way to pass text, so a plan, a reason or any stream text can never be
+    /// typed here. The take-over check runs under the writer lock, so it cannot interleave with the human typing.
+    pub fn submit_fixed_turn(&self, id: &str, turn: &ApprovedPlanTurn) -> Result<(), SessionError> {
+        let s = self.get(id)?;
+        let mut w = lock(&s.writer);
+        if s.take_over.load(Ordering::SeqCst) {
+            return Err(SessionError::TakeOverActive);
+        }
+        w.write_all(turn.text().as_bytes())
+            .and_then(|_| w.write_all(b"\r"))
             .and_then(|_| w.flush())
             .map_err(|e| SessionError::Io(e.to_string()))
     }

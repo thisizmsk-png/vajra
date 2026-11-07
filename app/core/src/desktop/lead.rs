@@ -340,7 +340,7 @@ impl App {
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
 
-    fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
+    pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)

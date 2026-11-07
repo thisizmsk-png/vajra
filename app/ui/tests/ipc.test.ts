@@ -29,6 +29,17 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps approve and reject to their commands with camelCase arguments", async () => {
+    const f = fakeIpc({ approve_plan: { action_id: "a1", state: "delivered", via: "session" }, reject_plan: { action_id: "a2", state: "rejected" } });
+    setTransport(f.transport);
+    await api.approvePlan("plan:20261106-0911.0", "ab".repeat(32));
+    await api.rejectPlan("plan:20261106-0911.0", "too risky");
+    expect(f.calls).toEqual([
+      { cmd: "approve_plan", args: { id: "plan:20261106-0911.0", planSha256: "ab".repeat(32) } },
+      { cmd: "reject_plan", args: { id: "plan:20261106-0911.0", reason: "too risky" } },
+    ]);
+  });
+
   it("maps inbox to the inbox command", async () => {
     const f = fakeIpc({ inbox: { count: 0, items: [] } });
     setTransport(f.transport);

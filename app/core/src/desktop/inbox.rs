@@ -5,15 +5,19 @@
 //! item comes from stream or terminal text (AC-5.1.6). Every text field is untrusted: control characters are
 //! dropped, and the UI renders it as plain text.
 //!
-//! `plan` and `question` items need the workflow's final result, whose location is still open (the `Workflow`
-//! tool_result in the run transcript is only the launch acknowledgement), so they are not listed here.
+//! Core B2 adds `plan` and `question` items from the workflow's own result file (`wfresult.rs`, ADR-14). That file is
+//! unsigned and worker-writable, so those items say where they came from, and every plan carries `plan_sha256`, the
+//! hash of exactly what was shown: `approve_plan` refuses unless the file still hashes to it.
 
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
-use super::{App, Res, fail, runindex};
+use std::path::PathBuf;
+
+use super::{App, Res, fail, lock, project_slug, runindex, wfresult};
 use crate::control::lead::sanitise;
+use crate::control::sha256;
 use crate::control::time::parse_iso;
 use crate::crew::redact::Redactor;
 
@@ -32,7 +36,37 @@ fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Shown with every item that comes from the workflow result file.
+const FROM_RESULT: &str = "from the workflow result";
+
+/// `plan:<run_id>.<index>` -> (run_id, index).
+pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
+    let (run, idx) = id.strip_prefix("plan:")?.split_once('.')?;
+    let index = idx.parse::<usize>().ok().filter(|i| *i <= crate::sessions::ApprovedPlanTurn::MAX_INDEX && idx == i.to_string())?;
+    crate::ids::valid_run_id(run).then_some((run, index))
+}
+
+/// The bytes that are shown and hashed for one plan item.
+pub(super) fn plan_sha(shown: &Value) -> String {
+    sha256::hex_digest(&serde_json::to_vec(shown).unwrap_or_default())
+}
+
 impl App {
+    /// The `workflows/` directory of the session an app-launched run used. The run's directory must match the one the
+    /// app recorded under its guarded control dir, so a forged `runs.jsonl` line cannot point this anywhere else.
+    fn workflows_dir(&self, e: &runindex::Entry) -> Option<PathBuf> {
+        if !crate::ids::valid_session_id(&e.session_id) || !crate::ids::valid_run_id(&e.run_id) || self.read_run_cwd(&e.run_id)? != e.cwd {
+            return None;
+        }
+        Some(self.claude.join("projects").join(project_slug(&e.cwd)).join(&e.session_id).join("workflows"))
+    }
+
+    /// What the newest `vajra-deliver` result of this app run asks of the human.
+    pub(super) fn waiting(&self, e: &runindex::Entry) -> Option<wfresult::Waiting> {
+        let dir = self.workflows_dir(e)?;
+        wfresult::waiting_for(&self.allow().ok()?, &dir, &e.campaign).ok().flatten()
+    }
+
     /// Everything waiting on the human, oldest first, at most 200 items with the true count.
     pub fn inbox(&self) -> Res {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -70,6 +104,37 @@ impl App {
             }
             Ok(())
         })?;
+        for (slug, e) in &launched {
+            let Some(w) = self.waiting(e) else { continue };
+            let age = |t: i64| (now - t).max(0);
+            let base = |id: &str, kind: &str| json!({"id": id, "kind": kind, "campaign": slug, "origin": "app", "source": FROM_RESULT, "created": crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(w.modified.max(0) as u64)), "age_s": age(w.modified)});
+            if let Some(q) = &w.question {
+                let id = format!("question:{}", e.run_id);
+                let mut v = base(&id, "question");
+                v["title"] = json!("The run needs an answer");
+                v["body"] = json!(q);
+                v["actions"] = json!(["open"]);
+                items.push((w.modified, id, v));
+            }
+            for (i, p) in w.plans.iter().enumerate() {
+                let id = format!("plan:{}.{i}", e.run_id);
+                // Decided plans are not offered again; a ledger that cannot be read fails closed (the plan is hidden).
+                if !matches!(lock(&self.control).decided(&id), Ok(None)) {
+                    continue;
+                }
+                let sha = plan_sha(p);
+                lock(&self.shown).insert(id.clone(), sha.clone());
+                let mut v = base(&id, "plan");
+                let action = p["action"].as_str().unwrap_or_default();
+                v["title"] = json!(format!("Approve: {action}"));
+                v["body"] = p["why"].clone();
+                v["plan"] = p.get("plan").cloned().unwrap_or(Value::Null);
+                v["action"] = json!(action);
+                v["plan_sha256"] = json!(sha);
+                v["actions"] = json!(["approve", "reject"]);
+                items.push((w.modified, id, v));
+            }
+        }
         items.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let count = items.len();
         let list: Vec<Value> = items.into_iter().take(MAX_ITEMS).map(|(_, _, v)| v).collect();
