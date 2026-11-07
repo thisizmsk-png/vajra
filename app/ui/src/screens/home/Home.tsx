@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Input, Section, SegmentedControl, StatusDot, Text } from "../../../components/ui/base";
+import { Badge, Button, Input, Section, SegmentedControl, Text } from "../../../components/ui/base";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useRoute } from "../../router";
+import { PreflightList } from "../PreflightList";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
 
@@ -69,16 +70,7 @@ export function Home() {
         {pre.state === "loading" && <Text variant="body-sm" muted>…</Text>}
         {pre.state === "error" && <div role="alert"><Text variant="body-sm">{S.home.preflightFailed} {pre.text}</Text></div>}
         {pre.state === "ok" && (
-          <ul className="v-home__checks">
-            {pre.data.rows.map((r) => (
-              <li key={r.name}>
-                <StatusDot status={r.ok ? "pass" : "fail"} />
-                <span>{r.name}</span>
-                <Text variant="body-sm" muted>{r.detail}</Text>
-                {!r.ok && r.fix && <code className="v-home__fix">{r.fix}</code>}
-              </li>
-            ))}
-          </ul>
+          <PreflightList rows={pre.data.rows} />
         )}
       </Section>
 

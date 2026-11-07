@@ -56,6 +56,31 @@ export const S = {
     errRounds: "Fix rounds must be 1, 2 or 3.",
     errInFlight: "Use a number from 1 to 16.",
   },
+  history: {
+    title: "History",
+    campaigns: "Past campaigns",
+    empty: "No campaigns yet.",
+    failed: "Could not read the campaigns.",
+    colSlug: "Campaign", colGoal: "Goal", colStatus: "Status", colPassing: "Passing", colUpdated: "Updated",
+    unreadable: "Unreadable",
+    search: "Search what the crew learned",
+    query: "Search",
+    queryHint: "Searches the knowledge ledger of the repository below.",
+    repo: "Repository folder",
+    go: "Search",
+    searching: "Searching",
+    none: "No results.",
+    unavailable: (code: number | null) => `Knowledge search is unavailable (exit code ${code ?? "none"}).`,
+    errQuery: "Enter something to search for.",
+    errRepo: "Enter the repository folder.",
+    hitKind: "Kind",
+  },
+  settings: {
+    title: "Settings",
+    checks: "Checks",
+    recheck: "Check again",
+    failed: "Could not run the checks.",
+  },
 } as const;
 
 export type StatusKey = keyof typeof S.status;
