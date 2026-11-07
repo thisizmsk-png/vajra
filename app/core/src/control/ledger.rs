@@ -22,7 +22,7 @@ impl Ledger {
 
     /// Test only: appends fail from now on (the file is reopened read-only).
     #[cfg(test)]
-    pub(super) fn break_for_test(&mut self) {
+    pub(crate) fn break_for_test(&mut self) {
         self.file = File::open(&self.path).unwrap();
     }
 

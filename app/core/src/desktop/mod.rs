@@ -67,6 +67,7 @@ struct Run {
 
 pub struct App {
     data: PathBuf,
+    home: PathBuf,
     claude: PathBuf,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
@@ -83,6 +84,8 @@ pub struct App {
     launching: Mutex<()>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
+    /// ADR-13: the Lead chat (asks, the guard, the claude binary).
+    lead: lead::LeadState,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -99,6 +102,8 @@ impl App {
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
         Ok(Self {
             data: data.to_path_buf(),
+            home: home.to_path_buf(),
+            lead: lead::LeadState::new(home),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")),
             reader: Mutex::new(None),
             claude,
@@ -674,6 +679,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod lead;
 mod runindex;
 
 #[cfg(test)]

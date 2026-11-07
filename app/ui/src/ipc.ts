@@ -52,6 +52,8 @@ export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start:
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
+export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
+export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
 export const api = {
@@ -76,6 +78,10 @@ export const api = {
   /** The session and directory of each campaign this app started (absent: started elsewhere). */
   resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
+  /** ADR-13: one headless Lead turn per question. The reply streams into `stream` (`lead-<run_id>`). */
+  askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
+  cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
+  leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */

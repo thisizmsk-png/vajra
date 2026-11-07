@@ -1,0 +1,531 @@
+use super::*;
+use crate::control::ledger::Ledger;
+use crate::control::lead_run::expected_tools;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static N: AtomicUsize = AtomicUsize::new(0);
+
+const RUN_ID: &str = "20261106-0911";
+const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+const FAKE_CLAUDE: &str = r#"#!/bin/sh
+D="$(cd "$(dirname "$0")" && pwd)"
+case "$1" in --warm) exit 0;; --version) cat "$D/version"; exit 0;; esac
+N="$$"
+cat > "$D/stdin.$N"
+printf '%s\n' "$@" > "$D/argv.$N"
+cp "$(cat "$D/ledger.path")" "$D/ledger-at-spawn.$N" 2>/dev/null
+if grep -q 'Read the file' "$D/stdin.$N"; then
+  echo x >> "$D/selftest.count"
+  cat "$D/init.json"
+  P=$(sed -n 's/.*Read the file \(.*\) and show its content\..*/\1/p' "$D/stdin.$N")
+  case "$(cat "$D/selftest")" in
+    leak)
+      C=$(cat "$P")
+      printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$C"
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+    notry)
+      echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+    *)
+      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"denied"}]}}'
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}';;
+  esac
+  exit 0
+fi
+echo x >> "$D/ask.count"
+case "$(cat "$D/mode")" in
+  slow) sleep 60 &
+        echo $! > "$D/slow.child"
+        cat "$D/init.json"
+        wait;;
+  bad_tools) cat "$D/init_bad.json"; sleep 30;;
+  card) cat "$D/init.json"
+        echo '{"type":"assistant","message":{"content":[{"type":"text","text":"{\"card\":\"stop\",\"worker\":\"bhima\"}"}]}}'
+        echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+  *) cat "$D/init.json"
+     echo '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from the lead"}]}}'
+     echo '{"type":"result","is_error":false,"result":"hello from the lead","permission_denials":[]}';;
+esac
+"#;
+
+struct Tmp(PathBuf);
+
+impl Tmp {
+    fn new() -> Self {
+        let d = std::env::temp_dir().join(format!("vajra-lead-app-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("home/.claude/vajra/campaigns")).unwrap();
+        std::fs::create_dir_all(d.join("home/.claude/skills/vajra/hooks")).unwrap();
+        std::fs::create_dir_all(d.join("home/.claude/skills/vajra/scripts")).unwrap();
+        std::fs::create_dir_all(d.join("repo")).unwrap();
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        // A canonical root: the macOS temp dir is a /var → /private/var symlink, and these tests compare paths.
+        let d = std::fs::canonicalize(&d).unwrap();
+        std::fs::write(d.join("home/.claude/skills/vajra/hooks/pre-tool-use.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        let doctor = d.join("home/.claude/skills/vajra/scripts/vajra-doctor.sh");
+        std::fs::write(&doctor, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&doctor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS scans a new executable on its first run; do that here, not inside a timed call.
+        let _ = std::process::Command::new(&doctor).env_clear().status();
+        for stub in ["bash", "jq"] {
+            let p = d.join("bin").join(stub);
+            std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let claude = d.join("bin/claude");
+        std::fs::write(&claude, FAKE_CLAUDE).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::process::Command::new(&claude).arg("--warm").env_clear().status();
+        let tools = serde_json::to_string(&expected_tools()).unwrap();
+        let init = |tools: &str, mode: &str| format!(r#"{{"type":"system","subtype":"init","session_id":"{SID}","tools":{tools},"permissionMode":"{mode}"}}"#);
+        for (f, body) in [
+            ("init.json", init(&tools, "dontAsk") + "\n"),
+            ("init_bad.json", init(r#"["Bash","Read"]"#, "dontAsk") + "\n"),
+            ("version", "9.9.9 (Claude Code)".to_string()),
+            ("mode", "ok".to_string()),
+            ("selftest", "deny".to_string()),
+            ("ledger.path", d.join("data/control/ledger.jsonl").to_string_lossy().into_owned()),
+        ] {
+            std::fs::write(d.join("bin").join(f), body).unwrap();
+        }
+        Self(d)
+    }
+    fn home(&self) -> PathBuf {
+        self.0.join("home")
+    }
+    fn data(&self) -> PathBuf {
+        self.0.join("data")
+    }
+    fn repo(&self) -> PathBuf {
+        self.0.join("repo")
+    }
+    fn bin(&self, f: &str) -> PathBuf {
+        self.0.join("bin").join(f)
+    }
+    fn set(&self, f: &str, body: &str) {
+        std::fs::write(self.bin(f), body).unwrap();
+    }
+    fn count(&self, f: &str) -> usize {
+        std::fs::read_to_string(self.bin(f)).map(|s| s.lines().count()).unwrap_or(0)
+    }
+    fn files(&self, prefix: &str) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(self.0.join("bin"))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
+            .collect();
+        v.sort();
+        v
+    }
+    /// An app whose Lead is the fake claude, with a run this app launched (still in memory).
+    fn app(&self) -> App {
+        let app = App::open(&self.data(), &self.home()).unwrap();
+        app.lead.set_bin(Some(self.bin("claude")));
+        app.lead.set_env(vec![("HOME", self.home().into()), ("PATH", format!("{}:/usr/bin:/bin", self.0.join("bin").display()).into())]);
+        let mut nonces = Redactor::default();
+        nonces.add(Some(NONCE));
+        lock(&app.runs).insert(
+            format!("run-{SID}"),
+            Run { session_id: SID.into(), run_id: RUN_ID.into(), campaign: "deliver-x".into(), cwd: self.repo(), nonces },
+        );
+        app
+    }
+    fn ledger(&self) -> Vec<Value> {
+        Ledger::read_all(&self.data().join("control/ledger.jsonl")).unwrap()
+    }
+    fn ask_states(&self) -> Vec<String> {
+        self.ledger().iter().filter(|r| r["kind"] == "ask").map(|r| format!("{}:{}", r["state"].as_str().unwrap(), r["reason"].as_str().unwrap_or(""))).collect()
+    }
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        // Stop anything a failed test left running.
+        let _ = std::process::Command::new("pkill").args(["-f", &self.0.to_string_lossy()]).status();
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn wait_until(what: &str, f: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !f() {
+        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn code(v: &Value) -> &str {
+    v["error"].as_str().unwrap_or("")
+}
+
+fn idle(app: &App) -> bool {
+    lock(&app.lead.active).is_empty()
+}
+
+fn stream_text(app: &App) -> Vec<String> {
+    app.bus.tail(&format!("lead-{RUN_ID}"), 0, 1 << 20).lines.iter().map(|l| l.text.to_string()).collect()
+}
+
+// ------------------------------------------------------------ the happy path
+
+#[test]
+fn ask_round_trip_streams_records_and_resumes() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = app.ask_lead(RUN_ID, &format!("what is bhima doing? {NONCE}")).unwrap();
+    assert_eq!(r["state"], "queued");
+    assert_eq!(r["stream"], format!("lead-{RUN_ID}"));
+    let sid = r["lead_session_id"].as_str().unwrap().to_string();
+    assert!(ids::valid_session_id(&sid));
+    wait_until("the ask to finish", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+
+    // The reply is on the bus, tagged, with the question first.
+    let lines = stream_text(&app);
+    assert_eq!(lines[0], "you\twhat is bhima doing? [redacted]");
+    assert!(lines.contains(&"lead\thello from the lead".to_string()), "{lines:?}");
+
+    // The Lead was started with the fixed argv, and the framed ask on stdin (nonce redacted, header first).
+    // (The first Lead process of the app's life is the self-test turn, with its own throwaway session.)
+    let argvs: Vec<String> = t.files("argv.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    let argv = argvs.iter().find(|a| a.contains(&sid)).expect("the real ask's argv").clone();
+    assert!(argv.starts_with("-p\n--session-id\n"), "{argv}");
+    assert!(argv.contains("--setting-sources\n\n--settings\n") && argv.contains("--setting-sources\n\n--settings\n"), "{argv}");
+    assert!(!argv.contains("bhima"), "ask text is never an argv element");
+    let stdin = std::fs::read_to_string(&t.files("stdin.").iter().find(|p| std::fs::read_to_string(p).unwrap().contains("what is bhima")).unwrap()).unwrap();
+    assert!(stdin.starts_with("[Vajra Desktop: question from the human, ask "), "{stdin}");
+    assert!(stdin.ends_with("what is bhima doing? [redacted]") && !stdin.contains(NONCE));
+
+    // The ledger holds the redacted text once, and the Lead session was remembered after `init`.
+    let q = &t.ledger().into_iter().find(|r| r["kind"] == "ask" && r["state"] == "queued").unwrap();
+    assert_eq!(q["text"], "what is bhima doing? [redacted]");
+    assert_eq!(q["actor"], "human");
+    assert_eq!(runindex::latest(&t.data().join("runs.jsonl"))["deliver-x"].lead_session_id.as_deref(), Some(sid.as_str()));
+    assert!(std::fs::read_to_string(t.data().join("runs.jsonl")).unwrap_or_default().contains(&sid));
+
+    // The second ask resumes the same Lead session. The self-test ran once, not twice.
+    let r2 = app.ask_lead(RUN_ID, "and now?").unwrap();
+    assert_eq!(r2["lead_session_id"], sid);
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+    let argvs: Vec<String> = t.files("argv.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert!(argvs.iter().any(|a| a.starts_with("-p\n--resume\n") && a.contains(&sid)), "{argvs:?}");
+    assert_eq!(t.count("selftest.count"), 1, "proven once per (settings sha, version)");
+    assert_eq!(t.count("ask.count"), 2);
+    // An ask writes no audit.log line and adds no queue entry (AC-3.1.3).
+    assert!(!t.home().join(".claude/vajra/audit.log").exists());
+    assert!(t.ledger().iter().all(|r| r["kind"] == "ask"));
+}
+
+#[test]
+fn ask_ledger_record_before_spawn() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.ask_lead(RUN_ID, "is the record there first?").unwrap();
+    wait_until("the ask", || idle(&app));
+    // The fake copied the ledger the moment it was started: the queued line was already in it.
+    let snaps = t.files("ledger-at-spawn.");
+    assert!(!snaps.is_empty());
+    let any = snaps.iter().any(|p| std::fs::read_to_string(p).unwrap().contains("is the record there first?"));
+    assert!(any, "the ask was in the ledger before the Lead existed");
+    // And if the ledger cannot take the line, the Lead is never started.
+    let t2 = Tmp::new();
+    let app2 = t2.app();
+    lock(&app2.control).break_ledger_for_test();
+    assert_eq!(code(&app2.ask_lead(RUN_ID, "x").unwrap_err()), "io_error");
+    assert!(t2.files("stdin.").len() <= 1, "only the self-test turn may have run: {:?}", t2.files("stdin."));
+    assert_eq!(t2.count("ask.count"), 0);
+}
+
+#[test]
+fn reply_card_lookalike_stays_text() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("mode", "card");
+    app.ask_lead(RUN_ID, "stop bhima").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert!(stream_text(&app).contains(&"lead\t{\"card\":\"stop\",\"worker\":\"bhima\"}".to_string()));
+    // Action cards come from the ledger only, and the ledger holds nothing but the ask.
+    assert!(t.ledger().iter().all(|r| r["kind"] == "ask"));
+}
+
+// ------------------------------------------------------------ scope, concurrency, cancel, timeout
+
+#[test]
+fn ask_refused_for_terminal_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    lock(&app.runs).clear();
+    let e = app.ask_lead(RUN_ID, "hello?").unwrap_err();
+    assert_eq!((code(&e), e["detail"].as_str()), ("read_only", Some("run not launched by this app")));
+    let s = app.lead_status(RUN_ID).unwrap();
+    assert_eq!((s["available"].as_bool(), s["read_only_reason"].as_str()), (Some(false), Some("run not launched by this app")));
+    assert!(t.ledger().is_empty(), "a refused ask leaves no record");
+    assert!(t.files("stdin.").is_empty(), "nothing was spawned");
+    // A run that only runs.jsonl remembers (a finished run of this app) can still be asked about.
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], true);
+    assert!(app.ask_lead(RUN_ID, "still there?").is_ok());
+    wait_until("the ask", || idle(&app));
+    // Bad ids and bad text are refused before anything else.
+    assert_eq!(code(&app.ask_lead("../x", "hi").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "").unwrap_err()), "invalid_args");
+}
+
+#[test]
+fn ask_lead_busy_second_call_and_cancel_kills_group() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("mode", "slow");
+    let first = app.ask_lead(RUN_ID, "take your time").unwrap();
+    let ask_id = first["ask_id"].as_str().unwrap().to_string();
+    wait_until("the Lead to be running", || t.bin("slow.child").exists() && t.ask_states().contains(&"delivered:".to_string()));
+    // One ask in flight per Lead session.
+    assert_eq!(code(&app.ask_lead(RUN_ID, "me too").unwrap_err()), "lead_busy");
+    let s = app.lead_status(RUN_ID).unwrap();
+    assert_eq!((s["busy"].as_bool(), s["ask_id"].as_str()), (Some(true), Some(ask_id.as_str())));
+    // Cancel: the group (the CLI and the child it started) is killed and the ask is failed/cancelled.
+    assert_eq!(code(&app.cancel_ask("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err()), "ask_not_found");
+    assert_eq!(code(&app.cancel_ask("nope").unwrap_err()), "invalid_args");
+    let c = app.cancel_ask(&ask_id).unwrap();
+    assert_eq!((c["state"].as_str(), c["reason"].as_str()), (Some("failed"), Some("cancelled")));
+    wait_until("the cancel to settle", || idle(&app));
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "failed:cancelled"]);
+    let child: i32 = std::fs::read_to_string(t.bin("slow.child")).unwrap().trim().parse().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    // SAFETY: signal 0 only checks existence.
+    assert!(unsafe { libc::kill(child, 0) } != 0, "the Lead's child is gone");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["busy"], false);
+    // The Lead can be asked again once it is free; a session that never finished is resumed, not recreated.
+    t.set("mode", "ok");
+    assert!(app.ask_lead(RUN_ID, "back").is_ok());
+    wait_until("the next ask", || idle(&app));
+}
+
+#[test]
+fn ask_timeout_marks_failed() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("mode", "slow");
+    app.lead.set_limits(Limits { init: Duration::from_secs(10), total: Duration::from_millis(800) });
+    app.ask_lead(RUN_ID, "too slow").unwrap();
+    wait_until("the timeout", || idle(&app));
+    assert_eq!(t.ask_states().last().unwrap(), "failed:lead_timeout");
+    assert!(stream_text(&app).contains(&"error\tlead_timeout".to_string()));
+}
+
+// ------------------------------------------------------------ the init check, at the app level
+
+#[test]
+fn a_lead_with_the_wrong_tools_is_killed_and_not_remembered() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("mode", "bad_tools");
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the failure", || idle(&app));
+    assert_eq!(t.ask_states(), ["queued:", "failed:lead_tools_mismatch"]);
+    assert!(stream_text(&app).contains(&"error\tlead_tools_mismatch".to_string()));
+    // No Lead id was written: the next ask starts a fresh session instead of resuming one that never passed.
+    assert!(!t.data().join("runs.jsonl").exists());
+}
+
+// ------------------------------------------------------------ the guard (ADR-13 2a)
+
+#[test]
+fn lead_refused_without_guard_script() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::remove_file(t.home().join(".claude/skills/vajra/hooks/pre-tool-use.sh")).unwrap();
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing", "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded, nothing spawned");
+    assert!(idle(&app), "the busy lock is released");
+    // A directory where the script should be is not a regular file.
+    std::fs::create_dir_all(t.home().join(".claude/skills/vajra/hooks/pre-tool-use.sh")).unwrap();
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+}
+
+#[test]
+fn lead_refused_when_the_doctor_fails_or_the_env_cannot_run_the_guard() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::write(t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh"), "#!/bin/sh\necho 'FAIL hooks'\nexit 1\n").unwrap();
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    std::fs::write(t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    *lock(&app.lead.doctor) = None;
+    // No jq on the Lead's PATH: the guard would fail closed on every tool, so preflight refuses.
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", "/usr/bin:/bin".into())]);
+    std::fs::remove_file(t.bin("jq")).unwrap();
+    let no_jq = find_on_path("jq", &[PathBuf::from("/usr/bin"), PathBuf::from("/bin")]).is_none();
+    if no_jq {
+        assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    }
+    app.lead.set_env(vec![("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing", "no HOME");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty());
+}
+
+#[test]
+fn lead_settings_tamper_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    // Someone edits the file between the core writing it and spawning: fewer deny rules.
+    *lock(&app.lead.after_write) = Some(Box::new(|p: &Path| {
+        let s = std::fs::read_to_string(p).unwrap().replace("\"disable\"", "\"enable\"");
+        std::fs::write(p, s).unwrap();
+    }));
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing", "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing spawned");
+    // A loosened mode is refused too, and the unit check agrees.
+    let p = t.0.join("s.json");
+    std::fs::write(&p, "{}").unwrap();
+    assert!(verify_settings_file(&p, "{}").is_err(), "0644 is not private");
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(verify_settings_file(&p, "{}").is_ok());
+    assert!(verify_settings_file(&p, "{ }").is_err());
+    let link = t.0.join("link.json");
+    std::os::unix::fs::symlink(&p, &link).unwrap();
+    assert!(verify_settings_file(&link, "{}").is_err(), "a symlink is never read");
+}
+
+#[test]
+fn lead_settings_are_written_private_atomic_and_constant() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let dir = t.data().join("lead");
+    let got = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    assert_eq!(got, lead_settings::settings(&t.home(), &t.repo(), &t.data()).unwrap());
+    for f in ["settings.json", "mcp.json"] {
+        assert_eq!(std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
+    }
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left");
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["vajra-desktop"]["args"], json!(["--mcp"]));
+    // The argv names exactly those files.
+    let argv = std::fs::read_to_string(&t.files("argv.").pop().unwrap()).unwrap();
+    assert!(argv.contains(&format!("--settings\n{}\n", dir.join("settings.json").display())), "{argv}");
+}
+
+#[test]
+fn lead_startup_selftest_failclosed() {
+    let t = Tmp::new();
+    let app = t.app();
+    // A claude that hands back the canary: the deny layer is broken, so the Lead is never started.
+    t.set("selftest", "leak");
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing", "{e}");
+    assert_eq!(t.count("selftest.count"), 1);
+    assert_eq!(t.count("ask.count"), 0, "the real ask never ran");
+    assert!(t.ledger().is_empty() && idle(&app));
+    assert!(!t.data().join("lead/canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
+    // A failure is not cached: it is tried again, and is still refused.
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    assert_eq!(t.count("selftest.count"), 2);
+    // A model that never tries the read proves nothing: two tries, then refused.
+    t.set("selftest", "notry");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    assert_eq!(t.count("selftest.count"), 4);
+    // A denied read passes, and the pass is cached per (settings sha256, CLI version).
+    t.set("selftest", "deny");
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    assert_eq!(t.count("selftest.count"), 5);
+    app.ask_lead(RUN_ID, "again").unwrap();
+    wait_until("the ask", || idle(&app));
+    assert_eq!(t.count("selftest.count"), 5, "cached");
+    // A new CLI version is a new key.
+    *lock(&app.lead.version) = None;
+    t.set("version", "9.9.10 (Claude Code)");
+    app.ask_lead(RUN_ID, "again").unwrap();
+    wait_until("the ask", || idle(&app));
+    assert_eq!(t.count("selftest.count"), 6);
+    // So is a different repo (the generated rules change with it).
+    let other = t.0.join("other-repo");
+    std::fs::create_dir_all(&other).unwrap();
+    lock(&app.runs).values_mut().for_each(|r| r.cwd = other.clone());
+    app.ask_lead(RUN_ID, "again").unwrap();
+    wait_until("the ask", || idle(&app));
+    assert_eq!(t.count("selftest.count"), 7);
+}
+
+#[test]
+fn the_selftest_runs_with_the_hooks_removed_and_the_canary_covered_by_a_rule() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let bare = std::fs::read_to_string(t.data().join("lead/selftest-settings.json")).unwrap();
+    assert_eq!(bare, lead_settings::settings_no_hooks(&t.home(), &t.repo(), &t.data()).unwrap());
+    let v: Value = serde_json::from_str(&bare).unwrap();
+    assert!(v.get("hooks").is_none());
+    // The canary lives under the data dir, which a generated rule denies.
+    let rules = lead_settings::deny_rules(&t.home(), &t.repo(), &t.data()).unwrap();
+    let data_rule = format!("Read(//{}/**)", t.data().to_str().unwrap().trim_start_matches('/'));
+    assert!(rules.contains(&data_rule), "{data_rule}");
+}
+
+// ------------------------------------------------------------ restart
+
+#[test]
+fn lead_stream_rebuilt_from_transcript_after_restart() {
+    let t = Tmp::new();
+    let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(lead_sid.into()) };
+    std::fs::create_dir_all(&t.data()).unwrap();
+    runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
+    std::fs::create_dir_all(&proj).unwrap();
+    let hdr = format!("[Vajra Desktop: question from the human, ask 01ARZ3NDEKTSV4RRFFQ69G5FAV, run {RUN_ID}. Answer with the read and control tools only.]\nwhat is bhima doing?");
+    let rec = |v: Value| v.to_string();
+    let body = [
+        rec(json!({"type": "user", "message": {"role": "user", "content": hdr}})),
+        rec(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "bhima is on task t1"}, {"type": "tool_use", "name": "mcp__vajra-desktop__list_workers", "input": {}}]}})),
+        rec(json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "SECRET WORKER OUTPUT"}]}})),
+        "not json".to_string(),
+        rec(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}})),
+    ]
+    .join("\n");
+    std::fs::write(proj.join(format!("{lead_sid}.jsonl")), body).unwrap();
+    // A fresh app (a restart): its bus is empty.
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    assert!(app.bus.tail(&format!("lead-{RUN_ID}"), 0, 1 << 20).lines.is_empty());
+    let s = app.lead_status(RUN_ID);
+    // (claude may not be installed on the test machine; the history is rebuilt either way)
+    assert!(s.is_ok());
+    let lines = stream_text(&app);
+    assert_eq!(lines, vec!["you\twhat is bhima doing?", "lead\tbhima is on task t1", "tool\tmcp__vajra-desktop__list_workers: {}", "lead\tdone"], "{lines:?}");
+    assert!(lines.iter().all(|l| !l.contains("SECRET")), "tool results are not replayed");
+    // Asking again does not duplicate it.
+    app.lead_status(RUN_ID).unwrap();
+    assert_eq!(stream_text(&app).len(), 4);
+}
+
+#[test]
+fn claude_is_resolved_to_an_absolute_path_once() {
+    let t = Tmp::new();
+    let found = resolve_claude(&t.home(), &[t.0.join("bin")]).unwrap();
+    assert!(found.is_absolute() && found.ends_with("bin/claude"));
+    // Not on PATH: the usual install places are searched, newest nvm node first.
+    let nvm_old = t.home().join(".nvm/versions/node/v20.1.0/bin");
+    let nvm_new = t.home().join(".nvm/versions/node/v22.2.0/bin");
+    for d in [&nvm_old, &nvm_new] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::copy(t.bin("claude"), d.join("claude")).unwrap();
+        std::fs::set_permissions(d.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(resolve_claude(&t.home(), &[]).unwrap(), nvm_new.join("claude"));
+    assert!(resolve_claude(&t.0.join("empty-home"), &[]).is_none() || Path::new("/opt/homebrew/bin/claude").exists() || Path::new("/usr/local/bin/claude").exists());
+    // No binary: the ask says so instead of searching the PATH at ask time.
+    let app = t.app();
+    app.lead.set_bin(None);
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "claude_not_found");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["read_only_reason"], "claude not found");
+}

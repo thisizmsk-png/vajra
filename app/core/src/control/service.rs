@@ -395,6 +395,12 @@ impl Service {
     /// Append one ask line. An ask is human and `ui` by construction. It writes no `audit.log` line (it acts on no
     /// worker), enters no queue, and is never pending, so the ack watcher and reconcile have nothing to do with it.
     /// The caller records `queued` before it spawns the Lead and stops if this fails.
+    /// Test only: appends fail from now on.
+    #[cfg(test)]
+    pub(crate) fn break_ledger_for_test(&mut self) {
+        self.ledger.break_for_test();
+    }
+
     pub fn record_ask(&mut self, r: &AskRecord<'_>) -> Result<()> {
         let now = SystemTime::now();
         let mut a = self.new_action(Kind::Ask, Actor::Human, None, now)?;
