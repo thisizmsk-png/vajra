@@ -417,6 +417,33 @@ cmd_report() {
 
 # E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
 # the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
+# verify-digest: the held-bytes path (the desktop core reads the campaign files once, hashes the bytes it holds and asks
+# only "is this signature valid for these hashes"). stdin is exactly four lines, in this order, each ending in a
+# newline: `campaign <hex64>`, `features <hex64>`, `progress <hex64>`, `sig <hex64>` (lowercase hex), at most 512 bytes.
+# No slug, no file and no campaign dir is accepted or opened. The digest is built with THIS script's SCHEMA, so the
+# caller cannot choose it, and the key stays here. Exit 0 = valid, 3 = not valid, 2 = malformed input.
+cmd_verify_digest() {
+  [ $# -eq 0 ] || { echo "verify-digest takes no arguments" >&2; exit 2; }
+  local tmp size bad lines n c f p sig a want got
+  tmp="$(umask 077; mktemp "${TMPDIR:-/tmp}/vajra-digest.XXXXXX")" || die "cannot create a temp file"
+  trap 'rm -f "$tmp"' EXIT
+  head -c 513 > "$tmp"
+  size="$(wc -c < "$tmp" | tr -d ' ')"; lines="$(wc -l < "$tmp" | tr -d ' ')"
+  # every byte must be a lowercase letter, a digit, a space or a newline (a NUL, CR or any control byte is counted by tr)
+  bad="$(LC_ALL=C tr -d 'a-z0-9 \n' < "$tmp" | wc -c | tr -d ' ')"
+  { [ "$size" -le 512 ] && [ "$bad" -eq 0 ] && [ "$lines" -eq 4 ]; } || { echo "verify-digest: malformed input" >&2; exit 2; }
+  n=0
+  for a in campaign features progress sig; do
+    n=$((n+1)); local line; line="$(sed -n "${n}p" "$tmp")"
+    [[ "$line" =~ ^$a\ ([0-9a-f]{64})$ ]] || { echo "verify-digest: malformed input" >&2; exit 2; }
+    case "$a" in campaign) c="${BASH_REMATCH[1]}" ;; features) f="${BASH_REMATCH[1]}" ;; progress) p="${BASH_REMATCH[1]}" ;; sig) sig="${BASH_REMATCH[1]}" ;; esac
+  done
+  [ "$(tail -c 1 "$tmp" | od -An -c | tr -d ' ')" = '\n' ] || { echo "verify-digest: malformed input" >&2; exit 2; }
+  load_key
+  got="$(printf '%s\n%s\n%s\n%s\n' "$SCHEMA" "$c" "$f" "$p" | hmac_stdin)"
+  [ -n "$got" ] && [ "$got" = "$sig" ] || exit 3
+}
+
 # manifest is HMAC-signed so the app can check it through E3 check-evidence --archived.
 cmd_archive_evidence() {
   local slug="${1:-}" src="${2:-}" head="${3:-}" setup="${4:-}" out
@@ -441,6 +468,7 @@ case "$cmd" in
   checkpoint) cmd_checkpoint "$@" ;;
   resume)     cmd_resume "$@" ;;
   verify)     cmd_verify "$@" ;;
+  verify-digest) cmd_verify_digest "$@" ;;
   close)      cmd_close "$@" ;;
   report)     cmd_report "$@" ;;
   archive-evidence) cmd_archive_evidence "$@" ;;

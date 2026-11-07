@@ -274,6 +274,28 @@ for args in "report --campaign" "report --bytes" "report --check" "close --statu
   bounded $args; check "$args with no value exits with an error" $?
 done
 
+# --- verify-digest: the script's only key use for the core's held-bytes path (stdin: four hex lines, no slug, no files) ---
+C create vd1 --feature "ac-1|x" >/dev/null 2>&1; VD="$CD/vd1"
+sha() { openssl dgst -sha256 -r < "$1" | awk '{print $1}'; }
+VSIG="$(tr -d ' \r\n' < "$VD/state.sig")"
+vd_in() { printf 'campaign %s\nfeatures %s\nprogress %s\nsig %s\n' "$(sha "$VD/campaign.json")" "$(sha "$VD/features.json")" "$(sha "$VD/progress.md")" "$1"; }
+vd_in "$VSIG" | C verify-digest >/dev/null 2>&1; check "verify-digest: the signed hashes and signature verify (exit 0)" $?
+vd_in "$(printf '%064d' 0)" | C verify-digest >/dev/null 2>&1; [ $? -eq 3 ]; check "verify-digest: a different signature is exit 3" $?
+printf 'campaign %s\nfeatures %s\nprogress %s\nsig %s\n' "$(printf '%064d' 1)" "$(sha "$VD/features.json")" "$(sha "$VD/progress.md")" "$VSIG" | C verify-digest >/dev/null 2>&1; [ $? -eq 3 ]; check "verify-digest: a changed campaign hash is exit 3" $?
+for bad in "" "campaign x" "$(vd_in "$VSIG")
+extra 1" "$(vd_in "$VSIG" | sed 's/^campaign/Campaign/')" "$(vd_in "$VSIG" | tr 'a-f' 'A-F')"; do
+  printf '%s\n' "$bad" | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: malformed input is exit 2 ($(printf '%s' "$bad" | head -c 20 | tr '\n' '|'))" $?
+done
+vd_in "$VSIG" | awk 'NR==1{a=$0}NR==2{b=$0}NR==3{c=$0}NR==4{d=$0}END{print a;print c;print b;print d}' | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: lines out of order are exit 2" $?
+{ vd_in "$VSIG" | tr -d '\n'; printf '\n'; } | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: lines joined by nothing are exit 2" $?
+{ vd_in "$VSIG" | sed '1s/$/\r/'; } | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: a CR is exit 2" $?
+{ vd_in "$VSIG"; printf 'x%.0s' $(seq 1 600); } 2>/dev/null | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: more than 512 bytes is exit 2" $?
+{ vd_in "$VSIG" | head -c 100; printf '\0'; vd_in "$VSIG" | tail -c +102; } | C verify-digest >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: a NUL is exit 2" $?
+vd_in "$VSIG" | C verify-digest vd1 >/dev/null 2>&1; [ $? -eq 2 ]; check "verify-digest: any argument (a slug) is exit 2" $?
+# it must not open the campaign dir at all: the result is the same with the campaigns dir unreadable
+vd_in "$VSIG" > "$WORK/vd-in"; chmod 000 "$CD"; C verify-digest < "$WORK/vd-in" >/dev/null 2>&1; rc=$?; chmod 700 "$CD"
+[ "$rc" -eq 0 ]; check "verify-digest: same result with the campaigns dir unreadable (it never opens it)" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
