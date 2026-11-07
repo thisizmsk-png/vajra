@@ -595,7 +595,7 @@ impl App {
     }
 
     /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run). Cached per campaign
-    /// against the name, size, inode and ctime of every file in its dir and in `checkpoints/`: ctime cannot be set
+    /// against the name, size, inode and ctime of every file in its dir and in `checkpoints/` (and of the target of a symlink among them): ctime cannot be set
     /// from user space, so an edit that keeps `updated` and even restores the mtime still triggers a fresh check.
     fn integrity_of(&self, slug: &str) -> &'static str {
         let dir = self.claude.join("vajra/campaigns").join(slug);
@@ -608,6 +608,14 @@ impl App {
                     // ctime, not mtime: mtime can be put back by the editor of the file, ctime cannot be set.
                     use std::os::unix::fs::MetadataExt;
                     stamp.push_str(&format!("{:?}:{}:{}:{}.{};", e.file_name(), m.len(), m.ino(), m.ctime(), m.ctime_nsec()));
+                    // verify follows links (features.json, state.sig ...): stamp what a link points at as well, so an
+                    // in-place edit of the target (maybe another campaign's file) invalidates this verdict too.
+                    if m.file_type().is_symlink() {
+                        match e.path().metadata() {
+                            Ok(t) => stamp.push_str(&format!("->{}:{}:{}.{};", t.len(), t.ino(), t.ctime(), t.ctime_nsec())),
+                            Err(_) => stamp.push_str("->dangling;"),
+                        }
+                    }
                 }
             }
         }

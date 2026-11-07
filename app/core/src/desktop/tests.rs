@@ -945,3 +945,26 @@ fn an_unknown_verdict_is_retried_not_cached() {
     fake_campaign_script(&t, 0, ""); // the install is repaired; the campaign files are untouched
     assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
 }
+
+#[test]
+fn list_campaigns_reverifies_when_a_symlinked_input_changes_its_target() {
+    // verify follows links like features.json; a stamp of the link alone would keep a cached "ok" after the target
+    // (another campaign's file) is edited in place.
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    campaign(&t, "c2", None);
+    let camps = t.home().join(".claude/vajra/campaigns");
+    let target = camps.join("c2/features.json");
+    fs::write(&target, r#"{"features":[]}"#).unwrap();
+    std::os::unix::fs::symlink(&target, camps.join("c1/features.json")).unwrap();
+    let app = t.app();
+    let ok = |l: &Value, i: usize| l["campaigns"][i]["integrity"].clone();
+    let l = app.list_campaigns().unwrap();
+    assert_eq!((ok(&l, 0), ok(&l, 1)), (json!("ok"), json!("ok")));
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&target, r#"{"features":[1]}"#).unwrap(); // edited in place, the link itself untouched
+    fake_campaign_script(&t, 3, "signature INVALID");
+    let l = app.list_campaigns().unwrap();
+    assert_eq!(ok(&l, 0), "failed", "c1 follows the edited target: {l}");
+}
