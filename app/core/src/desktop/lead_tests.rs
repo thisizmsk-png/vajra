@@ -42,6 +42,11 @@ if grep -q 'Read the file' "$D/stdin.$N"; then
       echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
       echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"File does not exist."}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+    wait)
+      while [ ! -e "$D/release" ]; do sleep 0.05; done
+      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}';;
     retry)
       if [ "$(wc -l < "$D/selftest.count")" -le 1 ]; then
         echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
@@ -427,7 +432,7 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let dir = t.data().join("lead").join(RUN_ID);
+    let dir = t.data().join("control").join("lead").join(RUN_ID);
     let got = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     assert_eq!(got, lead_settings::settings(&t.home(), &t.repo(), &t.data()).unwrap());
     for f in ["settings.json", "mcp.json"] {
@@ -455,7 +460,7 @@ fn lead_startup_selftest_failclosed() {
     assert_eq!(t.count("selftest.count"), 1);
     assert_eq!(t.count("ask.count"), 0, "the real ask never ran");
     assert!(t.ledger().is_empty() && idle(&app));
-    assert!(!t.data().join("lead").join(RUN_ID).join("canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
+    assert!(!t.data().join("control").join("lead").join(RUN_ID).join("canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
     // A failure is not cached: it is tried again, and is still refused.
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
     assert_eq!(t.count("selftest.count"), 2);
@@ -496,7 +501,7 @@ fn the_selftest_runs_with_the_hooks_removed_and_the_canary_covered_by_a_rule() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let bare = std::fs::read_to_string(t.data().join("lead").join(RUN_ID).join("selftest-settings.json")).unwrap();
+    let bare = std::fs::read_to_string(t.data().join("control").join("lead").join(RUN_ID).join("selftest-settings.json")).unwrap();
     assert_eq!(bare, lead_settings::settings_no_hooks(&t.home(), &t.repo(), &t.data()).unwrap());
     let v: Value = serde_json::from_str(&bare).unwrap();
     assert!(v.get("hooks").is_none());
@@ -599,8 +604,8 @@ fn two_runs_asking_at_once_each_get_their_own_settings() {
     }
     assert!(checked >= 4, "two self-tests and two asks: {checked}");
     for id in [RUN_ID, run_b] {
-        assert!(t.data().join("lead").join(id).join("settings.json").is_file());
-        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(t.data().join("lead").join(id).join("mcp.json")).unwrap()).unwrap();
+        assert!(t.data().join("control").join("lead").join(id).join("settings.json").is_file());
+        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(t.data().join("control").join("lead").join(id).join("mcp.json")).unwrap()).unwrap();
         assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_RUN"], id, "each Lead is bound to its own run");
     }
     for h in lock(&app.lead.active).values() {
@@ -740,4 +745,31 @@ fn the_selftest_retry_uses_a_new_session_id() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
     assert_eq!(t.count("selftest.count"), 2);
     assert_eq!(t.files("sid.").len(), 2, "two distinct session ids");
+}
+
+#[test]
+fn lead_files_tampered_during_the_selftest_never_reach_the_real_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("selftest", "wait");
+    let dir = t.data().join("control").join("lead").join(RUN_ID);
+    std::thread::scope(|s| {
+        let h = s.spawn(|| app.ask_lead(RUN_ID, "hi"));
+        wait_until("the self-test to be running", || t.count("selftest.count") == 1);
+        // A worker (same uid) rewrites both generated files while the self-test runs.
+        for f in ["settings.json", "mcp.json"] {
+            let p = dir.join(f);
+            let _ = std::fs::remove_file(&p);
+            std::fs::write(&p, "{\"TAMPER\":true}").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(t.bin("release"), "").unwrap();
+        h.join().unwrap().unwrap();
+    });
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    for f in ["settings.json", "mcp.json"] {
+        assert!(!std::fs::read_to_string(dir.join(f)).unwrap().contains("TAMPER"), "{f} was restored before launch");
+    }
+    let seen: Vec<String> = t.files("settings-seen.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert!(seen.len() >= 2 && seen.iter().all(|c| !c.contains("TAMPER")), "no Lead process read the tampered settings");
 }

@@ -332,10 +332,17 @@ impl App {
         let env = cli_env(env, bin);
         // Per-run files: the settings hold the run repo's deny rules, and asks for two different runs can overlap
         // (the busy lock is per run). A shared file would let run B rewrite it before run A's CLI reads it.
-        fsx::private_dir(&self.data.join("lead")).map_err(io)?;
-        let dir = self.data.join("lead").join(&t.run_id);
+        // Under `control/`, which the worker guard already keeps workers from writing (on the default data dir).
+        let base = self.data.join("control").join("lead");
+        fsx::private_dir(&base).map_err(io)?;
+        let dir = base.join(&t.run_id);
         let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id)?;
         self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id, handle)?;
+        // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
+        // them again and check both byte for byte, immediately before the real launch.
+        if self.write_lead_files(&dir, &t.cwd, &t.run_id)? != settings {
+            return Err(LeadError::GuardMissing("the Lead settings changed during the self-test".into()));
+        }
 
         let (lead_sid, resume) = match &t.lead_session_id {
             Some(s) => (s.clone(), true),
@@ -471,13 +478,16 @@ impl App {
             "args": ["--mcp"],
             "env": {"VAJRA_DESKTOP_DATA": self.data.to_string_lossy(), crate::control::mcp::RUN_ENV: run_id},
         }}});
-        fsx::write_atomic(dir, "mcp.json", mcp.to_string().as_bytes()).map_err(io)?;
+        let mcp = mcp.to_string();
+        let mcp_path = fsx::write_atomic(dir, "mcp.json", mcp.as_bytes()).map_err(io)?;
         let path = fsx::write_atomic(dir, "settings.json", want.as_bytes()).map_err(io)?;
         #[cfg(test)]
         if let Some(f) = lock(&self.lead.after_write).as_ref() {
             f(&path);
         }
         verify_settings_file(&path, &want)?;
+        // The MCP config names a command the CLI runs before `init` is checked: it is held to the same standard.
+        verify_settings_file(&mcp_path, &mcp)?;
         Ok(sha_hex(want.as_bytes()))
     }
 
