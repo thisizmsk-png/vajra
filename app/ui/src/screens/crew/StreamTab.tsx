@@ -12,7 +12,9 @@ const EVENT_MIN_GAP_MS = 500;
 /** One worker's output: a bounded window that follows the tail, with older output fetched on request. */
 export function StreamTab({ stream }: { stream: string }) {
   const [ring, setRing] = useState<Ring>(emptyRing);
-  const [earlier, setEarlier] = useState<"idle" | "busy" | "done">("idle");
+  const [earlier, setEarlier] = useState<"idle" | "busy">("idle");
+  /** The oldest line shown when a page came back empty: nothing is older than it. Rows evicted later move the window past it. */
+  const [exhaustedAt, setExhaustedAt] = useState<number | null>(null);
   const [err, setErr] = useState("");
   const [pin, setPin] = useState(0);
   const ringRef = useRef<Ring>(emptyRing);
@@ -60,7 +62,8 @@ export function StreamTab({ stream }: { stream: string }) {
       const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
-      setEarlier(p.at_start || p.lines.length === 0 ? "done" : "idle");
+      if (p.lines.length === 0) setExhaustedAt(first);
+      setEarlier("idle");
     } catch (e) {
       setErr(errorText(e));
       setEarlier("idle");
@@ -70,6 +73,7 @@ export function StreamTab({ stream }: { stream: string }) {
   /** Back to the live tail: forget the paged history and re-read the newest rows. */
   const jumpLatest = () => {
     capRef.current = RING;
+    setExhaustedAt(null);
     put(emptyRing);
     setEarlier("idle");
     setPin((n) => n + 1);
@@ -80,7 +84,7 @@ export function StreamTab({ stream }: { stream: string }) {
   // Older output may exist whenever the oldest line shown is not the first one: in the core's own buffer, on disk, or
   // just evicted from this window (by rows or bytes) even though nothing was spilled.
   const firstSeq = ring.rows.find((r) => r.seq !== null)?.seq;
-  const canLoad = firstSeq != null && firstSeq > 1 && earlier !== "done";
+  const canLoad = firstSeq != null && firstSeq > 1 && firstSeq !== exhaustedAt;
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}
