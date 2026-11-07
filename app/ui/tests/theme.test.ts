@@ -17,7 +17,7 @@ function fakeMq(matches: boolean) {
 describe("theme follows the OS (prefers-color-scheme)", () => {
   it("is dark when there is no light preference or no media query support", () => {
     expect(systemTheme({ matches: false })).toBe("dark");
-    expect(systemTheme(undefined)).toBe("dark");
+    expect(systemTheme(null)).toBe("dark");
   });
 
   it("is light when the OS asks for light", () => {
@@ -36,9 +36,22 @@ describe("theme follows the OS (prefers-color-scheme)", () => {
     expect(root.dataset.theme).toBe("dark");
   });
 
+  it("does not read window.matchMedia when given null (the no-query path)", () => {
+    const real = window.matchMedia;
+    window.matchMedia = (() => ({ matches: true, addEventListener: () => {}, removeEventListener: () => {} })) as unknown as typeof window.matchMedia;
+    try {
+      expect(systemTheme(null)).toBe("dark");
+      const root = document.createElement("html");
+      followSystemTheme(root, null);
+      expect(root.dataset.theme).toBe("dark");
+    } finally {
+      window.matchMedia = real;
+    }
+  });
+
   it("falls back to dark with no media query", () => {
     const root = document.createElement("html");
-    followSystemTheme(root, undefined);
+    followSystemTheme(root, null);
     expect(root.dataset.theme).toBe("dark");
   });
 });

@@ -3,15 +3,15 @@
 export const SYSTEM_QUERY = "(prefers-color-scheme: light)";
 
 type Mq = { matches: boolean; addEventListener: (t: "change", cb: () => void) => void; removeEventListener: (t: "change", cb: () => void) => void };
-const queryList = (): Mq | undefined => (typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia(SYSTEM_QUERY) : undefined);
+const queryList = (): Mq | null => (typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia(SYSTEM_QUERY) : null);
 
 /** The theme the OS asks for right now. */
-export function systemTheme(mq: Pick<Mq, "matches"> | undefined = queryList()): "light" | "dark" {
+export function systemTheme(mq: Pick<Mq, "matches"> | null = queryList()): "light" | "dark" {
   return mq?.matches ? "light" : "dark";
 }
 
 /** Sets data-theme from the OS and keeps it in step when the OS changes. Returns the stop function. */
-export function followSystemTheme(root: HTMLElement = document.documentElement, mq: Mq | undefined = queryList()): () => void {
+export function followSystemTheme(root: HTMLElement = document.documentElement, mq: Mq | null = queryList()): () => void {
   const apply = () => {
     root.dataset.theme = systemTheme(mq);
   };
