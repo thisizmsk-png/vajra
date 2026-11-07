@@ -45,14 +45,26 @@ impl Tmp {
     fn run(&self, app: &App) {
         let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: self.cwd(), lead_session_id: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
-        app.record_run(RUN, &self.cwd(), SID, CAMP).unwrap();
+        app.record_run(RUN, &self.cwd(), SID, CAMP, true).unwrap();
     }
     /// The harness's result file for a finished `vajra-deliver`, at 0600.
     fn result(&self, name: &str, body: &Value) -> PathBuf {
+        self.result_at(name, body, RUN, 60)
+    }
+    /// Same, with the file's mtime `secs` after the start of the run named `run` (a workflow writes its result while it runs).
+    fn result_at(&self, name: &str, body: &Value, run: &str, secs: u64) -> PathBuf {
         let p = self.wf_dir().join(name);
         fs::write(&p, body.to_string()).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        let start = crate::control::time::parse_iso(&format!("{}-{}-{}T{}:{}:00Z", &run[0..4], &run[4..6], &run[6..8], &run[9..11], &run[11..13])).unwrap() as u64;
+        fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start + secs)).unwrap();
         p
+    }
+    /// Index and record another run of the same session.
+    fn another_run(&self, app: &App, run: &str, workflow: bool) {
+        let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: run.into(), cwd: self.cwd(), lead_session_id: None };
+        runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
+        app.record_run(run, &self.cwd(), SID, CAMP, workflow).unwrap();
     }
     fn campaign_script(&self, code: i32) -> PathBuf {
         let sh = self.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
@@ -223,7 +235,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
-    app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP).unwrap();
+    app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "guarded record names another directory");
 }
 
@@ -443,7 +455,7 @@ fn a_forged_session_id_or_campaign_on_the_same_run_is_not_trusted() {
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     t.campaign_script(0);
     // The guarded record says (SID, CAMP); the index line (worker-writable) claims another session, then another campaign.
-    app.record_run(RUN, &t.cwd(), SID, CAMP).unwrap();
+    app.record_run(RUN, &t.cwd(), SID, CAMP, true).unwrap();
     for (sid, camp) in [(other, CAMP), (SID, "deliver-other")] {
         let e = runindex::Entry { campaign: camp.into(), session_id: sid.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
         runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
@@ -553,7 +565,7 @@ fn plan_ids_stay_stable_after_an_approval_driven_resume() {
     let r2 = "20261106-1005";
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
-    app.record_run(r2, &t.cwd(), SID, CAMP).unwrap();
+    app.record_run(r2, &t.cwd(), SID, CAMP, false).unwrap();
     assert_eq!(item_ids(&app), ["plan:20261106-0911.1"], "the approved plan stays decided; its sibling keeps its id");
     t.live(&app);
     let before = t.ledger().len();
@@ -570,7 +582,92 @@ fn a_different_plan_at_an_old_index_is_not_treated_as_decided() {
     let sha = ready(&t, &app);
     t.live(&app);
     app.approve_plan(PLAN, &sha).unwrap();
-    t.result("wf_b.json", &done(CAMP, json!([{"action": "push", "why": "a later result, different content"}])));
+    t.result_at("wf_b.json", &done(CAMP, json!([{"action": "push", "why": "a later result, different content"}])), RUN, 120);
     assert!(item_ids(&app).contains(&PLAN.to_string()), "new content at the same index is a new decision");
     app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+// ---- second review round (PR #38) ----------------------------------------------------------------------------
+
+#[test]
+fn an_older_completed_plan_is_not_offered_while_a_newer_workflow_runs() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    t.live(&app);
+    // The same session resumes a new workflow (its result file exists, still running); the old file keeps its plans.
+    let mut running = done(CAMP, json!([]));
+    running["status"] = json!("running");
+    running["result"] = Value::Null;
+    t.result_at("wf_b.json", &running, RUN, 600);
+    assert_eq!(app.inbox().unwrap()["count"], 0, "nothing is actionable while the newest workflow is not finished");
+    assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "plan_changed");
+    assert!(t.ledger().is_empty(), "nothing recorded, nothing typed");
+    // A failed newest workflow blocks it too; a finished one with the same plans makes them actionable again.
+    let mut failed = running.clone();
+    failed["status"] = json!("failed");
+    t.result_at("wf_b.json", &failed, RUN, 600);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+    t.result_at("wf_b.json", &done(CAMP, pushes()), RUN, 600);
+    assert_eq!(app.inbox().unwrap()["count"], 2);
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn a_result_older_than_the_run_belongs_to_an_earlier_workflow() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    t.result_at("wf_old.json", &done(CAMP, pushes()), RUN, 60);
+    // A resume starts a new workflow in the same session; until it writes its own file the old result is not offered.
+    let r2 = "20261106-1005";
+    t.another_run(&app, r2, true);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+    t.result_at("wf_new.json", &done(CAMP, pushes()), r2, 60);
+    assert_eq!(item_ids(&app), ["plan:20261106-1005.0", "plan:20261106-1005.1"]);
+}
+
+#[test]
+fn a_new_workflow_with_the_same_entries_is_a_new_actionable_plan() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    t.live(&app);
+    let a = app.approve_plan(PLAN, &sha).unwrap();
+    // An approval-only resume starts no workflow: ids keep naming the workflow that produced the plans.
+    t.another_run(&app, "20261106-0930", false);
+    assert_eq!(item_ids(&app), ["plan:20261106-0911.1"]);
+    // A real second workflow (another delivered commit, identical pending entries) gets its own identity.
+    let r2 = "20261106-1005";
+    t.another_run(&app, r2, true);
+    let mut second = done(CAMP, pushes());
+    second["result"]["commit"] = json!("a-different-commit");
+    t.result_at("wf_b.json", &second, r2, 60);
+    assert_eq!(item_ids(&app), ["plan:20261106-1005.0", "plan:20261106-1005.1"], "the second workflow stays actionable");
+    let sha2 = item(&app.inbox().unwrap(), "plan:20261106-1005.0")["plan_sha256"].as_str().unwrap().to_string();
+    assert_eq!(sha2, sha, "the entries are identical; only the identity differs");
+    assert!(app.approve_plan("plan:20261106-1005.0", &sha2).is_ok());
+    assert_ne!(app.approve_plan("plan:20261106-1005.0", &sha2).unwrap_err()["action_id"], a["action_id"]);
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn the_workflows_early_need_input_results_reach_the_question_inbox() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    // The two shapes vajra-deliver.js returns before a campaign slug exists: `understand` (artifacts.understanding only)
+    // and the signature failure at campaign.load (the campaign state object in artifacts.campaign).
+    for (artifacts, q) in [(json!({"understanding": {"goal": "x"}}), "which repo?"), (json!({"campaign": {"slug": CAMP, "status": "active"}}), "signature failed, restore?")] {
+        let mut v = done(CAMP, json!([]));
+        v["result"] = json!({"status": "need_input", "node": "n", "question": q, "artifacts": artifacts});
+        t.result("wf_q.json", &v);
+        let inbox = app.inbox().unwrap();
+        assert_eq!(item(&inbox, &format!("question:{RUN}"))["body"], q);
+    }
+    // A result that names another campaign is not this campaign's question.
+    let mut v = done(CAMP, json!([]));
+    v["result"] = json!({"status": "need_input", "question": "q", "artifacts": {"campaign": "deliver-other"}});
+    t.result("wf_q.json", &v);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
 }

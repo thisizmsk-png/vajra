@@ -316,6 +316,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+    }
+
+    /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
+    /// is not a workflow identity, so plan ids keep naming the run of the workflow that produced the plan.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn launch_kind(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+        workflow: bool,
+    ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
         let nonce = {
@@ -352,7 +368,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign).is_err() {
+        if self.record_run(run_id, cwd, session_id, campaign, workflow).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))

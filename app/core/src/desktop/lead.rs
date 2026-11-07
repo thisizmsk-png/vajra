@@ -40,6 +40,8 @@ const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's direct
 const CWD_FILE: &str = "cwd";
 const SESSION_FILE: &str = "session";
 const CAMPAIGN_FILE: &str = "campaign";
+/// Present for a run that started no new workflow (the approval-only resume).
+const APPROVAL_ONLY_FILE: &str = "approval_only";
 /// `read_only` detail for a run this app did not launch.
 const NOT_OURS: &str = "run not launched by this app";
 /// How long a passing `vajra-doctor.sh` answer is reused.
@@ -336,7 +338,7 @@ impl App {
     ///
     /// It also records the run's session id and campaign (ADR-14): `runs.jsonl` is worker-writable, so a plan approval
     /// or reject trusts only an index line whose directory, session and campaign all equal this record.
-    pub(super) fn record_run(&self, run_id: &str, cwd: &Path, session_id: &str, campaign: &str) -> std::io::Result<()> {
+    pub(super) fn record_run(&self, run_id: &str, cwd: &Path, session_id: &str, campaign: &str, workflow: bool) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
@@ -344,15 +346,19 @@ impl App {
         fsx::private_dir(&dir)?;
         fsx::write_atomic(&dir, SESSION_FILE, session_id.as_bytes())?;
         fsx::write_atomic(&dir, CAMPAIGN_FILE, campaign.as_bytes())?;
+        if !workflow {
+            fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
+        }
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
 
     /// The guarded (cwd, session id, campaign) of a run, or `None` if any part is missing (a run from before this
     /// record existed is not trusted for plan decisions).
-    pub(super) fn read_run_record(&self, run_id: &str) -> Option<(PathBuf, String, String)> {
+    pub(super) fn read_run_record(&self, run_id: &str) -> Option<(PathBuf, String, String, bool)> {
         let text = |f: &str| fsx::read_nofollow(&self.lead_sid_dir(run_id).join(f)).ok().and_then(|b| String::from_utf8(b).ok());
-        Some((self.read_run_cwd(run_id)?, text(SESSION_FILE)?.trim().to_string(), text(CAMPAIGN_FILE)?.trim().to_string()))
+        let workflow = !self.lead_sid_dir(run_id).join(APPROVAL_ONLY_FILE).exists();
+        Some((self.read_run_cwd(run_id)?, text(SESSION_FILE)?.trim().to_string(), text(CAMPAIGN_FILE)?.trim().to_string(), workflow))
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {

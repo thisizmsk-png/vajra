@@ -184,18 +184,38 @@ fn plan_entry(index: usize, p: &Value) -> Plan {
     Plan { index, action, raw: p.clone(), shown: show(p), invalid }
 }
 
-/// What a `vajra-deliver` result file asks of the human, or `None` when it is some other workflow, did not complete,
-/// or has nothing waiting. A failed workflow (`result: null`) never yields items.
-pub fn parse(bytes: &[u8], modified: i64) -> Option<Waiting> {
+/// One `vajra-deliver` result file, read.
+struct Env {
+    modified: i64,
+    /// The harness says the workflow finished (`status: "completed"`) and the script returned an object.
+    terminal: bool,
+    result: Option<Value>,
+}
+
+fn envelope(bytes: &[u8], modified: i64) -> Option<Env> {
     let v: Value = serde_json::from_slice(bytes).ok()?;
-    if v.get("workflowName").and_then(Value::as_str) != Some("vajra-deliver") || v.get("status").and_then(Value::as_str) != Some("completed") {
+    if v.get("workflowName").and_then(Value::as_str) != Some("vajra-deliver") {
         return None;
     }
-    let r = v.get("result").filter(|r| r.is_object())?;
-    let campaign = r.get("artifacts").and_then(|a| a.get("campaign")).and_then(Value::as_str).filter(|c| crate::bus::valid_stream_id(c))?.to_string();
+    let result = v.get("result").filter(|r| r.is_object()).cloned();
+    Some(Env { modified, terminal: v.get("status").and_then(Value::as_str) == Some("completed") && result.is_some(), result })
+}
+
+/// What a finished result asks of the human. The campaign comes from the run's guarded record, not from the result:
+/// the early `need_input` returns of the workflow carry no campaign slug (`artifacts.understanding`, or the campaign
+/// state object). If the result does name a slug, it must be this campaign.
+fn waiting(env: &Env, campaign: &str) -> Option<Waiting> {
+    let r = env.result.as_ref()?;
+    match r.get("artifacts").and_then(|a| a.get("campaign")) {
+        Some(Value::String(c)) if c != campaign => return None,
+        None | Some(Value::String(_)) | Some(Value::Object(_)) | Some(Value::Null) => {}
+        Some(_) => return None,
+    }
     let (question, plans) = match r.get("status").and_then(Value::as_str)? {
         "need_input" => (Some(plain(r.get("question"), TEXT_MAX)), Vec::new()),
         "done" => {
+            // A finished delivery always names its campaign.
+            r.get("artifacts").and_then(|a| a.get("campaign")).and_then(Value::as_str)?;
             let entries = r.get("pending_approval").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
             if entries.len() > MAX_PLANS {
                 return None;
@@ -204,11 +224,14 @@ pub fn parse(bytes: &[u8], modified: i64) -> Option<Waiting> {
         }
         _ => return None,
     };
-    Some(Waiting { campaign, modified, question, plans })
+    Some(Waiting { campaign: campaign.to_string(), modified: env.modified, question, plans })
 }
 
-/// The newest `vajra-deliver` result in `dir` (a session's `workflows/` directory) that names `campaign`.
-pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str) -> Result<Option<Waiting>, WfError> {
+/// What the CURRENT `vajra-deliver` of a session's `workflows/` directory asks of the human. Result files older than
+/// the run (`since`, unix seconds) belong to earlier workflows and are ignored. Of the rest the newest one is the
+/// current workflow: if it is still running, or failed, nothing is actionable, even when an older file holds pending
+/// approvals (fail closed while the workflow is not terminal).
+pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) -> Result<Option<Waiting>, WfError> {
     let real = allow.resolve(dir).map_err(|_| WfError::NotAllowed)?;
     let held = open_dir(&real)?;
     let d = File::from(held.try_clone().map_err(|_| WfError::Io)?);
@@ -222,17 +245,21 @@ pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str) -> Result<Opti
         .take(MAX_FILES)
         .collect();
     names.sort();
-    let mut best: Option<Waiting> = None;
+    let mut files: Vec<Env> = Vec::new();
     for n in names {
-        // An unsafe or unreadable file is skipped, never trusted. It cannot hide a good one.
+        // An unsafe or unreadable file is skipped, never trusted.
         let Ok((bytes, mtime)) = read_held(&held, &n) else { continue };
-        if let Some(w) = parse(&bytes, mtime).filter(|w| w.campaign == campaign)
-            && best.as_ref().is_none_or(|b| w.modified >= b.modified)
-        {
-            best = Some(w);
+        if let Some(env) = envelope(&bytes, mtime).filter(|e| e.modified >= since) {
+            files.push(env);
         }
     }
-    Ok(best)
+    let Some(newest) = files.iter().map(|e| e.modified).max() else { return Ok(None) };
+    // Equal times: any file that is not finished makes the whole tie not actionable.
+    let tied: Vec<&Env> = files.iter().filter(|e| e.modified == newest).collect();
+    if tied.iter().any(|e| !e.terminal) {
+        return Ok(None);
+    }
+    Ok(tied.iter().find_map(|e| waiting(e, campaign)))
 }
 
 /// Strict read of one named file, for tests and the refusal contract: any unsafe file is an error, not a skip.

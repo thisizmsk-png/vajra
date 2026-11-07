@@ -47,6 +47,14 @@ fn valid_task_id(id: &str) -> bool {
 /// Shown with every item that comes from the workflow result file.
 const FROM_RESULT: &str = "from the workflow result";
 
+/// The UTC minute a `YYYYMMDD-HHMM` run id names, as unix seconds. A workflow result written before it belongs to an
+/// earlier workflow of the same session.
+fn run_start(run_id: &str) -> Option<i64> {
+    let b = run_id.as_bytes();
+    crate::ids::valid_run_id(run_id).then_some(())?;
+    crate::control::time::parse_iso(&format!("{}-{}-{}T{}:{}:00Z", &run_id[0..4], &run_id[4..6], &run_id[6..8], std::str::from_utf8(&b[9..11]).ok()?, std::str::from_utf8(&b[11..13]).ok()?))
+}
+
 /// `plan:<run_id>.<index>` -> (run_id, index).
 pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
     let (run, idx) = id.strip_prefix("plan:")?.split_once('.')?;
@@ -60,16 +68,19 @@ pub(super) fn plan_sha(shown: &Value) -> String {
 }
 
 impl App {
-    /// The runs whose plans the app will show or act on, one per campaign: the campaign's newest app-launched run,
-    /// named by the EARLIEST run of the same session. A resume launches a new run (new id) in the same session, and a
-    /// plan keeps the id it was first shown with. `runs.jsonl` is worker-writable, so an index line counts only if its
-    /// directory, session id and campaign all equal what the app recorded under its guarded control dir at launch.
+    /// The runs whose plans the app will show or act on, one per campaign: the campaign's newest app-launched run in
+    /// its newest session, narrowed to the newest run that STARTED A WORKFLOW (a resume with `vajra-deliver`). The
+    /// approval-only resume (ADR-14) starts no workflow, so it keeps naming the workflow that produced the plan; a
+    /// resume that runs a new workflow gets its own id, so its plans are new items even when their text repeats an
+    /// earlier, already decided one. `runs.jsonl` is worker-writable, so an index line counts only if its directory,
+    /// session id and campaign all equal what the app recorded under its guarded control dir at launch.
     pub(super) fn plan_origins(&self) -> HashMap<String, runindex::Entry> {
         let trusted = |e: &runindex::Entry| {
             crate::ids::valid_session_id(&e.session_id)
                 && crate::ids::valid_run_id(&e.run_id)
-                && self.read_run_record(&e.run_id).is_some_and(|(cwd, sid, camp)| cwd == e.cwd && sid == e.session_id && camp == e.campaign)
+                && self.read_run_record(&e.run_id).map(|(cwd, sid, camp, wf)| (cwd == e.cwd && sid == e.session_id && camp == e.campaign, wf)).is_some_and(|(same, _)| same)
         };
+        let workflow = |e: &runindex::Entry| self.read_run_record(&e.run_id).is_some_and(|r| r.3);
         let all: Vec<runindex::Entry> = runindex::entries(&self.data.join("runs.jsonl")).into_iter().filter(|e| trusted(e)).collect();
         let mut latest: HashMap<String, &runindex::Entry> = HashMap::new();
         for e in &all {
@@ -78,8 +89,8 @@ impl App {
         latest
             .into_iter()
             .filter_map(|(camp, l)| {
-                let first = all.iter().filter(|e| e.campaign == camp && e.session_id == l.session_id).min_by(|a, b| a.run_id.cmp(&b.run_id))?;
-                Some((camp, first.clone()))
+                let wf = all.iter().filter(|e| e.campaign == camp && e.session_id == l.session_id && workflow(e)).max_by(|a, b| a.run_id.cmp(&b.run_id))?;
+                Some((camp, wf.clone()))
             })
             .collect()
     }
@@ -91,7 +102,7 @@ impl App {
 
     /// What the newest `vajra-deliver` result of this app run asks of the human.
     pub(super) fn waiting(&self, e: &runindex::Entry) -> Option<wfresult::Waiting> {
-        wfresult::waiting_for(&self.allow().ok()?, &self.workflows_dir(e), &e.campaign).ok().flatten()
+        wfresult::waiting_for(&self.allow().ok()?, &self.workflows_dir(e), &e.campaign, run_start(&e.run_id)?).ok().flatten()
     }
 
     /// Everything waiting on the human, oldest first, at most 200 items with the true count.
