@@ -1266,3 +1266,223 @@ fn verify_digest_never_opens_campaign_dir() {
     assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
 }
 
+#[test]
+fn the_crew_tree_shows_message_pending_and_stopped_by_the_human_from_the_control_ledger() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let sub = t.home().join(".claude/projects").join(project_slug(&cwd)).join(sid).join("subagents");
+    fs::create_dir_all(sub.join("workflows/wf_1")).unwrap();
+    fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
+    fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r1\",\"phase\":\"Execute\"}\n").unwrap();
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let overlays = |tree: &Value| -> Vec<String> {
+        fn find<'a>(n: &'a Value, id: &str) -> Option<&'a Value> {
+            if n["id"] == id { return Some(n) }
+            n["children"].as_array()?.iter().find_map(|c| find(c, id))
+        }
+        find(tree, "agent:a2").map(|n| n["overlays"].as_array().unwrap().iter().map(|o| o.as_str().unwrap().to_string()).collect()).unwrap_or_else(|| panic!("worker missing: {tree}"))
+    };
+    assert!(overlays(&app.crew("c", "20261105-1230").unwrap()).is_empty());
+    app.control_message("a2", "use the kit Button").unwrap();
+    assert_eq!(overlays(&app.crew("c", "20261105-1230").unwrap()), vec!["message pending"]);
+    app.control_stop("a2", None).unwrap();
+    let o = overlays(&app.crew("c", "20261105-1230").unwrap());
+    assert!(o.contains(&"stopped by the human".to_string()), "{o:?}");
+    app.sup.kill(&stream).unwrap();
+}
+
+
+// ---- review follow-ups: explicit verify vs an in-flight listing check; unreadable campaigns ------------------------
+
+/// First invocation: signal `started`, wait for `go`, then exit 0 (it saw the old, valid state). Any later one exits 3.
+fn barrier_campaign_script(t: &Tmp) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let ctl = t.0.join("ctl");
+    fs::create_dir_all(&ctl).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    let body = format!(
+        "#!/bin/bash\nif mkdir '{c}/first' 2>/dev/null; then\n  touch '{c}/started'\n  while [ ! -e '{c}/go' ]; do sleep 0.05; done\n  exit 0\nfi\necho 'signature INVALID' >&2\nexit 3\n",
+        c = ctl.display()
+    );
+    fs::write(&sh, body).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    ctl
+}
+
+#[test]
+fn an_older_listing_check_cannot_overwrite_a_newer_explicit_verify() {
+    let t = Tmp::new();
+    let ctl = barrier_campaign_script(&t);
+    campaign(&t, "c1", None);
+    let app = Arc::new(t.app());
+    // 1. A listing check starts against valid state and is held at the barrier.
+    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !ctl.join("started").exists() {
+        assert!(std::time::Instant::now() < end, "the listing check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // 2. The key is replaced; the user verifies explicitly. It must join the flight, not race past it.
+    let b = { let app = app.clone(); std::thread::spawn(move || app.verify_campaign("c1").unwrap()) };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!b.is_finished(), "an explicit verify waits for the campaign's running check, then runs its own");
+    // 3. The old check finishes (exit 0), then the explicit one runs and fails.
+    fs::write(ctl.join("go"), "").unwrap();
+    let listed = a.join().unwrap();
+    assert_eq!(listed["campaigns"][0]["integrity"], "ok");
+    let v = b.join().unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    // 4. The badge shows the newer failure, not the older check's ok.
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn a_campaign_the_reader_cannot_summarise_still_gets_an_integrity_verdict() {
+    // campaign.json missing: plain verify exits 3, and the listing must say so instead of leaving the field out.
+    let t = Tmp::new();
+    fake_campaign_script(&t, 3, "signature INVALID");
+    let d = t.home().join(".claude/vajra/campaigns/gone");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("progress.md"), "p").unwrap();
+    campaign(&t, "bad", None);
+    fs::write(t.home().join(".claude/vajra/campaigns/bad/campaign.json"), "{ truncated").unwrap();
+    let l = t.app().list_campaigns().unwrap();
+    for s in ["gone", "bad"] {
+        let c = l["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == s).unwrap_or_else(|| panic!("{s} missing: {l}"));
+        assert!(c["error"].is_string(), "{s}: {c}");
+        assert_eq!(c["integrity"], "failed", "{s}: {c}");
+    }
+}
+
+#[test]
+fn an_unreadable_campaign_whose_check_cannot_run_is_unknown_never_missing() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 1, "jq: not found");
+    let d = t.home().join(".claude/vajra/campaigns/gone");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("progress.md"), "p").unwrap();
+    let l = t.app().list_campaigns().unwrap();
+    assert_eq!(l["campaigns"][0]["integrity"], "unknown", "{l}");
+}
+
+#[test]
+fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
+    // Campaign A was resumed in minute M by an earlier app life; it has no `deliver-M` directory. After a restart
+    // in the same minute, campaign B must not get M: the Lead's run lookup and MCP binding key on the run id.
+    let t = Tmp::new();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    std::fs::create_dir_all(t.0.join("data")).ok();
+    let app = t.app();
+    let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
+    runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
+    let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
+    let (_, id) = app.fresh_run_id(now);
+    assert_ne!(id, "20261105-1230", "the persisted id is taken");
+}
+
+// ---- review #34 (P2): a report read and the shared integrity cache ----------------------------------------------
+
+#[test]
+fn an_older_report_read_cannot_overwrite_a_newer_explicit_verify() {
+    // The report-read equivalent of `an_older_listing_check_cannot_overwrite_a_newer_explicit_verify`.
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let app = t.app();
+    let report = camp_file(&t, "report.md");
+    // 1. The report read has held valid bytes. 2. While it is paused, the report is tampered with and the user
+    // verifies explicitly: that newer check fails and caches "failed".
+    let between = || {
+        fs::write(&report, "Delivered on branch X").unwrap();
+        let v = app.verify_campaign("real1").unwrap();
+        assert_eq!(v["ok"], false, "the newer explicit verify sees the tamper: {v}");
+    };
+    // 3. The older read resumes: its held bytes are genuine, so it returns them...
+    let r = app.read_report_with("real1", &|_| {}, &between).unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+    // 4. ...but its older "ok" must not replace the newer failure: the next listing keeps it.
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn a_newer_report_failure_survives_an_older_listing_check_that_finishes_ok() {
+    // The reverse order: a listing check starts against valid state and is held; a report read that starts later
+    // fails; then the older listing check finishes with exit 0. The badge must keep the newer failure.
+    let t = Tmp::new();
+    let ctl = barrier_campaign_script(&t);
+    campaign(&t, "c1", None); // only campaign.json: the held reader refuses it (required inputs missing)
+    let app = Arc::new(t.app());
+    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !ctl.join("started").exists() {
+        assert!(std::time::Instant::now() < end, "the listing check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.read_report("c1").unwrap()["integrity"], "integrity_failed");
+    fs::write(ctl.join("go"), "").unwrap();
+    assert_eq!(a.join().unwrap()["campaigns"][0]["integrity"], "ok", "the held listing check saw the old state");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn settle_orders_verdicts_by_ticket_and_never_loses_a_failure() {
+    let t = Tmp::new();
+    let app = t.app();
+    let now = |app: &App| match lock(&app.verdicts).by_slug.get("c") {
+        Some(Verdict::Fresh(_, v)) => *v,
+        Some(Verdict::Flying(_)) => "flying",
+        None => "none",
+    };
+    let (t1, t2, t3, t4) = (app.ticket(), app.ticket(), app.ticket(), app.ticket());
+    assert!(t1 < t2 && t2 < t3 && t3 < t4, "tickets increase");
+    app.settle("c", "failed", t2);
+    app.settle("c", "ok", t1); // older success after a newer failure: dropped
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "unknown", t1); // an older "could not run" cannot clear it either
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t3); // a newer success replaces it (the repair shows)
+    assert_eq!(now(&app), "ok");
+    app.settle("c", "failed", t1); // an older failure still lands: fail closed
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t4);
+    assert_eq!(now(&app), "ok");
+}
+
+#[test]
+fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
+    // review #34 (P2, 54a2df9): "ok" used to be published after the signature and features checks but before the
+    // report check, so a listing at that moment reused it for a campaign whose recorded report was edited or
+    // deleted (or cleared an already cached failure). Pause exactly there and list.
+    for (tamper, cached_failure) in [("edit", false), ("edit", true), ("delete", false), ("delete", true)] {
+        let Some((t, run)) = real_script_home() else { return };
+        real_campaign_with_report(&run, "Delivered on branch b");
+        let report = camp_file(&t, "report.md");
+        if tamper == "edit" {
+            fs::write(&report, "Delivered on branch X").unwrap();
+        } else {
+            fs::remove_file(&report).unwrap();
+        }
+        let app = t.app();
+        if cached_failure {
+            assert_eq!(app.verify_campaign("real1").unwrap()["ok"], false);
+        }
+        let seen = std::cell::RefCell::new(None);
+        let seam = |st: &str| {
+            if st == "check:report" {
+                *seen.borrow_mut() = Some(app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone());
+            }
+        };
+        let r = app.read_report_with("real1", &seam, &|| {}).unwrap();
+        let case = format!("{tamper}, cached failure {cached_failure}");
+        assert_eq!(r["integrity"], "integrity_failed", "{case}: {r}");
+        assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
+        assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
+    }
+}

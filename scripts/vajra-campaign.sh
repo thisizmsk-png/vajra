@@ -415,8 +415,6 @@ cmd_report() {
   echo "report saved for $SLUG ($nb bytes)"
 }
 
-# E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
-# the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
 # verify-digest: the held-bytes path (the desktop core reads the campaign files once, hashes the bytes it holds and asks
 # only "is this signature valid for these hashes"). stdin is exactly four lines, in this order, each ending in a
 # newline: `campaign <hex64>`, `features <hex64>`, `progress <hex64>`, `sig <hex64>` (lowercase hex), at most 512 bytes.
@@ -426,7 +424,10 @@ cmd_verify_digest() {
   [ $# -eq 0 ] || { echo "verify-digest takes no arguments" >&2; exit 2; }
   local tmp size bad lines n c f p sig a want got
   tmp="$(umask 077; mktemp "${TMPDIR:-/tmp}/vajra-digest.XXXXXX")" || die "cannot create a temp file"
-  trap 'rm -f "$tmp"' EXIT
+  # The EXIT trap runs after this function has returned (exit 0 path), when `tmp` is out of scope; keep the path in
+  # a global so the trap removes the file on every exit.
+  VD_TMP="$tmp"
+  trap 'rm -f "${VD_TMP:-}"' EXIT
   head -c 513 > "$tmp"
   size="$(wc -c < "$tmp" | tr -d ' ')"; lines="$(wc -l < "$tmp" | tr -d ' ')"
   # every byte must be a lowercase letter, a digit, a space or a newline (a NUL, CR or any control byte is counted by tr)
@@ -444,6 +445,8 @@ cmd_verify_digest() {
   [ -n "$got" ] && [ "$got" = "$sig" ] || exit 3
 }
 
+# E7: before cleanup removes the worktree, keep the verification bundle and the exact setup list
+# the workflow ran. Only allowlisted regular files are copied (never through a symlink); the
 # manifest is HMAC-signed so the app can check it through E3 check-evidence --archived.
 cmd_archive_evidence() {
   local slug="${1:-}" src="${2:-}" head="${3:-}" setup="${4:-}" out
