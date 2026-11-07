@@ -67,9 +67,11 @@ impl Service {
     }
 
     /// Settle one queued action from file evidence alone. The hook moves queue/ -> inflight/, writes the ack, then
-    /// removes inflight/, so reading in the order queue, inflight, ack makes "all absent" proof that the file was never
-    /// published (a hook that ran in between would have left an ack). Queue wins over everything: an honest hook cannot
-    /// ack before it claims. A stop has no queue file; only its ack settles it.
+    /// removes inflight/. Reading in the order queue, inflight, ack means a hook that ran in between has left an ack, but
+    /// "all absent" is still not proof of non-publication: after power loss an ack and a claim removal that were never
+    /// made durable look the same. So absence settles as `delivery_unknown` (`no_evidence`), and only the app's own
+    /// `expired/` rename is a firm `not_delivered`. Queue wins over everything: an honest hook cannot ack before it
+    /// claims. A stop has no queue file; only its ack settles it.
     pub(super) fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
         let stop = a.kind == Kind::Stop;

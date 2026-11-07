@@ -165,8 +165,10 @@ fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
 
 // ---- delivery state machine (Opus design, ADR note on #5) -------------------------------------------------------
 // The hook claims queue/ -> inflight/, writes acks/, then removes inflight/. check() observes in the order
-// queue, inflight, ack, expired: an "all absent" reading then proves the file was never published, because a hook that
-// ran between the reads would have left an ack behind. Q = queue/, I = inflight/, A = acks/, E = expired/.
+// queue, inflight, ack, expired. A hook that ran between the reads would have left an ack behind, but an "all absent"
+// reading is not proof of non-publication (after power loss an unsynced ack looks the same): it settles as
+// delivery_unknown, and only the app's own expired/ rename is a firm not_delivered. Q = queue/, I = inflight/,
+// A = acks/, E = expired/.
 
 #[derive(Clone, Copy)]
 enum Ack { None, Valid, Big, Array, Text, Symlink }
