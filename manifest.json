@@ -1,12 +1,12 @@
 {
-  "generated": "2026-11-07T16:38:05Z",
+  "generated": "2026-11-07T19:59:17Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
     ".github/workflows/perf.yml": "3b43664c69fd590dfb2f7e91a162a7d090210d121db21cb1663a6a7b6b5e9667",
     ".github/workflows/skill-pins.yml": "2456a6ec61b2e88e9d07f3f73c5c20ae1971f2a4c8c1ddc499ea83e97adb0a98",
     ".gitignore": "fe01c9d701137b0b32ce5d86839375d71e8daf6b9ad728b6caf6975b46a0c540",
-    "CONTRIBUTING.md": "8771af7362343ea98351b01afe3c751460c0ccc87dc6af9daa2c298df32b2533",
+    "CONTRIBUTING.md": "ae45e5b4a9d108e03008c5e0a94f5fa33986e714dccc220a99a34b8b9af9b981",
     "CREDITS.md": "501f54428cc731a46da1255e3f485ed0e84a442e7e57fc290e3e3176a0e8a0a1",
     "LICENSE": "78d502785dedbd4eb6e4225a81dc728d0bc9a5282d38695131254829768e0c88",
     "README.md": "91c340a022611743f8734f6205036b6bba2aa4ffdad12b65507820f933d0c823",
