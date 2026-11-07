@@ -67,6 +67,24 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     vi.useRealTimers();
   });
 
+  it("keeps the Task tab (and the header title) current while the same worker and tab stay selected", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let later = false;
+    await open({
+      task: () => {
+        const t = { ...task.task, attempts: later ? 3 : 2, report: later ? { status: "done", summary: "second attempt green" } : task.task.report };
+        return { ...task, task: t };
+      },
+    });
+    fireEvent.click(await tab(S.crew.tabs.task));
+    expect(await screen.findByText(/all green/)).toBeTruthy();
+    later = true; // tasks.json changes while the same worker and tab stay selected
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(await screen.findByText(/second attempt green/)).toBeTruthy();
+    expect(screen.queryByText(/all green/)).toBeNull();
+    vi.useRealTimers();
+  });
+
   it("Diff says when there is nothing to show, was cut off, or failed", async () => {
     await open({ diff: { code: 0, diff: "", truncated: false, timed_out: false } });
     fireEvent.click(await tab(S.crew.tabs.diff));

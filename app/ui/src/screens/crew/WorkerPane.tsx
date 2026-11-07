@@ -47,17 +47,9 @@ function DiffTab({ info }: { info: WorktreeInfo }) {
   );
 }
 
-function TaskTab({ slug, taskId }: { slug: string; taskId: string | null }) {
-  const [t, setT] = useState<Json | "none" | { err: string } | null>(null);
-  useEffect(() => {
-    let live = true;
-    if (!taskId) { setT("none"); return; }
-    api.task(slug, taskId).then(
-      (r) => live && setT((r.task as Json) ?? "none"),
-      (e) => live && setT(typeof e === "object" && e && (e as { error?: string }).error === "task_not_found" ? "none" : { err: errorText(e) }),
-    );
-    return () => { live = false; };
-  }, [slug, taskId]);
+type TaskState = Json | "none" | { err: string } | null;
+
+function TaskTab({ t }: { t: TaskState }) {
   if (!t) return <Text variant="body-sm" muted>{S.crew.loading}</Text>;
   if (t === "none") return <Text variant="body-sm" muted>{S.crew.noTask}</Text>;
   if ("err" in t) return <div role="alert"><Text variant="body-sm">{String(t.err)}</Text></div>;
@@ -91,13 +83,15 @@ function WorktreeTab({ info }: { info: WorktreeInfo | null | undefined }) {
 }
 
 const WORKTREE_RETRY_MS = 3000;
+/** Same cadence as the Crew screen's own refresh. */
+const TASK_POLL_MS = 2000;
 
 /** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
 export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
   const agent = node.id.slice("agent:".length);
   const [tab, setTab] = useState<TabId>("stream");
   const [info, setInfo] = useState<WorktreeInfo | null | undefined>(undefined);
-  const [task, setTask] = useState<Json | null>(null);
+  const [task, setTask] = useState<TaskState>(null);
   const taskId = taskGraphId(runId, taskLocalId);
 
   // A worker can exist before its transcript names a cwd, so the first answer may be "no crew worktree". Keep asking
@@ -117,11 +111,20 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
     void ask();
     return () => { live = false; clearTimeout(timer); };
   }, [agent, finished]);
+  // One task read shared by the header and the Task tab, repeated on the crew's own cadence so attempts and the last
+  // report follow tasks.json while this worker stays selected.
   useEffect(() => {
     let live = true;
-    if (taskId) api.task(slug, taskId).then((r) => live && setTask((r.task as Json) ?? null), () => undefined);
-    return () => { live = false; };
+    if (!taskId) { setTask("none"); return; }
+    const read = () => api.task(slug, taskId).then(
+      (r) => live && setTask((r.task as Json) ?? "none"),
+      (e) => live && setTask(typeof e === "object" && e && (e as { error?: string }).error === "task_not_found" ? "none" : { err: errorText(e) }),
+    );
+    void read();
+    const poll = setInterval(() => { if (!document.hidden) void read(); }, TASK_POLL_MS);
+    return () => { live = false; clearInterval(poll); };
   }, [slug, taskId]);
+  const taskObj = task && task !== "none" && !("err" in task) ? task : null;
 
   return (
     <>
@@ -130,7 +133,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           <dt>{S.crew.role}</dt><dd>{node.role ?? node.title}</dd>
           {node.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{node.engine_id}</dd></>)}
           <dt>{S.crew.status}</dt><dd><Badge>{status}</Badge></dd>
-          <dt>{S.crew.task}</dt><dd>{taskId ? `${taskId}${task?.title ? ` ${String(task.title)}` : ""}` : S.crew.noTask}</dd>
+          <dt>{S.crew.task}</dt><dd>{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</dd>
           {info && (<>
             <dt>{S.crew.worktreePath}</dt><dd>{info.worktree} <Copy what={S.crew.worktreePath} text={info.worktree} /></dd>
             <dt>{S.crew.branch}</dt><dd>{info.branch ?? ""} {info.branch && <Copy what={S.crew.branch} text={info.branch} />}</dd>
@@ -144,7 +147,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
         tabs={[
           { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} /> },
           { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
-          { id: "task", label: S.crew.tabs.task, panel: <TaskTab slug={slug} taskId={taskId} /> },
+          { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },
           { id: "worktree", label: S.crew.tabs.worktree, panel: <WorktreeTab info={info} /> },
         ]}
       />
