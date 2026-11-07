@@ -48,7 +48,18 @@ fn append_locked(path: &Path, e: &Entry) -> io::Result<()> {
 /// The newest valid entry per campaign. A missing file is empty; garbage lines, a session id that is not a canonical
 /// uuid and relative paths are skipped.
 pub fn latest(path: &Path) -> HashMap<String, Entry> {
-    let mut out = HashMap::new();
+    entries(path).into_iter().map(|e| (e.campaign.clone(), e)).collect()
+}
+
+/// Every run id the index (its tail) has ever recorded, for any campaign: an id that was issued before a restart is
+/// still taken after it.
+pub fn run_ids(path: &Path) -> std::collections::HashSet<String> {
+    entries(path).into_iter().map(|e| e.run_id).collect()
+}
+
+/// Every valid entry, oldest first.
+fn entries(path: &Path) -> Vec<Entry> {
+    let mut out = Vec::new();
     let Ok(mut f) = std::fs::File::open(path) else { return out };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(READ_CAP);
@@ -69,7 +80,7 @@ pub fn latest(path: &Path) -> HashMap<String, Entry> {
         }
         // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
         let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
-        out.insert(campaign.clone(), Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id });
+        out.push(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id });
     }
     out
 }

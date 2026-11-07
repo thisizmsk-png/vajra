@@ -10,6 +10,9 @@ const RUN_ID: &str = "20261106-0911";
 const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
+/// A doctor that passes and reports the OS sandbox and its denyWrite on the app dir as active.
+const DOCTOR_OK: &str = "#!/bin/sh\necho 'PASS  OS sandbox enabled'\necho 'PASS  Vajra Desktop app dir write-protected by the OS sandbox (denyWrite active)'\nexit 0\n";
+
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 D="$(cd "$(dirname "$0")" && pwd)"
 case "$1" in --warm) exit 0;; --version) cat "$D/version"; exit 0;; esac
@@ -100,7 +103,7 @@ impl Tmp {
         let d = std::fs::canonicalize(&d).unwrap();
         std::fs::write(d.join("home/.claude/skills/vajra/hooks/pre-tool-use.sh"), "#!/bin/bash\nexit 0\n").unwrap();
         let doctor = d.join("home/.claude/skills/vajra/scripts/vajra-doctor.sh");
-        std::fs::write(&doctor, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(&doctor, DOCTOR_OK).unwrap();
         std::fs::set_permissions(&doctor, std::fs::Permissions::from_mode(0o755)).unwrap();
         // macOS scans a new executable on its first run; do that here, not inside a timed call.
         let _ = std::process::Command::new(&doctor).env_clear().status();
@@ -398,7 +401,7 @@ fn lead_refused_when_the_doctor_fails_or_the_env_cannot_run_the_guard() {
     let app = t.app();
     std::fs::write(t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh"), "#!/bin/sh\necho 'FAIL hooks'\nexit 1\n").unwrap();
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
-    std::fs::write(t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh"), DOCTOR_OK).unwrap();
     *lock(&app.lead.doctor) = None;
     // No jq on the Lead's PATH: the guard would fail closed on every tool, so preflight refuses.
     app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", "/usr/bin:/bin".into())]);
@@ -820,4 +823,22 @@ fn a_forged_lead_session_id_in_the_worker_writable_index_is_ignored() {
     assert!(argvs.iter().all(|a| !a.contains("--resume")), "nothing was resumed: {argvs:?}");
     // Nor is it replayed into the Lead stream.
     assert!(stream_text(&app).iter().all(|l| !l.contains("forged")));
+}
+
+#[test]
+fn lead_is_unavailable_when_the_doctor_passes_but_the_sandbox_denywrite_is_off() {
+    let t = Tmp::new();
+    let app = t.app();
+    let doctor = t.home().join(".claude/skills/vajra/scripts/vajra-doctor.sh");
+    // Exit 0 with only WARN lines: exactly what the real doctor does when sandbox/denyWrite is off.
+    std::fs::write(&doctor, "#!/bin/sh\necho 'WARN  OS sandbox is off (the enforced boundary; enable with /sandbox)'\necho 'WARN  Vajra Desktop denyWrite not active (the guard is the only layer for its control queue)'\nexit 0\n").unwrap();
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing");
+    assert!(e["detail"].as_str().unwrap_or_default().contains("Lead unavailable"), "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded or spawned");
+    // Once the sandbox is on, the same ask goes through.
+    std::fs::write(&doctor, DOCTOR_OK).unwrap();
+    *lock(&app.lead.doctor) = None;
+    assert!(app.ask_lead(RUN_ID, "hi").is_ok());
+    wait_until("the ask", || idle(&app));
 }

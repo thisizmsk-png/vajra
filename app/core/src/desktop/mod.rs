@@ -190,7 +190,9 @@ impl App {
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
     fn fresh_run_id(&self, now: u64) -> (u64, String) {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
+        let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
         let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
         lock(&self.issued).insert(pick.1.clone());
         pick

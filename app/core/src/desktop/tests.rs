@@ -1196,3 +1196,18 @@ fn an_unreadable_campaign_whose_check_cannot_run_is_unknown_never_missing() {
     let l = t.app().list_campaigns().unwrap();
     assert_eq!(l["campaigns"][0]["integrity"], "unknown", "{l}");
 }
+
+#[test]
+fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
+    // Campaign A was resumed in minute M by an earlier app life; it has no `deliver-M` directory. After a restart
+    // in the same minute, campaign B must not get M: the Lead's run lookup and MCP binding key on the run id.
+    let t = Tmp::new();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    std::fs::create_dir_all(t.0.join("data")).ok();
+    let app = t.app();
+    let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
+    runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
+    let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
+    let (_, id) = app.fresh_run_id(now);
+    assert_ne!(id, "20261105-1230", "the persisted id is taken");
+}

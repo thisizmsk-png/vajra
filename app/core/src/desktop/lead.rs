@@ -452,9 +452,7 @@ impl App {
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
             return Err(miss("pre-tool-use.sh is missing"));
         }
-        if !self.doctor_ok() {
-            return Err(miss("vajra doctor does not pass"));
-        }
+        self.doctor_ok().map_err(miss)?;
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
         if get("HOME").is_none_or(|h| h.is_empty()) {
             return Err(miss("HOME is not set for the Lead"));
@@ -466,16 +464,24 @@ impl App {
         Ok(())
     }
 
-    fn doctor_ok(&self) -> bool {
+    /// `vajra-doctor.sh` must pass, and it must report the OS sandbox with its denyWrite on the app dir as active.
+    /// Without the sandbox the worker guard is the only thing keeping a worker out of the files the Lead trusts
+    /// (its settings, MCP config and session mapping), so the Lead is unavailable rather than half-protected.
+    fn doctor_ok(&self) -> Result<(), &'static str> {
         let mut cache = lock(&self.lead.doctor);
-        if let Some((at, ok)) = *cache {
-            if ok && at.elapsed() < DOCTOR_TTL {
-                return true;
+        if let Some((at, true)) = *cache {
+            if at.elapsed() < DOCTOR_TTL {
+                return Ok(());
             }
         }
-        let ok = self.bridge.run(&Request::Doctor).is_ok_and(|o| o.code == Some(0) && !o.timed_out);
-        *cache = Some((Instant::now(), ok));
-        ok
+        let out = self.bridge.run(&Request::Doctor).ok().filter(|o| o.code == Some(0) && !o.timed_out);
+        let verdict = match out {
+            None => Err("vajra doctor does not pass"),
+            Some(o) if o.stdout.lines().any(|l| l.starts_with("PASS") && l.contains("denyWrite active")) => Ok(()),
+            Some(_) => Err("Lead unavailable: the OS sandbox with denyWrite on the app dir is not active (enable it with /sandbox)"),
+        };
+        *cache = Some((Instant::now(), verdict.is_ok()));
+        verdict
     }
 
     /// Write `<data>/lead/<run_id>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
