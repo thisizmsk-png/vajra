@@ -64,12 +64,23 @@ struct Lines {
 fn scan(progress: &str) -> Lines {
     let mut out = Lines::default();
     for line in progress.lines() {
-        let Some(rest) = line.split_once("run ").map(|x| x.1) else { continue };
-        // `<id> ...`: the run id is one word.
+        // Only the shape `append_progress` writes: `- <timestamp> <text>`, with the text starting `run <id>` (what the workflow
+        // writes) or `resumed by vajra-deliver run <id>`. Free text that merely contains "run " (a note, a reject reason) is not read.
+        let Some(text) = line.strip_prefix("- ").and_then(|l| l.split_once(' ')).map(|x| x.1) else { continue };
+        if text.starts_with("resumed by vajra-deliver run ") {
+            out.outcome = None; // a resume starts the campaign again
+            continue;
+        }
+        let Some(rest) = text.strip_prefix("run ") else { continue };
+        // `<id> ...` or `<id>: ...`: the run id is one word of id characters.
         let Some((id, after)) = rest.split_once(|c: char| c.is_whitespace() || c == ':') else { continue };
+        let id_ok = id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !id_ok {
+            continue;
+        }
         let after = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
         if out.outcome.is_some() && id != out.outcome_run {
-            out.outcome = None; // a resumed run (new id) starts the campaign again
+            out.outcome = None; // a later run (new id) starts the campaign again
         }
         if let Some(r) = after.strip_prefix("round ") {
             let n: u32 = r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
@@ -212,6 +223,14 @@ pub fn graph(run_id: &str, tasks: &[Value]) -> Value {
 mod tests {
     use super::*;
 
+    /// progress.md lines as `append_progress` writes them: `- <timestamp> <text>`.
+    fn stamp(p: &str) -> String {
+        p.lines().map(|l| format!("- 2026-11-07T00:00:00Z {l}\n")).collect()
+    }
+    fn timeline(p: &str, tasks: Option<&[Value]>) -> Timeline {
+        super::timeline(&stamp(p), tasks)
+    }
+
     fn task(id: &str, st: &str, deps: &[&str]) -> Value {
         json!({"id": id, "title": format!("T {id}"), "owner_agent": "bhima", "status": st, "deps": deps})
     }
@@ -259,6 +278,21 @@ mod tests {
         let t = [task("r.t1", "in_progress", &[])];
         let p = "run r round 1: waiting for the user on t1\nrun r2 round 1: 0/3 criteria passing\n";
         assert_eq!(cur(p, Some(&t)), ("Fix", Outcome::Active), "the stop no longer applies once a later run writes lines");
+    }
+
+    #[test]
+    fn free_text_containing_run_does_not_change_the_outcome() {
+        let t = [task("r.t1", "closed", &[])];
+        let stop = "run r round 1: waiting for the user on t1";
+        // A note or a reject reason typed by the user, appended after the stop.
+        for note in ["please rerun t2 after the fix", "note: run x delivered a @ b", "rejected: run x: no verified delivery after 3 round(s)", "see run r2 round 1: 3/3 criteria passing"] {
+            assert_eq!(cur(&format!("{stop}\n{note}"), Some(&t)), ("Execute", Outcome::NeedInput), "{note}");
+        }
+        // And a forged ending in free text is ignored with nothing before it.
+        assert_eq!(cur("note: run x delivered a @ b", Some(&t)).1, Outcome::Active);
+        // Lines without the `- <timestamp> ` prefix are not progress lines at all.
+        let raw = super::timeline("run r delivered b @ c\n", Some(&t));
+        assert_eq!(raw.outcome, Outcome::Active);
     }
 
     #[test]
@@ -367,6 +401,11 @@ mod tests {
             for l in &all {
                 assert!(!l.contains("${"), "unhandled placeholder in {l:?}: teach this test (and the parser) the new field");
             }
+        }
+
+        #[test]
+        fn the_resume_line_the_parser_keys_on_is_still_written() {
+            assert!(WORKFLOW.contains("`resumed by vajra-deliver run ${RUN}`"), "the resume progress line changed; update runview.rs");
         }
 
         #[test]
