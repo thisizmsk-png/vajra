@@ -3,6 +3,8 @@
 # Runs in a temp HOME with a temp campaign dir and a temp git repo; never touches ~/.claude.
 # Run: bash tests/tasks/run-check-evidence.sh
 set -uo pipefail
+# Apple's python3 (3.9) writes .pyc caches under $HOME/Library/Caches; this suite asserts that nothing under HOME changes.
+export PYTHONDONTWRITEBYTECODE=1
 command -v python3 >/dev/null || { echo "SKIP: python3 required"; exit 0; }
 command -v git >/dev/null || { echo "SKIP: git required"; exit 0; }
 
