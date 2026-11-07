@@ -802,7 +802,8 @@ fn list_campaigns_marks_each_campaign_ok_failed_or_unknown() {
 }
 
 #[test]
-fn list_campaigns_does_not_reverify_an_unchanged_campaign() {
+fn list_campaigns_verifies_every_campaign_on_every_listing() {
+    // Nothing is remembered between listings: the verdict depends on files, links and the signing key.
     let t = Tmp::new();
     let log = fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", None);
@@ -810,12 +811,74 @@ fn list_campaigns_does_not_reverify_an_unchanged_campaign() {
     let app = t.app();
     app.list_campaigns().unwrap();
     app.list_campaigns().unwrap();
-    assert_eq!(runs(&log), 2, "one verify per campaign, the second listing is cached");
-    // a change to the campaign (new `updated`) is verified again
-    let f = t.home().join(".claude/vajra/campaigns/c1/campaign.json");
-    fs::write(&f, r#"{"slug":"c1","goal":"g","status":"active","created":"c","updated":"later"}"#).unwrap();
-    app.list_campaigns().unwrap();
-    assert_eq!(runs(&log), 3);
+    assert_eq!(runs(&log), 4, "two campaigns, two listings, one fresh verify each");
+}
+
+/// A stand-in `verify` whose verdict depends on a signing-key file outside the campaign, like the real one: 0 when
+/// ~/.claude/vajra/stand-in.key holds "K1", 3 otherwise.
+fn key_dependent_script(t: &Tmp) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, "#!/bin/bash\n[ \"$(cat \"$HOME/.claude/vajra/stand-in.key\" 2>/dev/null)\" = K1 ] && exit 0\nexit 3\n").unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn list_campaigns_follows_the_signing_key_when_it_is_replaced_and_restored() {
+    let t = Tmp::new();
+    key_dependent_script(&t);
+    campaign(&t, "c1", None);
+    let key = t.home().join(".claude/vajra/stand-in.key");
+    fs::write(&key, "K1").unwrap();
+    let app = t.app();
+    let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
+    assert_eq!(verdict(&app), "ok");
+    fs::write(&key, "K2").unwrap(); // install repair generates a new key; no campaign file is touched
+    assert_eq!(verdict(&app), "failed");
+    fs::write(&key, "K1").unwrap(); // the original key is restored
+    assert_eq!(verdict(&app), "ok");
+}
+
+#[test]
+fn a_verify_that_overruns_its_timeout_reads_unknown_never_ok() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, "#!/bin/bash\nsleep 5\nexit 0\n").unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let mut app = t.app();
+    app.verify_timeout = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "unknown");
+    assert!(started.elapsed() < Duration::from_secs(4), "the listing waited for the full sleep");
+}
+
+#[test]
+fn listing_runs_verifies_in_parallel_but_never_more_than_four_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let log = t.0.join("overlap.log");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\necho s >> '{l}'\nsleep 0.4\necho e >> '{l}'\nexit 0\n", l = log.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    for i in 0..10 {
+        campaign(&t, &format!("c{i}"), None);
+    }
+    let l = t.app().list_campaigns().unwrap();
+    assert!(l["campaigns"].as_array().unwrap().iter().all(|c| c["integrity"] == "ok"), "{l}");
+    let (mut cur, mut peak) = (0i32, 0i32);
+    for line in fs::read_to_string(&log).unwrap().lines() {
+        cur += if line == "s" { 1 } else { -1 };
+        peak = peak.max(cur);
+    }
+    assert!((2..=4).contains(&peak), "peak concurrency {peak}");
 }
 
 #[test]
@@ -828,7 +891,6 @@ fn list_campaigns_reverifies_after_an_edit_even_when_the_mtime_is_restored() {
     assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
     let f = t.home().join(".claude/vajra/campaigns/c1/report.md");
     let old = fs::metadata(&f).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20)); // so the edit's ctime differs from the stamp's
     fs::write(&f, b"BBBB").unwrap(); // same size
     fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
     assert_eq!(fs::metadata(&f).unwrap().modified().unwrap(), old, "mtime restored");
@@ -934,9 +996,8 @@ fn read_report_with_the_real_script_refuses_a_planted_report_without_a_recorded_
 }
 
 #[test]
-fn an_unknown_verdict_is_retried_not_cached() {
-    // A check that could not run (script or jq missing, timeout) says nothing about the campaign; repairing the
-    // install changes no campaign file, so the next listing must try again.
+fn an_unknown_verdict_clears_once_the_install_is_repaired() {
+    // A check that could not run (script or jq missing) reads unknown; once the install is repaired the next listing is ok.
     let t = Tmp::new();
     fake_campaign_script(&t, 1, "jq: not found");
     campaign(&t, "c1", None);
@@ -962,11 +1023,32 @@ fn list_campaigns_reverifies_when_a_symlinked_input_changes_its_target() {
     let ok = |l: &Value, i: usize| l["campaigns"][i]["integrity"].clone();
     let l = app.list_campaigns().unwrap();
     assert_eq!((ok(&l, 0), ok(&l, 1)), (json!("ok"), json!("ok")));
-    std::thread::sleep(Duration::from_millis(20));
     fs::write(&target, r#"{"features":[1]}"#).unwrap(); // edited in place, the link itself untouched
     fake_campaign_script(&t, 3, "signature INVALID");
     let l = app.list_campaigns().unwrap();
     assert_eq!(ok(&l, 0), "failed", "c1 follows the edited target: {l}");
+}
+
+#[test]
+#[ignore = "measurement: cargo test --lib listing_latency -- --ignored --nocapture"]
+fn listing_latency_with_the_real_script() {
+    let Some((t, run)) = real_script_home() else { return };
+    let app = t.app();
+    let mut made = 0;
+    for n in [1, 10, 30] {
+        while made < n {
+            made += 1;
+            assert!(run(&["create", &format!("lat{made}"), "--goal", "g", "--feature", "ac-1|x"]).status.success());
+        }
+        let mut ms = Vec::new();
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            let l = app.list_campaigns().unwrap();
+            ms.push(t0.elapsed().as_millis());
+            assert!(l["campaigns"].as_array().unwrap().iter().all(|c| c["integrity"] == "ok"), "{l}");
+        }
+        println!("LATENCY campaigns={n} listing_ms={ms:?}");
+    }
 }
 
 // ---- resume_targets: which session to resume for a campaign ---------------------------------------------------------

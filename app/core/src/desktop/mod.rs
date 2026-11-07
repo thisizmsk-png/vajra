@@ -65,6 +65,9 @@ struct Run {
     nonces: Redactor,
 }
 
+const LIST_VERIFY_WORKERS: usize = 4;
+const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct App {
     data: PathBuf,
     claude: PathBuf,
@@ -72,8 +75,8 @@ pub struct App {
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
     bridge: Bridge,
-    /// slug -> (stamp of the campaign's files, verdict), so listing does not re-run verify for an unchanged campaign.
-    integrity: Mutex<HashMap<String, (String, &'static str)>>,
+    /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
+    verify_timeout: Duration,
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
@@ -102,7 +105,7 @@ impl App {
         Ok(Self {
             data: data.to_path_buf(),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
-            integrity: Mutex::new(HashMap::new()),
+            verify_timeout: LIST_VERIFY_TIMEOUT,
             reader: Mutex::new(None),
             claude,
             sup: Supervisor::new(bus.clone(), log.clone()),
@@ -181,11 +184,28 @@ impl App {
                 })
                 .collect())
         })?;
-        for c in &mut list {
-            if c.get("error").is_none() {
-                let verdict = self.integrity_of(c["slug"].as_str().unwrap_or_default());
-                c["integrity"] = json!(verdict);
+        // Every listing verifies every campaign afresh (the verdict depends on the campaign files, the links they
+        // follow and the signing key, so nothing is remembered between listings), on a few worker threads.
+        let todo: Vec<(usize, String)> = list
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.get("error").is_none())
+            .map(|(i, c)| (i, c["slug"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let verdicts: Mutex<Vec<(usize, &'static str)>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..todo.len().min(LIST_VERIFY_WORKERS) {
+                s.spawn(|| loop {
+                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((i, slug)) = todo.get(n) else { break };
+                    let v = self.integrity_of(slug);
+                    lock(&verdicts).push((*i, v));
+                });
             }
+        });
+        for (i, v) in lock(&verdicts).iter() {
+            list[*i]["integrity"] = json!(*v);
         }
         Ok(json!({"campaigns": list}))
     }
@@ -611,49 +631,19 @@ impl App {
         })
     }
 
-    /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run). Cached per campaign
-    /// against the name, size, inode and ctime of every file in its dir and in `checkpoints/` (and of the target of a symlink among them): ctime cannot be set
-    /// from user space, so an edit that keeps `updated` and even restores the mtime still triggers a fresh check.
+    /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
+    /// `verify_timeout`). Never remembered: it is `verify` run now.
     fn integrity_of(&self, slug: &str) -> &'static str {
-        let dir = self.claude.join("vajra/campaigns").join(slug);
-        let mut stamp = String::new();
-        for d in [dir.clone(), dir.join("checkpoints")] {
-            let mut names: Vec<_> = std::fs::read_dir(&d).into_iter().flatten().flatten().collect();
-            names.sort_by_key(|e| e.file_name());
-            for e in names {
-                if let Ok(m) = e.path().symlink_metadata() {
-                    // ctime, not mtime: mtime can be put back by the editor of the file, ctime cannot be set.
-                    use std::os::unix::fs::MetadataExt;
-                    stamp.push_str(&format!("{:?}:{}:{}:{}.{};", e.file_name(), m.len(), m.ino(), m.ctime(), m.ctime_nsec()));
-                    // verify follows links (features.json, state.sig ...): stamp what a link points at as well, so an
-                    // in-place edit of the target (maybe another campaign's file) invalidates this verdict too.
-                    if m.file_type().is_symlink() {
-                        match e.path().metadata() {
-                            Ok(t) => stamp.push_str(&format!("->{}:{}:{}.{};", t.len(), t.ino(), t.ctime(), t.ctime_nsec())),
-                            Err(_) => stamp.push_str("->dangling;"),
-                        }
-                    }
-                }
-            }
+        if !bus::valid_stream_id(slug) {
+            return "unknown";
         }
-        if let Some((s, v)) = lock(&self.integrity).get(slug) {
-            if *s == stamp {
-                return v;
-            }
-        }
-        let verdict = match self.run_verify(slug).ok().and_then(|o| o.code) {
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        match bridge.run(&Request::CampaignVerify { slug: slug.into() }).ok().and_then(|o| o.code) {
             Some(0) => "ok",
             Some(3) => "failed",
             _ => "unknown",
-        };
-        // "unknown" means the check could not run, which says nothing about the campaign and can be fixed without
-        // touching any campaign file, so only a real verdict is cached.
-        if verdict == "unknown" {
-            lock(&self.integrity).remove(slug);
-        } else {
-            lock(&self.integrity).insert(slug.to_string(), (stamp, verdict));
         }
-        verdict
     }
 
     /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text. One script call verifies the signature and prints
