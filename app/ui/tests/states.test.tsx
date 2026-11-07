@@ -87,7 +87,16 @@ describe("Check again", () => {
 });
 
 describe("Screens not built yet", () => {
-  // The Run view is built on main (#36), so only the screens still unbuilt are checked here.
+  it("the Run view right after a start opens on that run's evidence", async () => {
+    window.location.hash = "#/run?slug=camp&id=r1";
+    const f = fakeIpc({ evidence_list: { slug: "camp", stale: false, rows: [] } });
+    setTransport(f.transport);
+    const Run = REGISTRY.run;
+    render(<Run />);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list" && c.args?.slug === "camp")).toBe(true));
+    expect(await screen.findByText(S.run.none)).toBeTruthy();
+  });
+
   it("without a run, it says so and offers Home", () => {
     const Inbox = REGISTRY.inbox;
     render(<Inbox />);
