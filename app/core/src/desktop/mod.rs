@@ -442,9 +442,9 @@ impl App {
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
-        let node = self.with_reader(|r| {
-            Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
-        })?;
+        // Overlays come from the live control session only; a past run shows none.
+        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
         Ok(node_json(&node))
     }
 

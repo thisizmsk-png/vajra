@@ -500,6 +500,25 @@ impl Service {
 
     /// The worker's transcript ended: its queued messages expire now so they
     /// are never applied later to a different worker. Its stop stays.
+    /// What the crew tree overlays: a worker with a stop in force (its stop file exists; a resume removes it) or a
+    /// queued, not yet delivered message or redirect. Keyed by the worker key (agent id).
+    pub fn signals(&self) -> crate::crew::tree::Signals {
+        let mut sig = crate::crew::tree::Signals::default();
+        if let Some(sess) = &self.session {
+            for w in &self.workers {
+                if fs::symlink_metadata(sess.dir.stop_path(w.key())).is_ok() {
+                    sig.stopped.insert(w.key().to_string());
+                }
+            }
+        }
+        for a in self.pending.values() {
+            if a.kind.queued_text() && a.state == State::Queued && self.session.as_ref().is_some_and(|s| s.id == a.session_id) {
+                sig.message_pending.insert(a.worker.clone());
+            }
+        }
+        sig
+    }
+
     pub fn worker_finished(&mut self, key: &str) {
         let now = SystemTime::now();
         let ids: Vec<String> = self

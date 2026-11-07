@@ -39,3 +39,13 @@ S6 History and Settings.
 | Knowledge search is unavailable (exit code N). | search failure | names the exit code |
 | Enter something to search for. / Enter the repository folder. | inline errors | |
 | Settings, Checks, Check again, Could not run the checks. | settings | the app has no preferences yet |
+
+S2a Crew tree.
+
+| String | Where | Note |
+|---|---|---|
+| Crew, Details, Status, Kind, Engine id | Crew screen | engine id appears only in the details of a selected node |
+| No run is active. / Start a run from Home, or open a past run from History. | empty state | |
+| Could not read the crew. | load failure | followed by the core's error text |
+| Unknown (no signal) | node status | shown for a node nothing reports on, never Idle or Done (AC-2.1.5) |
+| Stopped by you / Message pending / Active now | node overlays | appended to the status after " · " |

@@ -380,6 +380,21 @@ fn ask_ledger_records_are_human_ui_and_carry_the_text_once() {
 }
 
 #[test]
+fn signals_show_a_queued_message_and_a_stop_in_force_until_resumed() {
+    let (mut s, dir) = svc();
+    let key = "aa870dd40540481f0".to_string();
+    assert!(s.signals().message_pending.is_empty() && s.signals().stopped.is_empty());
+    s.message_worker(Actor::Human, "bhima", "hello").unwrap();
+    assert!(s.signals().message_pending.contains(&key), "a queued message is pending");
+    assert!(s.signals().stopped.is_empty());
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    assert!(s.signals().stopped.contains(&key), "a confirmed stop is in force");
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert!(!s.signals().stopped.contains(&key), "a resume lifts it");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ask_adds_no_queue_entry_no_audit_line_and_no_pending_action() {
     // AC-3.1.3: an ask is not a control action. It reaches no worker, and (ADR-13 6) writes no audit.log line.
     let (mut s, dir) = svc();
@@ -475,5 +490,13 @@ fn lead_mcp_audit_line_per_call() {
     // An app line for an id the ledger never recorded is flagged.
     fs::write(dir.join("audit.log"), format!("{with_guard}{} ALLOW desktop-control reason=\"mcp stop_worker id=aDEADBEEF\"\n", time::iso_secs(SystemTime::now()))).unwrap();
     assert_eq!(rp(&dir).audit_without_ledger, vec!["aDEADBEEF".to_string()]);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lead_stop_request_that_awaits_confirmation_is_not_yet_a_stop() {
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Lead, "bhima", None).unwrap();
+    assert!(s.signals().stopped.is_empty(), "only the human's confirmed stop is enforced");
     let _ = fs::remove_dir_all(&dir);
 }
