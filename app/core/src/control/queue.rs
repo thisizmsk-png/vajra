@@ -73,6 +73,14 @@ impl SessionDir {
         find(&self.dir("expired"), |n| n.ends_with(&format!("-{action_id}.json")))
     }
 
+    /// The file names in queue/ and inflight/ right now, listed once so a tick settling many messages of one session
+    /// does not scan both directories per message. Taken before any ack is read, which keeps the check order
+    /// (queue, inflight, ack): a file only ever leaves queue/ and a claim only ever appears after it, so a stale
+    /// listing can only say "still queued" (retried next tick), never "gone" for a file that is not.
+    pub fn listing(&self) -> io::Result<Listing> {
+        Ok(Listing { queue: names(&self.dir("queue"))?, inflight: names(&self.dir("inflight"))? })
+    }
+
     /// The highest `<seq>` prefix in queue/ and expired/.
     pub fn max_seq(&self) -> u64 {
         ["queue", "expired"]
@@ -87,6 +95,39 @@ impl SessionDir {
 
 /// The first entry of `dir` that `pred` accepts. A scan that fails is an error, never "not found": settling on a
 /// failed scan would call a file absent that is still there. A directory that does not exist has no entries.
+/// A one-pass listing of a session's queue/ and inflight/ (see `SessionDir::listing`).
+pub struct Listing {
+    queue: Vec<String>,
+    inflight: Vec<String>,
+}
+
+impl Listing {
+    pub fn queued(&self, action_id: &str) -> bool {
+        let suffix = format!("-{action_id}.json");
+        self.queue.iter().any(|n| n.ends_with(&suffix))
+    }
+
+    pub fn inflight(&self, action_id: &str) -> bool {
+        let prefix = format!("{action_id}.");
+        self.inflight.iter().any(|n| n.starts_with(&prefix))
+    }
+}
+
+fn names(dir: &Path) -> io::Result<Vec<String>> {
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for e in rd {
+        if let Some(n) = e?.file_name().to_str().filter(|n| !n.starts_with('.')) {
+            out.push(n.to_string());
+        }
+    }
+    Ok(out)
+}
+
 fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,

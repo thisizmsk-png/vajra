@@ -25,9 +25,17 @@ impl Service {
         }
         // Every unsettled message, in the session dir it was published to: a claimed message outlives its session.
         let ids: Vec<String> = self.pending.values().filter(|a| a.state == State::Queued).map(|a| a.id.clone()).collect();
+        // Each session's queue/ and inflight/ are listed once per tick, not once per message.
+        let mut listings: HashMap<String, std::io::Result<Listing>> = HashMap::new();
         for id in ids {
             let Some(sid) = self.pending.get(&id).map(|a| a.session_id.clone()) else { continue };
-            match self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now) {
+            let dir = SessionDir { root: self.control_root.join(&sid) };
+            let listing = listings.entry(sid).or_insert_with(|| dir.listing());
+            let listing = match listing {
+                Ok(l) => Ok(&*l),
+                Err(e) => Err(e.raw_os_error().map_or_else(|| std::io::Error::from(e.kind()), std::io::Error::from_raw_os_error)),
+            };
+            match listing.map_err(ControlError::from).and_then(|l| self.check(&id, &dir, l, now)) {
                 Ok(()) => {
                     if let Some(a) = self.pending.get_mut(&id) {
                         a.check_failed = None;
@@ -72,16 +80,16 @@ impl Service {
     /// made durable look the same. So absence settles as `delivery_unknown` (`no_evidence`), and only the app's own
     /// `expired/` rename is a firm `not_delivered`. Queue wins over everything: an honest hook cannot ack before it
     /// claims. A stop has no queue file; only its ack settles it.
-    pub(super) fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
+    pub(super) fn check(&mut self, id: &str, dir: &SessionDir, listing: &Listing, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
         let stop = a.kind == Kind::Stop;
-        if !stop && dir.queued(id)?.is_some() {
+        if !stop && listing.queued(id) {
             if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
                 self.expire(id, now, "expired");
             }
             return Ok(());
         }
-        let claimed = dir.inflight(id)?.is_some();
+        let claimed = listing.inflight(id);
         let (delivered, invalid) = match fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES) {
             Ok(b) => match serde_json::from_slice::<Value>(&b) {
                 Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
