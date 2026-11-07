@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./gallery.css";
+import { systemTheme } from "./theme";
 import {
   AlertDialog, Badge, Button, Card, Input, ListBox, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
   useToasts,
@@ -18,6 +19,8 @@ export function Gallery() {
   const [sel, setSel] = useState(0);
   const { toasts, push, dismiss } = useToasts();
   document.documentElement.dataset.theme = theme;
+  // The page toggle is a demo: on leaving the gallery the root goes back to the OS theme.
+  useEffect(() => () => void (document.documentElement.dataset.theme = systemTheme()), []);
   return (
     <main className="v-gallery">
       <Text as="h1" variant="headline-lg">Kit gallery</Text>

@@ -96,8 +96,11 @@ borrows Linear's density and Raycast's palette, on a GitHub-dark base that the b
 native `<dialog>` for Sheet and AlertDialog, native radios for SegmentedControl, `role="switch"` for
 Switch, and `cn()` is a string join (it is not clsx and not tailwind-merge). It has no Tailwind,
 Radix, cva or tailwind-merge. Earlier drafts promised a shadcn-style stack; that was not built. The
-options and the cost are in the UI SOP decision memo (PR, "UI SOP"). Tokens are hex CSS variables
-consumed as `var(--c-primary)`, so a theme swaps variables and nothing else.
+decision (accepted by the orchestrator): keep the hand-rolled kit and its tokens. Add a Radix primitive
+per component only where an accessibility gap needs it (none is required today), and add `cva` only if
+variants outgrow the props. Tokens are hex CSS variables consumed as `var(--c-primary)`, so a theme
+swaps variables and nothing else. Type sizes and shorthands are tokens (`--size-*`, `--type-*`);
+strokes and focus widths are tokens (`--stroke-hairline`, `--stroke-focus`, `--focus-offset`).
 
 ## Art direction (app screens)
 
@@ -244,6 +247,13 @@ light), because agents print in all 16 colors.
 | white | #b1bac4 | #636c76 | bright white | #f0f6fc | #59636e |
 
 Dark black was #484f58 (2.28) and light bright white #8c959f (2.85) in the GitHub sets; both changed.
+
+### Theme selection
+
+The app follows the OS appearance: `prefers-color-scheme: light` selects the light set, anything else
+(including no media query support) selects dark. `src/theme.ts` sets `data-theme` on the root before
+the first render and follows OS changes; the values stay in `tokens.css`. There is no Settings toggle
+yet. The kit Gallery has its own toggle and restores the OS theme when it unmounts.
 
 ## Typography
 
