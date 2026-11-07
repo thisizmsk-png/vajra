@@ -12,7 +12,6 @@ const EVENT_MIN_GAP_MS = 500;
 /** One worker's output: a bounded window that follows the tail, with older output fetched on request. */
 export function StreamTab({ stream }: { stream: string }) {
   const [ring, setRing] = useState<Ring>(emptyRing);
-  const [spill, setSpill] = useState<{ start: number; end: number } | null>(null);
   const [earlier, setEarlier] = useState<"idle" | "busy" | "done">("idle");
   const [err, setErr] = useState("");
   const [pin, setPin] = useState(0);
@@ -31,7 +30,6 @@ export function StreamTab({ stream }: { stream: string }) {
       const t = await api.tail(stream, ringRef.current.last);
       setErr("");
       put(appendTail(ringRef.current, t, capRef.current));
-      if (t.spill_start != null && t.spill_end != null) setSpill({ start: t.spill_start, end: t.spill_end });
     } catch (e) {
       setErr(errorText(e));
     } finally {
@@ -62,7 +60,7 @@ export function StreamTab({ stream }: { stream: string }) {
       const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
-      setEarlier(p.at_start ? "done" : "idle");
+      setEarlier(p.at_start || p.lines.length === 0 ? "done" : "idle");
     } catch (e) {
       setErr(errorText(e));
       setEarlier("idle");
@@ -79,7 +77,10 @@ export function StreamTab({ stream }: { stream: string }) {
   };
 
   const text = useMemo(() => ring.rows.map((r) => r.text), [ring]);
-  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done";
+  // Older output may exist whenever the oldest line shown is not the first one: in the core's own buffer, on disk, or
+  // just evicted from this window (by rows or bytes) even though nothing was spilled.
+  const firstSeq = ring.rows.find((r) => r.seq !== null)?.seq;
+  const canLoad = firstSeq != null && firstSeq > 1 && earlier !== "done";
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}

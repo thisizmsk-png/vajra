@@ -149,6 +149,18 @@ describe("Stream tab (S2b, US-2.2)", () => {
     expect(screen.queryByText(S.crew.historyView)).toBeNull();
   });
 
+  it("offers Load earlier for rows the window dropped even when nothing was spilled (3,000 short lines, empty spill)", async () => {
+    const f = await openBackend({
+      tail: tail(lines(1, 3000), { spill_start: 0, spill_end: 0 }),
+      read_spill_before: spillBefore,
+    });
+    // The window keeps the newest 2,000; lines 1..1000 are only recoverable through the core's buffer.
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "read_spill_before")).toBe(true));
+    expect(f.calls.find((c) => c.cmd === "read_spill_before")!.args).toEqual({ stream: "w-a1", beforeSeq: 1001, maxLines: 1000 });
+    await waitFor(() => expect(earlierButton()).toBeNull()); // that page reached line 1
+  });
+
   it("offers no 'load earlier' when nothing was spilled", async () => {
     await openBackend({ tail: tail(lines(1, 3), { spill_start: 0, spill_end: 0 }) });
     await screen.findByRole("log");
