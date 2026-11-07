@@ -225,3 +225,98 @@ fn resume_without_a_valid_run_id_is_refused_and_the_json_names_the_workflows_run
     assert_eq!(json["run_id"], "20261105-1230", "given(A.run_id) is true, so RUN is the app's run id");
     assert_eq!(json["campaign"], "deliver-20261105-1230");
 }
+
+// ------------------------------------------------------------ ADR-13 Lead argv
+
+const CLAUDE: &str = "/Users/u/.nvm/versions/node/v22/bin/claude";
+const LSETTINGS: &str = "/Users/u/Library/Application Support/VajraDesktop/lead/settings.json";
+const LMCP: &str = "/Users/u/Library/Application Support/VajraDesktop/lead/mcp.json";
+
+fn lead(resume: bool) -> Vec<String> {
+    build_lead_argv(&LeadArgv {
+        claude: Path::new(CLAUDE),
+        lead_session_id: SID,
+        resume,
+        settings: Path::new(LSETTINGS),
+        mcp_config: Path::new(LMCP),
+    })
+    .unwrap()
+}
+
+fn after<'a>(argv: &'a [String], flag: &str) -> &'a str {
+    let i = argv.iter().position(|a| a == flag).unwrap_or_else(|| panic!("{flag} missing"));
+    &argv[i + 1]
+}
+
+#[test]
+fn lead_argv_is_fixed_template() {
+    let want = [
+        CLAUDE, "-p", "--session-id", SID, "--output-format", "stream-json", "--verbose",
+        "--setting-sources", "", "--settings", LSETTINGS, "--permission-mode", "dontAsk",
+        "--tools", LEAD_TOOLS, "--allowedTools", LEAD_TOOLS, "--mcp-config", LMCP, "--strict-mcp-config",
+        "--agents", LEAD_AGENTS, "--agent", "vajra-lead",
+    ];
+    assert_eq!(lead(false), want);
+    // A later ask resumes the same session; nothing else changes.
+    let mut resumed = want.to_vec();
+    resumed[2] = "--resume";
+    assert_eq!(lead(true), resumed);
+
+    for argv in [lead(false), lead(true)] {
+        // No positional prompt: the last element belongs to a flag, and no element is a free-standing prompt.
+        assert_eq!(argv.last().unwrap(), "vajra-lead");
+        assert_eq!(argv[argv.len() - 2], "--agent");
+        // The POS-2.4 test.
+        for a in &argv {
+            assert!(!a.contains("dangerously-skip-permissions") && !a.contains("bypassPermissions"), "{a}");
+        }
+        // --tools and --allowedTools are equal, exact, and one element each (both are variadic in the CLI).
+        assert_eq!(after(&argv, "--tools"), after(&argv, "--allowedTools"));
+        assert_eq!(
+            after(&argv, "--tools"),
+            "Read,Grep,Glob,mcp__vajra-desktop__list_workers,mcp__vajra-desktop__inspect_worker,\
+             mcp__vajra-desktop__message_worker,mcp__vajra-desktop__redirect_worker,mcp__vajra-desktop__stop_worker"
+        );
+        assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
+        assert_eq!(after(&argv, "--setting-sources"), "");
+        assert_eq!(after(&argv, "--mcp-config"), LMCP);
+        assert!(Path::new(&argv[0]).is_absolute());
+        // The element after every flag that takes a list is not another flag's value in disguise.
+        for f in ["--tools", "--allowedTools", "--mcp-config"] {
+            assert!(!after(&argv, f).starts_with('-'), "{f}");
+        }
+    }
+}
+
+#[test]
+fn lead_argv_has_settings_after_sources() {
+    for argv in [lead(false), lead(true)] {
+        let src = argv.iter().position(|a| a == "--setting-sources").unwrap();
+        let set = argv.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(argv[src + 1], "");
+        assert!(set > src, "--settings follows --setting-sources");
+        assert_eq!(argv[set + 1], LSETTINGS);
+        assert_eq!(argv.iter().filter(|a| *a == "--settings").count(), 1);
+    }
+}
+
+#[test]
+fn lead_argv_refuses_bad_inputs() {
+    let ok = |claude: &str, sid: &str, s: &str, m: &str| {
+        build_lead_argv(&LeadArgv { claude: Path::new(claude), lead_session_id: sid, resume: false, settings: Path::new(s), mcp_config: Path::new(m) })
+    };
+    assert!(ok(CLAUDE, SID, LSETTINGS, LMCP).is_ok());
+    assert_eq!(ok("claude", SID, LSETTINGS, LMCP).unwrap_err().field, "claude");
+    assert_eq!(ok(CLAUDE, "--last", LSETTINGS, LMCP).unwrap_err().field, "lead_session_id");
+    assert_eq!(ok(CLAUDE, SID, "lead/settings.json", LMCP).unwrap_err().field, "settings");
+    assert_eq!(ok(CLAUDE, SID, LSETTINGS, "mcp.json").unwrap_err().field, "mcp_config");
+    assert_eq!(ok(CLAUDE, SID, LSETTINGS, "/a\0b").unwrap_err().field, "mcp_config");
+}
+
+#[test]
+fn lead_agents_json_is_one_valid_agent() {
+    let v: serde_json::Value = serde_json::from_str(LEAD_AGENTS).unwrap();
+    let a = &v["vajra-lead"];
+    assert!(a["description"].is_string() && a["prompt"].as_str().unwrap().len() > 100);
+    assert_eq!(v.as_object().unwrap().len(), 1);
+}
