@@ -40,13 +40,18 @@ const MAX_META_BYTES: u64 = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 /// Evidence checks run this many at a time, each for at most `EVIDENCE_TIMEOUT`.
 const EVIDENCE_WORKERS: usize = 4;
-const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(10);
+const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(4);
 /// The whole of one `evidence_list` call (every batch together) may take this long. A campaign can hold 500 tasks, so
 /// without it a slow check per task would occupy the request for many minutes; checks not started by then read `checking`
 /// and the next call (the UI re-asks while any row is `checking`) continues from the cached verdicts.
 const EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
 /// Verdicts kept for unchanged evidence (cleared when it grows past this).
 const EVIDENCE_CACHE_MAX: usize = 512;
+// A check must be able to get its full timeout inside one call's budget, or "checking" could never turn into a verdict.
+const _: () = assert!(EVIDENCE_TIMEOUT.as_secs() <= EVIDENCE_BUDGET.as_secs());
+/// A check that timed out or could not start is remembered as unverified this long, so a hung check is not re-run (and the
+/// checks queued behind it starved) on every call.
+const EVIDENCE_FAILED_TTL: Duration = Duration::from_secs(60);
 /// Evidence files larger than this are always re-checked (their bytes are the cache key).
 const EVIDENCE_KEY_MAX: u64 = 16 * 1024;
 /// A verdict for evidence checked in a repo depends on the repo's state, which the key cannot see: it is reused this long.
@@ -125,7 +130,13 @@ impl Drop for FlightGuard<'_> {
 }
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
-type EvKey = (Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
+enum Outcome {
+    Verdict(bool),
+    TimedOut,
+    Failed,
+}
+
+type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
     data: PathBuf,
@@ -705,7 +716,7 @@ impl App {
             }
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut std::io::Read::take(f, EVIDENCE_KEY_MAX + 1), &mut bytes).ok()?;
-            (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (bytes, head.clone(), archived.clone(), repo.clone()))
+            (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (path.clone(), bytes, head.clone(), archived.clone(), repo.clone()))
         };
         let mut verdict: HashMap<usize, bool> = HashMap::new();
         let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
@@ -748,18 +759,21 @@ impl App {
             bridge.timeout = self.evidence_timeout.min(left);
             // A check cut short by the remaining budget (not by its own full timeout) did not get a fair run: `checking`, not `unverified`.
             let cut_by_budget = left < self.evidence_timeout;
-            let got: Vec<(usize, Option<bool>)> = std::thread::scope(|sc| {
+            let got: Vec<(usize, Outcome)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = batch
                     .iter()
                     .map(|(i, req, _)| {
                         let b = &bridge;
                         sc.spawn(move || {
-                            // `None`: the check could not finish (timed out or could not start): unverified, and not cached.
-                            let done = b.run(req).ok().filter(|o| !o.timed_out).map(|o| {
-                                o.code == Some(0)
-                                    && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true))
-                            });
-                            (*i, done)
+                            let out = match b.run(req) {
+                                Err(_) => Outcome::Failed,
+                                Ok(o) if o.timed_out => Outcome::TimedOut,
+                                Ok(o) => Outcome::Verdict(
+                                    o.code == Some(0)
+                                        && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true)),
+                                ),
+                            };
+                            (*i, out)
                         })
                     })
                     .collect();
@@ -769,15 +783,29 @@ impl App {
             if cache.len() > EVIDENCE_CACHE_MAX {
                 cache.clear();
             }
-            for (i, done) in got {
-                if done.is_none() && cut_by_budget {
+            for (i, out) in got {
+                // Cut short by the budget (not by its own full timeout): no verdict yet, so `checking`, and it is not remembered.
+                if matches!(out, Outcome::TimedOut) && cut_by_budget {
                     continue;
                 }
-                verdict.insert(i, done == Some(true));
-                if let (Some(v), Some(k)) = (done, jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone())) {
-                    let until = k.2.is_none().then(|| std::time::Instant::now() + EVIDENCE_LIVE_TTL);
-                    cache.insert(k, (v, until));
+                let (green, remember) = match out {
+                    Outcome::Verdict(g) => (g, true),
+                    Outcome::TimedOut | Outcome::Failed => (false, false),
+                };
+                verdict.insert(i, green);
+                // Remember it only if the file still holds the bytes the key was made from: the script opened it after the
+                // key was read, so a swapped file would otherwise store this verdict under the wrong content.
+                let Some(k) = jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone()) else { continue };
+                let req = &jobs.iter().find(|j| j.0 == i).expect("job").1;
+                if key(req).as_ref() != Some(&k) {
+                    continue;
                 }
+                let until = if remember {
+                    k.3.is_none().then(|| std::time::Instant::now() + EVIDENCE_LIVE_TTL)
+                } else {
+                    Some(std::time::Instant::now() + EVIDENCE_FAILED_TTL)
+                };
+                cache.insert(k, (green, until));
             }
         }
         let mut pending = 0usize;

@@ -1184,6 +1184,7 @@ fn fake_tasks_script(t: &Tmp) {
     let body = "import json, sys\np = sys.argv[2]\n\
         if 'slow' in p:\n    import time; time.sleep(30)\n\
         if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
+        if 'swap' in p:\n    open(p, 'w').write('{\"a\":\"BBB\"}')\n\
         green = 'green' in p\n\
         try:\n    green = green and 'RED' not in open(p).read()\nexcept OSError:\n    pass\n\
         print(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
@@ -1301,8 +1302,8 @@ fn evidence_list_has_a_total_budget_and_unchecked_tasks_read_checking() {
     // The second batch started with 300 ms of budget left (< the 400 ms timeout): the budget cut it, so it is checking and counted.
     assert_eq!(row(&r, "s4", "ac")["status"], "checking", "{r}");
     assert_eq!(r["pending"].as_u64().unwrap(), 36, "{r}");
-    // A timed-out check is never cached: the next call (budget again) runs it, it does not read a remembered "unverified".
-    assert!(app.evidence_cache.lock().unwrap().is_empty(), "timeouts must not be cached");
+    // Budget-cut checks are not remembered (they get a real run next call).
+    assert!(app.evidence_cache.lock().unwrap().values().all(|(_, until)| until.is_some()), "only the full-timeout failures are remembered, and only briefly");
 }
 
 #[test]
@@ -1344,6 +1345,47 @@ fn a_rewritten_evidence_file_with_the_same_size_and_mtime_is_rechecked_not_serve
     assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), mtime);
     let r = app.evidence_list(&slug).unwrap();
     assert_eq!(row(&r, "g0", "ac")["status"], "unverified", "the cache must not serve the old pass: {r}");
+}
+
+#[test]
+fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_call() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks = vec![
+        ev_task(&d, "h", "done", &["ac"], "slow"),
+        ev_task(&d, "g1", "done", &["ac"], "green"),
+        ev_task(&d, "g2", "done", &["ac"], "green"),
+    ];
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    // The shipped relation: a check's own timeout fits inside the call's budget.
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_millis(500);
+    let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    fs::write(ev_dir.join("slow.json"), b"{}").unwrap();
+    fs::write(ev_dir.join("green.json"), b"{}").unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "g1", "ac")["status"], "pass", "{r}");
+    assert_eq!(r["pending"], 0, "{r}");
+    // Remembered briefly: the next call does not spend 400 ms on it again.
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+}
+
+#[test]
+fn a_verdict_is_not_cached_when_the_file_is_swapped_while_the_check_runs() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "w", "done", &["ac"], "green-swap")]);
+    let file = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green-swap.json");
+    fs::write(&file, br#"{"a":"AAA"}"#).unwrap();
+    // The check script rewrites the file to BBB after the key was read from AAA: that verdict belongs to BBB.
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "w", "ac")["status"], "pass", "{r}");
+    assert_eq!(fs::read(&file).unwrap(), br#"{"a":"BBB"}"#);
+    assert!(app.evidence_cache.lock().unwrap().is_empty(), "no cache entry for a verdict whose key bytes changed");
 }
 
 #[test]
