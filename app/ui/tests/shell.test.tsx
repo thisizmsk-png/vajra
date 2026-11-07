@@ -1,12 +1,17 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setTransport } from "../src/ipc";
+import { fakeIpc } from "./fakeIpc";
 import { Shell } from "../src/Shell";
 import { useRoute } from "../src/router";
 import { REGISTRY } from "../src/screens/registry";
 import { S } from "../strings";
 
+beforeEach(() => setTransport(fakeIpc({ preflight: { rows: [], start_enabled: false }, list_campaigns: { campaigns: [] } }).transport));
+
 afterEach(() => {
   cleanup();
+  setTransport();
   window.location.hash = "";
 });
 
