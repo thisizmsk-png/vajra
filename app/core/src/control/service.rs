@@ -193,6 +193,8 @@ pub struct Service {
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
+    /// The id of the newest ledger record `record` wrote: how `call_tool` names the action in its audit line.
+    last_recorded: Option<String>,
     pub ttl: Duration,
 }
 
@@ -205,6 +207,8 @@ enum Kind {
     Redirect,
     Stop,
     Resume,
+    /// ADR-13: the human asked the Lead a question. Always actor human, via ui; it reaches no worker.
+    Ask,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -218,10 +222,12 @@ enum State {
     DeliveryUnknown,
     Refused,
     Done,
+    /// An ask that did not complete (the `reason` says why).
+    Failed,
 }
 
 impl Kind {
-    const ALL: [Kind; 6] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume];
+    const ALL: [Kind; 7] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask];
     fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -230,6 +236,7 @@ impl Kind {
             Kind::Redirect => "redirect",
             Kind::Stop => "stop",
             Kind::Resume => "resume",
+            Kind::Ask => "ask",
         }
     }
     fn parse(k: &str) -> Option<Kind> {
@@ -242,7 +249,7 @@ impl Kind {
 }
 
 impl State {
-    const ALL: [State; 8] = [State::Requested, State::AwaitingHumanConfirm, State::Queued, State::Delivered, State::NotDelivered, State::DeliveryUnknown, State::Refused, State::Done];
+    const ALL: [State; 9] = [State::Requested, State::AwaitingHumanConfirm, State::Queued, State::Delivered, State::NotDelivered, State::DeliveryUnknown, State::Refused, State::Done, State::Failed];
     fn as_str(self) -> &'static str {
         match self {
             State::Requested => "requested",
@@ -253,6 +260,7 @@ impl State {
             State::DeliveryUnknown => "delivery_unknown",
             State::Refused => "refused",
             State::Done => "done",
+            State::Failed => "failed",
         }
     }
     /// An unknown ledger state reads as final.
@@ -261,6 +269,40 @@ impl State {
     }
 }
 
+
+/// Where an ask is (ADR-13 Decision 6). `queued`: stdin written; `delivered`: the `init` check passed; `done`: the
+/// `result` event arrived; `failed`: anything else, with a reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskState {
+    Queued,
+    Delivered,
+    Done,
+    Failed,
+}
+
+impl AskState {
+    fn state(self) -> State {
+        match self {
+            Self::Queued => State::Queued,
+            Self::Delivered => State::Delivered,
+            Self::Done => State::Done,
+            Self::Failed => State::Failed,
+        }
+    }
+}
+
+/// One ledger line for an ask. `text` (already framed-sanitised, nonce redacted) goes on the `queued` line only.
+#[derive(Clone, Copy, Debug)]
+pub struct AskRecord<'a> {
+    pub ask_id: &'a str,
+    pub run_id: &'a str,
+    /// The run session the question is about (the Lead itself has `lead_session_id`).
+    pub session_id: &'a str,
+    pub lead_session_id: &'a str,
+    pub state: AskState,
+    pub text: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
 
 fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
@@ -292,6 +334,7 @@ impl Service {
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
+            last_recorded: None,
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
@@ -345,6 +388,26 @@ impl Service {
             }
         }
         self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
+    }
+
+    // ------------------------------------------------------------ asks
+
+    /// Append one ask line. An ask is human and `ui` by construction. It writes no `audit.log` line (it acts on no
+    /// worker), enters no queue, and is never pending, so the ack watcher and reconcile have nothing to do with it.
+    /// The caller records `queued` before it spawns the Lead and stops if this fails.
+    pub fn record_ask(&mut self, r: &AskRecord<'_>) -> Result<()> {
+        let now = SystemTime::now();
+        let mut a = self.new_action(Kind::Ask, Actor::Human, None, now)?;
+        a.id = r.ask_id.to_string();
+        a.run_id = r.run_id.to_string();
+        a.session_id = r.session_id.to_string();
+        a.reason = r.reason.map(str::to_string);
+        let mut extra = json!({"lead_session_id": r.lead_session_id});
+        if let Some(t) = r.text {
+            extra["text"] = json!(t);
+            extra["text_sha256"] = json!(sha256::hex_digest(t.as_bytes()));
+        }
+        self.record(&a, r.state.state(), extra, now)
     }
 
     // ------------------------------------------------------------ session
@@ -540,6 +603,7 @@ impl Service {
             r.extend(x);
         }
         self.ledger.append(&Value::Object(r))?;
+        self.last_recorded = Some(a.id.clone());
         if a.kind == Kind::Stop {
             self.last_stop.insert(a.worker.clone(), (a.id.clone(), state));
         }
@@ -901,7 +965,23 @@ impl Service {
 
     /// A tool call from the socket. The actor is always the Lead; arguments
     /// are checked against the tool's schema (no extra properties).
+    ///
+    /// Each successful call also appends one id-carrying audit line, `ALLOW desktop-control reason="mcp <tool>
+    /// id=<action_id>"`: evidence, not protection (ADR-13 6). Reconcile joins the Lead's calls by that id, and a
+    /// call with no guard line beside it means the Lead ran unguarded.
     pub fn call_tool(&mut self, tool: &str, args: &Value) -> Result<Value> {
+        self.last_recorded = None;
+        let out = self.dispatch_tool(tool, args)?;
+        let id = out.get("action_id").and_then(Value::as_str).map(str::to_string).or_else(|| self.last_recorded.take());
+        if let Some(id) = id {
+            if audit::append_line(&self.audit_log, "ALLOW", &format!("mcp {tool} id={id}"), SystemTime::now()).is_err() {
+                self.log("control_audit_failed", &[]);
+            }
+        }
+        Ok(out)
+    }
+
+    fn dispatch_tool(&mut self, tool: &str, args: &Value) -> Result<Value> {
         let empty = Map::new();
         let args = match args {
             Value::Object(m) => m,
