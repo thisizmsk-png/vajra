@@ -153,3 +153,26 @@
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
 .v-crew__state { padding: 48px var(--space-xl); }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
+
+/* Under 1200 px (UX.md section 3): the sidebar folds to 56 px icons, each keeping its name for screen readers and
+   as a tooltip; Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
+@media (max-width: 1199px) {
+  .v-shell { grid-template-columns: 56px 1fr; }
+  .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
+  .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .v-shell__nav .v-kbd-group { display: none; }
+  .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
+  .v-shell__search { margin-top: var(--space-xs); border-color: transparent; background: transparent; }
+  .v-shell__search:hover { background: var(--c-accent); }
+  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  .v-crew__head { padding: 0 var(--space-md); }
+  .v-history .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
+  .v-history .v-table th:nth-child(1) { width: 180px; }
+  .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
+  .v-history__body--open .v-history__main { display: none; }
+  .v-history__pane { border-left: 0; }
+  .v-history__form { flex-wrap: wrap; }
+  .v-history__q { flex: 1 1 100%; }
+}

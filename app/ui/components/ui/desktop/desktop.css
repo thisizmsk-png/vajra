@@ -46,7 +46,11 @@
 .v-tree__chev { transition: transform var(--t-fast) var(--ease-out); }
 .v-tree__chev--open { transform: rotate(90deg); }
 .v-tree__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.v-tree .v-row__meta { flex: none; }
+/* The name wins over the status when the tree is narrow: the status gives way first and ellipsizes. */
+.v-tree__label { min-width: 7ch; }
+.v-tree .v-row__meta { flex: 0 1 auto; min-width: 0; max-width: 60%; }
+.v-tree .v-row__meta .v-status-dot { max-width: 100%; }
+.v-tree .v-row__meta .v-status-dot > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .v-tree [role="treeitem"][aria-selected="true"] { background: var(--c-accent); }
 .v-tree .v-row { margin: 1px 0; }
 

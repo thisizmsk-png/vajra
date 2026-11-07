@@ -74,7 +74,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
 export function PaletteButton({ label }: { label: string }) {
   const { open } = useContext(Ctx);
   return (
-    <button type="button" className="v-shell__search" onClick={open} aria-keyshortcuts={ariaShortcut(KEYS)}>
+    <button type="button" className="v-shell__search" title={label} onClick={open} aria-keyshortcuts={ariaShortcut(KEYS)}>
       <Icon name="search" />
       <span className="v-shell__label">{label}</span>
       <Kbd keys={KEYS} decorative />

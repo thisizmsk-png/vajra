@@ -49,7 +49,7 @@ export function Shell() {
           <div className="v-shell__brand">{S.shell.brand}</div>
           <PaletteButton label={S.shell.search} />
           {SCREENS.map((s, i) => (
-            <a key={s} href={toHash(s)} className="v-shell__link" aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
+            <a key={s} href={toHash(s)} className="v-shell__link" title={S.nav[s]} aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
               <Icon name={ICON[s]} />
               <span className="v-shell__label">{S.nav[s]}</span>
               <Kbd keys={chord(i)} decorative />
