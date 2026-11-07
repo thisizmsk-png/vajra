@@ -40,7 +40,7 @@ const REPORT_MESSAGE: Record<string, string> = {
 };
 
 const text = (a?: string, b?: string) => (a ?? "").localeCompare(b ?? "");
-const TONE: Record<string, "success" | "warning" | "danger" | "info"> = { active: "info", done: "success", stopped: "warning", failed: "danger" };
+const TONE = { active: "info", done: "success", stopped: "warning", failed: "danger", abandoned: undefined } as Record<string, "success" | "warning" | "danger" | "info" | undefined>;
 const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, verify: (c: Campaign) => void): Column<Campaign>[] => [
   // The goal leads; the slug under it opens the run and names the button (the slug is what the terminal shows).
   { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => (
