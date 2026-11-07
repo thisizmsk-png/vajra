@@ -941,15 +941,15 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
 2026-11-05). Evidence (GitHub API and Competitor M's docs, 2026-11-05; not installed on the owner's machine):
 - **Project:** Competitor M, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
   141 open issues).
-- **Storage:** SQLite at its SQLite database (WAL mode, sessions, observations and summaries,
-  FTS5) plus a Chroma vector store. Settings are in its settings file.
+- **Storage:** SQLite in Competitor M's data directory under the home directory (exact path redacted here; it is in the local codename key; WAL mode, sessions, observations and summaries,
+  FTS5) plus a Chroma vector store. Its settings are a JSON file in the same directory.
 - **Capture:** six Claude Code hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
   SessionEnd) capture what the agent does, compress it with a model, and inject context into later
   sessions. A local Bun worker serves an HTTP API and a viewer, with loopback bind as its only protection
   (its docs say so).
 - **Billing and privacy:** compression defaults to provider `claude` with
-  `CLAUDE_MEM_CLAUDE_AUTH_METHOD=subscription`, which conflicts with our billing rules (no SDK use of plan
-  credentials). The installer offers a hosted account (CMEM Pro, cloud sync) unless opted out. `<private>`
+  its auth-method setting set to `subscription`, which conflicts with our billing rules (no SDK use of plan
+  credentials). The installer offers a hosted account (a paid plan with cloud sync) unless opted out. `<private>`
   tags exclude content.
 - **Options:**
   - (a) Integrate as a live read-only source. Rejected: it would tie us to an unauthenticated local HTTP
