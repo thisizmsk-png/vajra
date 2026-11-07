@@ -1555,6 +1555,10 @@ fn output_failure(o: &Output, home: &Path) -> Value {
     if o.timed_out {
         return reason("timeout", None, None);
     }
+    // Output cut at the bridge's cap: the exit code and the partial text of a cut run say nothing reliable.
+    if o.truncated {
+        return reason("oversize", Some("script output over the cap".into()), None);
+    }
     let from_stdout = || serde_json::from_str::<Value>(o.stdout.trim()).ok().and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
     // The script's own missing-dependency message is a missing jq, not an unexplained exit.
     if o.stderr.contains("jq is required") {

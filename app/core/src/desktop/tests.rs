@@ -2485,3 +2485,33 @@ fn report_unknown_says_jq_missing_when_the_script_itself_reports_it() {
     assert_eq!(r["integrity"], "unknown", "{r}");
     assert_eq!(r["reason"]["code"], "jq_missing", "{r}");
 }
+
+#[test]
+fn report_unknown_says_oversize_when_the_scripts_output_hits_the_cap() {
+    // Output cut at the bridge's cap is not a verifier failure: the exit code and the partial text say nothing reliable.
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x'\nexit 7")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+    assert!(r["reason"].get("exit_code").is_none(), "no exit code is reported for a cut run: {r}");
+    assert!(r["reason"]["detail"].as_str().is_some_and(|d| d.contains("output")), "{r}");
+}
+
+#[test]
+fn report_unknown_says_oversize_when_only_stderr_hits_the_cap() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 7")) else { return };
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+}
+
+#[test]
+fn evidence_says_oversize_when_the_check_output_hits_the_cap() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let py = t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py");
+    fs::write(&py, "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('x' * 2200000)\nsys.exit(0)\n").unwrap();
+    fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "oversize", "{r}");
+}
