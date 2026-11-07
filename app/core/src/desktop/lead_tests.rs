@@ -196,7 +196,7 @@ fn ask_round_trip_streams_records_and_resumes() {
     assert!(argv.starts_with("-p\n--session-id\n"), "{argv}");
     assert!(argv.contains("--setting-sources\n\n--settings\n") && argv.contains("--setting-sources\n\n--settings\n"), "{argv}");
     assert!(!argv.contains("bhima"), "ask text is never an argv element");
-    let stdin = std::fs::read_to_string(&t.files("stdin.").iter().find(|p| std::fs::read_to_string(p).unwrap().contains("what is bhima")).unwrap()).unwrap();
+    let stdin = std::fs::read_to_string(t.files("stdin.").iter().find(|p| std::fs::read_to_string(p).unwrap().contains("what is bhima")).unwrap()).unwrap();
     assert!(stdin.starts_with("[Vajra Desktop: question from the human, ask "), "{stdin}");
     assert!(stdin.ends_with("what is bhima doing? [redacted]") && !stdin.contains(NONCE));
 
@@ -410,7 +410,7 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"]["vajra-desktop"]["args"], json!(["--mcp"]));
     // The argv names exactly those files.
-    let argv = std::fs::read_to_string(&t.files("argv.").pop().unwrap()).unwrap();
+    let argv = std::fs::read_to_string(t.files("argv.").pop().unwrap()).unwrap();
     assert!(argv.contains(&format!("--settings\n{}\n", dir.join("settings.json").display())), "{argv}");
 }
 
@@ -479,7 +479,7 @@ fn lead_stream_rebuilt_from_transcript_after_restart() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(lead_sid.into()) };
-    std::fs::create_dir_all(&t.data()).unwrap();
+    std::fs::create_dir_all(t.data()).unwrap();
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
     std::fs::create_dir_all(&proj).unwrap();

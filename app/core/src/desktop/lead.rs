@@ -38,6 +38,10 @@ const REBUILD_BYTES: u64 = 4 * 1024 * 1024;
 /// Where the guard script lives under `$HOME`.
 const GUARD_SCRIPT: &str = ".claude/skills/vajra/hooks/pre-tool-use.sh";
 
+/// Test seam: runs right after the settings file is written, before it is verified.
+#[cfg(test)]
+pub(super) type AfterWrite = Box<dyn Fn(&Path) + Send>;
+
 struct Active {
     ask_id: String,
     handle: Arc<Handle>,
@@ -59,7 +63,7 @@ pub(super) struct LeadState {
     /// The app's own executable, for the `--mcp` server entry in `mcp.json`.
     exe: PathBuf,
     #[cfg(test)]
-    pub(super) after_write: Mutex<Option<Box<dyn Fn(&Path) + Send>>>,
+    pub(super) after_write: Mutex<Option<AfterWrite>>,
 }
 
 impl LeadState {

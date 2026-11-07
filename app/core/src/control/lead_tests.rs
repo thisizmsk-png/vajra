@@ -288,7 +288,7 @@ fn deny_rules_all_double_slash_abs() {
             let canon = canon.to_str().unwrap().trim_start_matches('/').to_string();
             let has = |b: &str| rules.iter().any(|x| x.starts_with(&format!("Read(//{b}/")));
             assert!(has(given), "case {case}: given form of {base:?}");
-            assert_eq!(has(&canon), true, "case {case}: realpath form of {base:?}");
+            assert!(has(&canon), "case {case}: realpath form of {base:?}");
             // The twin is a distinct rule exactly when the canonical base differs.
             let twin_distinct = canon != given;
             let n_given = rules.iter().filter(|x| x.starts_with(&format!("Read(//{given}/"))).count();
