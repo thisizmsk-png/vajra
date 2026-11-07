@@ -90,6 +90,8 @@ function WorktreeTab({ info }: { info: WorktreeInfo | null | undefined }) {
   );
 }
 
+const WORKTREE_RETRY_MS = 3000;
+
 /** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
 export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
   const agent = node.id.slice("agent:".length);
@@ -98,11 +100,23 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   const [task, setTask] = useState<Json | null>(null);
   const taskId = taskGraphId(runId, taskLocalId);
 
+  // A worker can exist before its transcript names a cwd, so the first answer may be "no crew worktree". Keep asking
+  // while the worker is live; a worker that finished (or never had a crew worktree) is asked once more per status change.
+  const finished = status === "done" || status === "failed";
   useEffect(() => {
     let live = true;
-    api.worktreeInfo(agent).then((i) => live && setInfo(i), () => live && setInfo(null));
-    return () => { live = false; };
-  }, [agent]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ask = () => api.worktreeInfo(agent).then(
+      (i) => live && setInfo(i),
+      () => {
+        if (!live) return;
+        setInfo(null);
+        if (!finished) timer = setTimeout(ask, WORKTREE_RETRY_MS);
+      },
+    );
+    void ask();
+    return () => { live = false; clearTimeout(timer); };
+  }, [agent, finished]);
   useEffect(() => {
     let live = true;
     if (taskId) api.task(slug, taskId).then((r) => live && setTask((r.task as Json) ?? null), () => undefined);

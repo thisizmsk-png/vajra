@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
@@ -52,6 +52,19 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     await waitFor(() => expect(screen.getAllByText(/two/).length).toBeGreaterThan(0));
     expect(f.calls.find((c) => c.cmd === "diff")?.args).toEqual({ cwd: info.worktree, base: info.base });
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("finds the worktree once the worker's transcript names it (first lookup fails, a later one succeeds)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let n = 0;
+    const f = await open({ worktree_info: () => { if (n++ === 0) throw { error: "not_a_crew_worktree" }; return info; } });
+    fireEvent.click(await tab(S.crew.tabs.worktree));
+    expect(await screen.findByText(S.crew.noWorktree)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    expect((await screen.findAllByText(info.worktree, { exact: false })).length).toBeGreaterThan(0);
+    expect(screen.queryByText(S.crew.noWorktree)).toBeNull();
+    expect(f.calls.filter((c) => c.cmd === "worktree_info").length).toBeGreaterThanOrEqual(2);
+    vi.useRealTimers();
   });
 
   it("Diff says when there is nothing to show, was cut off, or failed", async () => {
