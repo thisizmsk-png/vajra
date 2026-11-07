@@ -4,6 +4,7 @@ import { Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
+import { useCampaignIntegrity } from "../campaignIntegrity";
 import type { Campaign, Report } from "../../ipc";
 import { useRoute } from "../../router";
 
@@ -38,7 +39,8 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
   { key: "passing", header: S.history.colPassing, numeric: true, sort: (a, b) => (a.passing ?? 0) - (b.passing ?? 0), cell: (c) => (c.total != null ? `${c.passing ?? 0}/${c.total}` : "") },
   { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => c.updated ?? "" },
   { key: "integrity", header: S.history.colIntegrity, sort: (a, b) => text(a.integrity, b.integrity), cell: (c) => (
-    c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
+    c.integrity === "checking" ? <Badge>{S.history.integrityChecking}</Badge>
+      : c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
       : c.integrity === "ok" ? <Badge status="success">{S.history.integrityOk}</Badge>
       : <Badge>{S.history.integrityUnknown}</Badge>
   ) },
@@ -53,6 +55,7 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
 export function History() {
   const [, go] = useRoute();
   const [camps, setCamps] = useState<Campaign[] | null>(null);
+  const listed = useCampaignIntegrity(camps);
   const [loadErr, setLoadErr] = useState("");
   const [q, setQ] = useState("");
   const [repo, setRepo] = useState("");
@@ -107,7 +110,7 @@ export function History() {
         {loadErr && <div role="alert"><Text variant="body-sm">{S.history.failed} {loadErr}</Text></div>}
         {camps && camps.length === 0 && <Text variant="body-sm" muted>{S.history.empty}</Text>}
         {camps && camps.length > 0 && (
-          <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
+          <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={listed ?? []} rowKey={(c) => c.slug} />
         )}
         {view && (
           <div aria-live="polite">
