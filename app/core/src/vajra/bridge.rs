@@ -204,7 +204,7 @@ impl Bridge {
         }
     }
 
-    /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths left out),
+    /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths, relative to `repo`, left out),
     /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
     /// The repo's index, working tree and object store are never written: every new object (a blob per modified or untracked
     /// file, then the trees) goes to a temp object dir (`GIT_OBJECT_DIRECTORY`) that is removed afterwards, while the repo's
@@ -238,6 +238,9 @@ impl Bridge {
                 };
                 run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| !o.timed_out && o.code == Some(0))
             };
+            // verify-work excludes its walkthrough dir relative to the RUN's cwd (`<top>/<prefix>data/walkthroughs`), so the
+            // exclusions below are prefixed with the cwd's path under the top level (empty at the root).
+            let prefix = git(&["rev-parse", "--show-prefix"], false)?.stdout.trim().to_string();
             let root = git(&["rev-parse", "--show-toplevel"], false)?.stdout.trim().to_string();
             *top.borrow_mut() = Path::new(&root).canonicalize().ok().filter(|p| p.is_absolute())?;
             // The repo's object dir as an absolute path (`--git-path` answers relative to the top level for a plain checkout).
@@ -250,7 +253,7 @@ impl Bridge {
                 git(&["read-tree", &head], true)?;
             }
             let mut add = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
-            add.extend(exclude.iter().map(|d| format!(":(exclude){d}")));
+            add.extend(exclude.iter().map(|d| format!(":(exclude){prefix}{d}")));
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
             git(&add, true)?;
             let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
