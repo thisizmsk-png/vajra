@@ -100,11 +100,10 @@ impl DirHandle {
                 break if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code)) };
             }
             let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
-            if let Ok(n) = name.to_str()
-                && n != "."
-                && n != ".."
-            {
-                out.push(n.to_string());
+            if let Ok(n) = name.to_str() {
+                if n != "." && n != ".." {
+                    out.push(n.to_string());
+                }
             }
         };
         unsafe { libc::closedir(dir) };
