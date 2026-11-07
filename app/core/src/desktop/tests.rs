@@ -192,7 +192,7 @@ fn campaigns_and_crew_read_through_the_allowlist() {
     )
     .unwrap();
     let app = t.app();
-    let c = app.list_campaigns().unwrap();
+    let c = with_badges(&app, false);
     assert!(c["campaigns"].as_array().unwrap().iter().any(|x| x["slug"] == "deliver-20261105-1810"));
     let tree = app.crew("deliver-20261105-1810", "20261105-1810").unwrap();
     assert!(tree["kind"].is_string());
@@ -510,11 +510,11 @@ fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
     // A fresh run in a minute that is taken moves to the next free minute.
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC
     assert_eq!(ids::run_id_at(now), "20261105-1230");
-    let (t2, id2) = app.fresh_run_id(now);
+    let (t2, id2) = app.fresh_run_id(now).unwrap();
     assert_eq!(id2, "20261105-1231");
     assert_eq!(t2, now + 60);
     lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
-    assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
+    assert_eq!(app.fresh_run_id(now).unwrap().1, "20261105-1232");
 }
 
 #[test]
@@ -555,10 +555,10 @@ fn two_resumes_of_one_campaign_get_distinct_run_ids() {
     // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
     let t = Tmp::new();
     let app = t.app();
-    let a = app.fresh_run_id(1_794_000_000).1;
+    let a = app.fresh_run_id(1_794_000_000).unwrap().1;
     // The first resume's run entry is replaced by the second; the issued set still remembers it.
     lock(&app.runs).clear();
-    let b = app.fresh_run_id(1_794_000_000).1;
+    let b = app.fresh_run_id(1_794_000_000).unwrap().1;
     assert_ne!(a, b);
     assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
 }
@@ -738,7 +738,7 @@ fn list_campaigns_marks_each_campaign_ok_failed_or_unknown() {
         let t = Tmp::new();
         fake_campaign_script(&t, exit, "x");
         campaign(&t, "c1", None);
-        let l = t.app().list_campaigns().unwrap();
+        let l = with_badges(&t.app(), false);
         assert_eq!(l["campaigns"][0]["integrity"], want, "exit {exit}: {l}");
     }
 }
@@ -759,8 +759,8 @@ fn two_unchanged_listings_inside_the_ttl_verify_each_campaign_once() {
     campaign(&t, "c1", None);
     campaign(&t, "c2", None);
     let (app, _) = app_with_clock(&t);
-    app.list_campaigns().unwrap();
-    let l = app.list_campaigns().unwrap();
+    with_badges(&app, false);
+    let l = with_badges(&app, false);
     assert_eq!(runs(&log), 2, "one verify per campaign; the second listing reuses the verdict");
     assert_eq!(l["campaigns"][0]["integrity"], "ok");
 }
@@ -771,12 +771,12 @@ fn a_verdict_older_than_the_ttl_is_verified_again() {
     let log = fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", None);
     let (app, ms) = app_with_clock(&t);
-    app.list_campaigns().unwrap();
+    with_badges(&app, false);
     ms.fetch_add(4_999, std::sync::atomic::Ordering::SeqCst);
-    app.list_campaigns().unwrap();
+    with_badges(&app, false);
     assert_eq!(runs(&log), 1, "4.999 s: still inside the 5 s window");
     ms.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    app.list_campaigns().unwrap();
+    with_badges(&app, false);
     assert_eq!(runs(&log), 2, "5 s: expired");
 }
 
@@ -786,8 +786,8 @@ fn refresh_verifies_again_inside_the_ttl() {
     let log = fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", None);
     let (app, _) = app_with_clock(&t);
-    app.list_campaigns().unwrap();
-    app.list_campaigns_opt(true).unwrap();
+    with_badges(&app, false);
+    with_badges(&app, true);
     assert_eq!(runs(&log), 2);
 }
 
@@ -805,7 +805,7 @@ fn a_burst_of_listings_for_one_campaign_shares_one_verify() {
     campaign(&t, "c1", None);
     let app = t.app();
     let got: Vec<Value> = std::thread::scope(|s| {
-        let hs: Vec<_> = (0..8).map(|_| s.spawn(|| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone())).collect();
+        let hs: Vec<_> = (0..8).map(|_| s.spawn(|| with_badges(&app, false)["campaigns"][0]["integrity"].clone())).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert!(got.iter().all(|v| v == "ok"), "{got:?}");
@@ -818,8 +818,8 @@ fn unknown_is_never_reused() {
     let log = fake_campaign_script(&t, 1, "jq: not found");
     campaign(&t, "c1", None);
     let (app, _) = app_with_clock(&t);
-    app.list_campaigns().unwrap();
-    app.list_campaigns().unwrap();
+    with_badges(&app, false);
+    with_badges(&app, false);
     assert_eq!(runs(&log), 2, "an unknown verdict is retried on the next listing");
 }
 
@@ -829,7 +829,7 @@ fn verify_campaign_refreshes_that_campaigns_verdict() {
     fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", Some(b"text"));
     let (app, _) = app_with_clock(&t);
-    let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
+    let verdict = |app: &App| with_badges(app, false)["campaigns"][0]["integrity"].clone();
     assert_eq!(verdict(&app), "ok");
     fake_campaign_script(&t, 3, "signature INVALID");
     assert_eq!(verdict(&app), "ok", "inside the window the listing still shows the earlier verdict");
@@ -859,8 +859,8 @@ fn a_replaced_signing_key_shows_within_five_seconds_or_at_once_with_refresh() {
     fs::write(&key, "K1").unwrap();
     let (app, ms) = app_with_clock(&t);
     let step = |n: u64| { ms.fetch_add(n, std::sync::atomic::Ordering::SeqCst); };
-    let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
-    let fresh = |app: &App| app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"].clone();
+    let verdict = |app: &App| with_badges(app, false)["campaigns"][0]["integrity"].clone();
+    let fresh = |app: &App| with_badges(app, true)["campaigns"][0]["integrity"].clone();
     assert_eq!(verdict(&app), "ok");
     fs::write(&key, "K2").unwrap(); // install repair generates a new key; no campaign file is touched
     step(4_999);
@@ -889,31 +889,8 @@ fn a_verify_that_overruns_its_timeout_reads_unknown_never_ok() {
     let mut app = t.app();
     app.verify_timeout = Duration::from_millis(300);
     let started = std::time::Instant::now();
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "unknown");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "unknown");
     assert!(started.elapsed() < Duration::from_secs(4), "the listing waited for the full sleep");
-}
-
-#[test]
-fn listing_runs_verifies_in_parallel_but_never_more_than_four_at_once() {
-    use std::os::unix::fs::PermissionsExt;
-    let t = Tmp::new();
-    let dir = t.home().join(".claude/skills/vajra/scripts");
-    fs::create_dir_all(&dir).unwrap();
-    let log = t.0.join("overlap.log");
-    let sh = dir.join("vajra-campaign.sh");
-    fs::write(&sh, format!("#!/bin/bash\necho s >> '{l}'\nsleep 0.4\necho e >> '{l}'\nexit 0\n", l = log.display())).unwrap();
-    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
-    for i in 0..10 {
-        campaign(&t, &format!("c{i}"), None);
-    }
-    let l = t.app().list_campaigns().unwrap();
-    assert!(l["campaigns"].as_array().unwrap().iter().all(|c| c["integrity"] == "ok"), "{l}");
-    let (mut cur, mut peak) = (0i32, 0i32);
-    for line in fs::read_to_string(&log).unwrap().lines() {
-        cur += if line == "s" { 1 } else { -1 };
-        peak = peak.max(cur);
-    }
-    assert!((2..=4).contains(&peak), "peak concurrency {peak}");
 }
 
 #[test]
@@ -923,14 +900,14 @@ fn list_campaigns_reverifies_after_an_edit_even_when_the_mtime_is_restored() {
     fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", Some(b"AAAA"));
     let app = t.app();
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "ok");
     let f = t.home().join(".claude/vajra/campaigns/c1/report.md");
     let old = fs::metadata(&f).unwrap().modified().unwrap();
     fs::write(&f, b"BBBB").unwrap(); // same size
     fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
     assert_eq!(fs::metadata(&f).unwrap().modified().unwrap(), old, "mtime restored");
     fake_campaign_script(&t, 3, "signature INVALID"); // the script now says the campaign is tampered
-    assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "failed");
+    assert_eq!(with_badges(&app, true)["campaigns"][0]["integrity"], "failed");
 }
 
 #[test]
@@ -947,7 +924,7 @@ fn a_hung_verify_does_not_block_other_reader_calls() {
     campaign(&t, "c1", None);
     let app = t.app();
     let reached = std::thread::scope(|s| {
-        let lister = s.spawn(|| app.list_campaigns().unwrap());
+        let lister = s.spawn(|| with_badges(&app, false));
         std::thread::sleep(Duration::from_millis(400)); // the lister is now inside verify
         let (tx, rx) = std::sync::mpsc::channel();
         let app = &app;
@@ -986,9 +963,9 @@ fn an_unknown_verdict_clears_once_the_install_is_repaired() {
     fake_campaign_script(&t, 1, "jq: not found");
     campaign(&t, "c1", None);
     let app = t.app();
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "unknown");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "unknown");
     fake_campaign_script(&t, 0, ""); // the install is repaired; the campaign files are untouched
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "ok");
 }
 
 #[test]
@@ -1005,11 +982,11 @@ fn list_campaigns_reverifies_when_a_symlinked_input_changes_its_target() {
     std::os::unix::fs::symlink(&target, camps.join("c1/features.json")).unwrap();
     let app = t.app();
     let ok = |l: &Value, i: usize| l["campaigns"][i]["integrity"].clone();
-    let l = app.list_campaigns().unwrap();
+    let l = with_badges(&app, false);
     assert_eq!((ok(&l, 0), ok(&l, 1)), (json!("ok"), json!("ok")));
     fs::write(&target, r#"{"features":[1]}"#).unwrap(); // edited in place, the link itself untouched
     fake_campaign_script(&t, 3, "signature INVALID");
-    let l = app.list_campaigns_opt(true).unwrap();
+    let l = with_badges(&app, true);
     assert_eq!(ok(&l, 0), "failed", "c1 follows the edited target: {l}");
 }
 
@@ -1027,7 +1004,7 @@ fn listing_latency_with_the_real_script() {
         let mut ms = Vec::new();
         for _ in 0..3 {
             let t0 = std::time::Instant::now();
-            let l = app.list_campaigns().unwrap();
+            let l = with_badges(&app, false);
             ms.push(t0.elapsed().as_millis());
             assert!(l["campaigns"].as_array().unwrap().iter().all(|c| c["integrity"] == "ok"), "{l}");
         }
@@ -1864,7 +1841,7 @@ fn an_older_listing_check_cannot_overwrite_a_newer_explicit_verify() {
     campaign(&t, "c1", None);
     let app = Arc::new(t.app());
     // 1. A listing check starts against valid state and is held at the barrier.
-    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let a = { let app = app.clone(); std::thread::spawn(move || with_badges(&app, false)) };
     let end = std::time::Instant::now() + Duration::from_secs(10);
     while !ctl.join("started").exists() {
         assert!(std::time::Instant::now() < end, "the listing check never started");
@@ -1881,7 +1858,7 @@ fn an_older_listing_check_cannot_overwrite_a_newer_explicit_verify() {
     let v = b.join().unwrap();
     assert_eq!(v["ok"], false, "{v}");
     // 4. The badge shows the newer failure, not the older check's ok.
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "failed");
 }
 
 #[test]
@@ -1894,7 +1871,7 @@ fn a_campaign_the_reader_cannot_summarise_still_gets_an_integrity_verdict() {
     fs::write(d.join("progress.md"), "p").unwrap();
     campaign(&t, "bad", None);
     fs::write(t.home().join(".claude/vajra/campaigns/bad/campaign.json"), "{ truncated").unwrap();
-    let l = t.app().list_campaigns().unwrap();
+    let l = with_badges(&t.app(), false);
     for s in ["gone", "bad"] {
         let c = l["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == s).unwrap_or_else(|| panic!("{s} missing: {l}"));
         assert!(c["error"].is_string(), "{s}: {c}");
@@ -1909,7 +1886,7 @@ fn an_unreadable_campaign_whose_check_cannot_run_is_unknown_never_missing() {
     let d = t.home().join(".claude/vajra/campaigns/gone");
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("progress.md"), "p").unwrap();
-    let l = t.app().list_campaigns().unwrap();
+    let l = with_badges(&t.app(), false);
     assert_eq!(l["campaigns"][0]["integrity"], "unknown", "{l}");
 }
 
@@ -1924,7 +1901,7 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
     runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
-    let (_, id) = app.fresh_run_id(now);
+    let (_, id) = app.fresh_run_id(now).unwrap();
     assert_ne!(id, "20261105-1230", "the persisted id is taken");
 }
 
@@ -1948,7 +1925,7 @@ fn an_older_report_read_cannot_overwrite_a_newer_explicit_verify() {
     let r = app.read_report_with("real1", &|_| {}, &between).unwrap();
     assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
     // 4. ...but its older "ok" must not replace the newer failure: the next listing keeps it.
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "failed");
 }
 
 #[test]
@@ -1959,7 +1936,7 @@ fn a_newer_report_failure_survives_an_older_listing_check_that_finishes_ok() {
     let ctl = barrier_campaign_script(&t);
     campaign(&t, "c1", None); // only campaign.json: the held reader refuses it (required inputs missing)
     let app = Arc::new(t.app());
-    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let a = { let app = app.clone(); std::thread::spawn(move || with_badges(&app, false)) };
     let end = std::time::Instant::now() + Duration::from_secs(10);
     while !ctl.join("started").exists() {
         assert!(std::time::Instant::now() < end, "the listing check never started");
@@ -1968,7 +1945,7 @@ fn a_newer_report_failure_survives_an_older_listing_check_that_finishes_ok() {
     assert_eq!(app.read_report("c1").unwrap()["integrity"], "integrity_failed");
     fs::write(ctl.join("go"), "").unwrap();
     assert_eq!(a.join().unwrap()["campaigns"][0]["integrity"], "ok", "the held listing check saw the old state");
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+    assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "failed");
 }
 
 #[test]
@@ -2016,13 +1993,286 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         let seen = std::cell::RefCell::new(None);
         let seam = |st: &str| {
             if st == "check:report" {
-                *seen.borrow_mut() = Some(app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone());
+                *seen.borrow_mut() = Some(with_badges(&app, false)["campaigns"][0]["integrity"].clone());
             }
         };
         let r = app.read_report_with("real1", &seam, &|| {}).unwrap();
         let case = format!("{tamper}, cached failure {cached_failure}");
         assert_eq!(r["integrity"], "integrity_failed", "{case}: {r}");
         assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
-        assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
+        assert_eq!(with_badges(&app, false)["campaigns"][0]["integrity"], "failed", "{case}");
     }
+}
+
+// ---- #28: the list returns at once; each badge fills in from its own campaign_integrity call --------------------
+
+/// The list as the UI sees it once every badge has filled in: the summaries, then one `campaign_integrity` per slug.
+fn with_badges(app: &App, refresh: bool) -> Value {
+    let mut l = app.list_campaigns_opt(refresh).unwrap();
+    for c in l["campaigns"].as_array_mut().unwrap() {
+        let slug = c["slug"].as_str().unwrap().to_string();
+        c["integrity"] = app.campaign_integrity(&slug, refresh).unwrap()["integrity"].clone();
+    }
+    l
+}
+
+fn slow_campaign_script(t: &Tmp, secs: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let log = t.0.join("slow.log");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\necho v >> '{}'\nsleep {secs}\nexit 0\n", log.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    log
+}
+
+#[test]
+fn list_campaigns_answers_at_once_with_checking_and_starts_no_verify() {
+    let t = Tmp::new();
+    let log = slow_campaign_script(&t, "5");
+    campaign(&t, "c1", None);
+    campaign(&t, "c2", None);
+    let started = std::time::Instant::now();
+    let l = t.app().list_campaigns().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2), "the listing waited for a verify");
+    for c in l["campaigns"].as_array().unwrap() {
+        assert_eq!(c["integrity"], "checking", "{c}");
+        assert_eq!(c["goal"], "g", "the summary is still there: {c}");
+    }
+    assert_eq!(runs(&log), 0, "listing must not run the verify script");
+}
+
+#[test]
+fn a_fresh_cached_verdict_is_listed_and_refresh_lists_checking_again() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    let (app, ms) = app_with_clock(&t);
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok", "inside the TTL");
+    assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "checking", "refresh asks again");
+    ms.fetch_add(5_000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "checking", "an expired verdict is not shown");
+    assert_eq!(runs(&log), 1, "listing never verifies");
+}
+
+#[test]
+fn campaign_integrity_answers_ok_failed_or_unknown_and_refuses_a_bad_slug() {
+    for (exit, want) in [(0, "ok"), (3, "failed"), (1, "unknown")] {
+        let t = Tmp::new();
+        fake_campaign_script(&t, exit, "x");
+        campaign(&t, "c1", None);
+        let r = t.app().campaign_integrity("c1", false).unwrap();
+        assert_eq!((r["slug"].as_str(), r["integrity"].as_str()), (Some("c1"), Some(want)), "exit {exit}: {r}");
+    }
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    for bad in ["../x", "", "a b", ".hidden"] {
+        assert_eq!(code(&t.app().campaign_integrity(bad, false).unwrap_err()), "invalid_args", "{bad}");
+    }
+    // A name that looks like an option is a valid id but never reaches the script: it reads unknown.
+    assert_eq!(t.app().campaign_integrity("-rf", false).unwrap()["integrity"], "unknown");
+    assert_eq!(runs(&log), 0);
+}
+
+#[test]
+fn a_failed_or_timed_out_verify_is_not_kept_as_a_verdict() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 1, "jq: not found");
+    campaign(&t, "c1", None);
+    let (app, _) = app_with_clock(&t);
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "unknown");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "checking", "unknown is not listed as a verdict");
+    fake_campaign_script(&t, 0, "");
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok", "asked again, not served from a cached unknown");
+    assert_eq!(runs(&log), 2);
+}
+
+#[test]
+fn separate_integrity_calls_for_one_campaign_share_one_verify() {
+    let t = Tmp::new();
+    let log = slow_campaign_script(&t, "0.5");
+    campaign(&t, "c1", None);
+    let app = t.app();
+    let got: Vec<Value> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8).map(|_| s.spawn(|| app.campaign_integrity("c1", false).unwrap()["integrity"].clone())).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(got.iter().all(|v| v == "ok"), "{got:?}");
+    assert_eq!(runs(&log), 1, "eight calls, one verify in flight");
+}
+
+#[test]
+fn integrity_calls_for_many_campaigns_never_run_more_than_four_verifies_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let log = t.0.join("overlap2.log");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\necho s >> '{l}'\nsleep 0.4\necho e >> '{l}'\nexit 0\n", l = log.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    for i in 0..10 {
+        campaign(&t, &format!("c{i}"), None);
+    }
+    let app = t.app();
+    let got: Vec<Value> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..10).map(|i| { let app = &app; s.spawn(move || app.campaign_integrity(&format!("c{i}"), false).unwrap()["integrity"].clone()) }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(got.iter().all(|v| v == "ok"), "{got:?}");
+    let (mut cur, mut peak) = (0i32, 0i32);
+    for line in fs::read_to_string(&log).unwrap().lines() {
+        cur += if line == "s" { 1 } else { -1 };
+        peak = peak.max(cur);
+    }
+    assert!((2..=4).contains(&peak), "peak concurrency {peak}");
+}
+
+#[test]
+fn a_call_that_cannot_get_a_verify_slot_within_the_budget_reads_unknown_and_is_not_cached() {
+    let t = Tmp::new();
+    slow_campaign_script(&t, "1.5");
+    for i in 0..5 {
+        campaign(&t, &format!("c{i}"), None);
+    }
+    let mut app = t.app();
+    app.verify_queue_budget = Duration::from_millis(200);
+    let got: Vec<(usize, Value)> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..5).map(|i| { let app = &app; s.spawn(move || (i, app.campaign_integrity(&format!("c{i}"), false).unwrap()["integrity"].clone())) }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let unknown: Vec<_> = got.iter().filter(|(_, v)| v == "unknown").collect();
+    assert_eq!(unknown.len(), 1, "four hold slots, the fifth waits past its budget: {got:?}");
+    assert_eq!(got.iter().filter(|(_, v)| v == "ok").count(), 4, "{got:?}");
+    let slug = format!("c{}", unknown[0].0);
+    assert_eq!(app.campaign_integrity(&slug, false).unwrap()["integrity"], "ok", "the queue timeout was not remembered as a verdict");
+}
+
+/// Review of #50: `list_campaigns(refresh=true)` is followed by the hook's `campaign_integrity(slug)` calls, which pass the
+/// default `refresh=false`. A forced list refresh must still end in a new verify, not in the cached verdict.
+#[test]
+fn a_forced_list_refresh_reaches_the_hooks_default_calls_with_a_new_verify() {
+    let t = Tmp::new();
+    key_dependent_script(&t);
+    campaign(&t, "c1", None);
+    let key = t.home().join(".claude/vajra/stand-in.key");
+    fs::write(&key, "K1").unwrap();
+    let (app, _) = app_with_clock(&t);
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok");
+    fs::write(&key, "K2").unwrap(); // the verifier now says failed; the cached "ok" is 0 ms old
+    let l = app.list_campaigns_opt(true).unwrap();
+    assert_eq!(l["campaigns"][0]["integrity"], "checking");
+    // What useCampaignIntegrity does for each "checking" row: the default refresh=false.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed", "the forced refresh verifies afresh");
+    // The new verdict is cached again: further default calls reuse it.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
+}
+
+/// Review of #50: a forced list refresh that finds a verify already in flight must not be answered by that older
+/// flight. The hook's follow-up (default `refresh=false`) has to end in a verify that started after the refresh.
+#[test]
+fn a_forced_list_refresh_during_a_running_verify_is_answered_by_a_newer_verify() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    // Reads the key when it starts, then takes a while: the verdict reflects the key as of the start.
+    let started = t.0.join("verify-started");
+    fs::write(&sh, format!("#!/bin/bash\nk=$(cat \"$HOME/.claude/vajra/stand-in.key\" 2>/dev/null)\ntouch '{}'\nsleep 0.8\n[ \"$k\" = K1 ] && exit 0\nexit 3\n", started.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let key = t.home().join(".claude/vajra/stand-in.key");
+    fs::write(&key, "K1").unwrap();
+    let app = t.app();
+    std::thread::scope(|s| {
+        let old = s.spawn(|| app.campaign_integrity("c1", false).unwrap()["integrity"].clone());
+        for _ in 0..500 { // the first verify has read K1 and is running once it says so
+            if started.exists() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists());
+        fs::write(&key, "K2").unwrap();
+        assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "checking");
+        // What the hook does for the "checking" row.
+        assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed", "not the pre-refresh flight's ok");
+        assert_eq!(old.join().unwrap(), "ok", "the older flight itself still ends with what it saw");
+    });
+    // The newer verdict is the one kept.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
+}
+
+/// Review of #50: the verdict an older flight leaves behind must not be listed as fresh while a forced refresh is pending.
+#[test]
+fn a_verdict_settled_by_a_pre_refresh_verify_is_not_listed_while_the_refresh_is_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let started = t.0.join("verify-started2");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\ntouch '{}'\nsleep 0.5\nexit 0\n", started.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let app = t.app();
+    std::thread::scope(|s| {
+        let old = s.spawn(|| app.campaign_integrity("c1", false).unwrap()["integrity"].clone());
+        for _ in 0..500 {
+            if started.exists() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists());
+        assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "checking");
+        assert_eq!(old.join().unwrap(), "ok", "the older flight settles ok after the refresh was asked");
+    });
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "checking", "not the pre-refresh ok");
+    // The follow-up verify (after the floor) is listed again.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+}
+
+#[test]
+fn a_run_id_with_a_guarded_record_is_never_reissued_after_the_index_is_lost() {
+    // `runs.jsonl` is worker-writable. If it is emptied, a restarted app must still not hand out an id whose guarded
+    // record (`control/lead/<id>/`) exists: `record_run` would overwrite its session and campaign but keep the old
+    // Lead session id and approval-only marker, so the new run would resume another run's Lead.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let _ = std::fs::remove_file(t.0.join("data/runs.jsonl"));
+    let app = t.app();
+    let (_, id) = app.fresh_run_id(at).unwrap();
+    assert_ne!(id, run, "an id with a guarded record is taken");
+}
+
+#[test]
+fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
+    // Review of #46 (P1): the guarded record holds the current minute and a forged index holds every other candidate
+    // minute. The search must fail closed, never reissue the guarded id through a fallback.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let index = t.0.join("data/runs.jsonl");
+    let _ = std::fs::remove_file(&index);
+    for k in 1..120u64 {
+        let e = runindex::Entry { campaign: "deliver-forged".into(), session_id: "1f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: ids::run_id_at(at + 60 * k), cwd: t.0.clone(), lead_session_id: None };
+        runindex::append(&index, &e).unwrap();
+    }
+    let app = t.app();
+    let got = app.fresh_run_id(at);
+    assert_eq!(got.as_ref().map_err(code), Err("run_id_exhausted"), "the guarded id must not be reissued: {got:?}");
+    // A launch fails closed too: nothing is spawned and the guarded record is not overwritten.
+    assert!(!lock(&app.issued).contains(run));
+    let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
+    assert_eq!(rec.trim(), "deliver-x");
 }

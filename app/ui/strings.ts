@@ -157,7 +157,7 @@ export const S = {
     colSlug: "Campaign", colGoal: "Goal", colStatus: "Status", colPassing: "Passing", colUpdated: "Updated",
     unreadable: "Unreadable",
     colIntegrity: "Integrity", colActions: "Actions",
-    integrityOk: "Verified", integrityFailed: "Integrity check failed", integrityUnknown: "Not checked",
+    integrityOk: "Verified", integrityFailed: "Integrity check failed", integrityUnknown: "Not checked", integrityChecking: "Checking",
     report: (slug: string) => `Report ${slug}`,
     verify: (slug: string) => `Verify ${slug}`,
     reportTitle: (slug: string) => `Report for ${slug}`,
