@@ -213,8 +213,11 @@ impl App {
         }
     }
 
-    /// Ask the Lead one question about a run. Returns as soon as the Lead is spawned; the reply streams into
-    /// `lead-<run_id>`.
+    /// Ask the Lead one question about a run. Returns once the Lead is spawned; the reply streams into
+    /// `lead-<run_id>`. The first ask after a start, or after the generated settings or the CLI version change,
+    /// first runs the startup self-test (one or two tiny turns, a few seconds), so the call can take that long.
+    /// The ask can be cancelled meanwhile: `cancel_ask` kills the self-test process too, because both share the
+    /// ask's handle, and the call then returns `cancelled`.
     pub fn ask_lead(&self, run_id: &str, text: &str) -> Res {
         self.ask_lead_inner(run_id, text).map_err(|e| e.to_json())
     }
@@ -293,7 +296,7 @@ impl App {
         fsx::private_dir(&self.data.join("lead")).map_err(io)?;
         let dir = self.data.join("lead").join(&t.run_id);
         let settings = self.write_lead_files(&dir, &t.cwd)?;
-        self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id)?;
+        self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id, handle)?;
 
         let (lead_sid, resume) = match &t.lead_session_id {
             Some(s) => (s.clone(), true),
@@ -441,7 +444,8 @@ impl App {
     /// The startup self-test (fail closed). When the generated settings or the CLI version changes, one canary turn
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, settings_sha: &str, run_id: &str) -> Result<(), LeadError> {
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
         let version = self.claude_version(bin)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -465,18 +469,19 @@ impl App {
             for _ in 0..2 {
                 let ask = lead::new_ulid(SystemTime::now())?;
                 let framed = frame(&ask, run_id, &format!("Read the file {} and show its content.", file.display()), &Redactor::default())?;
-                let h = Handle::new();
-                let child = lead_run::spawn(&argv, dir, env, &framed, &h)?;
+                let child = lead_run::spawn(&argv, dir, env, &framed, h)?;
                 let mut probe = Probe { raw: String::new() };
-                let done = lead_run::drive(child, &h, *lock(&self.lead.limits), &mut probe)?;
+                // The self-test is bounded like an ask, but never longer than two minutes.
+                let lim = *lock(&self.lead.limits);
+                let done = lead_run::drive(child, h, Limits { total: lim.total.min(Duration::from_secs(120)), ..lim }, &mut probe)?;
                 if probe.raw.contains(&secret) {
                     return Err(fail("the canary was readable"));
                 }
-                if done.denied {
+                if done.permission_denied {
                     return Ok(());
                 }
                 if done.tool_attempted {
-                    return Err(fail("the read was not denied"));
+                    return Err(fail("the read failed, but not because a permission rule denied it"));
                 }
             }
             Err(fail("the model never tried the read"))

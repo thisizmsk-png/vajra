@@ -114,6 +114,9 @@ pub struct Done {
     pub is_error: bool,
     /// A tool call was denied: an erroring `tool_result`, or `permission_denials` in the result.
     pub denied: bool,
+    /// A Read was refused by the permission rules themselves: the "denied by your permission settings" error, or a
+    /// `Read` entry in `permission_denials`. Any other tool error (a bad path, an I/O failure) does not count.
+    pub permission_denied: bool,
     /// The model called some tool.
     pub tool_attempted: bool,
 }
@@ -246,7 +249,11 @@ pub fn spawn(
     let mut child = cmd.spawn()?;
     // Hold the lock across publishing the pid, so a cancel that raced the spawn kills the group right here.
     {
-        let _l = lock(&handle.exited);
+        // A handle can drive several processes in a row (the self-test turns, then the ask): re-arm it.
+        let mut exited = lock(&handle.exited);
+        *exited = false;
+        handle.timed_out.store(false, Ordering::SeqCst);
+        handle.no_init.store(false, Ordering::SeqCst);
         handle.pid.store(child.id(), Ordering::SeqCst);
     }
     if handle.is_cancelled() {
@@ -303,7 +310,11 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
                 if c.get("type").and_then(Value::as_str) == Some("tool_result") {
                     if c.get("is_error").and_then(Value::as_bool) == Some(true) {
                         done.denied = true;
-                        sink.event(Tag::Error, &format!("tool error: {}", short(&text_of(&c["content"]), 200)));
+                        let msg = text_of(&c["content"]);
+                        if msg.contains("denied by your permission settings") {
+                            done.permission_denied = true;
+                        }
+                        sink.event(Tag::Error, &format!("tool error: {}", short(&msg, 200)));
                     } else {
                         sink.event(Tag::Tool, "result ok");
                     }
@@ -313,8 +324,11 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
         }
         "result" => {
             done.is_error = ev.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-            if ev.get("permission_denials").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
+            if let Some(a) = ev.get("permission_denials").and_then(Value::as_array).filter(|a| !a.is_empty()) {
                 done.denied = true;
+                if a.iter().any(|d| d.get("tool_name").and_then(Value::as_str) == Some("Read")) {
+                    done.permission_denied = true;
+                }
             }
             let res = ev.get("result").and_then(Value::as_str).unwrap_or("");
             if done.is_error {

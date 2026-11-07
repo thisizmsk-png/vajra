@@ -28,12 +28,20 @@ if grep -q 'Read the file' "$D/stdin.$N"; then
       C=$(cat "$P")
       printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$C"
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
+    hang)
+      sleep 60 &
+      echo $! > "$D/selftest.child"
+      wait;;
+    toolerr)
+      echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"File does not exist."}]}}'
+      echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
     notry)
       echo '{"type":"assistant","message":{"content":[{"type":"text","text":"I will not."}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[]}';;
     *)
       echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}'
-      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"denied"}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":"<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>"}]}}'
       echo '{"type":"result","is_error":false,"result":"x","permission_denials":[{"tool_name":"Read"}]}';;
   esac
   exit 0
@@ -435,27 +443,32 @@ fn lead_startup_selftest_failclosed() {
     t.set("selftest", "notry");
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
     assert_eq!(t.count("selftest.count"), 4);
+    // A read that fails for another reason (a tool error) never exercised the deny rule: refused, not passed.
+    // (Counts: one tool-error turn, no retry, because the model did try the read.)
+    t.set("selftest", "toolerr");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    assert_eq!(t.count("selftest.count"), 5);
     // A denied read passes, and the pass is cached per (settings sha256, CLI version).
     t.set("selftest", "deny");
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    assert_eq!(t.count("selftest.count"), 5);
+    assert_eq!(t.count("selftest.count"), 6);
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
-    assert_eq!(t.count("selftest.count"), 5, "cached");
+    assert_eq!(t.count("selftest.count"), 6, "cached");
     // A new CLI version is a new key.
     *lock(&app.lead.version) = None;
     t.set("version", "9.9.10 (Claude Code)");
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
-    assert_eq!(t.count("selftest.count"), 6);
+    assert_eq!(t.count("selftest.count"), 7);
     // So is a different repo (the generated rules change with it).
     let other = t.0.join("other-repo");
     std::fs::create_dir_all(&other).unwrap();
     lock(&app.runs).values_mut().for_each(|r| r.cwd = other.clone());
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
-    assert_eq!(t.count("selftest.count"), 7);
+    assert_eq!(t.count("selftest.count"), 8);
 }
 
 #[test]
@@ -573,4 +586,24 @@ fn two_runs_asking_at_once_each_get_their_own_settings() {
         h.handle.cancel();
     }
     wait_until("idle", || idle(&app));
+}
+
+#[test]
+fn cancel_reaches_the_selftest_and_ask_lead_returns_cancelled() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("selftest", "hang");
+    let res = std::thread::scope(|s| {
+        let h = s.spawn(|| app.ask_lead(RUN_ID, "hi"));
+        wait_until("the self-test to be running", || t.bin("selftest.child").exists());
+        let ask_id = lock(&app.lead.active).values().next().map(|a| a.ask_id.clone()).expect("reserved ask");
+        app.cancel_ask(&ask_id).unwrap();
+        h.join().unwrap()
+    });
+    assert_eq!(code(&res.unwrap_err()), "cancelled");
+    let child: i32 = std::fs::read_to_string(t.bin("selftest.child")).unwrap().trim().parse().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    // SAFETY: signal 0 only checks existence.
+    assert!(unsafe { libc::kill(child, 0) } != 0, "the self-test child is gone");
+    assert!(idle(&app) && t.ledger().is_empty() && t.count("ask.count") == 0, "nothing recorded, no real ask ran");
 }
