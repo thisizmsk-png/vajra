@@ -59,14 +59,10 @@ Everything must be green before you open a pull request.
 
 After changing tracked files, run `bash scripts/generate-manifest.sh` in your
 own terminal so the integrity manifest stays in sync (like `install.sh`, it is
-for you to run, not the model). `vajra-doctor.sh` flags a mismatch.
-
-**For reviewers and agents.** The manifest hashes are operator-only: workers and
-agents never run `generate-manifest.sh` and never edit a hash. The operator and
-the workers share one GitHub account, so a commit titled exactly
-`chore: regenerate manifest.json` that changes only `manifest.json` is the
-operator's regeneration. Do not ask to revert it. Check instead that
-`tests/hooks/run-manifest-fresh.sh` passes on the head.
+for you to run, not the model). `vajra-doctor.sh` flags a mismatch. The manifest
+hashes are operator-only: agents never run the generator and never edit a hash
+by hand. `tests/hooks/run-manifest-fresh.sh` checks the committed manifest
+against the tree.
 
 ## Style
 
