@@ -46,7 +46,11 @@ const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// and the next call (the UI re-asks while any row is `checking`) continues from the cached verdicts.
 const EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
 /// Verdicts kept for unchanged evidence (cleared when it grows past this).
-const EVIDENCE_CACHE_MAX: usize = 4096;
+const EVIDENCE_CACHE_MAX: usize = 512;
+/// Evidence files larger than this are always re-checked (their bytes are the cache key).
+const EVIDENCE_KEY_MAX: u64 = 16 * 1024;
+/// A verdict for evidence checked in a repo depends on the repo's state, which the key cannot see: it is reused this long.
+const EVIDENCE_LIVE_TTL: Duration = Duration::from_secs(5);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -121,6 +125,8 @@ impl Drop for FlightGuard<'_> {
 }
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+type EvKey = (Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
+
 pub struct App {
     data: PathBuf,
     home: PathBuf,
@@ -160,8 +166,10 @@ pub struct App {
     evidence_timeout: Duration,
     /// Total time one `evidence_list` call may spend running checks.
     evidence_budget: Duration,
-    /// Verdicts of finished checks, keyed on the evidence file's path, head, mtime and size: unchanged evidence is not re-run.
-    evidence_cache: Mutex<HashMap<(PathBuf, Option<String>, Option<(std::time::SystemTime, u64)>), bool>>,
+    /// Verdicts of finished checks, keyed on the evidence file's exact bytes plus head, mode and repo, so a rewritten file
+    /// (whatever it does to size or mtime) is always re-checked. Archived bundles depend on nothing else and are kept; a
+    /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
+    evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -687,15 +695,20 @@ impl App {
         let Some(tasks) = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array) else {
             return Err(fail("not_found", "no tasks for this campaign"));
         };
-        let key = |t: &Value| {
-            let ev = t.get("evidence")?;
-            let path = PathBuf::from(ev.get("path")?.as_str()?);
-            let head = ev.get("head").and_then(Value::as_str).map(String::from);
-            let m = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
-            Some((path, head, m))
+        // The key is the evidence file's exact bytes (small files only) with head, mode and repo: nothing a writer can leave
+        // unchanged while changing what the check sees. A file too large or unreadable is never cached.
+        let key = |req: &Request| -> Option<EvKey> {
+            let Request::CheckEvidence { path, head, archived, repo } = req else { return None };
+            let f = std::fs::File::open(path).ok()?;
+            if f.metadata().ok()?.len() > EVIDENCE_KEY_MAX {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(f, EVIDENCE_KEY_MAX + 1), &mut bytes).ok()?;
+            (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (bytes, head.clone(), archived.clone(), repo.clone()))
         };
         let mut verdict: HashMap<usize, bool> = HashMap::new();
-        let mut jobs: Vec<(usize, Request, Option<(PathBuf, Option<String>, Option<(std::time::SystemTime, u64)>)>)> = Vec::new();
+        let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
         {
             let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
             for (i, t) in tasks.iter().enumerate() {
@@ -704,9 +717,10 @@ impl App {
                     if t.get("evidence").is_some_and(|e| !e.is_null()) { verdict.insert(i, false); }
                     continue;
                 };
-                let k = key(t).filter(|k| k.2.is_some());
-                match k.as_ref().and_then(|k| cache.get(k)) {
-                    Some(v) => { verdict.insert(i, *v); }
+                let k = key(&req);
+                let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
+                match hit {
+                    Some((v, _)) => { verdict.insert(i, *v); }
                     None => jobs.push((i, req, k)),
                 }
             }
@@ -756,7 +770,8 @@ impl App {
             for (i, done) in got {
                 verdict.insert(i, done == Some(true));
                 if let (Some(v), Some(k)) = (done, jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone())) {
-                    cache.insert(k, v);
+                    let until = k.2.is_none().then(|| std::time::Instant::now() + EVIDENCE_LIVE_TTL);
+                    cache.insert(k, (v, until));
                 }
             }
         }

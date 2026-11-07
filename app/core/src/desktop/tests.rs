@@ -1184,7 +1184,9 @@ fn fake_tasks_script(t: &Tmp) {
     let body = "import json, sys\np = sys.argv[2]\n\
         if 'slow' in p:\n    import time; time.sleep(30)\n\
         if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
-        green = 'green' in p\nprint(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
+        green = 'green' in p\n\
+        try:\n    green = green and 'RED' not in open(p).read()\nexcept OSError:\n    pass\n\
+        print(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
     fs::write(dir.join("vajra_tasks.py"), format!("#!/usr/bin/env python3\n{body}")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(dir.join("vajra_tasks.py"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -1321,6 +1323,22 @@ fn a_second_call_during_a_sweep_runs_no_checks_and_unchanged_evidence_is_not_rec
     let r = app.evidence_list(&slug).unwrap();
     assert_eq!(row(&r, "g0", "ac")["status"], "pass", "{r}");
     assert_eq!(r["pending"], 0);
+}
+
+#[test]
+fn a_rewritten_evidence_file_with_the_same_size_and_mtime_is_rechecked_not_served_from_the_cache() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "g0", "done", &["ac"], "green")]);
+    let file = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green.json");
+    fs::write(&file, br#"{"a":"GRN"}"#).unwrap();
+    assert_eq!(row(&app.evidence_list(&slug).unwrap(), "g0", "ac")["status"], "pass");
+    let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+    fs::write(&file, br#"{"a":"RED"}"#).unwrap(); // same size
+    fs::OpenOptions::new().write(true).open(&file).unwrap().set_modified(mtime).unwrap(); // utimes restores the old mtime
+    assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "unverified", "the cache must not serve the old pass: {r}");
 }
 
 #[test]
