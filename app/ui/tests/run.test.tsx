@@ -184,7 +184,7 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
 
   it("shows a read error as an alert and keeps the page", async () => {
     window.location.hash = "#/run?slug=camp";
-    setTransport(fakeIpc({ evidence_list: new Error("x") }).transport);
+    setTransport(fakeIpc({ evidence_list: new Error("x"), run_overview: overview() }).transport);
     render(<Run />);
     expect(await screen.findByRole("alert")).toBeTruthy();
   });
@@ -196,5 +196,93 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     render(<Run />);
     expect(await screen.findByText(S.run.pick)).toBeTruthy();
     await waitFor(() => expect(f.calls).toHaveLength(0));
+  });
+});
+
+const phases = (current: string, extra: Record<string, unknown> = {}) =>
+  ["Understand", "Plan", "Execute", "Verify", "Fix", "Deliver"].map((name, i, all) => {
+    const at = all.indexOf(current);
+    return { name, state: i < at ? "done" : i === at ? "current" : "pending", ...(name === "Fix" ? extra : {}) };
+  });
+const gtask = (local: string, wave: number, status = "pending", deps: string[] = []) =>
+  ({ id: `r1.${local}`, local, title: `Title ${local}`, owner: "Backend", status, deps, wave });
+const overview = (over: Record<string, unknown> = {}) => ({
+  slug: "camp", run_id: "r1", stale: false,
+  timeline: { phases: phases("Execute"), current: "Execute", status: "active" },
+  graph: { tasks: [gtask("t1", 0, "closed"), gtask("t2", 1, "in_progress", ["r1.t1"])], waves: 2 },
+  ...over,
+});
+
+describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
+  const openOverview = async (o: unknown) => {
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({ evidence_list: list([]), run_overview: o });
+    setTransport(f.transport);
+    render(<Run />);
+    await screen.findByRole("list", { name: S.run.graph });
+    return f;
+  };
+
+  it("marks exactly one phase current and states every phase as text (AC-4.1.1)", async () => {
+    await openOverview(overview());
+    const items = within(screen.getByRole("list", { name: S.run.timeline })).getAllByRole("listitem");
+    expect(items).toHaveLength(6);
+    expect(items.filter((i) => i.getAttribute("aria-current") === "step")).toHaveLength(1);
+    expect(items[2].textContent).toContain(S.run.phaseState.current);
+    expect(items[0].textContent).toContain(S.run.phaseState.done);
+    expect(items[5].textContent).toContain(S.run.phaseState.pending);
+  });
+
+  it("shows the Fix round, with the limit only when it is known (AC-4.1.2)", async () => {
+    await openOverview(overview({ timeline: { phases: phases("Fix", { round: 2, max_rounds: null }), current: "Fix", status: "active" } }));
+    expect(screen.getByText(/round 2$/)).toBeTruthy();
+    expect(screen.queryByText(/round 2 of/)).toBeNull();
+    cleanup();
+    await openOverview(overview({ timeline: { phases: phases("Fix", { round: 3, max_rounds: 3 }), current: "Fix", status: "error" } }));
+    expect(screen.getByText(/round 3 of 3/)).toBeTruthy();
+    expect(screen.getByText(S.run.runStatus.error)).toBeTruthy();
+  });
+
+  it("shows each way a run ends as text", async () => {
+    for (const status of ["done", "need_input", "rejected"] as const) {
+      await openOverview(overview({ timeline: { phases: phases("Verify"), current: "Verify", status } }));
+      expect(screen.getAllByText(S.run.runStatus[status])[0]).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it("lists tasks with wave, owner role, status text and what each waits for (AC-4.2.1)", async () => {
+    await openOverview(overview());
+    const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
+    expect(rows[1].textContent).toContain(S.run.wave(1));
+    expect(rows[1].textContent).toContain("Backend");
+    expect(rows[1].textContent).toContain(S.run.taskStatus.in_progress);
+    expect(rows[1].textContent).toContain(`${S.run.waitsFor} t1`);
+  });
+
+  it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {
+    const tasks = Array.from({ length: 200 }, (_, i) => gtask(`t${i}`, i, "pending", i ? [`r1.t${i - 1}`] : []));
+    await openOverview(overview({ graph: { tasks, waves: 200 } }));
+    expect(screen.getAllByRole("listitem").length).toBeLessThan(60);
+  });
+
+  it("Enter on a task opens that worker in the Crew view (AC-4.2.3)", async () => {
+    await openOverview(overview());
+    const row = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem")[1];
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(window.location.hash).toContain("#/crew");
+    const q = new URLSearchParams(window.location.hash.split("?")[1]);
+    expect(Object.fromEntries(q)).toEqual({ slug: "camp", id: "r1", focus: "task:t2" });
+  });
+
+  it("says so when no tasks are planned, and shows an error when the overview cannot be read", async () => {
+    window.location.hash = "#/run?slug=camp";
+    setTransport(fakeIpc({ evidence_list: list([]), run_overview: overview({ graph: { tasks: [], waves: 0 } }) }).transport);
+    render(<Run />);
+    expect(await screen.findByText(S.run.graphEmpty)).toBeTruthy();
+    cleanup();
+    setTransport(fakeIpc({ evidence_list: list([]), run_overview: new Error("x") }).transport);
+    render(<Run />);
+    expect(await screen.findByText(S.run.overviewFailed)).toBeTruthy();
   });
 });

@@ -195,3 +195,19 @@ describe("Crew tree (S2a, US-2.1)", () => {
     expect(screen.getByText("Reviewer")).toBeTruthy();
   });
 });
+
+describe("Crew focus from the Run view's task graph (AC-4.2.3)", () => {
+  it("selects the focused task and opens its ancestors", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1&focus=task%3At2";
+    const t = node("lead", "lead", "Lead", "in_progress", [
+      node("run", "run", "Run r1", "in_progress", [
+        node("task:t1", "task", "Backend", "in_progress"),
+        node("task:t2", "task", "Frontend", "pending"),
+      ]),
+    ]);
+    open({ crew: t });
+    render(<Crew />);
+    const row = (await screen.findByText("Frontend")).closest("[role=treeitem]") as HTMLElement;
+    await waitFor(() => expect(row.getAttribute("aria-selected")).toBe("true"));
+  });
+});
