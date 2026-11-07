@@ -280,6 +280,11 @@ impl App {
         // "checking" and the UI asks `campaign_integrity` for it (so one slow verify cannot hold the list up).
         for c in list.iter_mut() {
             let slug = c["slug"].as_str().unwrap_or_default().to_string();
+            if refresh {
+                // The follow-up `campaign_integrity` calls carry no refresh flag, so the forced refresh has to reach them
+                // through the cache: drop the kept verdict (a verify already running stays, and is waited for).
+                self.forget_fresh(&slug);
+            }
             c["integrity"] = json!(if refresh { "checking" } else { self.cached_integrity(&slug).unwrap_or("checking") });
         }
         Ok(json!({"campaigns": list}))
@@ -779,6 +784,14 @@ impl App {
     }
 
     /// A real verdict still inside `verdict_ttl`, or `None` (a verify running, none taken, expired, or "unknown").
+    /// Forget a kept verdict so the next check of `slug` verifies again. A verify in flight is left alone.
+    fn forget_fresh(&self, slug: &str) {
+        let mut m = lock(&self.verdicts);
+        if matches!(m.by_slug.get(slug), Some(Verdict::Fresh(..))) {
+            m.by_slug.remove(slug);
+        }
+    }
+
     fn cached_integrity(&self, slug: &str) -> Option<&'static str> {
         match lock(&self.verdicts).by_slug.get(slug) {
             Some(&Verdict::Fresh(at, v)) if (self.clock)().saturating_sub(at) < self.verdict_ttl => Some(v),

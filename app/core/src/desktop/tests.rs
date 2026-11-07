@@ -1705,3 +1705,23 @@ fn a_call_that_cannot_get_a_verify_slot_within_the_budget_reads_unknown_and_is_n
     let slug = format!("c{}", unknown[0].0);
     assert_eq!(app.campaign_integrity(&slug, false).unwrap()["integrity"], "ok", "the queue timeout was not remembered as a verdict");
 }
+
+/// Review of #50: `list_campaigns(refresh=true)` is followed by the hook's `campaign_integrity(slug)` calls, which pass the
+/// default `refresh=false`. A forced list refresh must still end in a new verify, not in the cached verdict.
+#[test]
+fn a_forced_list_refresh_reaches_the_hooks_default_calls_with_a_new_verify() {
+    let t = Tmp::new();
+    key_dependent_script(&t);
+    campaign(&t, "c1", None);
+    let key = t.home().join(".claude/vajra/stand-in.key");
+    fs::write(&key, "K1").unwrap();
+    let (app, _) = app_with_clock(&t);
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok");
+    fs::write(&key, "K2").unwrap(); // the verifier now says failed; the cached "ok" is 0 ms old
+    let l = app.list_campaigns_opt(true).unwrap();
+    assert_eq!(l["campaigns"][0]["integrity"], "checking");
+    // What useCampaignIntegrity does for each "checking" row: the default refresh=false.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed", "the forced refresh verifies afresh");
+    // The new verdict is cached again: further default calls reuse it.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
+}
