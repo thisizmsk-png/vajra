@@ -594,3 +594,31 @@ fn a_check_failure_is_logged_once_per_distinct_error() {
     assert_eq!(n, 1, "four ticks, one error: one line\n{text}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 item 4: a resume records first and removes the stop file last. If the removal fails after the ledger and audit
+/// lines were written, the stop stays in force and a retry adds a second resume record. That duplicate is the accepted
+/// cost (never a cleared stop without its records); this pins it so it cannot grow into a second stop-lift.
+#[test]
+fn a_resume_retry_after_a_failed_stop_removal_adds_a_second_record_and_lifts_the_stop_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    let stops = dir.join("control").join(SID).join("stops");
+    fs::set_permissions(&stops, fs::Permissions::from_mode(0o500)).unwrap();
+    if fs::File::create(stops.join("probe")).is_ok() {
+        // Running as root: a read-only directory does not stop the removal, so there is nothing to observe.
+        let _ = fs::remove_file(stops.join("probe"));
+        fs::set_permissions(&stops, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    assert!(s.resume_worker(Actor::Human, "bhima").is_err(), "the stop file could not be removed");
+    assert_eq!(files(&dir, "stops"), 1, "the stop stays in force");
+    fs::set_permissions(&stops, fs::Permissions::from_mode(0o700)).unwrap();
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert_eq!(files(&dir, "stops"), 0, "the retry lifts it");
+    let resumes = crate::control::ledger::Ledger::read_all(&dir.join("control").join("ledger.jsonl")).unwrap().iter().filter(|r| r["kind"] == "resume").count();
+    assert_eq!(resumes, 2, "the failed attempt's record and the retry's");
+    assert!(matches!(s.resume_worker(Actor::Human, "bhima"), Err(ControlError::NotStopped)), "a third resume finds nothing to lift");
+    let _ = fs::remove_dir_all(&dir);
+}
