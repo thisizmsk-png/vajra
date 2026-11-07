@@ -274,11 +274,16 @@ glob_pattern_check() { # canonical search root
   case "$pat" in "~") pat="$HOME" ;; "~/"*) pat="$HOME/${pat#??}" ;; esac
   # Split into components: the leading literal ones, then the rest from the first with a glob character.
   GLOB_R=() GLOB_N=0
-  local IFS=/ rest_started=0
+  local IFS=/ rest_started=0 dotdot=0
   set -f
   for c in $pat; do
     [ -n "$c" ] || continue
-    if [ "$rest_started" = 0 ] && ! glob_pat_has "$c"; then lit="$lit/$c"; else rest_started=1; GLOB_R[$GLOB_N]="$c"; GLOB_N=$((GLOB_N + 1)); fi
+    if [ "$rest_started" = 0 ] && ! glob_pat_has "$c"; then lit="$lit/$c"; continue; fi
+    rest_started=1
+    # After the first glob character the filesystem walks the pattern: "." is a no-op, ".." steps back out of whatever
+    # the glob matched, which cannot be followed statically.
+    case "$c" in .) continue ;; ..) dotdot=1 ;; esac
+    GLOB_R[$GLOB_N]="$c"; GLOB_N=$((GLOB_N + 1))
   done
   set +f
   unset IFS
@@ -287,6 +292,7 @@ glob_pattern_check() { # canonical search root
   [ -n "$lit" ] || lit="."
   canon "$lit" "$root"
   if ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi # the literal part is not at or above the state dir
+  if [ "$dotdot" = 1 ]; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character, from a directory that holds the Vajra state directory"; fi
   rel="${VS_C:${#CANON}}"; rel="${rel#/}"
   GLOB_S=() GLOB_K=0
   if [ -n "$rel" ]; then
