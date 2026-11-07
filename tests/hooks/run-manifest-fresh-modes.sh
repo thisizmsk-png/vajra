@@ -16,7 +16,7 @@ P=0; F=0
 ok()  { P=$((P+1)); }
 bad() { F=$((F+1)); echo "FAIL :: $1"; }
 manifest() { printf '{"files":{"a.txt":"%s","tests/hooks/run-manifest-fresh.sh":"%s"}}\n' "$1" "$HS" > "$T/manifest.json"; git -C "$T" add manifest.json 2>/dev/null; }
-run() { env -u GITHUB_ACTIONS "$@" bash "$RUN" 2>&1; }
+run() { env -u GITHUB_ACTIONS -u VAJRA_MANIFEST_FRESH "$@" bash "$RUN" 2>&1; }
 
 manifest "$H"
 out="$(run)"; [ $? -eq 0 ] && ok || bad "fresh manifest, default mode must pass: $out"
