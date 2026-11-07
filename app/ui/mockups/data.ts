@@ -164,3 +164,53 @@ export const score: Record<string, Seg[]> = {
   verifier: [],
   security: [],
 };
+
+// ---- Graphite v2 additions ----
+
+/** A second thing waiting for the human, so the inbox has a real queue. */
+export const question = {
+  kind: "Question",
+  title: "Which shape for the 429 body?",
+  from: "Backend worker 1",
+  taskId: "t4",
+  at: "22:06",
+  body: "The API already returns errors as { error, message }. RFC 9457 problem+json is the standard for this. Which one should the 429 use?",
+  options: ["Keep { error, message } like the other errors", "Use problem+json for 429 only", "Move every error to problem+json (new task)"],
+};
+
+export const inboxDone = [
+  { kind: "Plan", title: "Plan v1: 5 tasks for per-key rate limiting", who: "You approved", at: "21:47" },
+  { kind: "Permission", title: "Backend may run npm test in its worktree", who: "You allowed", at: "22:02" },
+];
+
+/** What Backend has touched so far: the review pane sums these (159 added, 9 removed, 4 files). */
+export const backendFiles = [
+  { path: "src/middleware/rateLimit.ts", added: 117, removed: 8, state: "Edited" },
+  { path: "test/rateLimit.test.ts", added: 39, removed: 0, state: "New" },
+  { path: "src/server.ts", added: 3, removed: 1, state: "Edited" },
+  { path: "test/rateLimit.redis.test.ts", added: 0, removed: 0, state: "Writing" },
+];
+
+export const backendCommands = [
+  { cmd: "npm test -- rateLimit", at: "22:02", exit: 1, summary: "1 failed, 2 passed" },
+  { cmd: "npm test -- rateLimit", at: "22:04", exit: 0, summary: "3 passed" },
+];
+
+/** Relative times as the sidebar shows them at 22:07. */
+export const ago: Record<string, string> = {
+  "deliver-20261106-2140": "now",
+  "deliver-20261105-1610": "1d",
+  "deliver-20261104-0930": "2d",
+  "deliver-20261103-1120": "3d",
+  "deliver-20261102-1505": "4d",
+  "deliver-20261031-1012": "6d",
+  "deliver-20261030-1544": "1w",
+};
+
+/** Real Vajra crews, offered on a first run instead of fake sample data. */
+export const templates = [
+  { name: "Deliver a change", cmd: "/vajra", hint: "Plan, build in worktrees, verify, report" },
+  { name: "Security audit", cmd: "/vajra fleet security-audit", hint: "Threat model and review, no code changes" },
+  { name: "Architecture review", cmd: "/vajra fleet architecture-review", hint: "ADR, votes, a pre-mortem and a ruling" },
+  { name: "Incident response", cmd: "/vajra fleet incident-response", hint: "Triage and a reversible mitigation plan" },
+];
