@@ -157,6 +157,10 @@ fn evidence_tree(path: &Path) -> Option<String> {
     doc.get("git")?.get("worktreeTree")?.as_str().filter(|t| !t.is_empty()).map(String::from)
 }
 
+/// What one read of a run repo learned: HEAD, the working tree's id, and whether the repo's own config defines a filter
+/// (then the tree is not computed).
+type RepoState = (String, Option<String>, bool);
+
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -203,7 +207,7 @@ pub struct App {
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, Option<String>)>)>>,
+    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -840,7 +844,7 @@ impl App {
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
-        let mut repos: HashMap<PathBuf, Option<(String, Option<String>)>> = HashMap::new();
+        let mut repos: HashMap<PathBuf, Option<RepoState>> = HashMap::new();
         for (i, r) in &repo_of {
             if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
                 repos.insert(r.clone(), self.worktree_state(r, deadline));
@@ -865,14 +869,16 @@ impl App {
                         let ev = t.get("evidence");
                         let want_head = ev.and_then(|e| e.get("head")).and_then(Value::as_str);
                         let want_tree = ev.and_then(|e| e.get("path")).and_then(Value::as_str).and_then(|p| evidence_tree(Path::new(p)));
-                        let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref).is_some_and(|(head, tree)| {
-                            match (&want_tree, tree) {
-                                (Some(w), Some(c)) => w != c,
-                                (Some(_), None) => false,
-                                (None, _) => want_head.is_some_and(|w| w != head),
-                            }
+                        let state = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref);
+                        let stale = state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
+                            (Some(w), Some(c)) => w != c,
+                            (Some(_), None) => false,
+                            (None, _) => want_head.is_some_and(|w| w != head),
                         });
-                        if stale { "stale" } else { "pass" }
+                        // A repo with its own executable filter cannot be compared by tree without running it: the evidence
+                        // cannot be shown current, so it is never `pass` (it is not claimed stale either).
+                        let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
+                        if stale { "stale" } else if filtered { "unverified" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -981,7 +987,7 @@ impl App {
     /// `git.worktreeTree`. The tree is `None` when it cannot be computed in time. `None` overall when git fails or times
     /// out: the caller then shows the check's own verdict, never `stale`, and nothing is remembered. Both reads count
     /// against the call's `deadline`.
-    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, Option<String>)> {
+    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<RepoState> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
             if at.elapsed() < ttl {
@@ -1007,8 +1013,10 @@ impl App {
                 .to_string();
             // The tree id gets what is left of the call's budget (it is one total timeout inside `tree_id`).
             bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
-            let tree = bridge.tree_id(repo, &VERIFY_EXCLUDES);
-            Some((head, tree))
+            // A repo whose own config defines a filter is never asked for its tree (`add` would run the filter).
+            let filtered = bridge.repo_filters(repo, bridge.timeout);
+            let tree = if filtered { None } else { bridge.tree_id(repo, &VERIFY_EXCLUDES) };
+            Some((head, tree, filtered))
         };
         let st = read();
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.

@@ -1506,9 +1506,10 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     // Deadline already passed: git is not even started, nothing is remembered.
     assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
     assert!(lock(&app.worktree_state).is_empty());
-    let (head, tree) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    let (head, tree, filtered) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
     assert_eq!(head.len(), 40);
     assert_eq!(tree.map(|t| t.len()), Some(40));
+    assert!(!filtered);
 }
 
 #[test]
@@ -2097,4 +2098,46 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
         assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
     }
+}
+
+/// A filter the repo's own config defines, attached to every `.txt` file, that leaves a marker file if it ever runs.
+fn plant_filter(repo: &Path, marker: &Path) {
+    git_in(repo, &["config", "filter.evil.clean", &format!("sh -c 'touch {}; cat'", marker.display())]);
+    fs::write(repo.join(".gitattributes"), b"*.txt filter=evil\n").unwrap();
+}
+
+#[test]
+fn a_filter_in_the_repos_own_config_never_runs_while_listing_evidence() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass");
+    let marker = t.home().join("filter-ran");
+    plant_filter(&repo, &marker);
+    fs::write(repo.join("f.txt"), b"modified so the clean filter would be applied").unwrap();
+    // Listing (twice, with the state cache cleared each time) must not execute the filter...
+    let first = status_of(&app, &slug);
+    let second = status_of(&app, &slug);
+    assert!(!marker.exists(), "the repo-configured clean filter ran during evidence_list");
+    // ...and evidence that cannot be compared by tree is not shown as a pass.
+    assert_eq!((first.as_str(), second.as_str()), ("unverified", "unverified"));
+}
+
+#[test]
+fn tree_id_refuses_a_repo_that_configures_a_filter_and_still_serves_one_that_does_not() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"changed").unwrap();
+    assert!(!app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    let marker = t.home().join("filter-ran");
+    plant_filter(&repo, &marker);
+    assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_none());
+    assert!(!marker.exists(), "tree_id ran the filter");
+    // smudge and process are filters too.
+    git_in(&repo, &["config", "--unset", "filter.evil.clean"]);
+    assert!(!app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    git_in(&repo, &["config", "filter.evil.process", "sh -c true"]);
+    assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
 }

@@ -185,14 +185,37 @@ impl Bridge {
 }
 
 impl Bridge {
+    /// True when the repo's own config (local, worktree or command scope) defines a `clean`, `smudge` or `process` filter, or
+    /// when that cannot be determined: `git add` would run that command, and a repo-configured helper must never run from the
+    /// desktop (an agent can write the config and the attribute). Filters from the user's own global config are theirs and are
+    /// not counted. Fails closed.
+    pub fn repo_filters(&self, repo: &Path, timeout: Duration) -> bool {
+        if timeout.is_zero() {
+            return true;
+        }
+        let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-C"].map(String::from).into_iter()
+            .chain([repo.to_string_lossy().into_owned()])
+            .chain(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"].map(String::from))
+            .collect();
+        match run_process_env(&self.git, &argv, None, timeout, self.home.as_deref(), None, &[]) {
+            Ok(o) if !o.timed_out && o.code == Some(1) => false, // no such key
+            Ok(o) if !o.timed_out && o.code == Some(0) => o.stdout.lines().any(|l| matches!(l.split('\t').next(), Some("local" | "worktree" | "command") | None)),
+            _ => true,
+        }
+    }
+
     /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths left out),
     /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
     /// The repo's index, working tree and object store are never written: every new object (a blob per modified or untracked
     /// file, then the trees) goes to a temp object dir (`GIT_OBJECT_DIRECTORY`) that is removed afterwards, while the repo's
     /// own objects are read through `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The tree id is the same as if they were written
-    /// there. `None` if any step fails or the total `timeout` runs out. Same git hardening as `Request::Git`.
+    /// there. `None` if any step fails, the total `timeout` runs out, or the repo's own config defines an executable filter
+    /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
         let start = Instant::now();
+        if self.repo_filters(repo, self.timeout) {
+            return None;
+        }
         let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
         std::fs::create_dir(&dir).ok()?;
         let idx = dir.join("index");
