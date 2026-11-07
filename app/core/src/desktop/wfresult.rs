@@ -300,12 +300,13 @@ pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) ->
         }
     }
     let Some(newest) = files.iter().map(|e| e.modified).max() else { return Ok(None) };
-    // Equal times: any file that is not finished makes the whole tie not actionable.
+    // Equal newest times (a coarse filesystem clock) cannot tell which workflow is current: more than one candidate, or
+    // any that is not finished, makes the result ambiguous, so nothing is offered.
     let tied: Vec<&Env> = files.iter().filter(|e| e.modified == newest).collect();
-    if tied.iter().any(|e| !e.terminal) {
+    if tied.len() != 1 || !tied[0].terminal {
         return Ok(None);
     }
-    Ok(tied.iter().find_map(|e| waiting(e, campaign)))
+    Ok(waiting(tied[0], campaign))
 }
 
 /// Strict read of one named file, for tests and the refusal contract: any unsafe file is an error, not a skip.
