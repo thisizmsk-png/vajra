@@ -24,7 +24,10 @@ use crate::vajra::allowlist::Allowlist;
 
 /// Largest result file read. A real `vajra-deliver` result is a few KB; anything bigger is refused, not truncated.
 pub const MAX_BYTES: u64 = 256 * 1024;
+/// Files whose contents are read: the newest this many (by mtime) at or after the run's launch.
 const MAX_FILES: usize = 200;
+/// Directory entries examined. More than this is refused (nothing actionable) instead of trusting a partial view.
+const MAX_NAMES: usize = 4096;
 const TEXT_MAX: usize = 500;
 /// `ApprovedPlanTurn::MAX_INDEX + 1`: a result with more entries is refused whole, never partly shown.
 const MAX_PLANS: usize = crate::sessions::ApprovedPlanTurn::MAX_INDEX + 1;
@@ -107,8 +110,8 @@ pub fn unsafe_reason(f: &Facts, me: u32) -> Option<&'static str> {
     }
 }
 
-/// Open `name` inside the held directory and return its bytes plus mtime, after checking the descriptor itself.
-fn read_held(dir: &OwnedFd, name: &str) -> Result<(Vec<u8>, i64), WfError> {
+/// Open `name` inside the held directory and check the descriptor itself (plain file, one link, ours, 0600, within the cap).
+fn open_checked(dir: &OwnedFd, name: &str) -> Result<(File, i64), WfError> {
     let c = CString::new(name).map_err(|_| WfError::Io)?;
     // SAFETY: `dir` is a live directory fd and `c` a valid NUL-terminated relative name.
     let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
@@ -116,15 +119,21 @@ fn read_held(dir: &OwnedFd, name: &str) -> Result<(Vec<u8>, i64), WfError> {
         return Err(if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound { WfError::Missing } else { WfError::Unsafe("cannot open (a symlink?)") });
     }
     // SAFETY: `fd` is a fresh descriptor we own.
-    let mut f = unsafe { File::from_raw_fd(fd) };
+    let f = unsafe { File::from_raw_fd(fd) };
     let m = f.metadata().map_err(|_| WfError::Io)?;
     unsafe_reason(&Facts { is_file: m.is_file(), nlink: m.nlink(), uid: m.uid(), mode: m.mode(), len: m.len() }, me()).map_or(Ok(()), |r| Err(WfError::Unsafe(r)))?;
+    Ok((f, m.mtime()))
+}
+
+/// The checked file's bytes plus mtime.
+fn read_held(dir: &OwnedFd, name: &str) -> Result<(Vec<u8>, i64), WfError> {
+    let (mut f, mtime) = open_checked(dir, name)?;
     let mut buf = Vec::new();
     f.by_ref().take(MAX_BYTES + 1).read_to_end(&mut buf).map_err(|_| WfError::Io)?;
     if buf.len() as u64 > MAX_BYTES {
         return Err(WfError::Unsafe("file is too large"));
     }
-    Ok((buf, m.mtime()))
+    Ok((buf, mtime))
 }
 
 fn plain(v: Option<&Value>, cap: usize) -> String {
@@ -238,16 +247,26 @@ pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) ->
     if d.metadata().map_err(|_| WfError::Io)?.uid() != me() {
         return Err(WfError::Unsafe("directory owned by another user"));
     }
-    let mut names: Vec<String> = std::fs::read_dir(&real)
+    let names: Vec<String> = std::fs::read_dir(&real)
         .map_err(|_| WfError::Io)?
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|n| n.starts_with("wf_") && n.ends_with(".json") && n.len() <= 80)
-        .take(MAX_FILES)
+        .take(MAX_NAMES + 1)
         .collect();
-    names.sort();
-    let mut files: Vec<Env> = Vec::new();
-    for n in names {
+    // `read_dir` has no order, so every candidate's mtime is looked at (cheaply, without reading) before choosing which
+    // to read. A directory too big to examine whole is refused: an incomplete view could offer an old approval.
+    if names.len() > MAX_NAMES {
+        return Ok(None);
+    }
+    let mut dated: Vec<(i64, String)> = names
+        .into_iter()
         // An unsafe or unreadable file is skipped, never trusted.
+        .filter_map(|n| open_checked(&held, &n).ok().map(|(_, mtime)| (mtime, n)))
+        .filter(|(mtime, _)| *mtime >= since)
+        .collect();
+    dated.sort_by(|a, b| b.cmp(a));
+    let mut files: Vec<Env> = Vec::new();
+    for (_, n) in dated.into_iter().take(MAX_FILES) {
         let Ok((bytes, mtime)) = read_held(&held, &n) else { continue };
         if let Some(env) = envelope(&bytes, mtime).filter(|e| e.modified >= since) {
             files.push(env);

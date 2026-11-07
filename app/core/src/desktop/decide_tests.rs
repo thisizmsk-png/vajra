@@ -701,3 +701,32 @@ fn a_run_id_naming_a_future_minute_does_not_hide_a_result_written_before_it() {
     fs::remove_file(t.0.join("data/control/lead").join(r3).join("started")).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0);
 }
+
+#[test]
+fn the_newest_workflow_is_found_among_more_than_200_result_files() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    t.live(&app);
+    // 300 older finished results, then a newest one that is still running. Whatever order the directory lists them in,
+    // the newest decides: nothing is actionable and the old approval is refused.
+    for i in 0..300 {
+        t.result_at(&format!("wf_f{i:03}.json"), &done(CAMP, pushes()), RUN, 61 + i);
+    }
+    let mut running = done(CAMP, json!([]));
+    running["status"] = json!("running");
+    running["result"] = Value::Null;
+    t.result_at("wf_aaa.json", &running, RUN, 1000);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+    assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "plan_changed");
+    // The same with the newest being a finished result: it is the one shown (not one of the older 300).
+    t.result_at("wf_aaa.json", &done(CAMP, json!([{"action": "spend", "why": "newest"}])), RUN, 1000);
+    let inbox = app.inbox().unwrap();
+    assert_eq!((inbox["count"].as_u64(), item(&inbox, PLAN)["body"].as_str()), (Some(1), Some("newest")));
+    // More entries than can be examined whole are refused instead of trusting a partial view.
+    for i in 0..4100 {
+        fs::write(t.wf_dir().join(format!("wf_x{i:04}.json")), "{}").unwrap();
+    }
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
