@@ -11,10 +11,10 @@ type Hit = { id: string; kind: string; title: string };
 type Result = { state: "idle" } | { state: "busy" } | { state: "ok"; hits: Hit[] } | { state: "unavailable"; code: number | null } | { state: "error"; text: string };
 
 /** Show control characters (NUL, ESC, ...) and the invisible direction and line-separator marks (bidi overrides and
- * isolates, LRM/RLM, U+2028/9) as visible \uXXXX escapes, so a report cannot reorder or hide what it says; newline
+ * isolates, ALM, LRM/RLM, U+2028/9) as visible \uXXXX escapes, so a report cannot reorder or hide what it says; newline
  * and tab stay. */
 export const escapeControls = (t: string) =>
-  t.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+  t.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
     (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
 /** The badge for one report read. It comes from that read's own result (the held bytes it checked), never from the

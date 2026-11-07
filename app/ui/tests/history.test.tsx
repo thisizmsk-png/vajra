@@ -147,9 +147,9 @@ describe("History report and integrity (S6)", () => {
   });
 
   it("escapes bidi overrides, isolates, direction marks and line separators", async () => {
-    await open({ read_report: { slug: "a-camp", integrity: "ok", text: "pay ‮evil‬ ⁦x⁩ ‎‏   done" } });
+    await open({ read_report: { slug: "a-camp", integrity: "ok", text: "pay \u202eevil\u202c \u2066x\u2069 \u061c\u200e\u200f\u2028\u2029 done" } });
     const pre = await screen.findByRole("region", { name: S.history.reportTitle("a-camp") });
-    expect(pre.textContent).toBe("pay \\u202eevil\\u202c \\u2066x\\u2069 \\u200e\\u200f\\u2028\\u2029 done");
+    expect(pre.textContent).toBe("pay \\u202eevil\\u202c \\u2066x\\u2069 \\u061c\\u200e\\u200f\\u2028\\u2029 done");
   });
 
   it.each([
