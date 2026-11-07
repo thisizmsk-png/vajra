@@ -121,7 +121,7 @@ impl Tmp {
             ("version", "9.9.9 (Claude Code)".to_string()),
             ("mode", "ok".to_string()),
             ("selftest", "deny".to_string()),
-            ("ledger.path", d.join("data/control/ledger.jsonl").to_string_lossy().into_owned()),
+            ("ledger.path", d.join("home/Library/Application Support/VajraDesktop/control/ledger.jsonl").to_string_lossy().into_owned()),
         ] {
             std::fs::write(d.join("bin").join(f), body).unwrap();
         }
@@ -130,8 +130,9 @@ impl Tmp {
     fn home(&self) -> PathBuf {
         self.0.join("home")
     }
+    /// The default data dir under the temp HOME: the only one the Lead accepts (the worker guard protects that one).
     fn data(&self) -> PathBuf {
-        self.0.join("data")
+        self.home().join("Library/Application Support/VajraDesktop")
     }
     fn repo(&self) -> PathBuf {
         self.0.join("repo")
@@ -772,4 +773,23 @@ fn lead_files_tampered_during_the_selftest_never_reach_the_real_ask() {
     }
     let seen: Vec<String> = t.files("settings-seen.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
     assert!(seen.len() >= 2 && seen.iter().all(|c| !c.contains("TAMPER")), "no Lead process read the tampered settings");
+}
+
+#[test]
+fn a_data_dir_override_outside_the_guarded_location_is_refused() {
+    let t = Tmp::new();
+    let other = t.0.join("elsewhere");
+    std::fs::create_dir_all(&other).unwrap();
+    let app = App::open(&other, &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    lock(&app.runs).insert(
+        format!("run-{SID}"),
+        Run { session_id: SID.into(), run_id: RUN_ID.into(), campaign: "deliver-x".into(), cwd: t.repo(), nonces: Redactor::default() },
+    );
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing");
+    assert!(e.to_string().contains("not guard-protected"), "{e}");
+    assert!(t.count("ask.count") == 0 && t.files("stdin.").is_empty(), "nothing was spawned");
+    assert!(!other.join("control/lead").exists(), "no Lead files were written there");
 }

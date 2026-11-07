@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{Value, json};
 
 use super::{App, Res, Run, project_slug, runindex};
+use crate::paths;
 use crate::bus::Bus;
 use crate::control::lead::{self, LeadError, frame};
 use crate::control::lead_run::{self, Done, Handle, InitInfo, Limits, Sink, Tag};
@@ -434,6 +435,13 @@ impl App {
     /// fail closed and block every Lead tool).
     fn guard_preconditions(&self, env: &[(&'static str, OsString)]) -> Result<(), LeadError> {
         let miss = |why: &str| LeadError::GuardMissing(why.to_string());
+        // The Lead's generated files live under `<data>/control/`, which the installed worker guard protects only at
+        // its default place. Under any other data dir a worker could rewrite them, so the Lead is not started.
+        let guarded = paths::resolve_data_dir(None, &self.home);
+        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+        if !same(&self.data, &guarded) {
+            return Err(miss("Lead unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)"));
+        }
         let script = self.home.join(GUARD_SCRIPT);
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
             return Err(miss("pre-tool-use.sh is missing"));
