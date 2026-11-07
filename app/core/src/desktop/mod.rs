@@ -598,6 +598,16 @@ impl App {
         Ok(json!({"lines": lines_json(&p.lines), "next_offset": p.next_offset, "gap": p.gap, "end": p.end}))
     }
 
+    /// The `max_lines` (at most 1000) lines just before `before_seq`, for "Load earlier": adjacent to the reader's window,
+    /// whatever the size of the spill.
+    pub fn read_spill_before(&self, stream: &str, before_seq: u64, max_lines: usize) -> Res {
+        if !bus::valid_stream_id(stream) {
+            return Err(invalid("stream", "not a stream id"));
+        }
+        let p = self.bus.read_spill_before(stream, before_seq, max_lines.clamp(1, 1000)).map_err(|e| fail("io_error", e))?;
+        Ok(json!({"lines": lines_json(&p.lines), "at_start": p.at_start, "gap": p.gap}))
+    }
+
     pub fn task(&self, slug: &str, task_id: &str) -> Res {
         let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
         let found = snap

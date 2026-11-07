@@ -97,6 +97,11 @@ fn read_spill(app: State<'_, App>, stream: String, offset: u64, max_bytes: usize
 }
 
 #[tauri::command(async)]
+fn read_spill_before(app: State<'_, App>, stream: String, before_seq: u64, max_lines: usize) -> Res {
+    app.read_spill_before(&stream, before_seq, max_lines)
+}
+
+#[tauri::command(async)]
 fn task(app: State<'_, App>, slug: String, task_id: String) -> Res {
     app.task(&slug, &task_id)
 }
@@ -260,6 +265,7 @@ fn main() {
             crew,
             tail,
             read_spill,
+            read_spill_before,
             task,
             diff,
             control_message,
