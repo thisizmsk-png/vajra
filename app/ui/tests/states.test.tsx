@@ -87,15 +87,7 @@ describe("Check again", () => {
 });
 
 describe("Screens not built yet", () => {
-  it("the Run view right after a start points at the crew for that run", () => {
-    window.location.hash = "#/run?slug=camp&id=r1";
-    const Run = REGISTRY.run;
-    render(<Run />);
-    expect(screen.getByText(S.states.runStarted)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: S.states.openCrew }));
-    expect(window.location.hash).toBe("#/crew?slug=camp&id=r1");
-  });
-
+  // The Run view is built on main (#36), so only the screens still unbuilt are checked here.
   it("without a run, it says so and offers Home", () => {
     const Inbox = REGISTRY.inbox;
     render(<Inbox />);
