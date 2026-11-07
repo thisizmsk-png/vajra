@@ -846,7 +846,7 @@ fn lead_is_unavailable_when_the_doctor_passes_but_the_sandbox_denywrite_is_off()
     std::fs::write(&doctor, "#!/bin/sh\necho 'WARN  OS sandbox is off (the enforced boundary; enable with /sandbox)'\necho 'WARN  Vajra Desktop denyWrite not active (the guard is the only layer for its control queue)'\nexit 0\n").unwrap();
     let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
     assert_eq!(code(&e), "lead_guard_missing");
-    assert!(e["detail"].as_str().unwrap_or_default().contains("Lead unavailable"), "{e}");
+    assert!(e["detail"].as_str().unwrap_or_default()== SANDBOX_NEEDED, "{e}");
     assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded or spawned");
     // Once the sandbox is on, the same ask goes through.
     std::fs::write(&doctor, DOCTOR_OK).unwrap();
