@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -65,6 +65,36 @@ struct Run {
     nonces: Redactor,
 }
 
+const LIST_VERIFY_WORKERS: usize = 4;
+/// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
+/// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
+const VERDICT_TTL: Duration = Duration::from_secs(5);
+
+/// One in-flight verify, shared by every caller that asks for the same campaign while it runs.
+type Flight = Arc<(Mutex<Option<&'static str>>, Condvar)>;
+enum Verdict {
+    Fresh(Duration, &'static str),
+    Flying(Flight),
+}
+
+/// Ends a flight even if the verify panics, so waiters are never left hanging.
+struct FlightGuard<'a> {
+    app: &'a App,
+    slug: &'a str,
+    flight: Flight,
+    done: bool,
+}
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            lock(&self.app.verdicts).remove(self.slug);
+            *lock(&self.flight.0) = Some("unknown");
+            self.flight.1.notify_all();
+        }
+    }
+}
+const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct App {
     data: PathBuf,
     claude: PathBuf,
@@ -72,6 +102,13 @@ pub struct App {
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
     bridge: Bridge,
+    /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
+    verify_timeout: Duration,
+    /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
+    verdicts: Mutex<HashMap<String, Verdict>>,
+    verdict_ttl: Duration,
+    /// Monotonic time since start; tests replace it.
+    clock: Arc<dyn Fn() -> Duration + Send + Sync>,
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
@@ -99,7 +136,14 @@ impl App {
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
         Ok(Self {
             data: data.to_path_buf(),
-            bridge: Bridge::new(claude.join("skills/vajra/scripts")),
+            bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
+            verify_timeout: LIST_VERIFY_TIMEOUT,
+            verdicts: Mutex::new(HashMap::new()),
+            verdict_ttl: VERDICT_TTL,
+            clock: {
+                let t0 = std::time::Instant::now();
+                Arc::new(move || t0.elapsed())
+            },
             reader: Mutex::new(None),
             claude,
             sup: Supervisor::new(bus.clone(), log.clone()),
@@ -159,9 +203,16 @@ impl App {
     }
 
     pub fn list_campaigns(&self) -> Res {
-        self.with_reader(|r| {
+        self.list_campaigns_opt(false)
+    }
+
+    /// `refresh` re-verifies every campaign now, whatever the last verdict's age.
+    pub fn list_campaigns_opt(&self, refresh: bool) -> Res {
+        // Summaries are read under the reader lock; the verify subprocesses run after it is released, so a slow
+        // or hung verify cannot block any other reader call.
+        let mut list: Vec<Value> = self.with_reader(|r| {
             let slugs = r.campaigns().map_err(|e| fail("io_error", e))?;
-            let list: Vec<Value> = slugs
+            Ok(slugs
                 .iter()
                 .map(|s| match r.campaign(s) {
                     Ok(c) => json!({
@@ -174,9 +225,31 @@ impl App {
                     // A campaign dir the reader cannot summarise is still listed.
                     Err(e) => json!({"slug": s, "error": e.to_string()}),
                 })
-                .collect();
-            Ok(json!({"campaigns": list}))
-        })
+                .collect())
+        })?;
+        // Every listing verifies every campaign afresh (the verdict depends on the campaign files, the links they
+        // follow and the signing key, so nothing is remembered between listings), on a few worker threads.
+        let todo: Vec<(usize, String)> = list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c["slug"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let verdicts: Mutex<Vec<(usize, &'static str)>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..todo.len().min(LIST_VERIFY_WORKERS) {
+                s.spawn(|| loop {
+                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((i, slug)) = todo.get(n) else { break };
+                    let v = self.integrity_of(slug, refresh);
+                    lock(&verdicts).push((*i, v));
+                });
+            }
+        });
+        for (i, v) in lock(&verdicts).iter() {
+            list[*i]["integrity"] = json!(*v);
+        }
+        Ok(json!({"campaigns": list}))
     }
 
     /// The control service steers one session, so one run is active at a time.
@@ -588,6 +661,112 @@ impl App {
         let hits: Vec<Value> =
             parse_kb_hits(&o.stdout).into_iter().map(|h| json!({"id": h.id, "kind": h.kind, "title": h.title})).collect();
         Ok(json!({"hits": hits, "code": o.code}))
+    }
+
+    /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
+    /// `verify_timeout`). A real verdict is reused for `verdict_ttl`; callers that arrive while a verify for the same
+    /// campaign is running wait for it instead of starting another. `refresh` skips the reuse and, if a verify is
+    /// already running, waits for it and then runs its own (that one may have started before the change).
+    fn integrity_of(&self, slug: &str, refresh: bool) -> &'static str {
+        self.integrity_run(slug, refresh).0
+    }
+
+    /// `integrity_of` plus, when this call ran the verify itself, its result (callers that only waited get `None`).
+    /// An explicit `verify_campaign` goes through here with `refresh`, so it shares the campaign's flight: it waits for
+    /// a running check and then runs its own, and an older check can never overwrite the verdict it settled.
+    fn integrity_run(&self, slug: &str, refresh: bool) -> (&'static str, Option<Result<crate::vajra::bridge::Output, crate::vajra::bridge::BridgeError>>) {
+        if !bus::valid_stream_id(slug) {
+            return ("unknown", None);
+        }
+        let flight: Flight = loop {
+            let mut m = lock(&self.verdicts);
+            let waiting = match m.get(slug) {
+                Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return (v, None),
+                Some(Verdict::Flying(f)) => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = waiting {
+                drop(m);
+                let mut got = lock(&f.0);
+                while got.is_none() {
+                    got = f.1.wait(got).unwrap_or_else(|e| e.into_inner());
+                }
+                if !refresh {
+                    return (got.unwrap_or("unknown"), None);
+                }
+                continue;
+            }
+            let f: Flight = Arc::new((Mutex::new(None), Condvar::new()));
+            m.insert(slug.to_string(), Verdict::Flying(f.clone()));
+            break f;
+        };
+        let mut guard = FlightGuard { app: self, slug, flight, done: false };
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        let res = bridge.run(&Request::CampaignVerify { slug: slug.into() });
+        let verdict = match res.as_ref().ok().and_then(|o| o.code) {
+            Some(0) => "ok",
+            Some(3) => "failed",
+            _ => "unknown",
+        };
+        self.settle(slug, verdict);
+        *lock(&guard.flight.0) = Some(verdict);
+        guard.flight.1.notify_all();
+        guard.done = true;
+        (verdict, Some(res))
+    }
+
+    #[allow(dead_code)] // read_report (#22b) settles through it
+    fn settle_code(&self, slug: &str, code: Option<i32>) {
+        let v = match code {
+            Some(0) => "ok",
+            Some(3) => "failed",
+            _ => "unknown",
+        };
+        let m = lock(&self.verdicts);
+        if !matches!(m.get(slug), Some(Verdict::Flying(_))) {
+            drop(m);
+            self.settle(slug, v);
+        }
+    }
+
+    /// Remember a real verdict for the slug (or forget it when the check could not run).
+    fn settle(&self, slug: &str, verdict: &'static str) {
+        let mut m = lock(&self.verdicts);
+        if verdict == "unknown" {
+            m.remove(slug);
+        } else {
+            m.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
+        }
+    }
+
+    /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature
+    /// invalid) is `ok: false` with the restore command for the newest checkpoint listed; any other result is an
+    /// error, never a pass. Read-only: it never touches the HMAC key itself, the script does the check.
+    pub fn verify_campaign(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let o = match self.integrity_run(slug, true).1 {
+            Some(Ok(o)) => o,
+            Some(Err(crate::vajra::bridge::BridgeError::Invalid(_))) => return Err(invalid("slug", "not a campaign slug")),
+            Some(Err(e)) => return Err(fail("verify_failed", e)),
+            None => return Err(fail("verify_failed", "no result")),
+        };
+        match o.code {
+            Some(0) => Ok(json!({"slug": slug, "ok": true})),
+            Some(3) => {
+                let newest = self
+                    .with_reader(|r| r.checkpoints(slug).map_err(|e| fail("io_error", e)))
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|n| n.strip_suffix(".json")?.parse::<u32>().ok())
+                    .max();
+                let restore = newest.map(|n| format!("vajra-campaign.sh resume {slug} --from-checkpoint {n}"));
+                Ok(json!({"slug": slug, "ok": false, "restore": restore}))
+            }
+            code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        }
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
