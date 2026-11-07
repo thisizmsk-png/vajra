@@ -58,7 +58,23 @@ def sample(proc, before):
         parts["webkit"] += rows[pid][1] / KB
     parts["total_mib"] = round(sum(parts.values()), 1)
     parts["helpers"] = len(helpers)
+    parts["helper_detail"] = helper_detail(helpers)
     return {k: round(v, 1) if isinstance(v, float) else v for k, v in parts.items()}
+
+
+def helper_detail(pids):
+    """Name, RSS, age and command line of each counted helper, so a surprising helper count can be explained."""
+    if not pids:
+        return []
+    out = subprocess.run(["ps", "-o", "pid=,rss=,etime=,args=", "-p", ",".join(str(p) for p in sorted(pids))],
+                         capture_output=True, text=True).stdout
+    rows = []
+    for line in out.splitlines():
+        p = line.split(None, 3)
+        if len(p) == 4:
+            rows.append({"pid": int(p[0]), "rss_mib": round(int(p[1]) / KB, 1), "etime": p[2],
+                         "name": os.path.basename(p[3].split(" ")[0]), "args": p[3][:300]})
+    return rows
 
 
 def stop(proc):
