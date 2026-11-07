@@ -1388,6 +1388,77 @@ fn a_verdict_is_not_cached_when_the_file_is_swapped_while_the_check_runs() {
     assert!(app.evidence_cache.lock().unwrap().is_empty(), "no cache entry for a verdict whose key bytes changed");
 }
 
+/// A task with green LIVE evidence (outside the campaign's evidence dir) whose run repo is a real git repo at `head`.
+fn live_evidence_repo(t: &Tmp, git_repo: bool) -> (App, String, std::path::PathBuf, String) {
+    let repo = t.home().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git").current_dir(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    let mut head = "a".repeat(40);
+    if git_repo {
+        git(&["init", "-q"]);
+        fs::write(repo.join("f.txt"), b"one").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        head = git(&["rev-parse", "HEAD"]);
+    }
+    let ev = t.home().join("live-ev");
+    fs::create_dir_all(&ev).unwrap();
+    fs::write(ev.join("green.json"), b"{}").unwrap();
+    let mut task = ev_task(Path::new("/x"), "t1", "done", &["ac"], "green");
+    task["evidence"]["path"] = json!(ev.join("green.json").to_string_lossy());
+    task["evidence"]["head"] = json!(head);
+    let (app, slug) = campaign_with_tasks(t, vec![task]);
+    lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: repo.clone(), nonces: Redactor::default() });
+    (app, slug, repo, head)
+}
+
+fn status_of(app: &App, slug: &str) -> String {
+    lock(&app.worktree_state).clear(); // the 5 s state cache would otherwise hide the edit
+    app.evidence_list(slug).unwrap()["rows"][0]["status"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true);
+    assert_eq!(status_of(&app, &slug), "pass");
+    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
+    let git = |args: &[&str]| { std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap(); };
+    git(&["checkout", "--", "f.txt"]);
+    assert_eq!(status_of(&app, &slug), "pass", "clean again");
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
+    fs::remove_file(repo.join("new.txt")).unwrap();
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "stale", "the branch moved past the evidence's head");
+}
+
+#[test]
+fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered() {
+    let t = Tmp::new();
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, false);
+    assert_eq!(status_of(&app, &slug), "pass", "not a git repo: not stale");
+    assert!(lock(&app.worktree_state).is_empty());
+}
+
+#[test]
+fn a_big_untracked_tree_does_not_blow_the_budget() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true);
+    let big = repo.join("node_modules_like");
+    fs::create_dir_all(&big).unwrap();
+    for i in 0..3000 {
+        fs::write(big.join(format!("f{i}.js")), b"x").unwrap();
+    }
+    let start = std::time::Instant::now();
+    assert_eq!(status_of(&app, &slug), "stale");
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+}
+
 #[test]
 fn evidence_list_rejects_a_bad_slug_and_reports_an_unknown_campaign() {
     let t = Tmp::new();

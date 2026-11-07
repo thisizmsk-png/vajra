@@ -51,6 +51,10 @@ const EVIDENCE_CACHE_MAX: usize = 512;
 const _: () = assert!(EVIDENCE_TIMEOUT.as_secs() <= EVIDENCE_BUDGET.as_secs());
 /// A check that timed out or could not start is remembered as unverified this long, so a hung check is not re-run (and the
 /// checks queued behind it starved) on every call.
+/// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
+/// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
+const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
+const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
 const EVIDENCE_FAILED_TTL: Duration = Duration::from_secs(60);
 /// Evidence files larger than this are always re-checked (their bytes are the cache key).
 const EVIDENCE_KEY_MAX: u64 = 16 * 1024;
@@ -181,6 +185,8 @@ pub struct App {
     /// (whatever it does to size or mtime) is always re-checked. Archived bundles depend on nothing else and are kept; a
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
+    /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
+    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, (String, bool))>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -220,6 +226,7 @@ impl App {
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
+            worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
@@ -719,6 +726,7 @@ impl App {
             (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (path.clone(), bytes, head.clone(), archived.clone(), repo.clone()))
         };
         let mut verdict: HashMap<usize, bool> = HashMap::new();
+        let mut repo_of: HashMap<usize, PathBuf> = HashMap::new();
         let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
         {
             let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -728,12 +736,22 @@ impl App {
                     if t.get("evidence").is_some_and(|e| !e.is_null()) { verdict.insert(i, false); }
                     continue;
                 };
+                if let Request::CheckEvidence { repo: Some(r), .. } = &req {
+                    repo_of.insert(i, r.clone());
+                }
                 let k = key(&req);
                 let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
                 match hit {
                     Some((v, _)) => { verdict.insert(i, *v); }
                     None => jobs.push((i, req, k)),
                 }
+            }
+        }
+        // The state of each run repo the passing checks depend on, read once per call (and reused for 5 s).
+        let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        for r in repo_of.values() {
+            if !repos.contains_key(r) {
+                repos.insert(r.clone(), self.worktree_state(r));
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
@@ -819,7 +837,14 @@ impl App {
                 "fail"
             } else if has_evidence {
                 match verdict.get(&i) {
-                    Some(true) => "pass",
+                    Some(true) => {
+                        // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
+                        // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
+                        let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
+                        let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
+                            .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
+                        if stale { "stale" } else { "pass" }
+                    }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
                 }
@@ -849,6 +874,30 @@ impl App {
     /// An archived bundle (under the campaign's evidence dir) is checked
     /// without a repo; live evidence is checked in the repo of the run that
     /// made it. `None` when the task has no evidence path or no repo is known.
+    /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
+    /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
+    /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
+    fn worktree_state(&self, repo: &Path) -> Option<(String, bool)> {
+        if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
+            if at.elapsed() < WORKTREE_STATE_TTL {
+                return Some(st.clone());
+            }
+        }
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = WORKTREE_STATE_TIMEOUT.min(self.evidence_budget);
+        let git = |args: &[&str]| {
+            bridge
+                .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
+                .ok()
+                .filter(|o| !o.timed_out && o.code == Some(0))
+        };
+        let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
+        let dirty = !git(&["status", "--porcelain", "-unormal"])?.stdout.trim().is_empty();
+        let st = (head, dirty);
+        lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+        Some(st)
+    }
+
     fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
         let ev = task.get("evidence")?;
         let path = PathBuf::from(ev.get("path")?.as_str()?);
