@@ -1462,12 +1462,60 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     assert!(!dirty);
 }
 
+/// A "git" that never answers, to stand in for a slow repo.
+fn slow_git(t: &Tmp) -> std::path::PathBuf {
+    let p = t.home().join("slow-git.sh");
+    fs::write(&p, "#!/bin/sh\nsleep 30\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+#[test]
+fn a_slow_repo_does_not_eat_a_checks_full_timeout_and_is_not_asked_again_on_the_next_call() {
+    let t = Tmp::new();
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, true, false);
+    let mut app = app;
+    app.bridge.git = slow_git(&t);
+    app.evidence_timeout = Duration::from_millis(400);
+    app.evidence_budget = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(r["rows"][0]["status"], "pass", "the check's verdict stands when git is too slow: {r}");
+    assert!(start.elapsed() < Duration::from_millis(3500), "{:?}", start.elapsed());
+    // The second call does not pay for the slow repo again.
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(r["rows"][0]["status"], "pass", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300), "second call re-ran the slow git: {:?}", start.elapsed());
+}
+
+#[test]
+fn checks_run_before_the_repo_scan_so_a_slow_check_gets_its_full_timeout() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (_a, _s, repo, _h) = live_evidence_repo(&t, true, false);
+    let ev = t.home().join("live-ev/green.json");
+    let mut live = ev_task(&d, "t1", "done", &["ac"], "green");
+    live["evidence"]["path"] = json!(ev.to_string_lossy());
+    let (mut app, slug) = campaign_with_tasks(&t, vec![live, ev_task(&d, "t2", "done", &["ac2"], "slow")]);
+    lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: repo, nonces: Redactor::default() });
+    app.bridge.git = slow_git(&t);
+    app.evidence_timeout = Duration::from_millis(2500);
+    app.evidence_budget = Duration::from_secs(3);
+    let r = app.evidence_list(&slug).unwrap();
+    // With the scan first, the slow git would have used 2 s and left the check under 1 s of its 2.5 s: it would read "checking".
+    assert_eq!(row(&r, "t2", "ac2")["status"], "unverified", "a check that ran its full timeout is unverified, not cut by the budget: {r}");
+    assert_eq!(row(&r, "t1", "ac")["status"], "pass", "{r}");
+}
+
 #[test]
 fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered() {
     let t = Tmp::new();
     let (app, slug, _repo, _head) = live_evidence_repo(&t, false, false);
     assert_eq!(status_of(&app, &slug), "pass", "not a git repo: not stale");
-    assert!(lock(&app.worktree_state).is_empty());
+    // Git had its full time and could not read it: remembered as unknown, so it is not asked again for a while.
+    assert!(lock(&app.worktree_state).values().all(|(_, st)| st.is_none()));
 }
 
 #[test]
