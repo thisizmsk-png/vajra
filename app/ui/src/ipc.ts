@@ -65,6 +65,8 @@ export type InboxItem = {
   source?: string;
   /** B2 plan items: what `approve_plan` must be given back, the hash of exactly what was shown. */
   plan_sha256?: string; action?: "push" | "pr" | "deploy"; plan?: { commands: string[]; rollback: string; risk: string } | null;
+  /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
+  since?: string;
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
