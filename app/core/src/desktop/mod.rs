@@ -727,6 +727,25 @@ impl App {
         Ok(json!({"task": task, "stale": snap.stale, "evidence": evidence}))
     }
 
+    /// S4c: the Run view's phase timeline and task graph in one read-only call (AC-4.1.x, AC-4.2.x).
+    pub fn run_overview(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let (snap, progress) = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default())))?;
+        let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
+        // `tasks.json` holds every run's tasks: the graph and the Crew link are for the current run only.
+        let (run_id, scoped) = runview::scope(&progress, tasks);
+        let tl = runview::timeline(&progress, tasks);
+        Ok(json!({
+            "slug": slug,
+            "run_id": run_id,
+            "stale": snap.stale,
+            "timeline": runview::timeline_json(&tl),
+            "graph": runview::graph(&run_id, scoped.as_deref().unwrap_or(&[])),
+        }))
+    }
+
     /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
     /// `pass` = the task's signed evidence checks green; `unverified` = evidence exists but its check is red, unreadable,
     /// timed out or cannot be located (never counted as pass); `checking` = its check has not run yet (over the call's time
@@ -1502,6 +1521,7 @@ mod wfresult;
 mod decide;
 mod lead;
 mod runindex;
+mod runview;
 
 #[cfg(test)]
 mod tests;

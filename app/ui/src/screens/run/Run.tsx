@@ -3,20 +3,21 @@ import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
-import type { EvidenceDetail, EvidenceRow } from "../../ipc";
+import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useRoute } from "../../router";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
 const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.criterion}`;
 const ROW_H = 36;
+const GRAPH_H = 288;
 const LIST_H = 360;
 
 const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.run.status.not_run;
 
 /** Evidence is the Run view's default (POS-1.1). Rows render through VirtualList (only the rows in view exist) and are plain data. */
 export function Run() {
-  const [route] = useRoute();
+  const [route, go] = useRoute();
   const slug = route.params.slug ?? "";
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
@@ -25,6 +26,9 @@ export function Run() {
   /** The chosen criterion by identity (task + criterion), not list position: statuses change while polling and reorder the list. */
   const [sel, setSel] = useState<string | null>(null);
   const [detail, setDetail] = useState<EvidenceDetail | "failed" | null>(null);
+
+  const [overview, setOverview] = useState<RunOverview | null>(null);
+  const [overviewErr, setOverviewErr] = useState(false);
 
   /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
   const current = useRef(slug);
@@ -38,6 +42,16 @@ export function Run() {
   }, [slug]);
   // A new campaign starts empty: the previous campaign's rows, pending count, error and selection are not shown under it.
   useEffect(() => { current.current = slug; setRows(null); setPending(0); setErr(""); setSel(null); }, [slug]);
+  const loadOverview = useCallback(() => {
+    if (!slug) return;
+    api.runOverview(slug).then(
+      (o) => { if (current.current === slug) { setOverview(o); setOverviewErr(false); } },
+      () => { if (current.current === slug) setOverviewErr(true); },
+    );
+  }, [slug]);
+  useEffect(() => { setOverview(null); setOverviewErr(false); }, [slug]);
+  useEffect(loadOverview, [loadOverview]);
+  useEffect(() => (slug ? onChanged(loadOverview) : undefined), [slug, loadOverview]);
   useEffect(load, [load]);
   useEffect(() => (slug ? onChanged(load) : undefined), [slug, load]);
   useEffect(() => {
@@ -75,6 +89,48 @@ export function Run() {
   return (
     <div className="v-home">
       <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <Section title={S.run.timeline}>
+        {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
+        {overview && (
+          <>
+            <Badge status={overview.timeline.status === "done" ? "success" : overview.timeline.status === "active" ? "info" : "danger"}>{S.run.runStatus[overview.timeline.status]}</Badge>
+            {/* Exactly one phase is current; each state is text, never colour alone (AC-4.1.1). */}
+            <ol aria-label={S.run.timeline} className="v-run__phases">
+              {overview.timeline.phases.map((p) => (
+                <li key={p.name} aria-current={p.state === "current" ? "step" : undefined}>
+                  {S.run.phases[p.name] ?? p.name} <Text as="span" variant="body-sm" muted>{S.run.phaseState[p.state]}{p.name === "Fix" && p.state !== "pending" && p.round ? `, ${S.run.fixRound(p.round, p.max_rounds)}` : ""}</Text>
+                </li>
+              ))}
+            </ol>
+          </>
+        )}
+      </Section>
+      <Section title={S.run.graph}>
+        {overview && overview.graph.tasks.length === 0 && <Text variant="body-sm" muted>{S.run.graphEmpty}</Text>}
+        {overview && overview.graph.tasks.length > 0 && (
+          <VirtualList
+            role="list"
+            aria-label={S.run.graph}
+            count={overview.graph.tasks.length}
+            rowHeight={ROW_H}
+            height={GRAPH_H}
+            renderRow={(i) => {
+              const t = overview.graph.tasks[i];
+              const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
+              return (
+                <div role="listitem" className="v-run__row" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
+                  <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
+                  <span>{t.local} {t.title ?? ""}</span>
+                  <span>{t.owner ?? ""}</span>
+                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{S.run.taskStatus[t.status] ?? t.status}</Badge>
+                  {t.deps.length > 0 && <Text as="span" variant="body-sm" muted>{S.run.waitsFor} {t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}</Text>}
+                  <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
+                </div>
+              );
+            }}
+          />
+        )}
+      </Section>
       <Section title={S.run.evidence}>
         {err && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
         {rows && rows.length === 0 && <Text variant="body-sm" muted>{S.run.none}</Text>}

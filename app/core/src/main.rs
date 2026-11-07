@@ -137,6 +137,11 @@ fn evidence_list(app: State<'_, App>, slug: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn run_overview(app: State<'_, App>, slug: String) -> Res {
+    app.run_overview(&slug)
+}
+
+#[tauri::command(async)]
 fn evidence_detail(app: State<'_, App>, slug: String, task_id: String) -> Res {
     app.evidence_detail(&slug, &task_id)
 }
@@ -306,6 +311,7 @@ fn main() {
             diff,
             evidence_list,
             evidence_detail,
+            run_overview,
             worktree_info,
             control_message,
             control_redirect,
