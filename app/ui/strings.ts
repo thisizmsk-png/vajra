@@ -116,7 +116,7 @@ export const S = {
     commandsRun: "Commands run", noCommands: "No commands recorded.", detailFailed: "Could not read the commands.",
     detailTruncated: "The evidence file is too large to show here.",
     exit: (n: number | null) => (n === null ? "no exit code" : `exit ${n}`),
-    output: "Output (end of log)", notes: "Verifier notes",
+    output: "Output (end of log)", notes: "Verifier notes", writtenBy: "Written by", copyWhat: "command",
   },
   history: {
     title: "History",

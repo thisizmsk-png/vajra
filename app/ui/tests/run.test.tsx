@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Run } from "../src/screens/run/Run";
 import { S } from "../strings";
@@ -112,6 +112,20 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     await waitFor(() => expect(d.textContent).toContain("npm test"));
     for (const t of ["aaaaaaa", "/camp/evidence/e.json", "tests red", "t2", S.run.exit(1), S.run.exit(0), "tsc --noEmit", "FAIL src/a.test.ts", "verifier: two tests red"]) expect(d.textContent).toContain(t);
     expect(f.calls.find((c) => c.cmd === "evidence_detail")?.args).toEqual({ slug: "camp", taskId: "t2" });
+  });
+
+  it("shows who wrote the criterion's task and copies the literal command", async () => {
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await open(
+      [row("t2", "ac-2", "fail", { head: "a".repeat(40), path: "/camp/evidence/e.json", owner: "bhima" })],
+      detail([{ cmd: "pytest -k large", exit_code: 1, passed: false, output_tail: null }]),
+    );
+    fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
+    const d = await screen.findByRole("group", { name: S.run.detail });
+    expect(d.textContent).toContain("bhima");
+    fireEvent.click(await within(d).findByRole("button", { name: S.crew.copy(S.run.copyWhat) }));
+    expect(writeText).toHaveBeenCalledWith("pytest -k large");
   });
 
   it("shows command output as inert text, never as markup", async () => {

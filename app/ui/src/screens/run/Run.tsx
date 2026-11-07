@@ -105,6 +105,7 @@ export function Run() {
           <dl className="v-crew__facts" role="group" aria-label={S.run.detail}>
             <dt>{S.run.criterion}</dt><dd>{picked.criterion}</dd>
             <dt>{S.run.taskCol}</dt><dd>{picked.task} {picked.title ?? ""}</dd>
+            {picked.owner && (<><dt>{S.run.writtenBy}</dt><dd>{picked.owner}</dd></>)}
             <dt>{S.run.statusCol}</dt><dd>{label(picked.status)}</dd>
             {picked.path || picked.head ? (
               <>
@@ -120,6 +121,7 @@ export function Run() {
                     <div key={k} className="v-run__cmd">
                       {/* Text nodes only: output is untrusted and never rendered as markup. */}
                       <code>{c.cmd ?? ""}</code> <Badge status={c.passed ? "success" : "danger"}>{S.run.exit(c.exit_code)}</Badge>
+                      {c.cmd && <Button size="sm" variant="ghost" onClick={() => void navigator.clipboard?.writeText(c.cmd ?? "")}>{S.crew.copy(S.run.copyWhat)}</Button>}
                       {c.output_tail && <pre aria-label={S.run.output}>{c.output_tail}</pre>}
                     </div>
                   ))}
