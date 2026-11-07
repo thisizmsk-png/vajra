@@ -7,6 +7,7 @@ import type { StatusKey } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { CrewNodeDto } from "../../ipc";
 import { useRoute } from "../../router";
+import { StreamTab } from "./StreamTab";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -110,6 +111,7 @@ export function Crew() {
         <div className="v-crew__body">
           <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           {picked && (
+            <div className="v-crew__side">
             <Section title={S.crew.details}>
               <dl className="v-crew__facts" aria-label={S.crew.details}>
                 <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
@@ -117,6 +119,8 @@ export function Crew() {
                 {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
               </dl>
             </Section>
+            {picked.id.startsWith("agent:") && <StreamTab key={picked.id} stream={`w-${picked.id.slice("agent:".length)}`} />}
+            </div>
           )}
         </div>
       )}

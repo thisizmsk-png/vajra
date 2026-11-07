@@ -49,3 +49,13 @@ S2a Crew tree.
 | Could not read the crew. | load failure | followed by the core's error text |
 | Unknown (no signal) | node status | shown for a node nothing reports on, never Idle or Done (AC-2.1.5) |
 | Stopped by you / Message pending / Active now | node overlays | appended to the status after " · " |
+
+S2b Stream (worker output).
+
+| String | Where | Note |
+|---|---|---|
+| Stream, Worker output, read only | Crew details | the log region label |
+| Load earlier output / Loading | button | fetches output the live window no longer holds |
+| Jump to latest | button | re-pins the view to the newest line |
+| No output yet. / Could not read the output. | empty / failure | failure is followed by the core's error text |
+| 1 line was skipped / N lines were skipped | marker row | shown where output fell off the core's buffer |
