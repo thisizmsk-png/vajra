@@ -1486,3 +1486,23 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
     }
 }
+
+#[test]
+fn stream_window_serves_only_the_asked_rows_with_the_streams_bounds() {
+    let t = Tmp::new();
+    let app = t.app();
+    for i in 1..=3_000u64 {
+        app.bus.push("w-a", &format!("line {i}")).unwrap();
+    }
+    let newest = app.stream_window("w-a", None, 40, 64 * 1024).unwrap();
+    let seqs = |v: &Value| v["lines"].as_array().unwrap().iter().map(|l| l["seq"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert_eq!(seqs(&newest), (2_961..=3_000).collect::<Vec<_>>());
+    assert_eq!((newest["head_seq"].as_u64(), newest["first_seq"].as_u64()), (Some(3_000), Some(1)));
+    assert_eq!((newest["at_end"].as_bool(), newest["at_start"].as_bool(), newest["gap"].as_bool()), (Some(true), Some(false), Some(false)));
+    let mid = app.stream_window("w-a", Some(1_500), 40, 64 * 1024).unwrap();
+    assert_eq!(seqs(&mid), (1_500..1_540).collect::<Vec<_>>());
+    // Ceilings: a caller cannot ask for more than 500 rows, and a bad stream id is refused.
+    assert_eq!(app.stream_window("w-a", Some(1), 100_000, usize::MAX).unwrap()["lines"].as_array().unwrap().len(), 500);
+    assert_eq!(code(&app.stream_window("../x", None, 10, 10).unwrap_err()), "invalid_args");
+    assert_eq!(app.stream_window("w-unknown", None, 10, 10).unwrap()["lines"], json!([]));
+}

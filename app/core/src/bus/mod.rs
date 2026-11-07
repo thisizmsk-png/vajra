@@ -98,6 +98,25 @@ pub struct SpillBefore {
     pub gap: bool,
 }
 
+/// Result of `window`: the lines a reader is showing, and where they sit in the stream.
+#[derive(Debug, Default)]
+pub struct Window {
+    /// At most the requested number of lines, oldest first.
+    pub lines: Vec<Line>,
+    /// Newest seq of the stream (0 when empty).
+    pub head_seq: u64,
+    /// Oldest seq the core still holds (spill or ring); 0 when the stream is empty. `head_seq - first_seq + 1` is the
+    /// number of rows a scrollbar should stand for, unless `gap` says lines inside were lost.
+    pub first_seq: u64,
+    /// No older line is held than the first one returned.
+    pub at_start: bool,
+    /// The last line returned is the newest.
+    pub at_end: bool,
+    /// Lines the reader asked for were lost: the requested start was older than `first_seq`, the spill was evicted
+    /// while reading, or there is a hole between the spill and the ring. Retry or mark the hole.
+    pub gap: bool,
+}
+
 /// Result of `read_spill`.
 #[derive(Debug, Default)]
 pub struct SpillPage {
@@ -191,6 +210,8 @@ struct Stream {
     /// `(seq, logical offset)` of every `INDEX_EVERY`th line in the current spill file: lets a reader that wants the
     /// lines just before some seq start near them instead of at the start of the file.
     spill_index: Vec<(u64, u64)>,
+    /// Seq of the first line in the current spill file (0 while the file is empty).
+    spill_first: u64,
     spill_disabled: bool,
     spill_dropped: u64,
     last_used: u64,
@@ -348,6 +369,7 @@ impl Bus {
                         spill_base: 0,
                         spill_len: 0,
                         spill_index: Vec::new(),
+                        spill_first: 0,
                         spill_disabled: false,
                         spill_dropped: 0,
                         last_used: 0,
@@ -419,6 +441,9 @@ impl Bus {
         })();
         match wrote {
             Ok(()) => {
+                if s.spill_len == 0 {
+                    s.spill_first = lines.first().map_or(0, |l| l.seq);
+                }
                 s.spill_len += buf.len() as u64;
                 s.spill_index.extend(marks);
                 inner.spill_total += buf.len() as u64;
@@ -456,6 +481,7 @@ impl Bus {
             s.spill_base += s.spill_len;
             inner.spill_total -= s.spill_len;
             s.spill_len = 0;
+            s.spill_first = 0;
             s.spill_index.clear();
         }
     }
@@ -651,6 +677,108 @@ impl Bus {
             lines.drain(..lines.len() - max_lines);
         }
         Ok(SpillBefore { lines, at_start, gap: false })
+    }
+
+    /// The rows a reader is showing, and nothing else (#45): up to `max_lines` lines (and about `max_bytes` of text, at
+    /// least one line) starting at seq `from`, or the newest ones when `from` is `None`. Lines come from the spill and
+    /// the ring alike, so the reader never has to hold the stream: it asks for the window it is looking at. Memory is
+    /// bounded by the request, and the spill is read from the nearest index entry, so the cost is about the window.
+    pub fn window(&self, stream: &str, from: Option<u64>, max_lines: usize, max_bytes: usize) -> io::Result<Window> {
+        self.window_with(stream, from, max_lines, max_bytes, &|| {})
+    }
+
+    /// `between` runs after the bounds were captured and before the spill is read (tests force an eviction there).
+    pub(crate) fn window_with(&self, stream: &str, from: Option<u64>, max_lines: usize, max_bytes: usize, between: &dyn Fn()) -> io::Result<Window> {
+        let max_lines = max_lines.max(1);
+        let (head, first, ring_front, ring, base, start): (u64, u64, u64, Vec<Line>, u64, Option<u64>) = {
+            let inner = lock(&self.inner);
+            let Some(s) = inner.streams.get(stream) else {
+                return Ok(Window { at_start: true, at_end: true, ..Window::default() });
+            };
+            let head = s.next_seq - 1;
+            if head == 0 {
+                return Ok(Window { at_start: true, at_end: true, ..Window::default() });
+            }
+            let ring_front = s.ring.front().map_or(s.next_seq, |l| l.seq);
+            let first = if s.spill_len > 0 { s.spill_first.max(1) } else { ring_front };
+            let want = match from {
+                Some(f) => f.max(first),
+                None => (head + 1).saturating_sub(max_lines as u64).max(first),
+            };
+            let ring = s.ring.iter().filter(|l| l.seq >= want).take(max_lines).cloned().collect();
+            let start = (want < ring_front && s.spill_len > 0).then(|| s.spill_index.iter().rev().find(|(q, _)| *q <= want).map_or(s.spill_base, |(_, o)| *o));
+            (head, first, ring_front, ring, s.spill_base, start)
+        };
+        let want = match from {
+            Some(f) => f.max(first),
+            None => (head + 1).saturating_sub(max_lines as u64).max(first),
+        };
+        let mut gap = from.is_some_and(|f| f < first);
+        between();
+        let mut lines: Vec<Line> = Vec::new();
+        let mut held = 0usize;
+        if let Some(mut offset) = start {
+            'spill: loop {
+                let page = self.read_spill(stream, offset, 64 * 1024)?;
+                if page.gap && offset != base {
+                    // The spill was evicted while we read: the ring lines captured for this request are real, so
+                    // return them and say `gap` so the reader retries.
+                    let mut out = ring;
+                    out.truncate(max_lines);
+                    return Ok(Window { head_seq: head, first_seq: ring_front, at_start: false, at_end: out.last().is_none_or(|l| l.seq >= head), lines: out, gap: true });
+                }
+                for l in page.lines {
+                    if l.seq < want {
+                        continue;
+                    }
+                    if l.seq >= ring_front || lines.len() >= max_lines {
+                        break 'spill;
+                    }
+                    // `from` reads forward: stop at the budget. A newest window trims the front after the ring joins.
+                    if from.is_some() && !lines.is_empty() && held + l.text.len() > max_bytes {
+                        break 'spill;
+                    }
+                    held += l.text.len();
+                    lines.push(l);
+                }
+                if page.end {
+                    break;
+                }
+                offset = page.next_offset;
+            }
+        }
+        let last = lines.last().map(|l| l.seq);
+        for l in ring {
+            if lines.len() >= max_lines {
+                break;
+            }
+            if last.is_some_and(|q| l.seq <= q) {
+                continue;
+            }
+            if from.is_some() && !lines.is_empty() && held + l.text.len() > max_bytes {
+                break;
+            }
+            held += l.text.len();
+            lines.push(l);
+        }
+        if from.is_none() {
+            // The newest lines within the budget: the oldest are dropped, never the newest.
+            while held > max_bytes && lines.len() > 1 {
+                held -= lines.remove(0).text.len();
+            }
+        }
+        // A hole inside the window (the spill stopped before the ring started) is reported, not hidden.
+        if lines.windows(2).any(|w| w[1].seq != w[0].seq + 1) {
+            gap = true;
+        }
+        Ok(Window {
+            head_seq: head,
+            first_seq: first,
+            at_start: lines.first().is_none_or(|l| l.seq <= first) && from.is_none_or(|_| !lines.is_empty()),
+            at_end: lines.last().is_none_or(|l| l.seq >= head),
+            lines,
+            gap,
+        })
     }
 
     /// The last `max_lines` ring lines plus counters, for a subscriber that

@@ -35,6 +35,9 @@ pub type Res = Result<Value, Value>;
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
+/// Most rows and text one `stream_window` call returns: a view shows tens of rows, so this is a ceiling, not a default.
+const WINDOW_MAX_LINES: usize = 500;
+const WINDOW_MAX_BYTES: usize = 1024 * 1024;
 /// Largest worker meta file and workflow journal read whole (both are Claude Code files; over-limit ones are skipped).
 const MAX_META_BYTES: u64 = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
@@ -628,6 +631,20 @@ impl App {
         }
         let p = self.bus.read_spill_before(stream, before_seq, max_lines.clamp(1, 1000)).map_err(|e| fail("io_error", e))?;
         Ok(json!({"lines": lines_json(&p.lines), "at_start": p.at_start, "gap": p.gap}))
+    }
+
+    /// The rows a stream view is showing and nothing else (#45): up to `max_lines` (at most 500) starting at seq `from`,
+    /// or the newest ones when `from` is null, within `max_bytes` (at most 1 MiB) of text. `head_seq` and `first_seq` size
+    /// the scrollbar; `at_start`, `at_end` and `gap` tell the view what lies beyond the window and what was lost.
+    pub fn stream_window(&self, stream: &str, from: Option<u64>, max_lines: usize, max_bytes: usize) -> Res {
+        if !bus::valid_stream_id(stream) {
+            return Err(invalid("stream", "not a stream id"));
+        }
+        let w = self.bus.window(stream, from, max_lines.clamp(1, WINDOW_MAX_LINES), max_bytes.clamp(1, WINDOW_MAX_BYTES)).map_err(|e| fail("io_error", e))?;
+        Ok(json!({
+            "lines": lines_json(&w.lines), "head_seq": w.head_seq, "first_seq": w.first_seq,
+            "at_start": w.at_start, "at_end": w.at_end, "gap": w.gap,
+        }))
     }
 
     pub fn task(&self, slug: &str, task_id: &str) -> Res {
