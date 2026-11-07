@@ -137,6 +137,33 @@ describe("History report and integrity (S6)", () => {
     expect(screen.queryByText(/should never be shown/)).toBeNull();
   });
 
+  it("refreshes a row's badge from a superseded read while the panel keeps the newer one", async () => {
+    // Settled verdicts, as the core cache holds them; each read settles its own campaign's entry.
+    const settled: Record<string, string> = { "a-camp": "ok", "b-camp": "ok" };
+    let releaseA!: (v: unknown) => void;
+    const slowA = new Promise((r) => { releaseA = r; });
+    const f = fakeIpc({
+      list_campaigns: () => ({ campaigns: ["a-camp", "b-camp"].map((slug) => ({ slug, goal: slug, status: "done", integrity: settled[slug] })) }),
+      read_report: (a?: Record<string, unknown>) => a?.slug === "a-camp"
+        ? slowA.then(() => { settled["a-camp"] = "failed"; return { slug: "a-camp", integrity: "integrity_failed", text: null }; })
+        : { slug: "b-camp", integrity: "ok", text: "b body" },
+    });
+    setTransport(f.transport);
+    render(<History />);
+    const rowOf = (slug: string) => within(screen.getByRole("table")).getAllByRole("row").find((r) => within(r).queryByRole("button", { name: slug }))!;
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: S.history.report("a-camp") }));
+    fireEvent.click(screen.getByRole("button", { name: S.history.report("b-camp") }));
+    expect(await screen.findByRole("region", { name: S.history.reportTitle("b-camp") })).toBeTruthy();
+    const lists = () => f.calls.filter((c) => c.cmd === "list_campaigns").length;
+    await waitFor(() => expect(lists()).toBe(2)); // initial load + B's refresh
+    expect(within(rowOf("a-camp")).getByText(S.history.integrityOk)).toBeTruthy();
+    releaseA(undefined);
+    await waitFor(() => expect(within(rowOf("a-camp")).getByText(S.history.integrityFailed)).toBeTruthy());
+    expect(screen.getByRole("region", { name: S.history.reportTitle("b-camp") }).textContent).toContain("b body");
+    expect(screen.queryByText(S.history.reportFailed)).toBeNull();
+  });
+
   it("verifies now and offers the restore command when the signature fails", async () => {
     const f = fakeIpc({ list_campaigns: list("ok"), verify_campaign: { slug: "a-camp", ok: false, restore: "vajra-campaign.sh resume a-camp --from-checkpoint 2" } });
     setTransport(f.transport);

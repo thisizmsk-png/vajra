@@ -77,11 +77,10 @@ export function History() {
     } catch (e) {
       next = { slug: c.slug, state: "error", text: errorText(e) };
     }
-    if (mine !== req.current) return;
-    setView(next);
-    // The core settles the campaign's shared integrity verdict from this very check, so reload the table: the row
-    // badge then shows the same verdict as the report or verify result, not an older one.
+    // The core settles the campaign's shared integrity verdict from this very check (and emits no changed event), so
+    // reload the table even when this reply is superseded: the row badge then shows the verdict this check settled.
     load();
+    if (mine === req.current) setView(next);
   };
   const showReport = (c: Campaign) => run(c, async () => ({ slug: c.slug, state: "done", report: await api.readReport(c.slug) }));
   const verifyNow = (c: Campaign) => run(c, async () => {
