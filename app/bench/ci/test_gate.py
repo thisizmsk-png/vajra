@@ -1,6 +1,6 @@
 import unittest
-from gate import check, evaluate
-from measure import classify, flavour_key, flavour_summary, identity_key, launch_flavours, launch_summary, helper_type
+from gate import check, evaluate, post_only
+from measure import classify, flavour_key, flavour_summary, identity_key, launch_flavours, launch_summary, helper_type, postload_summary
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
 NW = "Networking+WebContent"
@@ -227,6 +227,50 @@ class Measure(unittest.TestCase):
         idle = {"identity": ID, "flavour": key, "median_of_medians_mib": med, "launch_flavours": launch_flavours(runs)}
         fails, _ = evaluate(bl(flavour=NW), idle, None, ci=True)
         self.assertTrue(any("no baseline entry" in f for f in fails), fails)
+
+
+
+POST = {"pre_load_mib": 150.0, "peak_mib": 210.0, "plus2_mib": 190.0, "plus10_mib": 195.0, "retained_mib": 45.0, "helpers": 2}
+
+
+class PostLoad(unittest.TestCase):
+    def idle(self, **extra):
+        return {**run(150), **extra}
+
+    def test_summary_takes_medians_and_the_peak_and_the_retained_growth(self):
+        s = postload_summary([{"total_mib": 149, "helpers": 2}, {"total_mib": 151, "helpers": 2}],
+                             [{"total_mib": 205, "helpers": 2}, {"total_mib": 212, "helpers": 2}],
+                             [{"total_mib": 188, "helpers": 2}, {"total_mib": 192, "helpers": 2}, {"total_mib": 190, "helpers": 2}],
+                             [{"total_mib": 194, "helpers": 2}, {"total_mib": 196, "helpers": 2}, {"total_mib": 195, "helpers": 2}])
+        self.assertEqual((s["pre_load_mib"], s["peak_mib"], s["plus2_mib"], s["plus10_mib"], s["retained_mib"]), (150.0, 212, 190, 195, 45.0))
+
+    def test_no_baseline_means_reported_only_never_a_failure(self):
+        fails, warns = evaluate(bl(), self.idle(post_load=POST), None)
+        self.assertEqual(fails, [])
+        self.assertTrue(any("post-load" in w and "no baseline" in w for w in warns), warns)
+
+    def test_over_the_baseline_or_the_ceiling_only_warns(self):
+        b = bl()
+        b["identities"][ID]["flavours"][NW]["post_load_mib"] = 150
+        fails, warns = evaluate(b, self.idle(post_load={**POST, "plus10_mib": 205}), None)
+        self.assertEqual(fails, [])
+        self.assertTrue(any("post-load" in w and "200" in w for w in warns), warns)
+        self.assertTrue(any("post-load" in w and "baseline 150" in w for w in warns), warns)
+
+    def test_a_run_without_a_post_load_section_is_unchanged(self):
+        fails, warns = evaluate(bl(), self.idle(), None)
+        self.assertEqual((fails, warns), ([], []))
+
+
+class PostOnly(unittest.TestCase):
+    def test_a_standalone_post_load_file_reports_and_never_fails(self):
+        warns, md = post_only(bl(), {"identity": ID, "helpers": 2, "flavour": NW, "post_load": POST})
+        self.assertTrue(any("no baseline" in w for w in warns), warns)
+        self.assertIn("| 150.0 | 210.0 | 190.0 | 195.0 | 45.0 MiB |", md)
+
+    def test_an_unknown_identity_still_reports(self):
+        warns, md = post_only(bl(), {"identity": "other", "helpers": 3, "flavour": GPU, "post_load": POST})
+        self.assertTrue(warns and md)
 
 
 if __name__ == "__main__":

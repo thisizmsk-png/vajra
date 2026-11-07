@@ -234,3 +234,12 @@ describe("History report and integrity (S6)", () => {
     expect(await screen.findByRole("alert")).toBeTruthy();
   });
 });
+
+describe("escapeControls (red team S3)", () => {
+  it("makes zero-width, soft hyphen, variation selectors and tag characters visible", async () => {
+    const { escapeControls } = await import("../src/screens/history/History");
+    const tags = [..."deploy"].map((c) => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join("");
+    const out = escapeControls(`ok​‍⁠﻿­️${tags}\u{e0100}.`);
+    expect(out).toBe("ok\\u200b\\u200d\\u2060\\ufeff\\u00ad\\ufe0f\\u{e0064}\\u{e0065}\\u{e0070}\\u{e006c}\\u{e006f}\\u{e0079}\\u{e0100}.");
+  });
+});
