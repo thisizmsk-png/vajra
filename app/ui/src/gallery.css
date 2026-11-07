@@ -1,0 +1,10 @@
+/* Kit gallery layout only (src/Gallery.tsx, GalleryDesktop.tsx). Replaces the inline style objects. Spacing on the 4 px base. */
+.v-gallery { padding: 24px; display: grid; gap: 16px; max-width: 720px; }
+.v-gallery__flex { display: flex; gap: 8px; }
+.v-gallery__wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+.v-gallery__wrap--loose { gap: 16px; }
+.v-gallery__center { align-items: center; }
+.v-gallery__stack { display: grid; gap: 12px; }
+.v-gallery__stack--tight { gap: 8px; }
+.v-gallery__gap { margin-top: 8px; }
+.v-gallery__panel { height: 160px; }

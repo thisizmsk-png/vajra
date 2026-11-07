@@ -91,12 +91,69 @@ A working tool, not a showcase: dense rows, quiet chrome, text that reads fast, 
 color (#d97757, "Vajra clay") that marks the primary action and what is live right now. Direction
 borrows Linear's density and Raycast's palette, on a GitHub-dark base that the brand art already uses.
 
-**Stack note.** Stack-agnostic until the spike decides; Tauri v2 with a Rust core is the option to
-beat. Component pattern is shadcn-style: the project owns the source in one kit folder
-(`components/ui`), built on Radix-like accessible primitives, variants with `cva`, class merging
-with `cn()` (clsx + tailwind-merge). Tokens are CSS variables consumed as
-`rgb(var(--c-primary) / <alpha-value>)`, so a theme swaps variables and nothing else. If a native
-toolkit wins the spike, the same token roles map to native theme objects.
+**Stack note (what is built today).** Tauri v2 with a Rust core, React UI in `app/ui`. The kit in
+`components/ui` is hand-rolled: plain CSS classes over the CSS variables in `theme/tokens.css`,
+native `<dialog>` for Sheet and AlertDialog, native radios for SegmentedControl, `role="switch"` for
+Switch, and `cn()` is a string join (it is not clsx and not tailwind-merge). It has no Tailwind,
+Radix, cva or tailwind-merge. Earlier drafts promised a shadcn-style stack; that was not built. The
+options and the cost are in the UI SOP decision memo (PR, "UI SOP"). Tokens are hex CSS variables
+consumed as `var(--c-primary)`, so a theme swaps variables and nothing else.
+
+## Art direction (app screens)
+
+Written under the UI SOP with `interface-design`. It decides on the existing tokens; it adds no colour.
+
+**Intent.** Who: a developer at a Mac who has started a crew and checks on it for hours, between
+other work. They glance at status, decide (approve a plan, redirect, stop a worker) and go back to
+their editor. What they must do: see what is running and what needs them, then act once. Feel: an
+instrument panel. Quiet, dense, legible from two metres, with one warm signal that means "live now".
+
+**Domain (territory, not features).** Run, crew, worker, checkpoint, criterion, plan, approval,
+handoff, stream, diff, worktree, terminal, evidence, campaign, verifier.
+
+**Colour world.** Graphite canvas (#0d1117), slate panels (#161b22), a bench edge (#30363d), clay
+ember (#d97757), and the status lights of an instrument (green, amber, red, blue). Everything else is
+structure.
+
+**Signature (only this product).** The **live clay marker**: the one node of the crew tree that is
+`in_progress` carries the only clay on the screen. Clay is therefore a place to look, never decoration.
+Status is a shape plus a label (○ ◐ ● ✓ ■ ◆ ✕ ▲), so the crew reads in greyscale too.
+
+**Defaults rejected.**
+- Identical stacked cards for workers → one 28 px row per worker in a tree, with the status shape first.
+- A hero metric block for "X of Y" → the run's own sentence ("3 of 7 criteria pass") set in headline-md.
+- Icon in a coloured circle for each status → the status shape, no container.
+- A full-width primary button floating under the form → the one primary sits at the decision point and
+  takes the verb of that decision ("Start run", "Approve plan").
+- An empty state with a sample chart → a sentence that says what is missing and the one command to fix it.
+
+**Hierarchy per screen (the focal element wins through size, weight, contrast or space).**
+- **Home:** focal is the start form, under a headline-lg "Home". Checks are quiet 12 px metadata above it. Campaigns are a list below, never cards.
+- **Crew:** focal is the live node in the tree; the selected row takes the accent, the detail pane stays flat.
+- **Run (not built):** focal is the stream pane at full height. Controls sit in a 24 px bar above it. No chrome around the terminal.
+- **History:** focal is the table. Sort headers are the only controls in the header row. Numbers are tabular.
+- **Settings:** focal is the check list. Each check is a row with its shape, label, detail and fix; nothing is grouped in a card.
+
+**Depth.** Borders only, committed. Three tonal layers (background, surface, surface-elevated) and
+1 px `border` lines for structure. Only floating layers (palette, dialog, toast) take the single
+`--shadow-floating`. No gradients.
+
+**Spacing and density.** 4 px base. Rows 28 px, row padding 8 px, component gap 8 px, section gap 24 px,
+screen padding 24 px. Forms stop at a 720 px column (about 80 characters); tables and the crew tree use
+the full width. The sidebar is 220 px, so navigation reads as the peer of the content, not a hero.
+
+**Type.** System fonts, three weights (400, 500, 600). Screen title 20/26 at 600. Section heading
+15/20 at 600. Body 13/19, labels 13/16 at 500, metadata 12/17, keyboard hints and badges 11/14 at 500.
+Hierarchy comes from size and weight first, then `text-secondary` and `text-muted`, never the brand
+clay. Tabular numerals on counts, timestamps, memory and exit codes.
+
+**Checks (interface-design).**
+- Swap test: with a stock typeface and a stock dashboard grid, the crew tree and the criterion rows
+  would still look generic. They are the parts that differ, so they are the parts to keep.
+- Squint test: the sidebar, the content and the one clay node are the three things that show.
+- Signature test: five places it shows: the crew tree live node, the Run status line, the Home primary
+  button, the Crew detail status, the approval action card.
+- Token test: `--c-primary`, `--c-text-muted`, `--c-border` read as this product's workbench, not a generic template.
 
 **Role names.** The UI shows generic names. This is the only place engine ids appear in design docs:
 

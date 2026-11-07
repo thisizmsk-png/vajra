@@ -31,7 +31,7 @@ export function GalleryDesktop() {
         ]} />
       </Section>
       <Section title="Crew and panes">
-        <div style={{ height: 160 }}>
+        <div className="v-gallery__panel">
           <ResizablePanes initial={220} min={160} max={320} label="Resize crew tree"
             first={<CrewTree label="Crew" nodes={TREE} selected={sel} onSelect={setSel} defaultOpen={["lead", "be"]} />}
             second={<Text variant="body">Selected: {sel}</Text>} />
@@ -49,8 +49,8 @@ export function GalleryDesktop() {
           <EvidenceRow id="ac-2" state="fail" command="npm test" exitCode={1} />
         </tbody>
         </table>
-        <div style={{ marginTop: 8 }}><ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+        <div className="v-gallery__gap"><ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
+        <div className="v-gallery__flex v-gallery__center v-gallery__gap">
           <Tooltip text="Open the command palette (Cmd K)"><Button onClick={() => setPalette(true)}>Commands</Button></Tooltip>
           <Text variant="body-sm" muted>{note}</Text>
         </div>
