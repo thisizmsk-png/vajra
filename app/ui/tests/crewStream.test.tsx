@@ -122,6 +122,16 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(screen.getByRole("log").textContent).not.toContain("out 1001");
   });
 
+  it("places each line at its own seq when the window has a hole inside it", async () => {
+    // seqs 1..5 and 9..12 (6..8 lost): row = seq - first_seq, so 9 sits at row 8, not row 5, and the newest line is last.
+    const hole = { lines: [...lines(1, 5), ...lines(9, 12)], head_seq: 12, first_seq: 1, at_start: true, at_end: true, gap: true };
+    await openBackend({ stream_window: hole });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 12"));
+    const rows = Array.from(log.querySelectorAll(".v-term-line")).map((e) => e.textContent ?? "");
+    expect(rows.slice(0, 12)).toEqual(["out 1", "out 2", "out 3", "out 4", "out 5", "", "", "", "out 9", "out 10", "out 11", "out 12"]);
+  });
+
   it("marks a window that lost lines", async () => {
     await openBackend({ stream_window: core(30, 10, { gap: true }) });
     await screen.findByRole("log");

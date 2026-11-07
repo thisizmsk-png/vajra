@@ -10,7 +10,7 @@ const NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "wh
  * no clipboard or title sequences, no cursor control, no controls) and only the visible rows are sanitized and rendered.
  * `takenOver` is a label change only: keyboard input is the host's job (Cmd chords only), never this component's.
  */
-export function TerminalPane({ lines, height = 360, takenOver, label, total, windowStart = 0, origin, onRange }: {
+export function TerminalPane({ lines, height = 360, takenOver, label, total, windowStart = 0, origin, rowAt, onRange }: {
   /** The rows held in memory. With `total` they are a window onto a longer stream: row `windowStart + k` is `lines[k]`. */
   lines: readonly string[];
   height?: number;
@@ -21,6 +21,8 @@ export function TerminalPane({ lines, height = 360, takenOver, label, total, win
   windowStart?: number;
   /** Id of row 0 (the stream's first seq): when it advances the view stays on the same lines. */
   origin?: number;
+  /** Row text by row number, for a window whose lines are not contiguous (a hole). When given it replaces `windowStart + lines`. */
+  rowAt?: (row: number) => string | undefined;
   /** Rows in view (start inclusive, end exclusive) and whether the view is at the bottom. */
   onRange?: (start: number, end: number, atBottom: boolean) => void;
 }) {
@@ -41,7 +43,7 @@ export function TerminalPane({ lines, height = 360, takenOver, label, total, win
       renderRow={(i) => {
         // Only the rows in view are sanitized (cost does not grow with the scrollback), so each line starts with plain
         // style: a color that a program leaves on across lines is not carried over.
-        const text = lines[i - windowStart];
+        const text = rowAt ? rowAt(i) : lines[i - windowStart];
         if (text === undefined) return <span className="v-term-line" aria-hidden />;
         const line = sanitizeLine(text);
         return (

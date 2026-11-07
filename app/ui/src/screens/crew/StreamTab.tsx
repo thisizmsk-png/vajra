@@ -107,6 +107,14 @@ export function StreamTab({ stream }: { stream: string }) {
   const text = useMemo(() => (win ? win.lines.map((l) => l.text) : []), [win]);
   const total = win ? Math.max(0, win.head_seq - win.first_seq + 1) : 0;
   const windowStart = win && win.lines.length ? win.lines[0].seq - win.first_seq : 0;
+  // Each line sits at its own seq (row = seq - first_seq), so a hole inside the window leaves blank rows and nothing shifts.
+  const rowAt = useMemo(() => {
+    if (!win) return undefined;
+    const by = new Map<number, string>();
+    for (const l of win.lines) by.set(l.seq, l.text);
+    const first = win.first_seq;
+    return (i: number) => by.get(first + i);
+  }, [win]);
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}
@@ -118,7 +126,7 @@ export function StreamTab({ stream }: { stream: string }) {
       {text.length === 0 && !err ? (
         <Text variant="body-sm" muted>{S.crew.noStream}</Text>
       ) : (
-        <TerminalPane key={pin} lines={text} total={total} windowStart={windowStart} origin={win?.first_seq} onRange={onRange} label={S.crew.streamLabel} height={HEIGHT} />
+        <TerminalPane key={pin} lines={text} total={total} windowStart={windowStart} rowAt={rowAt} origin={win?.first_seq} onRange={onRange} label={S.crew.streamLabel} height={HEIGHT} />
       )}
     </Section>
   );
