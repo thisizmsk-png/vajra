@@ -61,6 +61,13 @@ After changing tracked files, run `bash scripts/generate-manifest.sh` in your
 own terminal so the integrity manifest stays in sync (like `install.sh`, it is
 for you to run, not the model). `vajra-doctor.sh` flags a mismatch.
 
+**For reviewers and agents.** The manifest hashes are operator-only: workers and
+agents never run `generate-manifest.sh` and never edit a hash. The operator and
+the workers share one GitHub account, so a commit titled exactly
+`chore: regenerate manifest.json` that changes only `manifest.json` is the
+operator's regeneration. Do not ask to revert it. Check instead that
+`tests/hooks/run-manifest-fresh.sh` passes on the head.
+
 ## Style
 
 - Bash must run on macOS bash 3.2 (no associative arrays, no `mapfile`, no
