@@ -45,4 +45,6 @@ jobs:
       - name: Run all suites (vitest and every tests/**/run-*.sh)
         env:
           CI: "true"
+          # Feature PRs do not carry manifest.json: stale entries warn on pull_request, and block on pushes to main.
+          VAJRA_MANIFEST_FRESH: ${{ github.event_name == 'pull_request' && 'warn' || '' }}
         run: bash tests/run-all.sh

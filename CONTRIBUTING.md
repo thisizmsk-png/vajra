@@ -60,6 +60,7 @@ Everything must be green before you open a pull request.
 After changing tracked files, run `bash scripts/generate-manifest.sh` in your
 own terminal so the integrity manifest stays in sync (like `install.sh`, it is
 for you to run, not the model). `vajra-doctor.sh` flags a mismatch.
+Feature PRs don't include `manifest.json`; the operator regenerates it on main after merges.
 
 ## Style
 
