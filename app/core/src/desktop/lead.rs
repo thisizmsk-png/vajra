@@ -288,7 +288,10 @@ impl App {
         }
         let env = lock(&self.lead.env).clone();
         self.guard_preconditions(&env)?;
-        let dir = self.data.join("lead");
+        // Per-run files: the settings hold the run repo's deny rules, and asks for two different runs can overlap
+        // (the busy lock is per run). A shared file would let run B rewrite it before run A's CLI reads it.
+        fsx::private_dir(&self.data.join("lead")).map_err(io)?;
+        let dir = self.data.join("lead").join(&t.run_id);
         let settings = self.write_lead_files(&dir, &t.cwd)?;
         self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id)?;
 
@@ -411,7 +414,7 @@ impl App {
         ok
     }
 
-    /// Write `<data>/lead/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
+    /// Write `<data>/lead/<run_id>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
     fn write_lead_files(&self, dir: &Path, repo: &Path) -> Result<String, LeadError> {

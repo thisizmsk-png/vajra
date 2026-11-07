@@ -16,6 +16,8 @@ case "$1" in --warm) exit 0;; --version) cat "$D/version"; exit 0;; esac
 N="$$"
 cat > "$D/stdin.$N"
 printf '%s\n' "$@" > "$D/argv.$N"
+S=""; for a in "$@"; do [ "$P" = --settings ] && S="$a"; P="$a"; done
+[ -n "$S" ] && cp "$S" "$D/settings-seen.$N"
 cp "$(cat "$D/ledger.path")" "$D/ledger-at-spawn.$N" 2>/dev/null
 if grep -q 'Read the file' "$D/stdin.$N"; then
   echo x >> "$D/selftest.count"
@@ -399,7 +401,7 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let dir = t.data().join("lead");
+    let dir = t.data().join("lead").join(RUN_ID);
     let got = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     assert_eq!(got, lead_settings::settings(&t.home(), &t.repo(), &t.data()).unwrap());
     for f in ["settings.json", "mcp.json"] {
@@ -425,7 +427,7 @@ fn lead_startup_selftest_failclosed() {
     assert_eq!(t.count("selftest.count"), 1);
     assert_eq!(t.count("ask.count"), 0, "the real ask never ran");
     assert!(t.ledger().is_empty() && idle(&app));
-    assert!(!t.data().join("lead/canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
+    assert!(!t.data().join("lead").join(RUN_ID).join("canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
     // A failure is not cached: it is tried again, and is still refused.
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
     assert_eq!(t.count("selftest.count"), 2);
@@ -462,7 +464,7 @@ fn the_selftest_runs_with_the_hooks_removed_and_the_canary_covered_by_a_rule() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let bare = std::fs::read_to_string(t.data().join("lead/selftest-settings.json")).unwrap();
+    let bare = std::fs::read_to_string(t.data().join("lead").join(RUN_ID).join("selftest-settings.json")).unwrap();
     assert_eq!(bare, lead_settings::settings_no_hooks(&t.home(), &t.repo(), &t.data()).unwrap());
     let v: Value = serde_json::from_str(&bare).unwrap();
     assert!(v.get("hooks").is_none());
@@ -528,4 +530,47 @@ fn claude_is_resolved_to_an_absolute_path_once() {
     app.lead.set_bin(None);
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "claude_not_found");
     assert_eq!(app.lead_status(RUN_ID).unwrap()["read_only_reason"], "claude not found");
+}
+
+#[test]
+fn two_runs_asking_at_once_each_get_their_own_settings() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sid_b, run_b) = ("2b8fad5b-d9cb-469f-a165-70867728950e", "20261106-0912");
+    let repo_b = t.0.join("repo-b");
+    std::fs::create_dir_all(&repo_b).unwrap();
+    lock(&app.runs).insert(
+        format!("run-{sid_b}"),
+        Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-y".into(), cwd: repo_b.clone(), nonces: Redactor::default() },
+    );
+    t.set("mode", "slow");
+    let (a, b) = std::thread::scope(|s| {
+        let ha = s.spawn(|| app.ask_lead(RUN_ID, "a"));
+        let hb = s.spawn(|| app.ask_lead(run_b, "b"));
+        (ha.join().unwrap(), hb.join().unwrap())
+    });
+    a.unwrap();
+    b.unwrap();
+    wait_until("both Leads running", || t.files("settings-seen.").len() >= 4);
+    // Every real Lead (not the self-test turns) was pointed at a file under its own run dir, holding its own repo's rules.
+    let mut checked = 0;
+    for argv in t.files("argv.") {
+        let text = std::fs::read_to_string(&argv).unwrap();
+        let Some(path) = text.lines().skip_while(|l| *l != "--settings").nth(1).map(PathBuf::from) else { continue };
+        let seen = std::fs::read_to_string(t.bin(&format!("settings-seen.{}", argv.file_name().unwrap().to_string_lossy().trim_start_matches("argv.")))).unwrap();
+        let (mine, other) = if path.to_string_lossy().contains(&format!("/lead/{RUN_ID}/")) { (t.repo(), repo_b.clone()) } else { (repo_b.clone(), t.repo()) };
+        assert!(path.to_string_lossy().contains("/lead/2026110"), "{path:?}");
+        let rule = |r: &Path| format!("Read(//{}/**/.env)", r.to_str().unwrap().trim_start_matches('/'));
+        assert!(seen.contains(&rule(&mine)), "{path:?} lacks its own repo rules");
+        assert!(!seen.contains(&rule(&other)), "{path:?} holds the other repo's rules");
+        checked += 1;
+    }
+    assert!(checked >= 4, "two self-tests and two asks: {checked}");
+    for id in [RUN_ID, run_b] {
+        assert!(t.data().join("lead").join(id).join("settings.json").is_file());
+    }
+    for h in lock(&app.lead.active).values() {
+        h.handle.cancel();
+    }
+    wait_until("idle", || idle(&app));
 }
