@@ -31,6 +31,9 @@ use crate::sessions::scrubbed_env;
 use crate::vajra::bridge::Request;
 use crate::vajra::preflight::find_on_path;
 
+/// What the human sees when the doctor reports the OS sandbox (with its denyWrite on the app dir) as not active. One
+/// line: why, and what to do.
+pub(super) const SANDBOX_NEEDED: &str = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
 /// `read_only` detail for a run loaded from the index whose directory the app has no record of.
 const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
 /// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
@@ -514,7 +517,7 @@ impl App {
         let verdict = match out {
             None => Err("vajra doctor does not pass"),
             Some(o) if o.stdout.lines().any(|l| l.starts_with("PASS") && l.contains("denyWrite active")) => Ok(()),
-            Some(_) => Err("Lead unavailable: the OS sandbox with denyWrite on the app dir is not active (enable it with /sandbox)"),
+            Some(_) => Err(SANDBOX_NEEDED),
         };
         *cache = Some((Instant::now(), verdict.is_ok()));
         verdict

@@ -33,6 +33,11 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn inbox(app: State<'_, App>) -> Res {
+    app.inbox()
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -264,6 +269,7 @@ fn main() {
             ask_lead,
             cancel_ask,
             lead_status,
+            inbox,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
