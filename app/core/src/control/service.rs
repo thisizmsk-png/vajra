@@ -38,6 +38,10 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 /// Cap for files a worker can write in the control dir (acks, stops).
 pub const MAX_ACK_BYTES: u64 = 16 * 1024;
 pub const INFLIGHT_UNKNOWN: Duration = Duration::from_secs(60);
+/// A queued action whose settlement check fails this many ticks in a row, over at least `CHECK_FAIL_AFTER`, is
+/// settled as `delivery_unknown` (`scan_failed`) instead of staying pending, silently, for as long as the failure lasts.
+pub const CHECK_FAIL_TICKS: u32 = 5;
+pub const CHECK_FAIL_AFTER: Duration = Duration::from_secs(30);
 pub const MAX_TEXT: usize = 4000;
 pub const MAX_REASON: usize = 500;
 pub const MAX_WORKER: usize = 128;
@@ -175,6 +179,16 @@ struct Action {
     reason: Option<String>,
     stop_match: Option<Value>,
     inflight_seen: Option<SystemTime>,
+    /// The run of consecutive failed settlement checks, if one is going on.
+    check_failed: Option<CheckFailure>,
+}
+
+/// Consecutive failures of `check` for one action: when the run began, how long it is, and the last error's code.
+#[derive(Clone, Debug)]
+struct CheckFailure {
+    first: SystemTime,
+    count: u32,
+    errno: i64,
 }
 
 struct Session {
@@ -420,6 +434,7 @@ impl Service {
                         reason: r.get("reason").and_then(Value::as_str).map(str::to_string),
                         stop_match: r.get("match").cloned(),
                         inflight_seen: None,
+                        check_failed: None,
                     },
                 );
             } else {
@@ -681,6 +696,7 @@ impl Service {
             reason: None,
             stop_match: None,
             inflight_seen: None,
+                        check_failed: None,
         })
     }
 
@@ -1002,7 +1018,42 @@ impl Service {
         let ids: Vec<String> = self.pending.values().filter(|a| a.state == State::Queued).map(|a| a.id.clone()).collect();
         for id in ids {
             let Some(sid) = self.pending.get(&id).map(|a| a.session_id.clone()) else { continue };
-            let _ = self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now);
+            match self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now) {
+                Ok(()) => {
+                    if let Some(a) = self.pending.get_mut(&id) {
+                        a.check_failed = None;
+                    }
+                }
+                Err(e) => self.check_failed(&id, &e, now),
+            }
+        }
+    }
+
+    /// A settlement check failed (an unreadable `queue/`, a full descriptor table, a ledger that will not append).
+    /// The action stays pending and is retried, but never silently and never forever: the first failure and every
+    /// change of error is logged (the OS error number only, no paths or text), and after `CHECK_FAIL_TICKS` failures in
+    /// a row spanning `CHECK_FAIL_AFTER` the action is settled as `delivery_unknown` with the reason `scan_failed`, which
+    /// the UI shows like any other unknown delivery. A good check in between starts the count again.
+    fn check_failed(&mut self, id: &str, err: &ControlError, now: SystemTime) {
+        let errno = match err {
+            ControlError::Io(e) => e.raw_os_error().map_or(-1, i64::from),
+            _ => -2,
+        };
+        let Some(a) = self.pending.get_mut(id) else { return };
+        let f = a.check_failed.get_or_insert(CheckFailure { first: now, count: 0, errno: i64::MIN });
+        f.count += 1;
+        let new_error = f.errno != errno;
+        f.errno = errno;
+        let (count, long_enough) = (f.count, now.duration_since(f.first).unwrap_or_default() >= CHECK_FAIL_AFTER);
+        if new_error {
+            self.log("control_check_failed", &[("errno", errno.unsigned_abs()), ("count", u64::from(count))]);
+        }
+        if count >= CHECK_FAIL_TICKS && long_enough {
+            let Some(a) = self.pending.get(id).cloned() else { return };
+            if self.record(&a, State::DeliveryUnknown, json!({"reason": "scan_failed"}), now).is_ok() {
+                self.pending.remove(id);
+                self.log("control_check_gave_up", &[("errno", errno.unsigned_abs()), ("count", u64::from(count))]);
+            }
         }
     }
 
