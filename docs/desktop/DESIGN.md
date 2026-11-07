@@ -1,7 +1,7 @@
 ---
 version: alpha
 name: Vajra Desktop
-description: Graphite. A dense, keyboard-first macOS tool in the Linear and Raycast family. Graphite neutrals in dark and light, an ink primary action, and one azure for focus, the selection's live state and the live line.
+description: Graphite. A dense, keyboard-first macOS tool. Graphite neutrals in dark and light, an ink primary action, and one azure for focus, the selection's live state and the live line.
 colors:
   background: "#101113"
   surface: "#16171a"
