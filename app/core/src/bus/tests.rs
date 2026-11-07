@@ -734,3 +734,32 @@ fn bus_window_eviction_fallback_obeys_the_byte_budget() {
     assert_eq!(n.lines.len(), 1, "{:?}", seqs(&n));
     assert_eq!(n.lines[0].seq, n.head_seq, "the newest row is the one kept");
 }
+
+#[test]
+fn bus_window_from_inside_rows_lost_after_spilling_stopped_reports_a_gap() {
+    // Spilling worked for a prefix, then stopped (ENOSPC), so a hole sits between the spill and the ring. A request
+    // that starts inside the hole must not come back as the ring's first rows with `gap: false`.
+    let tmp = TmpDir::new("winlostprefix");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=1_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    super::lock(&bus.inner).streams.get_mut("s").unwrap().spill_disabled = true;
+    for i in 1_001..=5_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let ring_first = bus.tail("s", 0, usize::MAX).lines[0].seq;
+    let from = ring_first - 100;
+    assert!(from > 1_000, "from sits in the lost interval");
+    let w = bus.window("s", Some(from), 20, usize::MAX).unwrap();
+    assert!(w.gap, "the requested start is not among the returned rows: {:?}", seqs(&w));
+    // A start inside the retained spill prefix is still exact and clean.
+    let w = bus.window("s", Some(500), 20, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (500..520).collect::<Vec<_>>());
+    assert!(!w.gap);
+    // A start at the ring's first row is clean too, and so is one beyond the head.
+    let w = bus.window("s", Some(ring_first), 20, usize::MAX).unwrap();
+    assert_eq!(seqs(&w)[0], ring_first);
+    assert!(!w.gap);
+    assert!(!bus.window("s", Some(9_999), 20, usize::MAX).unwrap().gap);
+}

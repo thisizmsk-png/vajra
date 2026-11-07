@@ -777,6 +777,12 @@ impl Bus {
         if lines.windows(2).any(|w| w[1].seq != w[0].seq + 1) {
             gap = true;
         }
+        // So is a hole at the front: a request from `f` reads exactly from `f`, so rows that start later mean the
+        // requested prefix was lost (spilling stopped after the first rows, then the ring moved on). A newest window
+        // (`from` is None) trims its front on purpose, and a start beyond the head returns nothing, so neither counts.
+        if from.is_some() && lines.first().is_some_and(|l| l.seq > want) {
+            gap = true;
+        }
         Ok(Window {
             head_seq: head,
             first_seq: first,
