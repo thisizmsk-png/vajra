@@ -1,0 +1,48 @@
+/* Direction A tokens: the only mockup file for this direction that holds raw colours (theme/ is exempt from the design guard). */
+[data-dir="a"] {
+  --c-background: #101113;
+  --c-surface: #16171a;
+  --c-surface-elevated: #1d1e22;
+  --c-accent: #24262b;
+  --c-border: #26282d;
+  --c-border-strong: #6b6f78;
+  --c-text: #ededef;
+  --c-text-secondary: #b9bbc2;
+  --c-text-muted: #8f929b;
+  --c-primary: #7aa7ff;
+  --c-text-on-primary: #0b1020;
+  --c-success: #5fd38d;
+  --c-warning: #f0b44c;
+  --c-danger: #ff7070;
+  --c-info: #9fb6e6;
+  --c-focus-ring: #7aa7ff;
+  --a-live-tint: rgb(122 167 255 / 0.10);
+  --a-warn-tint: rgb(240 180 76 / 0.08);
+  --shadow-floating: 0 8px 24px rgb(0 0 0 / 0.45);
+  --a-kbd-on-primary: rgb(0 0 0 / 0.25);
+  color-scheme: dark;
+}
+[data-dir="a"][data-theme="light"] {
+  --c-background: #fbfbfc;
+  --c-surface: #f4f4f6;
+  --c-surface-elevated: #ffffff;
+  --c-accent: #e9e9ee;
+  --c-border: #e3e3e8;
+  --c-border-strong: #868993;
+  --c-text: #18191c;
+  --c-text-secondary: #44464d;
+  --c-text-muted: #5f626b;
+  --c-primary: #2556c8;
+  --c-text-on-primary: #ffffff;
+  --c-success: #1a7341;
+  --c-warning: #855600;
+  --c-danger: #c0282b;
+  --c-info: #2556c8;
+  --c-focus-ring: #2556c8;
+  --a-live-tint: rgb(37 86 200 / 0.07);
+  --a-warn-tint: rgb(133 86 0 / 0.07);
+  --shadow-floating: 0 8px 24px rgb(24 25 28 / 0.12);
+  --a-kbd-on-primary: rgb(255 255 255 / 0.4);
+  color-scheme: light;
+}
+

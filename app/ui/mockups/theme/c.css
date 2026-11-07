@@ -1,0 +1,51 @@
+/* Direction C tokens: the only mockup file for this direction that holds raw colours (theme/ is exempt from the design guard). */
+[data-dir="c"] {
+  --c-background: #121211;
+  --c-surface: #1a1a18;
+  --c-surface-elevated: #222220;
+  --c-accent: #2b2b28;
+  --c-border: #2e2e2b;
+  --c-border-strong: #78776f;
+  --c-text: #f2f1ec;
+  --c-text-secondary: #c4c2ba;
+  --c-text-muted: #9c9a91;
+  --c-primary: #ffd60a;
+  --c-text-on-primary: #121211;
+  --c-success: #7fd18b;
+  --c-warning: #ff9f5a;
+  --c-danger: #ff6f61;
+  --c-info: #8ab8ff;
+  --c-focus-ring: #ffd60a;
+  --c-bolt: #ffd60a;
+  --c-ink: #121211;
+  --c-read: #4a4944;
+  --c-edit: #c4c2ba;
+  --c-gate-tint: rgb(255 214 10 / 0.10);
+  --serif: "Iowan Old Style", "New York", ui-serif, Charter, Georgia, serif;
+  --c-ink-rule: rgb(18 18 17 / 0.25);
+  color-scheme: dark;
+}
+[data-dir="c"][data-theme="light"] {
+  --c-background: #f4f3ef;
+  --c-surface: #eceae4;
+  --c-surface-elevated: #ffffff;
+  --c-accent: #e2e0d8;
+  --c-border: #d9d7ce;
+  --c-border-strong: #7a786f;
+  --c-text: #121211;
+  --c-text-secondary: #3d3c37;
+  --c-text-muted: #5a5852;
+  --c-primary: #121211;
+  --c-text-on-primary: #121211;
+  --c-success: #2b6b34;
+  --c-warning: #954700;
+  --c-danger: #b3261e;
+  --c-info: #1f5bb5;
+  --c-focus-ring: #121211;
+  --c-read: #cfccc2;
+  --c-edit: #3d3c37;
+  --c-gate-tint: rgb(255 214 10 / 0.28);
+  --c-ink-rule: rgb(18 18 17 / 0.25);
+  color-scheme: light;
+}
+

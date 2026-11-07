@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [".", "../strings.ts", "../components/ui/base/StatusDot.tsx", "../components/ui/cn.ts"]
+}
