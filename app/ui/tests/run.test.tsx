@@ -238,9 +238,9 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(screen.getByText(/round 2$/)).toBeTruthy();
     expect(screen.queryByText(/round 2 of/)).toBeNull();
     cleanup();
-    await openOverview(overview({ timeline: { phases: phases("Fix", { round: 3, max_rounds: 3 }), current: "Fix", status: "error" } }));
+    await openOverview(overview({ timeline: { phases: phases("Fix", { round: 3, max_rounds: 3 }), current: "Fix", status: "need_input" } }));
     expect(screen.getByText(/round 3 of 3/)).toBeTruthy();
-    expect(screen.getByText(S.run.runStatus.error)).toBeTruthy();
+    expect(screen.getAllByText(S.run.runStatus.need_input)[0]).toBeTruthy();
   });
 
   it("shows each way a run ends as text", async () => {

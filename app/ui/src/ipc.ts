@@ -71,7 +71,7 @@ export type TimelinePhase = { name: string; state: "done" | "current" | "pending
 export type GraphTask = { id: string; local: string; title: string | null; owner: string | null; status: string; deps: string[]; wave: number };
 export type RunOverview = {
   slug: string; run_id: string; stale: boolean;
-  timeline: { phases: TimelinePhase[]; current: string; status: "active" | "done" | "need_input" | "rejected" | "error" };
+  timeline: { phases: TimelinePhase[]; current: string; status: "active" | "done" | "need_input" | "rejected" };
   graph: { tasks: GraphTask[]; waves: number };
 };
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };

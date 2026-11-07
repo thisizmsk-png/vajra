@@ -24,7 +24,6 @@ pub enum Outcome {
     Done,
     NeedInput,
     Rejected,
-    Error,
 }
 
 impl Outcome {
@@ -34,7 +33,6 @@ impl Outcome {
             Self::Done => "done",
             Self::NeedInput => "need_input",
             Self::Rejected => "rejected",
-            Self::Error => "error",
         }
     }
 }
@@ -60,6 +58,8 @@ struct Lines {
     /// campaign's state over: nothing a previous run recorded (rounds, limit, outcome) carries into it.
     cur_run: String,
     max_rounds: Option<u32>,
+    /// The stop is `no verified delivery after N round(s)` (node fix_loop), not a mid-round wait for the user.
+    exhausted: bool,
 }
 
 impl Lines {
@@ -97,21 +97,27 @@ fn scan(progress: &str) -> Lines {
             let body = r.split_once(':').map(|x| x.1.trim_start()).unwrap_or("");
             if body.starts_with("waiting for the user") {
                 out.outcome = Some((Outcome::NeedInput, n));
+                out.exhausted = false;
             } else if body.starts_with("review rejected") {
                 out.outcome = Some((Outcome::Rejected, n));
+                out.exhausted = false;
             } else if let Some((k, m)) = body.split_once(" criteria passing").and_then(|(h, _)| h.split_once('/')) {
                 if let (Ok(k), Ok(m)) = (k.trim().parse::<u32>(), m.trim().parse::<u32>()) {
                     // The workflow writes this line only when the round's gate FAILED (criteria, suite, review or blocking
                     // issues): a round that passes everything breaks out before writing it. So even `3/3` means rework.
                     out.verified = Some((n, k, m));
                     out.outcome = None; // a finished round supersedes an earlier stop
+                    out.exhausted = false;
                 }
             }
         } else if let Some(r) = after.strip_prefix("no verified delivery after ") {
             let n: u32 = r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
             out.max_rounds = Some(n);
             out.round = out.round.max(n);
-            out.outcome = Some((Outcome::Error, n));
+            // The workflow writes this line right before returning `{status: 'need_input', node: 'fix_loop'}`: the user can
+            // continue, take over or drop the campaign. It is a stop that needs the user, at the Fix phase, not an error.
+            out.outcome = Some((Outcome::NeedInput, n));
+            out.exhausted = true;
         } else if after.starts_with("delivered ") && after.contains(" @ ") {
             out.outcome = Some((Outcome::Done, out.round));
         }
@@ -148,8 +154,8 @@ pub fn timeline(progress: &str, tasks: Option<&[Value]>) -> Timeline {
     let (current, outcome, fix_round) = match l.outcome {
         Some((Outcome::Done, _)) => (5, Outcome::Done, next_fix),
         Some((Outcome::Rejected, _)) => (3, Outcome::Rejected, None),
+        Some((Outcome::NeedInput, n)) if l.exhausted => (4, Outcome::NeedInput, Some(n.max(1))),
         Some((Outcome::NeedInput, _)) => (2, Outcome::NeedInput, None),
-        Some((Outcome::Error, n)) => (4, Outcome::Error, Some(n.max(1))),
         _ => match (tasks, have_tasks, open, next_fix) {
             (None, _, _, _) => (0, Outcome::Active, None),
             (Some(_), false, _, _) => (1, Outcome::Active, None),
@@ -352,7 +358,7 @@ mod tests {
         assert_eq!(cur("run r round 1: waiting for the user on t1; x\n", Some(&t)), ("Execute", Outcome::NeedInput));
         assert_eq!(cur("run r round 1: review rejected the approach\n", Some(&t)), ("Verify", Outcome::Rejected));
         let t = timeline("run r round 1: 1/3 criteria passing\nrun r: no verified delivery after 3 round(s); x\n", Some(&t));
-        assert_eq!((PHASES[t.current], t.outcome, t.fix_round, t.max_rounds), ("Fix", Outcome::Error, Some(3), Some(3)));
+        assert_eq!((PHASES[t.current], t.outcome, t.fix_round, t.max_rounds), ("Fix", Outcome::NeedInput, Some(3), Some(3)));
     }
 
     #[test]
@@ -486,6 +492,17 @@ mod tests {
         }
 
         #[test]
+        fn exhausted_rounds_are_the_need_input_the_workflow_returns_at_the_fix_loop() {
+            // The line is written immediately before this return, so the timeline must show that result and node.
+            let at = WORKFLOW.find("no verified delivery after ${MAX_ROUNDS}").expect("the exhausted-rounds line");
+            let ret = &WORKFLOW[at..];
+            let ret = &ret[..ret.find("return {").map(|i| i + 120).expect("a return after the line").min(ret.len())];
+            assert!(ret.contains("status: 'need_input', node: 'fix_loop'"), "the workflow's result for exhausted rounds changed: {ret}");
+            let t = timeline(&format!("{}\n", line_with("no verified delivery")), Some(&[task("r1.t1", "closed", &[])]));
+            assert_eq!((PHASES[t.current], t.outcome.as_str()), ("Fix", "need_input"));
+        }
+
+        #[test]
         fn the_resume_line_the_parser_keys_on_is_still_written() {
             assert!(WORKFLOW.contains("`resumed by vajra-deliver run ${RUN}`"), "the resume progress line changed; update runview.rs");
         }
@@ -502,7 +519,7 @@ mod tests {
             assert_eq!(run(&[verified.clone()]), ("Fix", Outcome::Active, Some(3), None), "{verified}");
             assert_eq!(run(&[line_with("waiting for the user")]).1, Outcome::NeedInput);
             assert_eq!(run(&[line_with("review rejected")]).1, Outcome::Rejected);
-            assert_eq!(run(&[verified.clone(), line_with("no verified delivery")]), ("Fix", Outcome::Error, Some(3), Some(3)));
+            assert_eq!(run(&[verified.clone(), line_with("no verified delivery")]), ("Fix", Outcome::NeedInput, Some(3), Some(3)));
             let done = run(&[verified, line_with(" delivered ")]);
             assert_eq!((done.0, done.1), ("Deliver", Outcome::Done));
         }

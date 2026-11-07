@@ -104,7 +104,7 @@ export const S = {
     evidence: "Evidence",
     timeline: "Progress", graph: "Tasks", graphEmpty: "No tasks planned yet.",
     phaseState: { done: "done", current: "current", pending: "not started" },
-    runStatus: { active: "In progress", done: "Done", need_input: "Needs your input", rejected: "Rejected", error: "Stopped with an error" },
+    runStatus: { active: "In progress", done: "Done", need_input: "Needs your input", rejected: "Rejected" },
     phases: { Understand: "Understand", Plan: "Plan", Execute: "Execute", Verify: "Verify", Fix: "Fix", Deliver: "Deliver" } as Record<string, string>,
     fixRound: (n: number | null | undefined, max: number | null | undefined) => (n ? (max ? `round ${n} of ${max}` : `round ${n}`) : ""),
     wave: (n: number) => `Wave ${n + 1}`, waitsFor: "Waits for", openWorker: "Open",
