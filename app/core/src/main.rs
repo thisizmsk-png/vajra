@@ -33,13 +33,28 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn inbox(app: State<'_, App>) -> Res {
+    app.inbox()
+}
+
+#[tauri::command(async)]
+fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
+    app.approve_plan(&id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
+    app.reject_plan(&id, &reason)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
 
 #[tauri::command(async)]
-fn list_campaigns(app: State<'_, App>) -> Res {
-    app.list_campaigns()
+fn list_campaigns(app: State<'_, App>, refresh: Option<bool>) -> Res {
+    app.list_campaigns_opt(refresh.unwrap_or(false))
 }
 
 #[tauri::command(async)]
@@ -62,6 +77,16 @@ fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: St
 }
 
 #[tauri::command(async)]
+fn read_report(app: State<'_, App>, slug: String) -> Res {
+    app.read_report(&slug)
+}
+
+#[tauri::command(async)]
+fn verify_campaign(app: State<'_, App>, slug: String) -> Res {
+    app.verify_campaign(&slug)
+}
+
+#[tauri::command(async)]
 fn resume_targets(app: State<'_, App>) -> Res {
     app.resume_targets()
 }
@@ -79,6 +104,11 @@ fn tail(app: State<'_, App>, stream: String, after_seq: u64, max_bytes: usize) -
 #[tauri::command(async)]
 fn read_spill(app: State<'_, App>, stream: String, offset: u64, max_bytes: usize) -> Res {
     app.read_spill(&stream, offset, max_bytes)
+}
+
+#[tauri::command(async)]
+fn read_spill_before(app: State<'_, App>, stream: String, before_seq: u64, max_lines: usize) -> Res {
+    app.read_spill_before(&stream, before_seq, max_lines)
 }
 
 #[tauri::command(async)]
@@ -144,6 +174,21 @@ fn kb_search(app: State<'_, App>, query: String, k: u32, repo: String) -> Res {
 #[tauri::command(async)]
 fn take_over(app: State<'_, App>, stream: String, on: bool) -> Res {
     app.take_over(&stream, on)
+}
+
+#[tauri::command(async)]
+fn ask_lead(app: State<'_, App>, run_id: String, text: String) -> Res {
+    app.ask_lead(&run_id, &text)
+}
+
+#[tauri::command(async)]
+fn cancel_ask(app: State<'_, App>, ask_id: String) -> Res {
+    app.cancel_ask(&ask_id)
+}
+
+#[tauri::command(async)]
+fn lead_status(app: State<'_, App>, run_id: String) -> Res {
+    app.lead_status(&run_id)
 }
 
 #[tauri::command(async)]
@@ -234,10 +279,13 @@ fn main() {
             list_campaigns,
             start_run,
             resume_run,
+            verify_campaign,
+            read_report,
             resume_targets,
             crew,
             tail,
             read_spill,
+            read_spill_before,
             task,
             diff,
             evidence_list,
@@ -252,6 +300,12 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            ask_lead,
+            cancel_ask,
+            lead_status,
+            inbox,
+            approve_plan,
+            reject_plan,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
@@ -270,7 +324,11 @@ fn main() {
                 let _ = w.set_focus();
             }
         }
-        RunEvent::Exit => handle.state::<App>().sup.shutdown(),
+        RunEvent::Exit => {
+            let app = handle.state::<App>();
+            app.shutdown_lead();
+            app.sup.shutdown();
+        }
         _ => {}
     });
 }

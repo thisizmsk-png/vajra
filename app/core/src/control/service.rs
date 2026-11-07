@@ -81,6 +81,8 @@ pub enum ControlError {
     ControlDisabled,
     NotPermitted,
     NotStopped,
+    /// A Lead bound to a run called a tool while that run is not the current control session.
+    RunNotCurrent,
     ActionNotFound,
     UnknownTool,
     InvalidArgs(String),
@@ -96,6 +98,7 @@ impl ControlError {
             Self::ControlDisabled => "control_disabled",
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
+            Self::RunNotCurrent => "run_not_current",
             Self::ActionNotFound => "action_not_found",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
@@ -193,6 +196,8 @@ pub struct Service {
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
+    /// The id of the newest ledger record `record` wrote: how `call_tool` names the action in its audit line.
+    last_recorded: Option<String>,
     pub ttl: Duration,
 }
 
@@ -205,6 +210,11 @@ enum Kind {
     Redirect,
     Stop,
     Resume,
+    /// ADR-13: the human asked the Lead a question. Always actor human, via ui; it reaches no worker.
+    Ask,
+    /// ADR-14: the human approved or rejected a plan item. Always actor human, via ui.
+    Approve,
+    Reject,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -218,10 +228,12 @@ enum State {
     DeliveryUnknown,
     Refused,
     Done,
+    /// An ask that did not complete (the `reason` says why).
+    Failed,
 }
 
 impl Kind {
-    const ALL: [Kind; 6] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume];
+    const ALL: [Kind; 9] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject];
     fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -230,6 +242,9 @@ impl Kind {
             Kind::Redirect => "redirect",
             Kind::Stop => "stop",
             Kind::Resume => "resume",
+            Kind::Ask => "ask",
+            Kind::Approve => "approve",
+            Kind::Reject => "reject",
         }
     }
     fn parse(k: &str) -> Option<Kind> {
@@ -242,7 +257,7 @@ impl Kind {
 }
 
 impl State {
-    const ALL: [State; 8] = [State::Requested, State::AwaitingHumanConfirm, State::Queued, State::Delivered, State::NotDelivered, State::DeliveryUnknown, State::Refused, State::Done];
+    const ALL: [State; 9] = [State::Requested, State::AwaitingHumanConfirm, State::Queued, State::Delivered, State::NotDelivered, State::DeliveryUnknown, State::Refused, State::Done, State::Failed];
     fn as_str(self) -> &'static str {
         match self {
             State::Requested => "requested",
@@ -253,6 +268,7 @@ impl State {
             State::DeliveryUnknown => "delivery_unknown",
             State::Refused => "refused",
             State::Done => "done",
+            State::Failed => "failed",
         }
     }
     /// An unknown ledger state reads as final.
@@ -261,6 +277,71 @@ impl State {
     }
 }
 
+
+/// Where an ask is (ADR-13 Decision 6). `queued`: stdin written; `delivered`: the `init` check passed; `done`: the
+/// `result` event arrived; `failed`: anything else, with a reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskState {
+    Queued,
+    Delivered,
+    Done,
+    Failed,
+}
+
+impl AskState {
+    fn state(self) -> State {
+        match self {
+            Self::Queued => State::Queued,
+            Self::Delivered => State::Delivered,
+            Self::Done => State::Done,
+            Self::Failed => State::Failed,
+        }
+    }
+}
+
+/// One ledger line for an ask. `text` (already framed-sanitised, nonce redacted) goes on the `queued` line only.
+#[derive(Clone, Copy, Debug)]
+pub struct AskRecord<'a> {
+    pub ask_id: &'a str,
+    pub run_id: &'a str,
+    /// The run session the question is about (the Lead itself has `lead_session_id`).
+    pub session_id: &'a str,
+    pub lead_session_id: &'a str,
+    pub state: AskState,
+    pub text: Option<&'a str>,
+    pub reason: Option<&'a str>,
+}
+
+/// A human decision on a plan item (ADR-14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Approve,
+    Reject,
+}
+
+/// Where a decision is. `Requested` is written before anything is delivered; `Final` is `delivered` for an approve
+/// (the fixed turn was typed or the resumed session was started) and `done` for a reject (the progress line was signed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecisionState {
+    Requested,
+    Final,
+    Failed,
+}
+
+/// One ledger line for a decision. `reason` is the reject reason (cleaned, bounded) or a failure note.
+#[derive(Clone, Copy, Debug)]
+pub struct DecisionRecord<'a> {
+    pub decision: Decision,
+    /// Names the action across its lines; `None` on the first line, which mints it.
+    pub action_id: Option<&'a str>,
+    pub item: &'a str,
+    pub run_id: &'a str,
+    pub session_id: &'a str,
+    pub campaign: &'a str,
+    pub plan_sha256: Option<&'a str>,
+    pub state: DecisionState,
+    pub reason: Option<&'a str>,
+}
 
 fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
@@ -292,6 +373,7 @@ impl Service {
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
+            last_recorded: None,
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
@@ -345,6 +427,78 @@ impl Service {
             }
         }
         self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
+    }
+
+    // ------------------------------------------------------------ asks
+
+    /// Append one ask line. An ask is human and `ui` by construction. It writes no `audit.log` line (it acts on no
+    /// worker), enters no queue, and is never pending, so the ack watcher and reconcile have nothing to do with it.
+    /// The caller records `queued` before it spawns the Lead and stops if this fails.
+    /// Test only: appends fail from now on.
+    #[cfg(test)]
+    pub(crate) fn break_ledger_for_test(&mut self) {
+        self.ledger.break_for_test();
+    }
+
+    pub fn record_ask(&mut self, r: &AskRecord<'_>) -> Result<()> {
+        let now = SystemTime::now();
+        let mut a = self.new_action(Kind::Ask, Actor::Human, None, now)?;
+        a.id = r.ask_id.to_string();
+        a.run_id = r.run_id.to_string();
+        a.session_id = r.session_id.to_string();
+        a.reason = r.reason.map(str::to_string);
+        let mut extra = json!({"lead_session_id": r.lead_session_id});
+        if let Some(t) = r.text {
+            extra["text"] = json!(t);
+            extra["text_sha256"] = json!(sha256::hex_digest(t.as_bytes()));
+        }
+        self.record(&a, r.state.state(), extra, now)
+    }
+
+    /// The action that already decided `item` with exactly this plan (`plan_sha256`), if any: an approve or reject whose newest line is `requested`,
+    /// `delivered` or `done`. A `requested` with no outcome (a crash mid-delivery) counts as decided: delivery is
+    /// unknown, so the plan is never run twice. Only `failed` frees the item.
+    pub fn decided(&self, item: &str, plan_sha256: &str) -> io::Result<Option<String>> {
+        let records = Ledger::read_all(&self.control_root.join("ledger.jsonl"))?;
+        let mut last: Vec<(String, String)> = Vec::new();
+        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item && str_field(r, "plan_sha256") == plan_sha256) {
+            let (id, state) = (str_field(r, "action_id").to_string(), str_field(r, "state").to_string());
+            match last.iter_mut().find(|(i, _)| *i == id) {
+                Some(e) => e.1 = state,
+                None => last.push((id, state)),
+            }
+        }
+        Ok(last.into_iter().find(|(_, st)| st != "failed").map(|(id, _)| id))
+    }
+
+    /// Append one decision line and return the action id. The final line also appends the `audit.log` line
+    /// (`approve id=<action_id> item=<item>` or `reject ...`) that reconcile joins on. A failed audit append is logged,
+    /// not hidden: reconcile reports the action as a ledger line without an audit line.
+    pub fn record_decision(&mut self, r: &DecisionRecord<'_>) -> Result<String> {
+        let now = SystemTime::now();
+        let kind = if r.decision == Decision::Approve { Kind::Approve } else { Kind::Reject };
+        let mut a = self.new_action(kind, Actor::Human, None, now)?;
+        if let Some(id) = r.action_id {
+            a.id = id.to_string();
+        }
+        a.run_id = r.run_id.to_string();
+        a.session_id = r.session_id.to_string();
+        a.reason = r.reason.map(str::to_string);
+        let mut extra = json!({"item": r.item, "campaign": r.campaign});
+        if let Some(h) = r.plan_sha256 {
+            extra["plan_sha256"] = json!(h);
+        }
+        let (state, verb) = match (r.state, r.decision) {
+            (DecisionState::Requested, _) => (State::Requested, ""),
+            (DecisionState::Failed, _) => (State::Failed, ""),
+            (DecisionState::Final, Decision::Approve) => (State::Delivered, "approve"),
+            (DecisionState::Final, Decision::Reject) => (State::Done, "reject"),
+        };
+        self.record(&a, state, extra, now)?;
+        if !verb.is_empty() && audit::append_line(&self.audit_log, "ALLOW", &format!("{verb} id={} item={}", a.id, r.item), now).is_err() {
+            self.log("control_audit_failed", &[]);
+        }
+        Ok(a.id)
     }
 
     // ------------------------------------------------------------ session
@@ -428,6 +582,25 @@ impl Service {
 
     /// The worker's transcript ended: its queued messages expire now so they
     /// are never applied later to a different worker. Its stop stays.
+    /// What the crew tree overlays: a worker with a stop in force (its stop file exists; a resume removes it) or a
+    /// queued, not yet delivered message or redirect. Keyed by the worker key (agent id).
+    pub fn signals(&self) -> crate::crew::tree::Signals {
+        let mut sig = crate::crew::tree::Signals::default();
+        if let Some(sess) = &self.session {
+            for w in &self.workers {
+                if fs::symlink_metadata(sess.dir.stop_path(w.key())).is_ok() {
+                    sig.stopped.insert(w.key().to_string());
+                }
+            }
+        }
+        for a in self.pending.values() {
+            if a.kind.queued_text() && a.state == State::Queued && self.session.as_ref().is_some_and(|s| s.id == a.session_id) {
+                sig.message_pending.insert(a.worker.clone());
+            }
+        }
+        sig
+    }
+
     pub fn worker_finished(&mut self, key: &str) {
         let now = SystemTime::now();
         let ids: Vec<String> = self
@@ -540,6 +713,7 @@ impl Service {
             r.extend(x);
         }
         self.ledger.append(&Value::Object(r))?;
+        self.last_recorded = Some(a.id.clone());
         if a.kind == Kind::Stop {
             self.last_stop.insert(a.worker.clone(), (a.id.clone(), state));
         }
@@ -901,7 +1075,39 @@ impl Service {
 
     /// A tool call from the socket. The actor is always the Lead; arguments
     /// are checked against the tool's schema (no extra properties).
+    ///
+    /// Each successful call also appends one id-carrying audit line, `ALLOW desktop-control reason="mcp <tool>
+    /// id=<action_id>"`: evidence, not protection (ADR-13 6). Reconcile joins the Lead's calls by that id, and a
+    /// call with no guard line beside it means the Lead ran unguarded.
     pub fn call_tool(&mut self, tool: &str, args: &Value) -> Result<Value> {
+        self.call_tool_for_run(None, tool, args)
+    }
+
+    /// `call_tool` for a Lead that was started for one run (`VAJRA_LEAD_RUN` in its MCP config, sent with every
+    /// request). The service has one control session, so the run id in the prompt proves nothing: the call is
+    /// refused unless that run is the current session's run, checked here on every call under the service lock.
+    /// A Lead asked about a finished run, or one that outlives its run, can never see or steer another run's workers.
+    pub fn call_tool_for_run(&mut self, run: Option<&str>, tool: &str, args: &Value) -> Result<Value> {
+        if let Some(r) = run {
+            if !crate::ids::valid_run_id(r) {
+                return Err(ControlError::InvalidArgs("run".into()));
+            }
+            if self.session.as_ref().is_none_or(|s| s.run_id != r) {
+                return Err(ControlError::RunNotCurrent);
+            }
+        }
+        self.last_recorded = None;
+        let out = self.dispatch_tool(tool, args)?;
+        let id = out.get("action_id").and_then(Value::as_str).map(str::to_string).or_else(|| self.last_recorded.take());
+        if let Some(id) = id {
+            if audit::append_line(&self.audit_log, "ALLOW", &format!("mcp {tool} id={id}"), SystemTime::now()).is_err() {
+                self.log("control_audit_failed", &[]);
+            }
+        }
+        Ok(out)
+    }
+
+    fn dispatch_tool(&mut self, tool: &str, args: &Value) -> Result<Value> {
         let empty = Map::new();
         let args = match args {
             Value::Object(m) => m,

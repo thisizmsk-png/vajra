@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -68,13 +68,70 @@ struct Run {
     nonces: Redactor,
 }
 
+/// Untracked file names `diff` lists.
+const UNTRACKED_MAX: usize = 200;
+const LIST_VERIFY_WORKERS: usize = 4;
+/// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
+/// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
+const VERDICT_TTL: Duration = Duration::from_secs(5);
+
+/// One in-flight verify, shared by every caller that asks for the same campaign while it runs.
+type Flight = Arc<(Mutex<Option<&'static str>>, Condvar)>;
+enum Verdict {
+    Fresh(Duration, &'static str),
+    Flying(Flight),
+}
+
+/// The integrity cache. Every check (a listing or explicit verify, or a report read) takes a ticket from
+/// `App::tickets` when it starts, before it reads anything, and `last` keeps the newest ticket that settled per
+/// campaign. A check that started before the newest settled one can add a failure but never replace a verdict with
+/// "ok" or clear it: an older success must not hide a newer failure, and a failure is never lost to ordering.
+#[derive(Default)]
+struct Verdicts {
+    by_slug: HashMap<String, Verdict>,
+    last: HashMap<String, u64>,
+}
+
+/// Ends a flight even if the verify panics, so waiters are never left hanging.
+struct FlightGuard<'a> {
+    app: &'a App,
+    slug: &'a str,
+    flight: Flight,
+    done: bool,
+}
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            // Forget only this flight; a newer verdict that replaced it stays.
+            let mut m = lock(&self.app.verdicts);
+            if matches!(m.by_slug.get(self.slug), Some(Verdict::Flying(f)) if Arc::ptr_eq(f, &self.flight)) {
+                m.by_slug.remove(self.slug);
+            }
+            drop(m);
+            *lock(&self.flight.0) = Some("unknown");
+            self.flight.1.notify_all();
+        }
+    }
+}
+const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct App {
     data: PathBuf,
+    home: PathBuf,
     claude: PathBuf,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
     bridge: Bridge,
+    /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
+    verify_timeout: Duration,
+    /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
+    verdicts: Mutex<Verdicts>,
+    /// Integrity-check tickets, taken when a check starts (see `Verdicts`).
+    tickets: std::sync::atomic::AtomicU64,
+    verdict_ttl: Duration,
+    /// Monotonic time since start; tests replace it.
+    clock: Arc<dyn Fn() -> Duration + Send + Sync>,
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
@@ -86,6 +143,12 @@ pub struct App {
     launching: Mutex<()>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
+    /// ADR-13: the Lead chat (asks, the guard, the claude binary).
+    lead: lead::LeadState,
+    /// Plan id -> the `plan_sha256` the last `inbox` call showed for it. `approve_plan` needs it to match.
+    shown: Mutex<HashMap<String, String>>,
+    /// Plan ids being decided right now: one decision per plan at a time.
+    deciding: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
     /// How long one evidence check may run before its criterion reads `unverified`.
     evidence_timeout: Duration,
@@ -104,7 +167,19 @@ impl App {
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
         Ok(Self {
             data: data.to_path_buf(),
-            bridge: Bridge::new(claude.join("skills/vajra/scripts")),
+            home: home.to_path_buf(),
+            lead: lead::LeadState::new(home),
+            shown: Mutex::new(HashMap::new()),
+            deciding: Mutex::new(Default::default()),
+            bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
+            verify_timeout: LIST_VERIFY_TIMEOUT,
+            verdicts: Mutex::new(Verdicts::default()),
+            tickets: std::sync::atomic::AtomicU64::new(0),
+            verdict_ttl: VERDICT_TTL,
+            clock: {
+                let t0 = std::time::Instant::now();
+                Arc::new(move || t0.elapsed())
+            },
             reader: Mutex::new(None),
             claude,
             sup: Supervisor::new(bus.clone(), log.clone()),
@@ -147,7 +222,9 @@ impl App {
     /// `YYYYMMDD-HHMM` run id (it names branches and the default campaign), so uniqueness comes from the choice of minute.
     fn fresh_run_id(&self, now: u64) -> (u64, String) {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
+        let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
         let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
         lock(&self.issued).insert(pick.1.clone());
         pick
@@ -165,9 +242,16 @@ impl App {
     }
 
     pub fn list_campaigns(&self) -> Res {
-        self.with_reader(|r| {
+        self.list_campaigns_opt(false)
+    }
+
+    /// `refresh` re-verifies every campaign now, whatever the last verdict's age.
+    pub fn list_campaigns_opt(&self, refresh: bool) -> Res {
+        // Summaries are read under the reader lock; the verify subprocesses run after it is released, so a slow
+        // or hung verify cannot block any other reader call.
+        let mut list: Vec<Value> = self.with_reader(|r| {
             let slugs = r.campaigns().map_err(|e| fail("io_error", e))?;
-            let list: Vec<Value> = slugs
+            Ok(slugs
                 .iter()
                 .map(|s| match r.campaign(s) {
                     Ok(c) => json!({
@@ -180,9 +264,31 @@ impl App {
                     // A campaign dir the reader cannot summarise is still listed.
                     Err(e) => json!({"slug": s, "error": e.to_string()}),
                 })
-                .collect();
-            Ok(json!({"campaigns": list}))
-        })
+                .collect())
+        })?;
+        // Every listing verifies every campaign afresh (the verdict depends on the campaign files, the links they
+        // follow and the signing key, so nothing is remembered between listings), on a few worker threads.
+        let todo: Vec<(usize, String)> = list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c["slug"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let verdicts: Mutex<Vec<(usize, &'static str)>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..todo.len().min(LIST_VERIFY_WORKERS) {
+                s.spawn(|| loop {
+                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((i, slug)) = todo.get(n) else { break };
+                    let v = self.integrity_of(slug, refresh);
+                    lock(&verdicts).push((*i, v));
+                });
+            }
+        });
+        for (i, v) in lock(&verdicts).iter() {
+            list[*i]["integrity"] = json!(*v);
+        }
+        Ok(json!({"campaigns": list}))
     }
 
     /// The control service steers one session, so one run is active at a time.
@@ -236,6 +342,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+    }
+
+    /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
+    /// is not a workflow identity, so plan ids keep naming the run of the workflow that produced the plan.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn launch_kind(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+        workflow: bool,
+    ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
         let nonce = {
@@ -266,9 +388,14 @@ impl App {
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf() };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
+        }
+        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
+        // refused for this run after a restart, but the launch itself goes on.
+        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+            self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
@@ -370,9 +497,9 @@ impl App {
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
-        let node = self.with_reader(|r| {
-            Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &Signals::default()))
-        })?;
+        // Overlays come from the live control session only; a past run shows none.
+        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
         Ok(node_json(&node))
     }
 
@@ -499,6 +626,16 @@ impl App {
         }
         let p = self.bus.read_spill(stream, offset, max_bytes.clamp(1, MAX_PAGE)).map_err(|e| fail("io_error", e))?;
         Ok(json!({"lines": lines_json(&p.lines), "next_offset": p.next_offset, "gap": p.gap, "end": p.end}))
+    }
+
+    /// The `max_lines` (at most 1000) lines just before `before_seq`, for "Load earlier": adjacent to the reader's window,
+    /// whatever the size of the spill.
+    pub fn read_spill_before(&self, stream: &str, before_seq: u64, max_lines: usize) -> Res {
+        if !bus::valid_stream_id(stream) {
+            return Err(invalid("stream", "not a stream id"));
+        }
+        let p = self.bus.read_spill_before(stream, before_seq, max_lines.clamp(1, 1000)).map_err(|e| fail("io_error", e))?;
+        Ok(json!({"lines": lines_json(&p.lines), "at_start": p.at_start, "gap": p.gap}))
     }
 
     pub fn task(&self, slug: &str, task_id: &str) -> Res {
@@ -646,8 +783,8 @@ impl App {
         Ok(json!({"worker": worker, "worktree": wt.to_string_lossy(), "branch": branch, "base": base}))
     }
 
-    pub fn diff(&self, cwd: &str, base: &str) -> Res {
-        let cwd = repo_dir(cwd)?;
+    pub fn diff(&self, cwd_str: &str, base: &str) -> Res {
+        let cwd = repo_dir(cwd_str)?;
         if base.is_empty() || base.starts_with('-') || base.len() > 255 {
             return Err(invalid("base", "must be a ref or commit"));
         }
@@ -655,7 +792,24 @@ impl App {
             .bridge
             .run(&Request::Git { cwd, args: vec!["diff".into(), base.into(), "--".into()] })
             .map_err(|e| fail("git_failed", e))?;
-        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out}))
+        // `git diff <base>` leaves out files git does not track yet, so a worker's brand-new files are listed apart
+        // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
+        let mut untracked: Vec<String> = Vec::new();
+        let mut untracked_truncated = false;
+        if o.code == Some(0) && !o.timed_out {
+            if let Ok(u) = self.bridge.run(&Request::Git {
+                cwd: repo_dir(cwd_str)?,
+                args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
+            }) {
+                if u.code == Some(0) {
+                    let all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                    untracked_truncated = u.truncated || all.len() > UNTRACKED_MAX;
+                    untracked = all.into_iter().take(UNTRACKED_MAX).map(String::from).collect();
+                }
+            }
+        }
+        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+                  "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
     // ---------------------------------------------------------------- control
@@ -699,6 +853,217 @@ impl App {
         let hits: Vec<Value> =
             parse_kb_hits(&o.stdout).into_iter().map(|h| json!({"id": h.id, "kind": h.kind, "title": h.title})).collect();
         Ok(json!({"hits": hits, "code": o.code}))
+    }
+
+    /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
+    /// `verify_timeout`). A real verdict is reused for `verdict_ttl`; callers that arrive while a verify for the same
+    /// campaign is running wait for it instead of starting another. `refresh` skips the reuse and, if a verify is
+    /// already running, waits for it and then runs its own (that one may have started before the change).
+    fn integrity_of(&self, slug: &str, refresh: bool) -> &'static str {
+        self.integrity_run(slug, refresh).0
+    }
+
+    /// `integrity_of` plus, when this call ran the verify itself, its result (callers that only waited get `None`).
+    /// An explicit `verify_campaign` goes through here with `refresh`, so it shares the campaign's flight: it waits for
+    /// a running check and then runs its own, and an older check can never overwrite the verdict it settled.
+    fn integrity_run(&self, slug: &str, refresh: bool) -> (&'static str, Option<Result<crate::vajra::bridge::Output, crate::vajra::bridge::BridgeError>>) {
+        if !bus::valid_stream_id(slug) {
+            return ("unknown", None);
+        }
+        let flight: Flight = loop {
+            let mut m = lock(&self.verdicts);
+            let waiting = match m.by_slug.get(slug) {
+                Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return (v, None),
+                Some(Verdict::Flying(f)) => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = waiting {
+                drop(m);
+                let mut got = lock(&f.0);
+                while got.is_none() {
+                    got = f.1.wait(got).unwrap_or_else(|e| e.into_inner());
+                }
+                if !refresh {
+                    return (got.unwrap_or("unknown"), None);
+                }
+                continue;
+            }
+            let f: Flight = Arc::new((Mutex::new(None), Condvar::new()));
+            m.by_slug.insert(slug.to_string(), Verdict::Flying(f.clone()));
+            break f;
+        };
+        let ticket = self.ticket();
+        let mut guard = FlightGuard { app: self, slug, flight, done: false };
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        let res = bridge.run(&Request::CampaignVerify { slug: slug.into() });
+        let verdict = match res.as_ref().ok().and_then(|o| o.code) {
+            Some(0) => "ok",
+            Some(3) => "failed",
+            _ => "unknown",
+        };
+        self.settle(slug, verdict, ticket);
+        *lock(&guard.flight.0) = Some(verdict);
+        guard.flight.1.notify_all();
+        guard.done = true;
+        (verdict, Some(res))
+    }
+
+    /// A fresh ticket for an integrity check that is about to read the campaign (strictly increasing).
+    fn ticket(&self) -> u64 {
+        self.tickets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// Remember the verdict of the check that took `ticket` (or forget the slug when it could not run).
+    /// A check that started before the newest one already settled may only add "failed": its "ok" or "unknown"
+    /// is dropped, so a stale success never replaces a newer failure. A "failed" always lands (fail closed): at
+    /// worst it shows for one TTL after a repair, and an explicit verify or `refresh` clears it.
+    fn settle(&self, slug: &str, verdict: &'static str, ticket: u64) {
+        let mut m = lock(&self.verdicts);
+        let last = m.last.get(slug).copied().unwrap_or(0);
+        if ticket < last && verdict != "failed" {
+            return;
+        }
+        m.last.insert(slug.to_string(), last.max(ticket));
+        if verdict == "unknown" {
+            m.by_slug.remove(slug);
+        } else {
+            m.by_slug.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
+        }
+    }
+
+    /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature
+    /// invalid) is `ok: false` with the restore command for the newest checkpoint listed; any other result is an
+    /// error, never a pass. Read-only: it never touches the HMAC key itself, the script does the check.
+    pub fn verify_campaign(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let o = match self.integrity_run(slug, true).1 {
+            Some(Ok(o)) => o,
+            Some(Err(crate::vajra::bridge::BridgeError::Invalid(_))) => return Err(invalid("slug", "not a campaign slug")),
+            Some(Err(e)) => return Err(fail("verify_failed", e)),
+            None => return Err(fail("verify_failed", "no result")),
+        };
+        match o.code {
+            Some(0) => Ok(json!({"slug": slug, "ok": true})),
+            Some(3) => {
+                let newest = self
+                    .with_reader(|r| r.checkpoints(slug).map_err(|e| fail("io_error", e)))
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|n| n.strip_suffix(".json")?.parse::<u32>().ok())
+                    .max();
+                let restore = newest.map(|n| format!("vajra-campaign.sh resume {slug} --from-checkpoint {n}"));
+                Ok(json!({"slug": slug, "ok": false, "restore": restore}))
+            }
+            code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        }
+    }
+
+    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text, from held bytes. Every input is read once
+    /// (`vajra::held`); the signature, `featuresDefSha256` and `reportSha256` are all checked against those bytes,
+    /// and the text returned is exactly the held report. The script only answers "is this sig valid for these
+    /// hashes" (`verify-digest`), so it stays the only HMAC key holder. Result `{slug, integrity, text?}` where
+    /// integrity is `ok`, `no_report`, `integrity_failed`, `not_text` or `unknown` (too large / could not run).
+    pub fn read_report(&self, slug: &str) -> Res {
+        self.read_report_with(slug, &|_| {}, &|| {})
+    }
+
+    /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
+    /// `between` runs after the read and before the digest check (tests). A symlinked `campaigns` dir is refused by
+    /// the held reader (`O_NOFOLLOW`), so every report read there settles `failed`: that fails closed on purpose.
+    pub(crate) fn read_report_with(&self, slug: &str, seam: &dyn Fn(&str), between: &dyn Fn()) -> Res {
+        use crate::control::sha256::hex_digest;
+        use crate::vajra::held::{self, HeldError};
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let verdict = |integrity: &str, text: Option<String>| {
+            let mut v = json!({"slug": slug, "integrity": integrity});
+            if let Some(t) = text {
+                v["text"] = json!(t);
+            }
+            Ok(v)
+        };
+        // Taken before anything is read, so this check is ordered against every other one (see `Verdicts`).
+        let ticket = self.ticket();
+        let allow = self.allow().map_err(|e| fail("io_error", e))?;
+        let (dir, key) = (allow.campaigns_dir().to_path_buf(), allow.key_path());
+        let h = match held::read_campaign(&dir, slug, &key, seam) {
+            Ok(h) => h,
+            Err(HeldError::NotFound) => return Err(fail("not_found", "no such campaign")),
+            Err(HeldError::Failed(_)) | Err(HeldError::TooLarge("state.sig")) => {
+                self.settle(slug, "failed", ticket);
+                return verdict("integrity_failed", None);
+            }
+            Err(HeldError::TooLarge(_)) | Err(HeldError::Io(_)) => return verdict("unknown", None),
+        };
+        between();
+        let bad = |this: &Self| {
+            this.settle(slug, "failed", ticket);
+            verdict("integrity_failed", None)
+        };
+        if !held::json_without_duplicate_keys(&h.campaign) || !held::json_without_duplicate_keys(&h.features) {
+            return bad(self);
+        }
+        let (Ok(campaign), Ok(features)) =
+            (serde_json::from_slice::<Value>(&h.campaign), serde_json::from_slice::<Value>(&h.features))
+        else {
+            return bad(self);
+        };
+        if !features.get("features").is_some_and(Value::is_array) {
+            return bad(self);
+        }
+        let sig: Vec<u8> = h.sig.iter().copied().filter(|b| !matches!(b, b' ' | b'\r' | b'\n')).collect();
+        if sig.len() != 64 || !sig.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return bad(self);
+        }
+        let sig = String::from_utf8_lossy(&sig).into_owned();
+        let input = format!(
+            "campaign {}\nfeatures {}\nprogress {}\nsig {}\n",
+            hex_digest(&h.campaign),
+            hex_digest(&h.features),
+            hex_digest(&h.progress),
+            sig
+        );
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.verify_timeout;
+        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+            Ok(o) => o,
+            Err(_) => return verdict("unknown", None),
+        };
+        match o.code {
+            Some(0) => {}
+            Some(3) => return bad(self),
+            _ => return verdict("unknown", None),
+        }
+        // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes. Output cut at the bridge's
+        // cap would hash short and read as a tamper where plain `verify` says ok, so a truncated run is "unknown".
+        let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
+            Ok(o) if o.code == Some(0) && !o.truncated => o.stdout.replace('\n', ""),
+            _ => return verdict("unknown", None),
+        };
+        if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
+            return bad(self);
+        }
+        // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
+        // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
+        seam("check:report");
+        let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
+        if want.is_empty() {
+            self.settle(slug, "ok", ticket);
+            return verdict("no_report", None);
+        }
+        let Some(report) = h.report else { return bad(self) };
+        if hex_digest(&report) != want {
+            return bad(self);
+        }
+        self.settle(slug, "ok", ticket);
+        match String::from_utf8(report) {
+            Ok(t) => verdict("ok", Some(t)),
+            Err(_) => verdict("not_text", None),
+        }
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
@@ -759,6 +1124,8 @@ fn node_json(n: &Node) -> Value {
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
         "engine_id": n.engine_id,
+        // The name the UI shows for the role (AC-2.1.3); the engine id is only a secondary field.
+        "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
@@ -785,6 +1152,10 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod inbox;
+mod wfresult;
+mod decide;
+mod lead;
 mod runindex;
 
 #[cfg(test)]

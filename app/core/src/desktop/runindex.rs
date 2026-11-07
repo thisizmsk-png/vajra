@@ -18,14 +18,29 @@ pub struct Entry {
     pub session_id: String,
     pub run_id: String,
     pub cwd: PathBuf,
+    /// Legacy field, read for compatibility and **not trusted**: this file is writable by a worker. The app keeps the
+    /// run to Lead-session mapping in `<data>/control/lead/<run_id>/lead_session`, under the guarded control dir.
+    pub lead_session_id: Option<String>,
 }
+
+/// Serialises every read-modify-append of the index within the process, so a late metadata write cannot interleave
+/// with a launch or resume.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Append one entry (file mode 0600, created on first use).
 pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
+    let _g = WRITE.lock().unwrap_or_else(|p| p.into_inner());
+    append_locked(path, e)
+}
+
+fn append_locked(path: &Path, e: &Entry) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "campaign": e.campaign, "session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(),
     });
+    if let Some(l) = &e.lead_session_id {
+        line["lead_session_id"] = serde_json::json!(l);
+    }
     let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
     f.write_all(format!("{line}\n").as_bytes())
 }
@@ -33,7 +48,18 @@ pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
 /// The newest valid entry per campaign. A missing file is empty; garbage lines, a session id that is not a canonical
 /// uuid and relative paths are skipped.
 pub fn latest(path: &Path) -> HashMap<String, Entry> {
-    let mut out = HashMap::new();
+    entries(path).into_iter().map(|e| (e.campaign.clone(), e)).collect()
+}
+
+/// Every run id the index (its tail) has ever recorded, for any campaign: an id that was issued before a restart is
+/// still taken after it.
+pub fn run_ids(path: &Path) -> std::collections::HashSet<String> {
+    entries(path).into_iter().map(|e| e.run_id).collect()
+}
+
+/// Every valid entry in the tail of the file, oldest first.
+pub fn entries(path: &Path) -> Vec<Entry> {
+    let mut out = Vec::new();
     let Ok(mut f) = std::fs::File::open(path) else { return out };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(READ_CAP);
@@ -52,7 +78,9 @@ pub fn latest(path: &Path) -> HashMap<String, Entry> {
         if !ids::valid_session_id(&session_id) || !Path::new(&cwd).is_absolute() {
             continue;
         }
-        out.insert(campaign.clone(), Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd) });
+        // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
+        let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
+        out.push(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id });
     }
     out
 }
@@ -72,7 +100,7 @@ mod tests {
     }
 
     fn entry(c: &str, s: &str, r: &str) -> Entry {
-        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo") }
+        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo"), lead_session_id: None }
     }
 
     #[test]
@@ -103,6 +131,34 @@ mod tests {
         }
         let m = latest(&p);
         assert_eq!(m.keys().collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    #[test]
+    fn lead_session_id_round_trips_and_old_lines_still_read() {
+        let p = tmp("lead");
+        // A line written before the field existed.
+        append(&p, &entry("old", S1, "r0")).unwrap();
+        assert_eq!(latest(&p)["old"].lead_session_id, None);
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("lead_session_id"), "absent stays absent on disk");
+        // The Lead line carries it, and the newest line wins.
+        let mut e = entry("c", S1, "r1");
+        e.lead_session_id = Some(S2.into());
+        append(&p, &e).unwrap();
+        assert_eq!(latest(&p)["c"].lead_session_id.as_deref(), Some(S2));
+        assert_eq!(latest(&p)["c"].session_id, S1);
+        // A later launch line (no Lead id) supersedes it.
+        append(&p, &entry("c", S1, "r2")).unwrap();
+        assert_eq!(latest(&p)["c"].lead_session_id, None);
+    }
+
+    #[test]
+    fn a_malformed_lead_session_id_reads_as_absent() {
+        let p = tmp("lead-bad");
+        let mut f = OpenOptions::new().create(true).append(true).open(&p).unwrap();
+        f.write_all(b"{\"campaign\":\"x\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"run_id\":\"r\",\"cwd\":\"/r\",\"lead_session_id\":\"--last\"}\n").unwrap();
+        let m = latest(&p);
+        assert_eq!(m["x"].lead_session_id, None);
+        assert_eq!(m["x"].run_id, "r");
     }
 
     #[test]
