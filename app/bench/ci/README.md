@@ -22,6 +22,8 @@ The shared macOS runner shows two flavours on the **same** identity (same macOS 
 
 `measure.py` records each counted helper's name, RSS, age and arguments in `idle.json` (`runs[].last.helper_detail`), so the next surprise is explained by the artifact. Nothing in the UI triggers the GPU process (no canvas, WebGL, filter, `backdrop-filter`, `will-change`, animation or blend mode); it is WebKit's own compositing process, present when the VM exposes a GPU, and every real Mac has it. It therefore stays in the gated total. The runner image version is recorded (`runner.image_version`) but is not part of the key: it rotates weekly without changing WebKit.
 
+`measure.py` assigns each launch to the smallest helper count it saw and reports the flavour with the most launches (larger count on a tie), with `median_of_medians_mib` taken over that flavour's launches only (`flavour_launches`; `all_launches_median_mib` is kept for reference). The reported number and flavour therefore always describe the same launches.
+
 `baseline.json` is keyed `identities[<identity>].flavours[<helper count>]`. Entries marked `"provisional": true` rest on one run and are refined with the procedure below as more runs of that flavour land.
 
 ### Owner question: GPU-flavour ceiling

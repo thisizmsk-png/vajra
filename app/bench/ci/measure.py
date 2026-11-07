@@ -101,8 +101,17 @@ def identity_key(macos_build, webkit):
     return f"{macos_build}|{webkit}"
 
 
-def base_helpers(runs):
-    return min(min(r["helpers"]) for r in runs)
+def flavour_summary(runs):
+    """(helper count, median of that flavour's launch medians, launches in it).
+
+    A launch belongs to the smallest helper count it saw. The reported number and the reported flavour must describe the
+    same launches, or a mixed run (one 2-helper launch among 3-helper ones) would pair 175 MiB's baseline with 201 MiB.
+    The flavour with the most launches wins; on a tie the larger helper count, which is the conservative reading."""
+    by = {}
+    for r in runs:
+        by.setdefault(min(r["helpers"]), []).append(r["median_mib"])
+    n = max(by, key=lambda k: (len(by[k]), k))
+    return n, statistics.median(by[n]), len(by[n])
 
 
 def runner_identity():
@@ -142,9 +151,10 @@ def idle(binary, out):
                      "helpers": sorted({s["helpers"] for s in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
     meds = [r["median_mib"] for r in runs]
+    helpers, flavour_median, in_flavour = flavour_summary(runs)
     ident = runner_identity()
-    json.dump({"identity": ident["key"], "runner": ident, "helpers": base_helpers(runs), "runs": runs,
-               "median_of_medians_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
+    json.dump({"identity": ident["key"], "runner": ident, "helpers": helpers, "flavour_launches": in_flavour, "runs": runs,
+               "median_of_medians_mib": flavour_median, "all_launches_median_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
 
 
 def slope(points):  # least squares, MiB per minute

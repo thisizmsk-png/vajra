@@ -1,6 +1,6 @@
 import unittest
 from gate import check, evaluate
-from measure import clean_median, identity_key, base_helpers
+from measure import clean_median, identity_key, flavour_summary
 
 ID = "25D1|20622.1.22"  # macOS build | WebKit version
 
@@ -96,8 +96,23 @@ class Flavours(unittest.TestCase):
 
 
 class Measure(unittest.TestCase):
-    def test_base_helpers_is_the_smallest_count_seen_in_any_launch(self):
-        self.assertEqual(base_helpers([{"helpers": [3, 6]}, {"helpers": [3]}, {"helpers": [4, 7]}]), 3)
+    def r(self, median, *helpers):
+        return {"median_mib": median, "helpers": list(helpers)}
+
+    def test_a_launch_belongs_to_the_smallest_helper_count_it_saw(self):
+        self.assertEqual(flavour_summary([self.r(201, 3, 6), self.r(202, 3), self.r(203, 4, 7)])[0], 3)
+
+    def test_the_median_is_taken_only_over_launches_of_the_reported_flavour(self):
+        # one 2-helper launch at 175 followed by four 3-helper launches: report 3 helpers and 201, never helpers=2 with 201
+        runs = [self.r(175, 2), self.r(201, 3), self.r(202, 3), self.r(200.8, 3), self.r(201.1, 3)]
+        self.assertEqual(flavour_summary(runs), (3, 201.05, 4))
+
+    def test_the_majority_flavour_wins_and_the_minority_launch_is_left_out(self):
+        runs = [self.r(175, 2), self.r(174, 2), self.r(176, 2), self.r(201, 3), self.r(202, 3)]
+        self.assertEqual(flavour_summary(runs), (2, 175, 3))
+
+    def test_a_tie_between_flavours_reports_the_larger_helper_count(self):
+        self.assertEqual(flavour_summary([self.r(175, 2), self.r(201, 3)]), (3, 201, 1))
 
     def s(self, total, helpers):
         return {"total_mib": total, "helpers": helpers}
