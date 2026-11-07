@@ -67,7 +67,7 @@
 .v-dl--del .v-dl__glyph { color: var(--c-danger); }
 .v-dl--hunk { color: var(--c-info); }
 
-/* Command palette: Raycast-style, 720 px wide, 14% from the top, 34 px rows. */
+/* Command palette: a launcher-style overlay, 720 px wide, 14% from the top, 34 px rows. */
 .v-dialog.v-palette { width: min(720px, calc(100vw - 32px)); max-width: none; margin: 14vh auto auto; padding: 0; overflow: hidden; }
 .v-palette > h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-palette__field { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); color: var(--c-text-muted); }

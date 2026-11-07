@@ -1,7 +1,7 @@
 ---
 version: alpha
 name: Vajra Desktop
-description: Graphite. A dense, keyboard-first macOS tool in the Linear and Raycast family. Graphite neutrals in dark and light, one azure for the primary action, the selection's live state and the live line.
+description: Graphite. A dense, keyboard-first macOS tool. Graphite neutrals in dark and light, one azure for the primary action, the selection's live state and the live line.
 colors:
   background: "#101113"
   surface: "#16171a"
@@ -91,8 +91,8 @@ the light theme). This file follows the UI design SOP; its anti-slop rules overr
 ## Overview
 
 Graphite is the owner's pick (6 November 2026) from three directions mocked up in
-`app/ui/mockups/` (PR #42; the refined version is `mockups/a2/`). It is a working tool in the Linear
-and Raycast family: graphite neutrals, dense rows, quiet chrome, and one azure that means "act here" or
+`app/ui/mockups/` (PR #42; the refined version is `mockups/a2/`). It is a working tool in the family of
+fast keyboard-first trackers and launchers: graphite neutrals, dense rows, quiet chrome, and one azure that means "act here" or
 "live now". The signature is the **action bar**: a footer on every screen that names what is selected
 and lists its actions with their keys.
 
@@ -160,8 +160,8 @@ uses azure except a link or a match highlight in the palette.
 - **Settings:** the check list. Each check is a row with its shape, label, detail and fix.
 
 **Measured, not guessed.** Sizes were checked against the shipped CSS of two agent orchestration
-apps on the owner's Mac (AO and Orca, read-only): both use a 240 px sidebar and a 24/28/32 control
-scale, and AO's palette is 720 px wide at 14% from the top. Graphite matches those. It rejects their
+apps on the owner's Mac (Competitor A and Competitor B, read-only): both use a 240 px sidebar and a 24/28/32 control
+scale, and Competitor A's palette is 720 px wide at 14% from the top. Graphite matches those. It rejects their
 negative heading letter-spacing, half-pixel type sizes, bundled webfont and 20 px composer radius.
 
 **Role names.** The UI shows generic names. This is the only place engine ids appear in design docs:
