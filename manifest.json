@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-07T16:38:05Z",
+  "generated": "2026-11-07T19:48:36Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
@@ -162,9 +162,9 @@
     "docs/design/m3-kit-notes.md": "d30c617b861009ae6bd57187c54f98b1411624f88fdacbab25ccc72dd166882a",
     "docs/desktop/DESIGN.md": "970c47027ce6d252c29cf25cb78943efbcf3f950bf1fcc8075a31543f44589f6",
     "docs/desktop/PRD.md": "2cfa9da368dfeaf4870115b94aa3145c79536b5c471f030813c4d017b3dc8533",
-    "docs/desktop/UX.md": "971a33f4001f724b14d9fe9ab7ac80bcb7021b9a87317283ef0ade21886b8d05",
-    "docs/desktop/spec/design.md": "dacb1b4e641b51f64721bf08a899407f3fedfe9da528f7cbd071996031a715cd",
-    "docs/desktop/spec/requirements.md": "8bb3248d644e1a8bbc99d3a9649d5a1a356b034e54459d7db58af635bc50aed8",
+    "docs/desktop/UX.md": "83ea51750a1e903a1217df179f0912c1d2c6418993556ef1c606a22ae6a8f192",
+    "docs/desktop/spec/design.md": "470ba0130ede5aea2b500d1873c5e331766e05d661c31dc53ed457f8ea8ef085",
+    "docs/desktop/spec/requirements.md": "b693bfc4c4f074adca6e22d1db8f80891a9c7bf386a009142981a089aba5c1bb",
     "docs/desktop/spec/tasks.md": "58f5c83a909a351b98e1e12d48a232b62a6727f03c313d0a263ed379b8849f35",
     "docs/reference/product-kickoff-system-prompt.md": "731ed66fbc98b635aa78a0ae39a814b8914370e04a61967c450b406fefa91785",
     "docs/reference/x-article-claude-autopilot-14-steps.md": "f1ab08f82fc0809937e62b7c80f6b4dfdc0d1b752914b3de499d5aeee8b4ea5d",
