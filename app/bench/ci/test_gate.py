@@ -1,12 +1,12 @@
 import unittest
-from gate import check
+from gate import check, evaluate
 from measure import clean_median, identity_key, base_helpers
 
-ID = "25D1|20622.1.22|"  # macOS build | WebKit version
+ID = "25D1|20622.1.22"  # macOS build | WebKit version
 
 
 def bl(mib=150, helpers=2, key=ID):
-    return {"identities": {key: {"helpers": helpers, "idle_mib": mib}}}
+    return {"identities": {key: {"flavours": {str(helpers): {"idle_mib": mib}}}}}
 
 
 def run(v, helpers=2, key=ID):
@@ -17,8 +17,9 @@ class Gate(unittest.TestCase):
     def test_ok(self):
         self.assertEqual(check(bl(150), run(152), {"slope_mib_per_min": 0.2}), [])
 
-    def test_absolute_budget(self):
+    def test_absolute_budget_gates_the_two_helper_flavour(self):
         self.assertEqual(len(check(bl(200), run(201), None)), 1)
+        self.assertEqual(check(bl(200), run(200), None), [])
 
     def test_regression_over_five(self):
         self.assertEqual(len(check(bl(150), run(156), None)), 1)
@@ -34,16 +35,43 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(check(bl(), run(100), {"slope_mib_per_min": 1.5})), 1)
 
 
-class Identity(unittest.TestCase):
-    def test_known_identity_is_compared_to_its_own_baseline(self):
-        self.assertEqual(check(bl(150), run(152), None), [])
-        self.assertEqual(len(check(bl(150), run(156), None)), 1)
+class Flavours(unittest.TestCase):
+    two_three = {"identities": {ID: {"flavours": {"2": {"idle_mib": 175.0}, "3": {"idle_mib": 201.1}}}}}
 
-    def test_other_identity_does_not_borrow_the_baseline_of_a_different_one(self):
-        two = bl(150, 2)
-        two["identities"]["B"] = {"helpers": 3, "idle_mib": 192}
-        self.assertEqual(check(two, run(192, 3, "B"), None), [])
-        self.assertEqual(len(check(two, run(192, 3, ID), None)), 2)  # over 150 baseline AND helper mismatch
+    def test_each_flavour_is_compared_to_its_own_baseline(self):
+        self.assertEqual(check(self.two_three, run(176, 2), None), [])
+        self.assertEqual(check(self.two_three, run(201.5, 3), None), [])
+        self.assertEqual(len(check(self.two_three, run(201.1, 2), None)), 2)  # over 200 AND over 175 + 5.25
+
+    def test_three_helper_flavour_over_200_is_a_warning_with_the_number_not_a_failure(self):
+        fails, warns = evaluate(self.two_three, run(201.5, 3), None)
+        self.assertEqual(fails, [])
+        self.assertEqual(len(warns), 1)
+        self.assertIn("201.5", warns[0])
+        self.assertIn("200", warns[0])
+
+    def test_three_helper_flavour_under_200_has_no_warning(self):
+        t = {"identities": {ID: {"flavours": {"3": {"idle_mib": 190.0}}}}}
+        self.assertEqual(evaluate(t, run(191, 3), None), ([], []))
+
+    def test_three_helper_flavour_still_gates_a_regression(self):
+        fails, _ = evaluate(self.two_three, run(201.1 + 6.1, 3), None)
+        self.assertEqual(len(fails), 1)
+
+    def test_three_helper_flavour_still_gates_growth(self):
+        fails, _ = evaluate(self.two_three, run(201.1, 3), {"slope_mib_per_min": 2})
+        self.assertEqual(len(fails), 1)
+
+    def test_any_other_helper_count_fails_closed(self):
+        for n in (0, 1, 4, 7):
+            f = check(self.two_three, run(150, n), None)
+            self.assertEqual(len(f), 1, n)
+            self.assertIn("helper", f[0])
+
+    def test_a_known_identity_without_that_flavour_fails_closed(self):
+        f = check(bl(150, 2), run(150, 3), None)
+        self.assertEqual(len(f), 1)
+        self.assertIn("baseline.json", f[0])
 
     def test_unknown_identity_fails_closed_with_the_identity_in_the_message(self):
         f = check(bl(), run(100, 2, "NEW"), None)
@@ -51,16 +79,17 @@ class Identity(unittest.TestCase):
         self.assertIn("NEW", f[0])
         self.assertIn("baseline.json", f[0])
 
-    def test_known_identity_with_a_different_helper_count_is_our_regression(self):
-        f = check(bl(150, 2), run(151, 3), None)
-        self.assertEqual(len(f), 1)
-        self.assertIn("helper", f[0])
+    def test_other_identity_does_not_borrow_a_baseline(self):
+        t = bl(150, 2)
+        t["identities"]["B"] = {"flavours": {"3": {"idle_mib": 192}}}
+        self.assertEqual(check(t, run(192, 3, "B"), None), [])
+        self.assertEqual(len(check(t, run(192, 3, ID), None)), 1)
 
-    def test_unknown_identity_still_enforces_the_absolute_budget_and_slope(self):
+    def test_unknown_identity_still_enforces_the_budget_for_two_helpers_and_slope(self):
         self.assertEqual(len(check(bl(), run(201, 2, "NEW"), {"slope_mib_per_min": 2})), 3)
 
     def test_missing_identity_in_idle_json_fails_closed(self):
-        self.assertEqual(len(check(bl(), {"median_of_medians_mib": 100}, None)), 1)
+        self.assertEqual(len(check(bl(), {"median_of_medians_mib": 100, "helpers": 2}, None)), 1)
 
     def test_key_is_os_build_and_webkit_not_the_image_version(self):
         self.assertEqual(identity_key("25D1", "20622.1.22"), "25D1|20622.1.22")
