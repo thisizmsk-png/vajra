@@ -37,7 +37,7 @@ Vajra Desktop window
 │   └── Settings (Cmd-,) .. Claude path, Theme, Notifications
 ├── Chat dock (right, toggle Cmd-J, focus Cmd-L)
 ├── Command palette (Cmd-K, overlay on every screen)
-└── Status bar (run status, app memory, guard status, engine check)
+└── Action bar (the selection in words, and its actions with their keys)
 ```
 
 Cross-links: a task graph node opens that worker in Crew. A criterion row opens its evidence file. An
@@ -52,11 +52,15 @@ Default 1280x800. Minimum 960x600 (the window cannot be made smaller).
 +------+------------------------------------------------------------+-----------------+
 | side | screen content                                             | chat dock       |
 | bar  |                                                            | (optional)      |
-| 220  | min 480                                                    | 320, min 280    |
+| 240  | min 480                                                    | 320, min 280    |
+|      +------------------------------------------------------------+                 |
+|      | action bar 40 px                                           |                 |
 +------+------------------------------------------------------------+-----------------+
-| status bar 24 px                                                                    |
-+-------------------------------------------------------------------------------------+
 ```
+
+The action bar sits at the foot of each screen, not under the whole window (DESIGN.md "Signature").
+It replaces the 24 px status bar. The run health that sat there (app memory, guard, engine check)
+moves to the sidebar foot, which is not built yet.
 
 At widths under 1200 the sidebar collapses to 56 px (icons with tooltips and labels for VoiceOver).
 At 960 the chat dock becomes an overlay sheet over the right of the content instead of a column.
@@ -284,7 +288,7 @@ in "..." and open their confirm or form. 560 px wide, centered; at 960 it is 520
 2. Preflight runs on open (cached 60 s). Any FAIL disables Start run and names the fix.
 3. Pick repository (recent list) and base branch; max rounds defaults to 3; Advanced holds workers at once.
 4. Cmd-Enter starts. The app creates the run session and shows Crew with the Run node selected and its
-   terminal read-only. The status bar shows "Run <id> Route".
+   terminal read-only. Crew's action bar names the run and its status.
 
 **F2 Resume** (US-1.2)
 1. Home, Resume list (or History row, "Resume"). Rows show phase and round from `progress.md` and `tasks.json` (campaign.json has neither, D9).

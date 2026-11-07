@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Section, Text } from "../../../components/ui/base";
-import { CrewTree } from "../../../components/ui/desktop";
+import { Button, Section, Text } from "../../../components/ui/base";
+import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
-import { api, errorText, onChanged } from "../../ipc";
+import { api, onChanged } from "../../ipc";
+import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import type { CrewNodeDto } from "../../ipc";
+import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { WorkerPane } from "./WorkerPane";
 
@@ -23,7 +25,7 @@ function statusLabel(n: CrewNodeDto): string {
   const key = statusOf(n.status);
   const base = key === "unknown" ? S.crew.unknownSignal : S.status[key];
   const extra = (n.overlays as unknown[]).filter((o): o is string => typeof o === "string").map((o) => S.crew.overlay[o] ?? o);
-  return [base, ...extra].join(" · ");
+  return [base, ...extra].join(", ");
 }
 
 function toNode(n: CrewNodeDto): CrewNode {
@@ -47,6 +49,12 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
   }
   return undefined;
 };
+/** Every worker in the tree, in tree order. */
+const agents = (n: CrewNodeDto, out: CrewNodeDto[] = []): CrewNodeDto[] => {
+  if (n.id.startsWith("agent:")) out.push(n);
+  n.children.forEach((c) => agents(c, out));
+  return out;
+};
 /** Ids from the root down to `id`, or null. */
 const pathTo = (n: CrewNodeDto, id: string): string[] | null => {
   if (n.id === id) return [n.id];
@@ -63,12 +71,13 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 };
 
 export function Crew() {
-  const [route] = useRoute();
+  const [route, go] = useRoute();
   const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
   const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
   const [openIds, setOpenIds] = useState<string[] | null>(null);
-  const [selected, setSelected] = useState("");
+  // `worker` in the route opens on that worker (a deep link, for example from an action card).
+  const [selected, setSelected] = useState(route.params.worker ? `agent:${route.params.worker}` : "");
   const [err, setErr] = useState("");
   const last = useRef(0);
   const current = useRef<Target | null | undefined>(target);
@@ -110,10 +119,11 @@ export function Crew() {
     api.activeRuns().then(
       (a) => {
         if (!live) return;
+        setErr("");
         const r = (a.runs as { run_id?: string; campaign?: string }[])[0];
         setTarget(r?.run_id && r.campaign ? { slug: r.campaign, runId: r.run_id } : null);
       },
-      (e) => live && (setErr(errorText(e)), setTarget(null)),
+      (e) => live && (setErr(problemDetail(e)), setTarget(null)),
     );
     return () => { live = false; };
   }, [target]);
@@ -124,7 +134,7 @@ export function Crew() {
     const asked = target;
     api.crew(target.slug, target.runId).then(
       (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
-      (e) => { if (current.current === asked) setErr(errorText(e)); },
+      (e) => { if (current.current === asked) setErr(problemDetail(e)); },
     );
   }, [target]);
 
@@ -142,40 +152,63 @@ export function Crew() {
     return () => { clearInterval(poll); clearTimeout(later); off(); };
   }, [target, load]);
 
-  if (target === null && !err) {
+  // ⌘K: go to any worker of this run by name.
+  useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
+
+  const head = (title?: string) => (
+    <header className="v-crew__head">
+      <Text as="h1" variant="label" className={title ? "v-crew__title" : undefined}>{S.crew.title}</Text>
+      {title && <span className="v-crew__run">{title}</span>}
+      {target && <span className="v-crew__id">{target.runId}</span>}
+    </header>
+  );
+  // Nothing to show yet: no run, a crew that could not be read, or one on its way. Each says so in words.
+  if (!root) {
+    // The problem stays up while it asks again; an answer clears it, so a retry that fails the same way still shows.
+    const retry = () => { if (target) load(); else setTarget(undefined); };
     return (
-      <div className="v-crew">
-        <Text as="h1" variant="headline-lg">{S.crew.title}</Text>
-        <Text variant="body">{S.crew.noRun}</Text>
-        <Text variant="body-sm" muted>{S.crew.noRunHint}</Text>
+      <div className="v-screen v-crew">
+        {head()}
+        <div className="v-screen__body v-crew__state">
+          {err ? <Problem title={S.crew.failed} detail={err} retry={retry} />
+            : target === null ? (
+              <Empty title={S.crew.noRun} action={<>
+                <Button variant="primary" onClick={() => go("home")}>{S.states.goHome}</Button>
+                <Button variant="ghost" onClick={() => go("history")}>{S.states.openHistory}</Button>
+              </>}>{S.crew.noRunHint}</Empty>
+            ) : <div className="v-crew__tree v-crew__tree--loading"><LoadingRows rows={5} label={S.states.loading} /></div>}
+        </div>
       </div>
     );
   }
   const picked = root && selected ? find(root, selected) : null;
+  const run = root?.children.find((c) => c.kind === "run");
   return (
-    <div className="v-crew">
-      <Text as="h1" variant="headline-lg">{S.crew.title}</Text>
-      {err && <div role="alert"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
-      {root && openIds && (
-        <div className="v-crew__body">
-          <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
-          {picked && (
-            <div className="v-crew__side">
-            {picked.id.startsWith("agent:") ? (
-              target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={root ? taskGroupOf(root, picked.id) ?? null : null} status={statusLabel(picked)} />
-            ) : (
-              <Section title={S.crew.details}>
-                <dl className="v-crew__facts" aria-label={S.crew.details}>
-                  <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
-                  <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-                  {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
-                </dl>
-              </Section>
-            )}
-            </div>
+    <div className="v-screen v-crew">
+      {head(run?.title)}
+      {err && <div role="alert" className="v-crew__err"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
+      <div className="v-crew__body">
+        <div className="v-crew__tree">
+          {root && openIds && (
+            <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           )}
         </div>
-      )}
+        {root && picked && (picked.id.startsWith("agent:") ? (
+          target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, picked.id) ?? null} status={statusLabel(picked)} />
+        ) : (
+          <div className="v-crew__pane v-crew__pane--facts">
+            <Section title={S.crew.details}>
+              <dl className="v-crew__facts" aria-label={S.crew.details}>
+                <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
+                <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
+                {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
+              </dl>
+            </Section>
+          </div>
+        ))}
+      </div>
+      <ActionBar label={S.crew.barLabel}
+        context={picked ? <span>{`${picked.role ?? picked.title}, ${statusLabel(picked)}`}</span> : undefined} />
     </div>
   );
 }

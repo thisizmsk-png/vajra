@@ -60,3 +60,67 @@ S2b Stream (worker output).
 | Showing older output. Newer lines are held back until you jump to latest. | notice | shown once the window has slid back past its row cap |
 | No output yet. / Could not read the output. | empty / failure | failure is followed by the core's error text |
 | 1 line was skipped / N lines were skipped | marker row | shown where output fell off the core's buffer |
+
+Graphite shell, Home and Crew (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Vajra | sidebar top | the app name |
+| ⌘1 to ⌘7 | sidebar links | each link shows its key on hover and on focus; screen readers get `aria-keyshortcuts` |
+| Start a run | Home heading | was "Home"; the sidebar still says Home |
+| The crew builds in its own worktrees and reports back. This app never pushes. | Home, under the heading | new |
+| N of M checks pass / All checks | Home checks line | new; replaces the "Checks" heading, opens when a check fails |
+| Check again | Home action bar | moved from the checks section |
+| ⌘↵ | Start run button | the key shown beside the label; not part of the button's name |
+| No repository chosen | Home action bar | shown until a folder is entered; then the folder's name |
+| Actions on Home / Actions for the selection | action bar names | screen readers only |
+| Stopped by you / Message pending / Active now | node overlays | the separator changes from " · " to ", " (no middle dots) |
+
+Command palette (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Search or run | sidebar button, with ⌘K | opens the palette; a search icon before it |
+| Search commands | palette field | placeholder and the field's name |
+| Go to Home … Go to Settings | palette rows | every screen but the current one, with its ⌘ key |
+| Go to worker NAME | palette rows on Crew | the worker's status beside it |
+| Check again | palette row on Home | the same action as the action bar |
+| N commands / 1 command / No command matches "Q". | palette foot | "1 command" was "1 commands" |
+
+History, Settings and the report on Graphite (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| N campaigns / 1 campaign | History head | new, beside the title |
+| Report / Verify | History row buttons | the visible word; the button's name still reads "Report SLUG" and "Verify SLUG" |
+| Report, Close the report | History report pane | new; the pane opens beside the table instead of under it |
+| Signature verified. | report pane | now a success badge, same words |
+| Actions on History / Actions on Settings | action bar names | screen readers only |
+| The app has no preferences yet. These checks decide whether a run can start. | Settings, under the heading | new |
+| Check again | Settings action bar and palette | moved from the Checks section head |
+
+Empty, loading and error states (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| The app's core did not answer. It may still be starting; try again in a moment, and if it keeps happening, quit and reopen Vajra. | under any "Could not ..." title | new; shown when the core gives no answer at all (before, "unexpected error"). A core error still shows its own code and detail |
+| Try again | every load failure | new; reloads that part only |
+| Loading | loading rows | screen readers only |
+| Go to Home / Open History | Crew with no run | new buttons under "No run is active." |
+| Every run you start, here or from the terminal, is listed here with its report. | History with no campaigns | new, under "No campaigns yet.", with Go to Home |
+| Open the crew for this run | Run view right after a start | new; the Run view is not built, so it points at the crew |
+| The run is under way. Its timeline is not built yet; the crew shows each worker as it goes. | same | new |
+
+Accessibility pass (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Skip to the screen | first Tab stop | new; out of sight until it has focus |
+| SCREEN - Vajra | window title | was "Vajra Desktop" on every screen |
+
+Click crawl fixes (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Checked at TIME | under the checks on Home and Settings | new; a re-check that finds nothing new used to look like a dead click |
+| Tried again at TIME | in every "could not load" box, after Try again | new; a retry that fails the same way used to look like a dead click |

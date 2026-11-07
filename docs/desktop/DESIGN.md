@@ -1,71 +1,74 @@
 ---
 version: alpha
 name: Vajra Desktop
-description: Dense, keyboard-first macOS tool UI over the Vajra harness. Dark theme from the brand art, derived light theme, one brand color for the primary action and live highlights.
+description: Graphite. A dense, keyboard-first macOS tool in the Linear and Raycast family. Graphite neutrals in dark and light, one azure for the primary action, the selection's live state and the live line.
 colors:
-  background: "#0d1117"
-  surface: "#161b22"
-  surface-elevated: "#1c2128"
-  accent: "#21262d"
-  border: "#30363d"
-  border-strong: "#768390"
-  text: "#e6edf3"
-  text-secondary: "#c9d1d9"
-  text-muted: "#9da7b3"
-  primary: "#d97757"
-  text-on-primary: "#0d1117"
-  success: "#7ee787"
-  warning: "#e3b341"
-  danger: "#ff7b72"
-  info: "#79c0ff"
-  focus-ring: "#79c0ff"
-  light-background: "#f6f8fa"
-  light-surface: "#fdfdfe"
+  background: "#101113"
+  surface: "#16171a"
+  surface-elevated: "#1d1e22"
+  accent: "#24262b"
+  border: "#2a2c31"
+  border-strong: "#74787f"
+  text: "#ededef"
+  text-secondary: "#b9bbc2"
+  text-muted: "#8f929b"
+  primary: "#7aa7ff"
+  text-on-primary: "#0b1020"
+  success: "#5fd38d"
+  warning: "#f0b44c"
+  danger: "#ff7070"
+  info: "#6cc6d9"
+  focus-ring: "#7aa7ff"
+  light-background: "#fbfbfc"
+  light-surface: "#f4f4f6"
   light-surface-elevated: "#ffffff"
-  light-accent: "#eaeef2"
-  light-border: "#d8dee4"
-  light-border-strong: "#6e7781"
-  light-text: "#1f2328"
-  light-text-secondary: "#424a53"
-  light-text-muted: "#59636e"
-  light-primary: "#a84a29"
+  light-accent: "#e9e9ee"
+  light-border: "#e1e1e6"
+  light-border-strong: "#7c7f88"
+  light-text: "#18191c"
+  light-text-secondary: "#44464d"
+  light-text-muted: "#5f626b"
+  light-primary: "#2556c8"
   light-text-on-primary: "#ffffff"
-  light-success: "#116329"
-  light-warning: "#7d4e00"
-  light-danger: "#b42318"
-  light-info: "#0550ae"
-  light-focus-ring: "#0550ae"
+  light-success: "#1a7341"
+  light-warning: "#855600"
+  light-danger: "#c0282b"
+  light-info: "#0b6b80"
+  light-focus-ring: "#2556c8"
 typography:
-  headline-lg: {fontFamily: -apple-system, fontSize: 20px, fontWeight: 600, lineHeight: 1.3}
-  headline-md: {fontFamily: -apple-system, fontSize: 15px, fontWeight: 600, lineHeight: 1.35}
-  body-md: {fontFamily: -apple-system, fontSize: 13px, fontWeight: 400, lineHeight: 1.45}
-  body-sm: {fontFamily: -apple-system, fontSize: 12px, fontWeight: 400, lineHeight: 1.4}
-  label-md: {fontFamily: -apple-system, fontSize: 13px, fontWeight: 500, lineHeight: 1.2}
-  label-sm: {fontFamily: -apple-system, fontSize: 11px, fontWeight: 500, lineHeight: 1.3}
-  mono-md: {fontFamily: ui-monospace, fontSize: 12px, fontWeight: 400, lineHeight: 1.5}
-  mono-number: {fontFamily: -apple-system, fontSize: 12px, fontWeight: 400, lineHeight: 1.4, fontFeature: '"tnum" 1'}
-rounded: {none: 0px, sm: 4px, md: 6px, full: 9999px}
-spacing: {xs: 4px, sm: 8px, md: 12px, lg: 16px, xl: 24px, xxl: 32px, row: 28px, target-min: 24px, sidebar-collapsed: 56px, sidebar: 220px, dock: 320px, statusbar: 24px}
+  headline-lg: {fontFamily: -apple-system, fontSize: 22px, fontWeight: 600, lineHeight: 1.27}
+  headline-md: {fontFamily: -apple-system, fontSize: 15px, fontWeight: 600, lineHeight: 1.33}
+  body-md: {fontFamily: -apple-system, fontSize: 13px, fontWeight: 400, lineHeight: 1.46}
+  body-sm: {fontFamily: -apple-system, fontSize: 12px, fontWeight: 400, lineHeight: 1.42}
+  label-md: {fontFamily: -apple-system, fontSize: 13px, fontWeight: 500, lineHeight: 1.23}
+  label-sm: {fontFamily: -apple-system, fontSize: 11px, fontWeight: 500, lineHeight: 1.27}
+  mono-md: {fontFamily: SF Mono, fontSize: 12px, fontWeight: 400, lineHeight: 1.5}
+  mono-number: {fontFamily: -apple-system, fontSize: 12px, fontWeight: 400, lineHeight: 1.42, fontFeature: '"tnum" 1'}
+rounded: {none: 0px, sm: 4px, md: 6px, lg: 10px, full: 9999px}
+spacing: {xs: 4px, sm: 8px, md: 12px, lg: 16px, xl: 24px, xxl: 32px, control-sm: 24px, row: 28px, control-lg: 32px, target-min: 24px, sidebar: 240px, action-bar: 40px, dock: 320px}
 components:
   button-primary: {backgroundColor: "{colors.primary}", textColor: "{colors.text-on-primary}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   button-secondary: {backgroundColor: "{colors.surface-elevated}", textColor: "{colors.text}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
   button-danger: {backgroundColor: "{colors.surface-elevated}", textColor: "{colors.danger}", typography: "{typography.label-md}", rounded: "{rounded.md}", height: 28px, padding: 12px}
-  list-row: {backgroundColor: "{colors.background}", textColor: "{colors.text}", typography: "{typography.body-md}", height: 28px, padding: 8px}
+  list-row: {backgroundColor: "{colors.background}", textColor: "{colors.text}", typography: "{typography.body-md}", rounded: "{rounded.md}", height: 28px, padding: 8px}
   list-row-selected: {backgroundColor: "{colors.accent}", textColor: "{colors.text}"}
-  input: {backgroundColor: "{colors.surface}", textColor: "{colors.text}", typography: "{typography.body-md}", rounded: "{rounded.md}", height: 28px, padding: 8px}
+  input: {backgroundColor: "{colors.background}", textColor: "{colors.text}", typography: "{typography.body-md}", rounded: "{rounded.md}", height: 28px, padding: 8px}
   input-outline: {backgroundColor: "{colors.border-strong}", width: 1px}
   separator: {backgroundColor: "{colors.border}", width: 1px}
   focus-ring: {backgroundColor: "{colors.focus-ring}", width: 2px}
   card: {backgroundColor: "{colors.surface}", textColor: "{colors.text}", rounded: "{rounded.md}", padding: 12px}
+  dialog: {backgroundColor: "{colors.surface-elevated}", textColor: "{colors.text}", rounded: "{rounded.lg}", padding: 16px}
   section-label: {textColor: "{colors.text-secondary}", typography: "{typography.label-md}"}
+  status-working: {textColor: "{colors.text-secondary}", typography: "{typography.label-sm}"}
   status-success: {textColor: "{colors.success}", typography: "{typography.label-sm}"}
   status-warning: {textColor: "{colors.warning}", typography: "{typography.label-sm}"}
   status-danger: {textColor: "{colors.danger}", typography: "{typography.label-sm}"}
   status-info: {textColor: "{colors.info}", typography: "{typography.label-sm}"}
-  status-dot: {rounded: "{rounded.full}", size: 8px}
-  badge: {textColor: "{colors.text-secondary}", typography: "{typography.label-sm}", rounded: "{rounded.sm}", padding: 4px}
+  status-muted: {textColor: "{colors.text-muted}", typography: "{typography.label-sm}"}
+  badge: {backgroundColor: "{colors.accent}", textColor: "{colors.text-secondary}", typography: "{typography.label-sm}", rounded: "{rounded.sm}", height: 20px, padding: 6px}
   terminal-pane: {backgroundColor: "{colors.background}", textColor: "{colors.text}", typography: "{typography.mono-md}", padding: 8px}
-  status-bar: {backgroundColor: "{colors.surface}", textColor: "{colors.text-muted}", typography: "{typography.mono-number}", height: 24px}
+  action-bar: {backgroundColor: "{colors.surface}", textColor: "{colors.text-secondary}", typography: "{typography.body-sm}", height: 40px}
+  timestamp: {textColor: "{colors.text-muted}", typography: "{typography.mono-number}"}
   window-light: {backgroundColor: "{colors.light-background}", textColor: "{colors.light-text}"}
   surface-light: {backgroundColor: "{colors.light-surface}", textColor: "{colors.light-text-secondary}"}
   popover-light: {backgroundColor: "{colors.light-surface-elevated}", textColor: "{colors.light-text-muted}"}
@@ -80,23 +83,86 @@ components:
   status-info-light: {textColor: "{colors.light-info}"}
 ---
 
-# Vajra Desktop design system
+# Vajra Desktop design system: Graphite
 
 Companion to [UX.md](UX.md). Front matter tokens are normative (dark is the default set; `light-*` is
 the light theme). This file follows the UI design SOP; its anti-slop rules override any other skill.
 
 ## Overview
 
-A working tool, not a showcase: dense rows, quiet chrome, text that reads fast, and one warm brand
-color (#d97757, "Vajra clay") that marks the primary action and what is live right now. Direction
-borrows Linear's density and Raycast's palette, on a GitHub-dark base that the brand art already uses.
+Graphite is the owner's pick (6 November 2026) from three directions mocked up in
+`app/ui/mockups/` (PR #42; the refined version is `mockups/a2/`). It is a working tool in the Linear
+and Raycast family: graphite neutrals, dense rows, quiet chrome, and one azure that means "act here" or
+"live now". The signature is the **action bar**: a footer on every screen that names what is selected
+and lists its actions with their keys.
 
-**Stack note.** Stack-agnostic until the spike decides; Tauri v2 with a Rust core is the option to
-beat. Component pattern is shadcn-style: the project owns the source in one kit folder
-(`components/ui`), built on Radix-like accessible primitives, variants with `cva`, class merging
-with `cn()` (clsx + tailwind-merge). Tokens are CSS variables consumed as
-`rgb(var(--c-primary) / <alpha-value>)`, so a theme swaps variables and nothing else. If a native
-toolkit wins the spike, the same token roles map to native theme objects.
+**Stack note (what is built today).** Tauri v2 with a Rust core, React UI in `app/ui`. The kit in
+`components/ui` is hand-rolled: plain CSS classes over the CSS variables in `theme/tokens.css`,
+native `<dialog>` for Sheet, AlertDialog and the command palette, native radios for SegmentedControl,
+`role="switch"` for Switch, and `cn()` is a string join (not clsx, not tailwind-merge). There is no
+Tailwind, Radix, cva or tailwind-merge. The decision (accepted by the orchestrator): keep the
+hand-rolled kit and its tokens; add a Radix primitive per component only where an accessibility gap
+needs it (none does today), and add `cva` only if variants outgrow the props. Colours are hex CSS
+variables consumed as `var(--c-primary)`, so a theme swaps variables and nothing else. The other
+tokens that exist are `--font-ui`, `--font-mono`, `--space-xs` to `--space-xl`, `--radius-sm`,
+`--radius-md`, `--radius-lg`, `--ctl-sm`, `--row-h`, `--ctl-lg`, `--target-min`, `--sidebar-w`,
+`--bar-h`, `--t-fast`, `--t-panel` and `--ease-out`. Type sizes are not tokens; they live in the
+`Text` variants and the kit CSS, from the scale below.
+
+## Art direction (app screens)
+
+Written under the UI SOP with `interface-design` and an `impeccable` critique of the first mockups.
+
+**Intent.** Who: a developer at a Mac who has started a crew and checks on it for hours, between
+other work. They glance at what needs them, decide (approve a plan, answer a question, redirect, stop
+a worker) and go back to their editor. Feel: a precise instrument. Quiet and dense, legible at a
+glance, with keys shown next to every action so the mouse becomes optional.
+
+**Domain (territory, not features).** Run, crew, worker, round, plan, approval, question, handoff,
+stream, diff, worktree, terminal, evidence, criterion, campaign, verifier, guard.
+
+**Colour world.** Graphite canvas (#101113), slate panels (#16171a), a raised fill (#1d1e22), a
+pressed fill (#24262b), and one cold azure (#7aa7ff) like a pilot light. Status uses an instrument's
+lights (green, amber, red, teal). Everything else is structure.
+
+**Signature.** The **action bar**, 40 px, at the foot of every screen. Left: the selection, in words
+("Backend, t2 Token bucket middleware"). Right: its actions, each with its keys, the primary first
+("Approve plan ⌘↵"). People learn the shortcuts by reading the bar. It replaces the 24 px status bar
+in UX.md section 2; the run health that sat there (guard, engine, memory) moves to the sidebar foot
+(not built yet). UX.md sections 2 and 3 record the change. The bar lists only actions the screen can
+run today: Check again on Home, none yet on Crew until Message, Redirect and Stop are wired.
+
+**What azure means.** Only three things: the one primary action on a view, the live line (the run
+that is running, the stream line being written), and a working status *inside the selected row*. A
+busy crew must not turn blue, so working agents elsewhere are ink (`text-secondary`). Text never
+uses azure except a link or a match highlight in the palette.
+
+**Defaults rejected.**
+- Identical stacked cards for workers → one row per worker, grouped by what it needs from you
+  (Needs you, Working, Waiting, Done).
+- A coloured rail on the selected row → the accent fill. No `border-left` wider than 1 px anywhere.
+- Unicode glyphs as icons (✓, ▲) → one SVG set on a 16 px grid, 1.5 px stroke, `currentColor`.
+- A hero metric block for "X of Y" → the run's own sentence ("3 of 7 criteria pass").
+- A form with a submit button for the ask → a launcher: one field, settings as inline tokens
+  (Base, Rounds, Workers, Guard), Start run at the right; its ⌘↵ hint shows while focus is in the form, where the key works. The sidebar's ⌘1 to ⌘7 hints are out of layout until hover or focus. Neither is drawn in the idle window, and Home sets the check-fix hint in the UI face, so idle loads one typeface (idle memory gate).
+- Separate search and command fields → one ⌘K field for actions, runs and files.
+- An empty state with sample data → the real Vajra crews and the one command that starts each.
+
+**Hierarchy per screen (the focal element wins through size, weight, contrast or space).**
+- **Home:** the launcher, under a headline-lg "Start a run". Below it, "Needs you" leads, then the
+  running run, then recent runs. Lists, never cards.
+- **Crew:** the selected worker's stream. The crew list on the left is grouped by attention; the
+  pending approval is a band under the header; the review pane on the right lists files changed,
+  commands run with exit codes, and the criteria Verify will check.
+- **Inbox:** the open request. The list on the left is triage (J and K move, ⌘↵ approves); the
+  detail shows the plan diff, what happens on approve and on reject, and the cost.
+- **History:** the table. Sort headers are the only controls in the header row. Numbers are tabular.
+- **Settings:** the check list. Each check is a row with its shape, label, detail and fix.
+
+**Measured, not guessed.** Sizes were checked against the shipped CSS of two agent orchestration
+apps on the owner's Mac (AO and Orca, read-only): both use a 240 px sidebar and a 24/28/32 control
+scale, and AO's palette is 720 px wide at 14% from the top. Graphite matches those. It rejects their
+negative heading letter-spacing, half-pixel type sizes, bundled webfont and 20 px composer radius.
 
 **Role names.** The UI shows generic names. This is the only place engine ids appear in design docs:
 
@@ -116,64 +182,63 @@ Unknown ids render title-cased. The worker Task tab has an "Engine id" field; no
 
 ## Colors
 
-**Dark theme sources** (exact pixels sampled from `docs/assets/vajra-social-preview.png`, 2560x1280):
-background #0d1117 (canvas), surface #161b22 (chip fill), border #30363d (chip outline), text #e6edf3
-(wordmark), text-secondary #c9d1d9 (chip text), text-muted #9da7b3 (body line), primary #d97757
-(tagline), success #7ee787 ("verify" chip). The URL gray #6e7681 is 4.12:1 on the canvas, under 4.5,
-so it is not used for text. Derived (not in the art): surface-elevated, accent, border-strong,
-warning, danger, info, focus-ring, ANSI. **The light theme is derived; no light brand art exists.**
-Its primary is a darker clay #a84a29 because #d97757 on #f6f8fa is 2.93:1.
+Graphite replaces the earlier GitHub-dark palette and its clay primary. Both themes are designed
+together; neither is derived from brand art. Neutrals are a near-neutral graphite with a faint cool
+cast, so azure reads as the only hue in the chrome.
 
 | Role | Use |
 |---|---|
-| background | Window canvas, terminal, stream |
-| surface | Sidebar, status bar, cards, inputs |
+| background | Window canvas, terminal, stream, inputs (inset) |
+| surface | Sidebar, action bar, cards, the review pane |
 | surface-elevated | Popovers, dialogs, palette, secondary buttons |
-| accent | Selected row, hover row, active tab (a neutral, not a hue) |
-| border | Decorative separators and pane edges (never the only cue) |
-| border-strong | Input and control outlines (3:1 rule) |
-| text / text-secondary / text-muted | Primary content / labels / metadata and timestamps |
-| primary | One primary button per view, live node indicator, progress of the current phase |
-| text-on-primary | Label on primary fill |
+| accent | Selected row, hover row, badge fill, segmented track (a neutral, not a hue) |
+| border | Separators and pane edges (never the only cue) |
+| border-strong | Input and control outlines, floating layer edges (3:1 rule) |
+| text / text-secondary / text-muted | Content / labels and working status / metadata and timestamps |
+| primary | One primary button per view, the live line, working status in the selected row |
+| text-on-primary | Label on the primary fill |
 | success / warning / danger / info | Status only, always with a shape and a label |
-| focus-ring | 2 px ring, 2 px offset on background |
+| focus-ring | 2 px ring, 2 px offset |
 
-**Contrast** (WCAG 2.x ratio, computed with a throwaway script in /tmp). Text pairs need 4.5:1;
-border-strong and focus-ring need 3:1. Status colors are used as text and icon color on these four
-backgrounds; there are no tinted status fills, so no tinted pairs exist.
+Non-hex tokens in `tokens.css`, per theme: `--shadow-floating`, `--c-live-tint` (azure at 10% / 7%,
+behind the live stream line), `--c-warn-tint` (amber at 8% / 7%, behind the approval band),
+`--c-kbd-on-primary` (key outline on a primary button), `--c-selection` (text selection) and
+`--c-scrim` (behind modal layers, background at 60%). Text on the two tints, composited over the
+background: the lowest pair is light danger on the live tint at 5.10:1, and dark text-muted on the
+live tint is 5.24:1. Tints cost up to 1.4 points of contrast, so nothing near 4.5 goes on them.
+
+**Contrast** (WCAG 2.x ratio; `tests/contrast.test.ts` recomputes every cell from `tokens.css`).
+Text pairs need 4.5:1; border-strong and focus-ring need 3:1.
 
 | Dark fg on: | background | surface | surface-elevated | accent |
 |---|---|---|---|---|
-| text #e6edf3 | 16.02 | 14.64 | 13.70 | 12.88 |
-| text-secondary #c9d1d9 | 12.26 | 11.21 | 10.49 | 9.86 |
-| text-muted #9da7b3 | 7.76 | 7.09 | 6.64 | 6.24 |
-| primary #d97757 | 6.06 | 5.54 | 5.18 | 4.88 |
-| success #7ee787 | 12.32 | 11.26 | 10.53 | 9.91 |
-| warning #e3b341 | 9.72 | 8.89 | 8.32 | 7.82 |
-| danger #ff7b72 | 7.51 | 6.86 | 6.42 | 6.04 |
-| info, focus-ring #79c0ff | 9.73 | 8.89 | 8.32 | 7.82 |
-| border-strong #768390 | 4.88 | 4.46 | 4.18 | 3.93 |
+| text #ededef | 16.16 | 15.33 | 14.24 | 12.95 |
+| text-secondary #b9bbc2 | 9.85 | 9.35 | 8.68 | 7.89 |
+| text-muted #8f929b | 6.07 | 5.76 | 5.35 | 4.87 |
+| primary, focus-ring #7aa7ff | 7.92 | 7.51 | 6.98 | 6.34 |
+| success #5fd38d | 10.07 | 9.55 | 8.87 | 8.07 |
+| warning #f0b44c | 10.20 | 9.68 | 8.99 | 8.17 |
+| danger #ff7070 | 7.02 | 6.66 | 6.19 | 5.63 |
+| info #6cc6d9 | 9.64 | 9.15 | 8.50 | 7.73 |
+| border-strong #74787f | 4.26 | 4.04 | 3.76 | 3.41 |
 
-| Light fg on: | background #f6f8fa | surface #fdfdfe | surface-elevated #ffffff | accent #eaeef2 |
+| Light fg on: | background #fbfbfc | surface #f4f4f6 | surface-elevated #ffffff | accent #e9e9ee |
 |---|---|---|---|---|
-| text #1f2328 | 14.84 | 15.54 | 15.80 | 13.55 |
-| text-secondary #424a53 | 8.44 | 8.84 | 8.99 | 7.71 |
-| text-muted #59636e | 5.74 | 6.01 | 6.11 | 5.24 |
-| primary #a84a29 | 5.37 | 5.62 | 5.71 | 4.90 |
-| success #116329 | 6.94 | 7.27 | 7.39 | 6.34 |
-| warning #7d4e00 | 6.66 | 6.97 | 7.09 | 6.08 |
-| danger #b42318 | 6.18 | 6.47 | 6.57 | 5.64 |
-| info, focus-ring #0550ae | 7.13 | 7.47 | 7.59 | 6.51 |
-| border-strong #6e7781 | 4.27 | 4.47 | 4.55 | 3.90 |
+| text #18191c | 17.00 | 16.00 | 17.58 | 14.53 |
+| text-secondary #44464d | 9.11 | 8.58 | 9.42 | 7.79 |
+| text-muted #5f626b | 5.89 | 5.55 | 6.09 | 5.04 |
+| primary, focus-ring #2556c8 | 6.26 | 5.89 | 6.47 | 5.35 |
+| success #1a7341 | 5.68 | 5.35 | 5.88 | 4.86 |
+| warning #855600 | 6.10 | 5.74 | 6.31 | 5.21 |
+| danger #c0282b | 5.67 | 5.34 | 5.87 | 4.85 |
+| info #0b6b80 | 5.92 | 5.58 | 6.12 | 5.06 |
+| border-strong #7c7f88 | 3.87 | 3.64 | 4.00 | 3.31 |
 
-**On primary.** #d97757 on #0d1117 is 6.06:1 (passes). White on #d97757 is 3.12:1 and **fails** for
-13 px labels, so dark text-on-primary is #0d1117 (6.06:1). Light: white on #a84a29 is 5.71:1.
-Fixes made while computing: light primary moved from #b4532f (4.27 on accent) to #a84a29; light
-success, warning, info darkened off GitHub defaults (4.17 to 4.45 on accent); border-strong replaced
-the source gray #6e7681 (3.31 on accent); ANSI entries below adjusted where they fell under 4.5.
+The lowest text pair is light danger on accent, 4.85:1. **On primary:** #0b1020 on #7aa7ff is 7.93:1;
+white on #2556c8 is 6.47:1. Info is teal, not a second blue, so "ready" never reads as "live".
 
-**Terminal ANSI 16.** Every entry is at least 4.5:1 on its theme's background (min 5.07 dark, 4.63
-light), because agents print in all 16 colors.
+**Terminal ANSI 16.** Every entry is at least 4.5:1 on its theme's background (lowest 5.06 dark,
+ansi black; 4.77 light, ansi cyan), because agents print in all 16 colours.
 
 | Slot | Dark | Light | Slot | Dark | Light |
 |---|---|---|---|---|---|
@@ -186,87 +251,118 @@ light), because agents print in all 16 colors.
 | cyan | #39c5cf | #1b7c83 | bright cyan | #56d4dd | #0f6270 |
 | white | #b1bac4 | #636c76 | bright white | #f0f6fc | #59636e |
 
-Dark black was #484f58 (2.28) and light bright white #8c959f (2.85) in the GitHub sets; both changed.
+### Theme selection
+
+The app follows the OS appearance: `prefers-color-scheme: light` selects the light set, anything else
+(including no media query support) selects dark. `src/theme.ts` sets `data-theme` on the root before
+the first render and follows OS changes; the values stay in `tokens.css`. There is no Settings toggle
+yet. The kit Gallery has its own toggle (and `?theme=light` to open on light) and restores the OS
+theme when it unmounts. Text selection, the caret and scrollbars use the theme.
 
 ## Typography
 
-System fonts only, no webfonts: UI `-apple-system, BlinkMacSystemFont` (SF Pro), mono
-`ui-monospace, "SF Mono", Menlo`. Three weights at most: 400, 500, 600. No letter-spacing anywhere
-(SF Pro tracks itself by size). Numbers in tables, counts, timestamps, memory and exit codes use
-tabular numerals (`font-variant-numeric: tabular-nums`, token `mono-number`).
+System fonts only, no webfonts: UI `-apple-system, BlinkMacSystemFont` (SF Pro), mono `"SF Mono",
+ui-monospace, Menlo`. Three weights: 400, 500, 600. Whole pixels on a ratio near 1.2. No
+letter-spacing anywhere (SF Pro tracks itself by size). Tabular numerals on counts, timestamps,
+memory, diff counts and exit codes.
 
 | Token | Size / line | Weight | Use |
 |---|---|---|---|
-| headline-lg | 20 / 26 | 600 | Screen title (one per screen) |
-| headline-md | 15 / 20 | 600 | Section heading, dialog title |
-| body-md | 13 / 19 | 400 | Default text, rows, chat |
-| label-md | 13 / 16 | 500 | Buttons, tabs, selected labels |
-| body-sm | 12 / 17 | 400 | Metadata, status bar, table secondary columns |
-| label-sm | 11 / 14 | 500 | Keyboard hints, badge text (sentence case, never all caps) |
+| headline-lg | 22 / 28 | 600 | Screen title (one per screen), the open Inbox request |
+| headline-md | 15 / 20 | 600 | Section heading, dialog title, worker name |
+| body-md | 13 / 19 | 400 | Default text, rows, stream cards |
+| label-md | 13 / 16 | 500 | Buttons, tabs, selected rows |
+| body-sm | 12 / 17 | 400 | Metadata, group headings, the action bar |
+| label-sm | 11 / 14 | 500 | Keys, badge text, status labels (sentence case, never all caps) |
 | mono-md | 12 / 18 | 400 | Terminal, stream, diff, commands, paths |
 
-Hierarchy is size and weight first, then text-secondary/muted, never the brand color.
+The launcher ask is the one exception: 16 / 25 at 400, because it is the field people type a
+paragraph into. Hierarchy is size and weight first, then text-secondary and text-muted, never azure.
 
 ## Layout
 
-4 px base: 4, 8, 12, 16, 24, 32. Rows are 28 px (compact desktop); hit targets never under 24x24 px.
-Sidebar 220 px, collapsed 56 px under 1200 px window width. Status bar 24 px. Chat dock 320 px
-(min 280). Panes are resizable with a 4 px drag handle (8 px hit area, keyboard resizable with
-arrow keys when focused) and min widths: crew tree 200, worker pane 480, inbox list 320, detail 400.
-Minimum window 960x600; at that size the dock becomes an overlay sheet (see UX.md, section 4).
-Content max line length 80ch for reports and chat.
+4 px base: 4, 8, 12, 16, 24, 32. Controls are 24 (small), 28 (rows, buttons, inputs) and 32 px
+(search, palette field, toolbar tabs); hit targets never under 24x24 px. Sidebar 240 px; it holds
+navigation, the runs in the current repository (live run first, with a spinner and a count of what
+needs you) and the health line at its foot. Action bar 40 px. Chat dock 320 px (min 280). Panes are
+resizable with a 4 px drag handle (8 px hit area, keyboard resizable with arrow keys when focused);
+min widths: crew list 240, worker pane 480, review pane 280, inbox list 320, detail 400. Minimum
+window 960x600; at that size the dock becomes an overlay sheet (UX.md section 4). The launcher and
+reading columns stop at 800 px and 68ch; tables, the stream and the crew list use the full width.
 
 ## Elevation & Depth
 
-Flat. Depth is three tonal layers (background, surface, surface-elevated) plus 1 px borders. Only
-floating layers (palette, dialog, popover, toast) get one shadow, `0 8px 24px rgb(0 0 0 / 0.4)` dark
-and `0 8px 24px rgb(31 35 40 / 0.12)` light, and a scrim of background at 60% for modal dialogs.
+Flat. Depth is three tonal layers (background, surface, surface-elevated) plus 1 px borders. Inputs
+are inset: they sit on `background`, darker than the surface around them. Only floating layers
+(palette, dialog, sheet, toast, tooltip) take a `border-strong` edge and the one shadow,
+`--shadow-floating`, over the `--c-scrim` for modal layers. No blur, glass, gradients or glows; the
+palette's backdrop is a flat scrim (vibrancy would cost memory against the 200 MiB budget).
 
 ## Shapes
 
-Radius 4 px for badges, inputs in tables and tooltips; 6 px for buttons, inputs, cards, dialogs;
-full only for StatusDot. Nothing larger. Same radius family per view.
+Radius 4 px for badges, keys and tooltips; 6 px for buttons, inputs, rows and cards; 10 px for
+floating layers (dialog, palette, toast) and the launcher; full only for StatusDot, the switch and
+count pills. Same radius family per view.
 
 ## Components
 
-Kit folder owns the source. Screens compose these and never restyle them inline.
+The kit folder owns the source. Screens compose these and never restyle them inline.
 
 | Component | Variants | Purpose and states | A11y |
 |---|---|---|---|
 | Text | headline-lg, headline-md, body, body-sm, label, mono | All type goes through it | Semantic element prop |
 | Button | primary, secondary, ghost, danger; sm 24, md 28 | Actions; hover, pressed, focus, disabled, busy (label changes, e.g. "Stopping") | `aria-disabled`, label on icon-only |
 | Card | default, interactive | Groups a detail block; no stacked identical cards | Interactive is a button or link |
-| Badge | neutral, status | Small label next to text, outline not fill | Text label always |
-| Input | text, textarea, select, number | Forms, filters; error text below, never color alone | `<label>`, `aria-invalid`, `aria-describedby` |
-| ListRow | default, selected, with meta | 28 px rows in every list | `option` or `row` role per parent |
-| Section | with heading, with action | Groups content under a headline-md | `<section aria-labelledby>` |
-| SegmentedControl | 2 to 4 options | Max rounds, theme | `radiogroup` + `radio` |
-| Switch | default | Notification toggles | `role="switch"`, announced once |
+| Badge | neutral, status | Small label next to text; accent fill, status-coloured text | Text label always |
+| Input | text, textarea, select | Forms, filters; inset; error text below, never colour alone | `<label>`, `aria-invalid`, `aria-describedby` |
+| ListRow | default, selected, with meta | 28 px rows in every list; selection is the accent fill | `option` or `row` role per parent |
+| Section | with heading, with action | Groups content under a heading | `<section aria-labelledby>` |
+| SegmentedControl | 2 to 4 options | View toggles, max rounds, theme; recessed track, raised choice | `radiogroup` + `radio` |
+| Switch | default | Follow the live line, notification toggles | `role="switch"`, announced once |
 | Sheet | right, center | Message, redirect, reject reason | Focus trap, Esc closes, returns focus |
-| AlertDialog | destructive, confirm | Stop worker, approve plan, take over | Safe button default focus for destructive |
+| AlertDialog | destructive, confirm | Stop worker, take over | Safe button default focus for destructive |
 | Toast | info, success, danger | Result of an action, 5 s, pausable on hover | `role="status"`, never the only record |
 | Skeleton | row, block | Shown only after 300 ms | `aria-busy` on container |
 | Separator | horizontal, vertical | Divides panes and groups | `role="separator"` |
-| Tabs | default | Worker pane tabs | `tablist`, arrow keys |
+| Tabs | default | Worker pane tabs; ink underline on the selected tab | `tablist`, arrow keys |
 | Table | default, expandable rows | Criteria, task list fallback | Header cells, sortable `aria-sort` |
-| Tooltip | default | Collapsed sidebar labels, truncated names, shortcut hints | Not the only source of info |
-| Command palette | default | Cmd-K fuzzy actions and navigation | `combobox` + `listbox` |
-| Resizable panes | horizontal, vertical | Tree/pane, list/detail | Handle `role="separator"` with `aria-valuenow` |
+| Tooltip | default | Truncated names, shortcut hints | Not the only source of info |
+| Command palette | default | ⌘K: actions, runs and files in one field; 720 px, 34 px rows | `combobox` + `listbox` |
+| Resizable panes | horizontal, vertical | List/pane/review, list/detail | Handle `role="separator"` with `aria-valuenow` |
 | Terminal pane | read-only, taken over | Run session PTY; ANSI 16 palette, virtualized scrollback | Label "Run terminal, read only"; Cmd chords only |
-| Crew tree | default | Lead, run, agents, sub-workers | `tree`/`treeitem`, `aria-expanded`, roving tabindex |
-| StatusDot | per status below | Shape + color + text label, never dot alone | Label in accessible name |
+| Crew tree | default | Lead, run, agents, sub-workers; a drawn chevron (never a Unicode arrow) opens a group; long names truncate with a tooltip | `tree`/`treeitem`, `aria-expanded`, roving tabindex |
+| StatusDot | per status below | Shape + colour + text label, never a dot alone | Label in accessible name |
 | EvidenceRow | pass, fail, not run | Criterion, command, exit code, evidence file, commit | Row header is criterion id |
-| ActionCard | message, redirect, stop request; queued, delivered, acknowledged, failed | Orchestrator or human control action, links to worker and audit line | `article` with heading; status in live region |
-| Diff view | unified, file list | Worktree vs base, virtualized | Added/removed marked with +/- glyphs, not color only |
+| ActionCard | message, redirect, stop request; queued, delivered, acknowledged, failed | Lead or human control action, links to worker and audit line | `article` with heading; status in live region |
+| Diff view | unified, file list | Worktree vs base, virtualized; + and − glyphs in success and danger | Glyphs, not colour only |
+
+**Built with the shell** (PR #39): `Kbd` (a key, 18 px, radius 4; `decorative` inside a control,
+which then carries `aria-keyshortcuts`) and `ActionBar` (the signature: the selection in words, then
+actions with label and keys, primary first; chords bind on the window while it is mounted, and a
+chord without a modifier never fires while typing in a field). The ⌘K command palette is wired into
+the shell: it lists the other screens with their keys, and each screen adds what it can really run
+(`useCommands` in `src/palette.tsx`): Crew adds "Go to worker" for each worker with its status, Home
+adds Check again. Runs, tasks, criteria and files join as their screens land. The sidebar's
+"Search or run ⌘K" button opens the same palette for the mouse.
+
+`Icon` (`components/ui/base/Icon.tsx`) is the authored set: 16 px grid, 1.5 px stroke, round caps and
+joins, `currentColor`, always `aria-hidden` (the text beside it or the control's label names the
+thing). A 12 px icon draws a 2 px line on the 16 grid, so it still renders at 1.5 px. It holds only
+icons in use: the seven screens, search, chevron (the tree), check, redirect, stop, terminal, file and
+branch. Icons sit in muted text and take the text colour on hover and on the current item. The Gallery
+shows the set at both sizes.
+
+**Planned, not built yet** (the mockups in `mockups/a2/` are their reference): `Launcher` (the ask
+field with inline tokens and @-mentions) and `Banner` (the approval band on `--c-warn-tint`).
 
 ### Status vocabulary
 
-| Status | Role color | Shape | Label |
+| Status | Role colour | Shape | Label |
 |---|---|---|---|
 | pending | text-muted | ○ empty circle | Pending |
 | ready | info | ◌ dashed circle | Ready |
 | claimed | info | ◐ half circle | Claimed |
-| in_progress | primary (live highlight) | ● filled circle | In progress |
+| in_progress | text-secondary; primary in the selected row or the live run | ● filled circle | In progress |
 | done | success | ✓ check | Done |
 | blocked | warning | ■ square | Blocked |
 | question | warning | ◆ diamond | Question |
@@ -276,28 +372,35 @@ Kit folder owns the source. Screens compose these and never restyle them inline.
 | criterion unknown | text-muted | ○ empty circle | Not run |
 | needs approval | warning | ▲ triangle | Needs approval |
 
-Icons are drawn as SVG shapes from one icon set; the glyphs above describe the shape, not a font.
+Status shapes are SVG from one set; the glyphs above describe the shape, not a font. A row that
+shows its status as an icon keeps the label for screen readers (`.v-sr`).
 
 ### Motion
 
-Plain CSS transitions, 120 ms for hover and press, 180 ms for panels and sheets, `ease-out`. State
-changes (status, card status) cross-fade color only. No motion on streams, terminals or lists:
-new lines appear, nothing slides. No spinner without text; any wait over 1 s shows what it waits for.
-`prefers-reduced-motion: reduce` sets every duration to 0.
+Plain CSS transitions on `--ease-out` (cubic-bezier(0.23, 1, 0.32, 1)): 120 ms (`--t-fast`) for
+hover, press and toggles, 180 ms (`--t-panel`) for panels and sheets. State changes cross-fade
+colour only. No motion on streams, terminals or lists: new lines appear, nothing slides. The only
+looping motion is the live run's spinner and the caret on the live stream line; both stop under
+reduced motion. Any wait over 1 s says what it waits for. `prefers-reduced-motion: reduce` sets
+every duration to 0.
 
 ## Do's and Don'ts
 
 **Anti-slop (blocking):**
-- Don't stack identical cards or put icons in colored circles.
+- Don't stack identical cards or put icons in coloured circles.
 - Don't use checkmark bullet lists, testimonials, invented stats or fake urgency.
-- Don't use decorative or animated gradients, glows, glass, radial orbs or dot grids.
+- Don't use decorative or animated gradients, glows, glass, blur, radial orbs or dot grids.
 - Don't use ALL-CAPS tracked labels, letter-spacing, or meta strings joined with middle dots.
-- Do use the brand color only for the primary action and live highlights; status colors only for status.
-- Do build hierarchy from size, weight and spacing first, then color.
+- Don't mark selection with a coloured side rail; use the accent fill.
+- Don't use Unicode symbols or emoji as icons; use the SVG set and the status shapes.
+- Do keep azure to the primary action, the live line and the selected row's live state; status
+  colours only for status.
+- Do build hierarchy from size, weight and spacing first, then colour.
+- Do show keys next to actions (the action bar, the palette, buttons with a shortcut).
 - Do write honest empty states; never fake data, sample charts or placeholder rows that look real.
 - Don't show fake activity: no pulsing "thinking" dots without a real event, no invented progress bars.
-- Don't use emoji for status, "AI sparkle" icons, or mahabharat names anywhere in the UI.
-- Don't use Inter, Geist or Space Grotesk; system fonts only.
+- Don't use "AI sparkle" icons or mahabharat names anywhere in the UI.
+- Don't use Inter, Geist or Space Grotesk; system fonts only. No half-pixel type sizes.
 - Don't put hover animation on everything or drop shadows on flat content.
 
 **Copy:** sentence case; plain verbs ("Start run", "Approve plan", "Stop worker"); say what happened
@@ -307,15 +410,31 @@ one file; log visible wording in `docs/design/changed-strings.md`. Run copy thro
 
 ## Verification
 
-**Design-guard test** (runs in CI once the renderer exists). Fails on: raw hex, `rgb(`/`hsl(` values,
-any `letter-spacing` or `tracking-*` class, inline `style` color properties, and named colors in
-screens and kit components. Token files (`tokens.css`, theme config) are exempt. Baseline: 0 screens,
-0 violations, because no UI exists yet; the target stays 0.
+**Design-guard test** (`app/ui/tests/design-guard.test.ts`, in CI). Fails on raw hex, `rgb(`/`hsl(`
+values, any `letter-spacing` or `tracking-*` class, inline `style` colour properties and named
+colours anywhere in `app/ui` outside token files (`theme/` directories). Baseline 0; target 0.
 
-**Screenshot plan** (once screens exist). Playwright drives the renderer (web build of the UI with
-a fixture engine state) at 1280x800 and 960x600, dark and light: every MVP screen plus palette,
-dialogs and each empty, loading, error and engine-missing state. A click crawl presses every visible
-control and records crashes, page errors, console errors, outbound requests and dead buttons; target
-0 of each. Shots go to `docs/design/after/`. Then `vidura` checks accessibility independently.
+**Contrast test** (`app/ui/tests/contrast.test.ts`). Recomputes every role pair from `tokens.css`
+and checks the tables above to within 0.01.
 
-design-md-lint: ran `npx @google/design.md lint` (CLI 0.4.0 from npm, in /tmp; the catalog pins git commit 6e5da53, which was not cross-checked against this npm build). Result: 0 errors, 0 warnings, 1 info (token summary) after fixing 23 orphaned-token warnings.
+**Screenshots.** The kit Gallery (`#kit`, `?theme=light`) is shot before and after each kit change
+at 1440 px, dark and light. Once screens migrate: every MVP screen plus palette, dialogs and each
+empty, loading, error and engine-missing state at 1280x800 and 960x600, and a click crawl that
+presses every visible control and records crashes, page errors, console errors, outbound requests
+and dead buttons; target 0 of each. Shots go to `docs/design/after/`. Then `vidura` checks
+accessibility independently.
+
+**Rendered audit (PR #39, dev fixture, 1440x900).** An in-page check measured every visible text
+against its real composited background on Home, Crew, History (with the report open), Settings, the
+palette, and the empty and core-down states, in both themes: 0 below AA, lowest 4.85:1. It found 0
+interactive elements without an accessible name. Tabbing with real key presses: the skip link
+("Skip to the screen") is the first stop and lands in the screen's first control; then the sidebar,
+the screen in reading order, and the action bar. Every stop shows a ring: the ask and the palette
+field, which have no box of their own, ring their frame (2 px). ⌘K moves focus into the palette, and
+Esc gives it back to where it was. A run starts from the keyboard alone (skip link, ask, Tab,
+repository, ⌘↵). With reduced motion, every transition is 0 s. The window title names the screen.
+Not done yet: 960x600, the click crawl and a real screen reader pass.
+
+design-md-lint: last run on the previous palette (`npx @google/design.md lint`, CLI 0.4.0: 0 errors,
+0 warnings). Not re-run on this version; the front matter keeps the same shape, and every colour
+token is still referenced by a component.
