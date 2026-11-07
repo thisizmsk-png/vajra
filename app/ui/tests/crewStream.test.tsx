@@ -231,6 +231,17 @@ describe("Stream tab (S2b, US-2.2)", () => {
     await waitFor(() => expect(earlierButton()).toBeNull()); // confirmed: nothing older
   });
 
+  it("hides Load earlier when the core says a non-empty page is the start, even if that page begins after line 1", async () => {
+    const f = await openBackend({
+      tail: tail(lines(1001, 1003), { spill_start: 0, spill_end: 1024 }),
+      // Lines 1..499 were dropped from the core; the oldest it has is 500, and it says so.
+      read_spill_before: { lines: lines(500, 1000), at_start: true, gap: false },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "read_spill_before")).toBe(true));
+    await waitFor(() => expect(earlierButton()).toBeNull());
+  });
+
   it("offers no 'load earlier' when nothing was spilled", async () => {
     await openBackend({ tail: tail(lines(1, 3), { spill_start: 0, spill_end: 0 }) });
     await screen.findByRole("log");
