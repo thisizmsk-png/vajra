@@ -151,10 +151,35 @@ enum Outcome {
 }
 
 /// The `git.worktreeTree` recorded in an evidence file (regular file, at most 16 KiB), if there is one.
-fn evidence_tree(path: &Path) -> Option<String> {
-    std::fs::symlink_metadata(path).ok().filter(|m| m.is_file() && m.len() <= EVIDENCE_KEY_MAX)?;
-    let doc: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    doc.get("git")?.get("worktreeTree")?.as_str().filter(|t| !t.is_empty()).map(String::from)
+/// What the evidence file says about the tree it was verified on. Reading failures are not "no tree": a file that cannot be
+/// read (too large, unreadable, not JSON) says nothing about its tree, so freshness is unknown, never assumed.
+enum RecordedTree {
+    /// `git.worktreeTree`.
+    Id(String),
+    /// A readable evidence file with no recorded tree (older evidence): the commit decides.
+    None,
+    /// The file could not be read within the bound.
+    Unreadable,
+}
+
+/// `check-evidence` itself reads at most this much of an evidence file (vajra_tasks.py / vajra_kb.py: 5,000,000 bytes).
+const EVIDENCE_READ_MAX: u64 = 5_000_000;
+
+fn evidence_tree(path: &Path) -> RecordedTree {
+    let read = || -> Option<RecordedTree> {
+        std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path).ok()?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
+        if bytes.len() as u64 > EVIDENCE_READ_MAX {
+            return None;
+        }
+        let doc: Value = serde_json::from_slice(&bytes).ok()?;
+        Some(match doc.get("git").and_then(|g| g.get("worktreeTree")).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            Some(t) => RecordedTree::Id(t.to_string()),
+            None => RecordedTree::None,
+        })
+    };
+    read().unwrap_or(RecordedTree::Unreadable)
 }
 
 /// What one read of a run repo learned: HEAD, the working tree's id, and whether the repo's own config defines a filter
@@ -868,9 +893,11 @@ impl App {
                         // read the check's verdict stands.
                         let ev = t.get("evidence");
                         let want_head = ev.and_then(|e| e.get("head")).and_then(Value::as_str);
-                        let want_tree = ev.and_then(|e| e.get("path")).and_then(Value::as_str).and_then(|p| evidence_tree(Path::new(p)));
+                        let recorded = ev.and_then(|e| e.get("path")).and_then(Value::as_str).map(|p| evidence_tree(Path::new(p))).unwrap_or(RecordedTree::None);
+                        let unreadable = matches!(recorded, RecordedTree::Unreadable);
+                        let want_tree = match recorded { RecordedTree::Id(t) => Some(t), _ => None };
                         let state = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref);
-                        let stale = state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
+                        let stale = !unreadable && state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
                             (Some(w), Some(c)) => w != c,
                             (Some(_), None) => false,
                             (None, _) => want_head.is_some_and(|w| w != head),
@@ -878,7 +905,8 @@ impl App {
                         // A repo with its own executable filter cannot be compared by tree without running it: the evidence
                         // cannot be shown current, so it is never `pass` (it is not claimed stale either).
                         let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
-                        if stale { "stale" } else if filtered { "unverified" } else { "pass" }
+                        // Evidence whose tree cannot be read is never assumed current either (a green check proves the file, not the tree).
+                        if stale { "stale" } else if filtered || (unreadable && state.is_some()) { "unverified" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }

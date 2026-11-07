@@ -221,11 +221,14 @@ impl Bridge {
         let idx = dir.join("index");
         let objects = dir.join("objects");
         let repo_objects: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+        // Every step runs from the repository's top level, as verify-work does (`--show-toplevel`): the run's cwd may be a
+        // subdirectory, and `add -A -- .` from there would leave dirty files elsewhere at their HEAD content.
+        let top: std::cell::RefCell<PathBuf> = std::cell::RefCell::new(repo.to_path_buf());
         let result = (|| {
             let git = |args: &[&str], with_index: bool| -> Option<Output> {
                 let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
                 let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-C"].map(String::from).into_iter()
-                    .chain([repo.to_string_lossy().into_owned()])
+                    .chain([top.borrow().to_string_lossy().into_owned()])
                     .chain(args.iter().map(|a| a.to_string()))
                     .collect();
                 let alt = repo_objects.borrow().clone();
@@ -235,9 +238,11 @@ impl Bridge {
                 };
                 run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| !o.timed_out && o.code == Some(0))
             };
-            // The repo's object dir as an absolute path (`--git-path` answers relative to the repo for a plain checkout).
+            let root = git(&["rev-parse", "--show-toplevel"], false)?.stdout.trim().to_string();
+            *top.borrow_mut() = Path::new(&root).canonicalize().ok().filter(|p| p.is_absolute())?;
+            // The repo's object dir as an absolute path (`--git-path` answers relative to the top level for a plain checkout).
             let found = git(&["rev-parse", "--git-path", "objects"], false)?.stdout.trim().to_string();
-            let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { repo.join(found) };
+            let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { top.borrow().join(found) };
             *repo_objects.borrow_mut() = Some(found.canonicalize().ok()?);
             std::fs::create_dir(&objects).ok()?;
             if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {

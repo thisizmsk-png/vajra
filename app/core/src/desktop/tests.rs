@@ -1431,8 +1431,12 @@ fn git_in(repo: &Path, args: &[&str]) -> String {
 
 /// Run the REAL `vajra-verify-work.sh` in `repo` (so `git.worktreeTree` is what production records) under slug `green-run`.
 fn verify_work(repo: &Path) {
+    verify_work_cmd(repo, "true");
+}
+
+fn verify_work_cmd(repo: &Path, cmd: &str) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-verify-work.sh");
-    let o = std::process::Command::new("bash").current_dir(repo).arg(&script).args(["green-run", "true"]).output().unwrap();
+    let o = std::process::Command::new("bash").current_dir(repo).arg(&script).args(["green-run", cmd]).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
@@ -2140,4 +2144,43 @@ fn tree_id_refuses_a_repo_that_configures_a_filter_and_still_serves_one_that_doe
     assert!(!app.bridge.repo_filters(&repo, Duration::from_secs(10)));
     git_in(&repo, &["config", "filter.evil.process", "sh -c true"]);
     assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+}
+
+#[test]
+fn big_signed_evidence_is_still_compared_by_tree() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // verify-work records the full command string, so a valid signed file can be far over the 16 KiB cache limit.
+    verify_work_cmd(&repo, &format!("true # {}", "x".repeat(40_000)));
+    let ev = repo.join("data/walkthroughs/green-run/evidence.json");
+    assert!(fs::metadata(&ev).unwrap().len() > 16 * 1024, "the fixture must exceed the cache limit");
+    set_evidence_path(&t, &slug, &ev);
+    assert_eq!(status_of(&app, &slug), "pass", "unchanged since verification");
+    // HEAD does not move: only the working tree differs.
+    fs::write(repo.join("f.txt"), b"edited, HEAD unchanged").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit must not hide behind a large evidence file");
+    git_in(&repo, &["checkout", "--", "f.txt"]);
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file too");
+}
+
+#[test]
+fn the_tree_is_computed_from_the_top_level_when_the_run_started_in_a_subdirectory() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.txt"), b"a").unwrap();
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "src"]);
+    // Evidence is captured at the root, on a tree with an uncommitted edit OUTSIDE src.
+    fs::write(repo.join("f.txt"), b"uncommitted root edit").unwrap();
+    verify_work(&repo);
+    set_evidence_path(&t, &slug, &repo.join("data/walkthroughs/green-run/evidence.json"));
+    for r in lock(&app.runs).values_mut() { r.cwd = repo.join("src"); }
+    assert_eq!(status_of(&app, &slug), "pass", "the same tree, compared from a subdirectory, is not stale");
+    // An edit in a sibling/root file is seen from the subdirectory too.
+    fs::write(repo.join("f.txt"), b"another root edit").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
 }
