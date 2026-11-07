@@ -287,7 +287,7 @@
     "tests/fixtures/gate-web/clean.html": "f0bc6cd2eb14940a85992ea78d8001b8c2072a53b08172996704091c2657a4a9",
     "tests/gate-web/run-gate-web.sh": "11f939857ebafcbdb3cab6c4a53bceb350f0da4955e570c6ba533a0a711f3d57",
     "tests/hmac-contract.sh": "ce29bed4b2cd9d80206151d6e4d43f5e389a173f9359d4c4755e916480d32def",
-    "tests/hooks/run-desktop-control.sh": "8d6ab0eac7e667118e1deb350039c3ef05726fa832798072482f80f19892b008",
+    "tests/hooks/run-desktop-control.sh": "6fd25f98bb591111caa605fc928a53c6ee317705b21c1dcc8a06a27581d6d619",
     "tests/hooks/run-generate-manifest.sh": "720e8d5e4af5e991cea830adce72a7f4b8b03236573116832933ebc8c006dcbe",
     "tests/hooks/run-guard-text.sh": "0f33437bd5b7571f7a9fe62137ff9aa70bf4d92e29087a89afcf9773b7144b7a",
     "tests/hooks/run-home-isolation.sh": "fb4ee353cb2756314782e51c0079eec843d7e76338b21b5f9146d306417803bd",

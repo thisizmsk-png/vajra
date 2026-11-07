@@ -11,7 +11,7 @@ command -v jq >/dev/null || { echo "SKIP: jq required"; exit 0; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HOOK="$REPO/hooks/desktop-control.sh"
-SH=/bin/bash
+SH="${SH:-/bin/bash}"
 TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/vajra-dc-XXXXXX")"
 TEST_HOME="$(cd "$TEST_HOME" && pwd -P)"
 trap 'rm -rf "$TEST_HOME"' EXIT
@@ -269,11 +269,28 @@ reset_dir
 run "$(raw PreToolUse SubagentHandback AG1 "$(jq -nc --arg n "$NONCE" '{message:("quoted " + $n)}')" '{}')"
 [ "$RC" -eq 2 ] && grep -qi 'remove it and retry' "$ERR"; ok "nonce in a handback: blocked with a retry hint" $?
 # Large payloads are read quickly once a control dir exists (5 s hook timeout).
-reset_dir; BIG="$(head -c 600000 /dev/zero | tr '\0' a)"
-s=$(python3 -c 'import time;print(time.time())')
-run "$(raw PostToolUse Read "" '{"file_path":"x"}' "$(jq -nc --arg b "$BIG" '{content:$b}')")"
-e=$(python3 -c "import time;print(int((time.time()-$s)*1000))")
-[ "$RC" -eq 0 ] && [ "$e" -lt 400 ]; ok "600 KB payload handled in ${e} ms (< 400)" $?
+# Correctness is asserted apart from time. Time is best of 3 (a shared runner adds noise, never subtracts it) with a
+# local limit of 400 ms and a CI limit of 1500 ms (under a third of the 5 s hook timeout, see issue #12), plus a
+# scaling check that does not depend on runner speed: 600 KB must cost under 20x of 60 KB (catches a quadratic path).
+big_ms() { # bytes -> best-of-3 ms; leaves RC from the last run
+  local b best=999999 s e
+  b="$(head -c "$1" /dev/zero | tr '\0' a)"
+  for _ in 1 2 3; do
+    reset_dir
+    s=$(python3 -c 'import time;print(time.time())')
+    run "$(raw PostToolUse Read "" '{"file_path":"x"}' "$(jq -nc --arg b "$b" '{content:$b}')")"
+    e=$(python3 -c "import time;print(int((time.time()-$s)*1000))")
+    [ "$RC" -eq 0 ] || { echo "$e"; return 1; }
+    [ "$e" -lt "$best" ] && best=$e
+  done
+  echo "$best"
+}
+SMALL_MS=$(big_ms 60000); [ $? -eq 0 ]; ok "60 KB payload: hook exits 0 every time" $?
+BIG_MS=$(big_ms 600000); [ $? -eq 0 ]; ok "600 KB payload: hook exits 0 every time" $?
+LIM=400; [ -n "${CI:-}" ] && LIM=1500
+[ "$BIG_MS" -lt "$LIM" ]; ok "600 KB payload handled in ${BIG_MS} ms, best of 3 (< ${LIM}: 400 local, 1500 CI)" $?
+FLOOR=$SMALL_MS; [ "$FLOOR" -lt 25 ] && FLOOR=25
+[ "$BIG_MS" -lt $((FLOOR * 20)) ]; ok "600 KB (${BIG_MS} ms) is under 20x of 60 KB (${SMALL_MS} ms): no quadratic path" $?
 
 # Sol P2: an ack that cannot be written leaves the entry inflight (never re-queued, never lost).
 reset_dir; q 000001 K1 message '{"agent_id":"AG1"}'; chmod 500 "$D/acks"
