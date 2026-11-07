@@ -308,7 +308,7 @@
     "tests/router/run-router.sh": "396a6a77fa6060e2d3fdc621c4d063d89b2b0127342e7a648ac6881edc4121e3",
     "tests/router/run-skill-routes.sh": "b793946ab9b04b8242efe8f8a20852e77e1339796dc8517b3f2e9bcda79a3ee2",
     "tests/run-all.sh": "e92b00bbc66eb85d14bc20df97a7a63a73ce89d0467d91046025b588b40eef94",
-    "tests/run-campaign.sh": "c3c8f712d14601bb913a8d0e87aad5e66a0727590a959773bf3c5b957fe5d557",
+    "tests/run-campaign.sh": "9a6c2846a0adbfa74b61573d9988002a3bb6ba6fc7d804016ef5a5bb3d07acd7",
     "tests/run-compaction.sh": "08f7278f3f9a46e044441b2ec2a0925afc3b394ef9237046810503535234dc30",
     "tests/run-cost.sh": "51dcfeb0a152f42d665cd9d7e036f8c673e46139d407d3fb5124e879465afc47",
     "tests/run-event-log.sh": "ffc7a655c9c18e62421a958afd3ad21ebd0b52a152d349965ce48c19c7c64ad5",
