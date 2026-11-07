@@ -20,8 +20,7 @@
 [data-dir="c"] .v-status-dot svg { width: 10px; height: 10px; flex: none; }
 [data-dir="c"] .v-status--pass, [data-dir="c"] .v-status--done { color: var(--c-success); }
 [data-dir="c"] .v-status--in_progress { color: var(--c-text); }
-[data-dir="c"] .v-status--in_progress svg { color: var(--c-bolt); }
-[data-theme="light"] .v-status--in_progress svg { color: var(--c-ink); }
+/* Live agents are ink (text colour) in both themes: the filled dot and the "Live" label carry it, so yellow stays for "now" and the gate. */
 [data-dir="c"] .v-status--ready, [data-dir="c"] .v-status--unknown, [data-dir="c"] .v-status--pending { color: var(--c-text-muted); }
 [data-dir="c"] .v-status--needs_approval { color: var(--c-text); }
 [data-dir="c"] .v-status--needs_approval svg { color: var(--c-bolt); stroke: var(--c-ink); stroke-width: 0.8; }
