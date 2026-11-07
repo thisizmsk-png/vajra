@@ -41,27 +41,52 @@ pub enum HeldError {
     Io(String),
 }
 
-/// Read the campaign `slug` under `campaigns_dir`. `seam(stage)` is called after the dir is open (`"dir"`) and
-/// before each file is opened (`"file:<name>"`); production passes a no-op, tests use it to swap files mid-read.
-pub fn read_campaign(campaigns_dir: &Path, slug: &str, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
-    read_campaign_as(campaigns_dir, slug, unsafe { libc::getuid() }, seam)
+/// Read the campaign `slug` under `campaigns_dir`. `key` is the signing key's path: it is only `stat`ed (never
+/// opened) so that no input can be the key's inode (NFR-SEC-2). `seam(stage)` is called after the dir is open
+/// (`"dir"`), before each file is looked at (`"file:<name>"`) and between that look and the open (`"open:<name>"`);
+/// production passes a no-op, tests use it to swap files mid-read.
+pub fn read_campaign(campaigns_dir: &Path, slug: &str, key: &Path, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
+    read_campaign_as(campaigns_dir, slug, key, unsafe { libc::getuid() }, seam)
+}
+
+/// The key's identity, `(st_dev, st_ino)`, for the path itself and for what it points at if it is a link. Metadata
+/// only: the key is never opened or read.
+fn key_ids(key: &Path) -> Vec<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut ids: Vec<(u64, u64)> =
+        [std::fs::symlink_metadata(key), std::fs::metadata(key)].into_iter().flatten().map(|m| (m.dev(), m.ino())).collect();
+    ids.dedup();
+    ids
 }
 
 /// `read_campaign` with the user id files must belong to (tests pass another one).
-fn read_campaign_as(campaigns_dir: &Path, slug: &str, uid: u32, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
+fn read_campaign_as(campaigns_dir: &Path, slug: &str, key: &Path, uid: u32, seam: &dyn Fn(&str)) -> Result<Held, HeldError> {
     if slug.is_empty() || slug.contains('/') || slug == "." || slug == ".." {
         return Err(HeldError::Failed("bad slug".into()));
     }
     let root = open_dir(None, campaigns_dir.to_str().ok_or_else(|| HeldError::Failed("path".into()))?, uid)?;
     let dir = open_dir(Some(root.as_raw_fd()), slug, uid)?;
     seam("dir");
-    let fd = dir.as_raw_fd();
-    let campaign = read_file(fd, "campaign.json", CAP_CAMPAIGN, true, uid, seam)?.unwrap_or_default();
-    let features = read_file(fd, "features.json", CAP_FEATURES, true, uid, seam)?.unwrap_or_default();
-    let progress = read_file(fd, "progress.md", CAP_PROGRESS, true, uid, seam)?.unwrap_or_default();
-    let sig = read_file(fd, "state.sig", CAP_SIG, true, uid, seam)?.unwrap_or_default();
-    let report = read_file(fd, "report.md", CAP_REPORT, false, uid, seam)?;
+    let keys = key_ids(key);
+    let rd = |name: &'static str, cap: usize, required: bool| read_file(dir.as_raw_fd(), name, cap, required, uid, &keys, seam);
+    let campaign = rd("campaign.json", CAP_CAMPAIGN, true)?.unwrap_or_default();
+    let features = rd("features.json", CAP_FEATURES, true)?.unwrap_or_default();
+    let progress = rd("progress.md", CAP_PROGRESS, true)?.unwrap_or_default();
+    let sig = rd("state.sig", CAP_SIG, true)?.unwrap_or_default();
+    let report = rd("report.md", CAP_REPORT, false)?;
     Ok(Held { campaign, features, progress, sig, report })
+}
+
+/// A held input must be a plain single-link file that is not the signing key. `O_NOFOLLOW` stops symlinks only; a
+/// hard link to the key (or to anything else) placed under an allowed name has that name but another file's data.
+fn single_link_not_key(st: &libc::stat, name: &str, keys: &[(u64, u64)]) -> Result<(), HeldError> {
+    if st.st_nlink != 1 {
+        return Err(HeldError::Failed(format!("{name}: has more than one link")));
+    }
+    if keys.contains(&(st.st_dev as u64, st.st_ino)) {
+        return Err(HeldError::Failed(format!("{name}: is the signing key")));
+    }
+    Ok(())
 }
 
 fn open_dir(parent: Option<RawFd>, name: &str, uid: u32) -> Result<OwnedFd, HeldError> {
@@ -101,9 +126,26 @@ fn check_owner(fd: RawFd, want_dir: bool, name: &str, uid: u32) -> Result<libc::
     Ok(st)
 }
 
-fn read_file(dir: RawFd, name: &'static str, cap: usize, required: bool, uid: u32, seam: &dyn Fn(&str)) -> Result<Option<Vec<u8>>, HeldError> {
+fn read_file(
+    dir: RawFd,
+    name: &'static str,
+    cap: usize,
+    required: bool,
+    uid: u32,
+    keys: &[(u64, u64)],
+    seam: &dyn Fn(&str),
+) -> Result<Option<Vec<u8>>, HeldError> {
     seam(&format!("file:{name}"));
     let c = CString::new(name).unwrap();
+    // Look before opening, so a hard link to the key is refused without the key ever being opened. A swap after
+    // this look is caught by the same check on the open descriptor below, still before any byte is read.
+    let mut pre: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, c.as_ptr(), &mut pre, libc::AT_SYMLINK_NOFOLLOW) } == 0
+        && pre.st_mode & libc::S_IFMT == libc::S_IFREG
+    {
+        single_link_not_key(&pre, name, keys)?;
+    }
+    seam(&format!("open:{name}"));
     let fd = unsafe { libc::openat(dir, c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     if fd < 0 {
         let e = std::io::Error::last_os_error();
@@ -116,6 +158,7 @@ fn read_file(dir: RawFd, name: &'static str, cap: usize, required: bool, uid: u3
     }
     let mut f = unsafe { File::from_raw_fd(fd) };
     let st = check_owner(f.as_raw_fd(), false, name, uid)?;
+    single_link_not_key(&st, name, keys)?;
     if st.st_size as u64 > cap as u64 {
         return Err(HeldError::TooLarge(name));
     }
@@ -188,8 +231,12 @@ mod tests {
         d
     }
     fn nop(_: &str) {}
+    /// A dummy stand-in for the signing key, inside the test's temp dir (never the real one).
+    fn key(d: &Path) -> PathBuf {
+        d.join("dummy-signing-key")
+    }
     fn read(d: &Path) -> Result<Held, HeldError> {
-        read_campaign(d, "camp", &nop)
+        read_campaign(d, "camp", &key(d), &nop)
     }
 
     #[test]
@@ -213,7 +260,7 @@ mod tests {
     #[test]
     fn a_missing_campaign_dir_is_not_found() {
         let d = dir();
-        assert_eq!(read_campaign(&d, "nope", &nop).unwrap_err(), HeldError::NotFound);
+        assert_eq!(read_campaign(&d, "nope", &key(&d), &nop).unwrap_err(), HeldError::NotFound);
     }
 
     #[test]
@@ -250,7 +297,7 @@ mod tests {
     fn a_symlinked_campaign_dir_is_refused() {
         let d = dir();
         symlink(d.join("camp"), d.join("alias")).unwrap();
-        assert!(matches!(read_campaign(&d, "alias", &nop), Err(HeldError::Failed(_)) | Err(HeldError::NotFound)));
+        assert!(matches!(read_campaign(&d, "alias", &key(&d), &nop), Err(HeldError::Failed(_)) | Err(HeldError::NotFound)));
     }
 
     #[test]
@@ -273,7 +320,7 @@ mod tests {
                 symlink(root.join("elsewhere"), root.join("camp/report.md")).unwrap();
             }
         };
-        assert!(matches!(read_campaign(&d, "camp", &seam), Err(HeldError::Failed(_))));
+        assert!(matches!(read_campaign(&d, "camp", &key(&d), &seam), Err(HeldError::Failed(_))));
     }
 
     #[test]
@@ -301,7 +348,7 @@ mod tests {
     fn a_file_owned_by_someone_else_is_refused() {
         let d = dir();
         let other = unsafe { libc::getuid() } + 1;
-        assert!(matches!(read_campaign_as(&d, "camp", other, &nop), Err(HeldError::Failed(_))));
+        assert!(matches!(read_campaign_as(&d, "camp", &key(&d), other, &nop), Err(HeldError::Failed(_))));
     }
 
     #[test]
@@ -333,13 +380,83 @@ mod tests {
     #[test]
     fn the_reader_opens_only_the_five_named_files_never_the_signing_key() {
         let d = dir();
-        let key = format!(".hmac{}", "-key");
-        fs::write(d.join("camp").join(&key), b"secret").unwrap();
+        let key_name = format!(".hmac{}", "-key");
+        fs::write(d.join("camp").join(&key_name), b"secret").unwrap();
         let seen = std::cell::RefCell::new(Vec::new());
         let seam = |st: &str| seen.borrow_mut().push(st.to_string());
-        read_campaign(&d, "camp", &seam).unwrap();
+        read_campaign(&d, "camp", &key(&d), &seam).unwrap();
         let seen = seen.into_inner();
-        assert_eq!(seen, ["dir", "file:campaign.json", "file:features.json", "file:progress.md", "file:state.sig", "file:report.md"]);
-        assert!(seen.iter().all(|s| !s.contains(&key)));
+        let want: Vec<String> = std::iter::once("dir".to_string())
+            .chain(["campaign.json", "features.json", "progress.md", "state.sig", "report.md"].iter().flat_map(|n| {
+                // report.md is optional and absent here: it is looked at, then openat reports ENOENT.
+                [format!("file:{n}"), format!("open:{n}")]
+            }))
+            .collect();
+        assert_eq!(seen, want);
+        assert!(seen.iter().all(|s| !s.contains(&key_name)));
+    }
+
+    // ---- review #34 (P1): hard links. O_NOFOLLOW stops symlinks only. -------------------------------------------
+
+    const CANARY: &[u8] = b"DUMMY-KEY-CANARY-0f3a"; // a test value in a temp dir, never a real key
+
+    #[test]
+    fn a_hard_link_to_the_signing_key_is_refused_for_every_input() {
+        for name in ["campaign.json", "features.json", "progress.md", "state.sig", "report.md"] {
+            let d = dir();
+            fs::write(key(&d), CANARY).unwrap();
+            let p = d.join("camp").join(name);
+            let _ = fs::remove_file(&p);
+            fs::hard_link(key(&d), &p).unwrap();
+            let r = read(&d);
+            match &r {
+                Err(HeldError::Failed(why)) => assert!(!why.as_bytes().windows(CANARY.len()).any(|w| w == CANARY), "{why}"),
+                other => panic!("{name}: a hard link to the key must fail, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn any_input_with_more_than_one_link_is_refused() {
+        // A hard link to an unrelated file of the same user: nlink 2, so it is not a plain single-link input.
+        let d = dir();
+        let elsewhere = d.join("elsewhere.md");
+        fs::write(&elsewhere, b"p").unwrap();
+        fs::remove_file(d.join("camp/progress.md")).unwrap();
+        fs::hard_link(&elsewhere, d.join("camp/progress.md")).unwrap();
+        assert!(matches!(read(&d), Err(HeldError::Failed(w)) if w.contains("more than one link")));
+    }
+
+    #[test]
+    fn an_input_that_is_the_keys_inode_is_refused_even_with_a_single_link() {
+        // The inode check stands on its own: here the key path is a symlink to the input, so the input has one link
+        // but the same (st_dev, st_ino) as what the key path resolves to.
+        let d = dir();
+        symlink(d.join("camp/state.sig"), key(&d)).unwrap();
+        assert!(matches!(read(&d), Err(HeldError::Failed(w)) if w.contains("is the signing key")));
+    }
+
+    #[test]
+    fn a_hard_link_swapped_in_after_the_pre_open_look_is_caught_on_the_descriptor() {
+        // The look before openat sees a plain file; the seam swaps in a hard link to the key right after it, so only
+        // the fstat on the open descriptor can catch it, and it must, before any byte is read.
+        let d = dir();
+        fs::write(key(&d), CANARY).unwrap();
+        let target = d.join("camp/progress.md");
+        let k = key(&d);
+        let seam = |st: &str| {
+            if st == "open:progress.md" {
+                fs::remove_file(&target).unwrap();
+                fs::hard_link(&k, &target).unwrap();
+            }
+        };
+        let r = read_campaign(&d, "camp", &key(&d), &seam);
+        assert!(matches!(&r, Err(HeldError::Failed(w)) if w.starts_with("progress.md")), "{r:?}");
+    }
+
+    #[test]
+    fn a_missing_key_file_changes_nothing() {
+        let d = dir(); // no dummy key at all
+        assert!(read(&d).is_ok());
     }
 }

@@ -1387,3 +1387,70 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let (_, id) = app.fresh_run_id(now);
     assert_ne!(id, "20261105-1230", "the persisted id is taken");
 }
+
+// ---- review #34 (P2): a report read and the shared integrity cache ----------------------------------------------
+
+#[test]
+fn an_older_report_read_cannot_overwrite_a_newer_explicit_verify() {
+    // The report-read equivalent of `an_older_listing_check_cannot_overwrite_a_newer_explicit_verify`.
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let app = t.app();
+    let report = camp_file(&t, "report.md");
+    // 1. The report read has held valid bytes. 2. While it is paused, the report is tampered with and the user
+    // verifies explicitly: that newer check fails and caches "failed".
+    let between = || {
+        fs::write(&report, "Delivered on branch X").unwrap();
+        let v = app.verify_campaign("real1").unwrap();
+        assert_eq!(v["ok"], false, "the newer explicit verify sees the tamper: {v}");
+    };
+    // 3. The older read resumes: its held bytes are genuine, so it returns them...
+    let r = app.read_report_with("real1", &|_| {}, &between).unwrap();
+    assert_eq!((r["integrity"].as_str(), r["text"].as_str()), (Some("ok"), Some("Delivered on branch b")), "{r}");
+    // 4. ...but its older "ok" must not replace the newer failure: the next listing keeps it.
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn a_newer_report_failure_survives_an_older_listing_check_that_finishes_ok() {
+    // The reverse order: a listing check starts against valid state and is held; a report read that starts later
+    // fails; then the older listing check finishes with exit 0. The badge must keep the newer failure.
+    let t = Tmp::new();
+    let ctl = barrier_campaign_script(&t);
+    campaign(&t, "c1", None); // only campaign.json: the held reader refuses it (required inputs missing)
+    let app = Arc::new(t.app());
+    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !ctl.join("started").exists() {
+        assert!(std::time::Instant::now() < end, "the listing check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.read_report("c1").unwrap()["integrity"], "integrity_failed");
+    fs::write(ctl.join("go"), "").unwrap();
+    assert_eq!(a.join().unwrap()["campaigns"][0]["integrity"], "ok", "the held listing check saw the old state");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn settle_orders_verdicts_by_ticket_and_never_loses_a_failure() {
+    let t = Tmp::new();
+    let app = t.app();
+    let now = |app: &App| match lock(&app.verdicts).by_slug.get("c") {
+        Some(Verdict::Fresh(_, v)) => *v,
+        Some(Verdict::Flying(_)) => "flying",
+        None => "none",
+    };
+    let (t1, t2, t3, t4) = (app.ticket(), app.ticket(), app.ticket(), app.ticket());
+    assert!(t1 < t2 && t2 < t3 && t3 < t4, "tickets increase");
+    app.settle("c", "failed", t2);
+    app.settle("c", "ok", t1); // older success after a newer failure: dropped
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "unknown", t1); // an older "could not run" cannot clear it either
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t3); // a newer success replaces it (the repair shows)
+    assert_eq!(now(&app), "ok");
+    app.settle("c", "failed", t1); // an older failure still lands: fail closed
+    assert_eq!(now(&app), "failed");
+    app.settle("c", "ok", t4);
+    assert_eq!(now(&app), "ok");
+}
