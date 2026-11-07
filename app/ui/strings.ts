@@ -56,6 +56,23 @@ export const S = {
     errRounds: "Fix rounds must be 1, 2 or 3.",
     errInFlight: "Use a number from 1 to 16.",
   },
+  crew: {
+    title: "Crew",
+    treeLabel: "Crew",
+    details: "Details",
+    noRun: "No run is active.",
+    noRunHint: "Start a run from Home, or open a past run from History.",
+    failed: "Could not read the crew.",
+    unknownSignal: "Unknown (no signal)",
+    engineId: "Engine id",
+    kind: "Kind",
+    status: "Status",
+    overlay: {
+      "stopped by the human": "Stopped by you",
+      "message pending": "Message pending",
+      activity: "Active now",
+    } as Record<string, string>,
+  },
   history: {
     title: "History",
     campaigns: "Past campaigns",
