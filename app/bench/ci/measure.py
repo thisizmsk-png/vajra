@@ -133,10 +133,11 @@ def launch_summary(samples):
     flavours = collections.Counter(flavour_key(s["types"]) for s in pool)
     flavour = max(flavours, key=lambda k: (flavours[k], len(k), k))
     use = [s for s in clean if flavour_key(s["types"]) == flavour]
-    unknown = sorted({t for s in use for t in classify(s["types"])[2]})
-    dropped_unknown = sorted({t for s in samples for t in classify(s["types"])[2]} - set(unknown))
+    # Unknown types are collected over ALL samples, before any RSS/churn filtering: the PID diff cannot show that an
+    # unknown helper belongs to a foreign app, so it must never be filtered away.
+    unknown = sorted({t for s in samples for t in classify(s["types"])[2]})
     return {"flavour": flavour, "median": statistics.median(s["total_mib"] for s in use) if use else None,
-            "clean_samples": len(use), "churn": churn, "unknown_types": unknown, "dropped_unknown_types": dropped_unknown}
+            "clean_samples": len(use), "churn": churn, "unknown_types": unknown}
 
 
 def flavour_summary(runs):
@@ -184,7 +185,7 @@ def idle(binary, out):
         tot = [x["total_mib"] for x in samples]
         runs.append({"run": n + 1, "median_mib": ls["median"], "flavour": ls["flavour"], "clean_samples": ls["clean_samples"],
                      "churn": ls["churn"], "unknown_types": ls["unknown_types"],
-                     "dropped_unknown_types": ls["dropped_unknown_types"], "min": min(tot), "max": max(tot),
+                     "min": min(tot), "max": max(tot),
                      "helpers": sorted({x["helpers"] for x in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
     flavour, flavour_median, in_flavour, excluded = flavour_summary(runs)

@@ -190,6 +190,18 @@ class Measure(unittest.TestCase):
         ls = launch_summary(samples)
         self.assertEqual((ls["flavour"], ls["median"], ls["clean_samples"]), (NW, 171, 2))
 
+    def test_an_unknown_type_only_in_a_dropped_sample_still_fails_the_gate(self):
+        samples = [self.s(175, Networking=1, WebContent=1), self.s(176, Networking=1, WebContent=1),
+                   self.s(260, Networking=1, WebContent=1, Plugin=1)]
+        ls = launch_summary(samples)
+        self.assertEqual((ls["flavour"], ls["median"], ls["unknown_types"]), (NW, 175.5, ["Plugin"]))
+        runs = [dict(ls, median_mib=ls["median"])]
+        key, med, _, _ = flavour_summary(runs)
+        idle = {"identity": ID, "flavour": key, "median_of_medians_mib": med, "launch_flavours": launch_flavours(runs),
+                "unknown_types": sorted({t for r in runs for t in r["unknown_types"]})}
+        fails, _ = evaluate(bl(175.0, NW), idle, None, ci=True)
+        self.assertTrue(any("Plugin" in f for f in fails), fails)
+
     def test_an_unknown_type_in_the_counted_helpers_is_reported(self):
         ls = launch_summary([self.s(170, Networking=1, WebContent=1, Plugin=1)])
         self.assertEqual(ls["unknown_types"], ["Plugin"])
