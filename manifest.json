@@ -1,8 +1,8 @@
 {
-  "generated": "2026-11-07T16:38:05Z",
+  "generated": "2026-11-07T19:48:38Z",
   "version": "0.6.2",
   "files": {
-    ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
+    ".github/workflows/ci.yml": "575aaacb0950435cffb637130e05c510cd33d7debbda974ddb07c5948a23e286",
     ".github/workflows/perf.yml": "3b43664c69fd590dfb2f7e91a162a7d090210d121db21cb1663a6a7b6b5e9667",
     ".github/workflows/skill-pins.yml": "2456a6ec61b2e88e9d07f3f73c5c20ae1971f2a4c8c1ddc499ea83e97adb0a98",
     ".gitignore": "fe01c9d701137b0b32ce5d86839375d71e8daf6b9ad728b6caf6975b46a0c540",
