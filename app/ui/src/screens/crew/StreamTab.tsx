@@ -77,7 +77,8 @@ export function StreamTab({ stream }: { stream: string }) {
       if (g !== gen.current) return;
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
-      if (p.lines.length === 0) setExhaustedAt(first);
+      // An empty page with `gap` means the spill was evicted mid-read, not that nothing is older: stay retryable.
+      if (p.lines.length === 0 && !p.gap) setExhaustedAt(first);
       setEarlier("idle");
     } catch (e) {
       if (g !== gen.current) return;
