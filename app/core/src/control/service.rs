@@ -13,12 +13,14 @@
 //! - The nonce is redacted from message text and agent output before either
 //!   reaches the queue, ledger or a tool result.
 
-mod types;
-mod tools;
-mod watcher;
-mod actions;
-mod session;
-mod asks;
+// The service is split by seam; each child adds methods to `Service` (or defines the types it uses) and sees this
+// module's private items. This file keeps the `Service` struct, `open`, `rebuild` and the shared helpers.
+mod actions; // list, inspect, message, redirect, stop, confirm, cancel, resume
+mod asks; // the Lead-ask and plan-decision records
+mod session; // start, resume and end a session; the nonce, redactor and worker list
+mod tools; // the Lead's tool surface (socket calls and their dispatch)
+mod types; // actors, errors, the action model, the ask and decision records, the limits
+mod watcher; // the ack watcher and the thread that ticks it
 pub use types::*;
 pub use watcher::{Watcher, spawn_watcher};
 
@@ -256,7 +258,6 @@ impl Service {
         // Human and Lead text keeps its lines; only the nonce is replaced.
         Ok(self.redactor().redact(text.to_string()))
     }
-
 }
 
 #[cfg(test)]
