@@ -225,18 +225,80 @@ key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
   inside "$1" "$2" && inside "$2" "$1"
 }
-# A Glob pattern can name the state directory itself ("<state>/*", "~/.claude/vajra/.*") or the key. The literal
-# part of the pattern, up to its first glob character, is resolved against the search root.
+# A Glob pattern can reach the state directory's file names (the HMAC key, the audit log) however it is written:
+# "<state>/*", "~/.claude/vaj?a/.h*", "~/.claude/{vajra,x}/*", "~/**/.h*", "../*" from campaigns/. The pattern is read
+# one path component at a time. Its leading components without a glob character are resolved (symlinks, "..") against
+# the search root; if that directory is the state directory or an ancestor of it, the glob components after it are
+# matched against the state directory's own components, then the next one against the names that must stay hidden.
+# A brace alternation is assumed to match (not expanded). "**" may stand for any number of directories.
+GLOB_R=() GLOB_S=() GLOB_K=0 GLOB_N=0 PNAMES=()
+glob_pat_has() { case "$1" in *[*?[{]*) return 0 ;; *) return 1 ;; esac; }
+glob_comp_match() { # pattern-component state-component -> 0 if the component can match the name
+  case "$1" in *{*) return 0 ;; esac
+  # shellcheck disable=SC2053
+  [[ "$2" == $1 ]]
+}
+glob_leaf() { # pattern-component -> 0 if it can match a protected name directly inside the state dir
+  local nm
+  glob_pat_has "$1" || return 1 # a literal name lists nothing by itself; a literal subdirectory is judged on its own
+  case "$1" in *{*) return 0 ;; esac
+  for nm in ${PNAMES[@]+"${PNAMES[@]}"}; do
+    # shellcheck disable=SC2053
+    [[ "$nm" == $1 ]] && return 0
+  done
+  return 1
+}
+glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can list the state dir's protected names
+  local ri="$1" si="$2" c
+  if [ "$si" -ge "$GLOB_K" ]; then
+    [ "$ri" -lt "$GLOB_N" ] || return 1
+    c="${GLOB_R[$ri]}"
+    case "$c" in
+      *\*\**) [ $((ri + 1)) -lt "$GLOB_N" ] || return 0; glob_chain $((ri + 1)) "$si"; return $? ;;
+    esac
+    glob_leaf "$c"; return $?
+  fi
+  [ "$ri" -lt "$GLOB_N" ] || return 1
+  c="${GLOB_R[$ri]}"
+  case "$c" in
+    *\*\**) glob_chain $((ri + 1)) "$si" && return 0; glob_chain "$ri" $((si + 1)); return $? ;;
+  esac
+  glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
+  glob_chain $((ri + 1)) $((si + 1))
+}
 glob_pattern_check() { # canonical search root
-  local lit dir root="$1"
-  [ -n "$PAT" ] || return 0
+  local root="$1" pat="$PAT" lit="" c r rel i
+  [ -n "$pat" ] || return 0
   shopt -s nocasematch
-  case "$PAT" in *.hmac-key*) shopt -u nocasematch; block "Glob pattern names the Vajra HMAC key" ;; esac
+  case "$pat" in *.hmac-key*) shopt -u nocasematch; block "Glob pattern names the Vajra HMAC key" ;; esac
+  case "$pat" in "~") pat="$HOME" ;; "~/"*) pat="$HOME/${pat#??}" ;; esac
+  # Split into components: the leading literal ones, then the rest from the first with a glob character.
+  GLOB_R=() GLOB_N=0
+  local IFS=/ rest_started=0
+  set -f
+  for c in $pat; do
+    [ -n "$c" ] || continue
+    if [ "$rest_started" = 0 ] && ! glob_pat_has "$c"; then lit="$lit/$c"; else rest_started=1; GLOB_R[$GLOB_N]="$c"; GLOB_N=$((GLOB_N + 1)); fi
+  done
+  set +f
+  unset IFS
+  case "$pat" in /*) ;; *) lit="${lit#/}" ;; esac
+  if [ "$GLOB_N" -eq 0 ]; then shopt -u nocasematch; return 0; fi # no glob character: a plain path, judged as a path
+  [ -n "$lit" ] || lit="."
+  canon "$lit" "$root"
+  if ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi # the literal part is not at or above the state dir
+  rel="${VS_C:${#CANON}}"; rel="${rel#/}"
+  GLOB_S=() GLOB_K=0
+  if [ -n "$rel" ]; then
+    set -f; IFS=/
+    for r in $rel; do [ -n "$r" ] && { GLOB_S[$GLOB_K]="$r"; GLOB_K=$((GLOB_K + 1)); }; done
+    set +f; unset IFS
+  fi
+  PNAMES=()
+  for r in "${ROOTS[@]}"; do [ "${r%/*}" = "$VS_C" ] && PNAMES[${#PNAMES[@]}]="${r##*/}"; done
+  i=0
+  if glob_chain 0 0; then shopt -u nocasematch; block "Glob pattern would list the Vajra state directory ($VS_C), including the HMAC key and audit log file names"; fi
   shopt -u nocasematch
-  lit="${PAT%%[*?[{]*}"
-  case "$lit" in */*) dir="${lit%/*}"; [ -n "$dir" ] || dir="/" ;; *) return 0 ;; esac
-  canon "$dir" "$root"
-  same_dir "$CANON" "$VS_C" && block "Glob pattern would list the Vajra state directory ($VS_C), including the HMAC key and audit log file names"
   return 0
 }
 
