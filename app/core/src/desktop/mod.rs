@@ -535,6 +535,40 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        if !bus::valid_stream_id(&worker_stream(worker)) {
+            return Err(invalid("worker", "not a worker id"));
+        }
+        let cwd = lock(&self.transcripts).get(worker).map(|t| t.cwd().map(str::to_string));
+        let Some(cwd) = cwd else { return Err(fail("not_found", "no such worker")) };
+        let refuse = || fail("not_a_crew_worktree", "the worker has no crew worktree");
+        let wt = cwd.map(PathBuf::from).and_then(|p| p.canonicalize().ok()).ok_or_else(refuse)?;
+        let repo = lock(&self.runs)
+            .values()
+            .map(|r| r.cwd.clone())
+            .find(|r| {
+                r.canonicalize().is_ok_and(|r| {
+                    wt.strip_prefix(r.join(".claude/worktrees")).is_ok_and(|rest| rest.components().next().is_some())
+                })
+            })
+            .ok_or_else(refuse)?;
+        if !wt.is_dir() {
+            return Err(refuse());
+        }
+        let git = |dir: &Path, args: &[&str]| -> Option<String> {
+            let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
+            (o.code == Some(0)).then(|| o.stdout.trim().to_string())
+        };
+        let branch = git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]).and_then(|h| git(&wt, &["merge-base", "HEAD", &h]));
+        Ok(json!({"worker": worker, "worktree": wt.to_string_lossy(), "branch": branch, "base": base}))
+    }
+
     pub fn diff(&self, cwd: &str, base: &str) -> Res {
         let cwd = repo_dir(cwd)?;
         if base.is_empty() || base.starts_with('-') || base.len() > 255 {
