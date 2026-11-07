@@ -68,6 +68,7 @@ export const S = {
     streamLabel: "Worker output, read only",
     loadEarlier: "Load earlier output",
     loadingEarlier: "Loading",
+    earlierLimit: "This is as far back as the view keeps. Older output is in the run log.",
     jumpLatest: "Jump to latest",
     noStream: "No output yet.",
     streamFailed: "Could not read the output.",

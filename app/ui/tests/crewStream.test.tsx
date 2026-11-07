@@ -75,16 +75,69 @@ describe("Stream tab (S2b, US-2.2)", () => {
     await waitFor(() => expect(screen.getByRole("log").textContent).toContain("6 lines were skipped"));
   });
 
-  it("loads earlier output from the spill on request, once", async () => {
+  // A 10 MiB spill (well over the old 4 MiB page budget) whose lines 1..30000 are before the window, which starts at 30001.
+  const spillBefore = (args?: Record<string, unknown>) => {
+    const before = args?.beforeSeq as number, max = args?.maxLines as number;
+    const from = Math.max(1, before - max);
+    return { lines: lines(from, before - 1), at_start: from === 1, gap: false };
+  };
+  const earlierButton = () => screen.queryByRole("button", { name: S.crew.loadEarlier });
+
+  it("loads the lines immediately before the window, then walks back contiguously", async () => {
     const f = await openBackend({
-      tail: tail(lines(100, 102), { spill_start: 0, spill_end: 50 }),
-      read_spill: { lines: lines(1, 5), next_offset: 50, gap: false, end: true },
+      tail: tail(lines(30001, 30003), { spill_start: 0, spill_end: 10 * 1024 * 1024 }),
+      read_spill_before: spillBefore,
     });
-    const btn = await screen.findByRole("button", { name: S.crew.loadEarlier });
-    fireEvent.click(btn);
-    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 1"));
-    expect(f.calls.find((c) => c.cmd === "read_spill")?.args).toMatchObject({ stream: "w-a1", offset: 0 });
-    expect(screen.queryByRole("button", { name: S.crew.loadEarlier })).toBeNull();
+    const asks = () => f.calls.filter((c) => c.cmd === "read_spill_before").map((c) => c.args);
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(asks()).toHaveLength(1));
+    expect(asks()[0]).toEqual({ stream: "w-a1", beforeSeq: 30001, maxLines: 1000 });
+    for (let k = 2; k <= 5; k++) {
+      await waitFor(() => expect(earlierButton()).toBeTruthy());
+      fireEvent.click(earlierButton()!);
+      await waitFor(() => expect(asks()).toHaveLength(k));
+      // Each click starts where the previous page started: contiguous, never from the start of the spill.
+      expect(asks()[k - 1]).toEqual({ stream: "w-a1", beforeSeq: 30001 - 1000 * (k - 1), maxLines: 1000 });
+    }
+    expect(f.calls.some((c) => c.cmd === "read_spill")).toBe(false);
+  });
+
+  it("is done only when the start of the spill is reached", async () => {
+    const f = await openBackend({
+      tail: tail(lines(3001, 3003), { spill_start: 0, spill_end: 1024 }),
+      read_spill_before: spillBefore,
+    });
+    const asks = () => f.calls.filter((c) => c.cmd === "read_spill_before").length;
+    for (let k = 1; k <= 3; k++) {
+      fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+      await waitFor(() => expect(asks()).toBe(k));
+      if (k < 3) await waitFor(() => expect(earlierButton()).toBeTruthy());
+    }
+    await waitFor(() => expect(earlierButton()).toBeNull());
+  });
+
+  it("keeps the button while older output exists, even after the first page", async () => {
+    await openBackend({
+      tail: tail(lines(30001, 30003), { spill_start: 0, spill_end: 10 * 1024 * 1024 }),
+      read_spill_before: spillBefore,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.loadEarlier }));
+    await waitFor(() => expect(screen.getByRole("log").textContent).toBeTruthy());
+    await waitFor(() => expect(earlierButton()).toBeTruthy());
+  });
+
+  it("says where the view stops when the row cap is reached", async () => {
+    await openBackend({
+      tail: tail(lines(900001, 900003), { spill_start: 0, spill_end: 10 }),
+      read_spill_before: spillBefore,
+    });
+    for (let k = 0; k < 19; k++) {
+      await waitFor(() => expect(earlierButton()).toBeTruthy());
+      fireEvent.click(earlierButton()!);
+      await waitFor(() => expect(earlierButton()?.hasAttribute("disabled") ?? false).toBe(false));
+    }
+    expect(await screen.findByText(S.crew.earlierLimit)).toBeTruthy();
+    expect(earlierButton()).toBeNull();
   });
 
   it("offers no 'load earlier' when nothing was spilled", async () => {

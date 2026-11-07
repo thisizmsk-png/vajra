@@ -3,23 +3,17 @@ import { Button, Section, Text } from "../../../components/ui/base";
 import { TerminalPane } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
-import type { Line } from "../../ipc";
-import { EARLIER_CAP, RING, appendTail, emptyRing, prependEarlier } from "./streamRing";
+import { EARLIER_PAGE, MAX_ROWS, RING, appendTail, emptyRing, prependEarlier } from "./streamRing";
 import type { Ring } from "./streamRing";
 
 const POLL_MS = 1000;
 const EVENT_MIN_GAP_MS = 500;
-const SPILL_PAGE = 64 * 1024;
-/** At most this many spill pages are fetched per request (4 MiB), whatever the spill holds. */
-const MAX_SPILL_PAGES = 64;
-
-type SpillPage = { lines: Line[]; next_offset: number; end: boolean };
 
 /** One worker's output: a bounded window that follows the tail, with older output fetched on request. */
 export function StreamTab({ stream }: { stream: string }) {
   const [ring, setRing] = useState<Ring>(emptyRing);
   const [spill, setSpill] = useState<{ start: number; end: number } | null>(null);
-  const [earlier, setEarlier] = useState<"idle" | "busy" | "done">("idle");
+  const [earlier, setEarlier] = useState<"idle" | "busy" | "done" | "limit">("idle");
   const [err, setErr] = useState("");
   const [pin, setPin] = useState(0);
   const ringRef = useRef<Ring>(emptyRing);
@@ -59,21 +53,16 @@ export function StreamTab({ stream }: { stream: string }) {
     return () => { clearInterval(poll); clearTimeout(later); off(); };
   }, [stream, load]);
 
+  /** The EARLIER_PAGE lines just before the oldest row shown, fetched by seq so they are adjacent to the window whatever the spill's size. */
   const loadEarlier = async () => {
-    if (!spill) return;
+    const first = ringRef.current.rows.find((r) => r.seq !== null)?.seq;
+    if (first == null) return;
     setEarlier("busy");
     try {
-      let off = spill.start;
-      let keep: Line[] = [];
-      for (let i = 0; i < MAX_SPILL_PAGES; i++) {
-        const p = (await api.readSpill(stream, off, SPILL_PAGE)) as unknown as SpillPage;
-        keep = keep.concat(p.lines).slice(-EARLIER_CAP); // a rolling window: the lines just before the live window
-        if (p.end) break;
-        off = p.next_offset;
-      }
-      capRef.current = RING + EARLIER_CAP;
-      put(prependEarlier(ringRef.current, keep, capRef.current));
-      setEarlier("done");
+      const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
+      capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
+      put(prependEarlier(ringRef.current, p.lines, capRef.current));
+      setEarlier(p.at_start ? "done" : capRef.current >= MAX_ROWS ? "limit" : "idle");
     } catch (e) {
       setErr(errorText(e));
       setEarlier("idle");
@@ -81,10 +70,11 @@ export function StreamTab({ stream }: { stream: string }) {
   };
 
   const text = useMemo(() => ring.rows.map((r) => r.text), [ring]);
-  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done";
+  const canLoad = spill !== null && spill.end > spill.start && earlier !== "done" && earlier !== "limit";
   return (
     <Section title={S.crew.stream}>
       {err && <div role="alert"><Text variant="body-sm">{S.crew.streamFailed} {err}</Text></div>}
+      {earlier === "limit" && <Text variant="body-sm" muted>{S.crew.earlierLimit}</Text>}
       <div className="v-crew__actions">
         {canLoad && (
           <Button size="sm" onClick={() => void loadEarlier()} busy={earlier === "busy"}>
