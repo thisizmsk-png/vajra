@@ -808,7 +808,9 @@ impl App {
         self.read_report_with(slug, &|_| {}, &|| {})
     }
 
-    /// `seam` is passed to the held reader; `between` runs after the read and before the digest check (tests).
+    /// `seam` is passed to the held reader and is also called with `"check:report"` right before the report check;
+    /// `between` runs after the read and before the digest check (tests). A symlinked `campaigns` dir is refused by
+    /// the held reader (`O_NOFOLLOW`), so every report read there settles `failed`: that fails closed on purpose.
     pub(crate) fn read_report_with(&self, slug: &str, seam: &dyn Fn(&str), between: &dyn Fn()) -> Res {
         use crate::control::sha256::hex_digest;
         use crate::vajra::held::{self, HeldError};
@@ -874,23 +876,28 @@ impl App {
             Some(3) => return bad(self),
             _ => return verdict("unknown", None),
         }
-        // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes.
+        // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes. Output cut at the bridge's
+        // cap would hash short and read as a tamper where plain `verify` says ok, so a truncated run is "unknown".
         let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
-            Ok(o) if o.code == Some(0) => o.stdout.replace('\n', ""),
+            Ok(o) if o.code == Some(0) && !o.truncated => o.stdout.replace('\n', ""),
             _ => return verdict("unknown", None),
         };
         if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
             return bad(self);
         }
-        self.settle(slug, "ok", ticket);
+        // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
+        // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
+        seam("check:report");
         let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
         if want.is_empty() {
+            self.settle(slug, "ok", ticket);
             return verdict("no_report", None);
         }
         let Some(report) = h.report else { return bad(self) };
         if hex_digest(&report) != want {
             return bad(self);
         }
+        self.settle(slug, "ok", ticket);
         match String::from_utf8(report) {
             Ok(t) => verdict("ok", Some(t)),
             Err(_) => verdict("not_text", None),

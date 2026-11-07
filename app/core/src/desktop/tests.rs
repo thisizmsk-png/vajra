@@ -1454,3 +1454,35 @@ fn settle_orders_verdicts_by_ticket_and_never_loses_a_failure() {
     app.settle("c", "ok", t4);
     assert_eq!(now(&app), "ok");
 }
+
+#[test]
+fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
+    // review #34 (P2, 54a2df9): "ok" used to be published after the signature and features checks but before the
+    // report check, so a listing at that moment reused it for a campaign whose recorded report was edited or
+    // deleted (or cleared an already cached failure). Pause exactly there and list.
+    for (tamper, cached_failure) in [("edit", false), ("edit", true), ("delete", false), ("delete", true)] {
+        let Some((t, run)) = real_script_home() else { return };
+        real_campaign_with_report(&run, "Delivered on branch b");
+        let report = camp_file(&t, "report.md");
+        if tamper == "edit" {
+            fs::write(&report, "Delivered on branch X").unwrap();
+        } else {
+            fs::remove_file(&report).unwrap();
+        }
+        let app = t.app();
+        if cached_failure {
+            assert_eq!(app.verify_campaign("real1").unwrap()["ok"], false);
+        }
+        let seen = std::cell::RefCell::new(None);
+        let seam = |st: &str| {
+            if st == "check:report" {
+                *seen.borrow_mut() = Some(app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone());
+            }
+        };
+        let r = app.read_report_with("real1", &seam, &|| {}).unwrap();
+        let case = format!("{tamper}, cached failure {cached_failure}");
+        assert_eq!(r["integrity"], "integrity_failed", "{case}: {r}");
+        assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
+        assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
+    }
+}

@@ -295,6 +295,14 @@ vd_in "$VSIG" | C verify-digest vd1 >/dev/null 2>&1; [ $? -eq 2 ]; check "verify
 # it must not open the campaign dir at all: the result is the same with the campaigns dir unreadable
 vd_in "$VSIG" > "$WORK/vd-in"; chmod 000 "$CD"; C verify-digest < "$WORK/vd-in" >/dev/null 2>&1; rc=$?; chmod 700 "$CD"
 [ "$rc" -eq 0 ]; check "verify-digest: same result with the campaigns dir unreadable (it never opens it)" $?
+# review #34: the temp file is removed on every exit, including exit 0 (the EXIT trap runs after the function returned)
+for vd_case in "0:$VSIG" "3:$(printf '%064d' 0)" "2:"; do
+  want="${vd_case%%:*}"; s="${vd_case#*:}"; VT="$WORK/vd-tmp-$want"; mkdir -p "$VT"
+  if [ "$want" = 2 ]; then printf 'junk\n'; else vd_in "$s"; fi | TMPDIR="$VT" C verify-digest >/dev/null 2>"$WORK/vd-err-$want"; rc=$?
+  [ "$rc" -eq "$want" ]; check "verify-digest: exit $want with a scratch TMPDIR" $?
+  [ -z "$(ls -A "$VT")" ]; check "verify-digest: no vajra-digest.* temp file left after exit $want" $?
+done
+[ ! -s "$WORK/vd-err-0" ]; check "verify-digest: a valid check writes nothing to stderr (no unbound variable from the trap)" $?
 
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
