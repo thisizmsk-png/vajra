@@ -284,7 +284,8 @@ impl App {
         let latest = runindex::latest(&self.data.join("runs.jsonl"));
         let lead_of = |campaign: &str| latest.get(campaign).filter(|e| e.run_id == run_id).and_then(|e| e.lead_session_id.clone());
         let live: Option<Run> = lock(&self.runs).values().find(|r| r.run_id == run_id).cloned();
-        if let Some(r) = live {
+        if let Some(mut r) = live {
+            self.add_disk_nonce(&mut r.nonces, &r.session_id);
             return Some(Target {
                 lead_session_id: lead_of(&r.campaign),
                 campaign: r.campaign,
@@ -294,14 +295,23 @@ impl App {
                 nonces: r.nonces,
             });
         }
-        latest.into_values().find(|e| e.run_id == run_id).map(|e| Target {
-            campaign: e.campaign,
-            session_id: e.session_id,
-            run_id: e.run_id,
-            cwd: e.cwd,
-            lead_session_id: e.lead_session_id,
-            nonces: Redactor::default(),
+        // A run loaded from disk (after a restart): its control nonce is still on disk and must stay out of the
+        // ask text, the ledger, the bus and the rebuilt history.
+        latest.into_values().find(|e| e.run_id == run_id).map(|e| {
+            let mut nonces = Redactor::default();
+            self.add_disk_nonce(&mut nonces, &e.session_id);
+            Target { campaign: e.campaign, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: e.lead_session_id, nonces }
         })
+    }
+
+    /// Add the session's persisted control nonce (read under the hook's rules), if there is a valid one.
+    fn add_disk_nonce(&self, red: &mut Redactor, session_id: &str) {
+        if !ids::valid_session_id(session_id) {
+            return;
+        }
+        if let Ok(n) = nonce::read(&self.data.join("control").join(session_id)) {
+            red.add(Some(&n));
+        }
     }
 
     fn start_ask(

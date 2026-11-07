@@ -686,3 +686,30 @@ fn an_nvm_style_claude_runs_with_node_from_its_own_directory() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
     assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
 }
+
+#[test]
+fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
+    let t = Tmp::new();
+    let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    std::fs::create_dir_all(t.data()).unwrap();
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(lead_sid.into()) };
+    runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    // The run's control nonce, as the earlier app life left it.
+    let disk = nonce::create(&t.data().join("control").join(SID)).unwrap();
+    // A history line of the Lead's own transcript that quotes it.
+    let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
+    std::fs::create_dir_all(&proj).unwrap();
+    let line = json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": format!("the nonce is {disk}")}]}});
+    std::fs::write(proj.join(format!("{lead_sid}.jsonl")), line.to_string()).unwrap();
+    // A fresh app: no in-memory run, no control session.
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    app.ask_lead(RUN_ID, &format!("is {disk} still valid?")).unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    let stdin = t.files("stdin.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect::<String>();
+    assert!(stdin.contains("is [redacted] still valid?") && !stdin.contains(&disk), "stdin: {stdin}");
+    assert!(!serde_json::to_string(&t.ledger()).unwrap().contains(&disk), "ledger");
+    let lines = stream_text(&app);
+    assert!(lines.iter().any(|l| l.contains("[redacted]")) && lines.iter().all(|l| !l.contains(&disk)), "bus: {lines:?}");
+}
