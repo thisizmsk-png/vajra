@@ -65,6 +65,9 @@ export type EvidenceRow = {
   task: string; title: string | null; owner: string | null; criterion: string; status: EvidenceStatus;
   head: string | null; path: string | null; commands: number | null; report: string | null;
 };
+/** One recorded verification command with its exit code; `output_tail` is the end of its output for a failed one. Plain text. */
+export type ProofCommand = { cmd: string | null; exit_code: number | null; passed: boolean; output_tail: string | null };
+export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
@@ -106,6 +109,7 @@ export const api = {
   worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
   /** Every acceptance criterion of a campaign with its proof status (bounded checks on the core side). */
   evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
+  evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),

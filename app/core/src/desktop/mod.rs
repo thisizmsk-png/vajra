@@ -51,6 +51,11 @@ const EVIDENCE_CACHE_MAX: usize = 512;
 const _: () = assert!(EVIDENCE_TIMEOUT.as_secs() <= EVIDENCE_BUDGET.as_secs());
 /// A check that timed out or could not start is remembered as unverified this long, so a hung check is not re-run (and the
 /// checks queued behind it starved) on every call.
+/// The evidence file read for a criterion's detail, the output tail kept per failed command, and how many commands are listed.
+const PROOF_FILE_MAX: u64 = 64 * 1024;
+const PROOF_LOG_TAIL: u64 = 4 * 1024;
+const PROOF_CMDS_MAX: usize = 50;
+const PROOF_TEXT_MAX: usize = 2000;
 /// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
 /// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
 const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
@@ -704,7 +709,7 @@ impl App {
     /// timed out or cannot be located (never counted as pass); `checking` = its check has not run yet (over the call's time
     /// budget, or another sweep is running); `fail` = the task failed; `not_run` = no evidence yet
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
-    /// The command text and exit codes live in the evidence file and are not read here (only the count of commands).
+    /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
     pub fn evidence_list(&self, slug: &str) -> Res {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
@@ -869,6 +874,82 @@ impl App {
             }
         }
         Ok(json!({"slug": slug, "stale": snap.stale, "pending": pending, "rows": rows}))
+    }
+
+    /// The proof behind one task's evidence, for the Run detail: each recorded command with its exit code and, for a failed
+    /// one, the tail of its output, plus the verifier's notes. Read from the evidence file (at most 64 KiB; a larger one is
+    /// reported `truncated` with no commands) and from `cmd-N.log` files next to it (plain sibling file names only, regular
+    /// files only, the last 4 KiB). All text is cleaned (escapes stripped) and redacted with the nonces of this campaign's
+    /// runs before it leaves the core, and is shown as plain text.
+    pub fn evidence_detail(&self, slug: &str, task_id: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
+        let task = snap
+            .value
+            .as_ref()
+            .and_then(|v| v.get("tasks"))
+            .and_then(Value::as_array)
+            .and_then(|ts| ts.iter().find(|t| t.get("id").and_then(Value::as_str) == Some(task_id)))
+            .cloned();
+        let Some(task) = task else { return Err(fail("task_not_found", task_id)) };
+        let mut red = Redactor::default();
+        for r in lock(&self.runs).values().filter(|r| r.campaign == slug) {
+            red.absorb(&r.nonces);
+        }
+        let text = |s: &str, max: usize| -> String {
+            let cut: String = s.chars().take(max).collect();
+            cut.split('\n').map(|l| red.clean(l)).collect::<Vec<_>>().join("\n")
+        };
+        let notes = task.get("report").and_then(|r| r.get("summary")).and_then(Value::as_str).map(|n| text(n, PROOF_TEXT_MAX));
+        let mut out = json!({"task": task_id, "commands": [], "notes": notes, "truncated": false});
+        // The same path rules as the check (no `..`, an archived bundle or the run repo); anything else shows no commands.
+        let Some(Request::CheckEvidence { path, .. }) = self.evidence_request(slug, &task) else { return Ok(out) };
+        let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+        if !regular(&path) {
+            return Ok(out);
+        }
+        let read_tail = |p: &Path, max: u64| -> Option<String> {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = std::fs::File::open(p).ok()?;
+            let len = f.metadata().ok()?.len();
+            f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+            let mut b = Vec::new();
+            f.take(max).read_to_end(&mut b).ok()?;
+            Some(String::from_utf8_lossy(&b).into_owned())
+        };
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
+            out["truncated"] = json!(true);
+            return Ok(out);
+        }
+        let Some(doc) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return Ok(out) };
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let cmds: Vec<Value> = doc
+            .get("commands")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .take(PROOF_CMDS_MAX)
+                    .map(|c| {
+                        let exit = c.get("exit").and_then(Value::as_i64);
+                        let passed = c.get("passed").and_then(Value::as_bool).unwrap_or(exit == Some(0));
+                        let log = c.get("log").and_then(Value::as_str).filter(|n| {
+                            !n.is_empty() && n.len() <= 64 && !n.contains(['/', '\\']) && *n != "." && *n != ".."
+                        });
+                        let tail = if passed { None } else { log.map(|n| dir.join(n)).filter(|p| regular(p)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
+                        json!({
+                            "cmd": c.get("cmd").and_then(Value::as_str).map(|s| text(s, PROOF_TEXT_MAX)),
+                            "exit_code": exit,
+                            "passed": passed,
+                            "output_tail": tail,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out["commands"] = json!(cmds);
+        Ok(out)
     }
 
     /// An archived bundle (under the campaign's evidence dir) is checked

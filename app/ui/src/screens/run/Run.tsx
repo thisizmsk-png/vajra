@@ -3,7 +3,7 @@ import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
-import type { EvidenceRow } from "../../ipc";
+import type { EvidenceDetail, EvidenceRow } from "../../ipc";
 import { useRoute } from "../../router";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
@@ -22,6 +22,7 @@ export function Run() {
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
   const [pending, setPending] = useState(0);
   const [sel, setSel] = useState<number | null>(null);
+  const [detail, setDetail] = useState<EvidenceDetail | "failed" | null>(null);
 
   /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
   const current = useRef(slug);
@@ -50,6 +51,17 @@ export function Run() {
   );
   const passing = sorted.filter((r) => r.status === "pass").length;
 
+  const picked = sel !== null ? sorted[sel] : null;
+  const pickedTask = picked?.task;
+  // The recorded commands and their output come from the core one task at a time, only for the criterion being looked at.
+  useEffect(() => {
+    setDetail(null);
+    if (!slug || !pickedTask) return;
+    let live = true;
+    api.evidenceDetail(slug, pickedTask).then((d) => { if (live) setDetail(d); }, () => { if (live) setDetail("failed"); });
+    return () => { live = false; };
+  }, [slug, pickedTask]);
+
   if (!slug) {
     return (
       <div className="v-home">
@@ -58,7 +70,6 @@ export function Run() {
       </div>
     );
   }
-  const picked = sel !== null ? sorted[sel] : null;
   return (
     <div className="v-home">
       <Text as="h1" variant="headline-lg">{S.run.title}</Text>
@@ -99,10 +110,24 @@ export function Run() {
               <>
                 <dt>{S.run.commit}</dt><dd>{picked.head ? picked.head.slice(0, 7) : ""}</dd>
                 <dt>{S.run.evidenceFile}</dt><dd>{picked.path ?? ""}</dd>
-                <dt>{S.run.commands}</dt><dd>{picked.commands ?? ""}</dd>
+                <dt>{S.run.commandsRun}</dt>
+                <dd>
+                  {detail === null && <Text variant="body-sm" muted>…</Text>}
+                  {detail === "failed" && <Text variant="body-sm">{S.run.detailFailed}</Text>}
+                  {detail && detail !== "failed" && detail.truncated && <Text variant="body-sm" muted>{S.run.detailTruncated}</Text>}
+                  {detail && detail !== "failed" && !detail.truncated && detail.commands.length === 0 && <Text variant="body-sm" muted>{S.run.noCommands}</Text>}
+                  {detail && detail !== "failed" && detail.commands.map((c, k) => (
+                    <div key={k} className="v-run__cmd">
+                      {/* Text nodes only: output is untrusted and never rendered as markup. */}
+                      <code>{c.cmd ?? ""}</code> <Badge status={c.passed ? "success" : "danger"}>{S.run.exit(c.exit_code)}</Badge>
+                      {c.output_tail && <pre aria-label={S.run.output}>{c.output_tail}</pre>}
+                    </div>
+                  ))}
+                </dd>
               </>
             ) : (<><dt>{S.run.evidenceCol}</dt><dd>{S.run.noEvidence}</dd></>)}
             {picked.report && (<><dt>{S.run.report}</dt><dd>{picked.report}</dd></>)}
+            {detail && detail !== "failed" && detail.notes && detail.notes !== picked.report && (<><dt>{S.run.notes}</dt><dd>{detail.notes}</dd></>)}
           </dl>
         )}
       </Section>

@@ -1459,6 +1459,74 @@ fn a_big_untracked_tree_does_not_blow_the_budget() {
     assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
 }
 
+fn detail_fixture(t: &Tmp, nonce: Option<&str>) -> (App, String, std::path::PathBuf) {
+    let d = std::path::PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "failed", &["ac"], "evidence");
+    task["report"] = json!({"status": "failed", "summary": format!("tests red {}", nonce.unwrap_or(""))});
+    let (app, slug) = campaign_with_tasks(t, vec![task]);
+    if let Some(n) = nonce {
+        lock(&app.runs).insert("run-x".into(), Run { session_id: "s".into(), run_id: "20261105-1230".into(), campaign: slug.clone(), cwd: t.home().join("repo"), nonces: Redactor::new(Some(n)) });
+    }
+    let ev = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    (app, slug, ev)
+}
+
+#[test]
+fn evidence_detail_returns_each_command_its_exit_code_and_a_failed_ones_output_tail() {
+    let t = Tmp::new();
+    let (app, slug, ev) = detail_fixture(&t, None);
+    fs::write(ev.join("evidence.json"), serde_json::to_vec(&json!({"commands": [
+        {"cmd": "npm test", "exit": 1, "log": "cmd-1.log", "passed": false},
+        {"cmd": "tsc --noEmit", "exit": 0, "log": "cmd-2.log", "passed": true},
+        {"cmd": "evil", "exit": 1, "log": "../escape.log", "passed": false},
+    ]})).unwrap()).unwrap();
+    fs::write(ev.join("cmd-1.log"), format!("{}\x1b[31mFAIL src/a.test.ts\x1b[0m\n<script>alert(1)</script>\n", "noise\n".repeat(2000))).unwrap();
+    fs::write(ev.join("cmd-2.log"), "all green\n").unwrap();
+    fs::write(t.home().join(".claude/vajra/campaigns").join(&slug).join("escape.log"), "outside the evidence dir").unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    let cmds = r["commands"].as_array().unwrap();
+    assert_eq!(cmds.len(), 3, "{r}");
+    assert_eq!(cmds[0]["cmd"], "npm test");
+    assert_eq!(cmds[0]["exit_code"], 1);
+    let tail = cmds[0]["output_tail"].as_str().unwrap();
+    assert!(tail.contains("FAIL src/a.test.ts") && !tail.contains('\u{1b}'), "escapes stripped: {tail:?}");
+    assert!(tail.contains("<script>alert(1)</script>"), "kept as inert text for the UI to render as text");
+    assert!(tail.len() <= 4 * 1024 + 16, "tail is bounded: {}", tail.len());
+    assert!(cmds[1]["output_tail"].is_null(), "a passing command carries no output");
+    assert_eq!(cmds[2]["output_tail"], Value::Null, "a log name that climbs out is never read");
+    assert_eq!(r["notes"], "tests red ");
+}
+
+#[test]
+fn evidence_detail_redacts_a_planted_secret_from_commands_output_and_notes() {
+    let t = Tmp::new();
+    let secret = "STEERNONCE-9f8e7d6c5b";
+    let (app, slug, ev) = detail_fixture(&t, Some(secret));
+    fs::write(ev.join("evidence.json"), serde_json::to_vec(&json!({"commands": [
+        {"cmd": format!("curl -H 'x: {secret}' host"), "exit": 1, "log": "cmd-1.log", "passed": false},
+    ]})).unwrap()).unwrap();
+    fs::write(ev.join("cmd-1.log"), format!("token={secret}\n")).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap().to_string();
+    assert!(!r.contains(secret), "secret leaked: {r}");
+    assert!(r.contains("[redacted]"), "{r}");
+}
+
+#[test]
+fn evidence_detail_bounds_the_evidence_file_and_refuses_a_link() {
+    let t = Tmp::new();
+    let (app, slug, ev) = detail_fixture(&t, None);
+    fs::write(ev.join("evidence.json"), vec![b' '; 70 * 1024]).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    assert_eq!(r["truncated"], true, "{r}");
+    assert_eq!(r["commands"].as_array().unwrap().len(), 0);
+    fs::remove_file(ev.join("evidence.json")).unwrap();
+    fs::write(ev.join("real.json"), br#"{"commands":[{"cmd":"x","exit":0}]}"#).unwrap();
+    std::os::unix::fs::symlink(ev.join("real.json"), ev.join("evidence.json")).unwrap();
+    let r = app.evidence_detail(&slug, "t1").unwrap();
+    assert_eq!(r["commands"].as_array().unwrap().len(), 0, "a symlinked evidence file is not read: {r}");
+    assert_eq!(code(&app.evidence_detail("../x", "t1").unwrap_err()), "invalid_args");
+}
+
 #[test]
 fn evidence_list_rejects_a_bad_slug_and_reports_an_unknown_campaign() {
     let t = Tmp::new();

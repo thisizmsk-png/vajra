@@ -113,6 +113,10 @@ export const S = {
     criterion: "Criterion", taskCol: "Task", statusCol: "Status", evidenceCol: "Evidence",
     commit: "Commit", evidenceFile: "Evidence file", commands: "Commands", report: "Last report",
     noEvidence: "No evidence",
+    commandsRun: "Commands run", noCommands: "No commands recorded.", detailFailed: "Could not read the commands.",
+    detailTruncated: "The evidence file is too large to show here.",
+    exit: (n: number | null) => (n === null ? "no exit code" : `exit ${n}`),
+    output: "Output (end of log)", notes: "Verifier notes",
   },
   history: {
     title: "History",

@@ -14,9 +14,9 @@ afterEach(() => {
 const row = (task: string, criterion: string, status: string, extra: object = {}) =>
   ({ task, title: `Task ${task}`, owner: "bhima", criterion, status, head: null, path: null, commands: null, report: null, ...extra });
 const list = (rows: unknown[]) => ({ slug: "camp", stale: false, rows });
-const open = async (rows: unknown[]) => {
+const open = async (rows: unknown[], extra: Record<string, unknown> = {}) => {
   window.location.hash = "#/run?slug=camp";
-  const f = fakeIpc({ evidence_list: list(rows) });
+  const f = fakeIpc({ evidence_list: list(rows), ...extra });
   setTransport(f.transport);
   render(<Run />);
   await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list")).toBe(true));
@@ -97,11 +97,44 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     expect(screen.getByText(S.run.none)).toBeTruthy();
   });
 
-  it("selecting a row shows its proof: commit, evidence file, command count, report", async () => {
-    await open([row("t2", "ac-2", "unverified", { head: "a".repeat(40), path: "/camp/evidence/e.json", commands: 3, report: "tests red" })]);
+  const detail = (commands: unknown[], notes: string | null = null, truncated = false) => ({ evidence_detail: { task: "t2", commands, notes, truncated } });
+
+  it("selecting a row shows its proof: commit, evidence file, each recorded command with its exit code, report", async () => {
+    const f = await open(
+      [row("t2", "ac-2", "unverified", { head: "a".repeat(40), path: "/camp/evidence/e.json", commands: 2, report: "tests red" })],
+      detail([
+        { cmd: "npm test", exit_code: 1, passed: false, output_tail: "FAIL src/a.test.ts" },
+        { cmd: "tsc --noEmit", exit_code: 0, passed: true, output_tail: null },
+      ], "verifier: two tests red"),
+    );
     fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
     const d = await screen.findByRole("group", { name: S.run.detail });
-    for (const t of ["aaaaaaa", "/camp/evidence/e.json", "3", "tests red", "t2"]) expect(d.textContent).toContain(t);
+    await waitFor(() => expect(d.textContent).toContain("npm test"));
+    for (const t of ["aaaaaaa", "/camp/evidence/e.json", "tests red", "t2", S.run.exit(1), S.run.exit(0), "tsc --noEmit", "FAIL src/a.test.ts", "verifier: two tests red"]) expect(d.textContent).toContain(t);
+    expect(f.calls.find((c) => c.cmd === "evidence_detail")?.args).toEqual({ slug: "camp", taskId: "t2" });
+  });
+
+  it("shows command output as inert text, never as markup", async () => {
+    await open(
+      [row("t2", "ac-2", "fail", { head: "a".repeat(40), path: "/camp/evidence/e.json", commands: 1 })],
+      detail([{ cmd: "<img src=x onerror=alert(1)>", exit_code: 2, passed: false, output_tail: "<script>window.__pwned=1</script>" }]),
+    );
+    fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
+    const d = await screen.findByRole("group", { name: S.run.detail });
+    await waitFor(() => expect(d.textContent).toContain("<script>window.__pwned=1</script>"));
+    expect(d.querySelector("script, img")).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
+  it("says so when the commands cannot be read or the evidence file is too large", async () => {
+    await open([row("t2", "ac-2", "fail", { head: "a".repeat(40), path: "/camp/evidence/e.json" })], { evidence_detail: new Error("boom") });
+    fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
+    expect((await screen.findByRole("group", { name: S.run.detail })).textContent).toContain("");
+    await waitFor(() => expect(screen.getByRole("group", { name: S.run.detail }).textContent).toContain(S.run.detailFailed));
+    cleanup();
+    await open([row("t2", "ac-2", "fail", { head: "a".repeat(40), path: "/camp/evidence/e.json" })], detail([], null, true));
+    fireEvent.click(within(screen.getByRole("listitem")).getByRole("button"));
+    await waitFor(() => expect(screen.getByRole("group", { name: S.run.detail }).textContent).toContain(S.run.detailTruncated));
   });
 
   it("a criterion without evidence says no evidence, never pass", async () => {
