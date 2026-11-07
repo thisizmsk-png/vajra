@@ -1089,3 +1089,78 @@ fn a_target_whose_directory_is_gone_is_not_offered() {
     fs::remove_dir_all(&cwd).unwrap();
     assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
 }
+
+// ---- review follow-ups: explicit verify vs an in-flight listing check; unreadable campaigns ------------------------
+
+/// First invocation: signal `started`, wait for `go`, then exit 0 (it saw the old, valid state). Any later one exits 3.
+fn barrier_campaign_script(t: &Tmp) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let ctl = t.0.join("ctl");
+    fs::create_dir_all(&ctl).unwrap();
+    let sh = dir.join("vajra-campaign.sh");
+    let body = format!(
+        "#!/bin/bash\nif mkdir '{c}/first' 2>/dev/null; then\n  touch '{c}/started'\n  while [ ! -e '{c}/go' ]; do sleep 0.05; done\n  exit 0\nfi\necho 'signature INVALID' >&2\nexit 3\n",
+        c = ctl.display()
+    );
+    fs::write(&sh, body).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    ctl
+}
+
+#[test]
+fn an_older_listing_check_cannot_overwrite_a_newer_explicit_verify() {
+    let t = Tmp::new();
+    let ctl = barrier_campaign_script(&t);
+    campaign(&t, "c1", None);
+    let app = Arc::new(t.app());
+    // 1. A listing check starts against valid state and is held at the barrier.
+    let a = { let app = app.clone(); std::thread::spawn(move || app.list_campaigns().unwrap()) };
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !ctl.join("started").exists() {
+        assert!(std::time::Instant::now() < end, "the listing check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // 2. The key is replaced; the user verifies explicitly. It must join the flight, not race past it.
+    let b = { let app = app.clone(); std::thread::spawn(move || app.verify_campaign("c1").unwrap()) };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!b.is_finished(), "an explicit verify waits for the campaign's running check, then runs its own");
+    // 3. The old check finishes (exit 0), then the explicit one runs and fails.
+    fs::write(ctl.join("go"), "").unwrap();
+    let listed = a.join().unwrap();
+    assert_eq!(listed["campaigns"][0]["integrity"], "ok");
+    let v = b.join().unwrap();
+    assert_eq!(v["ok"], false, "{v}");
+    // 4. The badge shows the newer failure, not the older check's ok.
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}
+
+#[test]
+fn a_campaign_the_reader_cannot_summarise_still_gets_an_integrity_verdict() {
+    // campaign.json missing: plain verify exits 3, and the listing must say so instead of leaving the field out.
+    let t = Tmp::new();
+    fake_campaign_script(&t, 3, "signature INVALID");
+    let d = t.home().join(".claude/vajra/campaigns/gone");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("progress.md"), "p").unwrap();
+    campaign(&t, "bad", None);
+    fs::write(t.home().join(".claude/vajra/campaigns/bad/campaign.json"), "{ truncated").unwrap();
+    let l = t.app().list_campaigns().unwrap();
+    for s in ["gone", "bad"] {
+        let c = l["campaigns"].as_array().unwrap().iter().find(|c| c["slug"] == s).unwrap_or_else(|| panic!("{s} missing: {l}"));
+        assert!(c["error"].is_string(), "{s}: {c}");
+        assert_eq!(c["integrity"], "failed", "{s}: {c}");
+    }
+}
+
+#[test]
+fn an_unreadable_campaign_whose_check_cannot_run_is_unknown_never_missing() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 1, "jq: not found");
+    let d = t.home().join(".claude/vajra/campaigns/gone");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("progress.md"), "p").unwrap();
+    let l = t.app().list_campaigns().unwrap();
+    assert_eq!(l["campaigns"][0]["integrity"], "unknown", "{l}");
+}
