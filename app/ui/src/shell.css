@@ -1,0 +1,8 @@
+.v-shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+.v-shell__nav { display: flex; flex-direction: column; gap: var(--space-xs); padding: var(--space-md) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); }
+.v-shell__link { display: flex; align-items: center; min-height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); }
+.v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
+.v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
+.v-shell__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-shell__main { padding: var(--space-lg); overflow: auto; }
+.v-shell__error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); }
