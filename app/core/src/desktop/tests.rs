@@ -2614,3 +2614,26 @@ fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
     let i = app2.worktree_info("aa870dd40540481f0").unwrap();
     assert!(i["branch"].is_null() && i["base"].is_null(), "{i}");
 }
+
+#[test]
+fn a_cut_verify_run_never_resumes_and_a_cut_diff_has_no_exit_code() {
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    for code in [0, 3] {
+        cut_exe(&dir.join("vajra-campaign.sh"), "#!/bin/bash", "", code);
+        let app = t.app();
+        let e = app.verify_campaign("deliver-20261105-1810").unwrap_err();
+        assert_eq!(code_of_err(&e), "verify_failed", "a cut exit {code} is neither ok nor a signature failure: {e}");
+    }
+    // diff: a cut `git diff` reports no exit code and lists no untracked files.
+    let mut app = t.app();
+    app.bridge.git = t.home().join("cut-git.sh");
+    cut_exe(&app.bridge.git, "#!/bin/sh", "diff --git a/f b/f\n", 0);
+    let d = app.diff(t.home().to_str().unwrap(), "main").unwrap();
+    assert_eq!((d["truncated"].clone(), d["code"].is_null(), d["untracked"].as_array().unwrap().len()), (json!(true), true, 0), "{d}");
+}
+
+fn code_of_err(v: &Value) -> &str {
+    v["error"].as_str().unwrap_or("")
+}

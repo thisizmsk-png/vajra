@@ -1150,19 +1150,23 @@ impl App {
         // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
         let mut untracked: Vec<String> = Vec::new();
         let mut untracked_truncated = false;
-        if o.code == Some(0) && !o.timed_out {
+        if o.exit() == Some(0) {
             if let Ok(u) = self.bridge.run(&Request::Git {
                 cwd: repo_dir(cwd_str)?,
                 args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
             }) {
-                if u.code == Some(0) {
-                    let all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                if u.code == Some(0) && !u.timed_out {
+                    // A list cut at the cap is a prefix; its last name may be half a path, so it is dropped.
+                    let mut all: Vec<&str> = u.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                    if u.truncated {
+                        all.pop();
+                    }
                     untracked_truncated = u.truncated || all.len() > UNTRACKED_MAX;
                     untracked = all.into_iter().take(UNTRACKED_MAX).map(String::from).collect();
                 }
             }
         }
-        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+        Ok(json!({"code": o.exit(), "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
                   "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
@@ -1353,7 +1357,7 @@ impl App {
             Some(Err(e)) => return Err(fail("verify_failed", e)),
             None => return Err(fail("verify_failed", "no result")),
         };
-        match o.code {
+        match o.exit() {
             Some(0) => Ok(json!({"slug": slug, "ok": true})),
             Some(3) => {
                 let newest = self
@@ -1365,6 +1369,7 @@ impl App {
                 let restore = newest.map(|n| format!("vajra-campaign.sh resume {slug} --from-checkpoint {n}"));
                 Ok(json!({"slug": slug, "ok": false, "restore": restore}))
             }
+            _ if o.truncated => Err(fail("verify_failed", "output over the cap")),
             code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
         }
     }
