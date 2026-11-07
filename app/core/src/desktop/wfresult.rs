@@ -225,9 +225,15 @@ fn entry_mtime(dir: &OwnedFd, name: &str) -> Option<i64> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
     // SAFETY: `dir` is a live directory fd, `c` a valid NUL-terminated relative name, `st` a valid out-pointer.
     let rc = unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        return None;
+    }
     // SAFETY: fstatat returned 0, so it filled `st`.
-    #[allow(clippy::unnecessary_cast)] // time_t is i64 here but not on every target
-    (rc == 0).then(|| unsafe { st.assume_init() }.st_mtime as i64)
+    let st = unsafe { st.assume_init() };
+    // time_t is i64 here but not on every target, so the cast stays; the lint is allowed on this statement.
+    #[allow(clippy::unnecessary_cast)]
+    let mtime = st.st_mtime as i64;
+    Some(mtime)
 }
 
 /// What a finished result asks of the human. The campaign comes from the run's guarded record, not from the result:
