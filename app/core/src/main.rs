@@ -38,8 +38,8 @@ fn preflight(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
-fn list_campaigns(app: State<'_, App>) -> Res {
-    app.list_campaigns()
+fn list_campaigns(app: State<'_, App>, refresh: Option<bool>) -> Res {
+    app.list_campaigns_opt(refresh.unwrap_or(false))
 }
 
 #[tauri::command(async)]
@@ -59,6 +59,11 @@ fn start_run(
 #[tauri::command(async)]
 fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
     app.resume_run(&session_id, &campaign, &cwd)
+}
+
+#[tauri::command(async)]
+fn verify_campaign(app: State<'_, App>, slug: String) -> Res {
+    app.verify_campaign(&slug)
 }
 
 #[tauri::command(async)]
@@ -229,6 +234,7 @@ fn main() {
             list_campaigns,
             start_run,
             resume_run,
+            verify_campaign,
             resume_targets,
             crew,
             tail,

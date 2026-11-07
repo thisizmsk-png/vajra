@@ -142,4 +142,16 @@ describe("Crew tree (S2a, US-2.1)", () => {
     const row = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
     expect(row.textContent).toContain(S.crew.overlay["stopped by the human"]);
   });
+
+  it("shows both overlays the core emits for a stopped worker with a queued message, in the core's own strings", async () => {
+    window.location.hash = "#/crew?slug=camp&id=r1";
+    const t = tree();
+    // The exact strings crew/tree.rs puts in `overlays` (see the core test the_crew_tree_shows_message_pending_...).
+    (t.children[0] as { children: { overlays: string[] }[] }).children[0].overlays = ["stopped by the human", "message pending"];
+    open({ crew: t });
+    render(<Crew />);
+    const row = (await screen.findByText("Backend")).closest("[role=treeitem]") as HTMLElement;
+    expect(row.textContent).toContain(S.crew.overlay["stopped by the human"]);
+    expect(row.textContent).toContain(S.crew.overlay["message pending"]);
+  });
 });
