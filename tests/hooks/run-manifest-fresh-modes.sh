@@ -32,5 +32,10 @@ out="$(run VAJRA_MANIFEST_FRESH=warn)"; rc=$?
 out="$(env GITHUB_ACTIONS=true VAJRA_MANIFEST_FRESH=warn bash "$RUN" 2>&1)"
 echo "$out" | grep -q "^::warning::" && ok || bad "warn mode on Actions must emit an annotation: $out"
 
+# The workflow turns warn on only for a pull_request whose base is not main (so a PR into main, and main itself, stay strict).
+CI_YML="$REPO/.github/workflows/ci.yml"
+grep -q "VAJRA_MANIFEST_FRESH: \${{ github.event_name == 'pull_request' && github.base_ref != 'main' && 'warn' || '' }}" "$CI_YML" && ok || bad "ci.yml must set warn only for pull_request with base_ref != main"
+[ "$(grep -c 'VAJRA_MANIFEST_FRESH' "$CI_YML")" -eq 1 ] && ok || bad "ci.yml must set VAJRA_MANIFEST_FRESH in exactly one place"
+
 echo "manifest-fresh modes: $P passed, $F failed"
 [ "$F" -eq 0 ]
