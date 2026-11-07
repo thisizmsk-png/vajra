@@ -16,6 +16,19 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
+    setTransport(f.transport);
+    await api.askLead("20261106-0911", "what is bhima doing?");
+    await api.cancelAsk("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    await api.leadStatus("20261106-0911");
+    expect(f.calls).toEqual([
+      { cmd: "ask_lead", args: { runId: "20261106-0911", text: "what is bhima doing?" } },
+      { cmd: "cancel_ask", args: { askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
+      { cmd: "lead_status", args: { runId: "20261106-0911" } },
+    ]);
+  });
+
   it("rejects with the core's {error, detail} and errorText reads it", async () => {
     setTransport(fakeIpc({ preflight: () => { throw { error: "no_claude", detail: "not on PATH" }; } }).transport);
     const e = await api.preflight().catch((x) => x);
