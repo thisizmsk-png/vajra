@@ -173,24 +173,41 @@ impl Handle {
 
     /// Has the child exited, without reaping it? The zombie keeps the pid (and so the group id) from being
     /// recycled, which is what lets the caller kill leftover group members (its MCP server, hooks) safely.
-    fn child_exited(&self) -> bool {
+    /// `None` means the pid is not a child of ours any more (already reaped): never signal it.
+    fn exit_seen(&self) -> Option<bool> {
         let pid = self.pid.load(Ordering::SeqCst);
         if pid == 0 {
-            return false;
+            return Some(false);
         }
         // SAFETY: waitid with WNOWAIT only inspects the child; `info` is a zeroed siginfo_t the call fills in.
         unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             let r = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
-            r == 0 && info.si_pid() != 0
+            if r != 0 {
+                return None;
+            }
+            Some(info.si_pid() != 0)
         }
     }
 
-    /// Reap `child` if it has exited, and mark it so no later kill can reach its pid.
+    /// Reap `child` once it has exited, and mark it so no later kill can reach its pid. The group is killed first,
+    /// while the zombie still holds the group id and the lock is held, so no exit path reaps a leader and leaves
+    /// its MCP server or asynchronous hooks running. The reap happens only after that non-reaping exit observation.
     fn try_reap(&self, child: &mut Child) -> bool {
         let mut exited = lock(&self.exited);
         if *exited {
             return true;
+        }
+        match self.exit_seen() {
+            Some(false) => return false,
+            Some(true) => {
+                let pid = self.pid.load(Ordering::SeqCst);
+                // SAFETY: the zombie leader is not reaped (we hold `exited` false and the lock), so -pid is its group.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            None => {}
         }
         if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
             *exited = true;
@@ -432,10 +449,7 @@ pub fn drive(mut child: Child, handle: &Arc<Handle>, limits: Limits, sink: &mut 
         if fatal.is_some() || grace.elapsed() >= EXIT_GRACE {
             handle.kill_group();
         }
-        if handle.child_exited() {
-            // The CLI is gone but its zombie still holds the group id: take down whatever it left running.
-            handle.kill_group();
-        }
+        // `try_reap` takes down whatever the CLI left running before it reaps the CLI.
         if handle.try_reap(&mut child) {
             break;
         }

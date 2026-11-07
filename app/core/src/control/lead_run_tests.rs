@@ -246,6 +246,23 @@ fn cancel_ask_kills_group() {
 }
 
 #[test]
+fn a_lead_that_exits_normally_leaves_no_group_member_behind() {
+    let d = tmp("normal-exit");
+    let f = d.join("events.jsonl");
+    std::fs::write(&f, format!("{}\n{HOOKS}\n{TAIL}\n", good_init())).unwrap();
+    // The CLI starts a background helper (its MCP server or an async hook), prints a complete turn and exits.
+    let body = format!("sleep 60 >/dev/null 2>&1 &\necho $! > '{}'\ncat > /dev/null &\ncat '{}'", d.join("helper.pid").display(), f.display());
+    let p = script(&d, "claude", &body);
+    let (r, _, h) = run(&p, quick());
+    assert!(r.is_ok(), "{r:?}");
+    let pid: i32 = std::fs::read_to_string(d.join("helper.pid")).unwrap().trim().parse().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    // SAFETY: signal 0 only checks existence.
+    assert!(unsafe { libc::kill(pid, 0) } != 0, "the helper the CLI left behind is killed with its group");
+    assert!(!group_alive(h.pid.load(Ordering::SeqCst)));
+}
+
+#[test]
 fn cancel_before_spawn_spawns_nothing() {
     let d = tmp("precancel");
     let marker = d.join("ran");
