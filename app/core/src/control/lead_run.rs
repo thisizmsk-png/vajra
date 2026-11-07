@@ -209,14 +209,14 @@ impl Handle {
 /// let _child = spawn(&["/bin/cat".to_string()], Path::new("/"), &[], &framed, &Handle::new());
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use std::path::Path;
 /// use vajra_desktop::control::lead_run::{Handle, spawn};
 ///
 /// let _ = spawn(&["/bin/cat".to_string()], Path::new("/"), &[], "raw text", &Handle::new());
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use std::path::Path;
 /// use vajra_desktop::control::lead_run::{Handle, spawn};
 ///
