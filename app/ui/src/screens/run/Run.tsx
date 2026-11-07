@@ -1,0 +1,96 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Badge, Button, Section, Text } from "../../../components/ui/base";
+import { VirtualList } from "../../../components/ui/desktop";
+import { S } from "../../../strings";
+import { api, errorText, onChanged } from "../../ipc";
+import type { EvidenceRow } from "../../ipc";
+import { useRoute } from "../../router";
+
+const ORDER: Record<string, number> = { fail: 0, unverified: 1, not_run: 2, stale: 3, pass: 4 };
+const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", not_run: undefined, stale: "warning" };
+const ROW_H = 36;
+const LIST_H = 360;
+
+const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.run.status.not_run;
+
+/** Evidence is the Run view's default (POS-1.1). Rows render through VirtualList (only the rows in view exist) and are plain data. */
+export function Run() {
+  const [route] = useRoute();
+  const slug = route.params.slug ?? "";
+  const [rows, setRows] = useState<EvidenceRow[] | null>(null);
+  const [err, setErr] = useState("");
+  const [sel, setSel] = useState<number | null>(null);
+
+  const load = useCallback(() => {
+    if (!slug) return;
+    api.evidenceList(slug).then((r) => { setRows(r.rows); setErr(""); }, (e) => setErr(errorText(e)));
+  }, [slug]);
+  useEffect(load, [load]);
+  useEffect(() => (slug ? onChanged(load) : undefined), [slug, load]);
+
+  // Failing first; ties keep the campaign's own order.
+  const sorted = useMemo(
+    () => (rows ?? []).map((r, i) => [r, i] as const).sort((a, b) => (ORDER[a[0].status] ?? 9) - (ORDER[b[0].status] ?? 9) || a[1] - b[1]).map((x) => x[0]),
+    [rows],
+  );
+  const passing = sorted.filter((r) => r.status === "pass").length;
+
+  if (!slug) {
+    return (
+      <div className="v-home">
+        <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+        <Text variant="body-sm" muted>{S.run.pick}</Text>
+      </div>
+    );
+  }
+  const picked = sel !== null ? sorted[sel] : null;
+  return (
+    <div className="v-home">
+      <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <Section title={S.run.evidence}>
+        {err && <div role="alert"><Text variant="body-sm">{S.run.failed} {err}</Text></div>}
+        {rows && rows.length === 0 && <Text variant="body-sm" muted>{S.run.none}</Text>}
+        {rows && rows.length > 0 && (
+          <>
+            {/* Green only when every criterion is a pass (POS-1.5). */}
+            {passing === sorted.length
+              ? <Badge status="success">{S.run.allPass}</Badge>
+              : <Badge status="danger">{S.run.summary(passing, sorted.length)}</Badge>}
+            <VirtualList
+              role="list"
+              aria-label={S.run.criteria}
+              count={sorted.length}
+              rowHeight={ROW_H}
+              height={LIST_H}
+              renderRow={(i) => {
+                const r = sorted[i];
+                return (
+                  <div role="listitem" className="v-run__row">
+                    <Button size="sm" variant="ghost" onClick={() => setSel(i)}>{r.criterion}</Button>
+                    <span>{r.task}</span>
+                    <Badge status={BADGE[r.status]}>{label(r.status)}</Badge>
+                  </div>
+                );
+              }}
+            />
+          </>
+        )}
+        {picked && (
+          <dl className="v-crew__facts" role="group" aria-label={S.run.detail}>
+            <dt>{S.run.criterion}</dt><dd>{picked.criterion}</dd>
+            <dt>{S.run.taskCol}</dt><dd>{picked.task} {picked.title ?? ""}</dd>
+            <dt>{S.run.statusCol}</dt><dd>{label(picked.status)}</dd>
+            {picked.path || picked.head ? (
+              <>
+                <dt>{S.run.commit}</dt><dd>{picked.head ? picked.head.slice(0, 7) : ""}</dd>
+                <dt>{S.run.evidenceFile}</dt><dd>{picked.path ?? ""}</dd>
+                <dt>{S.run.commands}</dt><dd>{picked.commands ?? ""}</dd>
+              </>
+            ) : (<><dt>{S.run.evidenceCol}</dt><dd>{S.run.noEvidence}</dd></>)}
+            {picked.report && (<><dt>{S.run.report}</dt><dd>{picked.report}</dd></>)}
+          </dl>
+        )}
+      </Section>
+    </div>
+  );
+}
