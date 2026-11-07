@@ -46,3 +46,8 @@ jobs:
         env:
           CI: "true"
         run: bash tests/run-all.sh
+      - name: Clippy (Rust core, warnings are errors)
+        # macOS only: the Tauri crate needs webkit2gtk system packages on Linux, which this job does not install.
+        if: runner.os == 'macOS'
+        working-directory: app/core
+        run: cargo clippy --all-targets -- -D warnings
