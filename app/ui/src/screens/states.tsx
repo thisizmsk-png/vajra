@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Button, Skeleton, Text } from "../../components/ui/base";
 import { S } from "../../strings";
 import { errorText, isIpcError } from "../ipc";
@@ -9,13 +9,20 @@ import { errorText, isIpcError } from "../ipc";
  */
 export const problemDetail = (e: unknown): string => (isIpcError(e) ? errorText(e) : S.states.noAnswer);
 
-/** A screen or section could not load: a plain title, the detail, and Try again when it can be retried. */
+const clock = (d: Date) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+/**
+ * A screen or section could not load: a plain title, the detail, and Try again when it can be retried. A retry that
+ * fails the same way would leave the screen unchanged, so the box says when it last tried.
+ */
 export function Problem({ title, detail, retry }: { title: string; detail?: string; retry?: () => void }) {
+  const [tried, setTried] = useState<Date | null>(null);
   return (
     <div role="alert" className="v-problem">
       <Text variant="label">{title}</Text>
       {detail && <Text variant="body-sm" muted className="v-problem__detail">{detail}</Text>}
-      {retry && <Button size="sm" onClick={retry}>{S.states.retry}</Button>}
+      {retry && <Button size="sm" onClick={() => { setTried(new Date()); retry(); }}>{S.states.retry}</Button>}
+      {retry && <span role="status" className="v-checked">{tried ? S.states.triedAt(clock(tried)) : ""}</span>}
     </div>
   );
 }
@@ -38,4 +45,12 @@ export function LoadingRows({ rows = 3, label }: { rows?: number; label: string 
       {Array.from({ length: rows }, (_, i) => <Skeleton key={i} />)}
     </div>
   );
+}
+
+/**
+ * When a check last finished. A re-check that finds nothing new would otherwise look like a dead click, so every
+ * finished check updates this line and a screen reader hears it once. The region exists before the first answer.
+ */
+export function CheckedAt({ at }: { at: Date | null }) {
+  return <span role="status" className="v-checked">{at ? S.states.checkedAt(clock(at)) : ""}</span>;
 }

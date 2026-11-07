@@ -4,7 +4,7 @@ import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
-import { LoadingRows, Problem, problemDetail } from "../states";
+import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
@@ -14,14 +14,17 @@ import type { Draft } from "./validate";
 
 type Load<T> = { state: "loading" } | { state: "ok"; data: T } | { state: "error"; text: string };
 
-function useLoad<T>(fetch: () => Promise<T>, refreshOnChange = false): [Load<T>, () => void] {
+function useLoad<T>(fetch: () => Promise<T>, refreshOnChange = false): [Load<T>, () => void, Date | null] {
   const [v, setV] = useState<Load<T>>({ state: "loading" });
+  const [at, setAt] = useState<Date | null>(null);
   const run = useCallback(() => {
-    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: problemDetail(e) }));
+    setAt(null);
+    fetch().then((data) => setV({ state: "ok", data }), (e) => setV({ state: "error", text: problemDetail(e) }))
+      .finally(() => setAt(new Date()));
   }, [fetch]);
   useEffect(run, [run]);
   useEffect(() => (refreshOnChange ? onChanged(run) : undefined), [refreshOnChange, run]);
-  return [v, run];
+  return [v, run, at];
 }
 
 const fetchPreflight = () => api.preflight();
@@ -36,7 +39,7 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
-  const [pre, recheck] = useLoad<Preflight>(fetchPreflight);
+  const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [camps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
   const [d, setD] = useState<Draft>({ repo: "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
@@ -130,6 +133,7 @@ export function Home() {
                 <PreflightList rows={pre.data.rows} />
               </details>
             )}
+            <CheckedAt at={checkedAt} />
           </section>
 
           <section className="v-home__runs" aria-labelledby="v-home-camps">

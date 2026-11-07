@@ -95,6 +95,7 @@ export function Crew() {
     api.activeRuns().then(
       (a) => {
         if (!live) return;
+        setErr("");
         const r = (a.runs as { run_id?: string; campaign?: string }[])[0];
         setTarget(r?.run_id && r.campaign ? { slug: r.campaign, runId: r.run_id } : null);
       },
@@ -139,7 +140,8 @@ export function Crew() {
   );
   // Nothing to show yet: no run, a crew that could not be read, or one on its way. Each says so in words.
   if (!root) {
-    const retry = () => { setErr(""); if (target) load(); else setTarget(undefined); };
+    // The problem stays up while it asks again; an answer clears it, so a retry that fails the same way still shows.
+    const retry = () => { if (target) load(); else setTarget(undefined); };
     return (
       <div className="v-screen v-crew">
         {head()}

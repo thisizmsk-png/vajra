@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Crew } from "../src/screens/crew/Crew";
 import { History } from "../src/screens/history/History";
+import { Settings } from "../src/screens/settings/Settings";
 import { REGISTRY } from "../src/screens/registry";
 import { problemDetail } from "../src/screens/states";
 import { S } from "../strings";
@@ -45,6 +46,8 @@ describe("Crew states", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(S.crew.failed);
     expect(alert.textContent).toContain(S.states.noAnswer);
+    fireEvent.click(screen.getByRole("button", { name: S.states.retry }));
+    expect((await screen.findByText(/^Tried again at /)).getAttribute("role")).toBe("status");
     up = true;
     fireEvent.click(screen.getByRole("button", { name: S.states.retry }));
     expect(await screen.findByRole("tree", { name: S.crew.treeLabel })).toBeTruthy();
@@ -68,6 +71,18 @@ describe("History states", () => {
     expect(screen.getByRole("status", { name: S.states.loading })).toBeTruthy();
     answer({ campaigns: [] });
     await waitFor(() => expect(screen.queryByRole("status", { name: S.states.loading })).toBeNull());
+  });
+});
+
+describe("Check again", () => {
+  it("says when the check finished, so a re-check that finds nothing new is not a dead click", async () => {
+    let calls = 0;
+    setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; } }).transport);
+    render(<Settings />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Checked at /));
+    fireEvent.click(screen.getAllByRole("button", { name: S.settings.recheck })[0]);
+    await waitFor(() => expect(calls).toBe(2));
+    expect(screen.getByRole("status").textContent).toMatch(/^Checked at /);
   });
 });
 

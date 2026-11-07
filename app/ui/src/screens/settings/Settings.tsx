@@ -3,7 +3,7 @@ import { Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api } from "../../ipc";
-import { LoadingRows, Problem, problemDetail } from "../states";
+import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import type { Preflight } from "../../ipc";
 import { useCommands } from "../../palette";
 import { PreflightList } from "../PreflightList";
@@ -12,8 +12,10 @@ import { PreflightList } from "../PreflightList";
 export function Settings() {
   const [pre, setPre] = useState<Preflight | null>(null);
   const [err, setErr] = useState("");
+  const [at, setAt] = useState<Date | null>(null);
   const run = useCallback(() => {
-    api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e)));
+    setAt(null);
+    api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e))).finally(() => setAt(new Date()));
   }, []);
   useEffect(run, [run]);
   useCommands([{ id: "recheck", label: S.settings.recheck, run }]);
@@ -28,6 +30,7 @@ export function Settings() {
             {err && <Problem title={S.settings.failed} detail={err} retry={run} />}
             {!pre && !err && <LoadingRows rows={4} label={S.states.loading} />}
             {pre && <PreflightList rows={pre.rows} />}
+            <CheckedAt at={at} />
           </section>
         </div>
       </div>

@@ -23,6 +23,8 @@ export const S = {
     noAnswer: "The app's core did not answer. It may still be starting; try again in a moment, and if it keeps happening, quit and reopen Vajra.",
     retry: "Try again",
     loading: "Loading",
+    checkedAt: (time: string) => `Checked at ${time}`,
+    triedAt: (time: string) => `Tried again at ${time}`,
     goHome: "Go to Home",
     openHistory: "Open History",
     openCrew: "Open the crew for this run",

@@ -117,3 +117,10 @@ Accessibility pass (PR #39).
 |---|---|---|
 | Skip to the screen | first Tab stop | new; out of sight until it has focus |
 | SCREEN - Vajra | window title | was "Vajra Desktop" on every screen |
+
+Click crawl fixes (PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Checked at TIME | under the checks on Home and Settings | new; a re-check that finds nothing new used to look like a dead click |
+| Tried again at TIME | in every "could not load" box, after Try again | new; a retry that fails the same way used to look like a dead click |
