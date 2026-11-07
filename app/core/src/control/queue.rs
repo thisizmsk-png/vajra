@@ -76,12 +76,10 @@ impl SessionDir {
     /// Remove the `.<name>.<pid>.tmp` files a crash between `write_atomic`'s write and rename left in queue/. The hook
     /// skips dot files, so none is live when a session starts. Best effort: a file that will not go is left for next time.
     pub fn sweep_temp(&self) {
-        let Ok(rd) = fsx::read_dir_nofollow(&self.dir("queue")) else { return };
-        for e in rd.flatten() {
-            let name = e.file_name();
-            let Some(n) = name.to_str() else { continue };
-            if n.starts_with('.') && n.ends_with(".tmp") && e.file_type().is_ok_and(|t| !t.is_dir()) {
-                let _ = fs::remove_file(e.path());
+        let Ok(d) = fsx::DirHandle::open(&self.dir("queue")) else { return };
+        for n in d.names().unwrap_or_default() {
+            if n.starts_with('.') && n.ends_with(".tmp") {
+                let _ = d.unlink(&n); // unlinkat without AT_REMOVEDIR: a directory of that name is left alone
             }
         }
     }
@@ -127,31 +125,13 @@ impl Listing {
 }
 
 fn names(dir: &Path) -> io::Result<Vec<String>> {
-    let rd = match fsx::read_dir_nofollow(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut out = Vec::new();
-    for e in rd {
-        if let Some(n) = e?.file_name().to_str().filter(|n| !n.starts_with('.')) {
-            out.push(n.to_string());
-        }
+    match fsx::DirHandle::open(dir).and_then(|d| d.names()) {
+        Ok(v) => Ok(v.into_iter().filter(|n| !n.starts_with('.')).collect()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
-    Ok(out)
 }
 
 fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
-    let rd = match fsx::read_dir_nofollow(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for e in rd {
-        let p = e?.path();
-        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && pred(n)) {
-            return Ok(Some(p));
-        }
-    }
-    Ok(None)
+    Ok(names(dir)?.into_iter().find(|n| pred(n)).map(|n| dir.join(n)))
 }
