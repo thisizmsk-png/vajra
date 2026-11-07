@@ -67,7 +67,10 @@ struct Run {
 
 /// Untracked file names `diff` lists.
 const UNTRACKED_MAX: usize = 200;
-const LIST_VERIFY_WORKERS: usize = 4;
+/// Most integrity verifies running at once, across every `campaign_integrity` call.
+const VERIFY_SLOTS: usize = 4;
+/// Longest a verify waits for a free slot (the total budget for a call); past it the call reads "unknown" and starts nothing.
+const VERIFY_QUEUE_BUDGET: Duration = Duration::from_secs(15);
 /// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
 /// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
 const VERDICT_TTL: Duration = Duration::from_secs(5);
@@ -110,6 +113,14 @@ impl Drop for FlightGuard<'_> {
         }
     }
 }
+/// A taken verify slot; freed when dropped, even if the verify panics.
+struct VerifySlot<'a>(&'a (Mutex<usize>, Condvar));
+impl Drop for VerifySlot<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0 .0) += 1;
+        self.0 .1.notify_one();
+    }
+}
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct App {
@@ -122,6 +133,9 @@ pub struct App {
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
+    /// Free verify slots (see `VERIFY_SLOTS`) and the longest a call waits for one.
+    verify_slots: (Mutex<usize>, Condvar),
+    verify_queue_budget: Duration,
     /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
     verdicts: Mutex<Verdicts>,
     /// Integrity-check tickets, taken when a check starts (see `Verdicts`).
@@ -168,6 +182,8 @@ impl App {
             deciding: Mutex::new(Default::default()),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
+            verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
+            verify_queue_budget: VERIFY_QUEUE_BUDGET,
             verdicts: Mutex::new(Verdicts::default()),
             tickets: std::sync::atomic::AtomicU64::new(0),
             verdict_ttl: VERDICT_TTL,
@@ -260,27 +276,11 @@ impl App {
                 })
                 .collect())
         })?;
-        // Every listing verifies every campaign afresh (the verdict depends on the campaign files, the links they
-        // follow and the signing key, so nothing is remembered between listings), on a few worker threads.
-        let todo: Vec<(usize, String)> = list
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, c["slug"].as_str().unwrap_or_default().to_string()))
-            .collect();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let verdicts: Mutex<Vec<(usize, &'static str)>> = Mutex::new(Vec::new());
-        std::thread::scope(|s| {
-            for _ in 0..todo.len().min(LIST_VERIFY_WORKERS) {
-                s.spawn(|| loop {
-                    let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some((i, slug)) = todo.get(n) else { break };
-                    let v = self.integrity_of(slug, refresh);
-                    lock(&verdicts).push((*i, v));
-                });
-            }
-        });
-        for (i, v) in lock(&verdicts).iter() {
-            list[*i]["integrity"] = json!(*v);
+        // The listing never verifies: a campaign whose last verdict is still fresh shows it, every other one reads
+        // "checking" and the UI asks `campaign_integrity` for it (so one slow verify cannot hold the list up).
+        for c in list.iter_mut() {
+            let slug = c["slug"].as_str().unwrap_or_default().to_string();
+            c["integrity"] = json!(if refresh { "checking" } else { self.cached_integrity(&slug).unwrap_or("checking") });
         }
         Ok(json!({"campaigns": list}))
     }
@@ -778,6 +778,25 @@ impl App {
         Ok(json!({"hits": hits, "code": o.code}))
     }
 
+    /// A real verdict still inside `verdict_ttl`, or `None` (a verify running, none taken, expired, or "unknown").
+    fn cached_integrity(&self, slug: &str) -> Option<&'static str> {
+        match lock(&self.verdicts).by_slug.get(slug) {
+            Some(&Verdict::Fresh(at, v)) if (self.clock)().saturating_sub(at) < self.verdict_ttl => Some(v),
+            _ => None,
+        }
+    }
+
+    /// #28: one campaign's badge, `{slug, integrity}` with integrity `ok`, `failed` or `unknown`. The UI asks once per
+    /// listed campaign. At most `VERIFY_SLOTS` verifies run at once across all calls, one per campaign (a second call
+    /// for the same campaign waits for the first); a call that cannot get a slot within the budget, a verify that
+    /// fails to run and one that overruns its timeout all read `unknown`, which is never kept as a verdict.
+    pub fn campaign_integrity(&self, slug: &str, refresh: bool) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        Ok(json!({"slug": slug, "integrity": self.integrity_of(slug, refresh)}))
+    }
+
     /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
     /// `verify_timeout`). A real verdict is reused for `verdict_ttl`; callers that arrive while a verify for the same
     /// campaign is running wait for it instead of starting another. `refresh` skips the reuse and, if a verify is
@@ -815,8 +834,11 @@ impl App {
             m.by_slug.insert(slug.to_string(), Verdict::Flying(f.clone()));
             break f;
         };
-        let ticket = self.ticket();
         let mut guard = FlightGuard { app: self, slug, flight, done: false };
+        // Only the call that owns the flight takes a slot; a budget overrun drops the guard, which ends the flight as
+        // "unknown" and keeps nothing.
+        let Some(_slot) = self.take_verify_slot() else { return ("unknown", None) };
+        let ticket = self.ticket();
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
         let res = bridge.run(&Request::CampaignVerify { slug: slug.into() });
@@ -830,6 +852,17 @@ impl App {
         guard.flight.1.notify_all();
         guard.done = true;
         (verdict, Some(res))
+    }
+
+    fn take_verify_slot(&self) -> Option<VerifySlot<'_>> {
+        let deadline = std::time::Instant::now() + self.verify_queue_budget;
+        let mut free = lock(&self.verify_slots.0);
+        while *free == 0 {
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            free = self.verify_slots.1.wait_timeout(free, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        *free -= 1;
+        Some(VerifySlot(&self.verify_slots))
     }
 
     /// A fresh ticket for an integrity check that is about to read the campaign (strictly increasing).

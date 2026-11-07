@@ -53,6 +53,11 @@ fn preflight(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn campaign_integrity(app: State<'_, App>, slug: String, refresh: Option<bool>) -> Res {
+    app.campaign_integrity(&slug, refresh.unwrap_or(false))
+}
+
+#[tauri::command(async)]
 fn list_campaigns(app: State<'_, App>, refresh: Option<bool>) -> Res {
     app.list_campaigns_opt(refresh.unwrap_or(false))
 }
@@ -272,6 +277,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             preflight,
             list_campaigns,
+            campaign_integrity,
             start_run,
             resume_run,
             verify_campaign,
