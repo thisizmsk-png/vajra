@@ -10,6 +10,9 @@ export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" &
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
+  // The Lead's guard preconditions already carry a one-line "why and what to do" (for example the sandbox one), so
+  // it is shown as it is, without the code in front.
+  if (isIpcError(e) && e.error === "lead_guard_missing" && e.detail) return e.detail;
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }
@@ -54,6 +57,13 @@ export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
 export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
+/** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
+export type InboxItem = {
+  id: string; kind: "task"; campaign: string; origin: "app" | "terminal"; status: string; created: string; age_s: number;
+  title: string; body: string; context: string[]; actions: string[];
+  /** What `created` and `age_s` measure: when the app first saw the task waiting (tasks.json has no per-task time). */
+  since?: string;
+};
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
 export const api = {
@@ -82,6 +92,8 @@ export const api = {
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
+  /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
+  inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */

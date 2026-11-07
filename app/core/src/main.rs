@@ -33,6 +33,11 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn inbox(app: State<'_, App>) -> Res {
+    app.inbox()
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -59,6 +64,11 @@ fn start_run(
 #[tauri::command(async)]
 fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
     app.resume_run(&session_id, &campaign, &cwd)
+}
+
+#[tauri::command(async)]
+fn read_report(app: State<'_, App>, slug: String) -> Res {
+    app.read_report(&slug)
 }
 
 #[tauri::command(async)]
@@ -245,6 +255,7 @@ fn main() {
             start_run,
             resume_run,
             verify_campaign,
+            read_report,
             resume_targets,
             crew,
             tail,
@@ -264,6 +275,7 @@ fn main() {
             ask_lead,
             cancel_ask,
             lead_status,
+            inbox,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {

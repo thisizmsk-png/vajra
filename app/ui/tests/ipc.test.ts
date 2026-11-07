@@ -29,6 +29,19 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps inbox to the inbox command", async () => {
+    const f = fakeIpc({ inbox: { count: 0, items: [] } });
+    setTransport(f.transport);
+    expect(await api.inbox()).toEqual({ count: 0, items: [] });
+    expect(f.calls).toEqual([{ cmd: "inbox", args: undefined }]);
+  });
+
+  it("shows the sandbox message as one friendly line", () => {
+    const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+    expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);
+    expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
+  });
+
   it("rejects with the core's {error, detail} and errorText reads it", async () => {
     setTransport(fakeIpc({ preflight: () => { throw { error: "no_claude", detail: "not on PATH" }; } }).transport);
     const e = await api.preflight().catch((x) => x);
