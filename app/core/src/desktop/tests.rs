@@ -2461,3 +2461,37 @@ fn a_run_started_in_a_subdirectory_is_current_against_evidence_the_real_verify_w
     fs::write(repo.join("f.txt"), b"root edit").unwrap();
     assert_eq!(status_of(&app, &slug), "stale");
 }
+
+#[test]
+fn no_git_hook_runs_while_the_tree_is_computed_not_even_through_a_repo_configured_hooks_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"modified so the index is rewritten").unwrap();
+    let marker = t.home().join("hook-ran");
+    let hook = |dir: &Path| {
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join("post-index-change");
+        fs::write(&p, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // 1. The repo's own hooks dir.
+    hook(&repo.join(".git/hooks"));
+    // Sanity: git itself does run this hook when it writes an index, so the check below can fail.
+    git_in(&repo, &["add", "-A"]);
+    assert!(marker.exists(), "fixture: the post-index-change hook must fire for a plain git add");
+    fs::remove_file(&marker).unwrap();
+    fs::write(repo.join("f.txt"), b"modified again").unwrap();
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    assert!(!marker.exists(), "a hook in .git/hooks ran while computing the tree id");
+    // 2. A hooks dir selected by the repo's own config (core.hooksPath), as an agent could set it.
+    let dir = t.home().join("evil-hooks");
+    hook(&dir);
+    git_in(&repo, &["config", "core.hooksPath", &dir.to_string_lossy()]);
+    fs::write(repo.join("f.txt"), b"modified a third time").unwrap();
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    assert!(!marker.exists(), "a core.hooksPath hook ran while computing the tree id");
+    // And through the Run view's own call.
+    let _ = status_of(&app, "deliver-20261105-1810");
+    assert!(!marker.exists(), "a hook ran during evidence_list");
+}

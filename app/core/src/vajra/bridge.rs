@@ -193,7 +193,7 @@ impl Bridge {
         if timeout.is_zero() {
             return true;
         }
-        let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-C"].map(String::from).into_iter()
+        let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
             .chain([repo.to_string_lossy().into_owned()])
             .chain(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"].map(String::from))
             .collect();
@@ -206,6 +206,8 @@ impl Bridge {
 
     /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths, relative to `repo`, left out),
     /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
+    /// No hook runs: `core.hooksPath=/dev/null` on every command (writing the temporary index would otherwise fire a repo's
+    /// `post-index-change`, and `-c` outranks a repo-configured `hooksPath`).
     /// The repo's index, working tree and object store are never written: every new object (a blob per modified or untracked
     /// file, then the trees) goes to a temp object dir (`GIT_OBJECT_DIRECTORY`) that is removed afterwards, while the repo's
     /// own objects are read through `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The tree id is the same as if they were written
@@ -227,7 +229,7 @@ impl Bridge {
         let result = (|| {
             let git = |args: &[&str], with_index: bool| -> Option<Output> {
                 let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
-                let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-C"].map(String::from).into_iter()
+                let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
                     .chain([top.borrow().to_string_lossy().into_owned()])
                     .chain(args.iter().map(|a| a.to_string()))
                     .collect();
