@@ -907,21 +907,31 @@ fn key_dependent_script(t: &Tmp) {
 }
 
 #[test]
-fn list_campaigns_follows_the_signing_key_when_it_is_replaced_and_restored() {
+fn a_replaced_signing_key_shows_within_five_seconds_or_at_once_with_refresh() {
+    // Stated staleness: the key is not part of any cache key (there is none), so after a replacement the badge may keep
+    // the earlier verdict for up to the 5 s window; refresh=true, an expired window, and verify_campaign show it at once.
     let t = Tmp::new();
     key_dependent_script(&t);
     campaign(&t, "c1", None);
     let key = t.home().join(".claude/vajra/stand-in.key");
     fs::write(&key, "K1").unwrap();
-    let app = t.app();
+    let (app, ms) = app_with_clock(&t);
+    let step = |n: u64| { ms.fetch_add(n, std::sync::atomic::Ordering::SeqCst); };
     let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
+    let fresh = |app: &App| app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"].clone();
     assert_eq!(verdict(&app), "ok");
     fs::write(&key, "K2").unwrap(); // install repair generates a new key; no campaign file is touched
-    assert_eq!(verdict(&app), "ok", "inside the 5 s window the earlier verdict is shown");
-    let fresh = |app: &App| app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"].clone();
-    assert_eq!(fresh(&app), "failed");
+    step(4_999);
+    assert_eq!(verdict(&app), "ok", "4.999 s after the check the earlier verdict may still be shown (the bound)");
+    step(1);
+    assert_eq!(verdict(&app), "failed", "at 5 s the next listing reflects the replaced key, with no refresh");
     fs::write(&key, "K1").unwrap(); // the original key is restored
-    assert_eq!(fresh(&app), "ok");
+    assert_eq!(verdict(&app), "failed", "inside the window again: lags, within the bound");
+    assert_eq!(fresh(&app), "ok", "refresh shows the restored key at once");
+    fs::write(&key, "K2").unwrap();
+    assert_eq!(verdict(&app), "ok", "lag again");
+    app.verify_campaign("c1").unwrap();
+    assert_eq!(verdict(&app), "failed", "a user-initiated verify shows it at once and updates the badge");
 }
 
 #[test]
