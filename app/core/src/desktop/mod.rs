@@ -718,6 +718,8 @@ impl App {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
+        // The budget covers the whole call, the repo-state reads included.
+        let deadline = std::time::Instant::now() + self.evidence_budget;
         let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
         let Some(tasks) = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array) else {
             return Err(fail("not_found", "no tasks for this campaign"));
@@ -760,7 +762,7 @@ impl App {
         let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
         for r in repo_of.values() {
             if !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r));
+                repos.insert(r.clone(), self.worktree_state(r, deadline));
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
@@ -772,7 +774,6 @@ impl App {
             }
         }
         let _release = Release(&self.sweeping, slug.to_string(), claimed);
-        let deadline = std::time::Instant::now() + self.evidence_budget;
         for batch in jobs.chunks(EVIDENCE_WORKERS) {
             if !claimed {
                 break;
@@ -962,15 +963,20 @@ impl App {
     /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
     /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
     /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
-    fn worktree_state(&self, repo: &Path) -> Option<(String, bool)> {
+    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             if at.elapsed() < WORKTREE_STATE_TTL {
                 return Some(st.clone());
             }
         }
-        let mut bridge = self.bridge.clone();
-        bridge.timeout = WORKTREE_STATE_TIMEOUT.min(self.evidence_budget);
+        // Both git calls count against the call's deadline: each gets at most 2 s and never more than what is left.
         let git = |args: &[&str]| {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(left);
             bridge
                 .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
                 .ok()

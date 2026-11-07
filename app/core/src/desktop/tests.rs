@@ -1451,6 +1451,18 @@ fn the_runs_own_untracked_output_does_not_make_its_evidence_stale() {
 }
 
 #[test]
+fn the_repo_state_reads_stop_at_the_calls_deadline() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // Deadline already passed: git is not even started, nothing is remembered.
+    assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
+    assert!(lock(&app.worktree_state).is_empty());
+    let (head, dirty) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    assert_eq!(head.len(), 40);
+    assert!(!dirty);
+}
+
+#[test]
 fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered() {
     let t = Tmp::new();
     let (app, slug, _repo, _head) = live_evidence_repo(&t, false, false);

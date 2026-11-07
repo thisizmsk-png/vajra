@@ -128,6 +128,25 @@ describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
     expect(writeText).toHaveBeenCalledWith("pytest -k large");
   });
 
+  it("keeps the detail on the criterion the user chose when a status change reorders the list", async () => {
+    let n = 0;
+    window.location.hash = "#/run?slug=camp";
+    const first = [row("t1", "ac-a", "checking"), row("t2", "ac-b", "checking")];
+    const second = [row("t1", "ac-a", "pass"), row("t2", "ac-b", "fail")]; // ac-b now sorts above ac-a
+    const f = fakeIpc({
+      evidence_list: () => ({ slug: "camp", stale: false, pending: n++ === 0 ? 2 : 0, rows: n === 1 ? first : second }),
+      evidence_detail: { task: "t1", commands: [], notes: null, truncated: false },
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await screen.findAllByRole("listitem");
+    fireEvent.click(within(screen.getAllByRole("listitem").find((e) => e.textContent?.includes("ac-a"))!).getByRole("button"));
+    await waitFor(() => expect(screen.getByRole("group", { name: S.run.detail }).textContent).toContain("ac-a"));
+    await waitFor(() => expect(screen.getAllByRole("listitem")[0].textContent).toContain("ac-b"), { timeout: 4000 });
+    expect(screen.getByRole("group", { name: S.run.detail }).textContent).toContain("ac-a");
+    expect(screen.getByRole("group", { name: S.run.detail }).textContent).not.toContain("ac-b");
+  });
+
   it("shows command output as inert text, never as markup", async () => {
     await open(
       [row("t2", "ac-2", "fail", { head: "a".repeat(40), path: "/camp/evidence/e.json", commands: 1 })],

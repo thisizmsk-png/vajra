@@ -8,6 +8,7 @@ import { useRoute } from "../../router";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
+const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.criterion}`;
 const ROW_H = 36;
 const LIST_H = 360;
 
@@ -21,7 +22,8 @@ export function Run() {
   const [err, setErr] = useState("");
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
   const [pending, setPending] = useState(0);
-  const [sel, setSel] = useState<number | null>(null);
+  /** The chosen criterion by identity (task + criterion), not list position: statuses change while polling and reorder the list. */
+  const [sel, setSel] = useState<string | null>(null);
   const [detail, setDetail] = useState<EvidenceDetail | "failed" | null>(null);
 
   /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
@@ -51,7 +53,7 @@ export function Run() {
   );
   const passing = sorted.filter((r) => r.status === "pass").length;
 
-  const picked = sel !== null ? sorted[sel] : null;
+  const picked = sel === null ? null : sorted.find((r) => keyOf(r) === sel) ?? null;
   const pickedTask = picked?.task;
   // The recorded commands and their output come from the core one task at a time, only for the criterion being looked at.
   useEffect(() => {
@@ -92,7 +94,7 @@ export function Run() {
                 const r = sorted[i];
                 return (
                   <div role="listitem" className="v-run__row">
-                    <Button size="sm" variant="ghost" onClick={() => setSel(i)}>{r.criterion}</Button>
+                    <Button size="sm" variant="ghost" onClick={() => setSel(keyOf(r))}>{r.criterion}</Button>
                     <span>{r.task}</span>
                     <Badge status={BADGE[r.status]}>{label(r.status)}</Badge>
                   </div>
