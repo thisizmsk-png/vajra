@@ -766,3 +766,14 @@ fn worktree_info_rejects_a_bad_or_unknown_worker() {
     assert_eq!(code(&app.worktree_info("../x").unwrap_err()), "invalid_args");
     assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_found");
 }
+
+#[test]
+fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
+    use crate::crew::tree::{Node, NodeKind, Status};
+    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], children: vec![] };
+    let j = node_json(&n);
+    assert_eq!(j["role"], "Backend", "{j}");
+    assert_eq!(j["engine_id"], "bhima");
+    let g = node_json(&Node { engine_id: None, ..n });
+    assert!(g["role"].is_null());
+}

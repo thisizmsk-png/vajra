@@ -8,10 +8,9 @@ import { StreamTab } from "./StreamTab";
 
 type TabId = "stream" | "diff" | "task" | "worktree";
 
-/** The task graph id (`<run>.<tid>`) of a worker labelled `task.<tid>.r<N>`; null for any other worker. */
-export function taskGraphId(runId: string, label: string): string | null {
-  const parts = label.split(".");
-  return parts[0] === "task" && parts[1] ? `${runId}.${parts[1]}` : null;
+/** The task graph id (`<run>.<tid>`) of a worker whose crew-tree parent is the task group `task:<tid>`; null for any other worker. */
+export function taskGraphId(runId: string, taskLocalId: string | null): string | null {
+  return taskLocalId ? `${runId}.${taskLocalId}` : null;
 }
 
 const asList = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : JSON.stringify(x))) : []);
@@ -31,11 +30,11 @@ function DiffTab({ info }: { info: WorktreeInfo }) {
   }, [info]);
   if (!r) return <Text variant="body-sm" muted>{S.crew.loading}</Text>;
   if ("err" in r) return <div role="alert"><Text variant="body-sm">{r.err}</Text></div>;
+  if (r.timed_out) return <div role="alert"><Text variant="body-sm">{S.crew.diffTimedOut}</Text></div>;
   if (r.code !== 0) return <div role="alert"><Text variant="body-sm">{S.crew.diffFailed(r.code)}</Text></div>;
   return (
     <>
       {r.truncated && <Text variant="body-sm">{S.crew.diffTruncated}</Text>}
-      {r.timed_out && <Text variant="body-sm">{S.crew.diffTimedOut}</Text>}
       {r.diff.trim() === "" ? <Text variant="body-sm" muted>{S.crew.noChanges}</Text> : <DiffView diff={r.diff} />}
     </>
   );
@@ -85,12 +84,12 @@ function WorktreeTab({ info }: { info: WorktreeInfo | null | undefined }) {
 }
 
 /** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
-export function WorkerPane({ node, slug, runId, status }: { node: CrewNodeDto; slug: string; runId: string; status: string }) {
+export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
   const agent = node.id.slice("agent:".length);
   const [tab, setTab] = useState<TabId>("stream");
   const [info, setInfo] = useState<WorktreeInfo | null | undefined>(undefined);
   const [task, setTask] = useState<Json | null>(null);
-  const taskId = taskGraphId(runId, node.title);
+  const taskId = taskGraphId(runId, taskLocalId);
 
   useEffect(() => {
     let live = true;
@@ -107,7 +106,8 @@ export function WorkerPane({ node, slug, runId, status }: { node: CrewNodeDto; s
     <>
       <Section title={S.crew.details}>
         <dl className="v-crew__facts" role="group" aria-label={S.crew.header}>
-          <dt>{S.crew.role}</dt><dd>{node.engine_id ?? node.title}</dd>
+          <dt>{S.crew.role}</dt><dd>{node.role ?? node.title}</dd>
+          {node.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{node.engine_id}</dd></>)}
           <dt>{S.crew.status}</dt><dd><Badge>{status}</Badge></dd>
           <dt>{S.crew.task}</dt><dd>{taskId ? `${taskId}${task?.title ? ` ${String(task.title)}` : ""}` : S.crew.noTask}</dd>
           {info && (<>

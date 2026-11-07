@@ -12,10 +12,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const node = (id: string, kind: string, title: string, status: string, children: unknown[] = []) =>
-  ({ id, kind, title, engine_id: "backend-dev", status, overlays: [], children });
+// The shape crew/tree.rs builds: a worker is a "round N" under the task group `task:<tid>`, which sits under the run.
+const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], extra: object = {}) =>
+  ({ id, kind, title, engine_id: "bhima", role: "Backend", status, overlays: [], children, ...extra });
 const tree = node("lead", "lead", "Lead", "in_progress", [
-  node("run", "run", "Run r1", "in_progress", [node("agent:a1", "worker", "task.t2.r1", "in_progress")]),
+  node("run:r1", "run", "Run r1", "in_progress", [
+    node("task:t2", "task", "Backend · t2", "in_progress", [node("agent:a1", "round", "round 1", "in_progress")]),
+    node("verification:r1", "verification", "Verification r1", "unknown", [node("agent:v1", "worker", "Tester", "unknown", [], { role: "Tester", engine_id: "vidura" })]),
+  ]),
 ]);
 const info = { worker: "a1", worktree: "/repo/.claude/worktrees/w1", branch: "worker-1", base: "abc123" };
 const DIFF = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n one\n+two\n";
@@ -30,7 +34,7 @@ async function open(replies: Record<string, unknown> = {}) {
   const f = fakeIpc({ ...base, ...replies });
   setTransport(f.transport);
   render(<Crew />);
-  fireEvent.click((await screen.findByText("task.t2.r1")).closest("[role=treeitem]") as HTMLElement);
+  fireEvent.click((await screen.findByText("round 1")).closest("[role=treeitem]") as HTMLElement);
   return f;
 }
 const tab = (name: string) => screen.findByRole("tab", { name });
@@ -76,14 +80,38 @@ describe("Worker tabs (S2c, US-2.3)", () => {
     expect(f.calls.find((c) => c.cmd === "task")?.args).toEqual({ slug: "camp", taskId: "r1.t2" });
   });
 
-  it("Task says so when the worker has no task", async () => {
+  it("Task says so when the worker is not under a task group", async () => {
     window.location.hash = "#/crew?slug=camp&id=r1";
-    setTransport(fakeIpc({ ...base, crew: node("lead", "lead", "Lead", "in_progress", [node("agent:a1", "worker", "Reviewer", "in_progress")]) }).transport);
+    const f = fakeIpc({ ...base });
+    setTransport(f.transport);
     render(<Crew />);
-    fireEvent.click((await screen.findByText("Reviewer")).closest("[role=treeitem]") as HTMLElement);
+    fireEvent.click((await screen.findByText("Tester")).closest("[role=treeitem]") as HTMLElement);
     fireEvent.click(await tab(S.crew.tabs.task));
     const panel = await screen.findByRole("tabpanel");
     expect(panel.textContent).toContain(S.crew.noTask);
+    expect(f.calls.some((c) => c.cmd === "task")).toBe(false);
+  });
+
+  it("finds the task from the tree, not from the node title (a round is titled 'round 1')", async () => {
+    const f = await open({ task });
+    fireEvent.click(await tab(S.crew.tabs.task));
+    await screen.findByRole("group", { name: S.crew.taskFacts });
+    expect(f.calls.filter((c) => c.cmd === "task").every((c) => c.args?.taskId === "r1.t2")).toBe(true);
+  });
+
+  it("shows the role name from the core and the engine id as a secondary field", async () => {
+    await open();
+    const head = await screen.findByRole("group", { name: S.crew.header });
+    expect(within(head).getByText("Backend")).toBeTruthy();
+    expect(head.textContent).toContain(S.crew.engineId);
+    expect(head.textContent).toContain("bhima");
+  });
+
+  it("Diff reports a timed-out diff as a timeout, not as a git exit code", async () => {
+    await open({ diff: { code: null, diff: "", truncated: false, timed_out: true } });
+    fireEvent.click(await tab(S.crew.tabs.diff));
+    expect(await screen.findByText(S.crew.diffTimedOut)).toBeTruthy();
+    expect(screen.queryByText(/git exit code/)).toBeNull();
   });
 
   it("Worktree shows path, branch and base, each copyable to the clipboard only", async () => {

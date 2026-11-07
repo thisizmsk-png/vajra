@@ -692,6 +692,8 @@ fn node_json(n: &Node) -> Value {
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
         "engine_id": n.engine_id,
+        // The name the UI shows for the role (AC-2.1.3); the engine id is only a secondary field.
+        "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),

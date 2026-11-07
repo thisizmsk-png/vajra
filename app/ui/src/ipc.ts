@@ -46,7 +46,7 @@ export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
 };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
