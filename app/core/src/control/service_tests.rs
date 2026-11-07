@@ -706,3 +706,45 @@ fn a_queue_dir_swapped_for_a_symlink_is_not_trusted() {
     assert!(s.pending.contains_key(&id), "a symlinked queue/ settles nothing");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 review (P2): the queue/ and inflight/ scans fail independently. A queued message stays queued when only
+/// inflight/ is unreadable (queue/ already proves it), and a stop with a valid ack settles even when queue/ is unreadable
+/// (a stop never uses queue/).
+#[test]
+fn a_queued_message_with_an_unreadable_inflight_dir_stays_queued() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let inflight = dir.join("control").join(SID).join("inflight");
+    fs::set_permissions(&inflight, fs::Permissions::from_mode(0o000)).unwrap();
+    let t0 = SystemTime::now();
+    for i in 0..8u64 {
+        s.tick_at(t0 + Duration::from_secs(i * 10));
+    }
+    fs::set_permissions(&inflight, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(s.pending.contains_key(&id), "queue/ proves it queued; inflight/ errors must not settle it");
+    assert!(s.pending[&id].check_failed.is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_acknowledged_stop_settles_even_when_queue_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (mut s, dir) = svc();
+    let id = s.stop_worker(Actor::Human, "bhima", None).unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    fs::write(root.join("acks").join(format!("{id}.json")), json!({"action_id": id, "consumed_at": "2026-11-07T10:00:00Z", "tool_name": "Bash"}).to_string()).unwrap();
+    let queue = root.join("queue");
+    fs::set_permissions(&queue, fs::Permissions::from_mode(0o000)).unwrap();
+    s.tick_at(SystemTime::now());
+    fs::set_permissions(&queue, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!s.pending.contains_key(&id), "a stop never reads queue/");
+    assert_eq!(last_record(&s, &id)["state"].as_str(), Some("delivered"));
+    let _ = fs::remove_dir_all(&dir);
+}

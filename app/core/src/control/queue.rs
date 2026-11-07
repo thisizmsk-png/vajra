@@ -88,8 +88,10 @@ impl SessionDir {
     /// does not scan both directories per message. Taken before any ack is read, which keeps the check order
     /// (queue, inflight, ack): a file only ever leaves queue/ and a claim only ever appears after it, so a stale
     /// listing can only say "still queued" (retried next tick), never "gone" for a file that is not.
-    pub fn listing(&self) -> io::Result<Listing> {
-        Ok(Listing { queue: names(&self.dir("queue"))?, inflight: names(&self.dir("inflight"))? })
+    /// The two scans succeed or fail independently: a message still proves itself queued from queue/ when inflight/
+    /// is unreadable, and a stop (which never uses queue/) is not held up by an unreadable queue/.
+    pub fn listing(&self) -> Listing {
+        Listing { queue: names(&self.dir("queue")).map_err(Into::into), inflight: names(&self.dir("inflight")).map_err(Into::into) }
     }
 
     /// The highest `<seq>` prefix in queue/ and expired/.
@@ -104,23 +106,37 @@ impl SessionDir {
     }
 }
 
-/// The first entry of `dir` that `pred` accepts. A scan that fails is an error, never "not found": settling on a
-/// failed scan would call a file absent that is still there. A directory that does not exist has no entries.
+/// An io error kept so one failed scan can be reported to every message that needs it.
+#[derive(Clone, Copy)]
+pub struct ScanError(io::ErrorKind, Option<i32>);
+
+impl From<io::Error> for ScanError {
+    fn from(e: io::Error) -> Self {
+        Self(e.kind(), e.raw_os_error())
+    }
+}
+
+impl ScanError {
+    pub fn to_io(self) -> io::Error {
+        self.1.map_or_else(|| io::Error::from(self.0), io::Error::from_raw_os_error)
+    }
+}
+
 /// A one-pass listing of a session's queue/ and inflight/ (see `SessionDir::listing`).
 pub struct Listing {
-    queue: Vec<String>,
-    inflight: Vec<String>,
+    queue: Result<Vec<String>, ScanError>,
+    inflight: Result<Vec<String>, ScanError>,
 }
 
 impl Listing {
-    pub fn queued(&self, action_id: &str) -> bool {
+    pub fn queued(&self, action_id: &str) -> io::Result<bool> {
         let suffix = format!("-{action_id}.json");
-        self.queue.iter().any(|n| n.ends_with(&suffix))
+        self.queue.as_ref().map_err(|e| e.to_io()).map(|v| v.iter().any(|n| n.ends_with(&suffix)))
     }
 
-    pub fn inflight(&self, action_id: &str) -> bool {
+    pub fn inflight(&self, action_id: &str) -> io::Result<bool> {
         let prefix = format!("{action_id}.");
-        self.inflight.iter().any(|n| n.starts_with(&prefix))
+        self.inflight.as_ref().map_err(|e| e.to_io()).map(|v| v.iter().any(|n| n.starts_with(&prefix)))
     }
 }
 
@@ -132,6 +148,8 @@ fn names(dir: &Path) -> io::Result<Vec<String>> {
     }
 }
 
+/// The first entry of `dir` that `pred` accepts. A scan that fails is an error, never "not found": settling on a
+/// failed scan would call a file absent that is still there. A directory that does not exist has no entries.
 fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
     Ok(names(dir)?.into_iter().find(|n| pred(n)).map(|n| dir.join(n)))
 }
