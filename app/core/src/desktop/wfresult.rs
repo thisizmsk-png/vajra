@@ -228,7 +228,7 @@ fn waiting(env: &Env, campaign: &str) -> Option<Waiting> {
 }
 
 /// What the CURRENT `vajra-deliver` of a session's `workflows/` directory asks of the human. Result files older than
-/// the run (`since`, unix seconds) belong to earlier workflows and are ignored. Of the rest the newest one is the
+/// the run's actual launch time (`since`, unix seconds, from the guarded run record; never derived from the run id) belong to earlier workflows and are ignored. Of the rest the newest one is the
 /// current workflow: if it is still running, or failed, nothing is actionable, even when an older file holds pending
 /// approvals (fail closed while the workflow is not terminal).
 pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) -> Result<Option<Waiting>, WfError> {

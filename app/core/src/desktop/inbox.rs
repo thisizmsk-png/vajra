@@ -47,14 +47,6 @@ fn valid_task_id(id: &str) -> bool {
 /// Shown with every item that comes from the workflow result file.
 const FROM_RESULT: &str = "from the workflow result";
 
-/// The UTC minute a `YYYYMMDD-HHMM` run id names, as unix seconds. A workflow result written before it belongs to an
-/// earlier workflow of the same session.
-fn run_start(run_id: &str) -> Option<i64> {
-    let b = run_id.as_bytes();
-    crate::ids::valid_run_id(run_id).then_some(())?;
-    crate::control::time::parse_iso(&format!("{}-{}-{}T{}:{}:00Z", &run_id[0..4], &run_id[4..6], &run_id[6..8], std::str::from_utf8(&b[9..11]).ok()?, std::str::from_utf8(&b[11..13]).ok()?))
-}
-
 /// `plan:<run_id>.<index>` -> (run_id, index).
 pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
     let (run, idx) = id.strip_prefix("plan:")?.split_once('.')?;
@@ -102,7 +94,7 @@ impl App {
 
     /// What the newest `vajra-deliver` result of this app run asks of the human.
     pub(super) fn waiting(&self, e: &runindex::Entry) -> Option<wfresult::Waiting> {
-        wfresult::waiting_for(&self.allow().ok()?, &self.workflows_dir(e), &e.campaign, run_start(&e.run_id)?).ok().flatten()
+        wfresult::waiting_for(&self.allow().ok()?, &self.workflows_dir(e), &e.campaign, self.read_run_started(&e.run_id)?).ok().flatten()
     }
 
     /// Everything waiting on the human, oldest first, at most 200 items with the true count.

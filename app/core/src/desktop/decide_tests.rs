@@ -45,7 +45,7 @@ impl Tmp {
     fn run(&self, app: &App) {
         let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: self.cwd(), lead_session_id: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
-        app.record_run(RUN, &self.cwd(), SID, CAMP, true).unwrap();
+        app.record_run(RUN, &self.cwd(), SID, CAMP, true, start_of(RUN)).unwrap();
     }
     /// The harness's result file for a finished `vajra-deliver`, at 0600.
     fn result(&self, name: &str, body: &Value) -> PathBuf {
@@ -56,7 +56,7 @@ impl Tmp {
         let p = self.wf_dir().join(name);
         fs::write(&p, body.to_string()).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
-        let start = crate::control::time::parse_iso(&format!("{}-{}-{}T{}:{}:00Z", &run[0..4], &run[4..6], &run[6..8], &run[9..11], &run[11..13])).unwrap() as u64;
+        let start = start_of(run) as u64;
         fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(start + secs)).unwrap();
         p
     }
@@ -64,7 +64,7 @@ impl Tmp {
     fn another_run(&self, app: &App, run: &str, workflow: bool) {
         let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: run.into(), cwd: self.cwd(), lead_session_id: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
-        app.record_run(run, &self.cwd(), SID, CAMP, workflow).unwrap();
+        app.record_run(run, &self.cwd(), SID, CAMP, workflow, start_of(run)).unwrap();
     }
     fn campaign_script(&self, code: i32) -> PathBuf {
         let sh = self.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
@@ -93,6 +93,11 @@ impl Drop for Tmp {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// The actual launch time the tests give a run: the minute its id names (tests that need otherwise pass their own).
+fn start_of(run: &str) -> i64 {
+    crate::control::time::parse_iso(&format!("{}-{}-{}T{}:{}:00Z", &run[0..4], &run[4..6], &run[6..8], &run[9..11], &run[11..13])).unwrap()
 }
 
 fn done(campaign: &str, plans: Value) -> Value {
@@ -235,7 +240,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
-    app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true).unwrap();
+    app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true, start_of(RUN)).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "guarded record names another directory");
 }
 
@@ -455,7 +460,7 @@ fn a_forged_session_id_or_campaign_on_the_same_run_is_not_trusted() {
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     t.campaign_script(0);
     // The guarded record says (SID, CAMP); the index line (worker-writable) claims another session, then another campaign.
-    app.record_run(RUN, &t.cwd(), SID, CAMP, true).unwrap();
+    app.record_run(RUN, &t.cwd(), SID, CAMP, true, start_of(RUN)).unwrap();
     for (sid, camp) in [(other, CAMP), (SID, "deliver-other")] {
         let e = runindex::Entry { campaign: camp.into(), session_id: sid.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
         runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
@@ -565,7 +570,7 @@ fn plan_ids_stay_stable_after_an_approval_driven_resume() {
     let r2 = "20261106-1005";
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
-    app.record_run(r2, &t.cwd(), SID, CAMP, false).unwrap();
+    app.record_run(r2, &t.cwd(), SID, CAMP, false, start_of(r2)).unwrap();
     assert_eq!(item_ids(&app), ["plan:20261106-0911.1"], "the approved plan stays decided; its sibling keeps its id");
     t.live(&app);
     let before = t.ledger().len();
@@ -669,5 +674,30 @@ fn the_workflows_early_need_input_results_reach_the_question_inbox() {
     let mut v = done(CAMP, json!([]));
     v["result"] = json!({"status": "need_input", "question": "q", "artifacts": {"campaign": "deliver-other"}});
     t.result("wf_q.json", &v);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+}
+
+#[test]
+fn a_run_id_naming_a_future_minute_does_not_hide_a_result_written_before_it() {
+    // fresh_run_id hands out a later minute when the current one is taken: launched 12:00:20, id 12:01. The workflow's
+    // result, written at 12:00:40, must still count; the cutoff is the recorded launch time, not the id.
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    let (r2, launched) = ("20261106-1001", start_of("20261106-1000") + 20);
+    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+    app.record_run(r2, &t.cwd(), SID, CAMP, true, launched).unwrap();
+    // An earlier workflow's file (before the launch) is still ignored; the new one (written 20s after launch, before the id's minute) counts.
+    t.result_at("wf_old.json", &done(CAMP, json!([{"action": "push", "why": "old"}])), "20261106-1000", 5);
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+    t.result_at("wf_new.json", &done(CAMP, pushes()), "20261106-1000", 40);
+    assert_eq!(item_ids(&app), ["plan:20261106-1001.0", "plan:20261106-1001.1"]);
+    // A run recorded without a launch time (from before this record existed) is not trusted for results.
+    let r3 = "20261106-1100";
+    let e3 = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r3.into(), cwd: t.cwd(), lead_session_id: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e3).unwrap();
+    app.record_run(r3, &t.cwd(), SID, CAMP, true, start_of(r3)).unwrap();
+    fs::remove_file(t.0.join("data/control/lead").join(r3).join("started")).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0);
 }
