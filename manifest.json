@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-07T19:48:34Z",
+  "generated": "2026-11-07T19:59:15Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "7cc4f0560886ccba08e132f66de23428423677ac0a4ec53917b40aec3aae0f15",
@@ -341,7 +341,7 @@
     "tests/workflows/vajra-waves.test.mjs": "c125dca85eec9cf18346c8c844cb2a744543f08862c0739540ff76e9072c75f3",
     "vitest.config.ts": "af7e84f136cb43c936aba32114423a9c060c3618df4ca6231961410ac84d3890",
     "workflows/vajra-architecture-review.js": "be70bb4f2e565446a9eed12cac237a1dc5d0554ccdee643115e01db27c8bed0a",
-    "workflows/vajra-deliver.js": "b3e85feb26e4dafa775c7b4cbdb4b193e369825e81a3253c724b24b0ce80aa3a",
+    "workflows/vajra-deliver.js": "44730ec3d307115deaf7c37bcfc199ee2e659a43f86f1e9c85afd91e60108471",
     "workflows/vajra-feature-build.js": "7c80902765472a66e76d07fa9d0eed8fe65cecce5f91d3fa38c900d2bac84974",
     "workflows/vajra-incident-response.js": "dd95c795eeb43884e87ac8961f79692457d8947c35c7d2bb144e5c23d1f4e94e",
     "workflows/vajra-sabha.js": "1321836bd9c80dd94d8907509f816b1ee0bfcf31d429c6b9e07006da21e04dcf",
