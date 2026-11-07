@@ -1457,11 +1457,9 @@ impl App {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
-        // A run cut at the cap says nothing reliable about its exit code: a cut exit 3 must not record a tamper.
-        if o.truncated {
-            return unknown(output_failure(&o, home));
-        }
-        match o.code {
+        // A run cut at the cap or killed by the timeout says nothing reliable about its exit code: a cut exit 3 must
+        // not record a tamper. `exit()` is None for both, which falls to the reason below.
+        match o.exit() {
             Some(0) => {}
             Some(3) => return bad(self),
             _ => return unknown(output_failure(&o, home)),
@@ -1469,8 +1467,8 @@ impl App {
         // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes. Output cut at the bridge's
         // cap would hash short and read as a tamper where plain `verify` says ok, so a truncated run is "unknown".
         let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
-            Ok(o) if o.code == Some(0) && !o.truncated => o.stdout.replace('\n', ""),
-            Ok(o) if o.code == Some(0) => return unknown(reason("oversize", Some("features output".into()), None)),
+            Ok(o) if o.exit() == Some(0) => o.stdout.replace('\n', ""),
+            Ok(o) if o.truncated && !o.timed_out && o.code == Some(0) => return unknown(reason("oversize", Some("features output".into()), None)),
             Ok(o) => return unknown(output_failure(&o, home)),
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };

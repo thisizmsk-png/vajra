@@ -2559,6 +2559,9 @@ fn output_exit_and_stdout_whole_hide_a_cut_or_killed_run() {
     use crate::vajra::bridge::Output;
     let o = |truncated, timed_out| Output { code: Some(0), stdout: "{}".into(), stderr: String::new(), truncated, timed_out };
     assert_eq!((o(false, false).exit(), o(false, false).stdout_whole()), (Some(0), Some("{}")));
+    // A killed run that still carries a status (3, the tamper code) is not read as that status.
+    let killed = Output { code: Some(3), stdout: String::new(), stderr: String::new(), truncated: false, timed_out: true };
+    assert_eq!(killed.exit(), None);
     for cut in [o(true, false), o(false, true), o(true, true)] {
         assert_eq!((cut.exit(), cut.stdout_whole()), (None, None), "{cut:?}");
     }
