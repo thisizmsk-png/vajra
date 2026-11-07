@@ -59,6 +59,10 @@ const PROOF_TEXT_MAX: usize = 2000;
 /// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
 /// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
 const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
+/// What the run itself writes into its repo, so it is not an edit to the verified tree: `vajra-verify-work.sh` excludes the
+/// walkthrough dir (evidence, `cmd-N.log`, `diff.patch`, `untracked.txt`) from its own tree-stability check, and crew
+/// worktrees live under `.claude/worktrees/`. Keep in step with `EXCL` in `scripts/vajra-verify-work.sh`.
+const RUN_OWN_OUTPUT: [&str; 2] = ["data/walkthroughs", ".claude/worktrees"];
 const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
 const EVIDENCE_FAILED_TTL: Duration = Duration::from_secs(60);
 /// Evidence files larger than this are always re-checked (their bytes are the cache key).
@@ -973,7 +977,10 @@ impl App {
                 .filter(|o| !o.timed_out && o.code == Some(0))
         };
         let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
-        let dirty = !git(&["status", "--porcelain", "-unormal"])?.stdout.trim().is_empty();
+        let mut status = vec!["status".to_string(), "--porcelain".into(), "-unormal".into(), "--".into(), ".".into()];
+        status.extend(RUN_OWN_OUTPUT.iter().map(|d| format!(":(exclude){d}")));
+        let status: Vec<&str> = status.iter().map(String::as_str).collect();
+        let dirty = !git(&status)?.stdout.trim().is_empty();
         let st = (head, dirty);
         lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
         Some(st)

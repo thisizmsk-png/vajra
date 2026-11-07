@@ -1389,7 +1389,7 @@ fn a_verdict_is_not_cached_when_the_file_is_swapped_while_the_check_runs() {
 }
 
 /// A task with green LIVE evidence (outside the campaign's evidence dir) whose run repo is a real git repo at `head`.
-fn live_evidence_repo(t: &Tmp, git_repo: bool) -> (App, String, std::path::PathBuf, String) {
+fn live_evidence_repo(t: &Tmp, git_repo: bool, ev_in_repo: bool) -> (App, String, std::path::PathBuf, String) {
     let repo = t.home().join("repo");
     fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
@@ -1404,7 +1404,7 @@ fn live_evidence_repo(t: &Tmp, git_repo: bool) -> (App, String, std::path::PathB
         git(&["commit", "-q", "-m", "one"]);
         head = git(&["rev-parse", "HEAD"]);
     }
-    let ev = t.home().join("live-ev");
+    let ev = if ev_in_repo { repo.join("data/walkthroughs/deliver-20261105-1810") } else { t.home().join("live-ev") };
     fs::create_dir_all(&ev).unwrap();
     fs::write(ev.join("green.json"), b"{}").unwrap();
     let mut task = ev_task(Path::new("/x"), "t1", "done", &["ac"], "green");
@@ -1423,7 +1423,7 @@ fn status_of(app: &App, slug: &str) -> String {
 #[test]
 fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
     let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true);
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
     assert_eq!(status_of(&app, &slug), "pass");
     fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
     assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
@@ -1438,9 +1438,22 @@ fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
 }
 
 #[test]
+fn the_runs_own_untracked_output_does_not_make_its_evidence_stale() {
+    let t = Tmp::new();
+    // The real layout: <repo>/data/walkthroughs/<slug>/evidence.json, untracked, with its logs beside it.
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    fs::write(repo.join("data/walkthroughs/deliver-20261105-1810/cmd-1.log"), b"ok").unwrap();
+    fs::create_dir_all(repo.join(".claude/worktrees/w1")).unwrap();
+    fs::write(repo.join(".claude/worktrees/w1/x"), b"crew worktree").unwrap();
+    assert_eq!(status_of(&app, &slug), "pass", "the run's own output is not an edit");
+    fs::write(repo.join("unrelated.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an unrelated untracked file still counts");
+}
+
+#[test]
 fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered() {
     let t = Tmp::new();
-    let (app, slug, _repo, _head) = live_evidence_repo(&t, false);
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, false, false);
     assert_eq!(status_of(&app, &slug), "pass", "not a git repo: not stale");
     assert!(lock(&app.worktree_state).is_empty());
 }
@@ -1448,7 +1461,7 @@ fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered
 #[test]
 fn a_big_untracked_tree_does_not_blow_the_budget() {
     let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true);
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
     let big = repo.join("node_modules_like");
     fs::create_dir_all(&big).unwrap();
     for i in 0..3000 {
