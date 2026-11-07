@@ -146,6 +146,62 @@ describe("History report and integrity (S6)", () => {
     expect(f.calls.some((c) => c.cmd === "verify_campaign" && c.args?.slug === "a-camp")).toBe(true);
   });
 
+  it("escapes bidi overrides, isolates, direction marks and line separators", async () => {
+    await open({ read_report: { slug: "a-camp", integrity: "ok", text: "pay ‮evil‬ ⁦x⁩ ‎‏   done" } });
+    const pre = await screen.findByRole("region", { name: S.history.reportTitle("a-camp") });
+    expect(pre.textContent).toBe("pay \\u202eevil\\u202c \\u2066x\\u2069 \\u200e\\u200f\\u2028\\u2029 done");
+  });
+
+  it.each([
+    ["ok", S.history.integrityOk],
+    ["no_report", S.history.integrityOk],
+    ["integrity_failed", S.history.integrityFailed],
+    ["unknown", S.history.integrityUnknown],
+  ])("badges the report panel from the read's own %s result", async (integrity, badge) => {
+    // The listing says ok throughout, so a failed or unknown badge can only come from the read itself.
+    await open({ read_report: { slug: "a-camp", integrity, text: integrity === "ok" ? "body" : null } });
+    const live = await waitFor(() => {
+      const el = document.querySelector("[aria-live]") as HTMLElement;
+      expect(el?.textContent).not.toContain(S.history.reportLoading);
+      return el;
+    });
+    expect(within(live).getByText(badge)).toBeTruthy();
+  });
+
+  it("reloads the table after a read so the row badge matches the verdict that read settled", async () => {
+    let settled = "ok";
+    const f = fakeIpc({
+      list_campaigns: () => list(settled),
+      read_report: () => { settled = "failed"; return { slug: "a-camp", integrity: "integrity_failed", text: null }; },
+    });
+    setTransport(f.transport);
+    render(<History />);
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText(S.history.integrityOk)).toBeTruthy();
+    fireEvent.click(within(table).getByRole("button", { name: S.history.report("a-camp") }));
+    await waitFor(() => expect(within(screen.getByRole("table")).getByText(S.history.integrityFailed)).toBeTruthy());
+    const read = f.calls.findIndex((c) => c.cmd === "read_report");
+    expect(f.calls.slice(read).some((c) => c.cmd === "list_campaigns")).toBe(true);
+  });
+
+  it("drops a slow reply for an earlier click once a newer request is in flight", async () => {
+    let release!: (v: unknown) => void;
+    const slow = new Promise((r) => { release = r; });
+    setTransport(fakeIpc({
+      list_campaigns: list("ok"),
+      read_report: () => slow,
+      verify_campaign: { slug: "a-camp", ok: true, restore: null },
+    }).transport);
+    render(<History />);
+    fireEvent.click(await screen.findByRole("button", { name: S.history.report("a-camp") }));
+    fireEvent.click(screen.getByRole("button", { name: S.history.verify("a-camp") }));
+    expect(await screen.findByText(S.history.verifyOk)).toBeTruthy();
+    release({ slug: "a-camp", integrity: "ok", text: "stale report body" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText(/stale report body/)).toBeNull();
+    expect(screen.getByText(S.history.verifyOk)).toBeTruthy();
+  });
+
   it("shows a read error as an alert", async () => {
     await open({ read_report: new Error("x") });
     expect(await screen.findByRole("alert")).toBeTruthy();

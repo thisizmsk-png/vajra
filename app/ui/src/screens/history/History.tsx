@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Input, Section, Text } from "../../../components/ui/base";
 import { Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
@@ -10,9 +10,19 @@ import { useRoute } from "../../router";
 type Hit = { id: string; kind: string; title: string };
 type Result = { state: "idle" } | { state: "busy" } | { state: "ok"; hits: Hit[] } | { state: "unavailable"; code: number | null } | { state: "error"; text: string };
 
-/** Show control characters (NUL, ESC, ...) as visible \uXXXX escapes; newline and tab stay. */
+/** Show control characters (NUL, ESC, ...) and the invisible direction and line-separator marks (bidi overrides and
+ * isolates, LRM/RLM, U+2028/9) as visible \uXXXX escapes, so a report cannot reorder or hide what it says; newline
+ * and tab stay. */
 export const escapeControls = (t: string) =>
-  t.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  t.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+/** The badge for one report read. It comes from that read's own result (the held bytes it checked), never from the
+ * listing: no_report and not_text passed the signature check, so they read as verified too. */
+const reportBadge = (i: Report["integrity"]) =>
+  i === "integrity_failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
+    : i === "unknown" ? <Badge>{S.history.integrityUnknown}</Badge>
+    : <Badge status="success">{S.history.integrityOk}</Badge>;
 
 type View = { slug: string; state: "busy" } | { slug: string; state: "done"; report: Report } | { slug: string; state: "error"; text: string }
   | { slug: string; state: "verified"; ok: boolean; restore: string | null };
@@ -56,24 +66,28 @@ export function History() {
   useEffect(load, [load]);
   useEffect(() => onChanged(load), [load]);
 
-  const showReport = async (c: Campaign) => {
+  // Only the newest report or verify request may set the view: a slow reply for an earlier click is dropped.
+  const req = useRef(0);
+  const run = async (c: Campaign, act: () => Promise<View>) => {
+    const mine = ++req.current;
     setView({ slug: c.slug, state: "busy" });
+    let next: View;
     try {
-      setView({ slug: c.slug, state: "done", report: await api.readReport(c.slug) });
+      next = await act();
     } catch (e) {
-      setView({ slug: c.slug, state: "error", text: errorText(e) });
+      next = { slug: c.slug, state: "error", text: errorText(e) };
     }
+    if (mine !== req.current) return;
+    setView(next);
+    // The core settles the campaign's shared integrity verdict from this very check, so reload the table: the row
+    // badge then shows the same verdict as the report or verify result, not an older one.
+    load();
   };
-  const verifyNow = async (c: Campaign) => {
-    setView({ slug: c.slug, state: "busy" });
-    try {
-      const v = await api.verifyCampaign(c.slug);
-      setView({ slug: c.slug, state: "verified", ok: v.ok, restore: v.restore ?? null });
-      load();
-    } catch (e) {
-      setView({ slug: c.slug, state: "error", text: errorText(e) });
-    }
-  };
+  const showReport = (c: Campaign) => run(c, async () => ({ slug: c.slug, state: "done", report: await api.readReport(c.slug) }));
+  const verifyNow = (c: Campaign) => run(c, async () => {
+    const v = await api.verifyCampaign(c.slug);
+    return { slug: c.slug, state: "verified", ok: v.ok, restore: v.restore ?? null };
+  });
 
   const search = async () => {
     setShown(true);
@@ -103,6 +117,7 @@ export function History() {
             {view.state === "verified" && (view.ok
               ? <Text variant="body-sm">{S.history.verifyOk}</Text>
               : <div role="alert"><Text variant="body-sm">{view.restore ? S.history.verifyFailed : S.history.verifyFailedNoCheckpoint}</Text>{view.restore && <pre className="v-home__report">{view.restore}</pre>}</div>)}
+            {view.state === "done" && reportBadge(view.report.integrity)}
             {view.state === "done" && (view.report.integrity === "ok" && view.report.text != null
               ? <section aria-label={S.history.reportTitle(view.slug)}><pre className="v-home__report">{escapeControls(view.report.text)}</pre></section>
               : <div role="status"><Text variant="body-sm">{REPORT_MESSAGE[view.report.integrity] ?? S.history.reportUnknown}</Text></div>)}
