@@ -59,9 +59,19 @@ export type AskStarted = { ask_id: string; state: string; stream: string; lead_s
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
-  id: string; kind: "task"; campaign: string; origin: "app" | "terminal"; status: string; created: string; age_s: number;
-  title: string; body: string; context: string[]; actions: string[];
-  /** What `created` and `age_s` measure: when the app first saw the task waiting (tasks.json has no per-task time). */
+  id: string; kind: "task" | "plan" | "question"; campaign: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
+  title: string; body: string; context?: string[]; actions: string[];
+  /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
+  source?: string;
+  /** B2 plan items: what `approve_plan` must be given back, the hash of exactly what was shown. */
+  plan_sha256?: string; action?: string;
+  /** The deploy plan as the workflow wrote it (`S.DeployPlan`), unabridged; unsafe characters appear as visible `\u{..}` escapes. */
+  plan?: { target: string; commands: string[]; rollback: string[]; health_checks: string[]; risk: "low" | "medium" | "high" } | null;
+  /** The whole pending_approval entry, unabridged: what `plan_sha256` covers. */
+  entry?: Record<string, unknown>;
+  /** Set when the entry cannot be approved (only `reject` is offered). */
+  invalid?: string | null;
+  /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
@@ -95,6 +105,10 @@ export const api = {
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
+  /** Approve plan `id` as shown: starts the approved action as a new turn. Refused (`plan_changed`) if the plan changed since `inbox` showed it. */
+  approvePlan: (id: string, planSha256: string) => call<{ action_id: string; state: string; via: string }>("approve_plan", { id, planSha256 }),
+  /** Reject plan `id` with a reason (1 to 500 characters). */
+  rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
 };
 

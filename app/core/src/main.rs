@@ -38,6 +38,16 @@ fn inbox(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
+    app.approve_plan(&id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
+    app.reject_plan(&id, &reason)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -282,6 +292,8 @@ fn main() {
             cancel_ask,
             lead_status,
             inbox,
+            approve_plan,
+            reject_plan,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {

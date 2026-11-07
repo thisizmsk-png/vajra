@@ -11,15 +11,20 @@
 //! that blocked while the app was closed shows the time the app first looked); each item says
 //! `since: "first seen by the app"` so the UI never presents it as the engine's time.
 //!
-//! `plan` and `question` items need the workflow's final result, whose location is still open (the `Workflow`
-//! tool_result in the run transcript is only the launch acknowledgement), so they are not listed here.
+//! Core B2 adds `plan` and `question` items from the workflow's own result file (`wfresult.rs`, ADR-14). That file is
+//! unsigned and worker-writable, so those items say where they came from, and every plan carries `plan_sha256`, the
+//! hash of exactly what was shown: `approve_plan` refuses unless the file still hashes to it.
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
-use super::{App, Res, fail, runindex};
+use std::path::PathBuf;
+
+use super::{App, Res, fail, lock, project_slug, runindex, wfresult};
 use crate::control::lead::sanitise;
+use crate::control::sha256;
 use crate::crew::redact::Redactor;
 
 const TITLE_MAX: usize = 200;
@@ -39,7 +44,59 @@ fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Shown with every item that comes from the workflow result file.
+const FROM_RESULT: &str = "from the workflow result";
+
+/// `plan:<run_id>.<index>` -> (run_id, index).
+pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
+    let (run, idx) = id.strip_prefix("plan:")?.split_once('.')?;
+    let index = idx.parse::<usize>().ok().filter(|i| *i <= crate::sessions::ApprovedPlanTurn::MAX_INDEX && idx == i.to_string())?;
+    crate::ids::valid_run_id(run).then_some((run, index))
+}
+
+/// The bytes that are shown and hashed for one plan item.
+pub(super) fn plan_sha(shown: &Value) -> String {
+    sha256::hex_digest(&serde_json::to_vec(shown).unwrap_or_default())
+}
+
 impl App {
+    /// The runs whose plans the app will show or act on, one per campaign: the campaign's newest app-launched run in
+    /// its newest session, narrowed to the newest run that STARTED A WORKFLOW (a resume with `vajra-deliver`). The
+    /// approval-only resume (ADR-14) starts no workflow, so it keeps naming the workflow that produced the plan; a
+    /// resume that runs a new workflow gets its own id, so its plans are new items even when their text repeats an
+    /// earlier, already decided one. `runs.jsonl` is worker-writable, so an index line counts only if its directory,
+    /// session id and campaign all equal what the app recorded under its guarded control dir at launch.
+    pub(super) fn plan_origins(&self) -> HashMap<String, runindex::Entry> {
+        let trusted = |e: &runindex::Entry| {
+            crate::ids::valid_session_id(&e.session_id)
+                && crate::ids::valid_run_id(&e.run_id)
+                && self.read_run_record(&e.run_id).map(|(cwd, sid, camp, wf)| (cwd == e.cwd && sid == e.session_id && camp == e.campaign, wf)).is_some_and(|(same, _)| same)
+        };
+        let workflow = |e: &runindex::Entry| self.read_run_record(&e.run_id).is_some_and(|r| r.3);
+        let all: Vec<runindex::Entry> = runindex::entries(&self.data.join("runs.jsonl")).into_iter().filter(|e| trusted(e)).collect();
+        let mut latest: HashMap<String, &runindex::Entry> = HashMap::new();
+        for e in &all {
+            latest.insert(e.campaign.clone(), e);
+        }
+        latest
+            .into_iter()
+            .filter_map(|(camp, l)| {
+                let wf = all.iter().filter(|e| e.campaign == camp && e.session_id == l.session_id && workflow(e)).max_by(|a, b| a.run_id.cmp(&b.run_id))?;
+                Some((camp, wf.clone()))
+            })
+            .collect()
+    }
+
+    /// The `workflows/` directory of a run's session (the run is one `plan_origins` returned).
+    fn workflows_dir(&self, e: &runindex::Entry) -> PathBuf {
+        self.claude.join("projects").join(project_slug(&e.cwd)).join(&e.session_id).join("workflows")
+    }
+
+    /// What the newest `vajra-deliver` result of this app run asks of the human.
+    pub(super) fn waiting(&self, e: &runindex::Entry) -> Option<wfresult::Waiting> {
+        wfresult::waiting_for(&self.allow().ok()?, &self.workflows_dir(e), &e.campaign, self.read_run_started(&e.run_id)?).ok().flatten()
+    }
+
     /// Everything waiting on the human, oldest first, at most 200 items with the true count.
     pub fn inbox(&self) -> Res {
         self.inbox_at(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
@@ -89,6 +146,46 @@ impl App {
             }
             Ok(())
         })?;
+        for (slug, e) in &self.plan_origins() {
+            let Some(w) = self.waiting(e) else { continue };
+            // Same rule as tasks: the time is when the app first saw this exact item waiting (the result file's own
+            // mtime is worker-writable and says nothing about when it started waiting).
+            let mut base = |id: &str, kind: &str, key: String| {
+                let first = *seen.entry(key.clone()).or_insert(now);
+                waiting.insert(key);
+                let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
+                (first, json!({"id": id, "kind": kind, "campaign": slug, "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
+            };
+            if let Some(q) = &w.question {
+                let id = format!("question:{}", e.run_id);
+                let (first, mut v) = base(&id, "question", format!("{id}@{}", plan_sha(&json!(q))));
+                v["title"] = json!("The run needs an answer");
+                v["body"] = json!(q);
+                v["actions"] = json!(["open"]);
+                items.push((first, id, v));
+            }
+            for p in &w.plans {
+                let id = format!("plan:{}.{}", e.run_id, p.index);
+                let sha = plan_sha(&p.raw);
+                // Decided plans are not offered again (the same entry; a different entry at this index is new); a ledger
+                // that cannot be read fails closed (the plan is hidden).
+                if !matches!(lock(&self.control).decided(&id, &sha), Ok(None)) {
+                    continue;
+                }
+                lock(&self.shown).insert(id.clone(), sha.clone());
+                let (first, mut v) = base(&id, "plan", format!("{id}@{sha}"));
+                v["title"] = json!(format!("Approve: {}", p.action.replace('_', " ")));
+                v["body"] = p.shown.get("why").cloned().unwrap_or(Value::Null);
+                // The whole entry, as written (unsafe characters made visible), in the order the workflow wrote it.
+                v["entry"] = p.shown.clone();
+                v["plan"] = p.shown.get("plan").cloned().unwrap_or(Value::Null);
+                v["action"] = json!(p.shown.get("action").cloned().unwrap_or(Value::Null));
+                v["plan_sha256"] = json!(sha);
+                v["invalid"] = json!(p.invalid);
+                v["actions"] = if p.invalid.is_some() { json!(["reject"]) } else { json!(["approve", "reject"]) };
+                items.push((first, id, v));
+            }
+        }
         seen.retain(|k, _| waiting.contains(k));
         if seen != before {
             let saved = crate::control::fsx::private_dir(&self.data).and_then(|()| crate::control::fsx::write_atomic(&self.data, SEEN_FILE, &serde_json::to_vec(&seen).unwrap_or_default()));

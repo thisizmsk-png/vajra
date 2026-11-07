@@ -140,6 +140,10 @@ pub struct App {
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
     lead: lead::LeadState,
+    /// Plan id -> the `plan_sha256` the last `inbox` call showed for it. `approve_plan` needs it to match.
+    shown: Mutex<HashMap<String, String>>,
+    /// Plan ids being decided right now: one decision per plan at a time.
+    deciding: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
 }
 
@@ -158,6 +162,8 @@ impl App {
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
+            shown: Mutex::new(HashMap::new()),
+            deciding: Mutex::new(Default::default()),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verdicts: Mutex::new(Verdicts::default()),
@@ -328,6 +334,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+    }
+
+    /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
+    /// is not a workflow identity, so plan ids keep naming the run of the workflow that produced the plan.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn launch_kind(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+        workflow: bool,
+    ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
         let nonce = {
@@ -364,7 +386,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run_cwd(run_id, cwd).is_err() {
+        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
@@ -999,6 +1021,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod inbox;
+mod wfresult;
+mod decide;
 mod lead;
 mod runindex;
 
