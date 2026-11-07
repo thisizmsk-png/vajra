@@ -690,7 +690,7 @@ impl Bus {
     /// `between` runs after the bounds were captured and before the spill is read (tests force an eviction there).
     pub(crate) fn window_with(&self, stream: &str, from: Option<u64>, max_lines: usize, max_bytes: usize, between: &dyn Fn()) -> io::Result<Window> {
         let max_lines = max_lines.max(1);
-        let (head, first, ring_front, ring, base, start): (u64, u64, u64, Vec<Line>, u64, Option<u64>) = {
+        let (head, first, ring_front, ring, start): (u64, u64, u64, Vec<Line>, Option<u64>) = {
             let inner = lock(&self.inner);
             let Some(s) = inner.streams.get(stream) else {
                 return Ok(Window { at_start: true, at_end: true, ..Window::default() });
@@ -707,7 +707,7 @@ impl Bus {
             };
             let ring = s.ring.iter().filter(|l| l.seq >= want).take(max_lines).cloned().collect();
             let start = (want < ring_front && s.spill_len > 0).then(|| s.spill_index.iter().rev().find(|(q, _)| *q <= want).map_or(s.spill_base, |(_, o)| *o));
-            (head, first, ring_front, ring, s.spill_base, start)
+            (head, first, ring_front, ring, start)
         };
         let want = match from {
             Some(f) => f.max(first),
@@ -717,14 +717,17 @@ impl Bus {
         between();
         let mut lines: Vec<Line> = Vec::new();
         let mut held = 0usize;
+        let mut budget_stop = false;
         if let Some(mut offset) = start {
             'spill: loop {
                 let page = self.read_spill(stream, offset, 64 * 1024)?;
-                if page.gap && offset != base {
-                    // The spill was evicted while we read: the ring lines captured for this request are real, so
-                    // return them and say `gap` so the reader retries.
+                if page.gap {
+                    // The spill was evicted while we read (including the part at the captured base): the ring lines
+                    // captured for this request are real, so return them, cut to the same bounds a normal answer
+                    // obeys, and say `gap` so the reader retries from the new bounds.
                     let mut out = ring;
                     out.truncate(max_lines);
+                    let out = fit_bytes(out, from.is_some(), max_bytes);
                     return Ok(Window { head_seq: head, first_seq: ring_front, at_start: false, at_end: out.last().is_none_or(|l| l.seq >= head), lines: out, gap: true });
                 }
                 for l in page.lines {
@@ -736,6 +739,9 @@ impl Bus {
                     }
                     // `from` reads forward: stop at the budget. A newest window trims the front after the ring joins.
                     if from.is_some() && !lines.is_empty() && held + l.text.len() > max_bytes {
+                        // The budget ends the whole window: the ring must not be joined after a cut, or rows far
+                        // from the spill's last row would follow it and read as a data-loss gap.
+                        budget_stop = true;
                         break 'spill;
                     }
                     held += l.text.len();
@@ -749,7 +755,7 @@ impl Bus {
         }
         let last = lines.last().map(|l| l.seq);
         for l in ring {
-            if lines.len() >= max_lines {
+            if budget_stop || lines.len() >= max_lines {
                 break;
             }
             if last.is_some_and(|q| l.seq <= q) {
@@ -894,4 +900,20 @@ impl Subscriber {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Cut `lines` to about `max_bytes` of text, keeping at least one: from the front when the window reads forward from a
+/// seq (the newest are left out), from the back otherwise (the oldest are left out).
+fn fit_bytes(mut lines: Vec<Line>, forward: bool, max_bytes: usize) -> Vec<Line> {
+    let mut held: usize = lines.iter().map(|l| l.text.len()).sum();
+    if forward {
+        while held > max_bytes && lines.len() > 1 {
+            held -= lines.pop().map_or(0, |l| l.text.len());
+        }
+    } else {
+        while held > max_bytes && lines.len() > 1 {
+            held -= lines.remove(0).text.len();
+        }
+    }
+    lines
 }

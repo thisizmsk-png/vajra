@@ -675,3 +675,62 @@ fn bus_window_memory_is_bounded_by_the_request_not_the_stream() {
     assert!(w.lines.iter().map(|l| l.text.len()).sum::<usize>() < 64 * 1024 + 200);
     assert_eq!(w.head_seq, 100_000);
 }
+
+// ---- review of #48: budget stop, eviction at the spill base, byte budget on the eviction fallback --------------------
+
+#[test]
+fn bus_window_stops_at_the_byte_budget_without_joining_distant_ring_rows() {
+    let tmp = TmpDir::new("winbudgetstop");
+    // Big rows reach the spill; the ring then holds only short rows, smaller than the big row the budget rejects.
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for _ in 0..30 {
+        bus.push("s", &"B".repeat(100)).unwrap();
+    }
+    for i in 0..400 {
+        bus.push("s", &format!("s{i}")).unwrap();
+    }
+    let w = bus.window("s", Some(1), 200, 150).unwrap();
+    assert_eq!(seqs(&w), vec![1], "the first row fits, the second would pass the budget: the window ends there");
+    assert!(!w.gap, "no false data-loss gap from joining far-away ring rows");
+    assert!(!w.at_end);
+}
+
+fn evicting_bus(tmp: &TmpDir) -> Bus {
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    bus
+}
+
+fn burst(bus: &Bus) {
+    for i in 0..400 {
+        bus.push("other", &format!("other line {i:04}")).unwrap();
+    }
+}
+
+#[test]
+fn bus_window_reports_an_eviction_that_hits_a_request_at_the_spill_base() {
+    let tmp = TmpDir::new("winevictbase");
+    let bus = evicting_bus(&tmp);
+    let w = bus.window_with("old", Some(1), 60, usize::MAX, &|| burst(&bus)).unwrap();
+    assert!(w.gap, "the requested rows were evicted mid-read: the reader must see it");
+    assert!(seqs(&w).windows(2).all(|p| p[1] == p[0] + 1));
+    assert!(w.lines.first().is_none_or(|l| l.seq >= w.first_seq), "first_seq is not stale: {:?} first {}", seqs(&w), w.first_seq);
+}
+
+#[test]
+fn bus_window_eviction_fallback_obeys_the_byte_budget() {
+    // Explicit from: the first captured ring row only. Newest: the last captured ring row only.
+    let tmp = TmpDir::new("winevictbytes");
+    let bus = evicting_bus(&tmp);
+    let w = bus.window_with("old", Some(200), 60, 1, &|| burst(&bus)).unwrap();
+    assert!(w.gap);
+    assert_eq!(w.lines.len(), 1, "{:?}", seqs(&w));
+    let tmp2 = TmpDir::new("winevictbytes2");
+    let bus2 = evicting_bus(&tmp2);
+    let n = bus2.window_with("old", None, 300, 1, &|| burst(&bus2)).unwrap();
+    assert!(n.gap);
+    assert_eq!(n.lines.len(), 1, "{:?}", seqs(&n));
+    assert_eq!(n.lines[0].seq, n.head_seq, "the newest row is the one kept");
+}
