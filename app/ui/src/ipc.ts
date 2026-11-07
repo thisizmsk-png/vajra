@@ -60,7 +60,7 @@ export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start:
 export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
-export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "stale";
+export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "checking" | "stale";
 export type EvidenceRow = {
   task: string; title: string | null; owner: string | null; criterion: string; status: EvidenceStatus;
   head: string | null; path: string | null; commands: number | null; report: string | null;
@@ -105,7 +105,7 @@ export const api = {
   /** A worker's crew worktree path, branch and diff base; refused for any directory outside the crew worktrees. */
   worktreeInfo: (worker: string) => call<WorktreeInfo>("worktree_info", { worker }),
   /** Every acceptance criterion of a campaign with its proof status (bounded checks on the core side). */
-  evidenceList: (slug: string) => call<{ slug: string; stale: boolean; rows: EvidenceRow[] }>("evidence_list", { slug }),
+  evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),

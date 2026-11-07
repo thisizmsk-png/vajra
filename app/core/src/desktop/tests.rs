@@ -1282,7 +1282,7 @@ fn evidence_checks_are_bounded_and_a_slow_one_is_unverified_not_a_hang() {
 }
 
 #[test]
-fn evidence_list_has_a_total_budget_so_many_slow_checks_cannot_hold_the_request() {
+fn evidence_list_has_a_total_budget_and_unchecked_tasks_read_checking() {
     let t = Tmp::new();
     let d = std::path::PathBuf::from("/x");
     let tasks: Vec<Value> = (0..40).map(|i| ev_task(&d, &format!("s{i}"), "done", &["ac"], "slow")).collect();
@@ -1293,8 +1293,34 @@ fn evidence_list_has_a_total_budget_so_many_slow_checks_cannot_hold_the_request(
     let r = app.evidence_list(&slug).unwrap();
     // Unbounded this is 10 batches x 400 ms = 4 s.
     assert!(start.elapsed() < Duration::from_millis(2500), "{:?}", start.elapsed());
-    assert_eq!(r["truncated"], true, "{r}");
-    assert_eq!(row(&r, "s39", "ac")["status"], "unverified");
+    assert_eq!(row(&r, "s39", "ac")["status"], "checking", "{r}");
+    assert!(r["pending"].as_u64().unwrap() > 0, "{r}");
+    assert_eq!(row(&r, "s0", "ac")["status"], "unverified", "a check that timed out is unverified, not checking");
+}
+
+#[test]
+fn a_second_call_during_a_sweep_runs_no_checks_and_unchanged_evidence_is_not_rechecked() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let tasks: Vec<Value> = (0..3).map(|i| ev_task(&d, &format!("g{i}"), "done", &["ac"], "green")).collect();
+    let (app, slug) = campaign_with_tasks(&t, tasks);
+    // A sweep of this campaign is "running": a call (another change event) must not start a parallel one.
+    app.sweeping.lock().unwrap().insert(slug.clone());
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "checking", "{r}");
+    assert!(start.elapsed() < Duration::from_millis(300));
+    app.sweeping.lock().unwrap().remove(&slug);
+    // The verdict cache keys on the evidence file's mtime and size, so the file has to exist.
+    let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
+    fs::write(ev_dir.join("green.json"), b"{}").unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "pass", "{r}");
+    // Verdicts are cached: while another sweep holds the campaign, the same tasks still answer `pass`.
+    app.sweeping.lock().unwrap().insert(slug.clone());
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "g0", "ac")["status"], "pass", "{r}");
+    assert_eq!(r["pending"], 0);
 }
 
 #[test]

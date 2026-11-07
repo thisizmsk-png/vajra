@@ -42,8 +42,11 @@ const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
 const EVIDENCE_WORKERS: usize = 4;
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole of one `evidence_list` call (every batch together) may take this long. A campaign can hold 500 tasks, so
-/// without it a slow check per task would occupy the request for many minutes; checks not started by then read `unverified`.
-const EVIDENCE_BUDGET: Duration = Duration::from_secs(30);
+/// without it a slow check per task would occupy the request for many minutes; checks not started by then read `checking`
+/// and the next call (the UI re-asks while any row is `checking`) continues from the cached verdicts.
+const EVIDENCE_BUDGET: Duration = Duration::from_secs(5);
+/// Verdicts kept for unchanged evidence (cleared when it grows past this).
+const EVIDENCE_CACHE_MAX: usize = 4096;
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -157,6 +160,10 @@ pub struct App {
     evidence_timeout: Duration,
     /// Total time one `evidence_list` call may spend running checks.
     evidence_budget: Duration,
+    /// Verdicts of finished checks, keyed on the evidence file's path, head, mtime and size: unchanged evidence is not re-run.
+    evidence_cache: Mutex<HashMap<(PathBuf, Option<String>, Option<(std::time::SystemTime, u64)>), bool>>,
+    /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
+    sweeping: Mutex<std::collections::HashSet<String>>,
 }
 
 impl App {
@@ -193,6 +200,8 @@ impl App {
             runs: Mutex::new(HashMap::new()),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
+            evidence_cache: Mutex::new(HashMap::new()),
+            sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
             issued: Mutex::new(Default::default()),
@@ -666,7 +675,8 @@ impl App {
 
     /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
     /// `pass` = the task's signed evidence checks green; `unverified` = evidence exists but its check is red, unreadable,
-    /// timed out or cannot be located (never counted as pass); `fail` = the task failed; `not_run` = no evidence yet
+    /// timed out or cannot be located (never counted as pass); `checking` = its check has not run yet (over the call's time
+    /// budget, or another sweep is running); `fail` = the task failed; `not_run` = no evidence yet
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The command text and exit codes live in the evidence file and are not read here (only the count of commands).
     pub fn evidence_list(&self, slug: &str) -> Res {
@@ -677,39 +687,80 @@ impl App {
         let Some(tasks) = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array) else {
             return Err(fail("not_found", "no tasks for this campaign"));
         };
-        let jobs: Vec<(usize, Request)> = tasks
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| self.evidence_request(slug, t).map(|r| (i, r)))
-            .collect();
+        let key = |t: &Value| {
+            let ev = t.get("evidence")?;
+            let path = PathBuf::from(ev.get("path")?.as_str()?);
+            let head = ev.get("head").and_then(Value::as_str).map(String::from);
+            let m = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+            Some((path, head, m))
+        };
         let mut verdict: HashMap<usize, bool> = HashMap::new();
+        let mut jobs: Vec<(usize, Request, Option<(PathBuf, Option<String>, Option<(std::time::SystemTime, u64)>)>)> = Vec::new();
+        {
+            let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            for (i, t) in tasks.iter().enumerate() {
+                let Some(req) = self.evidence_request(slug, t) else {
+                    // Evidence that cannot be checked here (outside the campaign, `..` path, no repo) is unverified, not pending.
+                    if t.get("evidence").is_some_and(|e| !e.is_null()) { verdict.insert(i, false); }
+                    continue;
+                };
+                let k = key(t).filter(|k| k.2.is_some());
+                match k.as_ref().and_then(|k| cache.get(k)) {
+                    Some(v) => { verdict.insert(i, *v); }
+                    None => jobs.push((i, req, k)),
+                }
+            }
+        }
+        // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
+        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                if self.2 { self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.1); }
+            }
+        }
+        let _release = Release(&self.sweeping, slug.to_string(), claimed);
         let deadline = std::time::Instant::now() + self.evidence_budget;
-        let mut truncated = false;
         for batch in jobs.chunks(EVIDENCE_WORKERS) {
-            // Out of budget: the checks not yet started stay unverified (never pass), and the reply says so.
+            if !claimed {
+                break;
+            }
+            // Out of budget: the checks not yet started read `checking` (never pass).
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                truncated = true;
                 break;
             }
             let mut bridge = self.bridge.clone();
             bridge.timeout = self.evidence_timeout.min(left);
-            let got: Vec<(usize, bool)> = std::thread::scope(|sc| {
+            let got: Vec<(usize, Option<bool>)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = batch
                     .iter()
-                    .map(|(i, req)| {
+                    .map(|(i, req, _)| {
                         let b = &bridge;
                         sc.spawn(move || {
-                            let green = b.run(req).ok().filter(|o| o.code == Some(0)).and_then(|o| serde_json::from_str::<Value>(o.stdout.trim()).ok())
-                                .is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true));
-                            (*i, green)
+                            // `None`: the check could not finish (timed out or could not start): unverified, and not cached.
+                            let done = b.run(req).ok().map(|o| {
+                                o.code == Some(0)
+                                    && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true))
+                            });
+                            (*i, done)
                         })
                     })
                     .collect();
                 hs.into_iter().filter_map(|h| h.join().ok()).collect()
             });
-            verdict.extend(got);
+            let mut cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() > EVIDENCE_CACHE_MAX {
+                cache.clear();
+            }
+            for (i, done) in got {
+                verdict.insert(i, done == Some(true));
+                if let (Some(v), Some(k)) = (done, jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone())) {
+                    cache.insert(k, v);
+                }
+            }
         }
+        let mut pending = 0usize;
         let mut rows = Vec::new();
         for (i, t) in tasks.iter().enumerate() {
             let id = t.get("id").and_then(Value::as_str).unwrap_or("");
@@ -719,7 +770,11 @@ impl App {
             let status = if task_status == "failed" {
                 "fail"
             } else if has_evidence {
-                if verdict.get(&i).copied().unwrap_or(false) { "pass" } else { "unverified" }
+                match verdict.get(&i) {
+                    Some(true) => "pass",
+                    Some(false) => "unverified",
+                    None => { pending += 1; "checking" }
+                }
             } else {
                 "not_run"
             };
@@ -740,7 +795,7 @@ impl App {
                 }));
             }
         }
-        Ok(json!({"slug": slug, "stale": snap.stale, "truncated": truncated, "rows": rows}))
+        Ok(json!({"slug": slug, "stale": snap.stale, "pending": pending, "rows": rows}))
     }
 
     /// An archived bundle (under the campaign's evidence dir) is checked

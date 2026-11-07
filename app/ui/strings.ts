@@ -108,7 +108,7 @@ export const S = {
     failed: "Could not read the evidence.",
     allPass: "All criteria pass",
     summary: (n: number, m: number) => `${n} of ${m} criteria pass`,
-    status: { pass: "Pass", fail: "Fail", not_run: "Not run", unverified: "Unverified evidence", stale: "Stale" },
+    status: { pass: "Pass", fail: "Fail", not_run: "Not run", unverified: "Unverified evidence", checking: "Checking", stale: "Stale" },
     detail: "Criterion details",
     criterion: "Criterion", taskCol: "Task", statusCol: "Status", evidenceCol: "Evidence",
     commit: "Commit", evidenceFile: "Evidence file", commands: "Commands", report: "Last report",

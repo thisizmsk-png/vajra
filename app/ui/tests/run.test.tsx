@@ -27,6 +27,21 @@ const open = async (rows: unknown[]) => {
 const order = () => screen.getAllByRole("listitem").map((e) => e.textContent ?? "");
 
 describe("Run view, Evidence (S4a, POS-1.1, US-4.3)", () => {
+  it("shows unchecked criteria as Checking and asks again until the core has checked them all", async () => {
+    let n = 0;
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({
+      evidence_list: () => (n++ === 0
+        ? { slug: "camp", stale: false, pending: 1, rows: [row("t1", "ac-1", "checking")] }
+        : { slug: "camp", stale: false, pending: 0, rows: [row("t1", "ac-1", "pass")] }),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await screen.findByText(S.run.status.checking);
+    await waitFor(() => expect(screen.getAllByRole("listitem")[0].textContent).toContain(S.run.status.pass), { timeout: 4000 });
+    expect(f.calls.filter((c) => c.cmd === "evidence_list")).toHaveLength(2);
+  });
+
   it("is the run's default view and asks the core for the campaign's criteria", async () => {
     const f = await open([row("t1", "ac-1", "pass")]);
     expect(f.calls.find((c) => c.cmd === "evidence_list")?.args).toEqual({ slug: "camp" });

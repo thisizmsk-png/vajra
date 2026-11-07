@@ -6,8 +6,8 @@ import { api, errorText, onChanged } from "../../ipc";
 import type { EvidenceRow } from "../../ipc";
 import { useRoute } from "../../router";
 
-const ORDER: Record<string, number> = { fail: 0, unverified: 1, not_run: 2, stale: 3, pass: 4 };
-const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", not_run: undefined, stale: "warning" };
+const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
+const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
 const ROW_H = 36;
 const LIST_H = 360;
 
@@ -19,14 +19,21 @@ export function Run() {
   const slug = route.params.slug ?? "";
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
+  /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
+  const [pending, setPending] = useState(0);
   const [sel, setSel] = useState<number | null>(null);
 
   const load = useCallback(() => {
     if (!slug) return;
-    api.evidenceList(slug).then((r) => { setRows(r.rows); setErr(""); }, (e) => setErr(errorText(e)));
+    api.evidenceList(slug).then((r) => { setRows(r.rows); setPending(r.pending ?? 0); setErr(""); }, (e) => setErr(errorText(e)));
   }, [slug]);
   useEffect(load, [load]);
   useEffect(() => (slug ? onChanged(load) : undefined), [slug, load]);
+  useEffect(() => {
+    if (!pending) return;
+    const t = setTimeout(load, 1500);
+    return () => clearTimeout(t);
+  }, [pending, rows, load]);
 
   // Failing first; ties keep the campaign's own order.
   const sorted = useMemo(
