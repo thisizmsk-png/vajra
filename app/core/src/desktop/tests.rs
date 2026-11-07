@@ -2510,6 +2510,20 @@ fn report_unknown_says_oversize_when_only_stderr_hits_the_cap() {
 }
 
 #[test]
+fn evidence_cut_output_that_still_parses_as_green_is_oversize_not_a_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let py = t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py");
+    fs::write(&py, "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('{\"green\": true}')\nsys.stderr.write('x' * 2200000)\nsys.exit(0)\n").unwrap();
+    fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "oversize", "{r}");
+}
+
+#[test]
 fn evidence_says_oversize_when_the_check_output_hits_the_cap() {
     use std::os::unix::fs::PermissionsExt;
     let t = Tmp::new();

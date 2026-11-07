@@ -1574,6 +1574,10 @@ fn output_failure(o: &Output, home: &Path) -> Value {
 
 /// What `check-evidence` said: green, refused (its `reasons[0]`), or did not answer.
 fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
+    // A cut response cannot give a verdict, even if what was kept happens to parse.
+    if o.truncated {
+        return Outcome::Verdict(false, Some(output_failure(o, home)));
+    }
     let parsed = serde_json::from_str::<Value>(o.stdout.trim()).ok();
     match (o.code, parsed) {
         (Some(0), Some(v)) if v.get("green").and_then(Value::as_bool) == Some(true) => Outcome::Verdict(true, None),
