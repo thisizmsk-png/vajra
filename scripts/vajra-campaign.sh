@@ -366,22 +366,28 @@ cmd_verify() {
   if verify_state "$DIR"; then echo "$SLUG: signature ok"; else echo "$SLUG: signature INVALID" >&2; exit 3; fi
 }
 
-# verify --print-report: check the signature and print report.md from ONE private snapshot, so the bytes printed are
-# the bytes the signed hash covers (a process that swaps report.md after the check cannot change the output).
+# verify --print-report: check the signature and print report.md, taken from one private snapshot.
+# report.md is read ONCE into a variable before the check; the text printed is that variable, and its sha256 must equal
+# the reportSha256 recorded in the snapshot's campaign.json, so what is printed is exactly what the recorded hash covers
+# (a file swapped in the snapshot afterwards cannot change the output; a NUL byte, which a shell variable cannot hold,
+# makes the hash differ and fails closed). The recorded hash itself is the one verify_state checked in the snapshot;
+# rewriting campaign.json and state.sig as well would need the HMAC key.
 # Exit 0 = verified, report on stdout; 3 = signature or report hash invalid; 4 = no report recorded in the signed state
 # (a report.md on disk without a recorded hash is unsigned and is never printed).
 verify_print_report() {
-  local f snap
+  local f snap rpt="" want
   snap="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/vajra-verify.XXXXXX")" || die "cannot create a temp dir"
   SNAP="$snap"   # global: the EXIT trap runs after this function's locals are gone
   trap 'rm -rf "${SNAP:-}"' EXIT
   for f in "$DIR"/*; do
     [ -f "$f" ] && [ ! -L "$f" ] && cp "$f" "$snap/" 2>/dev/null
   done
+  if [ -f "$snap/report.md" ]; then rpt="$(cat "$snap/report.md"; printf x)"; rpt="${rpt%x}"; fi
   if ! verify_state "$snap"; then echo "$SLUG: signature INVALID" >&2; exit 3; fi
-  [ -n "$(jq -r '.reportSha256 // ""' "$snap/campaign.json")" ] && [ -f "$snap/report.md" ] \
-    || { echo "$SLUG: no signed report" >&2; exit 4; }
-  cat "$snap/report.md"
+  want="$(jq -r '.reportSha256 // ""' "$snap/campaign.json")"
+  { [ -n "$want" ] && [ -f "$snap/report.md" ]; } || { echo "$SLUG: no signed report" >&2; exit 4; }
+  [ "$(sha256_str "$rpt")" = "$want" ] || { echo "$SLUG: signature INVALID" >&2; exit 3; }
+  printf '%s' "$rpt"
 }
 
 cmd_close() {

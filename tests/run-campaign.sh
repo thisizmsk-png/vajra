@@ -180,6 +180,31 @@ cp "$WORK/cj" "$PD/campaign.json"
 C verify rp --bogus >/dev/null 2>&1; [ $? -ne 0 ]; check "verify refuses an unknown option" $?
 [ -z "$(ls -A "${TMPDIR:-/tmp}" 2>/dev/null | grep '^vajra-verify\.')" ]; check "the private snapshot is removed" $?
 
+# printed bytes are exactly the hashed bytes: trailing newlines kept, a NUL byte fails closed, a swap cannot be printed
+save_report() { # slug text-via-printf-format
+  local slug="$1" fmt="$2" b n
+  C create "$slug" --feature "ac-1|x" >/dev/null 2>&1
+  b="$(printf "$fmt" | openssl base64 -A)"; n="$(printf "$fmt" | wc -c | tr -d ' ')"
+  C report --campaign "$slug" --bytes "$n" --check "$(fnv "$b")" --base64 "$b" >/dev/null 2>&1
+}
+save_report rq1 'no trailing newline'; printf 'no trailing newline' > "$WORK/exp1"
+C verify rq1 --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 0 ] && cmp -s "$WORK/out" "$WORK/exp1"; check "print-report keeps a report with no trailing newline exactly" $?
+save_report rq2 'two blank lines\n\n\n'; printf 'two blank lines\n\n\n' > "$WORK/exp2"
+C verify rq2 --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 0 ] && cmp -s "$WORK/out" "$WORK/exp2"; check "print-report keeps trailing blank lines exactly" $?
+save_report rq3 'a\0b'
+C verify rq3 --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 3 ] && [ ! -s "$WORK/out" ]; check "a report with a NUL byte fails closed (exit 3, nothing printed)" $?
+# a same-user swap of the snapshot's report.md right before the report is read must never reach the output
+mkdir -p "$WORK/shim"; REALCAT="$(command -v cat)"
+cat > "$WORK/shim/cat" <<SHIM
+#!/bin/bash
+for a in "\$@"; do case "\$a" in */vajra-verify.*/report.md) printf 'FORGED' > "\$a" ;; esac; done
+exec "$REALCAT" "\$@"
+SHIM
+chmod +x "$WORK/shim/cat"
+PATH="$WORK/shim:$PATH" C verify rq1 --print-report > "$WORK/out" 2>/dev/null; rc=$?
+! grep -q FORGED "$WORK/out"; check "a report.md swapped in the snapshot is never printed (rc=$rc)" $?
+rm -rf "$WORK/shim"
+
 # --- archive-evidence (E7, Q13): the verification bundle + the setup list, once per delivery, signed ---
 # Run from a git repo, as the write-back step does; the evidence must be signed and green for --head,
 # and at least one task of the campaign's graph must have been closed on exactly this evidence.
