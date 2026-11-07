@@ -62,6 +62,8 @@ const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
 /// What `vajra-verify-work.sh` leaves out of the tree id it records (its own walkthrough output: evidence, `cmd-N.log`,
 /// `diff.patch`, `untracked.txt`). Keep in step with `EXCL` there, or the two tree ids stop matching.
 const VERIFY_EXCLUDES: [&str; 1] = ["data/walkthroughs"];
+/// A repo whose state could not be read (git failed or was slow) is not asked again for this long.
+const WORKTREE_STATE_UNKNOWN_TTL: Duration = Duration::from_secs(30);
 const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
 const EVIDENCE_FAILED_TTL: Duration = Duration::from_secs(60);
 /// Evidence files larger than this are always re-checked (their bytes are the cache key).
@@ -201,7 +203,7 @@ pub struct App {
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, (String, Option<String>))>>,
+    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, Option<String>)>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -764,13 +766,6 @@ impl App {
                 }
             }
         }
-        // The state of each run repo the passing checks depend on, read once per call (and reused for 5 s).
-        let mut repos: HashMap<PathBuf, Option<(String, Option<String>)>> = HashMap::new();
-        for r in repo_of.values() {
-            if !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r, deadline));
-            }
-        }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
         let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
         struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
@@ -840,6 +835,15 @@ impl App {
                     Some(std::time::Instant::now() + EVIDENCE_FAILED_TTL)
                 };
                 cache.insert(k, (green, until));
+            }
+        }
+        // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
+        // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
+        // remembered as unknown for 30 s so a slow one is not paid for on every call.
+        let mut repos: HashMap<PathBuf, Option<(String, Option<String>)>> = HashMap::new();
+        for (i, r) in &repo_of {
+            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
+                repos.insert(r.clone(), self.worktree_state(r, deadline));
             }
         }
         let mut pending = 0usize;
@@ -979,28 +983,39 @@ impl App {
     /// against the call's `deadline`.
     fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, Option<String>)> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
-            if at.elapsed() < WORKTREE_STATE_TTL {
-                return Some(st.clone());
+            let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+            if at.elapsed() < ttl {
+                return st.clone();
             }
         }
-        let left = || deadline.saturating_duration_since(std::time::Instant::now());
-        let mut bridge = self.bridge.clone();
-        bridge.timeout = WORKTREE_STATE_TIMEOUT.min(left());
-        if bridge.timeout.is_zero() {
-            return None;
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if budget.is_zero() {
+            return None; // no time to ask: nothing learned, nothing remembered
         }
-        let head = bridge
-            .run(&Request::Git { cwd: repo.to_path_buf(), args: vec!["rev-parse".into(), "HEAD".into()] })
-            .ok()
-            .filter(|o| !o.timed_out && o.code == Some(0))?
-            .stdout
-            .trim()
-            .to_string();
-        bridge.timeout = left();
-        let tree = bridge.tree_id(repo, &VERIFY_EXCLUDES);
-        let st = (head, tree);
-        lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
-        Some(st)
+        let read = || {
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+            if bridge.timeout.is_zero() {
+                return None;
+            }
+            let head = bridge
+                .run(&Request::Git { cwd: repo.to_path_buf(), args: vec!["rev-parse".into(), "HEAD".into()] })
+                .ok()
+                .filter(|o| !o.timed_out && o.code == Some(0))?
+                .stdout
+                .trim()
+                .to_string();
+            // The tree id gets what is left of the call's budget (it is one total timeout inside `tree_id`).
+            bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            let tree = bridge.tree_id(repo, &VERIFY_EXCLUDES);
+            Some((head, tree))
+        };
+        let st = read();
+        // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
+        if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
+            lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+        }
+        st
     }
 
     /// An archived bundle (under the campaign's evidence dir) is checked
