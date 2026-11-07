@@ -112,6 +112,11 @@ impl Bridge {
                 if !path.is_absolute() {
                     return Err(BridgeError::Invalid("evidence path must be absolute".into()));
                 }
+                // An archived bundle is verified against one exact commit: a missing or abbreviated head is refused here, not
+                // learned from the script's exit 2.
+                if archived.is_some() && !head.as_deref().is_some_and(crate::sessions::argv::is_full_sha) {
+                    return Err(BridgeError::Invalid("an archived evidence check needs a full 40-hex head".into()));
+                }
                 let mut argv = vec![
                     script("vajra_tasks.py").to_string_lossy().into_owned(),
                     "check-evidence".into(),
