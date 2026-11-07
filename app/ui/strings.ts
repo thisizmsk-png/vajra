@@ -197,7 +197,7 @@ export const S = {
     panel: "Report",
     closeReport: "Close the report",
     barLabel: "Actions on History",
-    state: { active: "Active", done: "Done", stopped: "Stopped", failed: "Failed" } as Record<string, string>,
+    state: { active: "Active", done: "Done", stopped: "Stopped", failed: "Failed", abandoned: "Abandoned" } as Record<string, string>,
     of: (n: number, m: number) => `${n} of ${m}`,
   },
   settings: {

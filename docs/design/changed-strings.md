@@ -129,7 +129,7 @@ Polish pass (stacked on PR #39).
 
 | String | Where | Note |
 |---|---|---|
-| Active / Done / Stopped / Failed | History status badges | were the raw lower-case states |
+| Active / Done / Stopped / Failed / Abandoned | History status badges | were the raw lower-case states |
 | N/M (with "N of M" for screen readers) | History, Passing | beside a small progress bar |
 | 2 days ago (relative time) | History, Updated | was the stored timestamp; the exact time is the tooltip |
 | Terminal | Home campaign rows | short tag; replaces the visible "Started outside this app. Continue it from your terminal.", which stays as the tooltip and for screen readers |

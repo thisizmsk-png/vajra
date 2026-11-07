@@ -12,9 +12,10 @@ export function ago(v: string | undefined, now = Date.now()): string {
   const t = parseWhen(v);
   if (Number.isNaN(t)) return v;
   let d = (t - now) / 1000;
-  const fmt = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const fmt = new Intl.RelativeTimeFormat(undefined, { numeric: "always" });
   for (const [unit, size] of STEPS) {
-    if (Math.abs(d) < size) return fmt.format(Math.round(d), unit);
+    // Whole units that have passed: 6.6 days ago is "6 days ago", never rounded up into the next bucket.
+    if (Math.abs(d) < size) return fmt.format(Math.trunc(d), unit);
     d /= size;
   }
   return v;
