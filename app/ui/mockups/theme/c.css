@@ -36,7 +36,7 @@
   --c-text-secondary: #3d3c37;
   --c-text-muted: #5a5852;
   --c-primary: #121211;
-  --c-text-on-primary: #121211;
+  --c-text-on-primary: #f4f3ef; /* bone on ink; the bolt-yellow buttons use --c-bolt with --c-ink instead */
   --c-success: #2b6b34;
   --c-warning: #954700;
   --c-danger: #b3261e;
