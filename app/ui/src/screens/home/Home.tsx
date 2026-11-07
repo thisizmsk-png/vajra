@@ -128,7 +128,7 @@ export function Home() {
             {camps.state === "error" && <div role="alert"><Text variant="body-sm">{S.home.campaignsFailed} {camps.text}</Text></div>}
             {camps.state === "ok" && camps.data.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
             {camps.state === "ok" && camps.data.length > 0 && (
-              <ul className="v-home__list" aria-label={S.home.campaigns}>
+              <ul className="v-home__campaigns" aria-label={S.home.campaigns}>
                 {camps.data.map((c) => (
                   <li key={c.slug}>
                     <StatusDot status={c.error ? "failed" : campaignStatus(c)} className="v-home__dot" />

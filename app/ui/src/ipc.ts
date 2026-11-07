@@ -47,7 +47,12 @@ export type PreflightRow = { name: string; ok: boolean; detail: string; fix: str
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
+  /** The signature check: ok, failed or unknown (could not run). */
+  integrity?: "ok" | "failed" | "unknown";
 };
+export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_text" | "unknown";
+export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
+export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 export type Line = { seq: number; text: string };
@@ -80,6 +85,10 @@ export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlig
 export const api = {
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
+  /** The signed delivery report, verified on the bytes the core read; `text` only when integrity is "ok". */
+  readReport: (slug: string) => call<Report>("read_report", { slug }),
+  /** Run the signature check now (not the cached badge). */
+  verifyCampaign: (slug: string) => call<Verified>("verify_campaign", { slug }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
