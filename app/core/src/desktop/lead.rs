@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -57,7 +58,8 @@ pub(super) struct LeadState {
     active: Arc<Mutex<HashMap<String, Active>>>,
     /// (settings sha256, claude --version) pairs that passed the startup self-test.
     proven: Mutex<HashSet<(String, String)>>,
-    version: Mutex<Option<(PathBuf, String)>>,
+    /// Set when the app quits: no new ask starts.
+    closing: AtomicBool,
     doctor: Mutex<Option<(Instant, bool)>>,
     limits: Mutex<Limits>,
     /// The app's own executable, for the `--mcp` server entry in `mcp.json`.
@@ -74,7 +76,7 @@ impl LeadState {
             env: Mutex::new(scrubbed_env(|k| std::env::var_os(k))),
             active: Arc::new(Mutex::new(HashMap::new())),
             proven: Mutex::new(HashSet::new()),
-            version: Mutex::new(None),
+            closing: AtomicBool::new(false),
             doctor: Mutex::new(None),
             limits: Mutex::new(Limits::default()),
             exe: std::env::current_exe().unwrap_or_default(),
@@ -213,6 +215,28 @@ impl App {
         }
     }
 
+    /// App quit: refuse new asks, kill every Lead (and self-test) process group, and wait for the driver threads to
+    /// reap them. Without this a Lead would outlive the app with no watchdog, and a restarted app could `--resume`
+    /// the same Lead session while the orphan still writes it.
+    pub fn shutdown_lead(&self) {
+        {
+            // Under the same lock the ask takes, so no ask slips in after this point.
+            let _active = lock(&self.lead.active);
+            self.lead.closing.store(true, Ordering::SeqCst);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let handles: Vec<Arc<Handle>> = lock(&self.lead.active).values().map(|a| a.handle.clone()).collect();
+            if handles.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+            for h in &handles {
+                h.cancel();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Ask the Lead one question about a run. Returns once the Lead is spawned; the reply streams into
     /// `lead-<run_id>`. The first ask after a start, or after the generated settings or the CLI version change,
     /// first runs the startup self-test (one or two tiny turns, a few seconds), so the call can take that long.
@@ -238,6 +262,9 @@ impl App {
         let handle = Handle::new();
         {
             let mut active = lock(&self.lead.active);
+            if self.lead.closing.load(Ordering::SeqCst) {
+                return Err(LeadError::ShuttingDown);
+            }
             if active.contains_key(run_id) {
                 return Err(LeadError::Busy);
             }
@@ -355,7 +382,8 @@ impl App {
                 // The Lead passed the tool and mode check: the ask is delivered. A new Lead session is remembered
                 // only now, so a Lead that never started leaves no id behind to `--resume`.
                 let _ = ledger_init(AskState::Delivered, None, None);
-                if first && runindex::append(&runs_path, &entry).is_err() {
+                // Only while this run is still the campaign's newest line: a resume that landed meanwhile wins.
+                if first && runindex::attach_lead(&runs_path, &entry).is_err() {
                     if let Some(l) = &log {
                         let _ = l.log("lead_index_failed", &[]);
                     }
@@ -492,19 +520,14 @@ impl App {
         Ok(())
     }
 
+    /// `claude --version`, asked of the executable on every ask. Never cached by path: a CLI updated in place must
+    /// get its own self-test, because deny-rule semantics depend on the version.
     fn claude_version(&self, bin: &Path) -> Result<String, LeadError> {
-        if let Some((p, v)) = lock(&self.lead.version).as_ref() {
-            if p == bin {
-                return Ok(v.clone());
-            }
-        }
         let out = run_process(bin, &["--version".to_string()], None, Duration::from_secs(10)).map_err(io)?;
         if out.code != Some(0) {
             return Err(LeadError::GuardMissing("claude --version failed".into()));
         }
-        let v = out.stdout.trim().to_string();
-        *lock(&self.lead.version) = Some((bin.to_path_buf(), v.clone()));
-        Ok(v)
+        Ok(out.stdout.trim().to_string())
     }
 
     // ---------------------------------------------------------------- history after a restart

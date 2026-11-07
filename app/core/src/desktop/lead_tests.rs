@@ -459,7 +459,6 @@ fn lead_startup_selftest_failclosed() {
     wait_until("the ask", || idle(&app));
     assert_eq!(t.count("selftest.count"), 6, "cached");
     // A new CLI version is a new key.
-    *lock(&app.lead.version) = None;
     t.set("version", "9.9.10 (Claude Code)");
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
@@ -610,4 +609,35 @@ fn cancel_reaches_the_selftest_and_ask_lead_returns_cancelled() {
     // SAFETY: signal 0 only checks existence.
     assert!(unsafe { libc::kill(child, 0) } != 0, "the self-test child is gone");
     assert!(idle(&app) && t.ledger().is_empty() && t.count("ask.count") == 0, "nothing recorded, no real ask ran");
+}
+
+#[test]
+fn app_shutdown_kills_every_lead_and_refuses_new_asks() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("mode", "slow");
+    app.ask_lead(RUN_ID, "take your time").unwrap();
+    wait_until("the Lead to be running", || std::fs::read_to_string(t.bin("slow.child")).is_ok_and(|s| !s.trim().is_empty()) && t.ask_states().contains(&"delivered:".to_string()));
+    let child: i32 = std::fs::read_to_string(t.bin("slow.child")).unwrap().trim().parse().unwrap();
+    app.shutdown_lead();
+    // It returns only after the driver reaped the Lead: nothing is left running and the ask is closed in the ledger.
+    assert!(idle(&app), "no ask is left in flight");
+    // SAFETY: signal 0 only checks existence.
+    assert!(unsafe { libc::kill(child, 0) } != 0, "the Lead's child is gone");
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "failed:cancelled"]);
+    assert_eq!(code(&app.ask_lead(RUN_ID, "too late").unwrap_err()), "shutting_down");
+}
+
+#[test]
+fn app_shutdown_reaches_a_self_test_in_progress() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.set("selftest", "hang");
+    std::thread::scope(|s| {
+        let h = s.spawn(|| app.ask_lead(RUN_ID, "hi"));
+        wait_until("the self-test to be running", || std::fs::read_to_string(t.bin("selftest.child")).is_ok_and(|s| !s.trim().is_empty()));
+        app.shutdown_lead();
+        assert_eq!(code(&h.join().unwrap().unwrap_err()), "cancelled");
+    });
+    assert!(idle(&app));
 }

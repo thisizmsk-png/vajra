@@ -276,7 +276,11 @@ fn main() {
                 let _ = w.set_focus();
             }
         }
-        RunEvent::Exit => handle.state::<App>().sup.shutdown(),
+        RunEvent::Exit => {
+            let app = handle.state::<App>();
+            app.shutdown_lead();
+            app.sup.shutdown();
+        }
         _ => {}
     });
 }

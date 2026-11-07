@@ -32,6 +32,8 @@ pub enum LeadError {
     ModeMismatch,
     Timeout,
     Cancelled,
+    /// The app is quitting: no new ask starts.
+    ShuttingDown,
     Io(String),
 }
 
@@ -48,6 +50,7 @@ impl LeadError {
             Self::ModeMismatch => "lead_mode_mismatch",
             Self::Timeout => "lead_timeout",
             Self::Cancelled => "cancelled",
+            Self::ShuttingDown => "shutting_down",
             Self::Io(_) => "io_error",
         }
     }
