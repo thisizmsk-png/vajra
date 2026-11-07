@@ -18,8 +18,8 @@ pub struct Entry {
     pub session_id: String,
     pub run_id: String,
     pub cwd: PathBuf,
-    /// The per-run Lead chat session (ADR-13). Optional: lines written before it existed, and every launch or resume
-    /// line, carry none. A line that does carry one names the same run, so a newer launch line supersedes it.
+    /// Legacy field, read for compatibility and **not trusted**: this file is writable by a worker. The app keeps the
+    /// run to Lead-session mapping in `<data>/control/lead/<run_id>/lead_session`, under the guarded control dir.
     pub lead_session_id: Option<String>,
 }
 
@@ -31,18 +31,6 @@ static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
     let _g = WRITE.lock().unwrap_or_else(|p| p.into_inner());
     append_locked(path, e)
-}
-
-/// Record the Lead session id for `e.run_id`, but only while that run is still the newest line of its campaign (or the
-/// campaign has no line yet). A newer launch or resume of the same campaign wins: the id is then dropped and
-/// `Ok(false)` returned, so a late write can never roll the campaign back to an older run.
-pub fn attach_lead(path: &Path, e: &Entry) -> io::Result<bool> {
-    let _g = WRITE.lock().unwrap_or_else(|p| p.into_inner());
-    if latest(path).get(&e.campaign).is_some_and(|cur| cur.run_id != e.run_id) {
-        return Ok(false);
-    }
-    append_locked(path, e)?;
-    Ok(true)
 }
 
 fn append_locked(path: &Path, e: &Entry) -> io::Result<()> {
@@ -102,25 +90,6 @@ mod tests {
 
     fn entry(c: &str, s: &str, r: &str) -> Entry {
         Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo"), lead_session_id: None }
-    }
-
-    const LEAD: &str = "2b8fad5b-d9cb-469f-a165-70867728950a";
-
-    #[test]
-    fn a_late_lead_id_for_an_older_run_does_not_roll_the_campaign_back() {
-        let p = tmp("attach");
-        let with_lead = |r: &str| Entry { lead_session_id: Some(LEAD.into()), ..entry("a", S1, r) };
-        // No line yet: the id is recorded (the launch line could not be written).
-        assert!(attach_lead(&p, &with_lead("20261106-1000")).unwrap());
-        // Run A is still the newest: the id is attached.
-        append(&p, &entry("a", S1, "20261106-1000")).unwrap();
-        assert!(attach_lead(&p, &with_lead("20261106-1000")).unwrap());
-        assert_eq!(latest(&p)["a"].lead_session_id.as_deref(), Some(LEAD));
-        // The human resumes the campaign into run B while A's Lead was still starting: A's late write is dropped.
-        append(&p, &entry("a", S1, "20261106-1100")).unwrap();
-        assert!(!attach_lead(&p, &with_lead("20261106-1000")).unwrap());
-        let m = latest(&p);
-        assert_eq!((m["a"].run_id.as_str(), m["a"].lead_session_id.clone()), ("20261106-1100", None));
     }
 
     #[test]

@@ -135,7 +135,6 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 /// What a run needs to be asked about.
 struct Target {
-    campaign: String,
     session_id: String,
     run_id: String,
     cwd: PathBuf,
@@ -292,7 +291,6 @@ impl App {
             self.add_disk_nonce(&mut r.nonces, &r.session_id);
             return Some(Target {
                 lead_session_id: lead_sid,
-                campaign: r.campaign,
                 session_id: r.session_id,
                 run_id: r.run_id,
                 cwd: r.cwd,
@@ -304,7 +302,7 @@ impl App {
         latest.into_values().find(|e| e.run_id == run_id).map(|e| {
             let mut nonces = Redactor::default();
             self.add_disk_nonce(&mut nonces, &e.session_id);
-            Target { campaign: e.campaign, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces }
+            Target { session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces }
         })
     }
 
