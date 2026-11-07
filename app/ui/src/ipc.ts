@@ -55,7 +55,7 @@ export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlig
 
 export const api = {
   preflight: () => call<Preflight>("preflight"),
-  listCampaigns: () => call<{ campaigns: Campaign[] }>("list_campaigns"),
+  listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),

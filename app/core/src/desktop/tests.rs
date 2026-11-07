@@ -801,17 +801,98 @@ fn list_campaigns_marks_each_campaign_ok_failed_or_unknown() {
     }
 }
 
+/// An app whose clock the test moves by hand (milliseconds).
+fn app_with_clock(t: &Tmp) -> (App, Arc<std::sync::atomic::AtomicU64>) {
+    let ms = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+    let mut app = t.app();
+    let m = ms.clone();
+    app.clock = Arc::new(move || Duration::from_millis(m.load(std::sync::atomic::Ordering::SeqCst)));
+    (app, ms)
+}
+
 #[test]
-fn list_campaigns_verifies_every_campaign_on_every_listing() {
-    // Nothing is remembered between listings: the verdict depends on files, links and the signing key.
+fn two_unchanged_listings_inside_the_ttl_verify_each_campaign_once() {
     let t = Tmp::new();
     let log = fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", None);
     campaign(&t, "c2", None);
+    let (app, _) = app_with_clock(&t);
+    app.list_campaigns().unwrap();
+    let l = app.list_campaigns().unwrap();
+    assert_eq!(runs(&log), 2, "one verify per campaign; the second listing reuses the verdict");
+    assert_eq!(l["campaigns"][0]["integrity"], "ok");
+}
+
+#[test]
+fn a_verdict_older_than_the_ttl_is_verified_again() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    let (app, ms) = app_with_clock(&t);
+    app.list_campaigns().unwrap();
+    ms.fetch_add(4_999, std::sync::atomic::Ordering::SeqCst);
+    app.list_campaigns().unwrap();
+    assert_eq!(runs(&log), 1, "4.999 s: still inside the 5 s window");
+    ms.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    app.list_campaigns().unwrap();
+    assert_eq!(runs(&log), 2, "5 s: expired");
+}
+
+#[test]
+fn refresh_verifies_again_inside_the_ttl() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    let (app, _) = app_with_clock(&t);
+    app.list_campaigns().unwrap();
+    app.list_campaigns_opt(true).unwrap();
+    assert_eq!(runs(&log), 2);
+}
+
+#[test]
+fn a_burst_of_listings_for_one_campaign_shares_one_verify() {
+    // `changed` events arrive together; the verify takes a while, and nobody starts a second one meanwhile.
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let log = t.0.join("burst.log");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\necho v >> '{}'\nsleep 0.5\nexit 0\n", log.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
     let app = t.app();
+    let got: Vec<Value> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8).map(|_| s.spawn(|| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone())).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(got.iter().all(|v| v == "ok"), "{got:?}");
+    assert_eq!(runs(&log), 1, "eight concurrent listings, one verify");
+}
+
+#[test]
+fn unknown_is_never_reused() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 1, "jq: not found");
+    campaign(&t, "c1", None);
+    let (app, _) = app_with_clock(&t);
     app.list_campaigns().unwrap();
     app.list_campaigns().unwrap();
-    assert_eq!(runs(&log), 4, "two campaigns, two listings, one fresh verify each");
+    assert_eq!(runs(&log), 2, "an unknown verdict is retried on the next listing");
+}
+
+#[test]
+fn verify_campaign_and_read_report_refresh_that_campaigns_verdict() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", Some(b"text"));
+    let (app, _) = app_with_clock(&t);
+    let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
+    assert_eq!(verdict(&app), "ok");
+    fake_campaign_script(&t, 3, "signature INVALID");
+    assert_eq!(verdict(&app), "ok", "inside the window the listing still shows the earlier verdict");
+    app.verify_campaign("c1").unwrap(); // the user asked: this is a fresh check and it updates the badge
+    assert_eq!(verdict(&app), "failed");
 }
 
 /// A stand-in `verify` whose verdict depends on a signing-key file outside the campaign, like the real one: 0 when
@@ -836,9 +917,11 @@ fn list_campaigns_follows_the_signing_key_when_it_is_replaced_and_restored() {
     let verdict = |app: &App| app.list_campaigns().unwrap()["campaigns"][0]["integrity"].clone();
     assert_eq!(verdict(&app), "ok");
     fs::write(&key, "K2").unwrap(); // install repair generates a new key; no campaign file is touched
-    assert_eq!(verdict(&app), "failed");
+    assert_eq!(verdict(&app), "ok", "inside the 5 s window the earlier verdict is shown");
+    let fresh = |app: &App| app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"].clone();
+    assert_eq!(fresh(&app), "failed");
     fs::write(&key, "K1").unwrap(); // the original key is restored
-    assert_eq!(verdict(&app), "ok");
+    assert_eq!(fresh(&app), "ok");
 }
 
 #[test]
@@ -895,7 +978,7 @@ fn list_campaigns_reverifies_after_an_edit_even_when_the_mtime_is_restored() {
     fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
     assert_eq!(fs::metadata(&f).unwrap().modified().unwrap(), old, "mtime restored");
     fake_campaign_script(&t, 3, "signature INVALID"); // the script now says the campaign is tampered
-    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+    assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "failed");
 }
 
 #[test]
@@ -1025,7 +1108,7 @@ fn list_campaigns_reverifies_when_a_symlinked_input_changes_its_target() {
     assert_eq!((ok(&l, 0), ok(&l, 1)), (json!("ok"), json!("ok")));
     fs::write(&target, r#"{"features":[1]}"#).unwrap(); // edited in place, the link itself untouched
     fake_campaign_script(&t, 3, "signature INVALID");
-    let l = app.list_campaigns().unwrap();
+    let l = app.list_campaigns_opt(true).unwrap();
     assert_eq!(ok(&l, 0), "failed", "c1 follows the edited target: {l}");
 }
 

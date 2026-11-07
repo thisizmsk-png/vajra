@@ -38,8 +38,8 @@ fn preflight(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
-fn list_campaigns(app: State<'_, App>) -> Res {
-    app.list_campaigns()
+fn list_campaigns(app: State<'_, App>, refresh: Option<bool>) -> Res {
+    app.list_campaigns_opt(refresh.unwrap_or(false))
 }
 
 #[tauri::command(async)]

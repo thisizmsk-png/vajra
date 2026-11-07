@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -66,6 +66,33 @@ struct Run {
 }
 
 const LIST_VERIFY_WORKERS: usize = 4;
+/// How long a real verdict is reused. The badge is a trust signal, so the window is short; it bounds the verify
+/// processes started by a burst of `changed` events to one per campaign per window (and `refresh` skips it).
+const VERDICT_TTL: Duration = Duration::from_secs(5);
+
+/// One in-flight verify, shared by every caller that asks for the same campaign while it runs.
+type Flight = Arc<(Mutex<Option<&'static str>>, Condvar)>;
+enum Verdict {
+    Fresh(Duration, &'static str),
+    Flying(Flight),
+}
+
+/// Ends a flight even if the verify panics, so waiters are never left hanging.
+struct FlightGuard<'a> {
+    app: &'a App,
+    slug: &'a str,
+    flight: Flight,
+    done: bool,
+}
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            lock(&self.app.verdicts).remove(self.slug);
+            *lock(&self.flight.0) = Some("unknown");
+            self.flight.1.notify_all();
+        }
+    }
+}
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct App {
@@ -77,6 +104,11 @@ pub struct App {
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
+    /// slug -> a real verdict with the time it was taken, or the verify now running for it. "unknown" is never kept.
+    verdicts: Mutex<HashMap<String, Verdict>>,
+    verdict_ttl: Duration,
+    /// Monotonic time since start; tests replace it.
+    clock: Arc<dyn Fn() -> Duration + Send + Sync>,
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
@@ -106,6 +138,12 @@ impl App {
             data: data.to_path_buf(),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
+            verdicts: Mutex::new(HashMap::new()),
+            verdict_ttl: VERDICT_TTL,
+            clock: {
+                let t0 = std::time::Instant::now();
+                Arc::new(move || t0.elapsed())
+            },
             reader: Mutex::new(None),
             claude,
             sup: Supervisor::new(bus.clone(), log.clone()),
@@ -165,6 +203,11 @@ impl App {
     }
 
     pub fn list_campaigns(&self) -> Res {
+        self.list_campaigns_opt(false)
+    }
+
+    /// `refresh` re-verifies every campaign now, whatever the last verdict's age.
+    pub fn list_campaigns_opt(&self, refresh: bool) -> Res {
         // Summaries are read under the reader lock; the verify subprocesses run after it is released, so a slow
         // or hung verify cannot block any other reader call.
         let mut list: Vec<Value> = self.with_reader(|r| {
@@ -199,7 +242,7 @@ impl App {
                 s.spawn(|| loop {
                     let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((i, slug)) = todo.get(n) else { break };
-                    let v = self.integrity_of(slug);
+                    let v = self.integrity_of(slug, refresh);
                     lock(&verdicts).push((*i, v));
                 });
             }
@@ -632,17 +675,71 @@ impl App {
     }
 
     /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run, or overran
-    /// `verify_timeout`). Never remembered: it is `verify` run now.
-    fn integrity_of(&self, slug: &str) -> &'static str {
+    /// `verify_timeout`). A real verdict is reused for `verdict_ttl`; callers that arrive while a verify for the same
+    /// campaign is running wait for it instead of starting another. `refresh` skips the reuse and, if a verify is
+    /// already running, waits for it and then runs its own (that one may have started before the change).
+    fn integrity_of(&self, slug: &str, refresh: bool) -> &'static str {
         if !bus::valid_stream_id(slug) {
             return "unknown";
         }
+        let flight: Flight = loop {
+            let mut m = lock(&self.verdicts);
+            let waiting = match m.get(slug) {
+                Some(Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(*at) < self.verdict_ttl => return v,
+                Some(Verdict::Flying(f)) => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(f) = waiting {
+                drop(m);
+                let mut got = lock(&f.0);
+                while got.is_none() {
+                    got = f.1.wait(got).unwrap_or_else(|e| e.into_inner());
+                }
+                if !refresh {
+                    return got.unwrap_or("unknown");
+                }
+                continue;
+            }
+            let f: Flight = Arc::new((Mutex::new(None), Condvar::new()));
+            m.insert(slug.to_string(), Verdict::Flying(f.clone()));
+            break f;
+        };
+        let mut guard = FlightGuard { app: self, slug, flight, done: false };
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
-        match bridge.run(&Request::CampaignVerify { slug: slug.into() }).ok().and_then(|o| o.code) {
+        let verdict = match bridge.run(&Request::CampaignVerify { slug: slug.into() }).ok().and_then(|o| o.code) {
             Some(0) => "ok",
             Some(3) => "failed",
             _ => "unknown",
+        };
+        self.settle(slug, verdict);
+        *lock(&guard.flight.0) = Some(verdict);
+        guard.flight.1.notify_all();
+        guard.done = true;
+        verdict
+    }
+
+    fn settle_code(&self, slug: &str, code: Option<i32>) {
+        // exit 4 (no report) still means the signature held.
+        let v = match code {
+            Some(0) | Some(4) => "ok",
+            Some(3) => "failed",
+            _ => "unknown",
+        };
+        let m = lock(&self.verdicts);
+        if !matches!(m.get(slug), Some(Verdict::Flying(_))) {
+            drop(m);
+            self.settle(slug, v);
+        }
+    }
+
+    /// Remember a real verdict for the slug (or forget it when the check could not run).
+    fn settle(&self, slug: &str, verdict: &'static str) {
+        let mut m = lock(&self.verdicts);
+        if verdict == "unknown" {
+            m.remove(slug);
+        } else {
+            m.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
         }
     }
 
@@ -659,6 +756,7 @@ impl App {
             crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
             e => fail("verify_failed", e),
         })?;
+        self.settle_code(slug, o.code);
         match o.code {
             Some(0) => {
                 let truncated = o.stdout.len() > CAP;
@@ -679,6 +777,7 @@ impl App {
     /// error, never a pass. Read-only: it never touches the HMAC key itself, the script does the check.
     pub fn verify_campaign(&self, slug: &str) -> Res {
         let o = self.run_verify(slug)?;
+        self.settle_code(slug, o.code);
         match o.code {
             Some(0) => Ok(json!({"slug": slug, "ok": true})),
             Some(3) => {
