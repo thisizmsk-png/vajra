@@ -455,13 +455,17 @@ impl Service {
         self.record(&a, r.state.state(), extra, now)
     }
 
-    /// The action that already decided `item` with exactly this plan (`plan_sha256`), if any: an approve or reject whose newest line is `requested`,
+    /// The action that already decided plan `item`, if any, whatever entry it named: an approve or reject whose newest line is `requested`,
     /// `delivered` or `done`. A `requested` with no outcome (a crash mid-delivery) counts as decided: delivery is
     /// unknown, so the plan is never run twice. Only `failed` frees the item.
-    pub fn decided(&self, item: &str, plan_sha256: &str) -> io::Result<Option<String>> {
+    ///
+    /// Keyed on the id alone (ADR-14 §5: one terminal decision per plan id). The turn an approval delivers names only
+    /// `<run_id>.<index>`, so a second decision on the same id after its entry changed would reach the session as the
+    /// same turn, which it may map to the entry the human rejected or already approved.
+    pub fn decided(&self, item: &str) -> io::Result<Option<String>> {
         let records = Ledger::read_all(&self.control_root.join("ledger.jsonl"))?;
         let mut last: Vec<(String, String)> = Vec::new();
-        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item && str_field(r, "plan_sha256") == plan_sha256) {
+        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item) {
             let (id, state) = (str_field(r, "action_id").to_string(), str_field(r, "state").to_string());
             match last.iter_mut().find(|(i, _)| *i == id) {
                 Some(e) => e.1 = state,

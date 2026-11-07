@@ -218,7 +218,10 @@ impl App {
         let on_disk: Vec<String> = self.with_reader(|r| Ok(r.campaigns().unwrap_or_default())).unwrap_or_default();
         // Run ids of earlier app lives: after a restart in the same minute, an older campaign's id is still taken.
         let indexed = runindex::run_ids(&self.data.join("runs.jsonl"));
-        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}"));
+        // The guarded run record (`control/lead/<id>/`) counts too: the index is worker-writable and can be emptied, and
+        // reusing an id would keep that record's Lead session and approval-only marker for a different run.
+        let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
+        let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
         let pick = (0..120u64).map(|k| now + 60 * k).map(|t| (t, ids::run_id_at(t))).find(|(_, id)| !used(id)).unwrap_or((now, ids::run_id_at(now)));
         lock(&self.issued).insert(pick.1.clone());
         pick

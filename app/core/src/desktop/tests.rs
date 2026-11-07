@@ -1582,3 +1582,21 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
     }
 }
+
+#[test]
+fn a_run_id_with_a_guarded_record_is_never_reissued_after_the_index_is_lost() {
+    // `runs.jsonl` is worker-writable. If it is emptied, a restarted app must still not hand out an id whose guarded
+    // record (`control/lead/<id>/`) exists: `record_run` would overwrite its session and campaign but keep the old
+    // Lead session id and approval-only marker, so the new run would resume another run's Lead.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let _ = std::fs::remove_file(t.0.join("data/runs.jsonl"));
+    let app = t.app();
+    let (_, id) = app.fresh_run_id(at);
+    assert_ne!(id, run, "an id with a guarded record is taken");
+}

@@ -9,7 +9,7 @@
 //! - Plan ids carry the entry's own index in the workflow result, and the hash covers the whole entry as written.
 //! - Both are bound to what the human saw: the plan comes from an unsigned, worker-writable file, so `approve_plan`
 //!   re-reads it and refuses unless it still hashes to the `plan_sha256` the inbox showed.
-//! - One terminal decision per plan, behind a per-plan lock. The `requested` ledger line is written first.
+//! - One terminal decision per plan id (whatever entry it named), behind a per-plan lock. The `requested` ledger line is written first.
 
 use serde_json::{Value, json};
 
@@ -44,9 +44,9 @@ impl App {
         Ok(Deciding(self, id.to_string()))
     }
 
-    /// Refuse if this exact plan (id and content hash) was already approved or rejected. An unreadable ledger refuses too.
-    fn undecided(&self, id: &str, sha: &str) -> Result<(), Value> {
-        match lock(&self.control).decided(id, sha) {
+    /// Refuse if this plan id was already approved or rejected, whatever entry it named then. An unreadable ledger refuses too.
+    fn undecided(&self, id: &str) -> Result<(), Value> {
+        match lock(&self.control).decided(id) {
             Ok(None) => Ok(()),
             Ok(Some(a)) => Err(already(&a)),
             Err(e) => Err(fail("io_error", e)),
@@ -81,7 +81,7 @@ impl App {
         if let Some(why) = plan.invalid {
             return Err(fail("plan_invalid", format!("this plan cannot be approved: {why}")));
         }
-        self.undecided(id, plan_sha256)?;
+        self.undecided(id)?;
         let turn = ApprovedPlanTurn::new(run_id, index).ok_or_else(|| invalid("id", "not a plan id"))?;
         let stream = format!("run-{}", e.session_id);
         let live = self.sup.is_running(&stream).unwrap_or(false);
@@ -127,7 +127,7 @@ impl App {
         let _one = self.begin_decision(id)?;
         let e = self.plan_run(run_id)?;
         let sha = self.waiting(&e).and_then(|w| w.plans.iter().find(|p| p.index == index).map(|p| plan_sha(&p.raw))).ok_or_else(|| fail("not_found", "no such plan"))?;
-        self.undecided(id, &sha)?;
+        self.undecided(id)?;
         let sha = Some(sha.as_str());
         let action = self.decision_line(Decision::Reject, None, id, &e, sha, DecisionState::Requested, Some(&reason))?;
         let text = format!("rejected plan {id}: {reason}");
