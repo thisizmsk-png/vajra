@@ -16,6 +16,7 @@ impl Service {
             Ok(n) => n,
             Err(_) => nonce::rotate(&dir.root)?,
         };
+        dir.sweep_temp();
         self.seq = self.seq.max(dir.max_seq());
         self.session = Some(Session { id: session_id.into(), run_id: run_id.into(), dir, nonce: n });
         self.log("control_session_start", &[]);

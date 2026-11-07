@@ -674,3 +674,19 @@ fn an_ack_that_cannot_be_opened_for_now_is_retried_not_settled_invalid() {
     assert_eq!(r["state"].as_str(), Some("delivered"), "{r}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #13 C3-4: a crash between the temp write and the rename leaves `.<name>.<pid>.tmp` in queue/ for good. Starting the
+/// session sweeps those (the hook ignores dot files, so nothing live is touched).
+#[test]
+fn start_session_sweeps_stale_temp_files_from_queue() {
+    let (mut s, dir) = svc();
+    let q = dir.join("control").join(SID).join("queue");
+    let stale = q.join(".7-abc.json.4242.tmp");
+    let keep = q.join("7-abc.json");
+    fs::write(&stale, "x").unwrap();
+    fs::write(&keep, "{}").unwrap();
+    s.start_session(SID, "run-1").unwrap();
+    assert!(!stale.exists(), "the stale temp file is gone");
+    assert!(keep.exists(), "a real queue file stays");
+    let _ = fs::remove_dir_all(&dir);
+}

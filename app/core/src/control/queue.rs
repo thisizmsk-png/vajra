@@ -73,6 +73,19 @@ impl SessionDir {
         find(&self.dir("expired"), |n| n.ends_with(&format!("-{action_id}.json")))
     }
 
+    /// Remove the `.<name>.<pid>.tmp` files a crash between `write_atomic`'s write and rename left in queue/. The hook
+    /// skips dot files, so none is live when a session starts. Best effort: a file that will not go is left for next time.
+    pub fn sweep_temp(&self) {
+        let Ok(rd) = fs::read_dir(self.dir("queue")) else { return };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(n) = name.to_str() else { continue };
+            if n.starts_with('.') && n.ends_with(".tmp") && e.file_type().is_ok_and(|t| !t.is_dir()) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+
     /// The file names in queue/ and inflight/ right now, listed once so a tick settling many messages of one session
     /// does not scan both directories per message. Taken before any ack is read, which keeps the check order
     /// (queue, inflight, ack): a file only ever leaves queue/ and a claim only ever appears after it, so a stale
