@@ -2290,3 +2290,175 @@ fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
     let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
     assert_eq!(rec.trim(), "deliver-x");
 }
+
+// ---------------------------------------------------------------- verify reasons (report and evidence)
+
+fn campaign_script_body(t: &Tmp, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let sh = t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\n{body}\n")).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A signed real campaign, then `break_it` damages the install or the files; returns `read_report`'s answer.
+fn report_after(timeout_ms: Option<u64>, break_it: impl Fn(&Tmp)) -> Option<Value> {
+    let (t, run) = real_script_home()?;
+    real_campaign_with_report(&run, "Delivered on branch b");
+    break_it(&t);
+    let mut app = t.app();
+    if let Some(ms) = timeout_ms {
+        app.verify_timeout = Duration::from_millis(ms);
+    }
+    Some(app.read_report("real1").unwrap())
+}
+
+#[test]
+fn report_unknown_says_spawn_failed_when_the_script_is_missing() {
+    let Some(r) = report_after(None, |t| fs::remove_file(t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh")).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "the old field stays: {r}");
+    assert_eq!(r["reason"]["code"], "spawn_failed", "{r}");
+}
+
+#[test]
+fn report_unknown_says_bad_exit_with_the_exit_code_and_the_scripts_message() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "echo 'verify-digest exploded' >&2\nexit 7")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "bad_exit", "{r}");
+    assert_eq!(r["reason"]["exit_code"], 7, "{r}");
+    assert!(r["reason"]["detail"].as_str().unwrap().contains("exploded"), "{r}");
+}
+
+#[test]
+fn report_unknown_says_timeout_when_the_check_overruns() {
+    let Some(r) = report_after(Some(300), |t| campaign_script_body(t, "sleep 30")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "timeout", "{r}");
+}
+
+#[test]
+fn report_unknown_says_oversize_when_the_report_is_over_its_cap() {
+    let Some(r) = report_after(None, |t| fs::write(camp_file(t, "report.md"), vec![b'x'; 70 * 1024]).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+    assert_eq!(r["reason"]["detail"], "report.md", "{r}");
+}
+
+#[test]
+fn report_unknown_says_io_error_when_a_campaign_file_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root can read a mode-000 file, so this case only means something for an ordinary user.
+    if unsafe { libc::getuid() } == 0 {
+        return;
+    }
+    let Some(r) = report_after(None, |t| fs::set_permissions(camp_file(t, "progress.md"), fs::Permissions::from_mode(0o000)).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "io_error", "{r}");
+    assert!(r["reason"].get("detail").is_none(), "no OS error text, it carries paths: {r}");
+}
+
+#[test]
+fn bridge_failures_map_to_fixed_codes() {
+    use crate::vajra::bridge::BridgeError;
+    let spawn = BridgeError::Spawn(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert_eq!(bridge_failure(&spawn), "spawn_failed");
+    assert_eq!(bridge_failure(&BridgeError::Invalid("jq not found".into())), "jq_missing");
+    assert_eq!(bridge_failure(&BridgeError::Invalid("bad name: \"x\"".into())), "io_error");
+}
+
+#[test]
+fn reason_text_is_bounded_cleaned_and_free_of_the_home_path() {
+    let home = Path::new("/Users/someone");
+    let raw = format!("line one\x1b[31m /Users/someone/.claude/vajra/.hmac-key {}\nsecond line", "y".repeat(500));
+    let d = reason_detail(&raw, home);
+    assert!(d.chars().count() <= 200, "{}", d.len());
+    assert!(!d.contains('\x1b') && !d.contains('\n'), "{d:?}");
+    assert!(!d.contains("/Users/someone"), "{d}");
+    assert!(d.starts_with("line one"), "{d}");
+}
+
+#[test]
+fn report_reason_text_has_no_home_path() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    campaign_script_body(&t, "echo \"cannot open $HOME/.claude/vajra/x\" >&2\nexit 9");
+    let r = t.app().read_report("real1").unwrap();
+    let d = r["reason"]["detail"].as_str().unwrap();
+    assert_eq!(d, "cannot open ~/.claude/vajra/x", "{r}");
+}
+
+#[test]
+fn evidence_without_a_registered_run_says_no_run_registered() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/green.json"); // live evidence, not an archived bundle
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "the old field stays: {r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "no_run_registered", "{r}");
+}
+
+#[test]
+fn evidence_that_climbs_out_says_outside_campaign() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/../etc/green.json");
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "outside_campaign", "{r}");
+}
+
+#[test]
+fn evidence_keeps_the_scripts_reason_when_the_check_is_not_green() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t2", "done", &["ac-3"], "red")]);
+    let r = app.evidence_list(&slug).unwrap();
+    let w = &row(&r, "t2", "ac-3")["why"];
+    assert_eq!((w["code"].as_str(), w["detail"].as_str()), (Some("refused"), Some("a check failed")), "{r}");
+}
+
+#[test]
+fn evidence_says_bad_exit_when_the_check_itself_fails() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t4", "done", &["ac-5"], "boom")]);
+    let r = app.evidence_list(&slug).unwrap();
+    let w = &row(&r, "t4", "ac-5")["why"];
+    assert_eq!((w["code"].as_str(), w["exit_code"].as_i64(), w["detail"].as_str()), (Some("bad_exit"), Some(1), Some("unreadable")), "{r}");
+}
+
+#[test]
+fn evidence_says_timeout_for_a_check_that_ran_out_its_time() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (mut app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "s1", "done", &["ac"], "slow")]);
+    app.evidence_timeout = Duration::from_millis(400);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "s1", "ac")["why"]["code"], "timeout", "{r}");
+}
+
+#[test]
+fn evidence_says_spawn_failed_when_the_check_script_is_not_installed() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    fs::remove_file(t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py")).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "spawn_failed", "{r}");
+}
+
+#[test]
+fn evidence_why_survives_the_verdict_cache_and_is_absent_for_other_statuses() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green"), ev_task(&d, "t2", "done", &["ac-3"], "red"), ev_task(&d, "t3", "in_progress", &["ac-4"], "")]);
+    for _ in 0..2 {
+        let r = app.evidence_list(&slug).unwrap();
+        assert_eq!(row(&r, "t2", "ac-3")["why"]["code"], "refused", "the second call answers from the cache and still says why: {r}");
+        assert!(row(&r, "t1", "ac-1").get("why").is_none_or(Value::is_null), "{r}");
+        assert!(row(&r, "t3", "ac-4").get("why").is_none_or(Value::is_null), "{r}");
+    }
+}

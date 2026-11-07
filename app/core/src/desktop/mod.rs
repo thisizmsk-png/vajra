@@ -24,7 +24,7 @@ use crate::paths;
 use crate::sessions::argv::{self, InvalidInput, RunInput};
 use crate::sessions::{SpawnSpec, Supervisor};
 use crate::vajra::allowlist::Allowlist;
-use crate::vajra::bridge::{Bridge, Request, parse_kb_hits};
+use crate::vajra::bridge::{Bridge, BridgeError, Output, Request, parse_kb_hits};
 use crate::vajra::preflight;
 use crate::vajra::state::Reader;
 
@@ -160,9 +160,11 @@ impl Drop for VerifySlot<'_> {
 const LIST_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum Outcome {
-    Verdict(bool),
+    /// The check ran: green or not, with why it was not (`None` when green).
+    Verdict(bool, Option<Value>),
     TimedOut,
-    Failed,
+    /// The check could not start; the code is a `reason` code.
+    Failed(&'static str),
 }
 
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
@@ -213,6 +215,8 @@ pub struct App {
     /// (whatever it does to size or mtime) is always re-checked. Archived bundles depend on nothing else and are kept; a
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
+    /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
+    evidence_why: Mutex<HashMap<EvKey, Value>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, bool)>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
@@ -256,6 +260,7 @@ impl App {
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
+            evidence_why: Mutex::new(HashMap::new()),
             worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
@@ -775,14 +780,19 @@ impl App {
             (bytes.len() as u64 <= EVIDENCE_KEY_MAX).then(|| (path.clone(), bytes, head.clone(), archived.clone(), repo.clone()))
         };
         let mut verdict: HashMap<usize, bool> = HashMap::new();
+        let mut why: HashMap<usize, Value> = HashMap::new();
         let mut repo_of: HashMap<usize, PathBuf> = HashMap::new();
         let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
         {
             let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let cached_why = self.evidence_why.lock().unwrap_or_else(|e| e.into_inner());
             for (i, t) in tasks.iter().enumerate() {
                 let Some(req) = self.evidence_request(slug, t) else {
                     // Evidence that cannot be checked here (outside the campaign, `..` path, no repo) is unverified, not pending.
-                    if t.get("evidence").is_some_and(|e| !e.is_null()) { verdict.insert(i, false); }
+                    if t.get("evidence").is_some_and(|e| !e.is_null()) {
+                        verdict.insert(i, false);
+                        why.insert(i, reason(self.evidence_skip_code(t), None, None));
+                    }
                     continue;
                 };
                 if let Request::CheckEvidence { repo: Some(r), .. } = &req {
@@ -791,7 +801,14 @@ impl App {
                 let k = key(&req);
                 let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
                 match hit {
-                    Some((v, _)) => { verdict.insert(i, *v); }
+                    Some((v, _)) => {
+                        verdict.insert(i, *v);
+                        if !*v {
+                            if let Some(w) = k.as_ref().and_then(|k| cached_why.get(k)) {
+                                why.insert(i, w.clone());
+                            }
+                        }
+                    }
                     None => jobs.push((i, req, k)),
                 }
             }
@@ -816,6 +833,7 @@ impl App {
             }
             let mut bridge = self.bridge.clone();
             bridge.timeout = self.evidence_timeout.min(left);
+            let (home, installed) = (self.home.as_path(), bridge.scripts_dir.join("vajra_tasks.py").is_file());
             // A check cut short by the remaining budget (not by its own full timeout) did not get a fair run: `checking`, not `unverified`.
             let cut_by_budget = left < self.evidence_timeout;
             let got: Vec<(usize, Outcome)> = std::thread::scope(|sc| {
@@ -824,13 +842,14 @@ impl App {
                     .map(|(i, req, _)| {
                         let b = &bridge;
                         sc.spawn(move || {
-                            let out = match b.run(req) {
-                                Err(_) => Outcome::Failed,
-                                Ok(o) if o.timed_out => Outcome::TimedOut,
-                                Ok(o) => Outcome::Verdict(
-                                    o.code == Some(0)
-                                        && serde_json::from_str::<Value>(o.stdout.trim()).ok().is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true)),
-                                ),
+                            let out = if !installed {
+                                Outcome::Failed("spawn_failed")
+                            } else {
+                                match b.run(req) {
+                                    Err(e) => Outcome::Failed(bridge_failure(&e)),
+                                    Ok(o) if o.timed_out => Outcome::TimedOut,
+                                    Ok(o) => evidence_outcome(&o, home),
+                                }
                             };
                             (*i, out)
                         })
@@ -839,19 +858,25 @@ impl App {
                 hs.into_iter().filter_map(|h| h.join().ok()).collect()
             });
             let mut cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cached_why = self.evidence_why.lock().unwrap_or_else(|e| e.into_inner());
             if cache.len() > EVIDENCE_CACHE_MAX {
                 cache.clear();
+                cached_why.clear();
             }
             for (i, out) in got {
                 // Cut short by the budget (not by its own full timeout): no verdict yet, so `checking`, and it is not remembered.
                 if matches!(out, Outcome::TimedOut) && cut_by_budget {
                     continue;
                 }
-                let (green, remember) = match out {
-                    Outcome::Verdict(g) => (g, true),
-                    Outcome::TimedOut | Outcome::Failed => (false, false),
+                let (green, remember, w) = match out {
+                    Outcome::Verdict(g, w) => (g, true, w),
+                    Outcome::TimedOut => (false, false, Some(reason("timeout", None, None))),
+                    Outcome::Failed(code) => (false, false, Some(reason(code, None, None))),
                 };
                 verdict.insert(i, green);
+                if let Some(w) = w.clone() {
+                    why.insert(i, w);
+                }
                 // Remember it only if the file still holds the bytes the key was made from: the script opened it after the
                 // key was read, so a swapped file would otherwise store this verdict under the wrong content.
                 let Some(k) = jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone()) else { continue };
@@ -864,6 +889,10 @@ impl App {
                 } else {
                     Some(std::time::Instant::now() + EVIDENCE_FAILED_TTL)
                 };
+                match w {
+                    Some(w) if !green => { cached_why.insert(k.clone(), w); }
+                    _ => { cached_why.remove(&k); }
+                }
                 cache.insert(k, (green, until));
             }
         }
@@ -911,6 +940,7 @@ impl App {
                     "owner": t.get("owner_agent"),
                     "criterion": c,
                     "status": status,
+                    "why": if status == "unverified" { why.get(&i).cloned() } else { None },
                     "head": ev.and_then(|e| e.get("head")),
                     "path": ev.and_then(|e| e.get("path")),
                     "commands": ev.and_then(|e| e.get("commands")),
@@ -1041,6 +1071,18 @@ impl App {
             lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
         }
         st
+    }
+
+    /// Why `evidence_request` gave nothing for a task that has evidence.
+    fn evidence_skip_code(&self, task: &Value) -> &'static str {
+        let Some(path) = task.get("evidence").and_then(|e| e.get("path")).and_then(Value::as_str) else { return "io_error" };
+        if Path::new(path).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            "outside_campaign"
+        } else if self.allow().is_err() {
+            "io_error"
+        } else {
+            "no_run_registered"
+        }
     }
 
     fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
@@ -1350,6 +1392,9 @@ impl App {
             }
             Ok(v)
         };
+        // `integrity: "unknown"` plus a `reason` (a fixed code, see `reason`): which of the six ways the check could not run.
+        let unknown = |why: Value| -> Res { Ok(json!({"slug": slug, "integrity": "unknown", "reason": why})) };
+        let home = self.home.as_path();
         // Taken before anything is read, so this check is ordered against every other one (see `Verdicts`).
         let ticket = self.ticket();
         let allow = self.allow().map_err(|e| fail("io_error", e))?;
@@ -1361,7 +1406,9 @@ impl App {
                 self.settle(slug, "failed", ticket);
                 return verdict("integrity_failed", None);
             }
-            Err(HeldError::TooLarge(_)) | Err(HeldError::Io(_)) => return verdict("unknown", None),
+            Err(HeldError::TooLarge(name)) => return unknown(reason("oversize", Some(name.to_string()), None)),
+            // The OS error text carries paths, so only the code is sent.
+            Err(HeldError::Io(_)) => return unknown(reason("io_error", None, None)),
         };
         between();
         let bad = |this: &Self| {
@@ -1395,18 +1442,20 @@ impl App {
         bridge.timeout = self.verify_timeout;
         let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
             Ok(o) => o,
-            Err(_) => return verdict("unknown", None),
+            Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
         match o.code {
             Some(0) => {}
             Some(3) => return bad(self),
-            _ => return verdict("unknown", None),
+            _ => return unknown(output_failure(&o, home)),
         }
         // featuresDefSha256: the exact canonicaliser the script uses, fed the held bytes. Output cut at the bridge's
         // cap would hash short and read as a tamper where plain `verify` says ok, so a truncated run is "unknown".
         let def = match bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
             Ok(o) if o.code == Some(0) && !o.truncated => o.stdout.replace('\n', ""),
-            _ => return verdict("unknown", None),
+            Ok(o) if o.code == Some(0) => return unknown(reason("oversize", Some("features output".into()), None)),
+            Ok(o) => return unknown(output_failure(&o, home)),
+            Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
         if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
             return bad(self);
@@ -1455,6 +1504,68 @@ const INSPECT_BYTES: usize = 16 * 1024;
 
 fn worker_stream(agent_id: &str) -> String {
     format!("w-{agent_id}")
+}
+
+/// Longest reason text sent to the UI.
+const REASON_DETAIL_MAX: usize = 200;
+
+/// A verification step that could not give a verdict. `code` is one of a fixed set chosen here (`spawn_failed`, `timeout`,
+/// `bad_exit`, `jq_missing`, `oversize`, `io_error`, and for evidence also `refused`, `no_run_registered`,
+/// `outside_campaign`); `detail` is bounded, single-line text (see `reason_detail`) and is untrusted: show it as text only.
+fn reason(code: &str, detail: Option<String>, exit_code: Option<i32>) -> Value {
+    let mut v = json!({"code": code});
+    if let Some(d) = detail.filter(|d| !d.is_empty()) {
+        v["detail"] = json!(d);
+    }
+    if let Some(c) = exit_code {
+        v["exit_code"] = json!(c);
+    }
+    v
+}
+
+fn bridge_failure(e: &BridgeError) -> &'static str {
+    match e {
+        BridgeError::Spawn(_) => "spawn_failed",
+        BridgeError::Invalid(m) if m == "jq not found" => "jq_missing",
+        BridgeError::Invalid(_) => "io_error",
+    }
+}
+
+/// First non-empty line of `raw`, control characters dropped, the home directory shown as `~`, at most
+/// `REASON_DETAIL_MAX` characters. The reason text of a script can name paths; the home is the part that identifies the user.
+fn reason_detail(raw: &str, home: &Path) -> String {
+    let mut line = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+    for h in [Some(home.to_path_buf()), home.canonicalize().ok()].into_iter().flatten() {
+        let h = h.to_string_lossy().into_owned();
+        if h.len() > 1 {
+            line = line.replace(&h, "~");
+        }
+    }
+    line.chars().filter(|c| !c.is_control()).take(REASON_DETAIL_MAX).collect()
+}
+
+/// A script that ran but did not give an answer: `timeout`, or `bad_exit` with its exit code and the first line of its
+/// stderr (or the `error` of its JSON stdout).
+fn output_failure(o: &Output, home: &Path) -> Value {
+    if o.timed_out {
+        return reason("timeout", None, None);
+    }
+    let from_stdout = || serde_json::from_str::<Value>(o.stdout.trim()).ok().and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
+    let text = if o.stderr.trim().is_empty() { from_stdout().unwrap_or_default() } else { o.stderr.clone() };
+    reason("bad_exit", Some(reason_detail(&text, home)), o.code)
+}
+
+/// What `check-evidence` said: green, refused (its `reasons[0]`), or did not answer.
+fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
+    let parsed = serde_json::from_str::<Value>(o.stdout.trim()).ok();
+    match (o.code, parsed) {
+        (Some(0), Some(v)) if v.get("green").and_then(Value::as_bool) == Some(true) => Outcome::Verdict(true, None),
+        (Some(0), Some(v)) => {
+            let first = v.get("reasons").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
+            Outcome::Verdict(false, Some(reason("refused", Some(reason_detail(first, home)), None)))
+        }
+        _ => Outcome::Verdict(false, Some(output_failure(o, home))),
+    }
 }
 
 fn invalid(field: &str, reason: &str) -> Value {
