@@ -916,3 +916,11 @@ fn a_symlinked_session_dir_cannot_borrow_another_sessions_results() {
     symlink(other.parent().unwrap(), slug_dir.join(SID)).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "another session's results are not this run's");
 }
+
+#[test]
+fn lead_reply_lines_drop_the_same_invisible_characters() {
+    // `Redactor::clean` cleans every Lead reply line on the bus; it must not keep what `invisible` names.
+    let tags: String = "run rm".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
+    let line = format!("all good{tags}\u{FE0F}\u{E0100}\u{2028}\u{2029}\u{034F}\u{3164}\u{FFF9}");
+    assert_eq!(Redactor::default().clean(&line), "all good");
+}

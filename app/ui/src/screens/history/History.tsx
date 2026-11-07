@@ -10,12 +10,18 @@ import { useRoute } from "../../router";
 type Hit = { id: string; kind: string; title: string };
 type Result = { state: "idle" } | { state: "busy" } | { state: "ok"; hits: Hit[] } | { state: "unavailable"; code: number | null } | { state: "error"; text: string };
 
-/** Show control characters (NUL, ESC, ...) and the invisible direction and line-separator marks (bidi overrides and
- * isolates, ALM, LRM/RLM, U+2028/9) as visible \uXXXX escapes, so a report cannot reorder or hide what it says; newline
- * and tab stay. */
+/** Show control characters (NUL, ESC, ...) and every invisible character (bidi marks, overrides and isolates, zero-width
+ * and line separators, soft hyphen, fillers, variation selectors, and the tag block that spells ASCII invisibly) as
+ * visible escapes, so a report cannot reorder or hide what it says; newline and tab stay. The set matches the core's
+ * `control::lead::invisible`. Code points above U+FFFF are written `\u{...}`. */
 export const escapeControls = (t: string) =>
-  t.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
-    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  t.replace(
+    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/gu,
+    (c) => {
+      const n = c.codePointAt(0)!;
+      return n > 0xffff ? `\\u{${n.toString(16)}}` : `\\u${n.toString(16).padStart(4, "0")}`;
+    },
+  );
 
 /** The badge for one report read. It comes from that read's own result (the held bytes it checked), never from the
  * listing: no_report and not_text passed the signature check, so they read as verified too. */
