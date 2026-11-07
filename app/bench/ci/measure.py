@@ -1,6 +1,6 @@
 """H0 measurement: idle summed RSS (app + its WebKit helpers + app PTY children) and a growth slope.
 
-usage: h0_measure.py idle APP_BINARY OUT_JSON      (3 launches, median and spread)
+usage: measure.py idle APP_BINARY OUT_JSON      (5 launches, median of medians and spread)
        h0_measure.py growth APP_BINARY OUT_JSON MINUTES
 
 WebKit helpers are XPC services whose parent is launchd, not the app, so they are told apart by diffing the set of
@@ -76,9 +76,23 @@ def load():
     return os.getloadavg()
 
 
+LAUNCHES = 5
+
+
+def clean_median(samples):
+    """Median total of the samples taken while no foreign WebKit helpers were running.
+
+    Other apps on a shared runner start helpers of their own; a sample then counts them (helper count above the
+    smallest seen in this launch) and reads 140 to 260 MiB too high. Those samples are dropped, never averaged in.
+    """
+    lo = min(s["helpers"] for s in samples)
+    kept = [s["total_mib"] for s in samples if s["helpers"] == lo]
+    return statistics.median(kept), len(kept)
+
+
 def idle(binary, out):
     runs = []
-    for n in range(3):
+    for n in range(LAUNCHES):
         proc, before = launch(binary)
         time.sleep(25)  # settle
         samples = []
@@ -86,9 +100,10 @@ def idle(binary, out):
             samples.append(sample(proc, before))
             time.sleep(2)
         stop(proc)
+        med, kept = clean_median(samples)
         tot = [s["total_mib"] for s in samples]
-        runs.append({"run": n + 1, "median_mib": statistics.median(tot), "min": min(tot), "max": max(tot),
-                     "last": samples[-1], "load_avg": load()})
+        runs.append({"run": n + 1, "median_mib": med, "clean_samples": kept, "min": min(tot), "max": max(tot),
+                     "helpers": sorted({s["helpers"] for s in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
     meds = [r["median_mib"] for r in runs]
     json.dump({"runs": runs, "median_of_medians_mib": statistics.median(meds), "spread_mib": [min(meds), max(meds)]}, open(out, "w"), indent=1)
