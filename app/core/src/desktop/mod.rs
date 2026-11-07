@@ -59,10 +59,9 @@ const PROOF_TEXT_MAX: usize = 2000;
 /// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
 /// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
 const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
-/// What the run itself writes into its repo, so it is not an edit to the verified tree: `vajra-verify-work.sh` excludes the
-/// walkthrough dir (evidence, `cmd-N.log`, `diff.patch`, `untracked.txt`) from its own tree-stability check, and crew
-/// worktrees live under `.claude/worktrees/`. Keep in step with `EXCL` in `scripts/vajra-verify-work.sh`.
-const RUN_OWN_OUTPUT: [&str; 2] = ["data/walkthroughs", ".claude/worktrees"];
+/// What `vajra-verify-work.sh` leaves out of the tree id it records (its own walkthrough output: evidence, `cmd-N.log`,
+/// `diff.patch`, `untracked.txt`). Keep in step with `EXCL` there, or the two tree ids stop matching.
+const VERIFY_EXCLUDES: [&str; 1] = ["data/walkthroughs"];
 /// A repo whose state could not be read (git failed or was slow) is not asked again for this long.
 const WORKTREE_STATE_UNKNOWN_TTL: Duration = Duration::from_secs(30);
 const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -165,6 +164,42 @@ enum Outcome {
     Failed,
 }
 
+/// The `git.worktreeTree` recorded in an evidence file (regular file, at most 16 KiB), if there is one.
+/// What the evidence file says about the tree it was verified on. Reading failures are not "no tree": a file that cannot be
+/// read (too large, unreadable, not JSON) says nothing about its tree, so freshness is unknown, never assumed.
+enum RecordedTree {
+    /// `git.worktreeTree`.
+    Id(String),
+    /// A readable evidence file with no recorded tree (older evidence): the commit decides.
+    None,
+    /// The file could not be read within the bound.
+    Unreadable,
+}
+
+/// `check-evidence` itself reads at most this much of an evidence file (vajra_tasks.py / vajra_kb.py: 5,000,000 bytes).
+const EVIDENCE_READ_MAX: u64 = 5_000_000;
+
+fn evidence_tree(path: &Path) -> RecordedTree {
+    let read = || -> Option<RecordedTree> {
+        std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path).ok()?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
+        if bytes.len() as u64 > EVIDENCE_READ_MAX {
+            return None;
+        }
+        let doc: Value = serde_json::from_slice(&bytes).ok()?;
+        Some(match doc.get("git").and_then(|g| g.get("worktreeTree")).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            Some(t) => RecordedTree::Id(t.to_string()),
+            None => RecordedTree::None,
+        })
+    };
+    read().unwrap_or(RecordedTree::Unreadable)
+}
+
+/// What one read of a run repo learned: HEAD, the working tree's id, and whether the repo's own config defines a filter
+/// (then the tree is not computed).
+type RepoState = (String, Option<String>, bool);
+
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -214,7 +249,7 @@ pub struct App {
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, bool)>)>>,
+    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -870,7 +905,7 @@ impl App {
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
-        let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        let mut repos: HashMap<PathBuf, Option<RepoState>> = HashMap::new();
         for (i, r) in &repo_of {
             if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
                 repos.insert(r.clone(), self.worktree_state(r, deadline));
@@ -888,12 +923,26 @@ impl App {
             } else if has_evidence {
                 match verdict.get(&i) {
                     Some(true) => {
-                        // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
-                        // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
-                        let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
-                        let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
-                            .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
-                        if stale { "stale" } else { "pass" }
+                        // Green evidence is current while the working tree is the tree it was verified on (POS-1.3): a tracked
+                        // edit, an untracked file or a moved branch that changes the tree makes it stale; a different commit with
+                        // the same tree does not. Evidence without a recorded tree falls back to its commit. If git could not be
+                        // read the check's verdict stands.
+                        let ev = t.get("evidence");
+                        let want_head = ev.and_then(|e| e.get("head")).and_then(Value::as_str);
+                        let recorded = ev.and_then(|e| e.get("path")).and_then(Value::as_str).map(|p| evidence_tree(Path::new(p))).unwrap_or(RecordedTree::None);
+                        let unreadable = matches!(recorded, RecordedTree::Unreadable);
+                        let want_tree = match recorded { RecordedTree::Id(t) => Some(t), _ => None };
+                        let state = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref);
+                        let stale = !unreadable && state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
+                            (Some(w), Some(c)) => w != c,
+                            (Some(_), None) => false,
+                            (None, _) => want_head.is_some_and(|w| w != head),
+                        });
+                        // A repo with its own executable filter cannot be compared by tree without running it: the evidence
+                        // cannot be shown current, so it is never `pass` (it is not claimed stale either).
+                        let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
+                        // Evidence whose tree cannot be read is never assumed current either (a green check proves the file, not the tree).
+                        if stale { "stale" } else if filtered || (unreadable && state.is_some()) { "unverified" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -997,13 +1046,12 @@ impl App {
         Ok(out)
     }
 
-    /// An archived bundle (under the campaign's evidence dir) is checked
-    /// without a repo; live evidence is checked in the repo of the run that
-    /// made it. `None` when the task has no evidence path or no repo is known.
-    /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
-    /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
-    /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
-    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
+    /// `(HEAD, tree id)` of `repo`: the commit, and the whole-tree id of its working tree (tracked edits and untracked
+    /// files, the run's own `data/walkthroughs` output left out) computed as `vajra-verify-work.sh` records
+    /// `git.worktreeTree`. The tree is `None` when it cannot be computed in time. `None` overall when git fails or times
+    /// out: the caller then shows the check's own verdict, never `stale`, and nothing is remembered. Both reads count
+    /// against the call's `deadline`.
+    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<RepoState> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
             if at.elapsed() < ttl {
@@ -1014,26 +1062,25 @@ impl App {
         if budget.is_zero() {
             return None; // no time to ask: nothing learned, nothing remembered
         }
-        // Both git calls count against the call's deadline: each gets at most 2 s and never more than what is left.
-        let git = |args: &[&str]| {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
+        let read = || {
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+            if bridge.timeout.is_zero() {
                 return None;
             }
-            let mut bridge = self.bridge.clone();
-            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(left);
-            bridge
-                .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
+            let head = bridge
+                .run(&Request::Git { cwd: repo.to_path_buf(), args: vec!["rev-parse".into(), "HEAD".into()] })
                 .ok()
-                .filter(|o| !o.timed_out && o.code == Some(0))
-        };
-        let read = || {
-            let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
-            let mut status = vec!["status".to_string(), "--porcelain".into(), "-unormal".into(), "--".into(), ".".into()];
-            status.extend(RUN_OWN_OUTPUT.iter().map(|d| format!(":(exclude){d}")));
-            let status: Vec<&str> = status.iter().map(String::as_str).collect();
-            let dirty = !git(&status)?.stdout.trim().is_empty();
-            Some((head, dirty))
+                .filter(|o| !o.timed_out && o.code == Some(0))?
+                .stdout
+                .trim()
+                .to_string();
+            // The tree id gets what is left of the call's budget (it is one total timeout inside `tree_id`).
+            bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            // A repo whose own config defines a filter is never asked for its tree (`add` would run the filter).
+            let filtered = bridge.repo_filters(repo, bridge.timeout);
+            let tree = if filtered { None } else { bridge.tree_id(repo, &VERIFY_EXCLUDES) };
+            Some((head, tree, filtered))
         };
         let st = read();
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
@@ -1043,6 +1090,9 @@ impl App {
         st
     }
 
+    /// An archived bundle (under the campaign's evidence dir) is checked
+    /// without a repo; live evidence is checked in the repo of the run that
+    /// made it. `None` when the task has no evidence path or no repo is known.
     fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
         let ev = task.get("evidence")?;
         let path = PathBuf::from(ev.get("path")?.as_str()?);

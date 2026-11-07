@@ -184,6 +184,92 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// True when the repo's own config (local, worktree or command scope) defines a `clean`, `smudge` or `process` filter, or
+    /// when that cannot be determined: `git add` would run that command, and a repo-configured helper must never run from the
+    /// desktop (an agent can write the config and the attribute). Filters from the user's own global config are theirs and are
+    /// not counted. Fails closed.
+    pub fn repo_filters(&self, repo: &Path, timeout: Duration) -> bool {
+        if timeout.is_zero() {
+            return true;
+        }
+        let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
+            .chain([repo.to_string_lossy().into_owned()])
+            .chain(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"].map(String::from))
+            .collect();
+        match run_process_env(&self.git, &argv, None, timeout, self.home.as_deref(), None, &[]) {
+            Ok(o) if !o.timed_out && o.code == Some(1) => false, // no such key
+            Ok(o) if !o.timed_out && o.code == Some(0) => o.stdout.lines().any(|l| matches!(l.split('\t').next(), Some("local" | "worktree" | "command") | None)),
+            _ => true,
+        }
+    }
+
+    /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths, relative to `repo`, left out),
+    /// computed the way `vajra-verify-work.sh` records `git.worktreeTree`: HEAD read into a throwaway index, `add -A`, `write-tree`.
+    /// No hook runs: `core.hooksPath=/dev/null` on every command (writing the temporary index would otherwise fire a repo's
+    /// `post-index-change`, and `-c` outranks a repo-configured `hooksPath`).
+    /// The repo's index, working tree and object store are never written: every new object (a blob per modified or untracked
+    /// file, then the trees) goes to a temp object dir (`GIT_OBJECT_DIRECTORY`) that is removed afterwards, while the repo's
+    /// own objects are read through `GIT_ALTERNATE_OBJECT_DIRECTORIES`. The tree id is the same as if they were written
+    /// there. `None` if any step fails, the total `timeout` runs out, or the repo's own config defines an executable filter
+    /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
+    pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
+        let start = Instant::now();
+        if self.repo_filters(repo, self.timeout) {
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
+        std::fs::create_dir(&dir).ok()?;
+        let idx = dir.join("index");
+        let objects = dir.join("objects");
+        let repo_objects: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+        // Every step runs from the repository's top level, as verify-work does (`--show-toplevel`): the run's cwd may be a
+        // subdirectory, and `add -A -- .` from there would leave dirty files elsewhere at their HEAD content.
+        let top: std::cell::RefCell<PathBuf> = std::cell::RefCell::new(repo.to_path_buf());
+        let result = (|| {
+            let git = |args: &[&str], with_index: bool| -> Option<Output> {
+                let left = self.timeout.checked_sub(start.elapsed()).filter(|d| !d.is_zero())?;
+                let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
+                    .chain([top.borrow().to_string_lossy().into_owned()])
+                    .chain(args.iter().map(|a| a.to_string()))
+                    .collect();
+                let alt = repo_objects.borrow().clone();
+                let env: Vec<(&str, &Path)> = match (with_index, alt.as_deref()) {
+                    (true, Some(alt)) => vec![("GIT_INDEX_FILE", idx.as_path()), ("GIT_OBJECT_DIRECTORY", objects.as_path()), ("GIT_ALTERNATE_OBJECT_DIRECTORIES", alt)],
+                    _ => vec![],
+                };
+                run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| !o.timed_out && o.code == Some(0))
+            };
+            // verify-work excludes its walkthrough dir relative to the RUN's cwd (`<top>/<prefix>data/walkthroughs`), so the
+            // exclusions below are prefixed with the cwd's path under the top level (empty at the root).
+            let prefix = git(&["rev-parse", "--show-prefix"], false)?.stdout.trim().to_string();
+            let root = git(&["rev-parse", "--show-toplevel"], false)?.stdout.trim().to_string();
+            *top.borrow_mut() = Path::new(&root).canonicalize().ok().filter(|p| p.is_absolute())?;
+            // The repo's object dir as an absolute path (`--git-path` answers relative to the top level for a plain checkout).
+            let found = git(&["rev-parse", "--git-path", "objects"], false)?.stdout.trim().to_string();
+            let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { top.borrow().join(found) };
+            *repo_objects.borrow_mut() = Some(found.canonicalize().ok()?);
+            std::fs::create_dir(&objects).ok()?;
+            if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {
+                let head = head.stdout.trim().to_string();
+                git(&["read-tree", &head], true)?;
+            }
+            let mut add = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
+            add.extend(exclude.iter().map(|d| format!(":(exclude){prefix}{d}")));
+            let add: Vec<&str> = add.iter().map(String::as_str).collect();
+            git(&add, true)?;
+            let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
+            (tree.len() >= 40).then_some(tree)
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+}
+
+fn rand_tag() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
 fn find_jq() -> Option<PathBuf> {
     ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).find(|p| p.is_file())
 }
@@ -257,9 +343,26 @@ pub fn run_process_full(
     home: Option<&Path>,
     stdin: Option<&[u8]>,
 ) -> Result<Output, BridgeError> {
+    run_process_env(program, argv, cwd, timeout, home, stdin, &[])
+}
+
+/// As `run_process_full`, with extra environment variables on top of the scrubbed environment.
+#[allow(clippy::too_many_arguments)]
+pub fn run_process_env(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    home: Option<&Path>,
+    stdin: Option<&[u8]>,
+    env: &[(&str, &Path)],
+) -> Result<Output, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(argv).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     scrubbed_env(&mut cmd, home);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
