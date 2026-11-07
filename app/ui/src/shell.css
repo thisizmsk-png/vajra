@@ -13,8 +13,9 @@
 .v-shell__search { display: flex; align-items: center; gap: 10px; height: var(--row-h); margin-bottom: var(--space-md); padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); cursor: default; transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
 .v-shell__search:hover { border-color: var(--c-border-strong); color: var(--c-text-secondary); }
 .v-shell__search:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-.v-shell__link .v-kbd-group { opacity: 0; transition: opacity var(--t-fast) var(--ease-out); }
-.v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { opacity: 1; }
+/* Key hints are out of layout until asked for (hover, or focus in the nav), so the idle window draws no hint glyphs (idle memory). */
+.v-shell__link .v-kbd-group { display: none; }
+.v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { display: inline-flex; }
 .v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
@@ -56,7 +57,12 @@
 .v-home__checksall { color: var(--c-text-muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--c-border-strong); }
 .v-home__checks ul { list-style: none; margin: var(--space-xs) 0 0; padding: 0; display: flex; flex-direction: column; }
 .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
-.v-home__fix { font: 12px/16px var(--font-mono); color: var(--c-text-secondary); }
+/* The fix hint uses the UI face on Home so the idle window loads no second typeface (idle memory); Settings keeps mono. */
+.v-home__fix { font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
+.v-settings .v-home__fix { font-family: var(--font-mono); }
+/* Start run shows its key while you are in the form, which is where the key works. */
+.v-launch .v-button--primary .v-kbd-group { display: none; }
+.v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
 .v-home__report { margin: 0; padding: var(--space-md); max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); border: 1px solid var(--c-border); }
 .v-home__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -162,7 +168,7 @@
   .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
   .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .v-shell__nav .v-kbd-group { display: none; }
+  .v-shell .v-shell__nav .v-shell__link .v-kbd-group { display: none; }
   .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
   .v-shell__search { margin-top: var(--space-xs); border-color: transparent; background: transparent; }
   .v-shell__search:hover { background: var(--c-accent); }

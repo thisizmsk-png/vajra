@@ -144,7 +144,7 @@ uses azure except a link or a match highlight in the palette.
 - Unicode glyphs as icons (✓, ▲) → one SVG set on a 16 px grid, 1.5 px stroke, `currentColor`.
 - A hero metric block for "X of Y" → the run's own sentence ("3 of 7 criteria pass").
 - A form with a submit button for the ask → a launcher: one field, settings as inline tokens
-  (Base, Rounds, Workers, Guard), Start run at the right with ⌘↵.
+  (Base, Rounds, Workers, Guard), Start run at the right; its ⌘↵ hint shows while focus is in the form, where the key works. The sidebar's ⌘1 to ⌘7 hints are out of layout until hover or focus. Neither is drawn in the idle window, and Home sets the check-fix hint in the UI face, so idle loads one typeface (idle memory gate).
 - Separate search and command fields → one ⌘K field for actions, runs and files.
 - An empty state with sample data → the real Vajra crews and the one command that starts each.
 
