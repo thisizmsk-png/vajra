@@ -2616,7 +2616,7 @@ fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
 }
 
 #[test]
-fn a_cut_verify_run_never_resumes_and_a_cut_diff_has_no_exit_code() {
+fn a_cut_verify_run_never_resumes_and_a_cut_diff_stays_viewable() {
     let t = Tmp::new();
     let dir = t.home().join(".claude/skills/vajra/scripts");
     fs::create_dir_all(&dir).unwrap();
@@ -2626,12 +2626,13 @@ fn a_cut_verify_run_never_resumes_and_a_cut_diff_has_no_exit_code() {
         let e = app.verify_campaign("deliver-20261105-1810").unwrap_err();
         assert_eq!(code_of_err(&e), "verify_failed", "a cut exit {code} is neither ok nor a signature failure: {e}");
     }
-    // diff: a cut `git diff` reports no exit code and lists no untracked files.
+    // diff stays viewable: a cut `git diff` keeps its code and partial text and says `truncated`, for the UI's notice.
     let mut app = t.app();
     app.bridge.git = t.home().join("cut-git.sh");
     cut_exe(&app.bridge.git, "#!/bin/sh", "diff --git a/f b/f\n", 0);
     let d = app.diff(t.home().to_str().unwrap(), "main").unwrap();
-    assert_eq!((d["truncated"].clone(), d["code"].is_null(), d["untracked"].as_array().unwrap().len()), (json!(true), true, 0), "{d}");
+    assert_eq!((d["truncated"].clone(), d["code"].clone()), (json!(true), json!(0)), "{d}");
+    assert!(d["diff"].as_str().unwrap().starts_with("diff --git"), "{d}");
 }
 
 fn code_of_err(v: &Value) -> &str {

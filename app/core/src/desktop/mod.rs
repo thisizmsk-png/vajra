@@ -1150,7 +1150,8 @@ impl App {
         // (names only, ignore rules respected), instead of the tab calling an added-files-only change "no changes".
         let mut untracked: Vec<String> = Vec::new();
         let mut untracked_truncated = false;
-        if o.exit() == Some(0) {
+        // The diff itself is not interpreted: the client gets `code`, `truncated` and `timed_out` and shows a cut diff with its notice.
+        if o.code == Some(0) && !o.timed_out {
             if let Ok(u) = self.bridge.run(&Request::Git {
                 cwd: repo_dir(cwd_str)?,
                 args: ["ls-files", "--others", "--exclude-standard", "-z"].map(String::from).to_vec(),
@@ -1166,7 +1167,7 @@ impl App {
                 }
             }
         }
-        Ok(json!({"code": o.exit(), "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
+        Ok(json!({"code": o.code, "diff": o.stdout, "truncated": o.truncated, "timed_out": o.timed_out,
                   "untracked": untracked, "untracked_truncated": untracked_truncated}))
     }
 
