@@ -580,8 +580,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
       S.WorkerReport, 'Execute', { isolation: 'worktree' })
     if (!r.ok) return { ok: false, id, error: r.error }   // keyed by task id, not by label
     const c = flatten(r.out)
-    if (SHA_RE.test(c.commit)) runCommits.add(c.commit)
     if (stoppedReport(r.out)) return { ok: false, id, needsUser: true, out: { ...c, status: 'blocked', summary: 'stopped by the human; the task was not merged. ' + c.summary } }
+    if (SHA_RE.test(c.commit)) runCommits.add(c.commit)   // after the stop check: a stopped task's commit is not recorded
     const bad = checkChange(t, c, round)
     if (bad) return { ok: false, id, error: 'invalid worker report: ' + bad, out: c }
     if (c.status === 'progress') {
