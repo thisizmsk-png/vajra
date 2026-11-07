@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::control::lead::sanitise;
 use crate::crew::redact::Redactor;
@@ -25,9 +25,13 @@ use crate::vajra::allowlist::Allowlist;
 /// Largest result file read. A real `vajra-deliver` result is a few KB; anything bigger is refused, not truncated.
 pub const MAX_BYTES: u64 = 256 * 1024;
 const MAX_FILES: usize = 200;
-const MAX_ITEMS: usize = 20;
-const WHY_MAX: usize = 300;
 const TEXT_MAX: usize = 500;
+/// `ApprovedPlanTurn::MAX_INDEX + 1`: a result with more entries is refused whole, never partly shown.
+const MAX_PLANS: usize = crate::sessions::ApprovedPlanTurn::MAX_INDEX + 1;
+/// A plan entry bigger than this (as written) is shown in full but cannot be approved.
+const PLAN_MAX_BYTES: usize = 64 * 1024;
+/// `S.Action` of `workflows/vajra-deliver.js`.
+const ACTIONS: [&str; 9] = ["push", "pull_request", "deploy", "migration", "data_deletion", "secrets", "spend", "external_message", "other"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WfError {
@@ -44,8 +48,23 @@ pub struct Waiting {
     pub campaign: String,
     pub modified: i64,
     pub question: Option<String>,
-    /// Each `{action, why[, plan]}` exactly as shown, in order.
-    pub plans: Vec<Value>,
+    /// One per `pending_approval[]` entry, keeping the entry's own index in the workflow result.
+    pub plans: Vec<Plan>,
+}
+
+/// One `pending_approval[]` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// Position in the workflow's `pending_approval[]`. Ids and the delivered turn use this, never a filtered position.
+    pub index: usize,
+    pub action: String,
+    /// The entry exactly as the workflow wrote it. This is what is hashed (`plan_sha256`).
+    pub raw: Value,
+    /// The same entry with every control, bidi and invisible character shown as a visible `\u{..}` escape. Nothing is
+    /// shortened or dropped, so what is shown and what is hashed describe the same entry.
+    pub shown: Value,
+    /// Why this entry cannot be approved (it can still be rejected), if so.
+    pub invalid: Option<&'static str>,
 }
 
 fn open_dir(real: &Path) -> Result<OwnedFd, WfError> {
@@ -112,22 +131,57 @@ fn plain(v: Option<&Value>, cap: usize) -> String {
     sanitise(v.and_then(Value::as_str).unwrap_or_default(), &Redactor::default()).chars().take(cap).collect()
 }
 
-/// One `pending_approval` entry as it will be shown (and hashed). `None` for anything that is not a known action.
-fn plan_item(p: &Value) -> Option<Value> {
-    let action = p.get("action").and_then(Value::as_str)?;
-    if !matches!(action, "push" | "pr" | "deploy") {
-        return None;
+/// Make unsafe characters visible instead of dropping them.
+fn visible(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let hidden = c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}' | '\u{2028}' | '\u{2029}');
+        if hidden {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
     }
-    let mut out = json!({"action": action, "why": plain(p.get("why"), WHY_MAX)});
-    if action == "deploy" {
-        let plan = p.get("plan");
-        out["plan"] = json!({
-            "commands": plan.and_then(|x| x.get("commands")).and_then(Value::as_array).map(|a| a.iter().take(MAX_ITEMS).map(|c| plain(Some(c), TEXT_MAX)).collect::<Vec<_>>()).unwrap_or_default(),
-            "rollback": plain(plan.and_then(|x| x.get("rollback")), TEXT_MAX),
-            "risk": plain(plan.and_then(|x| x.get("risk")), TEXT_MAX),
-        });
+    out
+}
+
+fn show(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(visible(s)),
+        Value::Array(a) => Value::Array(a.iter().map(show).collect()),
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (visible(k), show(x))).collect()),
+        other => other.clone(),
     }
-    Some(out)
+}
+
+fn strings(v: Option<&Value>) -> bool {
+    v.and_then(Value::as_array).is_some_and(|a| a.iter().all(Value::is_string))
+}
+
+/// `S.DeployPlan`: target, commands[], rollback[], health_checks[], risk.
+fn deploy_plan_ok(p: Option<&Value>) -> bool {
+    let Some(p) = p else { return false };
+    p.get("target").is_some_and(Value::is_string)
+        && strings(p.get("commands"))
+        && strings(p.get("rollback"))
+        && strings(p.get("health_checks"))
+        && matches!(p.get("risk").and_then(Value::as_str), Some("low" | "medium" | "high"))
+}
+
+fn plan_entry(index: usize, p: &Value) -> Plan {
+    let action = p.get("action").and_then(Value::as_str).unwrap_or_default().to_string();
+    let invalid = if !p.is_object() || !ACTIONS.contains(&action.as_str()) {
+        Some("not a known action")
+    } else if !p.get("why").is_some_and(Value::is_string) {
+        Some("has no reason")
+    } else if action == "deploy" && !deploy_plan_ok(p.get("plan")) {
+        Some("a deploy needs a complete plan (target, commands, rollback, health checks, risk)")
+    } else if serde_json::to_vec(p).map_or(true, |b| b.len() > PLAN_MAX_BYTES) {
+        Some("too large to review")
+    } else {
+        None
+    };
+    Plan { index, action, raw: p.clone(), shown: show(p), invalid }
 }
 
 /// What a `vajra-deliver` result file asks of the human, or `None` when it is some other workflow, did not complete,
@@ -141,7 +195,13 @@ pub fn parse(bytes: &[u8], modified: i64) -> Option<Waiting> {
     let campaign = r.get("artifacts").and_then(|a| a.get("campaign")).and_then(Value::as_str).filter(|c| crate::bus::valid_stream_id(c))?.to_string();
     let (question, plans) = match r.get("status").and_then(Value::as_str)? {
         "need_input" => (Some(plain(r.get("question"), TEXT_MAX)), Vec::new()),
-        "done" => (None, r.get("pending_approval").and_then(Value::as_array).map(|a| a.iter().filter_map(plan_item).take(MAX_ITEMS).collect()).unwrap_or_default()),
+        "done" => {
+            let entries = r.get("pending_approval").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+            if entries.len() > MAX_PLANS {
+                return None;
+            }
+            (None, entries.iter().enumerate().map(|(i, p)| plan_entry(i, p)).collect())
+        }
         _ => return None,
     };
     Some(Waiting { campaign, modified, question, plans })

@@ -313,11 +313,13 @@ impl Supervisor {
     /// Send keystrokes. Refused unless take_over is on.
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), SessionError> {
         let s = self.get(id)?;
+        // The mode is checked under the writer lock, and `set_take_over` changes it under the same lock, so a write
+        // that was allowed cannot stay queued across the mode turning off.
+        let mut w = lock(&s.writer);
         if !s.take_over.load(Ordering::SeqCst) {
             self.log("session_write_refused", &[("pid", u64::from(s.pid))]);
             return Err(SessionError::ReadOnly);
         }
-        let mut w = lock(&s.writer);
         w.write_all(data)
             .and_then(|_| w.flush())
             .map_err(|e| SessionError::Io(e.to_string()))
@@ -340,7 +342,12 @@ impl Supervisor {
 
     pub fn set_take_over(&self, id: &str, on: bool) -> Result<(), SessionError> {
         let s = self.get(id)?;
-        s.take_over.store(on, Ordering::SeqCst);
+        {
+            // Serialised with every delivery: a write or fixed turn in progress finishes first, and none that starts
+            // later sees the old mode.
+            let _w = lock(&s.writer);
+            s.take_over.store(on, Ordering::SeqCst);
+        }
         self.log(
             "session_take_over",
             &[("pid", u64::from(s.pid)), ("on", u64::from(on))],

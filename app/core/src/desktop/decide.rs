@@ -6,6 +6,7 @@
 //!   and the human answers its permission prompts through Take over. `vajra-deliver` has no paused state, so this is a
 //!   new turn, not a resume of the workflow.
 //! - **Reject** signs a `rejected plan <id>: <reason>` progress line through the campaign script (one argv element).
+//! - Plan ids carry the entry's own index in the workflow result, and the hash covers the whole entry as written.
 //! - Both are bound to what the human saw: the plan comes from an unsigned, worker-writable file, so `approve_plan`
 //!   re-reads it and refuses unless it still hashes to the `plan_sha256` the inbox showed.
 //! - One terminal decision per plan, behind a per-plan lock. The `requested` ledger line is written first.
@@ -40,16 +41,21 @@ impl App {
         if !lock(&self.deciding).insert(id.to_string()) {
             return Err(fail("busy", "this plan is being decided"));
         }
-        let guard = Deciding(self, id.to_string());
-        match lock(&self.control).decided(id) {
-            Ok(None) => Ok(guard),
+        Ok(Deciding(self, id.to_string()))
+    }
+
+    /// Refuse if this exact plan (id and content hash) was already approved or rejected. An unreadable ledger refuses too.
+    fn undecided(&self, id: &str, sha: &str) -> Result<(), Value> {
+        match lock(&self.control).decided(id, sha) {
+            Ok(None) => Ok(()),
             Ok(Some(a)) => Err(already(&a)),
             Err(e) => Err(fail("io_error", e)),
         }
     }
 
+    /// The run a plan id names: the app's own origin run for that campaign (see `plan_origins`).
     fn plan_run(&self, run_id: &str) -> Result<runindex::Entry, Value> {
-        runindex::latest(&self.data.join("runs.jsonl")).into_values().find(|e| e.run_id == run_id).ok_or_else(|| fail("not_found", "no such run"))
+        self.plan_origins().into_values().find(|e| e.run_id == run_id).ok_or_else(|| fail("not_found", "no such run"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -68,9 +74,14 @@ impl App {
             return Err(changed());
         }
         let w = self.waiting(&e).ok_or_else(changed)?;
-        if w.plans.get(index).map(plan_sha).as_deref() != Some(plan_sha256) {
+        let plan = w.plans.iter().find(|p| p.index == index).ok_or_else(changed)?;
+        if plan_sha(&plan.raw) != plan_sha256 {
             return Err(changed());
         }
+        if let Some(why) = plan.invalid {
+            return Err(fail("plan_invalid", format!("this plan cannot be approved: {why}")));
+        }
+        self.undecided(id, plan_sha256)?;
         let turn = ApprovedPlanTurn::new(run_id, index).ok_or_else(|| invalid("id", "not a plan id"))?;
         let stream = format!("run-{}", e.session_id);
         let live = self.sup.is_running(&stream).unwrap_or(false);
@@ -115,14 +126,14 @@ impl App {
         }
         let _one = self.begin_decision(id)?;
         let e = self.plan_run(run_id)?;
-        if self.waiting(&e).is_none_or(|w| index >= w.plans.len()) {
-            return Err(fail("not_found", "no such plan"));
-        }
-        let action = self.decision_line(Decision::Reject, None, id, &e, None, DecisionState::Requested, Some(&reason))?;
+        let sha = self.waiting(&e).and_then(|w| w.plans.iter().find(|p| p.index == index).map(|p| plan_sha(&p.raw))).ok_or_else(|| fail("not_found", "no such plan"))?;
+        self.undecided(id, &sha)?;
+        let sha = Some(sha.as_str());
+        let action = self.decision_line(Decision::Reject, None, id, &e, sha, DecisionState::Requested, Some(&reason))?;
         let text = format!("rejected plan {id}: {reason}");
         match self.bridge.run(&Request::CampaignProgress { slug: e.campaign.clone(), text }) {
             Ok(o) if o.code == Some(0) => {
-                self.decision_line(Decision::Reject, Some(&action), id, &e, None, DecisionState::Final, Some(&reason))?;
+                self.decision_line(Decision::Reject, Some(&action), id, &e, sha, DecisionState::Final, Some(&reason))?;
                 self.note("plan_rejected", &[]);
                 Ok(json!({"action_id": action, "state": "rejected"}))
             }
@@ -131,7 +142,7 @@ impl App {
                     Ok(o) => format!("progress exited {:?}", o.code),
                     Err(err) => err.to_string(),
                 };
-                let _ = self.decision_line(Decision::Reject, Some(&action), id, &e, None, DecisionState::Failed, Some("progress_failed"));
+                let _ = self.decision_line(Decision::Reject, Some(&action), id, &e, sha, DecisionState::Failed, Some("progress_failed"));
                 Err(fail("reject_failed", why))
             }
         }

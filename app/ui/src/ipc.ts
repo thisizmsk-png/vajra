@@ -64,7 +64,13 @@ export type InboxItem = {
   /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
   source?: string;
   /** B2 plan items: what `approve_plan` must be given back, the hash of exactly what was shown. */
-  plan_sha256?: string; action?: "push" | "pr" | "deploy"; plan?: { commands: string[]; rollback: string; risk: string } | null;
+  plan_sha256?: string; action?: string;
+  /** The deploy plan as the workflow wrote it (`S.DeployPlan`), unabridged; unsafe characters appear as visible `\u{..}` escapes. */
+  plan?: { target: string; commands: string[]; rollback: string[]; health_checks: string[]; risk: "low" | "medium" | "high" } | null;
+  /** The whole pending_approval entry, unabridged: what `plan_sha256` covers. */
+  entry?: Record<string, unknown>;
+  /** Set when the entry cannot be approved (only `reject` is offered). */
+  invalid?: string | null;
   /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
 };

@@ -455,13 +455,13 @@ impl Service {
         self.record(&a, r.state.state(), extra, now)
     }
 
-    /// The action that already decided `item`, if any: an approve or reject whose newest line is `requested`,
+    /// The action that already decided `item` with exactly this plan (`plan_sha256`), if any: an approve or reject whose newest line is `requested`,
     /// `delivered` or `done`. A `requested` with no outcome (a crash mid-delivery) counts as decided: delivery is
     /// unknown, so the plan is never run twice. Only `failed` frees the item.
-    pub fn decided(&self, item: &str) -> io::Result<Option<String>> {
+    pub fn decided(&self, item: &str, plan_sha256: &str) -> io::Result<Option<String>> {
         let records = Ledger::read_all(&self.control_root.join("ledger.jsonl"))?;
         let mut last: Vec<(String, String)> = Vec::new();
-        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item) {
+        for r in records.iter().filter(|r| matches!(str_field(r, "kind"), "approve" | "reject") && str_field(r, "item") == item && str_field(r, "plan_sha256") == plan_sha256) {
             let (id, state) = (str_field(r, "action_id").to_string(), str_field(r, "state").to_string());
             match last.iter_mut().find(|(i, _)| *i == id) {
                 Some(e) => e.1 = state,

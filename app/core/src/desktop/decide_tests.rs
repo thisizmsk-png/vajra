@@ -45,7 +45,7 @@ impl Tmp {
     fn run(&self, app: &App) {
         let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: self.cwd(), lead_session_id: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
-        app.record_run_cwd(RUN, &self.cwd()).unwrap();
+        app.record_run(RUN, &self.cwd(), SID, CAMP).unwrap();
     }
     /// The harness's result file for a finished `vajra-deliver`, at 0600.
     fn result(&self, name: &str, body: &Value) -> PathBuf {
@@ -88,8 +88,13 @@ fn done(campaign: &str, plans: Value) -> Value {
         "result": {"status": "done", "node": "deliver", "branch": "b", "commit": "c", "report": "r", "pending_approval": plans, "artifacts": {"campaign": campaign}}})
 }
 
+/// `S.DeployPlan` of `workflows/vajra-deliver.js`: rollback and health_checks are arrays.
+fn deploy_plan() -> Value {
+    json!({"target": "prod", "commands": ["make deploy"], "rollback": ["make undo", "make verify"], "health_checks": ["curl -f /health"], "risk": "low"})
+}
+
 fn pushes() -> Value {
-    json!([{"action": "push", "why": "ship the branch"}, {"action": "deploy", "why": "go live", "plan": {"commands": ["make deploy"], "rollback": "make undo", "risk": "low"}}])
+    json!([{"action": "push", "why": "ship the branch"}, {"action": "deploy", "why": "go live", "plan": deploy_plan()}])
 }
 
 fn code_of(v: &Value) -> String {
@@ -122,10 +127,11 @@ fn inbox_plan_items_come_from_the_result_labelled_and_hashed() {
     let inbox = app.inbox().unwrap();
     let p = item(&inbox, PLAN);
     assert_eq!((p["kind"].as_str(), p["source"].as_str(), p["action"].as_str()), (Some("plan"), Some("from the workflow result"), Some("push")));
+    assert_eq!(p["entry"], json!({"action": "push", "why": "ship the branch"}));
     assert_eq!(p["actions"], json!(["approve", "reject"]));
     assert_eq!(p["plan_sha256"].as_str().unwrap().len(), 64);
     let d = item(&inbox, "plan:20261106-0911.1");
-    assert_eq!(d["plan"]["rollback"], "make undo");
+    assert_eq!(d["plan"], deploy_plan(), "the whole plan, rollback array and health checks included");
     assert_ne!(d["plan_sha256"], p["plan_sha256"]);
 }
 
@@ -217,7 +223,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
-    app.record_run_cwd(RUN, &t.0.join("elsewhere")).unwrap();
+    app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "guarded record names another directory");
 }
 
@@ -425,5 +431,146 @@ fn approve_reject_ledger_and_audit_lines_and_reconcile_covers_them() {
     fs::write(&audit_path, kept).unwrap();
     let rep = reconcile::run(&t.0.join("data/control/ledger.jsonl"), &audit_path).unwrap();
     assert_eq!(rep.ledger_without_audit, [a["action_id"].as_str().unwrap().to_string()], "{rep:?} {ledger:?}");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+// ---- review findings (PR #38) --------------------------------------------------------------------------------
+
+#[test]
+fn a_forged_session_id_or_campaign_on_the_same_run_is_not_trusted() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    t.campaign_script(0);
+    // The guarded record says (SID, CAMP); the index line (worker-writable) claims another session, then another campaign.
+    app.record_run(RUN, &t.cwd(), SID, CAMP).unwrap();
+    for (sid, camp) in [(other, CAMP), (SID, "deliver-other")] {
+        let e = runindex::Entry { campaign: camp.into(), session_id: sid.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
+        runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+        let dir = t.home().join(".claude/projects").join(project_slug(&t.cwd())).join(sid).join("workflows");
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("wf_a.json");
+        fs::write(&p, done(camp, pushes()).to_string()).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(app.inbox().unwrap()["count"], 0, "forged {sid} {camp}");
+        assert_eq!(code_of(&app.approve_plan(PLAN, &"0".repeat(64)).unwrap_err()), "not_found");
+        assert_eq!(code_of(&app.reject_plan(PLAN, "no").unwrap_err()), "not_found");
+    }
+    assert!(t.ledger().is_empty() && !t.0.join("argv.log").exists(), "nothing was recorded and no progress line was sent");
+}
+
+#[test]
+fn source_indices_survive_unsupported_entries_and_pull_request_is_recognised() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    let entries = json!([
+        {"action": "pull_request", "why": "open the PR"},
+        {"action": "teleport", "why": "not an action of the workflow"},
+        {"action": "deploy", "why": "go live", "plan": deploy_plan()},
+        {"action": "migration", "why": "run the migration"},
+    ]);
+    t.result("wf_a.json", &done(CAMP, entries));
+    let inbox = app.inbox().unwrap();
+    assert_eq!(item_ids(&app), ["plan:20261106-0911.0", "plan:20261106-0911.1", "plan:20261106-0911.2", "plan:20261106-0911.3"], "{inbox}");
+    assert_eq!(item(&inbox, "plan:20261106-0911.0")["action"], "pull_request");
+    assert_eq!(item(&inbox, "plan:20261106-0911.2")["action"], "deploy");
+    assert_eq!(item(&inbox, "plan:20261106-0911.1")["actions"], json!(["reject"]), "an unknown action can only be rejected");
+    // Approving the deploy types index 2, the deploy's own place in the result.
+    let typed = t.live(&app);
+    let sha = item(&inbox, "plan:20261106-0911.2")["plan_sha256"].as_str().unwrap().to_string();
+    app.approve_plan("plan:20261106-0911.2", &sha).unwrap();
+    let mut got = String::new();
+    for _ in 0..100 {
+        got = fs::read_to_string(&typed).unwrap_or_default();
+        if !got.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(got, "Execute approved plan 20261106-0911.2\n");
+    let bad = item(&inbox, "plan:20261106-0911.1")["plan_sha256"].as_str().unwrap().to_string();
+    assert_eq!(code_of(&app.approve_plan("plan:20261106-0911.1", &bad).unwrap_err()), "plan_invalid");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn the_whole_plan_is_shown_and_hashed_and_an_incomplete_one_cannot_be_approved() {
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    let mut plan = deploy_plan();
+    plan["commands"] = json!((0..25).map(|i| format!("step {i} {}", "x".repeat(700))).collect::<Vec<_>>());
+    plan["rollback"] = json!(["undo \u{202e}evil\u{1b}[31m"]);
+    let entry = |p: &Value| json!([{"action": "deploy", "why": "go", "plan": p}]);
+    t.result("wf_a.json", &done(CAMP, entry(&plan)));
+    let inbox = app.inbox().unwrap();
+    let it = item(&inbox, PLAN);
+    assert_eq!(it["plan"]["commands"].as_array().unwrap().len(), 25, "no 20-command cap");
+    assert_eq!(it["plan"]["commands"][24].as_str().unwrap().len(), plan["commands"][24].as_str().unwrap().len(), "no 500-character cap");
+    assert_eq!(it["plan"]["rollback"][0], "undo \\u{202e}evil\\u{1b}[31m", "unsafe characters are visible, not dropped");
+    assert_eq!(it["plan"]["health_checks"], json!(["curl -f /health"]));
+    let sha = it["plan_sha256"].as_str().unwrap().to_string();
+    // Each part the old projection ignored now changes the hash: a late character of a long command, a 26th command,
+    // the rollback, the target and the health checks.
+    for edit in [
+        |p: &mut Value| p["commands"][3] = json!(format!("step 3 {}y", "x".repeat(699))),
+        |p: &mut Value| p["commands"].as_array_mut().unwrap().push(json!("rm -rf /")),
+        |p: &mut Value| p["rollback"] = json!(["nothing"]),
+        |p: &mut Value| p["target"] = json!("staging"),
+        |p: &mut Value| p["health_checks"] = json!([]),
+    ] {
+        let mut p = plan.clone();
+        edit(&mut p);
+        t.result("wf_a.json", &done(CAMP, entry(&p)));
+        assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "plan_changed", "{p}");
+    }
+    // A deploy without a complete plan (string rollback, as the old code assumed) is listed but cannot be approved.
+    for bad in [json!({"target": "prod", "commands": ["x"], "rollback": "undo", "health_checks": [], "risk": "low"}), Value::Null] {
+        t.result("wf_a.json", &done(CAMP, entry(&bad)));
+        let inbox = app.inbox().unwrap();
+        assert_eq!(item(&inbox, PLAN)["actions"], json!(["reject"]));
+        let s = item(&inbox, PLAN)["plan_sha256"].as_str().unwrap().to_string();
+        assert_eq!(code_of(&app.approve_plan(PLAN, &s).unwrap_err()), "plan_invalid");
+    }
+    // An entry too large to review is refused; more entries than turns can name refuse the whole result.
+    t.result("wf_a.json", &done(CAMP, json!([{"action": "push", "why": "x".repeat(70_000)}])));
+    assert_eq!(item(&app.inbox().unwrap(), PLAN)["invalid"], "too large to review");
+    t.result("wf_a.json", &done(CAMP, json!((0..101).map(|_| json!({"action": "push", "why": "a"})).collect::<Vec<_>>())));
+    assert_eq!(app.inbox().unwrap()["count"], 0);
+}
+
+#[test]
+fn plan_ids_stay_stable_after_an_approval_driven_resume() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    let sha1 = item(&app.inbox().unwrap(), "plan:20261106-0911.1")["plan_sha256"].as_str().unwrap().to_string();
+    t.live(&app);
+    app.approve_plan(PLAN, &sha).unwrap();
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+    // The resume launches a new run (new id) in the same session; the old result file is still there.
+    let r2 = "20261106-1005";
+    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+    app.record_run(r2, &t.cwd(), SID, CAMP).unwrap();
+    assert_eq!(item_ids(&app), ["plan:20261106-0911.1"], "the approved plan stays decided; its sibling keeps its id");
+    t.live(&app);
+    let before = t.ledger().len();
+    assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "already_decided");
+    assert!(app.approve_plan("plan:20261106-0911.1", &sha1).is_ok(), "the sibling is still addressable");
+    assert_eq!(t.ledger().len(), before + 2);
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn a_different_plan_at_an_old_index_is_not_treated_as_decided() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    t.live(&app);
+    app.approve_plan(PLAN, &sha).unwrap();
+    t.result("wf_b.json", &done(CAMP, json!([{"action": "push", "why": "a later result, different content"}])));
+    assert!(item_ids(&app).contains(&PLAN.to_string()), "new content at the same index is a new decision");
     app.sup.kill(&format!("run-{SID}")).unwrap();
 }
