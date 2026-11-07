@@ -49,7 +49,7 @@ impl Redactor {
             if s.contains('\u{1b}') || s.chars().any(is_format) {
                 redact_keeping_escapes(&s, n)
             } else {
-                redact_wrapped(s.replace(n.as_str(), REDACTED), n)
+                redact_wrapped(replace_ci(&s, n), n)
             }
         })
     }
@@ -83,11 +83,15 @@ fn redact_keeping_escapes(s: &str, n: &str) -> String {
             plain.push(c);
         }
     }
-    let mut cut: Vec<(usize, usize)> = plain.match_indices(n).map(|(a, m)| (a, a + m.len())).collect();
-    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain.ends_with(&n[..k])) {
+    // Matched in lower case (ASCII only, so the byte offsets are the same as in `plain`): a nonce an agent writes in
+    // upper or mixed case is still the nonce.
+    let (plain_lc, n) = (plain.to_ascii_lowercase(), n.to_ascii_lowercase());
+    let n = n.as_str();
+    let mut cut: Vec<(usize, usize)> = plain_lc.match_indices(n).map(|(a, m)| (a, a + m.len())).collect();
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain_lc.ends_with(&n[..k])) {
         cut.push((plain.len() - k, plain.len()));
     }
-    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain.starts_with(&n[n.len() - k..])) {
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| plain_lc.starts_with(&n[n.len() - k..])) {
         cut.push((0, k));
     }
     if cut.is_empty() {
@@ -119,14 +123,31 @@ fn redact_keeping_escapes(s: &str, n: &str) -> String {
 /// `MIN_NONCE` chars at the end of a line, or a suffix at its start, is
 /// replaced too.
 fn redact_wrapped(mut s: String, n: &str) -> String {
-    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| s.ends_with(&n[..k])) {
+    let n = n.to_ascii_lowercase();
+    let lc = s.to_ascii_lowercase();
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| lc.ends_with(&n[..k])) {
         s.truncate(s.len() - k);
         s.push_str(REDACTED);
     }
-    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| s.starts_with(&n[n.len() - k..])) {
+    let lc = s.to_ascii_lowercase();
+    if let Some(k) = (MIN_NONCE..n.len()).rev().find(|&k| lc.starts_with(&n[n.len() - k..])) {
         s.replace_range(..k, REDACTED);
     }
     s
+}
+
+/// `s` with every ASCII-case-insensitive occurrence of `n` replaced by the marker.
+fn replace_ci(s: &str, n: &str) -> String {
+    let (lc, n) = (s.to_ascii_lowercase(), n.to_ascii_lowercase());
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    for (a, m) in lc.match_indices(n.as_str()) {
+        out.push_str(&s[at..a]);
+        out.push_str(REDACTED);
+        at = a + m.len();
+    }
+    out.push_str(&s[at..]);
+    out
 }
 
 /// Drop the CSI sequences `ansi::sanitize` keeps (SGR, cursor) and format
@@ -156,4 +177,48 @@ fn is_format(c: char) -> bool {
     matches!(c,
         '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
         | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const N: &str = "0123456789abcdef0123456789abcdef";
+
+    fn red() -> Redactor {
+        Redactor::new(Some(N))
+    }
+
+    #[test]
+    fn the_nonce_is_redacted_in_any_ascii_case() {
+        let up = N.to_ascii_uppercase();
+        let mixed: String = N.chars().enumerate().map(|(i, c)| if i % 3 == 0 { c.to_ascii_uppercase() } else { c }).collect();
+        for form in [N.to_string(), up, mixed] {
+            let line = format!("the nonce is {form} ok");
+            assert_eq!(red().clean(&line), "the nonce is [redacted] ok", "{form}");
+        }
+    }
+
+    #[test]
+    fn an_uppercase_nonce_is_found_through_escapes_and_invisible_characters() {
+        let up = N.to_ascii_uppercase();
+        let split = format!("{}\u{200b}{}", &up[..16], &up[16..]);
+        assert_eq!(red().clean(&format!("x {split} y")), "x [redacted] y");
+        // The PTY view keeps colours but still shows no nonce character.
+        let sgr = format!("x {}\u{1b}[0m{} y", &up[..16], &up[16..]);
+        let out = red().redact(sgr);
+        assert!(!out.to_ascii_lowercase().contains(&N[..8]) && out.contains(REDACTED), "{out:?}");
+    }
+
+    #[test]
+    fn an_uppercase_fragment_cut_by_a_terminal_wrap_is_redacted_too() {
+        let up = N.to_ascii_uppercase();
+        assert_eq!(red().clean(&format!("tail {}", &up[..20])), "tail [redacted]");
+        assert_eq!(red().clean(&format!("{} head", &up[12..])), "[redacted] head");
+    }
+
+    #[test]
+    fn ordinary_text_is_left_alone() {
+        assert_eq!(red().clean("a sha 0123abcd and DEADBEEF stay"), "a sha 0123abcd and DEADBEEF stay");
+    }
 }
