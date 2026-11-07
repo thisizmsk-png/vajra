@@ -184,6 +184,15 @@ impl Drop for Tmp {
     }
 }
 
+/// The Lead session id of RUN_ID as the app stores it: in the guarded control dir.
+fn remember_lead(t: &Tmp, sid: &str) {
+    let dir = t.data().join("control/lead").join(RUN_ID);
+    crate::control::fsx::private_dir(&t.data().join("control")).unwrap();
+    crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
+    crate::control::fsx::private_dir(&dir).unwrap();
+    crate::control::fsx::write_atomic(&dir, "lead_session", sid.as_bytes()).unwrap();
+}
+
 fn wait_until(what: &str, f: impl Fn() -> bool) {
     let t = Instant::now();
     while !f() {
@@ -238,8 +247,8 @@ fn ask_round_trip_streams_records_and_resumes() {
     let q = &t.ledger().into_iter().find(|r| r["kind"] == "ask" && r["state"] == "queued").unwrap();
     assert_eq!(q["text"], "what is bhima doing? [redacted]");
     assert_eq!(q["actor"], "human");
-    assert_eq!(runindex::latest(&t.data().join("runs.jsonl"))["deliver-x"].lead_session_id.as_deref(), Some(sid.as_str()));
-    assert!(std::fs::read_to_string(t.data().join("runs.jsonl")).unwrap_or_default().contains(&sid));
+    assert_eq!(std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("lead_session")).unwrap(), sid);
+    assert!(!std::fs::read_to_string(t.data().join("runs.jsonl")).unwrap_or_default().contains(&sid), "the worker-writable index holds no Lead id");
 
     // The second ask resumes the same Lead session. The self-test ran once, not twice.
     let r2 = app.ask_lead(RUN_ID, "and now?").unwrap();
@@ -518,9 +527,10 @@ fn the_selftest_runs_with_the_hooks_removed_and_the_canary_covered_by_a_rule() {
 fn lead_stream_rebuilt_from_transcript_after_restart() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(lead_sid.into()) };
     std::fs::create_dir_all(t.data()).unwrap();
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    remember_lead(&t, lead_sid);
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
     std::fs::create_dir_all(&proj).unwrap();
     let hdr = format!("[Vajra Desktop: question from the human, ask 01ARZ3NDEKTSV4RRFFQ69G5FAV, run {RUN_ID}. Answer with the read and control tools only.]\nwhat is bhima doing?");
@@ -713,8 +723,9 @@ fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(lead_sid.into()) };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    remember_lead(&t, lead_sid);
     // The run's control nonce, as the earlier app life left it.
     let disk = nonce::create(&t.data().join("control").join(SID)).unwrap();
     // A history line of the Lead's own transcript that quotes it.
@@ -792,4 +803,21 @@ fn a_data_dir_override_outside_the_guarded_location_is_refused() {
     assert!(e.to_string().contains("not guard-protected"), "{e}");
     assert!(t.count("ask.count") == 0 && t.files("stdin.").is_empty(), "nothing was spawned");
     assert!(!other.join("control/lead").exists(), "no Lead files were written there");
+}
+
+#[test]
+fn a_forged_lead_session_id_in_the_worker_writable_index_is_ignored() {
+    let t = Tmp::new();
+    let app = t.app();
+    // A worker rewrites runs.jsonl and points the run's Lead session at another session (here the run's own worker).
+    let forged = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(SID.into()) };
+    std::fs::create_dir_all(t.data()).unwrap();
+    runindex::append(&t.data().join("runs.jsonl"), &forged).unwrap();
+    let r = app.ask_lead(RUN_ID, "hi").unwrap();
+    assert_ne!(r["lead_session_id"], SID, "the forged id is not used");
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    let argvs: Vec<String> = t.files("argv.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert!(argvs.iter().all(|a| !a.contains("--resume")), "nothing was resumed: {argvs:?}");
+    // Nor is it replayed into the Lead stream.
+    assert!(stream_text(&app).iter().all(|l| !l.contains("forged")));
 }

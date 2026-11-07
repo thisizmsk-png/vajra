@@ -38,6 +38,8 @@ const DOCTOR_TTL: Duration = Duration::from_secs(60);
 /// Most of a Lead transcript read back after a restart.
 const REBUILD_BYTES: u64 = 4 * 1024 * 1024;
 /// Where the guard script lives under `$HOME`.
+/// File name of the Lead session id inside `<data>/control/lead/<run_id>/`.
+const LEAD_SID_FILE: &str = "lead_session";
 const GUARD_SCRIPT: &str = ".claude/skills/vajra/hooks/pre-tool-use.sh";
 
 /// Test seam: runs right after the settings file is written, before it is verified.
@@ -283,12 +285,13 @@ impl App {
     /// The run, if this app launched or resumed it: in memory, or in `runs.jsonl`. A finished run still counts.
     fn lead_target(&self, run_id: &str) -> Option<Target> {
         let latest = runindex::latest(&self.data.join("runs.jsonl"));
-        let lead_of = |campaign: &str| latest.get(campaign).filter(|e| e.run_id == run_id).and_then(|e| e.lead_session_id.clone());
+        // The Lead session id is read from the guarded control dir, never from `runs.jsonl`: a worker can write that.
+        let lead_sid = self.read_lead_sid(run_id);
         let live: Option<Run> = lock(&self.runs).values().find(|r| r.run_id == run_id).cloned();
         if let Some(mut r) = live {
             self.add_disk_nonce(&mut r.nonces, &r.session_id);
             return Some(Target {
-                lead_session_id: lead_of(&r.campaign),
+                lead_session_id: lead_sid,
                 campaign: r.campaign,
                 session_id: r.session_id,
                 run_id: r.run_id,
@@ -301,8 +304,20 @@ impl App {
         latest.into_values().find(|e| e.run_id == run_id).map(|e| {
             let mut nonces = Redactor::default();
             self.add_disk_nonce(&mut nonces, &e.session_id);
-            Target { campaign: e.campaign, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: e.lead_session_id, nonces }
+            Target { campaign: e.campaign, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces }
         })
+    }
+
+    /// `<data>/control/lead/<run_id>/lead_session`: the authoritative run to Lead-session mapping. It sits under the
+    /// directory the worker guard protects; `runs.jsonl` (worker-writable) is not trusted for it.
+    fn lead_sid_dir(&self, run_id: &str) -> PathBuf {
+        self.data.join("control").join("lead").join(run_id)
+    }
+
+    fn read_lead_sid(&self, run_id: &str) -> Option<String> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(LEAD_SID_FILE)).ok()?;
+        let sid = String::from_utf8(body).ok()?.trim().to_string();
+        ids::valid_session_id(&sid).then_some(sid)
     }
 
     /// Add the session's persisted control nonce (read under the hook's rules), if there is a valid one.
@@ -388,22 +403,15 @@ impl App {
         let log = self.log.clone();
         let handle = handle.clone();
         let first = !resume;
-        let entry = runindex::Entry {
-            campaign: t.campaign.clone(),
-            session_id: t.session_id.clone(),
-            run_id: t.run_id.clone(),
-            cwd: t.cwd.clone(),
-            lead_session_id: Some(lead_sid.clone()),
-        };
-        let runs_path = self.data.join("runs.jsonl");
+        let sid_dir = self.lead_sid_dir(&t.run_id);
+        let sid_text = lead_sid.clone();
         let ledger_init = ledger.clone();
         std::thread::spawn(move || {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
                 // The Lead passed the tool and mode check: the ask is delivered. A new Lead session is remembered
                 // only now, so a Lead that never started leaves no id behind to `--resume`.
                 let _ = ledger_init(AskState::Delivered, None, None);
-                // Only while this run is still the campaign's newest line: a resume that landed meanwhile wins.
-                if first && runindex::attach_lead(&runs_path, &entry).is_err() {
+                if first && fsx::write_atomic(&sid_dir, LEAD_SID_FILE, sid_text.as_bytes()).is_err() {
                     if let Some(l) = &log {
                         let _ = l.log("lead_index_failed", &[]);
                     }
