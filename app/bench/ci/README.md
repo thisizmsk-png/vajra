@@ -31,5 +31,20 @@ The shared macOS runner shows both flavours on the **same** identity (same macOS
 ### GPU-flavour ceiling (owner ruling)
 The GPU flavour reads about 201-205 MiB on the CI VM, while the dev-Mac H0 total with the GPU process was 189.9 MiB (the shared VM reads about 11 MiB heavier). **Owner ruling: "Allow about 212 MiB on CI only when the GPU process is present. The limit on real machines stays 200."** `gate.py` applies exactly that: `GPU_CI_BUDGET = 212.0` when the flavour includes `GPU` and `GITHUB_ACTIONS` is set, otherwise `IDLE_BUDGET = 200.0`. The no-GPU flavour keeps 200 on CI too. NFR-PERF-1 itself is unchanged for real machines.
 
+## Post-load idle (reported, not gated)
+NFR-PERF-1 is also about what the app holds after a long run, not only the first minute. The separate `postload` job builds a second
+copy of the app with `VITE_PERF_FIXTURE=1` (the normal bundle has none of it; a CI step greps the shipped bundle). That
+build replaces the core with a scripted one: a Crew view with one worker whose Stream tab receives 10,000 lines at 170/s
+starting 20 s after launch. `measure.py postload` samples the total before the load, the peak during it, and the idle
+total 2 and 10 minutes after the load ends, and writes `postload.json` with `post_load` (pre-load, peak, +2 min, +10 min, retained =
++10 min minus pre-load). `gate.py` prints them in the job summary and as warnings: it never fails on them. The scripted
+stream drives the real renderer through a fake transport, so the core's own bus and spill file are not exercised.
+
+It runs on push to main, nightly, on a PR that changes `app/ui/**` or `app/bench/**`, and on a PR labelled `perf`; otherwise the job
+skips with a one-line summary note. The per-PR idle gate (`memory` job) is unchanged.
+
+To start gating it, record a baseline with the bump procedure below: set `post_load_mib` on the flavour from the median
+`plus10_mib` of at least 3 green runs. Until then a run over the 200 MiB budget or over that baseline only warns.
+
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<flavour key>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the flavour key (the helper type set, e.g. `GPU+Networking+WebContent`) and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and flavour (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.

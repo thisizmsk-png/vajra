@@ -144,8 +144,7 @@ fn plain(v: Option<&Value>, cap: usize) -> String {
 fn visible(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        let hidden = c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}' | '\u{2028}' | '\u{2029}');
-        if hidden {
+        if c.is_control() || crate::control::lead::invisible(c) {
             out.push_str(&format!("\\u{{{:x}}}", c as u32));
         } else {
             out.push(c);
@@ -209,7 +208,16 @@ enum Class {
     Deliver(Env),
 }
 
+/// True when the bytes are not JSON or some object repeats a key (after unescaping). serde keeps the last duplicate, so
+/// such a file would be shown and hashed one way while the raw text the session reads also says something else.
+fn ambiguous_json(bytes: &[u8]) -> bool {
+    !crate::vajra::held::json_without_duplicate_keys(bytes)
+}
+
 fn envelope(bytes: &[u8], modified: i64) -> Class {
+    if ambiguous_json(bytes) {
+        return Class::Unknown;
+    }
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Class::Unknown };
     if v.get("workflowName").and_then(Value::as_str) != Some("vajra-deliver") {
         return Class::Unrelated;
@@ -268,6 +276,13 @@ fn waiting(env: &Env, campaign: &str) -> Option<Waiting> {
 /// approvals (fail closed while the workflow is not terminal).
 pub fn waiting_for(allow: &Allowlist, dir: &Path, campaign: &str, since: i64) -> Result<Option<Waiting>, WfError> {
     let real = allow.resolve(dir).map_err(|_| WfError::NotAllowed)?;
+    // Resolving follows symlinks, and every directory on the path is worker-writable: `<slug>/<sid>` as a link to
+    // another session would show that session's finished plans under this run. Only the root may resolve elsewhere
+    // (a symlinked HOME, macOS `/var`); the run's own `<slug>/<sid>/workflows` must still name the same directories.
+    let tail: std::path::PathBuf = dir.components().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect();
+    if !real.ends_with(&tail) {
+        return Err(WfError::NotAllowed);
+    }
     let held = open_dir(&real)?;
     let d = File::from(held.try_clone().map_err(|_| WfError::Io)?);
     if d.metadata().map_err(|_| WfError::Io)?.uid() != me() {

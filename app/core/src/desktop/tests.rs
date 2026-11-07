@@ -510,11 +510,11 @@ fn two_runs_in_one_minute_get_distinct_ids_and_views_never_cross() {
     // A fresh run in a minute that is taken moves to the next free minute.
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC
     assert_eq!(ids::run_id_at(now), "20261105-1230");
-    let (t2, id2) = app.fresh_run_id(now);
+    let (t2, id2) = app.fresh_run_id(now).unwrap();
     assert_eq!(id2, "20261105-1231");
     assert_eq!(t2, now + 60);
     lock(&app.runs).insert("run-x".into(), mk("2b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1231", "deliver-20261105-1231"));
-    assert_eq!(app.fresh_run_id(now).1, "20261105-1232");
+    assert_eq!(app.fresh_run_id(now).unwrap().1, "20261105-1232");
 }
 
 #[test]
@@ -555,10 +555,10 @@ fn two_resumes_of_one_campaign_get_distinct_run_ids() {
     // Review P1: a resume reused one identity, so its task ids and branches collided with the previous resume's.
     let t = Tmp::new();
     let app = t.app();
-    let a = app.fresh_run_id(1_794_000_000).1;
+    let a = app.fresh_run_id(1_794_000_000).unwrap().1;
     // The first resume's run entry is replaced by the second; the issued set still remembers it.
     lock(&app.runs).clear();
-    let b = app.fresh_run_id(1_794_000_000).1;
+    let b = app.fresh_run_id(1_794_000_000).unwrap().1;
     assert_ne!(a, b);
     assert!(ids::valid_run_id(&a) && ids::valid_run_id(&b));
 }
@@ -1924,7 +1924,7 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
     runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
-    let (_, id) = app.fresh_run_id(now);
+    let (_, id) = app.fresh_run_id(now).unwrap();
     assert_ne!(id, "20261105-1230", "the persisted id is taken");
 }
 
@@ -2025,4 +2025,48 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
         assert_eq!(seen.into_inner(), Some(json!("failed")), "{case}: the listing at the report check must not see ok");
         assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed", "{case}");
     }
+}
+
+#[test]
+fn a_run_id_with_a_guarded_record_is_never_reissued_after_the_index_is_lost() {
+    // `runs.jsonl` is worker-writable. If it is emptied, a restarted app must still not hand out an id whose guarded
+    // record (`control/lead/<id>/`) exists: `record_run` would overwrite its session and campaign but keep the old
+    // Lead session id and approval-only marker, so the new run would resume another run's Lead.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let _ = std::fs::remove_file(t.0.join("data/runs.jsonl"));
+    let app = t.app();
+    let (_, id) = app.fresh_run_id(at).unwrap();
+    assert_ne!(id, run, "an id with a guarded record is taken");
+}
+
+#[test]
+fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
+    // Review of #46 (P1): the guarded record holds the current minute and a forged index holds every other candidate
+    // minute. The search must fail closed, never reissue the guarded id through a fallback.
+    let t = Tmp::new();
+    let run = "20261106-0911";
+    let at = crate::control::time::parse_iso("2026-11-06T09:11:00Z").unwrap() as u64;
+    {
+        let app = t.app();
+        app.record_run(run, &t.0, "0f8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, at as i64).unwrap();
+    }
+    let index = t.0.join("data/runs.jsonl");
+    let _ = std::fs::remove_file(&index);
+    for k in 1..120u64 {
+        let e = runindex::Entry { campaign: "deliver-forged".into(), session_id: "1f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: ids::run_id_at(at + 60 * k), cwd: t.0.clone(), lead_session_id: None };
+        runindex::append(&index, &e).unwrap();
+    }
+    let app = t.app();
+    let got = app.fresh_run_id(at);
+    assert_eq!(got.as_ref().map_err(code), Err("run_id_exhausted"), "the guarded id must not be reissued: {got:?}");
+    // A launch fails closed too: nothing is spawned and the guarded record is not overwritten.
+    assert!(!lock(&app.issued).contains(run));
+    let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
+    assert_eq!(rec.trim(), "deliver-x");
 }
