@@ -165,6 +165,10 @@ enum Outcome {
     Failed,
 }
 
+/// `(HEAD, dirty)` of a repo.
+type RepoState = (String, bool);
+/// Per repo: when `RepoState` was read and what it was (`None`: the read failed).
+type WorktreeCache = HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -214,7 +218,7 @@ pub struct App {
     /// verdict from a live repo expires after `EVIDENCE_LIVE_TTL`.
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, bool)>)>>,
+    worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
