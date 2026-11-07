@@ -718,7 +718,9 @@ fn verify_campaign_refuses_a_bad_slug_without_running_anything() {
 fn campaign(t: &Tmp, slug: &str, report: Option<&[u8]>) {
     let d = t.home().join(".claude/vajra/campaigns").join(slug);
     fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("campaign.json"), format!(r#"{{"slug":"{slug}","goal":"g","status":"active","created":"c","updated":"u"}}"#)).unwrap();
+    // A saved report is registered in the signed state as its hash (E4); the stand-in script does not check it.
+    let hash = if report.is_some() { r#","reportSha256":"abc""# } else { "" };
+    fs::write(d.join("campaign.json"), format!(r#"{{"slug":"{slug}","goal":"g","status":"active","created":"c","updated":"u"{hash}}}"#)).unwrap();
     if let Some(r) = report {
         fs::write(d.join("report.md"), r).unwrap();
     }
@@ -854,4 +856,33 @@ fn a_hung_verify_does_not_block_other_reader_calls() {
         reached
     });
     assert!(reached, "another reader call waited behind a running verify");
+}
+
+#[test]
+fn read_report_refuses_a_planted_report_in_real_signed_state_without_a_report_hash() {
+    // Real vajra-campaign.sh under a temp HOME: `verify` exits 0 for a campaign that never recorded a report, even
+    // with a report.md dropped next to it. That file is unsigned and must not be returned.
+    let have = |c: &str| std::process::Command::new("sh").args(["-c", &format!("command -v {c}")]).output().is_ok_and(|o| o.status.success());
+    if !(have("jq") && have("openssl")) {
+        return;
+    }
+    let t = Tmp::new();
+    let scripts = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-campaign.sh");
+    fs::copy(&real, scripts.join("vajra-campaign.sh")).unwrap();
+    let home = t.home();
+    let run = |args: &[&str]| {
+        std::process::Command::new("bash").arg(scripts.join("vajra-campaign.sh")).args(args).env("HOME", &home).output().unwrap()
+    };
+    let created = run(&["create", "real1", "--goal", "g", "--feature", "ac-1|x"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    let app = t.app();
+    let slug = fs::read_dir(home.join(".claude/vajra/campaigns")).unwrap().flatten().find(|e| e.path().is_dir()).unwrap().file_name().into_string().unwrap();
+    assert_eq!(app.verify_campaign(&slug).unwrap()["ok"], true, "the real script verifies the fresh campaign");
+    fs::write(home.join(".claude/vajra/campaigns").join(&slug).join("report.md"), "forged delivery report").unwrap();
+    assert_eq!(app.verify_campaign(&slug).unwrap()["ok"], true, "verify still passes: the planted file is not covered");
+    let e = app.read_report(&slug).unwrap_err();
+    assert_eq!(code(&e), "no_report", "{e}");
+    assert!(!e.to_string().contains("forged"), "{e}");
 }

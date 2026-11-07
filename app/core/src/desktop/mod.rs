@@ -101,7 +101,7 @@ impl App {
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
         Ok(Self {
             data: data.to_path_buf(),
-            bridge: Bridge::new(claude.join("skills/vajra/scripts")),
+            bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             integrity: Mutex::new(HashMap::new()),
             reader: Mutex::new(None),
             claude,
@@ -634,12 +634,21 @@ impl App {
             Some(3) => return Err(fail("integrity_failed", "integrity check failed")),
             code => return Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
         }
-        match self.with_reader(|r| r.report(slug).map_err(|e| (e.kind(), e.to_string())).map_err(|(k, m)| {
-            if k == std::io::ErrorKind::NotFound { fail("no_report", "this campaign has no report yet") } else { fail("io_error", m) }
-        })) {
-            Ok((text, truncated)) => Ok(json!({"slug": slug, "text": text, "truncated": truncated})),
-            Err(e) => Err(e),
+        // A passing verify only authenticates report.md when the signed campaign.json records its hash (the script
+        // checks the file only then), so an unregistered report.md is unsigned bytes and is never returned.
+        let registered = self.with_reader(|r| {
+            let snap = r.campaign_json(slug);
+            Ok(!snap.stale && snap.value.as_ref().and_then(|v| v["reportSha256"].as_str()).is_some_and(|h| !h.is_empty()))
+        })?;
+        if !registered {
+            return Err(fail("no_report", "this campaign has no signed report yet"));
         }
+        self.with_reader(|r| {
+            r.report(slug).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound { fail("no_report", "this campaign has no report yet") } else { fail("io_error", e) }
+            })
+        })
+        .map(|(text, truncated)| json!({"slug": slug, "text": text, "truncated": truncated}))
     }
 
     /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature
