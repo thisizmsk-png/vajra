@@ -363,8 +363,7 @@ a reason at why 4, since native agent view already does it, P23)
 **POS-R4 Memory revival gates** (killed as a reason; build budgets regardless, and they only unlock wording)
 - POS-4.1 GIVEN 10 stub agents streaming at the spike's rate, WHEN measured by the spike's written method,
   THEN the app's own RSS (claude processes excluded, and also reported with them included) is within
-  NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Competitor F, Agent
-  Orchestrator).
+  NFR-PERF-1 and NFR-PERF-2 and is reported next to at least two installed competitors (Competitor F, Competitor B).
 - POS-4.2 (measurement) GIVEN Competitor A and Competitor F installed locally, WHEN each runs 10 sessions and its whole
   process tree (Competitor A's daemon included, agent processes excluded) is sampled as RSS and `phys_footprint`,
   3 or more runs each, THEN the medians and the method are published (NFR-PERF-7).
