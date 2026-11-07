@@ -23,12 +23,12 @@
 #   vajra-campaign.sh progress <text> [--campaign slug]
 #   vajra-campaign.sh checkpoint [label] [--campaign slug]
 #   vajra-campaign.sh resume [slug] [--from-checkpoint N]
-#   vajra-campaign.sh verify [slug]
+#   vajra-campaign.sh verify [slug] [--print-report]
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
 #   vajra-campaign.sh report --campaign slug --bytes N --check FNV32 --base64 B64
 #   vajra-campaign.sh archive-evidence <slug> <evidence-dir> <head> <setup-json>
 #
-# Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
+# Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure, 4 (verify --print-report) no signed report.
 # Bash 3.2 compatible (macOS /bin/bash).
 
 set -uo pipefail
@@ -359,8 +359,29 @@ cmd_resume() {
 }
 
 cmd_verify() {
-  resolve "${1:-}"; load_key
+  local slug="" print=0
+  while [ $# -gt 0 ]; do case "$1" in --print-report) print=1; shift ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  resolve "$slug"; load_key
+  [ "$print" -eq 1 ] && { verify_print_report; return; }
   if verify_state "$DIR"; then echo "$SLUG: signature ok"; else echo "$SLUG: signature INVALID" >&2; exit 3; fi
+}
+
+# verify --print-report: check the signature and print report.md from ONE private snapshot, so the bytes printed are
+# the bytes the signed hash covers (a process that swaps report.md after the check cannot change the output).
+# Exit 0 = verified, report on stdout; 3 = signature or report hash invalid; 4 = no report recorded in the signed state
+# (a report.md on disk without a recorded hash is unsigned and is never printed).
+verify_print_report() {
+  local f snap
+  snap="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/vajra-verify.XXXXXX")" || die "cannot create a temp dir"
+  SNAP="$snap"   # global: the EXIT trap runs after this function's locals are gone
+  trap 'rm -rf "${SNAP:-}"' EXIT
+  for f in "$DIR"/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] && cp "$f" "$snap/" 2>/dev/null
+  done
+  if ! verify_state "$snap"; then echo "$SLUG: signature INVALID" >&2; exit 3; fi
+  [ -n "$(jq -r '.reportSha256 // ""' "$snap/campaign.json")" ] && [ -f "$snap/report.md" ] \
+    || { echo "$SLUG: no signed report" >&2; exit 4; }
+  cat "$snap/report.md"
 }
 
 cmd_close() {

@@ -157,6 +157,29 @@ BIG="$(head -c 70000 /dev/zero | tr '\0' x | openssl base64 -A)"
 C report --campaign rep3 --bytes 70000 --check "$SHA" --base64 "$BIG" >/dev/null 2>&1; [ $? -ne 0 ]; check "report over 64 KiB refused" $?
 C verify rep3 >/dev/null 2>&1; check "campaign without a report still verifies" $?
 
+# --- verify --print-report: verify and emit the report in one process, from one private snapshot ---
+C create rp --feature "ac-1|x" >/dev/null 2>&1; PD="$CD/rp"
+C report --campaign rp --bytes "$NB" --check "$SHA" --base64 "$B64" >/dev/null
+printf '%s\n' "$REP" > "$WORK/expect-report"
+C verify rp --print-report > "$WORK/out" 2>/dev/null; rc=$?
+[ "$rc" -eq 0 ] && cmp -s "$WORK/out" "$WORK/expect-report"; check "verify --print-report prints exactly the signed report bytes" $?
+[ "$(C verify rp)" = "rp: signature ok" ]; check "plain verify is unchanged (no report bytes)" $?
+C verify rep3 --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 4 ] && [ ! -s "$WORK/out" ]; check "a campaign with no recorded report exits 4 and prints nothing" $?
+printf 'forged\n' > "$CD/rep3/report.md"
+C verify rep3 --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 4 ] && [ ! -s "$WORK/out" ]; check "a planted report.md with no recorded hash exits 4 and prints nothing" $?
+rm -f "$CD/rep3/report.md"
+cp "$PD/report.md" "$WORK/good-report"; printf 'tampered\n' >> "$PD/report.md"
+C verify rp --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 3 ] && [ ! -s "$WORK/out" ]; check "an edited report exits 3 and prints nothing" $?
+rm -f "$PD/report.md"; ln -s "$WORK/good-report" "$PD/report.md"
+C verify rp --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 3 ] && [ ! -s "$WORK/out" ]; check "a report.md swapped for a symlink exits 3 and prints nothing" $?
+rm -f "$PD/report.md"; cp "$WORK/good-report" "$PD/report.md"
+C verify rp --print-report >/dev/null 2>&1; check "restoring the exact bytes verifies again" $?
+cp "$PD/campaign.json" "$WORK/cj"; jq '.goal = "other"' "$WORK/cj" > "$PD/campaign.json"
+C verify rp --print-report > "$WORK/out" 2>/dev/null; [ $? -eq 3 ] && [ ! -s "$WORK/out" ]; check "an edited campaign.json exits 3 and prints nothing" $?
+cp "$WORK/cj" "$PD/campaign.json"
+C verify rp --bogus >/dev/null 2>&1; [ $? -ne 0 ]; check "verify refuses an unknown option" $?
+[ -z "$(ls -A "${TMPDIR:-/tmp}" 2>/dev/null | grep '^vajra-verify\.')" ]; check "the private snapshot is removed" $?
+
 # --- archive-evidence (E7, Q13): the verification bundle + the setup list, once per delivery, signed ---
 # Run from a git repo, as the write-back step does; the evidence must be signed and green for --head,
 # and at least one task of the campaign's graph must have been closed on exactly this evidence.

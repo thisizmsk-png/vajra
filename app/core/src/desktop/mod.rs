@@ -631,30 +631,32 @@ impl App {
         verdict
     }
 
-    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text. The signature is checked first, every time, and a
-    /// campaign that fails it returns no text at all.
+    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text. One script call verifies the signature and prints
+    /// `report.md` from the same private snapshot, so the text returned is the text the signed hash covers; nothing
+    /// is read from the campaign dir here. Exit 3 -> `integrity_failed` (no text), exit 4 -> `no_report` (a report.md
+    /// on disk with no hash recorded in the signed state is unsigned and never shown).
     pub fn read_report(&self, slug: &str) -> Res {
-        let o = self.run_verify(slug)?;
-        match o.code {
-            Some(0) => {}
-            Some(3) => return Err(fail("integrity_failed", "integrity check failed")),
-            code => return Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        const CAP: usize = 256 * 1024;
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
         }
-        // A passing verify only authenticates report.md when the signed campaign.json records its hash (the script
-        // checks the file only then), so an unregistered report.md is unsigned bytes and is never returned.
-        let registered = self.with_reader(|r| {
-            let snap = r.campaign_json(slug);
-            Ok(!snap.stale && snap.value.as_ref().and_then(|v| v["reportSha256"].as_str()).is_some_and(|h| !h.is_empty()))
+        let o = self.bridge.run(&Request::CampaignReport { slug: slug.into() }).map_err(|e| match e {
+            crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
+            e => fail("verify_failed", e),
         })?;
-        if !registered {
-            return Err(fail("no_report", "this campaign has no signed report yet"));
+        match o.code {
+            Some(0) => {
+                let truncated = o.stdout.len() > CAP;
+                let mut end = o.stdout.len().min(CAP);
+                while !o.stdout.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Ok(json!({"slug": slug, "text": &o.stdout[..end], "truncated": truncated}))
+            }
+            Some(3) => Err(fail("integrity_failed", "integrity check failed")),
+            Some(4) => Err(fail("no_report", "this campaign has no signed report yet")),
+            code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
         }
-        self.with_reader(|r| {
-            r.report(slug).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound { fail("no_report", "this campaign has no report yet") } else { fail("io_error", e) }
-            })
-        })
-        .map(|(text, truncated)| json!({"slug": slug, "text": text, "truncated": truncated}))
     }
 
     /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature

@@ -16,6 +16,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub enum Request {
     CampaignVerify { slug: String },
+    /// `verify <slug> --print-report`: verifies and prints report.md from one snapshot (exit 4 = no signed report).
+    CampaignReport { slug: String },
     CampaignProgress { slug: String, text: String },
     /// `check-evidence <path> [--head SHA] --json`, run in `repo`; or, for an
     /// archived bundle, `--archived <slug> --head <40-hex>` with no repo.
@@ -90,6 +92,9 @@ impl Bridge {
         Ok(match req {
             Request::CampaignVerify { slug } => {
                 (script("vajra-campaign.sh"), vec!["verify".into(), name(slug)?], None)
+            }
+            Request::CampaignReport { slug } => {
+                (script("vajra-campaign.sh"), vec!["verify".into(), name(slug)?, "--print-report".into()], None)
             }
             Request::CampaignProgress { slug, text } => (
                 script("vajra-campaign.sh"),

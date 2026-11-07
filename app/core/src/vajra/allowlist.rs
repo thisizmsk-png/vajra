@@ -167,7 +167,7 @@ impl Allowlist {
                 safe_name(slug)
                     && matches!(
                         *f,
-                        "campaign.json" | "features.json" | "tasks.json" | "progress.md" | "report.md" | "checkpoints"
+                        "campaign.json" | "features.json" | "tasks.json" | "progress.md" | "checkpoints"
                     )
             }
             ["vajra", "campaigns", slug, "checkpoints", name] => safe_name(slug) && safe_name(name),
