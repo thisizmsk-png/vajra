@@ -842,3 +842,41 @@ fn lead_is_unavailable_when_the_doctor_passes_but_the_sandbox_denywrite_is_off()
     assert!(app.ask_lead(RUN_ID, "hi").is_ok());
     wait_until("the ask", || idle(&app));
 }
+
+#[test]
+fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
+    // The reviewer's sequence: campaign A (resumed in minute M, no `deliver-M` dir) is in the index; after a
+    // restart in minute M campaign B also holds M in memory. The id cannot be told apart, so no Lead is chosen.
+    let t = Tmp::new();
+    let sid_a = "2b8fad5b-d9cb-469f-a165-70867728950e";
+    std::fs::create_dir_all(t.data()).unwrap();
+    let a = runindex::Entry { campaign: "deliver-old".into(), session_id: sid_a.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
+    let app = t.app(); // in memory: campaign deliver-x, session SID, the same run id
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "invalid_args");
+    assert!(e["detail"].as_str().unwrap_or_default().contains("more than one run"), "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded or spawned, no MCP binding made");
+    let s = app.lead_status(RUN_ID).unwrap();
+    assert_eq!(s["available"], false);
+    // Two indexed runs sharing an id (the same sequence seen only from disk after a restart) are refused too.
+    let t2 = Tmp::new();
+    std::fs::create_dir_all(t2.data()).unwrap();
+    for (c, s) in [("deliver-a", sid_a), ("deliver-b", SID)] {
+        let e = runindex::Entry { campaign: c.into(), session_id: s.into(), run_id: RUN_ID.into(), cwd: t2.repo(), lead_session_id: None };
+        runindex::append(&t2.data().join("runs.jsonl"), &e).unwrap();
+    }
+    let app2 = App::open(&t2.data(), &t2.home()).unwrap();
+    app2.lead.set_bin(Some(t2.bin("claude")));
+    assert_eq!(code(&app2.ask_lead(RUN_ID, "hi").unwrap_err()), "invalid_args");
+    // One run is fine, even when it appears on several index lines (a resume appends another line).
+    let t3 = Tmp::new();
+    std::fs::create_dir_all(t3.data()).unwrap();
+    for _ in 0..2 {
+        let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t3.repo(), lead_session_id: None };
+        runindex::append(&t3.data().join("runs.jsonl"), &e).unwrap();
+    }
+    let app3 = t3.app();
+    assert!(app3.ask_lead(RUN_ID, "hi").is_ok());
+    wait_until("the ask", || idle(&app3));
+}

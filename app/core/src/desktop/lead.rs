@@ -187,8 +187,10 @@ impl App {
             return Err(super::invalid("run_id", "must be YYYYMMDD-HHMM"));
         }
         let busy = lock(&self.lead.active).get(run_id).map(|a| a.ask_id.clone());
-        let Some(t) = self.lead_target(run_id) else {
-            return Ok(json!({"available": false, "read_only_reason": NOT_OURS, "busy": false}));
+        let t = match self.lead_target(run_id) {
+            Ok(t) => t,
+            Err(LeadError::Invalid(why)) => return Ok(json!({"available": false, "read_only_reason": why, "busy": false})),
+            Err(_) => return Ok(json!({"available": false, "read_only_reason": NOT_OURS, "busy": false})),
         };
         // After a restart the bus is empty; bring the history back from the Lead's own transcript.
         self.rebuild_lead_stream(&t);
@@ -252,7 +254,7 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
-        let target = self.lead_target(run_id).ok_or(LeadError::ReadOnly(NOT_OURS))?;
+        let target = self.lead_target(run_id)?;
         let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
         // The nonce of every session of this run, plus the live one, is redacted from the text.
@@ -282,28 +284,28 @@ impl App {
     // ---------------------------------------------------------------- the run
 
     /// The run, if this app launched or resumed it: in memory, or in `runs.jsonl`. A finished run still counts.
-    fn lead_target(&self, run_id: &str) -> Option<Target> {
-        let latest = runindex::latest(&self.data.join("runs.jsonl"));
+    /// A run id is only minute-based, so it must name exactly one (campaign, session): if the live runs and the whole
+    /// index hold two different ones for it, nothing is selected and the ask is refused, never guessed.
+    fn lead_target(&self, run_id: &str) -> Result<Target, LeadError> {
+        let live: Vec<Run> = lock(&self.runs).values().filter(|r| r.run_id == run_id).cloned().collect();
+        let indexed: Vec<runindex::Entry> = runindex::entries(&self.data.join("runs.jsonl")).into_iter().filter(|e| e.run_id == run_id).collect();
+        let mut ids: HashSet<(String, String)> = live.iter().map(|r| (r.campaign.clone(), r.session_id.clone())).collect();
+        ids.extend(indexed.iter().map(|e| (e.campaign.clone(), e.session_id.clone())));
+        if ids.len() > 1 {
+            return Err(LeadError::Invalid("run_id: more than one run has this id; it cannot be told apart".into()));
+        }
         // The Lead session id is read from the guarded control dir, never from `runs.jsonl`: a worker can write that.
         let lead_sid = self.read_lead_sid(run_id);
-        let live: Option<Run> = lock(&self.runs).values().find(|r| r.run_id == run_id).cloned();
-        if let Some(mut r) = live {
+        if let Some(mut r) = live.into_iter().next() {
             self.add_disk_nonce(&mut r.nonces, &r.session_id);
-            return Some(Target {
-                lead_session_id: lead_sid,
-                session_id: r.session_id,
-                run_id: r.run_id,
-                cwd: r.cwd,
-                nonces: r.nonces,
-            });
+            return Ok(Target { lead_session_id: lead_sid, session_id: r.session_id, run_id: r.run_id, cwd: r.cwd, nonces: r.nonces });
         }
         // A run loaded from disk (after a restart): its control nonce is still on disk and must stay out of the
         // ask text, the ledger, the bus and the rebuilt history.
-        latest.into_values().find(|e| e.run_id == run_id).map(|e| {
-            let mut nonces = Redactor::default();
-            self.add_disk_nonce(&mut nonces, &e.session_id);
-            Target { session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces }
-        })
+        let e = indexed.into_iter().next_back().ok_or(LeadError::ReadOnly(NOT_OURS))?;
+        let mut nonces = Redactor::default();
+        self.add_disk_nonce(&mut nonces, &e.session_id);
+        Ok(Target { session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces })
     }
 
     /// `<data>/control/lead/<run_id>/lead_session`: the authoritative run to Lead-session mapping. It sits under the

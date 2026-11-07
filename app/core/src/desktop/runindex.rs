@@ -57,8 +57,8 @@ pub fn run_ids(path: &Path) -> std::collections::HashSet<String> {
     entries(path).into_iter().map(|e| e.run_id).collect()
 }
 
-/// Every valid entry, oldest first.
-fn entries(path: &Path) -> Vec<Entry> {
+/// Every valid entry in the tail of the file, oldest first.
+pub fn entries(path: &Path) -> Vec<Entry> {
     let mut out = Vec::new();
     let Ok(mut f) = std::fs::File::open(path) else { return out };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
