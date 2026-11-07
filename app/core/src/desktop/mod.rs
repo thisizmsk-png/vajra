@@ -685,7 +685,7 @@ impl App {
         let flight: Flight = loop {
             let mut m = lock(&self.verdicts);
             let waiting = match m.get(slug) {
-                Some(Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(*at) < self.verdict_ttl => return *v,
+                Some(&Verdict::Fresh(at, v)) if !refresh && (self.clock)().saturating_sub(at) < self.verdict_ttl => return v,
                 Some(Verdict::Flying(f)) => Some(f.clone()),
                 _ => None,
             };
@@ -720,9 +720,8 @@ impl App {
     }
 
     fn settle_code(&self, slug: &str, code: Option<i32>) {
-        // exit 4 (no report) still means the signature held.
         let v = match code {
-            Some(0) | Some(4) => "ok",
+            Some(0) => "ok",
             Some(3) => "failed",
             _ => "unknown",
         };
@@ -740,35 +739,6 @@ impl App {
             m.remove(slug);
         } else {
             m.insert(slug.to_string(), Verdict::Fresh((self.clock)(), verdict));
-        }
-    }
-
-    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text. One script call verifies the signature and prints
-    /// `report.md` from the same private snapshot, so the text returned is the text the signed hash covers; nothing
-    /// is read from the campaign dir here. Exit 3 -> `integrity_failed` (no text), exit 4 -> `no_report` (a report.md
-    /// on disk with no hash recorded in the signed state is unsigned and never shown).
-    pub fn read_report(&self, slug: &str) -> Res {
-        const CAP: usize = 256 * 1024;
-        if !bus::valid_stream_id(slug) {
-            return Err(invalid("slug", "not a campaign slug"));
-        }
-        let o = self.bridge.run(&Request::CampaignReport { slug: slug.into() }).map_err(|e| match e {
-            crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
-            e => fail("verify_failed", e),
-        })?;
-        self.settle_code(slug, o.code);
-        match o.code {
-            Some(0) => {
-                let truncated = o.stdout.len() > CAP;
-                let mut end = o.stdout.len().min(CAP);
-                while !o.stdout.is_char_boundary(end) {
-                    end -= 1;
-                }
-                Ok(json!({"slug": slug, "text": &o.stdout[..end], "truncated": truncated}))
-            }
-            Some(3) => Err(fail("integrity_failed", "integrity check failed")),
-            Some(4) => Err(fail("no_report", "this campaign has no signed report yet")),
-            code => Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
         }
     }
 

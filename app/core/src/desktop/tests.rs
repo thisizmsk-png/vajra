@@ -648,22 +648,16 @@ fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
 
 // ---- verify_campaign (AC-1.2.1, AC-1.2.2) ------------------------------------------------------------------------
 
-/// Plant a stand-in `vajra-campaign.sh` under the temp home; it records its argv and exits `code`. With
-/// `--print-report` and exit 0 it prints the campaign's report.md (exit 4 when there is none), like the real one.
+/// Plant a stand-in `vajra-campaign.sh` under the temp home; it records its argv and exits `code`.
 fn fake_campaign_script(t: &Tmp, code: i32, stderr: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let dir = t.home().join(".claude/skills/vajra/scripts");
     fs::create_dir_all(&dir).unwrap();
     let log = t.0.join("argv.log");
-    let camps = t.home().join(".claude/vajra/campaigns");
     let sh = dir.join("vajra-campaign.sh");
     fs::write(
         &sh,
-        format!(
-            "#!/bin/bash\necho \"$@\" >> '{log}'\nif [ \"${{3:-}}\" = \"--print-report\" ] && [ {code} -eq 0 ]; then\n  f='{camps}'/\"$2\"/report.md; [ -f \"$f\" ] || exit 4; cat \"$f\"; exit 0\nfi\necho '{stderr}' >&2\nexit {code}\n",
-            log = log.display(),
-            camps = camps.display()
-        ),
+        format!("#!/bin/bash\necho \"$@\" >> '{log}'\necho '{stderr}' >&2\nexit {code}\n", log = log.display()),
     )
     .unwrap();
     fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
@@ -723,7 +717,7 @@ fn verify_campaign_refuses_a_bad_slug_without_running_anything() {
     assert!(!log.exists(), "the script must not run for a bad slug");
 }
 
-// ---- read_report and list_campaigns integrity (AC-6.1.2, AC-6.1.3) -------------------------------------------------
+// ---- list_campaigns integrity badges (AC-6.1.3) -------------------------------------------------
 
 fn campaign(t: &Tmp, slug: &str, report: Option<&[u8]>) {
     let d = t.home().join(".claude/vajra/campaigns").join(slug);
@@ -736,58 +730,6 @@ fn campaign(t: &Tmp, slug: &str, report: Option<&[u8]>) {
 
 fn runs(log: &Path) -> usize {
     fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
-}
-
-#[test]
-fn read_report_returns_the_text_of_a_verified_campaign() {
-    let t = Tmp::new();
-    fake_campaign_script(&t, 0, "");
-    campaign(&t, "c1", Some("# Delivered\nbranch x, commit abc\n".as_bytes()));
-    let r = t.app().read_report("c1").unwrap();
-    assert_eq!(r["text"], "# Delivered\nbranch x, commit abc\n", "{r}");
-    assert_eq!(r["truncated"], false);
-}
-
-#[test]
-fn read_report_refuses_text_when_the_signature_fails() {
-    let t = Tmp::new();
-    fake_campaign_script(&t, 3, "signature INVALID");
-    campaign(&t, "c1", Some(b"tampered"));
-    let e = t.app().read_report("c1").unwrap_err();
-    assert_eq!(code(&e), "integrity_failed", "{e}");
-    assert!(e.get("text").is_none(), "no report text for an unverified campaign: {e}");
-}
-
-#[test]
-fn read_report_without_a_report_file_says_so() {
-    let t = Tmp::new();
-    fake_campaign_script(&t, 0, "");
-    campaign(&t, "c1", None);
-    assert_eq!(code(&t.app().read_report("c1").unwrap_err()), "no_report");
-}
-
-#[test]
-fn read_report_caps_the_text_and_says_so() {
-    let t = Tmp::new();
-    fake_campaign_script(&t, 0, "");
-    campaign(&t, "c1", Some(&vec![b'a'; 300 * 1024]));
-    let r = t.app().read_report("c1").unwrap();
-    assert_eq!(r["truncated"], true, "{}", r["truncated"]);
-    assert_eq!(r["text"].as_str().unwrap().len(), 256 * 1024);
-}
-
-#[test]
-fn read_report_refuses_a_bad_slug_and_makes_exactly_one_script_call() {
-    let t = Tmp::new();
-    let log = fake_campaign_script(&t, 0, "");
-    for bad in ["../x", "-rf", "", ".hidden"] {
-        assert_eq!(code(&t.app().read_report(bad).unwrap_err()), "invalid_args", "{bad}");
-    }
-    assert!(!log.exists(), "no script runs for a bad slug");
-    campaign(&t, "c1", Some(b"text"));
-    t.app().read_report("c1").unwrap();
-    // verify and print are one process: there is no separate check whose result could be separated from the bytes
-    assert_eq!(fs::read_to_string(&log).unwrap().trim(), "verify c1 --print-report");
 }
 
 #[test]
@@ -882,7 +824,7 @@ fn unknown_is_never_reused() {
 }
 
 #[test]
-fn verify_campaign_and_read_report_refresh_that_campaigns_verdict() {
+fn verify_campaign_refreshes_that_campaigns_verdict() {
     let t = Tmp::new();
     fake_campaign_script(&t, 0, "");
     campaign(&t, "c1", Some(b"text"));
@@ -1035,57 +977,6 @@ fn real_script_home() -> Option<(Tmp, impl Fn(&[&str]) -> std::process::Output)>
     let home = t.home();
     let run = move |args: &[&str]| std::process::Command::new("bash").arg(scripts.join("vajra-campaign.sh")).args(args).env("HOME", &home).output().unwrap();
     Some((t, run))
-}
-
-fn fnv32(s: &str) -> String {
-    let mut h: u32 = 0x811c9dc5;
-    for b in s.bytes() {
-        h = (h ^ b as u32).wrapping_mul(0x01000193);
-    }
-    format!("{h:08x}")
-}
-
-fn real_campaign_with_report(run: &impl Fn(&[&str]) -> std::process::Output, text: &str) {
-    assert!(run(&["create", "real1", "--goal", "g", "--feature", "ac-1|x"]).status.success());
-    let b64 = String::from_utf8(
-        std::process::Command::new("sh").args(["-c", &format!("printf '%s' '{text}' | openssl base64 -A")]).output().unwrap().stdout,
-    )
-    .unwrap();
-    let saved = run(&["report", "--campaign", "real1", "--bytes", &text.len().to_string(), "--check", &fnv32(&b64), "--base64", &b64]);
-    assert!(saved.status.success(), "{}", String::from_utf8_lossy(&saved.stderr));
-}
-
-#[test]
-fn read_report_with_the_real_script_returns_the_signed_report() {
-    let Some((t, run)) = real_script_home() else { return };
-    real_campaign_with_report(&run, "Delivered on branch b");
-    let r = t.app().read_report("real1").unwrap();
-    assert_eq!(r["text"], "Delivered on branch b", "{r}");
-}
-
-#[test]
-fn read_report_with_the_real_script_refuses_a_report_edited_after_it_was_signed() {
-    let Some((t, run)) = real_script_home() else { return };
-    real_campaign_with_report(&run, "Delivered on branch b");
-    let f = t.home().join(".claude/vajra/campaigns/real1/report.md");
-    fs::write(&f, "Delivered on branch X").unwrap(); // same size, swapped after the signature was made
-    let e = t.app().read_report("real1").unwrap_err();
-    assert_eq!(code(&e), "integrity_failed", "{e}");
-    assert!(!e.to_string().contains("branch X"), "{e}");
-}
-
-#[test]
-fn read_report_with_the_real_script_refuses_a_planted_report_without_a_recorded_hash() {
-    // `verify` exits 0 for a campaign that never recorded a report even with a report.md dropped next to it: that
-    // file is unsigned and must not be returned.
-    let Some((t, run)) = real_script_home() else { return };
-    assert!(run(&["create", "real1", "--goal", "g", "--feature", "ac-1|x"]).status.success());
-    let app = t.app();
-    fs::write(t.home().join(".claude/vajra/campaigns/real1/report.md"), "forged delivery report").unwrap();
-    assert_eq!(app.verify_campaign("real1").unwrap()["ok"], true, "plain verify does not cover the planted file");
-    let e = app.read_report("real1").unwrap_err();
-    assert_eq!(code(&e), "no_report", "{e}");
-    assert!(!e.to_string().contains("forged"), "{e}");
 }
 
 #[test]
