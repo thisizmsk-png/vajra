@@ -766,3 +766,115 @@ fn worktree_info_rejects_a_bad_or_unknown_worker() {
     assert_eq!(code(&app.worktree_info("../x").unwrap_err()), "invalid_args");
     assert_eq!(code(&app.worktree_info("aa870dd40540481f0").unwrap_err()), "not_found");
 }
+
+// ---------------------------------------------------------------- evidence_list (S4a)
+
+/// A stand-in `vajra_tasks.py check-evidence`: the verdict comes from the evidence file's name.
+fn fake_tasks_script(t: &Tmp) {
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let body = "import json, sys\np = sys.argv[2]\n\
+        if 'slow' in p:\n    import time; time.sleep(30)\n\
+        if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
+        green = 'green' in p\nprint(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
+    fs::write(dir.join("vajra_tasks.py"), format!("#!/usr/bin/env python3\n{body}")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir.join("vajra_tasks.py"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn ev_task(slug_dir: &Path, id: &str, status: &str, acceptance: &[&str], evidence: &str) -> Value {
+    let ev = if evidence.is_empty() {
+        Value::Null
+    } else {
+        let p = slug_dir.join("evidence").join(format!("{evidence}.json"));
+        json!({"path": p, "sha256": "ab", "head": "a".repeat(40), "commands": 2})
+    };
+    json!({"id": id, "title": format!("Task {id}"), "owner_agent": "bhima", "deps": [], "acceptance": acceptance, "status": status, "attempts": 1, "evidence": ev})
+}
+
+fn campaign_with_tasks(t: &Tmp, tasks: Vec<Value>) -> (App, String) {
+    fake_tasks_script(t);
+    let slug = "deliver-20261105-1810";
+    let camp = t.home().join(".claude/vajra/campaigns").join(slug);
+    fs::create_dir_all(camp.join("evidence")).unwrap();
+    let tasks: Vec<Value> = tasks.into_iter().map(|mut x| {
+        if let Some(p) = x["evidence"]["path"].as_str().map(str::to_string).filter(|p| p.starts_with("/x/")) {
+            x["evidence"]["path"] = json!(camp.canonicalize().unwrap().join("evidence").join(Path::new(&p).file_name().unwrap()).to_string_lossy());
+        }
+        x
+    }).collect();
+    fs::write(camp.join("tasks.json"), serde_json::to_vec(&json!({"campaign": slug, "schema": "vajra.tasks/v1", "tasks": tasks})).unwrap()).unwrap();
+    (t.app(), slug.into())
+}
+
+fn row<'a>(r: &'a Value, task: &str, criterion: &str) -> &'a Value {
+    r["rows"].as_array().unwrap().iter().find(|x| x["task"] == task && x["criterion"] == criterion).unwrap_or_else(|| panic!("no row {task}/{criterion} in {r}"))
+}
+
+#[test]
+fn evidence_list_marks_each_criterion_pass_fail_not_run_or_unverified() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![
+        ev_task(&d, "t1", "done", &["ac-1", "ac-2"], "green"),
+        ev_task(&d, "t2", "done", &["ac-3"], "red"),
+        ev_task(&d, "t3", "in_progress", &["ac-4"], ""),
+        ev_task(&d, "t4", "done", &["ac-5"], "boom"),
+        ev_task(&d, "t5", "done", &["ac-6"], ""),
+    ]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "pass");
+    assert_eq!(row(&r, "t1", "ac-2")["status"], "pass");
+    assert_eq!(row(&r, "t2", "ac-3")["status"], "unverified", "evidence whose check is red is not a pass: {r}");
+    assert_eq!(row(&r, "t3", "ac-4")["status"], "not_run");
+    assert_eq!(row(&r, "t4", "ac-5")["status"], "unverified", "an unreadable check is never a pass");
+    assert_eq!(row(&r, "t5", "ac-6")["status"], "not_run", "a closed task without evidence is never pass");
+    assert_eq!(row(&r, "t1", "ac-1")["commands"], 2);
+    assert!(row(&r, "t1", "ac-1")["head"].as_str().unwrap().len() == 40);
+}
+
+#[test]
+fn a_failed_task_shows_fail_with_its_report() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut failed = ev_task(&d, "t1", "failed", &["ac-1"], "");
+    failed["report"] = json!({"status": "failed", "summary": "tests red"});
+    let (app, slug) = campaign_with_tasks(&t, vec![failed]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "fail");
+    assert_eq!(row(&r, "t1", "ac-1")["report"], "tests red");
+}
+
+#[test]
+fn evidence_checks_are_bounded_and_a_slow_one_is_unverified_not_a_hang() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut tasks: Vec<Value> = (0..9).map(|i| ev_task(&d, &format!("g{i}"), "done", &["ac"], "green")).collect();
+    tasks.push(ev_task(&d, "s1", "done", &["ac"], "slow"));
+    let (mut app, slug) = campaign_with_tasks(&t, tasks);
+    app.evidence_timeout = Duration::from_millis(400);
+    let start = std::time::Instant::now();
+    let r = app.evidence_list(&slug).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+    assert_eq!(row(&r, "s1", "ac")["status"], "unverified");
+    assert_eq!(row(&r, "g8", "ac")["status"], "pass");
+}
+
+#[test]
+fn evidence_list_rejects_a_bad_slug_and_reports_an_unknown_campaign() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.evidence_list("../x").unwrap_err()), "invalid_args");
+    assert_eq!(code(&app.evidence_list("nope").unwrap_err()), "not_found");
+}
+
+#[test]
+fn evidence_outside_the_campaign_or_with_a_dotdot_path_is_unverified_without_running_a_check() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/green.json");
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+}

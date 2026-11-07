@@ -38,6 +38,9 @@ const MAX_PAGE: usize = 64 * 1024;
 /// Largest worker meta file and workflow journal read whole (both are Claude Code files; over-limit ones are skipped).
 const MAX_META_BYTES: u64 = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Evidence checks run this many at a time, each for at most `EVIDENCE_TIMEOUT`.
+const EVIDENCE_WORKERS: usize = 4;
+const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(10);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
@@ -84,6 +87,8 @@ pub struct App {
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     pub log: Option<Arc<Logger>>,
+    /// How long one evidence check may run before its criterion reads `unverified`.
+    evidence_timeout: Duration,
 }
 
 impl App {
@@ -106,6 +111,7 @@ impl App {
             bus,
             control: Arc::new(Mutex::new(svc)),
             runs: Mutex::new(HashMap::new()),
+            evidence_timeout: EVIDENCE_TIMEOUT,
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
             issued: Mutex::new(Default::default()),
@@ -513,6 +519,76 @@ impl App {
             },
         };
         Ok(json!({"task": task, "stale": snap.stale, "evidence": evidence}))
+    }
+
+    /// S4a: every acceptance criterion of a campaign with its proof status, in one call.
+    /// `pass` = the task's signed evidence checks green; `unverified` = evidence exists but its check is red, unreadable,
+    /// timed out or cannot be located (never counted as pass); `fail` = the task failed; `not_run` = no evidence yet
+    /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time.
+    /// The command text and exit codes live in the evidence file and are not read here (only the count of commands).
+    pub fn evidence_list(&self, slug: &str) -> Res {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
+        let Some(tasks) = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array) else {
+            return Err(fail("not_found", "no tasks for this campaign"));
+        };
+        let jobs: Vec<(usize, Request)> = tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| self.evidence_request(slug, t).map(|r| (i, r)))
+            .collect();
+        let mut verdict: HashMap<usize, bool> = HashMap::new();
+        let mut bridge = self.bridge.clone();
+        bridge.timeout = self.evidence_timeout;
+        for batch in jobs.chunks(EVIDENCE_WORKERS) {
+            let got: Vec<(usize, bool)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = batch
+                    .iter()
+                    .map(|(i, req)| {
+                        let b = &bridge;
+                        sc.spawn(move || {
+                            let green = b.run(req).ok().filter(|o| o.code == Some(0)).and_then(|o| serde_json::from_str::<Value>(o.stdout.trim()).ok())
+                                .is_some_and(|v| v.get("green").and_then(Value::as_bool) == Some(true));
+                            (*i, green)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            verdict.extend(got);
+        }
+        let mut rows = Vec::new();
+        for (i, t) in tasks.iter().enumerate() {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or("");
+            let has_evidence = t.get("evidence").is_some_and(|e| !e.is_null());
+            let task_status = t.get("status").and_then(Value::as_str).unwrap_or("");
+            let status = if has_evidence {
+                if verdict.get(&i).copied().unwrap_or(false) { "pass" } else { "unverified" }
+            } else if task_status == "failed" {
+                "fail"
+            } else {
+                "not_run"
+            };
+            let ev = t.get("evidence").filter(|e| !e.is_null());
+            let report = t.get("report").and_then(|r| r.get("summary")).and_then(Value::as_str);
+            let criteria: Vec<Value> = t.get("acceptance").and_then(Value::as_array).cloned().unwrap_or_default();
+            for c in criteria {
+                rows.push(json!({
+                    "task": id,
+                    "title": t.get("title"),
+                    "owner": t.get("owner_agent"),
+                    "criterion": c,
+                    "status": status,
+                    "head": ev.and_then(|e| e.get("head")),
+                    "path": ev.and_then(|e| e.get("path")),
+                    "commands": ev.and_then(|e| e.get("commands")),
+                    "report": report,
+                }));
+            }
+        }
+        Ok(json!({"slug": slug, "stale": snap.stale, "rows": rows}))
     }
 
     /// An archived bundle (under the campaign's evidence dir) is checked
