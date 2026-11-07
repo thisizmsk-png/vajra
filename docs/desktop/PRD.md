@@ -206,7 +206,7 @@ The owner already uses Competitor B for fleets of independent tasks across proje
 agent per project, phone apps and the task to PR to CI to merge lifecycle. Vajra Desktop does none of that.
 It goes deep on one thing Competitor B treats as a black box: what happens inside a single Vajra delivery (criteria,
 task graph, verify and fix rounds, evidence, campaign checkpoints, the knowledge ledger). The two fit
-together: an Competitor B worker can run `/vajra <ask>`, and Vajra Desktop is where you watch and steer that run and
+together: a Competitor B worker can run `/vajra <ask>`, and Vajra Desktop is where you watch and steer that run and
 approve its plan; Competitor B then carries the approved branch through PR and CI.
 
 ### Where Vajra Desktop differs
