@@ -807,3 +807,21 @@ fn list_campaigns_does_not_reverify_an_unchanged_campaign() {
     app.list_campaigns().unwrap();
     assert_eq!(runs(&log), 3);
 }
+
+#[test]
+fn list_campaigns_reverifies_after_an_edit_even_when_the_mtime_is_restored() {
+    // The badge is the trust signal: a same-size edit with the old mtime put back must not keep a cached "ok".
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", Some(b"AAAA"));
+    let app = t.app();
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+    let f = t.home().join(".claude/vajra/campaigns/c1/report.md");
+    let old = fs::metadata(&f).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20)); // so the edit's ctime differs from the stamp's
+    fs::write(&f, b"BBBB").unwrap(); // same size
+    fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
+    assert_eq!(fs::metadata(&f).unwrap().modified().unwrap(), old, "mtime restored");
+    fake_campaign_script(&t, 3, "signature INVALID"); // the script now says the campaign is tampered
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "failed");
+}

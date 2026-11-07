@@ -588,8 +588,8 @@ impl App {
     }
 
     /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run). Cached per campaign
-    /// against the name, size and mtime of every file in its dir and in `checkpoints/`, so an edit that keeps
-    /// `updated` the same still triggers a fresh check.
+    /// against the name, size, inode and ctime of every file in its dir and in `checkpoints/`: ctime cannot be set
+    /// from user space, so an edit that keeps `updated` and even restores the mtime still triggers a fresh check.
     fn integrity_of(&self, slug: &str) -> &'static str {
         let dir = self.claude.join("vajra/campaigns").join(slug);
         let mut stamp = String::new();
@@ -598,8 +598,9 @@ impl App {
             names.sort_by_key(|e| e.file_name());
             for e in names {
                 if let Ok(m) = e.path().symlink_metadata() {
-                    let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-                    stamp.push_str(&format!("{:?}:{}:{};", e.file_name(), m.len(), t));
+                    // ctime, not mtime: mtime can be put back by the editor of the file, ctime cannot be set.
+                    use std::os::unix::fs::MetadataExt;
+                    stamp.push_str(&format!("{:?}:{}:{}:{}.{};", e.file_name(), m.len(), m.ino(), m.ctime(), m.ctime_nsec()));
                 }
             }
         }
