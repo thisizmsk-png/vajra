@@ -1,7 +1,11 @@
-/* K2 base kit styles. Variables from theme/tokens.css only; the design guard enforces it. */
-body { margin: 0; background: var(--c-background); color: var(--c-text); font: 400 13px/19px var(--font-ui); }
+/* K2 base kit styles, Graphite (docs/desktop/DESIGN.md). Variables from theme/tokens.css only; the design guard enforces it.
+   Azure (--c-primary) marks the primary action, the current selection's live state and the live line, nothing else. */
+body { margin: 0; background: var(--c-background); color: var(--c-text); font: 400 13px/19px var(--font-ui); caret-color: var(--c-primary); -webkit-font-smoothing: antialiased; }
+::selection { background: var(--c-selection); }
+:root { scrollbar-color: var(--c-border-strong) transparent; scrollbar-width: thin; }
+
 .v-text { margin: 0; font-family: var(--font-ui); color: var(--c-text); }
-.v-text--headline-lg { font-size: 20px; line-height: 26px; font-weight: 600; }
+.v-text--headline-lg { font-size: 22px; line-height: 28px; font-weight: 600; }
 .v-text--headline-md { font-size: 15px; line-height: 20px; font-weight: 600; }
 .v-text--body { font-size: 13px; line-height: 19px; font-weight: 400; }
 .v-text--body-sm { font-size: 12px; line-height: 17px; font-weight: 400; color: var(--c-text-secondary); }
@@ -15,87 +19,99 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
   outline-offset: 2px;
 }
 
+/* Buttons: one primary per view. Secondary is a quiet raised fill; the label identifies it, so its edge is the soft border. */
 .v-button {
   display: inline-flex; align-items: center; justify-content: center; gap: var(--space-sm);
   min-width: var(--target-min); height: var(--row-h); padding: 0 var(--space-md);
   border: 1px solid transparent; border-radius: var(--radius-md);
-  font: 500 13px/16px var(--font-ui); cursor: default;
-  transition: background-color var(--t-fast) ease-out, color var(--t-fast) ease-out;
+  font: 500 13px/16px var(--font-ui); white-space: nowrap; cursor: default;
+  transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
 }
-.v-button--sm { height: var(--target-min); padding: 0 var(--space-sm); }
+.v-button--sm { height: var(--ctl-sm); padding: 0 var(--space-sm); font-size: 12px; }
 .v-button--primary { background: var(--c-primary); color: var(--c-text-on-primary); }
 .v-button--primary:hover:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-primary) 88%, var(--c-text)); }
-.v-button--secondary { background: var(--c-surface-elevated); color: var(--c-text); border-color: var(--c-border-strong); }
-.v-button--ghost { background: transparent; color: var(--c-text); }
-.v-button--danger { background: var(--c-surface-elevated); color: var(--c-danger); border-color: var(--c-border-strong); }
+.v-button--secondary { background: var(--c-surface-elevated); color: var(--c-text); border-color: var(--c-border); }
+.v-button--ghost { background: transparent; color: var(--c-text-secondary); }
+.v-button--danger { background: var(--c-surface-elevated); color: var(--c-danger); border-color: var(--c-border); }
 .v-button--secondary:hover:not([aria-disabled="true"]),
-.v-button--ghost:hover:not([aria-disabled="true"]),
-.v-button--danger:hover:not([aria-disabled="true"]) { background: var(--c-accent); }
-.v-button:active:not([aria-disabled="true"]) { background: var(--c-accent); color: var(--c-text); }
+.v-button--danger:hover:not([aria-disabled="true"]) { background: var(--c-accent); border-color: var(--c-border-strong); }
+.v-button--ghost:hover:not([aria-disabled="true"]) { background: var(--c-accent); color: var(--c-text); }
+.v-button:active:not([aria-disabled="true"]) { background: var(--c-accent); }
+.v-button--primary:active:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-primary) 80%, var(--c-text)); }
 .v-button[aria-disabled="true"] { opacity: 0.55; }
 
 .v-card { background: var(--c-surface); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: var(--space-md); }
-.v-card--interactive { display: block; width: 100%; text-align: left; font: inherit; }
+.v-card--interactive { display: block; width: 100%; text-align: left; font: inherit; transition: background-color var(--t-fast) var(--ease-out); }
 .v-card--interactive:hover { background: var(--c-accent); }
 
-.v-badge { display: inline-flex; align-items: center; gap: var(--space-xs); padding: 0 var(--space-xs); border: 1px solid var(--c-border-strong); border-radius: var(--radius-sm); font: 500 11px/14px var(--font-ui); color: var(--c-text-secondary); }
-.v-badge--success { color: var(--c-success); border-color: currentColor; }
-.v-badge--warning { color: var(--c-warning); border-color: currentColor; }
-.v-badge--danger { color: var(--c-danger); border-color: currentColor; }
-.v-badge--info { color: var(--c-info); border-color: currentColor; }
+/* Badges are a quiet fill with status-coloured text (every status colour passes 4.5:1 on accent). */
+.v-badge { display: inline-flex; align-items: center; gap: var(--space-xs); height: 20px; padding: 0 6px; border-radius: var(--radius-sm); background: var(--c-accent); font: 500 11px/14px var(--font-ui); color: var(--c-text-secondary); white-space: nowrap; }
+.v-badge--success { color: var(--c-success); }
+.v-badge--warning { color: var(--c-warning); }
+.v-badge--danger { color: var(--c-danger); }
+.v-badge--info { color: var(--c-info); }
 
+/* Inputs are inset: darker than their surface, with the 3:1 edge that identifies them. */
 .v-field { display: flex; flex-direction: column; gap: var(--space-xs); }
 .v-field__label { font: 500 13px/16px var(--font-ui); color: var(--c-text-secondary); }
 .v-field__hint { font: 400 12px/17px var(--font-ui); color: var(--c-text-muted); }
 .v-field__error { font: 400 12px/17px var(--font-ui); color: var(--c-danger); }
-.v-input { height: var(--row-h); padding: 0 var(--space-sm); background: var(--c-surface); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-md); font: 400 13px/19px var(--font-ui); }
+.v-input { height: var(--row-h); padding: 0 var(--space-sm); background: var(--c-background); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-md); font: 400 13px/19px var(--font-ui); transition: border-color var(--t-fast) var(--ease-out); }
+.v-input::placeholder { color: var(--c-text-muted); }
+.v-input:focus-visible { border-color: var(--c-focus-ring); }
 textarea.v-input { height: auto; min-height: 72px; padding: var(--space-sm); resize: vertical; }
 .v-input[aria-invalid="true"] { border-color: var(--c-danger); }
 
-.v-row { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); padding: 0 var(--space-sm); color: var(--c-text); font: 400 13px/19px var(--font-ui); list-style: none; }
+/* Rows: selection is the accent fill, never a coloured rail. */
+.v-row { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text); font: 400 13px/19px var(--font-ui); list-style: none; }
 .v-row:hover { background: var(--c-accent); }
-.v-row[aria-selected="true"] { background: var(--c-accent); }
+.v-row[aria-selected="true"] { background: var(--c-accent); font-weight: 500; }
 .v-listbox:focus-visible { outline: none; }
 .v-listbox:focus-visible:not(:has([role="option"])) { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .v-listbox:focus-visible .v-row[data-active] { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
-.v-row__meta { margin-left: auto; color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.v-row__meta { margin-left: auto; color: var(--c-text-muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
 
 .v-section { margin: 0 0 var(--space-lg); }
 .v-section__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-sm); }
 
-.v-seg { display: inline-flex; width: fit-content; border: 1px solid var(--c-border-strong); border-radius: var(--radius-md); overflow: hidden; margin: 0; padding: 0; }
-.v-seg label { position: relative; display: inline-flex; align-items: center; min-width: var(--target-min); height: calc(var(--row-h) - 2px); padding: 0 var(--space-md); color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); }
+/* Segmented control: a recessed track, the chosen option raised on it. */
+.v-seg { display: inline-flex; width: fit-content; gap: 2px; padding: 2px; margin: 0; border: 0; border-radius: 7px; background: var(--c-accent); }
+.v-seg label { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: var(--target-min); height: var(--ctl-sm); padding: 0 var(--space-md); border-radius: 5px; color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
 .v-seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.v-seg label:has(input:checked) { background: var(--c-accent); color: var(--c-text); }
-.v-seg label:has(input:focus-visible) { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
+.v-seg label:hover:not(:has(input:checked)) { color: var(--c-text); }
+.v-seg label:has(input:checked) { background: var(--c-surface-elevated); color: var(--c-text); box-shadow: 0 0 0 1px var(--c-border-strong); }
+.v-seg label:has(input:focus-visible) { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 
-.v-switch { position: relative; width: 40px; height: var(--target-min); padding: 0; border: 1px solid var(--c-border-strong); border-radius: 12px; background: var(--c-surface); }
-.v-switch::after { content: ""; position: absolute; top: 4px; left: 4px; width: 14px; height: 14px; border-radius: 7px; background: var(--c-text-secondary); transition: transform var(--t-fast) ease-out; }
+.v-switch { position: relative; flex: none; width: 40px; height: var(--target-min); padding: 0; border: 1px solid var(--c-border-strong); border-radius: 12px; background: var(--c-background); transition: background-color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out); }
+.v-switch::after { content: ""; position: absolute; top: 4px; left: 4px; width: 14px; height: 14px; border-radius: 7px; background: var(--c-text-secondary); transition: transform var(--t-fast) var(--ease-out); }
 .v-switch[aria-checked="true"] { background: var(--c-primary); border-color: var(--c-primary); }
 .v-switch[aria-checked="true"]::after { background: var(--c-text-on-primary); transform: translateX(16px); }
 
-.v-dialog { padding: var(--space-lg); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); box-shadow: var(--shadow-floating); max-width: min(480px, calc(100vw - 32px)); }
-.v-dialog::backdrop { background: color-mix(in srgb, var(--c-background) 60%, transparent); }
-.v-dialog--right { margin: 0 0 0 auto; height: 100vh; max-height: none; width: 360px; border-radius: 0; overflow-y: auto; }
+/* Floating layers take the large radius and the one shadow. */
+.v-dialog { padding: var(--space-lg); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-floating); max-width: min(480px, calc(100vw - 32px)); }
+.v-dialog::backdrop { background: var(--c-scrim); }
+.v-dialog--right { margin: 0 0 0 auto; height: 100vh; max-height: none; width: 360px; border-width: 0 0 0 1px; border-radius: 0; overflow-y: auto; }
 .v-dialog__actions { display: flex; justify-content: flex-end; gap: var(--space-sm); margin-top: var(--space-lg); }
 
 .v-toasts { position: fixed; right: var(--space-lg); bottom: var(--space-lg); display: flex; flex-direction: column; gap: var(--space-sm); }
-.v-toast { display: flex; align-items: center; gap: var(--space-md); padding: var(--space-sm) var(--space-md); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); box-shadow: var(--shadow-floating); font: 400 13px/19px var(--font-ui); }
+.v-toast { display: flex; align-items: center; gap: var(--space-md); min-height: var(--ctl-lg); padding: var(--space-sm) var(--space-md); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-floating); font: 400 13px/19px var(--font-ui); }
 .v-toast--success .v-status-dot { color: var(--c-success); }
 .v-toast--danger .v-status-dot { color: var(--c-danger); }
 .v-toast--info .v-status-dot { color: var(--c-info); }
 
 .v-skeleton { display: block; height: 14px; border-radius: var(--radius-sm); background: var(--c-accent); }
-.v-skeleton--block { height: 64px; }
+.v-skeleton--block { height: 64px; border-radius: var(--radius-md); }
 .v-sep { border: 0; background: var(--c-border); margin: 0; flex: none; }
 .v-sep--horizontal { height: 1px; width: 100%; }
 .v-sep--vertical { width: 1px; align-self: stretch; }
 
-.v-status-dot { display: inline-flex; align-items: center; gap: var(--space-xs); font: 500 11px/14px var(--font-ui); }
+/* Status: shape plus label. Working is ink; azure only where the run is live or the row is selected. */
+.v-status-dot { display: inline-flex; align-items: center; gap: var(--space-xs); font: 500 11px/14px var(--font-ui); white-space: nowrap; }
 .v-status-dot svg { width: 10px; height: 10px; flex: none; }
 .v-status--pending { color: var(--c-text-muted); }
 .v-status--ready, .v-status--claimed { color: var(--c-info); }
-.v-status--in_progress { color: var(--c-primary); }
+.v-status--in_progress { color: var(--c-text-secondary); }
+:where([aria-selected="true"], .v-live) .v-status--in_progress { color: var(--c-primary); }
 .v-status--done, .v-status--pass { color: var(--c-success); }
 .v-status--blocked, .v-status--question, .v-status--needs_approval { color: var(--c-warning); }
 .v-status--failed, .v-status--fail { color: var(--c-danger); }

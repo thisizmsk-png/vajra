@@ -1,24 +1,29 @@
-/* Vajra Desktop tokens (docs/desktop/DESIGN.md). The only file besides tokens.ts allowed to hold raw colors.
+/* Vajra Desktop tokens, Graphite direction (docs/desktop/DESIGN.md). The only file besides tokens.ts allowed to hold raw colors.
    Dark is the default; the light theme is selected with data-theme="light" on the root element. */
 :root,
 [data-theme="dark"] {
-  --c-background: #0d1117;
-  --c-surface: #161b22;
-  --c-surface-elevated: #1c2128;
-  --c-accent: #21262d;
-  --c-border: #30363d;
-  --c-border-strong: #768390;
-  --c-text: #e6edf3;
-  --c-text-secondary: #c9d1d9;
-  --c-text-muted: #9da7b3;
-  --c-primary: #d97757;
-  --c-text-on-primary: #0d1117;
-  --c-success: #7ee787;
-  --c-warning: #e3b341;
-  --c-danger: #ff7b72;
-  --c-info: #79c0ff;
-  --c-focus-ring: #79c0ff;
-  --shadow-floating: 0 8px 24px rgb(0 0 0 / 0.4);
+  --c-background: #101113;
+  --c-surface: #16171a;
+  --c-surface-elevated: #1d1e22;
+  --c-accent: #24262b;
+  --c-border: #2a2c31;
+  --c-border-strong: #74787f;
+  --c-text: #ededef;
+  --c-text-secondary: #b9bbc2;
+  --c-text-muted: #8f929b;
+  --c-primary: #7aa7ff;
+  --c-text-on-primary: #0b1020;
+  --c-success: #5fd38d;
+  --c-warning: #f0b44c;
+  --c-danger: #ff7070;
+  --c-info: #6cc6d9;
+  --c-focus-ring: #7aa7ff;
+  --shadow-floating: 0 8px 24px rgb(0 0 0 / 0.45);
+  --c-live-tint: rgb(122 167 255 / 0.10);
+  --c-warn-tint: rgb(240 180 76 / 0.08);
+  --c-kbd-on-primary: rgb(0 0 0 / 0.25);
+  --c-selection: rgb(122 167 255 / 0.30);
+  --c-scrim: rgb(16 17 19 / 0.6);
 
   --ansi-black: #7d8590;
   --ansi-red: #ff7b72;
@@ -40,23 +45,28 @@
 }
 
 [data-theme="light"] {
-  --c-background: #f6f8fa;
-  --c-surface: #fdfdfe;
+  --c-background: #fbfbfc;
+  --c-surface: #f4f4f6;
   --c-surface-elevated: #ffffff;
-  --c-accent: #eaeef2;
-  --c-border: #d8dee4;
-  --c-border-strong: #6e7781;
-  --c-text: #1f2328;
-  --c-text-secondary: #424a53;
-  --c-text-muted: #59636e;
-  --c-primary: #a84a29;
+  --c-accent: #e9e9ee;
+  --c-border: #e1e1e6;
+  --c-border-strong: #7c7f88;
+  --c-text: #18191c;
+  --c-text-secondary: #44464d;
+  --c-text-muted: #5f626b;
+  --c-primary: #2556c8;
   --c-text-on-primary: #ffffff;
-  --c-success: #116329;
-  --c-warning: #7d4e00;
-  --c-danger: #b42318;
-  --c-info: #0550ae;
-  --c-focus-ring: #0550ae;
-  --shadow-floating: 0 8px 24px rgb(31 35 40 / 0.12);
+  --c-success: #1a7341;
+  --c-warning: #855600;
+  --c-danger: #c0282b;
+  --c-info: #0b6b80;
+  --c-focus-ring: #2556c8;
+  --shadow-floating: 0 8px 24px rgb(24 25 28 / 0.12);
+  --c-live-tint: rgb(37 86 200 / 0.07);
+  --c-warn-tint: rgb(133 86 0 / 0.07);
+  --c-kbd-on-primary: rgb(255 255 255 / 0.4);
+  --c-selection: rgb(37 86 200 / 0.18);
+  --c-scrim: rgb(251 251 252 / 0.6);
 
   --ansi-black: #24292f;
   --ansi-red: #cf222e;
@@ -79,7 +89,9 @@
 
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --radius-lg: 10px;
+  --bar-h: 40px;
   --radius-sm: 4px;
   --radius-md: 6px;
   --space-xs: 4px;
@@ -87,10 +99,15 @@
   --space-md: 12px;
   --space-lg: 16px;
   --space-xl: 24px;
+  /* Control heights: sm 24, md 28 (rows, buttons, inputs), lg 32 (search, toolbar fields). */
+  --ctl-sm: 24px;
   --row-h: 28px;
+  --ctl-lg: 32px;
   --target-min: 24px;
+  --sidebar-w: 240px;
   --t-fast: 120ms;
   --t-panel: 180ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {

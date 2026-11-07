@@ -10,7 +10,8 @@ import { GalleryDesktop } from "./GalleryDesktop";
 
 /** Every base component in its states, for review and the click crawl (open with #kit). Not an app screen. */
 export function Gallery() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  // ?theme=light opens on light, for screenshots; the default stays dark.
+  const [theme, setTheme] = useState<"dark" | "light">(() => (new URLSearchParams(location.search).get("theme") === "light" ? "light" : "dark"));
   const [rounds, setRounds] = useState<"1" | "2" | "3">("2");
   const [on, setOn] = useState(true);
   const [text, setText] = useState("main");
@@ -29,7 +30,7 @@ export function Gallery() {
       <Text as="h1" variant="headline-lg">Kit gallery</Text>
       <SegmentedControl label="Theme" value={theme} onChange={setTheme} options={[{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }]} />
       <Section title="Buttons">
-        <div className="v-gallery__wrap">
+        <div className="v-gallery__wrap v-gallery__center">
           <Button variant="primary">Start run</Button>
           <Button>Message</Button>
           <Button variant="ghost">Cancel</Button>

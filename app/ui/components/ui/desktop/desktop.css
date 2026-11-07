@@ -1,4 +1,4 @@
-/* K3 desktop kit styles. Variables only; the design guard enforces it. */
+/* K3 desktop kit styles, Graphite (docs/desktop/DESIGN.md). Variables only; the design guard enforces it. */
 /* Rows are as wide as their text: the list scrolls sideways, so nothing past the pane edge is hidden. */
 .v-vrow { position: absolute; left: 0; min-width: 100%; width: max-content; white-space: pre; }
 
@@ -10,9 +10,10 @@
 .v-ansi-blue-bright { color: var(--ansi-bright-blue); } .v-ansi-magenta-bright { color: var(--ansi-bright-magenta); } .v-ansi-cyan-bright { color: var(--ansi-bright-cyan); } .v-ansi-white-bright { color: var(--ansi-bright-white); }
 .v-ansi-bold { font-weight: 600; } .v-ansi-dim { opacity: 0.75; } .v-ansi-italic { font-style: italic; } .v-ansi-underline { text-decoration: underline; }
 
-.v-tablist { display: flex; gap: var(--space-xs); border-bottom: 1px solid var(--c-border); }
-.v-tab { height: var(--row-h); padding: 0 var(--space-md); background: transparent; color: var(--c-text-secondary); border: 0; border-bottom: 2px solid transparent; font: 500 13px/16px var(--font-ui); cursor: default; }
-.v-tab[aria-selected="true"] { color: var(--c-text); border-bottom-color: var(--c-primary); background: var(--c-accent); }
+.v-tablist { display: flex; gap: 2px; border-bottom: 1px solid var(--c-border); }
+.v-tab { height: var(--ctl-lg); padding: 0 var(--space-md); margin-bottom: -1px; background: transparent; color: var(--c-text-muted); border: 0; border-bottom: 2px solid transparent; font: 500 13px/16px var(--font-ui); cursor: default; transition: color var(--t-fast) var(--ease-out); }
+.v-tab:hover { color: var(--c-text); }
+.v-tab[aria-selected="true"] { color: var(--c-text); border-bottom-color: var(--c-text); }
 .v-tab:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: -2px; }
 .v-tabpanel { padding: var(--space-md) 0; }
 
@@ -24,7 +25,7 @@
 .v-th-button:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 
 .v-tip-wrap { position: relative; display: inline-flex; }
-.v-tooltip { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; padding: var(--space-xs) var(--space-sm); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-sm); box-shadow: var(--shadow-floating); font: 400 12px/17px var(--font-ui); white-space: nowrap; }
+.v-tooltip { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; padding: var(--space-xs) var(--space-sm); background: var(--c-surface-elevated); color: var(--c-text); border: 1px solid var(--c-border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow-floating); font: 400 12px/17px var(--font-ui); white-space: nowrap; }
 
 .v-panes { display: flex; width: 100%; height: 100%; }
 .v-panes--vertical { flex-direction: column; }
@@ -43,6 +44,7 @@
 .v-tree [role="treeitem"] { cursor: default; }
 .v-tree__twisty { display: inline-block; min-width: var(--target-min); text-align: center; color: var(--c-text-muted); }
 .v-tree [role="treeitem"][aria-selected="true"] { background: var(--c-accent); }
+.v-tree .v-row { margin: 1px 0; }
 
 .v-evidence th, .v-evidence td { padding: 0 var(--space-sm); height: var(--row-h); border-bottom: 1px solid var(--c-border); text-align: left; font-weight: 400; }
 .v-action-foot { display: flex; align-items: center; gap: var(--space-sm); margin-top: var(--space-sm); }
@@ -53,10 +55,15 @@
 .v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
 .v-dl__cut { color: var(--c-text-muted); }
 .v-dl__glyph { width: 1ch; color: var(--c-text-muted); flex: none; }
-.v-dl--add .v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
-.v-dl__cut { color: var(--c-text-muted); }
-.v-dl__glyph { color: var(--c-success); }
-.v-dl--del .v-term-line, .v-dl { unicode-bidi: isolate; direction: ltr; }
-.v-dl__cut { color: var(--c-text-muted); }
-.v-dl__glyph { color: var(--c-danger); }
+.v-dl--add .v-dl__glyph { color: var(--c-success); }
+.v-dl--del .v-dl__glyph { color: var(--c-danger); }
 .v-dl--hunk { color: var(--c-info); }
+
+/* Command palette: Raycast-style, 720 px wide, 14% from the top, 34 px rows. */
+.v-dialog.v-palette { width: min(720px, calc(100vw - 32px)); max-width: none; margin: 14vh auto auto; padding: 0; overflow: hidden; }
+.v-palette > h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.v-palette > .v-input { display: block; width: 100%; height: 52px; padding: 0 var(--space-lg); border: 0; border-bottom: 1px solid var(--c-border); border-radius: 0; background: transparent; font-size: 16px; }
+.v-palette > .v-input:focus-visible { outline: none; border-bottom-color: var(--c-border); }
+.v-palette [role="listbox"] { max-height: min(420px, 50vh); overflow: auto; padding: 6px; }
+.v-palette .v-row { min-height: 34px; padding: 0 10px; }
+.v-palette > p { padding: var(--space-sm) var(--space-lg); border-top: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-text-muted); }

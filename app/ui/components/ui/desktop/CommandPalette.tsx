@@ -37,7 +37,7 @@ export function CommandPalette({ open, onClose, commands, title = "Command palet
   useEffect(() => { document.getElementById(`${base}-${shown[active]?.id}`)?.scrollIntoView?.({ block: "nearest" }); }, [active, base, shown]);
   const run = (c: Command | undefined) => { if (c) { onClose(); c.run(); } };
   return (
-    <Sheet open={open} onClose={onClose} title={title}>
+    <Sheet open={open} onClose={onClose} title={title} className="v-palette">
       <input
         autoFocus
         role="combobox"
