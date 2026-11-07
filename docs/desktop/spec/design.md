@@ -814,8 +814,8 @@ check.
   - (e) Claude Code's own background sessions, if they cover workflow runs.
 - Evidence for (b):
   - P2 and P3 in `pain-points.md` (vajra-4) are mostly daemon-lifecycle failures in apps that have one:
-    old daemon generations left running after an update (F#9138), every session swept to `exited` after
-    a daemon restart (B#6639), and duplicate sessions after an upgrade (H#537, K#75). (c)
+    old daemon generations left running after an update (a public issue in Competitor F's tracker), every session swept to `exited` after
+    a daemon restart (a public issue in Competitor B's tracker), and duplicate sessions after an upgrade (public issues in Competitor H's and Competitor K's trackers). (c)
     takes on exactly that failure class plus a versioned protocol, in exchange for surviving crashes.
   - The spike measured the app core at about 110 MiB RSS (Rust main, flat over an hour). A daemon would
     split that across two processes and add its own baseline against an idle budget we already miss
