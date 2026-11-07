@@ -1759,3 +1759,32 @@ fn a_forced_list_refresh_during_a_running_verify_is_answered_by_a_newer_verify()
     // The newer verdict is the one kept.
     assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "failed");
 }
+
+/// Review of #50: the verdict an older flight leaves behind must not be listed as fresh while a forced refresh is pending.
+#[test]
+fn a_verdict_settled_by_a_pre_refresh_verify_is_not_listed_while_the_refresh_is_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    let started = t.0.join("verify-started2");
+    let sh = dir.join("vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\ntouch '{}'\nsleep 0.5\nexit 0\n", started.display())).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    campaign(&t, "c1", None);
+    let app = t.app();
+    std::thread::scope(|s| {
+        let old = s.spawn(|| app.campaign_integrity("c1", false).unwrap()["integrity"].clone());
+        for _ in 0..500 {
+            if started.exists() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists());
+        assert_eq!(app.list_campaigns_opt(true).unwrap()["campaigns"][0]["integrity"], "checking");
+        assert_eq!(old.join().unwrap(), "ok", "the older flight settles ok after the refresh was asked");
+    });
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "checking", "not the pre-refresh ok");
+    // The follow-up verify (after the floor) is listed again.
+    assert_eq!(app.campaign_integrity("c1", false).unwrap()["integrity"], "ok");
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+}

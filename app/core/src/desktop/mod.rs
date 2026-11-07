@@ -798,7 +798,12 @@ impl App {
     }
 
     fn cached_integrity(&self, slug: &str) -> Option<&'static str> {
-        match lock(&self.verdicts).by_slug.get(slug) {
+        let m = lock(&self.verdicts);
+        // A forced refresh is pending: whatever an older verify left behind is not shown (see `Verdicts::floor`).
+        if m.floor.contains_key(slug) {
+            return None;
+        }
+        match m.by_slug.get(slug) {
             Some(&Verdict::Fresh(at, v)) if (self.clock)().saturating_sub(at) < self.verdict_ttl => Some(v),
             _ => None,
         }
