@@ -645,3 +645,58 @@ fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
     assert_eq!(i["round"], 2, "{i}");
     app.sup.kill(&stream).unwrap();
 }
+
+// ---- resume_targets: which session to resume for a campaign ---------------------------------------------------------
+
+const SID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+fn launch_sleep(app: &App, sid: &str, run_id: &str, campaign: &str, cwd: &Path, rotate: bool) {
+    app.launch(sid, run_id, campaign, cwd, |_| Ok(vec!["sleep".into(), "5".into()]), rotate).unwrap();
+}
+
+#[test]
+fn a_launch_is_recorded_and_resume_targets_names_its_session_and_cwd() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
+    launch_sleep(&app, SID, "20261106-1000", "camp-a", &cwd, false);
+    let r = app.resume_targets().unwrap();
+    assert_eq!(r["targets"]["camp-a"]["session_id"], SID, "{r}");
+    assert_eq!(r["targets"]["camp-a"]["cwd"], cwd.to_string_lossy().as_ref(), "{r}");
+    assert_eq!(r["targets"]["camp-a"]["run_id"], "20261106-1000");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn the_record_survives_a_restart_and_a_resume_updates_the_run_id_only() {
+    let t = Tmp::new();
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    {
+        let app = t.app();
+        launch_sleep(&app, SID, "20261106-1000", "camp-a", &cwd, false);
+        app.sup.kill(&format!("run-{SID}")).unwrap();
+    }
+    let app = t.app(); // a new App over the same data dir: nothing is in memory
+    let r = app.resume_targets().unwrap();
+    assert_eq!(r["targets"]["camp-a"]["session_id"], SID, "{r}");
+    launch_sleep(&app, SID, "20261106-1100", "camp-a", &cwd, true);
+    let r = app.resume_targets().unwrap();
+    assert_eq!(r["targets"]["camp-a"]["session_id"], SID);
+    assert_eq!(r["targets"]["camp-a"]["run_id"], "20261106-1100");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
+fn a_target_whose_directory_is_gone_is_not_offered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    launch_sleep(&app, SID, "20261106-1000", "camp-a", &cwd, false);
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+    fs::remove_dir_all(&cwd).unwrap();
+    assert_eq!(app.resume_targets().unwrap()["targets"], json!({}));
+}
