@@ -47,6 +47,15 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
   }
   return undefined;
 };
+/** Ids from the root down to `id`, or null. */
+const pathTo = (n: CrewNodeDto, id: string): string[] | null => {
+  if (n.id === id) return [n.id];
+  for (const c of n.children) {
+    const p = pathTo(c, id);
+    if (p) return [n.id, ...p];
+  }
+  return null;
+};
 const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
   if (n.children.length) out.push(n.id);
   n.children.forEach((c) => withChildren(c, out));
@@ -78,6 +87,21 @@ export function Crew() {
     setErr("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeKey]);
+
+  // `focus=<node id>` (from the Run view's task graph) selects that node (a task's latest worker), and opens its ancestors, once the tree has loaded.
+  const focus = route.params.focus ?? "";
+  const focused = useRef("");
+  useEffect(() => {
+    if (!root || !focus || focused.current === `${routeKey}\n${focus}`) return;
+    // A task group (`task:<tid>`) has no stream or controls: open its latest round's worker (children are in round order).
+    const node = find(root, focus);
+    const target = node && focus.startsWith("task:") && node.children.length ? node.children[node.children.length - 1].id : focus;
+    const path = pathTo(root, target);
+    if (!path) return;
+    focused.current = `${routeKey}\n${focus}`;
+    setOpenIds((o) => Array.from(new Set([...(o ?? []), ...path.slice(0, -1)])));
+    setSelected(target);
+  }, [root, focus, routeKey]);
 
   // Which run: the route's, else the first active one.
   useEffect(() => {

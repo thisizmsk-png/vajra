@@ -978,3 +978,46 @@ fn a_selftest_denied_on_a_different_file_does_not_pass_and_is_not_cached() {
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
 }
+
+// ---- red team (S1): the Lead transcript is read like every other worker-writable file ---------------------------
+
+/// A restarted app whose remembered Lead transcript path is `make(path)`.
+fn restarted_with_transcript(t: &Tmp, make: impl FnOnce(&std::path::Path)) -> App {
+    let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    std::fs::create_dir_all(t.data()).unwrap();
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    remember_lead(t, lead_sid);
+    let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
+    std::fs::create_dir_all(&proj).unwrap();
+    make(&proj.join(format!("{lead_sid}.jsonl")));
+    App::open(&t.data(), &t.home()).unwrap()
+}
+
+#[test]
+fn a_fifo_in_place_of_the_lead_transcript_does_not_hang_lead_status() {
+    let t = Tmp::new();
+    let app = std::sync::Arc::new(restarted_with_transcript(&t, |p| {
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let a = app.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(a.lead_status(RUN_ID).is_ok());
+    });
+    assert_eq!(rx.recv_timeout(Duration::from_secs(3)), Ok(true), "lead_status must not block on a FIFO");
+    assert!(stream_text(&app).is_empty());
+}
+
+#[test]
+fn a_symlinked_lead_transcript_is_not_replayed() {
+    let t = Tmp::new();
+    let other = t.home().join("other-session.jsonl");
+    let line = json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "words the Lead never said"}]}}).to_string();
+    std::fs::write(&other, line).unwrap();
+    let app = restarted_with_transcript(&t, |p| std::os::unix::fs::symlink(&other, p).unwrap());
+    assert!(app.lead_status(RUN_ID).is_ok());
+    assert!(stream_text(&app).is_empty(), "{:?}", stream_text(&app));
+}
