@@ -4,6 +4,7 @@ import { Table } from "../../../components/ui/desktop";
 import type { Column } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
+import { useCampaignIntegrity } from "../campaignIntegrity";
 import type { Campaign, Report } from "../../ipc";
 import { useRoute } from "../../router";
 
@@ -44,7 +45,8 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
   { key: "passing", header: S.history.colPassing, numeric: true, sort: (a, b) => (a.passing ?? 0) - (b.passing ?? 0), cell: (c) => (c.total != null ? `${c.passing ?? 0}/${c.total}` : "") },
   { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => c.updated ?? "" },
   { key: "integrity", header: S.history.colIntegrity, sort: (a, b) => text(a.integrity, b.integrity), cell: (c) => (
-    c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
+    c.integrity === "checking" ? <Badge>{S.history.integrityChecking}</Badge>
+      : c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
       : c.integrity === "ok" ? <Badge status="success">{S.history.integrityOk}</Badge>
       : <Badge>{S.history.integrityUnknown}</Badge>
   ) },
@@ -58,7 +60,8 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
 
 export function History() {
   const [, go] = useRoute();
-  const [camps, setCamps] = useState<Campaign[] | null>(null);
+  const [loaded, setCamps] = useState<Campaign[] | null>(null);
+  const camps = useCampaignIntegrity(loaded); // the list as loaded, with each "checking" badge filled in as its call returns
   const [loadErr, setLoadErr] = useState("");
   const [q, setQ] = useState("");
   const [repo, setRepo] = useState("");

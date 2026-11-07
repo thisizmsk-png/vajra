@@ -48,7 +48,8 @@ export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
   /** The signature check: ok, failed or unknown (could not run). */
-  integrity?: "ok" | "failed" | "unknown";
+  /** "checking": the list came back before this campaign's verify ran; ask `campaignIntegrity`. */
+  integrity?: "ok" | "failed" | "unknown" | "checking";
 };
 export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_text" | "unknown";
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
@@ -97,6 +98,8 @@ export const api = {
   readReport: (slug: string) => call<Report>("read_report", { slug }),
   /** Run the signature check now (not the cached badge). */
   verifyCampaign: (slug: string) => call<Verified>("verify_campaign", { slug }),
+  /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
+  campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
