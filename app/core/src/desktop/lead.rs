@@ -31,6 +31,10 @@ use crate::sessions::scrubbed_env;
 use crate::vajra::bridge::Request;
 use crate::vajra::preflight::find_on_path;
 
+/// `read_only` detail for a run loaded from the index whose directory the app has no record of.
+const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
+/// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
+const CWD_FILE: &str = "cwd";
 /// `read_only` detail for a run this app did not launch.
 const NOT_OURS: &str = "run not launched by this app";
 /// How long a passing `vajra-doctor.sh` answer is reused.
@@ -135,6 +139,8 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 /// What a run needs to be asked about.
 struct Target {
+    /// Loaded from `runs.jsonl` (after a restart) rather than from a run this app life launched.
+    from_disk: bool,
     session_id: String,
     run_id: String,
     cwd: PathBuf,
@@ -189,8 +195,7 @@ impl App {
         let busy = lock(&self.lead.active).get(run_id).map(|a| a.ask_id.clone());
         let t = match self.lead_target(run_id) {
             Ok(t) => t,
-            Err(LeadError::Invalid(why)) => return Ok(json!({"available": false, "read_only_reason": why, "busy": false})),
-            Err(_) => return Ok(json!({"available": false, "read_only_reason": NOT_OURS, "busy": false})),
+            Err(e) => return Ok(json!({"available": false, "read_only_reason": e.detail().unwrap_or_else(|| NOT_OURS.to_string()), "busy": false})),
         };
         // After a restart the bus is empty; bring the history back from the Lead's own transcript.
         self.rebuild_lead_stream(&t);
@@ -298,20 +303,32 @@ impl App {
         let lead_sid = self.read_lead_sid(run_id);
         if let Some(mut r) = live.into_iter().next() {
             self.add_disk_nonce(&mut r.nonces, &r.session_id);
-            return Ok(Target { lead_session_id: lead_sid, session_id: r.session_id, run_id: r.run_id, cwd: r.cwd, nonces: r.nonces });
+            return Ok(Target { from_disk: false, lead_session_id: lead_sid, session_id: r.session_id, run_id: r.run_id, cwd: r.cwd, nonces: r.nonces });
         }
         // A run loaded from disk (after a restart): its control nonce is still on disk and must stay out of the
         // ask text, the ledger, the bus and the rebuilt history.
         let e = indexed.into_iter().next_back().ok_or(LeadError::ReadOnly(NOT_OURS))?;
+        // The index is worker-writable, so its `cwd` is only a claim: the app's own record under the guarded control
+        // dir (written when the run was first asked about) must exist and agree, or the run is not served.
+        match self.read_run_cwd(run_id) {
+            Some(c) if c == e.cwd => {}
+            _ => return Err(LeadError::ReadOnly(NO_TRUSTED_CWD)),
+        }
         let mut nonces = Redactor::default();
         self.add_disk_nonce(&mut nonces, &e.session_id);
-        Ok(Target { session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces })
+        Ok(Target { from_disk: true, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces })
     }
 
     /// `<data>/control/lead/<run_id>/lead_session`: the authoritative run to Lead-session mapping. It sits under the
     /// directory the worker guard protects; `runs.jsonl` (worker-writable) is not trusted for it.
     fn lead_sid_dir(&self, run_id: &str) -> PathBuf {
         self.data.join("control").join("lead").join(run_id)
+    }
+
+    fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
+        let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
+        p.is_absolute().then_some(p)
     }
 
     fn read_lead_sid(&self, run_id: &str) -> Option<String> {
@@ -353,6 +370,11 @@ impl App {
         fsx::private_dir(&base).map_err(io)?;
         let dir = base.join(&t.run_id);
         let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id)?;
+        // A run this app life launched is authoritative in memory: remember its directory under the guarded dir, so
+        // that after a restart the (worker-writable) index cannot supply a different one.
+        if !t.from_disk {
+            fsx::write_atomic(&dir, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
+        }
         self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.

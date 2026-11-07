@@ -194,6 +194,7 @@ fn remember_lead(t: &Tmp, sid: &str) {
     crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
     crate::control::fsx::private_dir(&dir).unwrap();
     crate::control::fsx::write_atomic(&dir, "lead_session", sid.as_bytes()).unwrap();
+    crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
 }
 
 fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -314,6 +315,13 @@ fn ask_refused_for_terminal_run() {
     // A run that only runs.jsonl remembers (a finished run of this app) can still be asked about.
     let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    // ...once the app's own record of the run's directory agrees (without it the index alone is not believed).
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], false);
+    let dir = t.data().join("control/lead").join(RUN_ID);
+    crate::control::fsx::private_dir(&t.data().join("control")).unwrap();
+    crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
+    crate::control::fsx::private_dir(&dir).unwrap();
+    crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], true);
     assert!(app.ask_lead(RUN_ID, "still there?").is_ok());
     wait_until("the ask", || idle(&app));
@@ -879,4 +887,50 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let app3 = t3.app();
     assert!(app3.ask_lead(RUN_ID, "hi").is_ok());
     wait_until("the ask", || idle(&app3));
+}
+
+#[test]
+fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
+    let t = Tmp::new();
+    // Life 1: the run is asked about, so the app records its directory under the guarded dir.
+    let app = t.app();
+    app.ask_lead(RUN_ID, "first").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    let rec = t.data().join("control/lead").join(RUN_ID).join("cwd");
+    assert_eq!(std::fs::read_to_string(&rec).unwrap(), t.repo().to_string_lossy());
+    let settings = t.data().join("control/lead").join(RUN_ID).join("settings.json");
+    let real_rules = std::fs::read_to_string(&settings).unwrap();
+    let asks = t.count("ask.count");
+    drop(app);
+    // Life 2 (a restart): only the index tells the app about the run, and a worker forged its cwd.
+    let evil = t.0.join("evil-repo");
+    std::fs::create_dir_all(&evil).unwrap();
+    let path = t.data().join("runs.jsonl");
+    let line = |cwd: &Path| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+    runindex::append(&path, &line(&evil)).unwrap();
+    let app2 = App::open(&t.data(), &t.home()).unwrap();
+    app2.lead.set_bin(Some(t.bin("claude")));
+    app2.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    let e = app2.ask_lead(RUN_ID, "again").unwrap_err();
+    assert_eq!(code(&e), "read_only");
+    assert_eq!(t.count("ask.count"), asks, "no Lead was spawned in the forged directory");
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), real_rules, "the repo deny rules are untouched");
+    assert_eq!(app2.lead_status(RUN_ID).unwrap()["available"], false);
+    // The honest index line (same cwd as the record) is served, in the real directory.
+    runindex::append(&path, &line(&t.repo())).unwrap();
+    app2.ask_lead(RUN_ID, "again").unwrap();
+    wait_until("the ask", || idle(&app2));
+    assert!(std::fs::read_to_string(&settings).unwrap().contains(&*t.repo().to_string_lossy()) || std::fs::read_to_string(&settings).unwrap() == real_rules);
+}
+
+#[test]
+fn a_run_loaded_from_the_index_with_no_cwd_record_is_read_only() {
+    let t = Tmp::new();
+    std::fs::create_dir_all(t.data()).unwrap();
+    let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "read_only");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], false);
 }
