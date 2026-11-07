@@ -2462,3 +2462,26 @@ fn evidence_why_survives_the_verdict_cache_and_is_absent_for_other_statuses() {
         assert!(row(&r, "t3", "ac-4").get("why").is_none_or(Value::is_null), "{r}");
     }
 }
+
+#[test]
+fn report_unknown_says_jq_missing_before_the_digest_script_runs() {
+    // The campaign script dies on a missing jq before it dispatches verify-digest, so the digest step must not be the one to find out.
+    let (t, run) = match real_script_home() { Some(x) => x, None => return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let marker = t.0.join("ran-script");
+    campaign_script_body(&t, &format!("touch '{}'\nexit 0", marker.display()));
+    let mut app = t.app();
+    app.bridge.jq_candidates.clear(); // no jq on this machine
+    let r = app.read_report("real1").unwrap();
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "jq_missing", "{r}");
+    assert!(!marker.exists(), "jq is checked before any script runs");
+}
+
+#[test]
+fn report_unknown_says_jq_missing_when_the_script_itself_reports_it() {
+    // A jq the app found but the script's own PATH did not: the script's "jq is required" is a missing dependency, not a bad exit.
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "echo 'vajra-campaign: jq is required' >&2\nexit 1")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "jq_missing", "{r}");
+}

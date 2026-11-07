@@ -69,6 +69,8 @@ pub struct Bridge {
     pub timeout: Duration,
     /// The HOME the scripts see. `None` passes the process HOME through; the app sets it to the home it was opened with.
     pub home: Option<PathBuf>,
+    /// Where `jq` is looked for (the first that is a file). A field so a test can say "no jq on this machine".
+    pub jq_candidates: Vec<PathBuf>,
 }
 
 const GIT_READ_ONLY: [&str; 7] = ["--version", "rev-parse", "merge-base", "status", "log", "diff", "ls-files"];
@@ -82,12 +84,18 @@ impl Bridge {
             git: PathBuf::from("/usr/bin/git"),
             timeout: DEFAULT_TIMEOUT,
             home: None,
+            jq_candidates: ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).collect(),
         }
     }
 
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
         self
+    }
+
+    /// The `jq` the bridge would run, if any.
+    pub fn find_jq(&self) -> Option<PathBuf> {
+        self.jq_candidates.iter().find(|p| p.is_file()).cloned()
     }
 
     /// Build `(program, argv, cwd)` for a request, or refuse it.
@@ -99,7 +107,7 @@ impl Bridge {
             }
             Request::VerifyDigest { .. } => (script("vajra-campaign.sh"), vec!["verify-digest".into()], None),
             Request::FeaturesDef { .. } => (
-                find_jq().ok_or_else(|| BridgeError::Invalid("jq not found".into()))?,
+                self.find_jq().ok_or_else(|| BridgeError::Invalid("jq not found".into()))?,
                 vec!["-cS".into(), "[.features[] | {id, description}]".into()],
                 None,
             ),
@@ -184,9 +192,6 @@ impl Bridge {
     }
 }
 
-fn find_jq() -> Option<PathBuf> {
-    ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).find(|p| p.is_file())
-}
 
 /// Slugs and task ids: `[A-Za-z0-9][A-Za-z0-9._-]*`, so never an option.
 fn name(s: &str) -> Result<String, BridgeError> {

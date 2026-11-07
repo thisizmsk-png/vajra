@@ -1440,6 +1440,11 @@ impl App {
         );
         let mut bridge = self.bridge.clone();
         bridge.timeout = self.verify_timeout;
+        // The campaign script dies on a missing jq ("jq is required", exit 1) before it dispatches verify-digest, so a
+        // missing jq has to be found here, not left to look like a bad exit of the digest step.
+        if bridge.find_jq().is_none() {
+            return unknown(reason("jq_missing", None, None));
+        }
         let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
@@ -1551,6 +1556,10 @@ fn output_failure(o: &Output, home: &Path) -> Value {
         return reason("timeout", None, None);
     }
     let from_stdout = || serde_json::from_str::<Value>(o.stdout.trim()).ok().and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
+    // The script's own missing-dependency message is a missing jq, not an unexplained exit.
+    if o.stderr.contains("jq is required") {
+        return reason("jq_missing", None, None);
+    }
     let text = if o.stderr.trim().is_empty() { from_stdout().unwrap_or_default() } else { o.stderr.clone() };
     reason("bad_exit", Some(reason_detail(&text, home)), o.code)
 }
