@@ -22,6 +22,8 @@ export function StreamTab({ stream }: { stream: string }) {
   const ringRef = useRef<Ring>(emptyRing);
   const capRef = useRef(RING);
   const busy = useRef(false);
+  /** Bumped by Jump to latest: a response that began before it belongs to the old window and is dropped. */
+  const gen = useRef(0);
   const last = useRef(0);
 
   const put = (r: Ring) => { ringRef.current = r; setRing(r); };
@@ -29,12 +31,14 @@ export function StreamTab({ stream }: { stream: string }) {
   const load = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
+    const g = gen.current;
     last.current = Date.now();
     try {
       // The core returns the oldest lines after the cursor, one page at a time (64 KiB): keep reading until the cursor
       // reaches head_seq, so opening a worker or Jump to latest gets to the newest lines now, not one page per poll.
       for (let page = 0; page < MAX_DRAIN_PAGES; page++) {
         const t = await api.tail(stream, ringRef.current.last);
+        if (g !== gen.current) return;
         setErr("");
         const before = ringRef.current.last;
         put(appendTail(ringRef.current, t, capRef.current));
@@ -42,9 +46,9 @@ export function StreamTab({ stream }: { stream: string }) {
         if (r.detached || r.last <= before || r.last >= t.head_seq) break;
       }
     } catch (e) {
-      setErr(errorText(e));
+      if (g === gen.current) setErr(errorText(e));
     } finally {
-      busy.current = false;
+      if (g === gen.current) busy.current = false;
     }
   }, [stream]);
 
@@ -66,14 +70,17 @@ export function StreamTab({ stream }: { stream: string }) {
   const loadEarlier = async () => {
     const first = ringRef.current.rows.find((r) => r.seq !== null)?.seq;
     if (first == null) return;
+    const g = gen.current;
     setEarlier("busy");
     try {
       const p = await api.readSpillBefore(stream, first, EARLIER_PAGE);
+      if (g !== gen.current) return;
       capRef.current = Math.min(MAX_ROWS, capRef.current + EARLIER_PAGE);
       put(prependEarlier(ringRef.current, p.lines, capRef.current));
       if (p.lines.length === 0) setExhaustedAt(first);
       setEarlier("idle");
     } catch (e) {
+      if (g !== gen.current) return;
       setErr(errorText(e));
       setEarlier("idle");
     }
@@ -81,6 +88,8 @@ export function StreamTab({ stream }: { stream: string }) {
 
   /** Back to the live tail: forget the paged history and re-read the newest rows. */
   const jumpLatest = () => {
+    gen.current += 1;
+    busy.current = false;
     capRef.current = RING;
     setExhaustedAt(null);
     put(emptyRing);
