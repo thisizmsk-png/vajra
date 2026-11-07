@@ -712,3 +712,98 @@ fn verify_campaign_refuses_a_bad_slug_without_running_anything() {
     }
     assert!(!log.exists(), "the script must not run for a bad slug");
 }
+
+// ---- read_report and list_campaigns integrity (AC-6.1.2, AC-6.1.3) -------------------------------------------------
+
+fn campaign(t: &Tmp, slug: &str, report: Option<&[u8]>) {
+    let d = t.home().join(".claude/vajra/campaigns").join(slug);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), format!(r#"{{"slug":"{slug}","goal":"g","status":"active","created":"c","updated":"u"}}"#)).unwrap();
+    if let Some(r) = report {
+        fs::write(d.join("report.md"), r).unwrap();
+    }
+}
+
+fn runs(log: &Path) -> usize {
+    fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
+}
+
+#[test]
+fn read_report_returns_the_text_of_a_verified_campaign() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", Some("# Delivered\nbranch x, commit abc\n".as_bytes()));
+    let r = t.app().read_report("c1").unwrap();
+    assert_eq!(r["text"], "# Delivered\nbranch x, commit abc\n", "{r}");
+    assert_eq!(r["truncated"], false);
+}
+
+#[test]
+fn read_report_refuses_text_when_the_signature_fails() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 3, "signature INVALID");
+    campaign(&t, "c1", Some(b"tampered"));
+    let e = t.app().read_report("c1").unwrap_err();
+    assert_eq!(code(&e), "integrity_failed", "{e}");
+    assert!(e.get("text").is_none(), "no report text for an unverified campaign: {e}");
+}
+
+#[test]
+fn read_report_without_a_report_file_says_so() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    assert_eq!(code(&t.app().read_report("c1").unwrap_err()), "no_report");
+}
+
+#[test]
+fn read_report_caps_the_text_and_says_so() {
+    let t = Tmp::new();
+    fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", Some(&vec![b'a'; 300 * 1024]));
+    let r = t.app().read_report("c1").unwrap();
+    assert_eq!(r["truncated"], true, "{}", r["truncated"]);
+    assert_eq!(r["text"].as_str().unwrap().len(), 256 * 1024);
+}
+
+#[test]
+fn read_report_refuses_a_bad_slug_and_a_symlinked_report() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    assert_eq!(code(&t.app().read_report("../x").unwrap_err()), "invalid_args");
+    campaign(&t, "c1", None);
+    let secret = t.0.join("secret.txt");
+    fs::write(&secret, "s3cret").unwrap();
+    std::os::unix::fs::symlink(&secret, t.home().join(".claude/vajra/campaigns/c1/report.md")).unwrap();
+    let e = t.app().read_report("c1").unwrap_err();
+    assert!(!e.to_string().contains("s3cret"), "{e}");
+    assert!(runs(&log) <= 1);
+}
+
+#[test]
+fn list_campaigns_marks_each_campaign_ok_failed_or_unknown() {
+    for (exit, want) in [(0, "ok"), (3, "failed"), (1, "unknown")] {
+        let t = Tmp::new();
+        fake_campaign_script(&t, exit, "x");
+        campaign(&t, "c1", None);
+        let l = t.app().list_campaigns().unwrap();
+        assert_eq!(l["campaigns"][0]["integrity"], want, "exit {exit}: {l}");
+    }
+}
+
+#[test]
+fn list_campaigns_does_not_reverify_an_unchanged_campaign() {
+    let t = Tmp::new();
+    let log = fake_campaign_script(&t, 0, "");
+    campaign(&t, "c1", None);
+    campaign(&t, "c2", None);
+    let app = t.app();
+    app.list_campaigns().unwrap();
+    app.list_campaigns().unwrap();
+    assert_eq!(runs(&log), 2, "one verify per campaign, the second listing is cached");
+    // a change to the campaign (new `updated`) is verified again
+    let f = t.home().join(".claude/vajra/campaigns/c1/campaign.json");
+    fs::write(&f, r#"{"slug":"c1","goal":"g","status":"active","created":"c","updated":"later"}"#).unwrap();
+    app.list_campaigns().unwrap();
+    assert_eq!(runs(&log), 3);
+}

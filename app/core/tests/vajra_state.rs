@@ -142,12 +142,15 @@ fn only_the_section_8_paths_are_allowed() {
     let h = Home::new();
     let allow = h.allow();
     let c = h.vajra().join("campaigns").join(ACTIVE);
-    for ok in ["campaign.json", "features.json", "tasks.json", "progress.md", "checkpoints/0001.json"] {
+    fs::write(c.join("report.md"), "# report\n").unwrap();
+    for ok in ["campaign.json", "features.json", "tasks.json", "progress.md", "report.md", "checkpoints/0001.json"] {
         assert!(allow.resolve(&c.join(ok)).is_ok(), "{ok}");
     }
     assert!(allow.resolve(&h.vajra().join("campaigns/.active")).is_ok());
     // Not on the list.
     assert!(matches!(allow.resolve(&c.join("state.sig")), Err(Denied::NotAllowed)));
+    fs::write(c.join("report.md.bak"), "x").unwrap();
+    assert!(matches!(allow.resolve(&c.join("report.md.bak")), Err(Denied::NotAllowed)));
     fs::create_dir_all(h.vajra().join("kb")).unwrap();
     fs::write(h.vajra().join("kb/x.json"), "{}").unwrap();
     assert!(matches!(allow.resolve(&h.vajra().join("kb/x.json")), Err(Denied::NotAllowed)));

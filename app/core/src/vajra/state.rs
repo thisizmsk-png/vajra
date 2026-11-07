@@ -57,6 +57,9 @@ pub struct Reader {
     good: HashMap<PathBuf, Value>,
 }
 
+/// The most report text sent to the UI.
+pub const REPORT_CAP: usize = 256 * 1024;
+
 impl Reader {
     pub fn new(allow: Allowlist) -> Self {
         Self { allow, good: HashMap::new() }
@@ -118,6 +121,19 @@ impl Reader {
 
     pub fn tasks(&mut self, slug: &str) -> Snapshot {
         self.json(&self.campaign_dir(slug).join("tasks.json"))
+    }
+
+    /// `report.md` (E4), at most `REPORT_CAP` bytes; the flag says it was cut. The final component is never
+    /// followed, so a symlinked report is refused like any other allowlist escape.
+    pub fn report(&self, slug: &str) -> io::Result<(String, bool)> {
+        let mut buf = Vec::new();
+        self.allow
+            .open_allowlisted(&self.campaign_dir(slug).join("report.md"))?
+            .take(REPORT_CAP as u64 + 1)
+            .read_to_end(&mut buf)?;
+        let cut = buf.len() > REPORT_CAP;
+        buf.truncate(REPORT_CAP);
+        Ok((String::from_utf8_lossy(&buf).into_owned(), cut))
     }
 
     pub fn progress(&self, slug: &str) -> io::Result<String> {

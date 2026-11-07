@@ -72,6 +72,8 @@ pub struct App {
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
     bridge: Bridge,
+    /// slug -> (stamp of the campaign's files, verdict), so listing does not re-run verify for an unchanged campaign.
+    integrity: Mutex<HashMap<String, (String, &'static str)>>,
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
@@ -100,6 +102,7 @@ impl App {
         Ok(Self {
             data: data.to_path_buf(),
             bridge: Bridge::new(claude.join("skills/vajra/scripts")),
+            integrity: Mutex::new(HashMap::new()),
             reader: Mutex::new(None),
             claude,
             sup: Supervisor::new(bus.clone(), log.clone()),
@@ -170,6 +173,7 @@ impl App {
                         "passing": c.passing, "total": c.total,
                         "last_integration": c.last_integration.map(|i| json!({"branch": i.branch, "sha": i.sha, "from": i.from})),
                         "checkpoints": c.checkpoints,
+                        "integrity": self.integrity_of(s),
                     }),
                     // A campaign dir the reader cannot summarise is still listed.
                     Err(e) => json!({"slug": s, "error": e.to_string()}),
@@ -573,20 +577,68 @@ impl App {
         Ok(json!({"hits": hits, "code": o.code}))
     }
 
+    fn run_verify(&self, slug: &str) -> Result<crate::vajra::bridge::Output, Value> {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        self.bridge.run(&Request::CampaignVerify { slug: slug.into() }).map_err(|e| match e {
+            crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
+            e => fail("verify_failed", e),
+        })
+    }
+
+    /// "ok", "failed" (signature invalid, exit 3) or "unknown" (the check could not run). Cached per campaign
+    /// against the name, size and mtime of every file in its dir and in `checkpoints/`, so an edit that keeps
+    /// `updated` the same still triggers a fresh check.
+    fn integrity_of(&self, slug: &str) -> &'static str {
+        let dir = self.claude.join("vajra/campaigns").join(slug);
+        let mut stamp = String::new();
+        for d in [dir.clone(), dir.join("checkpoints")] {
+            let mut names: Vec<_> = std::fs::read_dir(&d).into_iter().flatten().flatten().collect();
+            names.sort_by_key(|e| e.file_name());
+            for e in names {
+                if let Ok(m) = e.path().symlink_metadata() {
+                    let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+                    stamp.push_str(&format!("{:?}:{}:{};", e.file_name(), m.len(), t));
+                }
+            }
+        }
+        if let Some((s, v)) = lock(&self.integrity).get(slug) {
+            if *s == stamp {
+                return v;
+            }
+        }
+        let verdict = match self.run_verify(slug).ok().and_then(|o| o.code) {
+            Some(0) => "ok",
+            Some(3) => "failed",
+            _ => "unknown",
+        };
+        lock(&self.integrity).insert(slug.to_string(), (stamp, verdict));
+        verdict
+    }
+
+    /// AC-6.1.2 / AC-6.1.3: the stored delivery report as text. The signature is checked first, every time, and a
+    /// campaign that fails it returns no text at all.
+    pub fn read_report(&self, slug: &str) -> Res {
+        let o = self.run_verify(slug)?;
+        match o.code {
+            Some(0) => {}
+            Some(3) => return Err(fail("integrity_failed", "integrity check failed")),
+            code => return Err(fail("verify_failed", format!("exit {code:?}: {}", o.stderr.trim()))),
+        }
+        match self.with_reader(|r| r.report(slug).map_err(|e| (e.kind(), e.to_string())).map_err(|(k, m)| {
+            if k == std::io::ErrorKind::NotFound { fail("no_report", "this campaign has no report yet") } else { fail("io_error", m) }
+        })) {
+            Ok((text, truncated)) => Ok(json!({"slug": slug, "text": text, "truncated": truncated})),
+            Err(e) => Err(e),
+        }
+    }
+
     /// AC-1.2.1 / AC-1.2.2: `vajra-campaign.sh verify <slug>` before a resume. Exit 0 is `ok`; exit 3 (signature
     /// invalid) is `ok: false` with the restore command for the newest checkpoint listed; any other result is an
     /// error, never a pass. Read-only: it never touches the HMAC key itself, the script does the check.
     pub fn verify_campaign(&self, slug: &str) -> Res {
-        if !bus::valid_stream_id(slug) {
-            return Err(invalid("slug", "not a campaign slug"));
-        }
-        let o = self
-            .bridge
-            .run(&Request::CampaignVerify { slug: slug.into() })
-            .map_err(|e| match e {
-                crate::vajra::bridge::BridgeError::Invalid(_) => invalid("slug", "not a campaign slug"),
-                e => fail("verify_failed", e),
-            })?;
+        let o = self.run_verify(slug)?;
         match o.code {
             Some(0) => Ok(json!({"slug": slug, "ok": true})),
             Some(3) => {
