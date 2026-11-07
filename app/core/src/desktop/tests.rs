@@ -886,3 +886,16 @@ fn read_report_refuses_a_planted_report_in_real_signed_state_without_a_report_ha
     assert_eq!(code(&e), "no_report", "{e}");
     assert!(!e.to_string().contains("forged"), "{e}");
 }
+
+#[test]
+fn an_unknown_verdict_is_retried_not_cached() {
+    // A check that could not run (script or jq missing, timeout) says nothing about the campaign; repairing the
+    // install changes no campaign file, so the next listing must try again.
+    let t = Tmp::new();
+    fake_campaign_script(&t, 1, "jq: not found");
+    campaign(&t, "c1", None);
+    let app = t.app();
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "unknown");
+    fake_campaign_script(&t, 0, ""); // the install is repaired; the campaign files are untouched
+    assert_eq!(app.list_campaigns().unwrap()["campaigns"][0]["integrity"], "ok");
+}

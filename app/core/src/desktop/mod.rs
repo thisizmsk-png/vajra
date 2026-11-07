@@ -621,7 +621,13 @@ impl App {
             Some(3) => "failed",
             _ => "unknown",
         };
-        lock(&self.integrity).insert(slug.to_string(), (stamp, verdict));
+        // "unknown" means the check could not run, which says nothing about the campaign and can be fixed without
+        // touching any campaign file, so only a real verdict is cached.
+        if verdict == "unknown" {
+            lock(&self.integrity).remove(slug);
+        } else {
+            lock(&self.integrity).insert(slug.to_string(), (stamp, verdict));
+        }
         verdict
     }
 
