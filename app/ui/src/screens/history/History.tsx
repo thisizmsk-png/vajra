@@ -54,8 +54,8 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
 
 export function History() {
   const [, go] = useRoute();
-  const [camps, setCamps] = useState<Campaign[] | null>(null);
-  const listed = useCampaignIntegrity(camps);
+  const [loaded, setCamps] = useState<Campaign[] | null>(null);
+  const camps = useCampaignIntegrity(loaded); // the list as loaded, with each "checking" badge filled in as its call returns
   const [loadErr, setLoadErr] = useState("");
   const [q, setQ] = useState("");
   const [repo, setRepo] = useState("");
@@ -110,7 +110,7 @@ export function History() {
         {loadErr && <div role="alert"><Text variant="body-sm">{S.history.failed} {loadErr}</Text></div>}
         {camps && camps.length === 0 && <Text variant="body-sm" muted>{S.history.empty}</Text>}
         {camps && camps.length > 0 && (
-          <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={listed ?? []} rowKey={(c) => c.slug} />
+          <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
         )}
         {view && (
           <div aria-live="polite">
