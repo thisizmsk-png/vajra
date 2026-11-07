@@ -564,10 +564,11 @@ impl App {
             let id = t.get("id").and_then(Value::as_str).unwrap_or("");
             let has_evidence = t.get("evidence").is_some_and(|e| !e.is_null());
             let task_status = t.get("status").and_then(Value::as_str).unwrap_or("");
-            let status = if has_evidence {
-                if verdict.get(&i).copied().unwrap_or(false) { "pass" } else { "unverified" }
-            } else if task_status == "failed" {
+            // A task marked failed is `fail` whatever its evidence says; only then does evidence decide pass or unverified.
+            let status = if task_status == "failed" {
                 "fail"
+            } else if has_evidence {
+                if verdict.get(&i).copied().unwrap_or(false) { "pass" } else { "unverified" }
             } else {
                 "not_run"
             };

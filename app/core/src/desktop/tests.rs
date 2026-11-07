@@ -846,6 +846,19 @@ fn a_failed_task_shows_fail_with_its_report() {
 }
 
 #[test]
+fn a_failed_task_is_fail_even_when_its_evidence_checks_green() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let mut failed = ev_task(&d, "t1", "failed", &["ac-1"], "green");
+    failed["report"] = json!({"status": "failed", "summary": "green evidence, but the task failed"});
+    let (app, slug) = campaign_with_tasks(&t, vec![failed, ev_task(&d, "t2", "done", &["ac-2"], "green")]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "fail", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["report"], "green evidence, but the task failed");
+    assert_eq!(row(&r, "t2", "ac-2")["status"], "pass", "a done task with green evidence still passes");
+}
+
+#[test]
 fn evidence_checks_are_bounded_and_a_slow_one_is_unverified_not_a_hang() {
     let t = Tmp::new();
     let d = std::path::PathBuf::from("/x");
