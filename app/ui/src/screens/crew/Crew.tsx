@@ -45,14 +45,29 @@ const withChildren = (n: CrewNodeDto, out: string[] = []): string[] => {
 
 export function Crew() {
   const [route] = useRoute();
-  const [target, setTarget] = useState<Target | null | undefined>(
-    route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined,
-  );
+  const routed = route.params.slug && route.params.id ? { slug: route.params.slug, runId: route.params.id } : undefined;
+  const [target, setTarget] = useState<Target | null | undefined>(routed);
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
   const [openIds, setOpenIds] = useState<string[] | null>(null);
   const [selected, setSelected] = useState("");
   const [err, setErr] = useState("");
   const last = useRef(0);
+  const current = useRef<Target | null | undefined>(target);
+  current.current = target;
+
+  // The screen stays mounted while the hash changes: follow the route's run, and drop what belonged to the old one.
+  const routeKey = routed ? `${routed.slug}\n${routed.runId}` : "";
+  const seen = useRef(routeKey);
+  useEffect(() => {
+    if (seen.current === routeKey) return;
+    seen.current = routeKey;
+    setTarget(routed);
+    setRoot(null);
+    setOpenIds(null);
+    setSelected("");
+    setErr("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeKey]);
 
   // Which run: the route's, else the first active one.
   useEffect(() => {
@@ -72,9 +87,10 @@ export function Crew() {
   const load = useCallback(() => {
     if (!target) return;
     last.current = Date.now();
+    const asked = target;
     api.crew(target.slug, target.runId).then(
-      (n) => { setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
-      (e) => setErr(errorText(e)),
+      (n) => { if (current.current !== asked) return; setRoot(n); setErr(""); setOpenIds((o) => o ?? withChildren(n)); setSelected((s) => s || n.id); },
+      (e) => { if (current.current === asked) setErr(errorText(e)); },
     );
   }, [target]);
 
