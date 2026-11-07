@@ -337,6 +337,48 @@ fn a_failed_directory_scan_is_retried_not_settled() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ------------------------------------------------------------ ADR-13: Kind::Ask and the Lead audit line
+
+const ASK: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const LEAD_SID: &str = "1a8fad5b-d9cb-469f-a165-70867728950f";
+
+fn ask(s: &mut Service, state: AskState, text: Option<&str>, reason: Option<&str>) {
+    s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state, text, reason }).unwrap();
+}
+
+fn ledger_of(dir: &Path) -> Vec<Value> {
+    Ledger::read_all(&dir.join("control/ledger.jsonl")).unwrap()
+}
+
+fn audit_of(dir: &Path) -> String {
+    fs::read_to_string(dir.join("audit.log")).unwrap_or_default()
+}
+
+#[test]
+fn ask_ledger_records_are_human_ui_and_carry_the_text_once() {
+    let (mut s, dir) = svc();
+    ask(&mut s, AskState::Queued, Some("what is bhima doing?"), None);
+    ask(&mut s, AskState::Delivered, None, None);
+    ask(&mut s, AskState::Done, None, None);
+    let recs = ledger_of(&dir);
+    let asks: Vec<&Value> = recs.iter().filter(|r| r["kind"] == "ask").collect();
+    assert_eq!(asks.iter().map(|r| r["state"].as_str().unwrap()).collect::<Vec<_>>(), ["queued", "delivered", "done"]);
+    for r in &asks {
+        assert_eq!((r["actor"].as_str(), r["via"].as_str(), r["source"].as_str()), (Some("human"), Some("ui"), Some("human")));
+        assert_eq!(r["action_id"], ASK);
+        assert_eq!(r["run_id"], "20261105-1810");
+    }
+    assert_eq!(asks[0]["text"], "what is bhima doing?");
+    assert_eq!(asks[0]["text_sha256"], sha256::hex_digest(b"what is bhima doing?"));
+    assert_eq!(asks[0]["lead_session_id"], LEAD_SID);
+    assert!(asks[1].get("text").is_none(), "the text is stored once");
+    // A failure carries its reason.
+    ask(&mut s, AskState::Failed, None, Some("cancelled"));
+    let last = ledger_of(&dir).pop().unwrap();
+    assert_eq!((last["state"].as_str(), last["reason"].as_str()), (Some("failed"), Some("cancelled")));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn signals_show_a_queued_message_and_a_stop_in_force_until_resumed() {
     let (mut s, dir) = svc();
@@ -349,6 +391,105 @@ fn signals_show_a_queued_message_and_a_stop_in_force_until_resumed() {
     assert!(s.signals().stopped.contains(&key), "a confirmed stop is in force");
     s.resume_worker(Actor::Human, "bhima").unwrap();
     assert!(!s.signals().stopped.contains(&key), "a resume lifts it");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ask_adds_no_queue_entry_no_audit_line_and_no_pending_action() {
+    // AC-3.1.3: an ask is not a control action. It reaches no worker, and (ADR-13 6) writes no audit.log line.
+    let (mut s, dir) = svc();
+    ask(&mut s, AskState::Queued, Some("hello"), None);
+    ask(&mut s, AskState::Done, None, None);
+    assert_eq!(files(&dir, "queue"), 0);
+    assert_eq!(files(&dir, "stops"), 0);
+    assert!(s.pending.is_empty() && s.last_stop.is_empty());
+    assert_eq!(audit_of(&dir), "");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ask_records_survive_a_restart_without_becoming_pending() {
+    let (mut s, dir) = svc();
+    ask(&mut s, AskState::Queued, Some("hello"), None);
+    drop(s);
+    let again = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+    assert!(again.pending.is_empty(), "an ask is never replayed into the queue watcher");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_ledger_failure_is_an_error_not_a_silent_skip() {
+    let (mut s, dir) = svc();
+    s.ledger.break_for_test();
+    let r = s.record_ask(&AskRecord { ask_id: ASK, run_id: "20261105-1810", session_id: SID, lead_session_id: LEAD_SID, state: AskState::Queued, text: Some("x"), reason: None });
+    assert!(r.is_err(), "the caller must not spawn the Lead for an ask the ledger never recorded");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reconcile_ignores_ask() {
+    let (mut s, dir) = svc();
+    ask(&mut s, AskState::Queued, Some("hello"), None);
+    ask(&mut s, AskState::Delivered, None, None);
+    ask(&mut s, AskState::Failed, None, Some("lead_tools_mismatch"));
+    let rep = crate::control::reconcile::run(&dir.join("control/ledger.jsonl"), &dir.join("audit.log")).unwrap();
+    assert!(rep.is_clean(), "{rep:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn guard_line(tool: &str) -> String {
+    format!("{} ALLOW mcp__vajra-desktop__{tool} reason=\"x\"\n", time::iso_secs(SystemTime::now()))
+}
+
+#[test]
+fn lead_mcp_audit_line_per_call() {
+    let (mut s, dir) = svc();
+    let calls: [(&str, Value); 5] = [
+        ("list_workers", json!({})),
+        ("inspect_worker", json!({"worker": "bhima"})),
+        ("message_worker", json!({"worker": "bhima", "text": "hi"})),
+        ("redirect_worker", json!({"worker": "bhima", "text": "go left"})),
+        ("stop_worker", json!({"worker": "bhima"})),
+    ];
+    for (tool, args) in &calls {
+        s.call_tool(tool, args).unwrap();
+    }
+    // A failed call is not an action and gets no line.
+    assert!(s.call_tool("inspect_worker", &json!({"worker": "nobody"})).is_err());
+    assert!(s.call_tool("rm_rf", &json!({})).is_err());
+
+    let recs = ledger_of(&dir);
+    let mcp_ids: Vec<&str> = recs.iter().filter(|r| r["via"] == "mcp").map(|r| r["action_id"].as_str().unwrap()).collect();
+    let audit = audit_of(&dir);
+    for (tool, _) in &calls {
+        let n = audit.lines().filter(|l| l.contains(&format!("reason=\"mcp {tool} id="))).count();
+        assert_eq!(n, 1, "one line for {tool}: {audit}");
+    }
+    assert_eq!(audit.lines().count(), 5, "{audit}");
+    for l in audit.lines() {
+        assert!(l.contains(" ALLOW desktop-control reason=\"mcp "), "{l}");
+        let id = l.split("id=").nth(1).unwrap().trim_end_matches('"');
+        assert!(mcp_ids.contains(&id), "{id} is a Lead action in the ledger");
+    }
+
+    // Reconcile joins by id, and with the guard's own lines present the report is clean.
+    let rp = |dir: &Path| crate::control::reconcile::run(&dir.join("control/ledger.jsonl"), &dir.join("audit.log")).unwrap();
+    let mut with_guard = audit.clone();
+    for (tool, _) in &calls {
+        with_guard.push_str(&guard_line(tool));
+    }
+    fs::write(dir.join("audit.log"), &with_guard).unwrap();
+    assert!(rp(&dir).is_clean(), "{:?}", rp(&dir));
+
+    // guard_absent: a Lead call whose guard line never appeared means the Lead ran unguarded.
+    let without_one: String = with_guard.lines().filter(|l| !l.contains("mcp__vajra-desktop__redirect_worker")).map(|l| format!("{l}\n")).collect();
+    fs::write(dir.join("audit.log"), without_one).unwrap();
+    let rep = rp(&dir);
+    assert_eq!(rep.ledger_without_audit.len(), 1, "{rep:?}");
+
+    // An app line for an id the ledger never recorded is flagged.
+    fs::write(dir.join("audit.log"), format!("{with_guard}{} ALLOW desktop-control reason=\"mcp stop_worker id=aDEADBEEF\"\n", time::iso_secs(SystemTime::now()))).unwrap();
+    assert_eq!(rp(&dir).audit_without_ledger, vec!["aDEADBEEF".to_string()]);
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -33,6 +33,11 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn inbox(app: State<'_, App>) -> Res {
+    app.inbox()
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -59,6 +64,11 @@ fn start_run(
 #[tauri::command(async)]
 fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
     app.resume_run(&session_id, &campaign, &cwd)
+}
+
+#[tauri::command(async)]
+fn read_report(app: State<'_, App>, slug: String) -> Res {
+    app.read_report(&slug)
 }
 
 #[tauri::command(async)]
@@ -152,6 +162,21 @@ fn take_over(app: State<'_, App>, stream: String, on: bool) -> Res {
 }
 
 #[tauri::command(async)]
+fn ask_lead(app: State<'_, App>, run_id: String, text: String) -> Res {
+    app.ask_lead(&run_id, &text)
+}
+
+#[tauri::command(async)]
+fn cancel_ask(app: State<'_, App>, ask_id: String) -> Res {
+    app.cancel_ask(&ask_id)
+}
+
+#[tauri::command(async)]
+fn lead_status(app: State<'_, App>, run_id: String) -> Res {
+    app.lead_status(&run_id)
+}
+
+#[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
 }
@@ -240,6 +265,7 @@ fn main() {
             start_run,
             resume_run,
             verify_campaign,
+            read_report,
             resume_targets,
             crew,
             tail,
@@ -258,6 +284,10 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            ask_lead,
+            cancel_ask,
+            lead_status,
+            inbox,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
@@ -276,7 +306,11 @@ fn main() {
                 let _ = w.set_focus();
             }
         }
-        RunEvent::Exit => handle.state::<App>().sup.shutdown(),
+        RunEvent::Exit => {
+            let app = handle.state::<App>();
+            app.shutdown_lead();
+            app.sup.shutdown();
+        }
         _ => {}
     });
 }

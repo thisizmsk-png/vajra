@@ -2,6 +2,8 @@
 //! - every message/redirect/stop that reached `delivered` has a
 //!   desktop-control line with the same id; every resume has its resume line;
 //! - every desktop-control line carrying an id has a ledger action;
+//! - the app's own `mcp <tool> id=<action_id>` line for a Lead call is joined by id like the others (ADR-13 6);
+//! - an `ask` ledger action (ADR-13) has no audit line and is skipped;
 //! - every guard `ALLOW mcp__vajra-desktop__<tool>` line has a ledger
 //!   `via:"mcp"` action of that kind within 5 s, and the reverse.
 
@@ -59,7 +61,7 @@ fn parse_line(l: &str) -> Option<Line> {
     if tool == "desktop-control" {
         let reason = rest.strip_prefix("reason=\"")?.strip_suffix('"')?;
         let mut words = reason.split(' ');
-        if !matches!(words.next()?, "deliver" | "stop" | "resume") {
+        if !matches!(words.next()?, "deliver" | "stop" | "resume" | "mcp") {
             return None; // nonce echo, steer tag warnings: not an action
         }
         let id = words.find_map(|w| w.strip_prefix("id="))?;
