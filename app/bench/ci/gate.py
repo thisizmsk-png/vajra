@@ -9,7 +9,7 @@ not a failure, until the owner rules on it (see README "Owner question").
 import json, sys
 
 IDLE_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 5.0, 0.03, 1.0
-GATED_CEILING_HELPERS, FLAVOURS = {2}, {2, 3}
+FLAVOURS = {2, 3}
 
 
 def evaluate(baseline, idle, growth):
@@ -19,10 +19,8 @@ def evaluate(baseline, idle, growth):
     n = idle.get("helpers")
     if growth is not None and growth["slope_mib_per_min"] > SLOPE_BUDGET:
         fails.append(f"growth {growth['slope_mib_per_min']} MiB/min exceeds {SLOPE_BUDGET}")
-    if n in GATED_CEILING_HELPERS and v > IDLE_BUDGET:
+    if v > IDLE_BUDGET:
         fails.append(f"idle {v} MiB exceeds the {IDLE_BUDGET} MiB budget")
-    elif n not in GATED_CEILING_HELPERS and v > IDLE_BUDGET:
-        warns.append(f"idle {v} MiB is over the {IDLE_BUDGET} MiB ceiling in the {n}-helper flavour (report only, owner question open)")
     if n not in FLAVOURS:
         fails.append(f"WebKit helper count is {n}; only 2 or 3 are known flavours (fails closed)")
         return fails, warns
@@ -40,7 +38,11 @@ def evaluate(baseline, idle, growth):
     b = flavour["idle_mib"]
     tol = max(REGRESSION, b * REGRESSION_PCT)
     if v > b + tol:
-        fails.append(f"idle {v} MiB is more than {tol:.1f} MiB over the baseline {b} for runner {key}, {n} helpers")
+        msg = f"idle {v} MiB is more than {tol:.1f} MiB over the baseline {b} for runner {key}, {n} helpers"
+        if flavour.get("provisional"):
+            warns.append(f"{msg} (baseline is provisional, one run: warning only until refined)")
+        else:
+            fails.append(msg)
     return fails, warns
 
 

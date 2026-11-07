@@ -4,8 +4,8 @@
 
 - the runner's identity (macOS build + WebKit version, `idle.json` `identity`) has no entry in `baseline.json` (fails closed), or
 - the WebKit helper count is not 2 or 3, or the identity has no entry for that count (fails closed), or
-- idle exceeds that (identity, helper count) baseline `idle_mib` + max(5 MiB, 3%), or
-- the 2-helper flavour exceeds the 200 MiB ceiling (NFR-PERF-1). In the 3-helper flavour the ceiling is a **warning** with the number, not a failure (see "Owner question"), or
+- idle exceeds the 200 MiB ceiling (NFR-PERF-1) in **any** flavour, or
+- idle exceeds that (identity, helper count) baseline `idle_mib` + max(5 MiB, 3%). An entry marked `"provisional": true` (rests on one run) only **warns** on this check until it is refined; non-provisional entries gate. The ceiling still fails either way, or
 - the 10 minute growth slope (push to main only) exceeds 1 MiB/min.
 
 ## Why the measurement is built this way
@@ -27,10 +27,12 @@ The shared macOS runner shows two flavours on the **same** identity (same macOS 
 `baseline.json` is keyed `identities[<identity>].flavours[<helper count>]`. Entries marked `"provisional": true` rest on one run and are refined with the procedure below as more runs of that flavour land.
 
 ### Owner question: GPU-flavour ceiling
-The 3-helper flavour reads about 201 MiB on the CI VM, over the 200 MiB ceiling, while the dev-Mac H0 total with 3 helpers was 189.9 MiB (the shared VM reads about 11 MiB heavier). Until the owner rules, the default is **report-only** for that flavour: the gate prints a warning with the number and still gates the regression tolerance. The options:
-1. Gate the ceiling at 200 on CI (the check would fail on roughly 1 in 4 green runs).
-2. Raise the CI-only ceiling to about 212.
-3. Keep report-only and rely on the dev-Mac H0 soak (current default).
+The 3-helper flavour reads about 201 MiB on the CI VM, over the 200 MiB ceiling, while the dev-Mac H0 total with 3 helpers was 189.9 MiB (the shared VM reads about 11 MiB heavier). **The ceiling fails for every flavour until the owner rules**; nothing here relaxes NFR-PERF-1. The owner can choose one of these (each is a small reviewed change to `gate.py`):
+1. Keep the 200 MiB ceiling on CI for the 3-helper flavour (the check would fail on roughly 1 in 4 green runs).
+2. Raise a CI-only ceiling for that flavour to about 212.
+3. Make that flavour report-only and rely on the dev-Mac H0 soak.
+
+Operational rule until then: a failure whose **only** cause is the 3-helper ceiling (a GPU helper is present in `idle.json`, and the regression check passed) may get **one** rerun under the flake rule; a second failure is a real failure.
 
 ## Updating the baseline
 `baseline.json` is never written by CI. To add or move an entry: open a PR that sets `identities["<identity>"].flavours["<N>"] = {"idle_mib": X, "provisional": false, "measured": "..."}`, where `N` is the `helpers` count and `X` is the median of `median_of_medians_mib` over at least 3 green runs that reported that identity and count (list the run IDs in `measured`). With fewer runs, set `"provisional": true` and say so. Say why in the PR. The owner reviews it, because it moves the regression line.

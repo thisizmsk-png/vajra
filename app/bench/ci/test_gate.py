@@ -36,30 +36,44 @@ class Gate(unittest.TestCase):
 
 
 class Flavours(unittest.TestCase):
-    two_three = {"identities": {ID: {"flavours": {"2": {"idle_mib": 175.0}, "3": {"idle_mib": 201.1}}}}}
+    two_three = {"identities": {ID: {"flavours": {"2": {"idle_mib": 175.0}, "3": {"idle_mib": 190.0}}}}}
 
     def test_each_flavour_is_compared_to_its_own_baseline(self):
         self.assertEqual(check(self.two_three, run(176, 2), None), [])
-        self.assertEqual(check(self.two_three, run(201.5, 3), None), [])
-        self.assertEqual(len(check(self.two_three, run(201.1, 2), None)), 2)  # over 200 AND over 175 + 5.25
+        self.assertEqual(check(self.two_three, run(191, 3), None), [])
+        self.assertEqual(len(check(self.two_three, run(190.0 + 5.8, 3), None)), 1)   # 3% of 190 = 5.7
+        self.assertEqual(len(check(self.two_three, run(190.0, 2), None)), 1)          # over 175 + 5.25
 
-    def test_three_helper_flavour_over_200_is_a_warning_with_the_number_not_a_failure(self):
-        fails, warns = evaluate(self.two_three, run(201.5, 3), None)
+    def test_the_200_ceiling_fails_every_flavour_including_three_helpers(self):
+        t = {"identities": {ID: {"flavours": {"2": {"idle_mib": 199.0}, "3": {"idle_mib": 199.0}}}}}
+        for n in (2, 3):
+            self.assertEqual(check(t, run(200.0, n), None), [], n)
+            f = check(t, run(200.5, n), None)
+            self.assertEqual(len(f), 1, n)
+            self.assertIn("200", f[0])
+            self.assertEqual(evaluate(t, run(200.5, n), None)[1], [], n)  # a failure, not a warning
+
+    def test_a_provisional_entry_only_warns_on_regression(self):
+        t = {"identities": {ID: {"flavours": {"3": {"idle_mib": 150.0, "provisional": True}}}}}
+        fails, warns = evaluate(t, run(190, 3), None)
         self.assertEqual(fails, [])
         self.assertEqual(len(warns), 1)
-        self.assertIn("201.5", warns[0])
-        self.assertIn("200", warns[0])
+        self.assertIn("provisional", warns[0])
+        self.assertIn("190", warns[0])
 
-    def test_three_helper_flavour_under_200_has_no_warning(self):
-        t = {"identities": {ID: {"flavours": {"3": {"idle_mib": 190.0}}}}}
-        self.assertEqual(evaluate(t, run(191, 3), None), ([], []))
+    def test_a_provisional_entry_still_fails_the_ceiling_growth_and_unknowns(self):
+        t = {"identities": {ID: {"flavours": {"3": {"idle_mib": 150.0, "provisional": True}}}}}
+        self.assertEqual(len(evaluate(t, run(201, 3), None)[0]), 1)                         # ceiling
+        self.assertEqual(len(evaluate(t, run(150, 3), {"slope_mib_per_min": 2})[0]), 1)     # growth
+        self.assertEqual(len(evaluate(t, run(150, 2), None)[0]), 1)                         # no 2-helper entry
+        self.assertEqual(len(evaluate(t, run(150, 3, "NEW"), None)[0]), 1)                  # unknown identity
 
-    def test_three_helper_flavour_still_gates_a_regression(self):
-        fails, _ = evaluate(self.two_three, run(201.1 + 6.1, 3), None)
-        self.assertEqual(len(fails), 1)
+    def test_a_non_provisional_entry_gates_the_regression(self):
+        t = {"identities": {ID: {"flavours": {"3": {"idle_mib": 150.0, "provisional": False}}}}}
+        self.assertEqual(len(evaluate(t, run(190, 3), None)[0]), 1)
 
     def test_three_helper_flavour_still_gates_growth(self):
-        fails, _ = evaluate(self.two_three, run(201.1, 3), {"slope_mib_per_min": 2})
+        fails, _ = evaluate(self.two_three, run(190, 3), {"slope_mib_per_min": 2})
         self.assertEqual(len(fails), 1)
 
     def test_any_other_helper_count_fails_closed(self):
