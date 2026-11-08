@@ -56,3 +56,38 @@ describe("contract rules", () => {
     expect(supportsContracts({ schema: "vajra.app_info/1", contracts: { project: 2, session: 1 } })).toBe(false);
   });
 });
+
+// The invalid cases are shared with the core (tests/contract.rs): each patches a base fixture and must be rejected for
+// the same reason on both sides.
+type Case = { case: string; set?: Record<string, unknown>; unset?: string[]; reason: string };
+const patched = (base: string, c: Case): string => {
+  const v = JSON.parse(base) as Record<string, unknown>;
+  Object.assign(v, c.set ?? {});
+  for (const k of c.unset ?? []) delete v[k];
+  return JSON.stringify(v);
+};
+
+describe("shared invalid fixtures", () => {
+  const cases = JSON.parse(fx("invalid.v1.json")) as { project: Case[]; session: Case[] };
+  it("rejects every project case for its reason", () => {
+    for (const c of cases.project) {
+      const r = parseProject(patched(fx("project.v1.json"), c));
+      expect({ case: c.case, ok: r.ok, reason: r.ok ? null : r.reason }).toEqual({ case: c.case, ok: false, reason: c.reason });
+    }
+  });
+  it("rejects every session case for its reason", () => {
+    for (const c of cases.session) {
+      const r = parseSession(patched(fx("session.v1.json"), c));
+      expect({ case: c.case, ok: r.ok, reason: r.ok ? null : r.reason }).toEqual({ case: c.case, ok: false, reason: c.reason });
+    }
+  });
+  it("still accepts the valid fixtures the cases are built from", () => {
+    expect(parseProject(fx("project.v1.json")).ok).toBe(true);
+    expect(parseSession(fx("session.v1.json")).ok).toBe(true);
+  });
+  it("never lets a trailing newline through an id or a schema tag", () => {
+    expect(validId("s", "s_01JC5X8Z3B0K2M4N6P7Q8R9S0T\n")).toBe(false);
+    expect(schemaMajor("vajra.project/1\n", "project")).toBeNull();
+    expect(schemaMajor("vajra.project/1 ", "project")).toBeNull();
+  });
+});
