@@ -65,8 +65,8 @@ function Frame() {
       .sort((a, b) => ((b.updated ?? b.created ?? "") > (a.updated ?? a.created ?? "") ? 1 : -1)) : [];
     const mine = P.crew && project && P.byCampaign[P.crew.campaign] === project.id ? P.crew : null;
     const dgRun = mine?.runId ?? campaigns.map((c) => P.runIds[c.slug]).find(Boolean) ?? null;
-    // Interim: by folder. Keyed by the core's project id once project_list (T1, #77) gives the shell one.
-    const proposals = project ? proposalsFor(P.inbox, null, project.root) : [];
+    // By the T1 id for a project the core has registered (#77), and by its full root for any project.
+    const proposals = project ? proposalsFor(P.inbox, project.registered ? project.id : null, project.root) : [];
     return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null, dgRun, proposals };
   }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox]);
   const crew = current.runId ? P.crew : null;

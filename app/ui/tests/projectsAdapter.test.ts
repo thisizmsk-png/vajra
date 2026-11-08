@@ -3,6 +3,8 @@
 import { describe, expect, it } from "vitest";
 import { boardCards, groupProjects, projectId, sessionsByDay, summarize } from "../src/projects/adapter";
 import type { Campaign, EvidenceRow, InboxItem, RunOverview } from "../src/ipc";
+import type { Project as StoreProject } from "../src/projectContract";
+import { proposalsFor } from "../src/screens/orch/dgApi";
 
 const camp = (slug: string, extra: Partial<Campaign> = {}): Campaign => ({ slug, goal: `Goal ${slug}`, status: "done", updated: "2026-11-06 10:00", ...extra });
 const target = (cwd: string) => ({ session_id: "s", run_id: "r", cwd });
@@ -153,5 +155,46 @@ describe("boardCards (FG-06, ADR-15 §4.2: 4 lanes and a needs-you badge, read-o
   it("counts criteria per card for the evidence line", () => {
     const [c] = boardCards(overview([task("t1", "done")]), [ev("r1.t1", "pass"), ev("r1.t1", "fail", "AC-2"), ev("r1.t1", "not_run", "AC-3")], []);
     expect(c.criteria).toEqual({ pass: 1, total: 3 });
+  });
+});
+
+describe("T1 project store ids (#77)", () => {
+  const T_API = "p_01JC3H0000000000000000000A";
+  const T_EMPTY = "p_01JC3H0000000000000000000B";
+  const store = (id: string, root: string, name: string, created = "2026-11-01T09:00:00Z"): StoreProject =>
+    ({ schema: "vajra.project/1", id, name, root, root_key: { dev: 1, ino: 2 } as unknown as StoreProject["root_key"], created, archived: null, rev: 3 });
+  const reg = [store(T_API, "/src/api", "Harbor API"), store(T_EMPTY, "/src/new", "New thing", "2026-11-02T09:00:00Z")];
+  const prop = (o: Partial<InboxItem>): InboxItem => ({ id: "proposal:x", kind: "run_proposal", origin: "app", created: "", age_s: 1, title: "Start a run?", body: "", actions: ["start", "dismiss"], ...o });
+
+  it("Given a registered folder, Then its campaigns go to the store's project, with its id, name and rev", () => {
+    const { projects, byCampaign } = groupProjects([camp("a1"), camp("a2")], { a1: target("/src/api/"), a2: target("/src/api") }, reg);
+    const api = projects.find((p) => p.id === T_API)!;
+    expect(api).toMatchObject({ name: "Harbor API", root: "/src/api", rev: 3, registered: true });
+    expect(byCampaign).toEqual({ a1: T_API, a2: T_API });
+  });
+
+  it("lists registered projects first, even with no campaigns yet; unregistered folders keep a placeholder until you add them", () => {
+    const { projects, byCampaign } = groupProjects([camp("w1")], { w1: target("/src/web") }, reg);
+    expect(projects.map((p) => p.id)).toEqual([T_API, T_EMPTY, projectId("/src/web")]);
+    expect(projects[2].registered).toBeUndefined();
+    expect(byCampaign.w1).toBe(projectId("/src/web"));
+  });
+
+  it("ignores archived or malformed store entries rather than guessing", () => {
+    const bad = [{ ...store(T_API, "/src/api", "x"), archived: "2026-11-03T00:00:00Z" }, { ...store("not-an-id", "/src/z", "z") }, { ...store(T_EMPTY, "", "blank") }];
+    expect(groupProjects([], {}, bad).projects).toEqual([]);
+  });
+
+  it("counts a run proposal toward its registered project by id, else by full root", () => {
+    const idx = groupProjects([camp("w1")], { w1: target("/src/web") }, reg);
+    const s = summarize(idx, [camp("w1")], [prop({ project_id: T_API, project: "/moved/api" }), prop({ id: "proposal:y", project: "/src/web/" })], null);
+    expect(s.get(T_API)?.needsYou).toBe(1);
+    expect(s.get(projectId("/src/web"))?.needsYou).toBe(1);
+  });
+
+  it("proposalsFor finds a registered project's proposals by id, and still by full root", () => {
+    const items = [prop({ id: "a", project_id: T_API, project: "/moved/api" }), prop({ id: "b", project: "/src/api" }), prop({ id: "c", project: "/src/web" })];
+    expect(proposalsFor(items, T_API, "/src/api").map((i) => i.id)).toEqual(["a", "b"]);
+    expect(proposalsFor(items, null, "/src/web").map((i) => i.id)).toEqual(["c"]);
   });
 });

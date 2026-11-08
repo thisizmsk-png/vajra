@@ -66,13 +66,13 @@ export const dg = {
 };
 
 /**
- * This project's run proposals. Keyed by the core's project id once the Director-General has told us it (a folder can
- * be renamed or moved; the T1 id survives that). Before that, by the folder the proposal names: interim only.
+ * This project's run proposals: by the core's T1 id for a registered project (it survives a rename or a move), and by
+ * the full root the proposal names (FG-02b sends the recorded root) for any project.
  */
 export function proposalsFor(inbox: InboxItem[], projectId: string | null, root: string | null): InboxItem[] {
-  return inbox.filter((i) => i.kind === "run_proposal" && (projectId
-    ? i.project_id === projectId
-    : !!root && typeof i.project === "string" && normRoot(i.project) === normRoot(root)));
+  return inbox.filter((i) => i.kind === "run_proposal" && (
+    (!!projectId && i.project_id === projectId)
+    || (!!root && typeof i.project === "string" && normRoot(i.project) === normRoot(root))));
 }
 
 /**

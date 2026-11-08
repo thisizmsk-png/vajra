@@ -64,7 +64,7 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
     last.current = Date.now();
     void (async () => {
       // Campaigns and their folders decide the projects; without either, saying "no projects" would be wrong.
-      const [camps, targets, active, inbox] = await Promise.allSettled([api.listCampaigns(), api.resumeTargets(), api.activeRuns(), api.inbox()]);
+      const [camps, targets, active, inbox, store] = await Promise.allSettled([api.listCampaigns(), api.resumeTargets(), api.activeRuns(), api.inbox(), api.projectList()]);
       if (mine !== seq.current) return;
       if (camps.status === "rejected" || targets.status === "rejected") {
         const e = camps.status === "rejected" ? camps.reason : (targets as PromiseRejectedResult).reason;
@@ -73,7 +73,10 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       }
       const campaigns = Array.isArray(camps.value?.campaigns) ? camps.value.campaigns : [];
       const tmap = targets.value?.targets ?? {};
-      const index = groupProjects(campaigns, tmap);
+      // The core's project store (#77) gives registered projects their T1 ids; an older core, or a failed read, leaves
+      // every project as a folder placeholder, exactly as before.
+      const registered = store.status === "fulfilled" && Array.isArray(store.value?.projects) ? store.value.projects : [];
+      const index = groupProjects(campaigns, tmap, registered);
       const runIds: Record<string, string> = {};
       for (const [slug, t] of Object.entries(tmap)) if (t && typeof t.run_id === "string") runIds[slug] = t.run_id;
       // The inbox and the live run add urgency; if they fail the projects still show, without those marks.
