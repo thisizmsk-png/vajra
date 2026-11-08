@@ -266,12 +266,57 @@ glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can li
   glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
   glob_chain $((ri + 1)) $((si + 1))
 }
-glob_climbs() { # pattern-component -> 0 if it is ".." or a brace alternation with a ".." alternative ({..,x}, {x,..}, {..})
-  [ "$1" = .. ] && return 0
-  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.\.([,}]|$) ]]
+# Brace expansion of one pattern component, without eval: BX gets every value the component can take (nested groups and
+# text around them included, so "{.,x}." gives "..", "x."). A group without a comma is one alternative. At most 64 values:
+# past that BX_OVER is set and the callers assume the worst.
+BX=() BX_OVER=0
+brace_expand() { # string -> appends to BX
+  local s="$1" n=${#1} i=0 ch depth=0 start=-1 end=-1 pre body post alt k
+  [ "${#BX[@]}" -le 64 ] || { BX_OVER=1; return 0; }
+  while [ "$i" -lt "$n" ]; do
+    ch="${s:$i:1}"
+    if [ "$ch" = "{" ]; then
+      [ "$depth" -eq 0 ] && start=$i
+      depth=$((depth + 1))
+    elif [ "$ch" = "}" ] && [ "$depth" -gt 0 ]; then
+      depth=$((depth - 1))
+      if [ "$depth" -eq 0 ]; then end=$i; break; fi
+    fi
+    i=$((i + 1))
+  done
+  if [ "$end" -lt 0 ]; then BX[${#BX[@]}]="$s"; return 0; fi # no complete group: literal text
+  pre="${s:0:$start}"; body="${s:$((start + 1)):$((end - start - 1))}"; post="${s:$((end + 1))}"
+  depth=0 alt="" k=0
+  while [ "$k" -le "${#body}" ]; do
+    ch="${body:$k:1}"
+    if [ "$k" -eq "${#body}" ] || { [ "$ch" = "," ] && [ "$depth" -eq 0 ]; }; then
+      brace_expand "$pre$alt$post"; alt=""
+    else
+      [ "$ch" = "{" ] && depth=$((depth + 1))
+      [ "$ch" = "}" ] && depth=$((depth - 1))
+      alt="$alt$ch"
+    fi
+    k=$((k + 1))
+  done
 }
-glob_stays() { # pattern-component -> 0 if it is a brace alternation with a "." or an empty alternative ({.,x}, {,x}, {x,}), which may not descend
-  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.?([,}]|$) ]]
+glob_values() { # pattern-component -> BX (its possible values); BX_OVER=1 if there are too many to list
+  BX=() BX_OVER=0
+  case "$1" in *{*) brace_expand "$1" ;; *) BX[0]="$1" ;; esac
+}
+glob_climbs() { # pattern-component -> 0 if it is, or can expand to, ".." ({..,x}, {.,x}., .{.,x}, {..}); too many values: assumed yes
+  local v
+  glob_values "$1"
+  [ "$BX_OVER" = 1 ] && return 0
+  for v in "${BX[@]}"; do [ "$v" = .. ] && return 0; done
+  return 1
+}
+glob_stays() { # pattern-component -> 0 if it can expand to "." or to nothing ({.,x}, {,x}, {x,}), so it may not descend
+  local v
+  glob_values "$1"
+  [ "$BX_OVER" = 1 ] && return 0
+  case "$1" in *{*) ;; *) return 1 ;; esac
+  for v in "${BX[@]}"; do { [ -z "$v" ] || [ "$v" = . ]; } && return 0; done
+  return 1
 }
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
