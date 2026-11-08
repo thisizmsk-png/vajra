@@ -310,7 +310,7 @@ impl Store {
             Err(e) => return Err(e.into()),
         };
         let lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
-        Ok(contract::latest_sessions(&lines))
+        Ok(contract::latest_sessions_of(Some(project_id), &lines))
     }
 }
 

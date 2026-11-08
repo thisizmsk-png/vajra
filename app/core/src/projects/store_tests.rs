@@ -409,3 +409,26 @@ fn a_project_folder_swapped_for_a_symlink_after_the_store_opened_is_not_followed
     assert!(s.append_session(&session(&p.id, &contract::fresh_id("s").unwrap(), SessionStatus::Running)).is_err());
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0, "nothing was written through the swapped folder");
 }
+
+#[test]
+fn a_session_line_from_another_project_is_skipped_and_cannot_replace_a_local_one() {
+    use std::io::Write;
+    let t = Tmp::new("foreign");
+    let s = t.store();
+    let a = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let b = s.add(&t.repo("src/b"), false).unwrap().project().clone();
+    let local = contract::fresh_id("s").unwrap();
+    s.append_session(&session(&a.id, &local, SessionStatus::Running)).unwrap();
+    let foreign_new = contract::fresh_id("s").unwrap();
+    // Lines copied (as a same-user process could) from B into A's untrusted log: a session of B's, and a B line that
+    // reuses A's local session id with a different status.
+    let mut f = fs::OpenOptions::new().append(true).open(t.data().join("projects").join(&a.id).join("sessions.jsonl")).unwrap();
+    for line in [session(&b.id, &foreign_new, SessionStatus::Running), session(&b.id, &local, SessionStatus::Failed)] {
+        f.write_all(format!("{}\n", serde_json::to_string(&line).unwrap()).as_bytes()).unwrap();
+    }
+    let log = s.sessions(&a.id).unwrap();
+    assert_eq!(log.skipped, 2);
+    assert!(!log.unsupported);
+    assert_eq!(log.sessions.len(), 1);
+    assert_eq!((log.sessions[0].id.as_str(), log.sessions[0].project_id.as_str(), log.sessions[0].status), (local.as_str(), a.id.as_str(), SessionStatus::Running));
+}
