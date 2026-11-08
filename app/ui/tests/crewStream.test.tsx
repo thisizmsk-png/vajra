@@ -277,4 +277,31 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(n).toBeLessThanOrEqual(2);
     expect(screen.getByText(S.crew.windowGap)).toBeTruthy();
   });
+
+  // Review on #68: the poll (1 s) used to re-ask for the held start, which cleared the gap, and reconcile then asked for the
+  // lost prefix again: one lost request per poll for ever, the notice flickering off and on.
+  it("keeps the lost prefix settled across polls: no new lost asks and the gap notice stays", async () => {
+    const f = await openBackend({
+      stream_window: (a?: Record<string, unknown>) => {
+        const from = a?.from as number | null;
+        const start = from === null || from < 4970 ? 4970 : from;
+        const lost = from !== null && from < 4970;
+        return { lines: lines(start, 5000), head_seq: 5000, first_seq: 1, at_start: false, at_end: true, gap: lost };
+      },
+    });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(2000);
+    await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
+    const lostAsks = () => wins(f).filter((c) => typeof c.args?.from === "number" && c.args.from < 4970).length;
+    const polls = () => wins(f).length;
+    const n = lostAsks(), p0 = polls();
+    // Sample the notice through at least two poll intervals: it must never drop out.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      expect(screen.queryByText(S.crew.windowGap), `notice gone at ${i * 300} ms`).toBeTruthy();
+    }
+    expect(polls() - p0, "the poll kept running").toBeGreaterThanOrEqual(2);
+    expect(lostAsks() - n, "no new asks for the lost prefix after it settled").toBe(0);
+  }, 15000);
 });

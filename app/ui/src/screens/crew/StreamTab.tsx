@@ -35,6 +35,8 @@ export function StreamTab({ stream }: { stream: string }) {
   const nav = useRef<number | null>(null);
   /** The last numeric request that was answered, and the first row held after it. Asking again for the same `from` while the held window has not moved is a loop (a lost prefix is answered with later rows and `gap`). */
   const answered = useRef<{ from: number; held0: number } | null>(null);
+  /** The first row held after a request whose prefix the core had lost (it answered with later rows and `gap`). The poll re-reads from that held start; its answer carries no `gap` of its own, so it must not clear the notice or the guard above. */
+  const lostHeld0 = useRef<number | null>(null);
   /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
   const reconcileRef = useRef<() => void>(() => {});
   const last = useRef(0);
@@ -46,12 +48,19 @@ export function StreamTab({ stream }: { stream: string }) {
     const g = gen.current;
     last.current = Date.now();
     try {
-      const w = await api.streamWindow(stream, from, WINDOW_ROWS);
+      let w = await api.streamWindow(stream, from, WINDOW_ROWS);
       if (g !== gen.current || want.current !== from) return;
       setErr("");
+      const first = w.lines[0]?.seq;
+      // A poll re-reading the held start of a lost-prefix window: same rows, still short of what was asked, so still a gap.
+      const rereadOfLost = from !== null && first !== undefined && lostHeld0.current === first && from === first;
+      if (rereadOfLost) w = { ...w, gap: true };
       winRef.current = w;
       if (nav.current === from) nav.current = null;
-      if (from !== null && w.lines.length) answered.current = { from, held0: w.lines[0].seq };
+      if (from !== null && first !== undefined && !rereadOfLost) {
+        answered.current = { from, held0: first };
+        lostHeld0.current = w.gap && from < first ? first : null;
+      } else if (from === null) lostHeld0.current = null;
       setWin(w);
       // The view may still lie outside what came back (a short, byte-capped window): look again with the new window.
       setTimeout(() => reconcileRef.current(), 0);
