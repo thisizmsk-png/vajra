@@ -3,6 +3,7 @@
 pub mod adapter;
 pub mod ids;
 pub mod logging;
+pub mod mobile_m0;
 pub mod nap;
 pub mod paths;
 
