@@ -26,6 +26,9 @@ pub const SESSION_MAJOR: u32 = 1;
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// A project name longer than this (in characters) is refused.
 pub const MAX_NAME_CHARS: usize = 200;
+/// The largest integer a record may carry in `dev`, `ino` or `rev`: 2^53 - 1, the most a JSON reader in JavaScript holds
+/// exactly. It is part of the contract, so the core refuses what the window could not read.
+pub const MAX_JSON_INT: u64 = 9_007_199_254_740_991;
 /// The longest path accepted in a record.
 pub const MAX_PATH_BYTES: usize = 4096;
 
@@ -171,8 +174,11 @@ impl Project {
         if let Some(a) = &self.archived {
             valid_time(a)?;
         }
-        if self.rev == 0 {
+        if self.rev == 0 || self.rev > MAX_JSON_INT {
             return Err(ContractError::Invalid("rev"));
+        }
+        if self.root_key.dev > MAX_JSON_INT || self.root_key.ino > MAX_JSON_INT {
+            return Err(ContractError::Invalid("root_key"));
         }
         Ok(())
     }

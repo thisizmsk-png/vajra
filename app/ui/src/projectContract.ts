@@ -88,6 +88,8 @@ const optStr = (v: unknown): string | null => (str(v) ? v : null);
 const uint = (v: unknown, max: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
 const optUint = (v: unknown, max: number): boolean => v === undefined || v === null || uint(v, max);
 const U32 = 0xffff_ffff;
+/** 2^53 - 1: the contract's largest `dev`, `ino` or `rev` (the core refuses more), so JSON numbers stay exact. */
+const MAX_JSON_INT = Number.MAX_SAFE_INTEGER;
 
 type Fail = { ok: false; reason: "unsupported_version" | "malformed" | "invalid"; detail: string };
 const bad = (reason: Fail["reason"], detail: string): Fail => ({ ok: false, reason, detail });
@@ -141,10 +143,10 @@ export function parseProject(text: string): ParseResult<Project> {
   if (!("o" in r)) return r;
   const o = r.o;
   const rk = o.root_key;
-  if (!str(o.id) || !str(o.name) || !str(o.root) || !str(o.created) || !uint(o.rev, Number.MAX_SAFE_INTEGER) || !optStrOk(o.archived)) {
+  if (!str(o.id) || !str(o.name) || !str(o.root) || !str(o.created) || !uint(o.rev, Infinity) || !optStrOk(o.archived)) {
     return bad("malformed", "missing or mistyped field");
   }
-  if (!isObj(rk) || !uint(rk.dev, Number.MAX_SAFE_INTEGER) || !uint(rk.ino, Number.MAX_SAFE_INTEGER) || !optStrOk(rk.git_common_dir)) {
+  if (!isObj(rk) || !uint(rk.dev, Infinity) || !uint(rk.ino, Infinity) || !optStrOk(rk.git_common_dir)) {
     return bad("malformed", "missing or mistyped root_key");
   }
   if (!validId("p", o.id)) return bad("invalid", "project id");
@@ -153,7 +155,8 @@ export function parseProject(text: string): ParseResult<Project> {
   if (str(rk.git_common_dir) && !validPath(rk.git_common_dir)) return bad("invalid", "path");
   if (!validTime(o.created)) return bad("invalid", "timestamp");
   if (str(o.archived) && !validTime(o.archived)) return bad("invalid", "timestamp");
-  if (o.rev === 0) return bad("invalid", "rev");
+  if (o.rev === 0 || o.rev > MAX_JSON_INT) return bad("invalid", "rev");
+  if ((rk.dev as number) > MAX_JSON_INT || (rk.ino as number) > MAX_JSON_INT) return bad("invalid", "root_key");
   return {
     ok: true,
     value: {
