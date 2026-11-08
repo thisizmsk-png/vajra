@@ -1237,6 +1237,36 @@ fn a_new_conversation_starts_the_next_generation_on_an_empty_stream() {
     assert_eq!(code(&app.new_conversation("../x").unwrap_err()), "invalid_args");
 }
 
+/// #82 review: a "New conversation" that lands after an ask looked up the orchestrator but before it took the
+/// project's ask entry must not be undone. The ask must neither resume the old session nor put the service back on
+/// the old generation.
+#[test]
+fn a_new_conversation_racing_an_ask_is_never_undone() {
+    let t = Tmp::new();
+    let app = t.app();
+    let old = app.ask_lead(RUN_ID, "remember this").unwrap()["lead_session_id"].as_str().unwrap().to_string();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    // In the gap, do exactly what `new_conversation` does: drop the session, write generation 2, move the service on.
+    let (dir, p, control) = (orch_dir(&t), pid(&t), app.control.clone());
+    *lock(&app.lead.before_ask_lock) = Some(Box::new(move || {
+        let _ = std::fs::remove_file(dir.join("session"));
+        std::fs::write(dir.join("generation"), "2").unwrap();
+        lock(&control).set_generation(&p, 2).unwrap();
+    }));
+    let r = app.ask_lead(RUN_ID, "after the reset").unwrap();
+    *lock(&app.lead.before_ask_lock) = None;
+    assert_eq!(r["generation"].as_u64(), Some(2), "the ask runs in the new conversation: {r}");
+    assert_ne!(r["lead_session_id"], old.as_str());
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 6);
+    assert!(argvs(&t).iter().all(|a| !(a.contains("--resume") && a.contains(&old))), "the old session was never resumed");
+    assert!(
+        matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleGeneration)),
+        "the service was not put back on the old generation"
+    );
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(orch_dir(&t).join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_GEN"], "2");
+}
+
 #[test]
 fn lead_status_names_the_director_general_and_its_state() {
     let t = Tmp::new();
