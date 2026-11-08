@@ -93,6 +93,8 @@ export function History() {
     load();
     if (mine === req.current) setView(next);
   };
+  // Closing the pane ends the current request's claim on it: its reply still reloads the table (see `run`) but cannot reopen the pane.
+  const closeView = () => { req.current++; setView(null); };
   const showReport = (c: Campaign) => run(c, async () => ({ slug: c.slug, state: "done", report: await api.readReport(c.slug) }));
   const verifyNow = (c: Campaign) => run(c, async () => {
     const v = await api.verifyCampaign(c.slug);
@@ -154,7 +156,7 @@ export function History() {
             <div className="v-history__panehead">
               <Text as="h2" variant="label">{S.history.panel}</Text>
               <span className="v-history__paneslug">{view.slug}</span>
-              <Button size="sm" variant="ghost" aria-label={S.history.closeReport} onClick={() => setView(null)}><Icon name="close" /></Button>
+              <Button size="sm" variant="ghost" aria-label={S.history.closeReport} onClick={closeView}><Icon name="close" /></Button>
             </div>
             <div className="v-history__panebody" aria-live="polite">
               {view.state === "busy" && <Text variant="body-sm" muted>{S.history.reportLoading}</Text>}
