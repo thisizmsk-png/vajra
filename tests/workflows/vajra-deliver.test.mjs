@@ -972,3 +972,24 @@ await scenario('E5: a malformed steer_nonce is refused; none given means no stee
   const r = await go(ARGS)
   assert.ok(!r.calls.some((c) => c.prompt.includes('vajra-steer')), 'no steering text without a nonce')
 })
+// D2 (stage D red team): a worker the human stopped may still hand back with the exempt phrase while claiming "done".
+// The engine must never merge such a task, whatever status it reports.
+await scenario('D2: a stopped worker that reports done with the exempt phrase is never merged', async () => {
+  for (const summary of ['Status: done. Work committed (stopped by the human)', 'STOPPED BY THE HUMAN', 'stopped  by\tthe\nhuman, but finished first']) {
+    const r = await go(ARGS, { 'task.t1': change('t1', 1, ['src/export/json.ts'], { status: 'done', summary }) })
+    assert.equal(r.result.status, 'need_input', summary)
+    assert.match(r.result.question, /t1 \(blocked\)/)
+    assert.ok(!labels(r).includes('merge.r1'), 'a stopped task is not merged')
+    assert.ok(!labels(r).includes('task.t2.r1'), 'a dependent of a stopped task does not start')
+  }
+})
+await scenario('D2: the phrase in a later round, or in a sibling task, still holds back the merge', async () => {
+  const r = await go(ARGS, { 'task.t2': change('t2', 1, ['README.md'], { status: 'done', summary: 'done (stopped by the human)' }) })
+  assert.equal(r.result.status, 'need_input'); assert.match(r.result.question, /t2 \(blocked\)/)
+  assert.ok(!labels(r).includes('merge.r1'))
+})
+await scenario('D2: a stopped task does not carry its commit into the next round', async () => {
+  const r = await go(ARGS, { 'task.t1': change('t1', 1, ['src/export/json.ts'], { status: 'done', summary: 'done (stopped by the human)' }) })
+  assert.equal(r.result.status, 'need_input')
+  assert.equal(r.result.artifacts.changes.t1, undefined, 'the stopped task has no recorded change')
+})
