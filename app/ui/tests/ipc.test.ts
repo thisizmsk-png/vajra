@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { api, errorText, isIpcError, onChanged, setTransport } from "../src/ipc";
+import { api, errorText, isIpcError, onChanged, onInboxNew, setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
 
 afterEach(() => setTransport());
@@ -38,6 +38,24 @@ describe("typed ipc", () => {
       { cmd: "approve_plan", args: { id: "plan:20261106-0911.0", planSha256: "ab".repeat(32) } },
       { cmd: "reject_plan", args: { id: "plan:20261106-0911.0", reason: "too risky" } },
     ]);
+  });
+
+  it("maps the receipt-wrapped inbox actions and the arrival event (FG-07)", async () => {
+    const f = fakeIpc({ act_reject_plan: { receipt: null }, act_answer_question: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-0001-aaaa", project_id: "p_1", expect_generation: null };
+    await api.actRejectPlan(envelope, "plan:r.0", "no");
+    await api.actAnswerQuestion(envelope, "task:c1.t1", "use the key id");
+    expect(f.calls).toEqual([
+      { cmd: "act_reject_plan", args: { envelope, id: "plan:r.0", reason: "no" } },
+      { cmd: "act_answer_question", args: { envelope, id: "task:c1.t1", text: "use the key id" } },
+    ]);
+    const got: unknown[] = [];
+    const off = onInboxNew((p) => got.push(p));
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 2 });
+    off();
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 3 });
+    expect(got).toEqual([{ project_id: "p_1", kind: "plan", count: 2 }]);
   });
 
   it("maps inbox to the inbox command", async () => {

@@ -389,3 +389,97 @@ fn project_generation_is_durable_independent_of_receipts() {
     let stale = app.act_start_run(&env("run-0023-wwww", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None }, "/nonexistent");
     assert_eq!(stale["receipt"]["reason"], "stale_generation");
 }
+
+// ---- FG-07: answer a waiting task from the inbox ------------------------------------------------------------------
+
+fn waiting_task(t: &Tmp, status: &str) {
+    let d = t.0.join("home/.claude/vajra/campaigns/c1");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": "c1", "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": "c1", "schema": "vajra.tasks/v1", "tasks": [{"id": "t1", "status": status, "title": "Which key?"}]}).to_string()).unwrap();
+}
+
+fn queued_messages(app: &App) -> Vec<Value> {
+    app.ledger().unwrap()["records"].as_array().unwrap().iter().filter(|r| r["kind"] == "message").cloned().collect()
+}
+
+// Given a worker's task is waiting with a question, When the human answers through a receipt, Then the answer is queued
+// to that worker as a message, the receipt is done, and a second click with the same action id queues nothing more.
+#[test]
+fn answering_a_question_messages_the_worker_once() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let e = env("ans-0001-aaaa", None);
+    let r = app.act_answer_question(&e, "task:c1.t1", "use the key id; $(rm -rf /) is just text");
+    assert_eq!(state_of(&r), "done", "{r}");
+    assert_eq!(r["receipt"]["action"], "answer_question");
+    assert_eq!(queued_messages(&app).len(), 1);
+    assert!(queued_messages(&app)[0].to_string().contains("$(rm -rf /) is just text"), "the text is kept as plain text");
+    let again = app.act_answer_question(&e, "task:c1.t1", "use the key id");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(queued_messages(&app).len(), 1, "no second message");
+}
+
+// Given the worker moved to another attempt since the human looked, Then the answer is refused as stale.
+#[test]
+fn an_answer_for_an_older_attempt_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 3);
+    waiting_task(&t, "question");
+    let r = app.act_answer_question(&env("ans-0002-bbbb", Some(2)), "task:c1.t1", "x");
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")));
+    assert!(queued_messages(&app).is_empty());
+}
+
+// Given the worker is gone or the item is no longer waiting, Then the receipt says so and no message is queued.
+#[test]
+fn an_answer_with_no_worker_or_no_waiting_item_is_a_rejected_receipt() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let gone = app.act_answer_question(&env("ans-0003-cccc", None), "task:c1.t7", "x");
+    assert_eq!(gone["receipt"]["reason"], "not_found");
+    waiting_task(&t, "in_progress");
+    let moved = app.act_answer_question(&env("ans-0004-dddd", None), "task:c1.t1", "x");
+    assert_eq!(moved["receipt"]["reason"], "not_found");
+    assert!(queued_messages(&app).is_empty());
+}
+
+// A run-level question has no worker to message: it is refused with a clear code (answered in the conversation).
+#[test]
+fn a_run_level_question_is_not_answerable_from_here() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = app.act_answer_question(&env("ans-0005-eeee", None), "question:20261106-0911", "x");
+    assert_eq!(r["receipt"]["reason"], "not_answerable");
+}
+
+// The answer is bounded and plain: empty and oversize text are invalid and nothing is queued.
+#[test]
+fn an_answer_must_be_text_of_a_sane_size() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    for (i, bad) in ["", "   ", &"x".repeat(100_000)].into_iter().enumerate() {
+        let r = app.act_answer_question(&env(&format!("ans-1000-{i:04}"), None), "task:c1.t1", bad);
+        assert_eq!(r["receipt"]["state"], "rejected", "{r}");
+    }
+    assert!(queued_messages(&app).is_empty());
+}
+
+// Answering is a human decision: the MCP caller is refused before anything is queued.
+#[test]
+fn answering_is_human_only() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let r = app.act(&env("ans-0006-ffff", None), Caller::Mcp, true, "answer_question", "task:c1.t1", None, || app.control_message("t1", "x"));
+    assert_eq!(r["receipt"]["reason"], "human_only");
+    assert!(queued_messages(&app).is_empty());
+}

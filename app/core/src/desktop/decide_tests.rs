@@ -66,6 +66,13 @@ impl Tmp {
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
         app.record_run(run, &self.cwd(), SID, CAMP, workflow, start_of(run)).unwrap();
     }
+    /// A campaign with its `campaign.json` and `tasks.json` (a task waiting on the human, with no run).
+    fn campaign(&self, slug: &str, updated: &str, tasks: Value) {
+        let d = self.home().join(".claude/vajra/campaigns").join(slug);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("campaign.json"), json!({"slug": slug, "goal": "g", "status": "active", "created": updated, "updated": updated}).to_string()).unwrap();
+        fs::write(d.join("tasks.json"), json!({"campaign": slug, "schema": "vajra.tasks/v1", "tasks": tasks}).to_string()).unwrap();
+    }
     fn campaign_script(&self, code: i32) -> PathBuf {
         let sh = self.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
         let log = self.0.join("argv.log");
@@ -970,4 +977,149 @@ fn lead_reply_lines_drop_the_same_invisible_characters() {
     let tags: String = "run rm".chars().map(|c| char::from_u32(0xE0000 + c as u32).unwrap()).collect();
     let line = format!("all good{tags}\u{FE0F}\u{E0100}\u{2028}\u{2029}\u{034F}\u{3164}\u{FFF9}");
     assert_eq!(Redactor::default().clean(&line), "all good");
+}
+
+// ---- FG-07 core: ids, receipts, the projection and the arrival event -------------------------------------------------
+
+use crate::control::receipt::Caller;
+use crate::desktop::Envelope;
+
+fn act_env(id: &str, expect: Option<u64>, project: &str) -> Envelope {
+    Envelope { action_id: id.into(), project_id: project.into(), expect_generation: expect }
+}
+
+fn my_project(t: &Tmp) -> String {
+    super::super::inbox::placeholder_project_id(&t.cwd().to_string_lossy())
+}
+
+// The id a folder gets is the one the window computes for the same path, so the two agree until the store replaces both.
+#[test]
+fn the_placeholder_project_id_matches_the_window_adapter() {
+    use super::super::inbox::placeholder_project_id as id;
+    assert_eq!(id("/src/api"), "p_ac4c67fb");
+    assert_eq!(id("/src/web"), "p_ea65e8a5");
+    assert_eq!(id("/src/api/"), id("/src/api"), "a trailing slash is the same folder");
+    assert_eq!(id("  /src/api "), id("/src/api"));
+}
+
+// Given plans and task items, Then each carries the project_id of the folder its run was launched in; a campaign no
+// launched run owns is Unsorted.
+#[test]
+fn inbox_items_carry_the_project_id_of_their_folder() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    t.campaign("terminal-run", "2026-11-01T00:00:00Z", json!([{"id": "t9", "status": "blocked", "title": "stuck"}]));
+    let inbox = app.inbox().unwrap();
+    assert_eq!(item(&inbox, PLAN)["project_id"], my_project(&t));
+    assert_eq!(item(&inbox, "task:terminal-run.t9")["project_id"], "p_unsorted");
+}
+
+// Given a plan is rejected through a receipt, Then the reject runs once, the receipt is done, and the same action id
+// again is the stored receipt (no second progress line).
+#[test]
+fn act_reject_plan_runs_once_and_replays() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    let log = t.campaign_script(0);
+    let e = act_env("rej-0001-aaaa", None, &my_project(&t));
+    let first = app.act_reject_plan(&e, PLAN, "too risky");
+    assert_eq!(first["receipt"]["state"], "done", "{first}");
+    assert_eq!(first["receipt"]["action"], "reject_plan");
+    let again = app.act_reject_plan(&e, PLAN, "too risky");
+    assert_eq!((again["replayed"].clone(), again["receipt"].clone()), (json!(true), first["receipt"].clone()));
+    let args = fs::read_to_string(log).unwrap();
+    assert_eq!(args.matches("--end").count(), 1, "the progress script ran once: {args}");
+    assert_eq!(states(&t, "reject"), ["requested", "done"]);
+}
+
+// Given the plan shown to the human changed, When their reject carries the old plan's generation, Then it is refused
+// as stale and nothing is written.
+#[test]
+fn act_reject_plan_with_a_stale_generation_is_refused_before_it_runs() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    let log = t.campaign_script(0);
+    let stale = u64::from_str_radix(&"f".repeat(16), 16).unwrap();
+    let r = app.act_reject_plan(&act_env("rej-0002-bbbb", Some(stale), &my_project(&t)), PLAN, "no");
+    assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("stale_generation")), "{r}");
+    assert!(!log.exists() && states(&t, "reject").is_empty(), "nothing ran");
+    let right = u64::from_str_radix(&sha[..16], 16).unwrap();
+    assert_eq!(app.act_reject_plan(&act_env("rej-0003-cccc", Some(right), &my_project(&t)), PLAN, "no")["receipt"]["state"], "done");
+}
+
+// Given a plan already decided, a new reject action is refused with the core's reason; a bad reason is invalid_args.
+#[test]
+fn act_reject_plan_refusals_are_receipts_with_their_codes() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    t.campaign_script(0);
+    let p = my_project(&t);
+    let bad = app.act_reject_plan(&act_env("rej-0004-dddd", None, &p), PLAN, "   ");
+    assert_eq!((bad["receipt"]["state"].as_str(), bad["receipt"]["reason"].as_str()), (Some("rejected"), Some("invalid_args")));
+    assert_eq!(app.act_reject_plan(&act_env("rej-0005-eeee", None, &p), PLAN, "no")["receipt"]["state"], "done");
+    let twice = app.act_reject_plan(&act_env("rej-0006-ffff", None, &p), PLAN, "no again");
+    assert_eq!(twice["receipt"]["reason"], "already_decided");
+}
+
+// Rejecting is a human decision: the MCP caller is refused before the effect (same door as approve).
+#[test]
+fn reject_plan_is_human_only() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    t.campaign_script(0);
+    let r = app.act(&act_env("rej-0007-gggg", None, "p"), Caller::Mcp, true, "reject_plan", PLAN, None, || app.reject_plan(PLAN, "no"));
+    assert_eq!(r["receipt"]["reason"], "human_only");
+    assert!(states(&t, "reject").is_empty());
+}
+
+// Given waiting items in two projects, Then each project's projection lists only its own, with the true count, and says
+// the read worked; and an item arriving or leaving moves that project's revision with no other action.
+#[test]
+fn project_state_carries_the_projects_own_inbox_and_its_revision_moves() {
+    let t = Tmp::new();
+    let app = t.app();
+    let mine = my_project(&t);
+    let before = app.project_state(&mine, None).unwrap();
+    assert_eq!((before["inbox"]["ok"].clone(), before["inbox"]["count"].clone()), (json!(true), json!(0)));
+    ready(&t, &app);
+    t.campaign("terminal-run", "2026-11-01T00:00:00Z", json!([{"id": "t9", "status": "blocked", "title": "stuck"}]));
+    let after = app.project_state(&mine, Some(before["rev"].as_u64().unwrap())).unwrap();
+    assert_eq!(after["unchanged"], false, "a new waiting item moved the revision");
+    assert!(after["rev"].as_u64() > before["rev"].as_u64());
+    let ids: Vec<&str> = after["inbox"]["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&PLAN) && !ids.iter().any(|i| i.starts_with("task:terminal-run")), "{ids:?}");
+    assert_eq!(after["inbox"]["count"], 2);
+    let other = app.project_state("p_unsorted", None).unwrap();
+    assert_eq!(other["inbox"]["items"].as_array().unwrap().len(), 1, "the terminal run's block is Unsorted's");
+    // Nothing changed since: the same revision answers unchanged.
+    let rev = after["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&mine, Some(rev)).unwrap()["unchanged"], true);
+}
+
+// Given a burst of new items, When the 5 s window ends, Then one inbox_new per project and kind leaves, carrying ids
+// and a count and nothing from the item.
+#[test]
+fn a_burst_of_new_items_is_one_inbox_new_event_with_no_item_text() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.events.set_window_ms(60);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+    let sink = seen.clone();
+    app.set_event_sink(Box::new(move |name, v| sink.lock().unwrap().push((name.to_string(), v))));
+    app.inbox().unwrap(); // the baseline: nothing waiting yet
+    ready(&t, &app); // two plans arrive together
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "inbox_new");
+    assert_eq!(got[0].1, json!({"project_id": my_project(&t), "kind": "plan", "count": 2}));
+    // Reading again with nothing new says nothing more.
+    app.inbox().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }

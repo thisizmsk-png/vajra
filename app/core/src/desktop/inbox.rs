@@ -44,6 +44,24 @@ fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// The id of a campaign no known folder owns (a terminal-started run, or one from before the app recorded folders).
+pub(super) const UNSORTED_PROJECT: &str = "p_unsorted";
+
+/// A project id for a folder, until the project store (#77, ADR-15 section 1) hands out ULIDs. It is the same FNV-1a of the
+/// trimmed, slash-stripped path that the UI adapter's `projectId` computes, so a core id and a window id agree today
+/// and the store replaces both. STUB: swap the source (the store's id for the run's folder), not the shape.
+pub(super) fn placeholder_project_id(root: &str) -> String {
+    let t = root.trim();
+    let s = t.trim_end_matches('/');
+    let norm = if s.is_empty() && t.starts_with('/') { "/" } else { s };
+    let mut h: u32 = 0x811c_9dc5;
+    for ch in norm.chars() {
+        h ^= ch as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("p_{h:08x}")
+}
+
 /// Shown with every item that comes from the workflow result file.
 const FROM_RESULT: &str = "from the workflow result";
 
@@ -57,6 +75,31 @@ pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
 /// The bytes that are shown and hashed for one plan item.
 pub(super) fn plan_sha(shown: &Value) -> String {
     sha256::hex_digest(&serde_json::to_vec(shown).unwrap_or_default())
+}
+
+/// What `Arrivals` tracks for one item: its key (id plus the plan hash or the task status, so a changed plan or a task that
+/// left and came back is new), its project and its kind (a task's status, so a question and a block tell apart).
+fn arrival_key(v: &Value) -> (String, String, String) {
+    let s = |k: &str| v[k].as_str().unwrap_or_default();
+    let kind = if s("kind") == "task" { s("status") } else { s("kind") };
+    (format!("{}@{}", s("id"), if s("plan_sha256").is_empty() { s("status") } else { s("plan_sha256") }), s("project_id").to_string(), kind.to_string())
+}
+
+/// One fingerprint per project of the keys waiting in it, order-independent.
+fn project_fingerprints(keys: impl Iterator<Item = (String, String, String)>) -> HashMap<String, u64> {
+    use std::hash::{Hash, Hasher};
+    let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (key, project, _) in keys {
+        by.entry(project).or_default().push(key);
+    }
+    by.into_iter()
+        .map(|(p, mut ks)| {
+            ks.sort();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            ks.hash(&mut h);
+            (p, h.finish() | 1)
+        })
+        .collect()
 }
 
 impl App {
@@ -134,6 +177,7 @@ impl App {
                         item_id.clone(),
                         json!({
                             "id": item_id, "kind": "task", "campaign": slug, "origin": origin,
+                            "project_id": launched.get(&slug).map_or_else(|| UNSORTED_PROJECT.to_string(), |e| placeholder_project_id(&e.cwd.to_string_lossy())),
                             "status": status,
                             "since": SINCE, "created": crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(created.max(0) as u64)), "age_s": (now - created).max(0),
                             "title": clean(&text(t.get("title")), TITLE_MAX),
@@ -154,7 +198,7 @@ impl App {
                 let first = *seen.entry(key.clone()).or_insert(now);
                 waiting.insert(key);
                 let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
-                (first, json!({"id": id, "kind": kind, "campaign": slug, "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
+                (first, json!({"id": id, "kind": kind, "campaign": slug, "project_id": placeholder_project_id(&e.cwd.to_string_lossy()), "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
             };
             if let Some(q) = &w.question {
                 let id = format!("question:{}", e.run_id);
@@ -194,6 +238,8 @@ impl App {
             }
         }
         items.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        self.events.observe(items.iter().map(|(_, _, v)| arrival_key(v)));
+        self.inbox_read(project_fingerprints(items.iter().map(|(_, _, v)| arrival_key(v))));
         let count = items.len();
         let list: Vec<Value> = items.into_iter().take(MAX_ITEMS).map(|(_, _, v)| v).collect();
         Ok(json!({"count": count, "items": list}))

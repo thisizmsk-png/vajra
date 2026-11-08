@@ -19,6 +19,8 @@ use std::sync::Mutex;
 
 /// Receipts shown in one projection.
 const RECENT: usize = 20;
+/// Inbox items in one project's projection (the count is the true number waiting in that project).
+const INBOX_MAX: usize = 50;
 /// Error codes that mean the effect was attempted and broke, not that it was refused up front.
 const FAILED_CODES: [&str; 5] = ["io_error", "send_failed", "spawn_failed", "launch_failed", "kb_failed"];
 
@@ -36,6 +38,8 @@ pub(super) struct Hub {
     start_gate: std::sync::Arc<Mutex<()>>,
     /// Fingerprint of the worker list `project_state` last showed, to notice a quiet change.
     workers_fp: u64,
+    /// project_id -> fingerprint of the waiting items last read, so an item that arrives or leaves moves the revision.
+    inbox_fp: HashMap<String, u64>,
 }
 
 /// Where `act` gets the target's current generation.
@@ -67,7 +71,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0 })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new() })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -240,6 +244,67 @@ impl App {
         self.act(env, Caller::Ui, true, "stop_worker", worker, cur, || self.control_stop_expecting(worker, reason, env.expect_generation))
     }
 
+    /// Reject plan `id` with a reason, through a receipt. The plan's generation is the hash the inbox last showed; a UI
+    /// that holds the hash it read passes its first 16 hex chars as `expect_generation` and a changed plan is refused.
+    pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str) -> Value {
+        let shown = lock(&self.shown).get(id).and_then(|s| sha_generation(s));
+        self.act(env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan(id, reason))
+    }
+
+    /// Answer a waiting task (a question or a block) from the inbox: the text goes to that task's worker as a control
+    /// message, like `control_message`. Never a shell: the control service queues it for the worker to read. A run-level
+    /// question (`question:<run>`) has no worker and is answered in the Director-General conversation.
+    pub fn act_answer_question(&self, env: &Envelope, id: &str, text: &str) -> Value {
+        let target = self.answer_target(id);
+        let cur = target.as_ref().ok().and_then(|w| lock(&self.control).worker_generation(w));
+        self.act(env, Caller::Ui, true, "answer_question", id, cur, || {
+            let worker = target?;
+            if text.trim().is_empty() {
+                return Err(super::invalid("text", "an answer cannot be empty"));
+            }
+            self.control_message(&worker, text)
+        })
+    }
+
+    /// The worker argument for an inbox item the human may answer, or why not.
+    fn answer_target(&self, id: &str) -> Result<String, Value> {
+        if id.starts_with("question:") {
+            return Err(super::fail("not_answerable", "this question belongs to the whole run; answer it in the Director-General conversation"));
+        }
+        let inbox = self.inbox()?;
+        let item = inbox["items"].as_array().and_then(|a| a.iter().find(|i| i["id"] == id && i["kind"] == "task")).ok_or_else(|| super::fail("not_found", "that item is no longer waiting"))?;
+        let campaign = item["campaign"].as_str().unwrap_or_default();
+        id.strip_prefix("task:").and_then(|r| r.strip_prefix(campaign)).and_then(|r| r.strip_prefix('.')).filter(|t| !t.is_empty()).map(str::to_string).ok_or_else(|| super::invalid("id", "not a task item"))
+    }
+
+    /// An inbox read happened: a project whose waiting items differ from the last read moves its revision, so
+    /// `project_state` shows the change with no poll. Called after the read, with no lock held.
+    pub(super) fn inbox_read(&self, fps: HashMap<String, u64>) {
+        let moved: Vec<Value> = {
+            let mut h = lock(&self.acts);
+            let mut ids: Vec<String> = h.inbox_fp.keys().chain(fps.keys()).cloned().collect();
+            ids.sort();
+            ids.dedup();
+            let mut moved = Vec::new();
+            for p in ids {
+                let (before, now) = (h.inbox_fp.get(&p).copied().unwrap_or(0), fps.get(&p).copied().unwrap_or(0));
+                if before != now {
+                    moved.push(json!({"project_id": p, "rev": h.bump(&p)}));
+                }
+            }
+            h.inbox_fp = fps;
+            moved
+        };
+        if !moved.is_empty() {
+            self.emit_projects(moved);
+        }
+    }
+
+    /// The shell hands in how to emit named events (`inbox_new`), next to the `changed` sink.
+    pub fn set_event_sink(&self, sink: super::EventSink) {
+        self.events.set_sink(sink);
+    }
+
     pub fn act_approve_plan(&self, env: &Envelope, id: &str, plan_sha256: &str) -> Value {
         // The plan's generation is the hash the inbox last showed; the UI's expect is the hash it holds.
         let shown = lock(&self.shown).get(id).and_then(|s| sha_generation(s));
@@ -262,6 +327,16 @@ impl App {
         if project_id.is_empty() || project_id.len() > 128 {
             return Err(super::invalid("project_id", "must be 1..=128 chars"));
         }
+        // Read the inbox first: a project whose waiting items changed bumps its revision, and the revision below must be
+        // the one that already includes it.
+        let inbox = match self.inbox() {
+            Ok(v) => {
+                let mine: Vec<&Value> = v["items"].as_array().into_iter().flatten().filter(|i| i["project_id"] == project_id).collect();
+                json!({"ok": true, "count": mine.len(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()})
+            }
+            // Never "nothing waiting" on a failed read.
+            Err(e) => json!({"ok": false, "error": e["error"]}),
+        };
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
             let rev = h.rev(project_id);
@@ -282,6 +357,7 @@ impl App {
             "generations": {"project": run_gen},
             "workers": workers,
             "receipts": recent,
+            "inbox": inbox,
         }))
     }
 }

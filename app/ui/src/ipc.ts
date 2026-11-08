@@ -83,7 +83,9 @@ export type AskStarted = { ask_id: string; state: string; stream: string; lead_s
 export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
-  id: string; kind: "task" | "plan" | "question"; campaign: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
+  id: string; kind: "task" | "plan" | "question"; campaign: string;
+  /** The project this item belongs to (ADR-15 §2.6). A placeholder `p_<8hex>` until the project store hands out ids; `p_unsorted` for a run no folder owns. */
+  project_id?: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
   title: string; body: string; context?: string[]; actions: string[];
   /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
   source?: string;
@@ -134,6 +136,8 @@ export type ProjectState =
       generations: { project: number };
       workers: Json[];
       receipts: Receipt[];
+      /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
+      inbox: { ok: true; count: number; items: InboxItem[] } | { ok: false; error?: string };
     };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
@@ -156,6 +160,10 @@ export const api = {
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
+  /** Reject plan `id` through a receipt. Pass the first 16 hex chars of the plan hash you read as `expect_generation` to refuse a changed plan. */
+  actRejectPlan: (envelope: Envelope, id: string, reason: string) => call<ActResult>("act_reject_plan", { envelope, id, reason }),
+  /** Answer a waiting task: the text goes to its worker as a message (never a shell). Run-level questions are refused (`not_answerable`). */
+  actAnswerQuestion: (envelope: Envelope, id: string, text: string) => call<ActResult>("act_answer_question", { envelope, id, text }),
   actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
   /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
   projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
@@ -200,4 +208,7 @@ export const api = {
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */
+/** `inbox_new`: something new started waiting; carries ids, a kind and a count, never item text. Coalesced over 5 s in the core. */
+export type InboxNew = { project_id: string; kind: string; count: number };
+export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
 export const onChanged = (cb: (payload: unknown) => void) => transport.on("changed", cb);
