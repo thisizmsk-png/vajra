@@ -22,6 +22,7 @@ use vajra_desktop::desktop::{App, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
+use vajra_desktop::terminal::{Event as TermEvent, OpenSpec, Terminals};
 
 /// The one event the UI listens to.
 const CHANGED: &str = "changed";
@@ -156,6 +157,47 @@ fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
     app.diff(&cwd, &base)
 }
 
+// SPIKE: user terminals. Output goes to the tab's channel as raw bytes (an ArrayBuffer in the webview); the end of the
+// shell is one JSON message {"exit": code}. Nothing here is reachable from the control socket or the MCP surface.
+#[tauri::command]
+fn term_open(
+    terms: State<'_, Terminals>,
+    cwd: String,
+    rows: u16,
+    cols: u16,
+    on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<u32, String> {
+    use tauri::ipc::InvokeResponseBody as Body;
+    let sink: vajra_desktop::terminal::Sink = std::sync::Arc::new(move |e| {
+        let _ = match e {
+            TermEvent::Data(d) => on_event.send(Body::Raw(d)),
+            TermEvent::Exit(c) => on_event.send(Body::Json(format!("{{\"exit\":{}}}", c.map_or("null".into(), |c| c.to_string())))),
+        };
+    });
+    let spec = OpenSpec { cwd: PathBuf::from(cwd), rows, cols, shell: None, args: None, home: None };
+    terms.open(spec, sink).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Result<(), String> {
+    terms.write(id, data.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_resize(terms: State<'_, Terminals>, id: u32, rows: u16, cols: u16) -> Result<(), String> {
+    terms.resize(id, rows, cols).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Result<(), String> {
+    terms.ack(id, bytes).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn term_close(terms: State<'_, Terminals>, id: u32) -> Result<(), String> {
+    terms.close(id).map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 fn control_message(app: State<'_, App>, worker: String, text: String) -> Res {
     app.control_message(&worker, &text)
@@ -271,6 +313,7 @@ fn main() {
 
     let built = tauri::Builder::default()
         .manage(app)
+        .manage(Terminals::new())
         .setup(move |a| {
             let handle = a.handle().clone();
             std::thread::spawn(move || {
@@ -335,6 +378,11 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            term_open,
+            term_write,
+            term_resize,
+            term_ack,
+            term_close,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
@@ -357,6 +405,7 @@ fn main() {
             let app = handle.state::<App>();
             app.shutdown_lead();
             app.sup.shutdown();
+            handle.state::<Terminals>().shutdown();
         }
         _ => {}
     });

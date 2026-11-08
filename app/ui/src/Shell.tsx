@@ -7,6 +7,7 @@ import { SCREENS, toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { S } from "../strings";
+import { TerminalDock } from "./terminal/TerminalDock";
 import "./shell.css";
 
 /** ⌘1 to ⌘7 open the screens in nav order; each link shows its chord. */
@@ -62,6 +63,7 @@ export function Shell() {
           </ErrorBoundary>
         </main>
       </div>
+      <TerminalDock defaultCwd={(window as unknown as { __VAJRA_HOME__?: string }).__VAJRA_HOME__ ?? "/"} />
     </PaletteHost>
   );
 }

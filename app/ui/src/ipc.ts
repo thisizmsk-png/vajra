@@ -1,7 +1,7 @@
 // The one place that names the core's IPC commands. Screens call `api.*`, never `invoke`, so a screen can be tested
 // against `setTransport(fake)` and a command rename is a one-file change. Argument names are camelCase here; Tauri maps
 // them to the snake_case parameters of the Rust commands.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -125,6 +125,16 @@ export const api = {
   evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
   runOverview: (slug: string) => call<RunOverview>("run_overview", { slug }),
   evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
+  // SPIKE: user terminals. Output is raw bytes on a channel (an ArrayBuffer); the end of the shell is {"exit": code}.
+  termOpen: (cwd: string, rows: number, cols: number, onData: (b: Uint8Array) => void, onExit: (code: number | null) => void) => {
+    const ch = new Channel<ArrayBuffer | { exit: number | null }>();
+    ch.onmessage = (m) => (m instanceof ArrayBuffer ? onData(new Uint8Array(m)) : onExit(m.exit));
+    return invoke<number>("term_open", { cwd, rows, cols, onEvent: ch });
+  },
+  termWrite: (id: number, data: string) => invoke<void>("term_write", { id, data }),
+  termResize: (id: number, rows: number, cols: number) => invoke<void>("term_resize", { id, rows, cols }),
+  termAck: (id: number, bytes: number) => invoke<void>("term_ack", { id, bytes }),
+  termClose: (id: number) => invoke<void>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
