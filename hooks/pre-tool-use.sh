@@ -270,8 +270,8 @@ glob_climbs() { # pattern-component -> 0 if it is ".." or a brace alternation wi
   [ "$1" = .. ] && return 0
   [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.\.([,}]|$) ]]
 }
-glob_stays() { # pattern-component -> 0 if it is a brace alternation with a "." alternative, which may not descend at all
-  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.([,}]|$) ]]
+glob_stays() { # pattern-component -> 0 if it is a brace alternation with a "." or an empty alternative ({.,x}, {,x}, {x,}), which may not descend
+  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.?([,}]|$) ]]
 }
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
