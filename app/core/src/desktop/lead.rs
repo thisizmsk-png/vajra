@@ -27,6 +27,7 @@ use crate::crew::record::{self, LineKind};
 use crate::crew::redact::Redactor;
 use crate::ids;
 use crate::lock;
+use crate::projects::contract::{SessionKind, SessionStatus};
 use crate::sessions::argv::{LeadArgv, build_lead_argv};
 use crate::sessions::user_env;
 use crate::vajra::bridge::Request;
@@ -219,7 +220,11 @@ impl App {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
-        let running = lock(&self.runs).values().any(|r| orchestrator::project_ref(&r.cwd).0 == orch.id);
+        let live: Vec<(String, PathBuf)> = lock(&self.runs).values().map(|r| (r.run_id.clone(), r.cwd.clone())).collect();
+        let running = live.iter().any(|(run, cwd)| {
+            let pid = self.pinned_project(run).or_else(|| self.projects.find_by_path(cwd).ok().flatten().map(|p| p.id));
+            pid.as_deref() == Some(orch.id.as_str())
+        });
         let (state, reason) = match (&busy, running) {
             (Some(_), _) => ("thinking", "answering a question"),
             (None, true) => ("running", "a run of this project is going"),
@@ -317,7 +322,8 @@ impl App {
         // #82 review: the generation and session are read again now that this ask holds the project's entry.
         // `new_conversation` bumps them only while no entry is held, so this copy is the current conversation; the one
         // read before the lock may predate a "New conversation" and must never be resumed or re-published.
-        let orch = match self.orchestrator(&orch.id, &orch.root) {
+        // The project is checked again here, not only when the request came in: one archived meanwhile gets nothing.
+        let orch = match self.active_project(&orch.id).and_then(|_| self.orchestrator(&orch.id, &orch.root)) {
             Ok(o) => o,
             Err(e) => {
                 lock(&self.lead.active).remove(&orch.id);
@@ -386,8 +392,11 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
-        // The project is pinned now, while the app itself has just chosen the directory (ADR-15 2.3).
-        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, orchestrator::project_ref(cwd).0.as_bytes())?;
+        // The project is pinned now, while the app itself has just chosen the directory (ADR-15 2.3). A folder that is
+        // no project gets no pin (the launch refuses one; a record made otherwise is refused when asked about).
+        if let Ok(Some(p)) = self.projects.find_by_path(cwd) {
+            fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, p.id.as_bytes())?;
+        }
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -476,6 +485,10 @@ impl App {
             let rec = self.lead_sid_dir(&t.run_id);
             fsx::private_dir(&rec).map_err(io)?;
             fsx::write_atomic(&rec, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
+            // And its project, as a launch pins it: later asks follow this record, not a new look at the folder.
+            if self.pinned_project(&t.run_id).is_none() {
+                fsx::write_atomic(&rec, orchestrator::PROJECT_FILE, orch.id.as_bytes()).map_err(io)?;
+            }
         }
         // Per-project files (one ask per Director-General at a time), under `control/`, which the worker guard keeps
         // workers from writing (on the default data dir). Two projects' asks can overlap; each has its own files.
@@ -518,6 +531,8 @@ impl App {
                     .map_err(|e| LeadError::Io(e.code().to_string()))
             }
         };
+        // The last check before the process: the self-test can take minutes, and the project may be archived meanwhile.
+        self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None)?;
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
@@ -528,6 +543,9 @@ impl App {
             }
         };
         let _ = self.bus.push(&stream, &format!("you\t{}", red.clean(framed.text())));
+        // The window's record of the conversation (FG-01 sessions.jsonl); `--resume` never reads it.
+        let record = self.note_orchestrator(orch, Some(&lead_sid), SessionStatus::Running);
+        let (projects, rec_project, rec_gen) = (self.projects.clone(), orch.id.clone(), orch.generation);
 
         let limits = *lock(&self.lead.limits);
         let project = orch.id.clone();
@@ -538,6 +556,7 @@ impl App {
         let first = !resume;
         let sid_dir = orch.dir.clone();
         let sid_text = lead_sid.clone();
+        let sid_text_end = lead_sid.clone();
         let ledger_init = ledger.clone();
         std::thread::spawn(move || {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
@@ -563,6 +582,12 @@ impl App {
                     let _ = ledger(AskState::Failed, None, Some(e.code()));
                     sink.push("error", e.code());
                 }
+            }
+            // The turn is over: the orchestrator is idle again (or its turn failed), still on this conversation.
+            if let Some(id) = record {
+                let status = if matches!(&end, Ok(Done { is_error: false, .. })) { SessionStatus::Stopped } else { SessionStatus::Failed };
+                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, rec_gen, status);
+                let _ = projects.append_session(&line);
             }
             lock(&active).remove(&project);
         });

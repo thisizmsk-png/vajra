@@ -25,7 +25,9 @@ impl Tmp {
         fs::create_dir_all(d.join("home/.claude/skills/vajra/scripts")).unwrap();
         fs::create_dir_all(d.join("repo")).unwrap();
         // The allowlist and the run's directory are compared as real paths; macOS temp is a symlink.
-        Self(fs::canonicalize(&d).unwrap())
+        let d = fs::canonicalize(&d).unwrap();
+        super::super::test_project(&d.join("data"), &d.join("home"), &d.join("repo"));
+        Self(d)
     }
     fn home(&self) -> PathBuf {
         self.0.join("home")

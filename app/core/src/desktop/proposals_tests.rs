@@ -25,7 +25,9 @@ impl Tmp {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("home/.claude/vajra/campaigns")).unwrap();
         fs::create_dir_all(d.join("repo/.git")).unwrap();
-        Self(d.canonicalize().unwrap())
+        let d = d.canonicalize().unwrap();
+        super::super::test_project(&d.join("data"), &d.join("home"), &d.join("repo"));
+        Self(d)
     }
     fn home(&self) -> PathBuf {
         self.0.join("home")
@@ -55,8 +57,9 @@ fn proposed(t: &Tmp, asks: &[&str]) -> (App, String) {
 
 /// As `proposed`, for a project whose repo is at `repo`.
 fn proposed_at(t: &Tmp, repo: &Path, asks: &[&str]) -> (App, String) {
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), repo);
     let app = App::open(&t.0.join("data"), &t.home()).unwrap();
-    let (pid, root) = super::super::orchestrator::project_ref(repo);
+    let root = repo.canonicalize().unwrap();
     app.orchestrator(&pid, &root).unwrap();
     {
         let mut svc = lock(&app.control);
@@ -184,7 +187,7 @@ fn a_proposal_line_whose_fields_do_not_match_its_hash_is_never_started() {
 fn a_lead_bound_to_another_project_cannot_reach_this_projects_proposals() {
     let t = Tmp::new();
     let (app, pid) = proposed(&t, &["ours"]);
-    let other = "k_ffffffffffffffffffffffffffffffff";
+    let other = &super::super::test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
     let mut svc = lock(&app.control);
     svc.set_generation(other, 1).unwrap();
     // It may propose for its own project only; start and dismiss are not tools at all.

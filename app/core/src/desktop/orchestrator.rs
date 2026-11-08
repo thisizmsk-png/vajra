@@ -11,19 +11,32 @@
 //! Each turn is one headless `claude -p --resume` (ADR-13's mechanism, scope widened from run to project): its MCP
 //! calls are bound to `(project, generation)` and see only this project's live runs (`Service::call_tool_for_project`).
 //!
-//! **The project id is a stand-in** until the project store (FG-01) lands: `k_` and a digest of the project key
-//! (`caps::project_key`, the git common dir). It is pinned in the guarded run record at launch, so the app's own
-//! record decides which project a run belongs to, not a later re-read of the repo.
+//! **The project is the store's** (FG-02c): a run's folder is resolved to its `p_` project when it starts (a folder
+//! that is not a project is refused, `not_a_project`), and that id is pinned in the guarded run record, so the app's
+//! own record decides which project a run belongs to, not a later re-read of the repo. Every ask, every
+//! project-bound tool call and every proposal start checks the project still exists and is not archived.
+//!
+//! Before the store, FG-02a/b keyed the orchestrator by a **stand-in** (`k_` and a digest of `caps::project_key`).
+//! Owner decision Q3 carries those over: on a project's first use, a `k_` orchestrator whose recorded root is this
+//! project's root lends it its conversation (`MAP_STANDIN_IDS`). Nothing is deleted.
+//!
+//! The project's `sessions.jsonl` (FG-01) gets a `kind: orchestrator` line per conversation change and turn, and a
+//! `kind: run` line per run, parented to the orchestrator. Those lines are a record for the window only: what
+//! `--resume` uses is the guarded `session` file here, never the log.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
 use super::{App, Res, caps};
 use crate::control::lead::LeadError;
-use crate::control::{fsx, sha256};
+use crate::control::service::ControlError;
+use crate::control::{fsx, sha256, time};
 use crate::ids;
 use crate::lock;
+use crate::projects::contract::{self as pc, Project, Session, SessionKind, SessionStatus};
+use crate::projects::store::{Store, StoreError};
 
 /// The user-facing name of the per-project orchestrator.
 pub(super) const NAME: &str = "Director-General";
@@ -36,6 +49,13 @@ const GEN_FILE: &str = "generation";
 pub(super) const SESSION_FILE: &str = "session";
 /// Most generations a project can go through; far beyond any real use, and keeps the counter well inside `u32`.
 const MAX_GENERATION: u32 = 1_000_000;
+/// Owner decision Q3 (2026-11-08): a project's stand-in (`k_`) conversation carries over to its store id.
+const MAP_STANDIN_IDS: bool = true;
+/// In a `p_` orchestrator dir: the stand-in it took its conversation from. In the `k_` dir: the project it went to.
+const MAPPED_FROM: &str = "mapped-from";
+const MAPPED_TO: &str = "mapped-to";
+/// The orchestrator's own session id (`s_…`) in its project's `sessions.jsonl`, created once.
+const RECORD_FILE: &str = "record";
 
 /// A project's orchestrator as it is on disk now.
 #[derive(Clone, Debug)]
@@ -58,8 +78,9 @@ pub(super) fn stream(project: &str, generation: u32) -> String {
     format!("orchestrator-{project}-g{generation}")
 }
 
-/// The project a run folder belongs to: its stand-in id and the folder the Director-General's turns run in (the repo
-/// root for a folder inside a repo or one of its worktrees, else the folder itself).
+/// The stand-in id FG-02a/b gave a run folder, and the folder its Director-General ran in (the repo root for a folder
+/// inside a repo or one of its worktrees, else the folder itself). Only used now to find a stand-in conversation to
+/// carry over, and to check an old run's stand-in pin against its folder.
 pub(super) fn project_ref(cwd: &Path) -> (String, PathBuf) {
     let key = caps::project_key(cwd);
     let digest = sha256::hex_digest(key.as_os_str().as_encoded_bytes());
@@ -79,28 +100,170 @@ fn io(e: impl std::fmt::Display) -> LeadError {
     LeadError::Io(e.to_string())
 }
 
+/// A store failure that is not about the project itself. The text never carries a path.
+fn store_io(e: &StoreError) -> LeadError {
+    LeadError::Io(match e {
+        StoreError::Full => "the project list is too large to search".into(),
+        _ => "the project store could not be read".into(),
+    })
+}
+
+/// The check every Director-General tool call passes first (`Service::set_project_gate`): the project exists in the
+/// store and is not archived. A stand-in id is not a store project, so its calls are refused.
+pub(super) fn project_gate(store: &Store, pid: &str) -> Result<(), ControlError> {
+    if !pc::valid_project_id(pid) {
+        return Err(ControlError::ProjectMissing);
+    }
+    match store.get(pid) {
+        Ok(p) if p.archived.is_some() => Err(ControlError::ProjectArchived),
+        Ok(_) => Ok(()),
+        Err(StoreError::NotFound | StoreError::Invalid(_)) => Err(ControlError::ProjectMissing),
+        Err(e) => Err(ControlError::Io(std::io::Error::other(e.to_string()))),
+    }
+}
+
+/// One `vajra.session/1` line.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn session_line(id: String, project: &str, kind: SessionKind, parent: Option<String>, native: Option<&str>, run: Option<(&str, &str)>, generation: u32, status: SessionStatus) -> Session {
+    Session {
+        schema: pc::SESSION_SCHEMA.into(),
+        id,
+        project_id: project.into(),
+        kind,
+        parent,
+        provider: "claude".into(),
+        native_session_id: native.map(str::to_string),
+        run_id: run.map(|r| r.0.to_string()),
+        campaign: run.map(|r| r.1.to_string()),
+        task_id: None,
+        attempt: None,
+        generation,
+        status,
+        started: time::iso_secs(SystemTime::now()),
+        ended: None,
+    }
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+}
+
 impl App {
     /// `<data>/control/projects/<pid>/orchestrator/`.
     fn orchestrator_dir(&self, pid: &str) -> PathBuf {
         self.data.join("control").join("projects").join(pid).join("orchestrator")
     }
 
-    /// The project of a run the app recorded: the id pinned in its guarded record at launch. A record from before
-    /// projects existed gets one now, computed from its (guarded) directory, and pinned the same way.
+    /// The project a folder belongs to, for starting something there (FG-02c): it must be a project, and active.
+    pub(super) fn project_of_folder(&self, cwd: &Path) -> Result<Project, LeadError> {
+        let p = self.projects.find_by_path(cwd).map_err(|e| store_io(&e))?.ok_or_else(|| LeadError::NotAProject(cwd.to_string_lossy().into_owned()))?;
+        if p.archived.is_some() {
+            return Err(LeadError::ProjectArchived);
+        }
+        Ok(p)
+    }
+
+    /// The scope gate (ADR-15 2.3): `pid` is in the store and not archived.
+    pub(super) fn active_project(&self, pid: &str) -> Result<Project, LeadError> {
+        match self.projects.get(pid) {
+            Ok(p) if p.archived.is_some() => Err(LeadError::ProjectArchived),
+            Ok(p) => Ok(p),
+            Err(StoreError::NotFound | StoreError::Invalid(_)) => Err(LeadError::ProjectMissing),
+            Err(e) => Err(store_io(&e)),
+        }
+    }
+
+    /// The project id pinned in a run's guarded record, if any.
+    pub(super) fn pinned_project(&self, run_id: &str) -> Option<String> {
+        read_text(&self.data.join("control").join("lead").join(run_id).join(PROJECT_FILE))
+    }
+
+    /// The project of a run the app recorded, and the folder its Director-General's turns run in (the store's recorded
+    /// root). The id pinned in the guarded record at launch decides; the folder is never re-read for it.
+    /// - A store id must still be an active project (`project_archived`, `project_missing`).
+    /// - A stand-in pin (a run from before the store) resolves to the store project of its guarded folder, and only
+    ///   while that folder still gives the same stand-in id; otherwise the run is refused (`lead_guard_missing`).
+    /// - A record with no pin gets one now from its guarded folder, which must be a project.
     pub(super) fn run_project(&self, run_id: &str, cwd: &Path) -> Result<(String, PathBuf), LeadError> {
         let dir = self.data.join("control").join("lead").join(run_id);
-        let (pid, root) = match read_text(&dir.join(PROJECT_FILE)) {
-            Some(p) if ids::valid_project_ref(&p) => (p, project_ref(cwd).1),
+        let p = match read_text(&dir.join(PROJECT_FILE)) {
+            Some(p) if pc::valid_project_id(&p) => self.active_project(&p)?,
+            Some(k) if ids::valid_standin_ref(&k) => {
+                if project_ref(cwd).0 != k {
+                    return Err(LeadError::GuardMissing("the run's project record does not match its folder".into()));
+                }
+                let p = self.projects.find_by_path(cwd).map_err(|e| store_io(&e))?.ok_or_else(|| LeadError::GuardMissing("the run's folder is not a project".into()))?;
+                if p.archived.is_some() {
+                    return Err(LeadError::ProjectArchived);
+                }
+                p
+            }
             Some(_) => return Err(LeadError::GuardMissing("the run's project record is not valid".into())),
             None => {
-                let (p, root) = project_ref(cwd);
+                let p = self.project_of_folder(cwd)?;
                 if dir.is_dir() {
-                    fsx::write_atomic(&dir, PROJECT_FILE, p.as_bytes()).map_err(io)?;
+                    fsx::write_atomic(&dir, PROJECT_FILE, p.id.as_bytes()).map_err(io)?;
                 }
-                (p, root)
+                p
             }
         };
-        Ok((pid, root))
+        Ok((p.id, PathBuf::from(p.root)))
+    }
+
+    /// Decision Q3: on a store project's first use, take the conversation of the stand-in orchestrator FG-02a/b kept
+    /// for the same folder. Only when that `k_` dir's recorded root is this project's root (so a forged `.git` that once
+    /// moved a run cannot hand its conversation over), and only once: `mapped-from` here, `mapped-to` there. The `k_`
+    /// dir is left as it was.
+    fn map_standin(&self, pid: &str, root: &Path, dir: &Path) -> Result<(), LeadError> {
+        let (k, _) = project_ref(root);
+        let kdir = self.orchestrator_dir(&k);
+        let Some(kroot) = read_text(&kdir.join(ROOT_FILE)) else { return Ok(()) };
+        if !same_folder(Path::new(&kroot), root) || read_text(&kdir.join(MAPPED_TO)).is_some_and(|to| to != pid) {
+            return Ok(());
+        }
+        if let Some(g) = read_text(&kdir.join(GEN_FILE)).filter(|g| g.parse::<u32>().is_ok_and(|g| (1..=MAX_GENERATION).contains(&g))) {
+            fsx::write_atomic(dir, GEN_FILE, g.as_bytes()).map_err(io)?;
+        }
+        if let Some(s) = read_text(&kdir.join(SESSION_FILE)).filter(|s| ids::valid_session_id(s)) {
+            fsx::write_atomic(dir, SESSION_FILE, s.as_bytes()).map_err(io)?;
+        }
+        fsx::write_atomic(dir, MAPPED_FROM, k.as_bytes()).map_err(io)?;
+        fsx::write_atomic(&kdir, MAPPED_TO, pid.as_bytes()).map_err(io)?;
+        Ok(())
+    }
+
+    /// The orchestrator's `s_` id in its project's `sessions.jsonl`, created on first need. Store projects only.
+    fn orchestrator_record(&self, orch: &Orchestrator) -> Option<String> {
+        if !pc::valid_project_id(&orch.id) {
+            return None;
+        }
+        if let Some(s) = read_text(&orch.dir.join(RECORD_FILE)).filter(|s| pc::valid_session_id(s)) {
+            return Some(s);
+        }
+        let s = pc::fresh_id(pc::SESSION_PREFIX).ok()?;
+        fsx::write_atomic(&orch.dir, RECORD_FILE, s.as_bytes()).ok()?;
+        Some(s)
+    }
+
+    /// Append the orchestrator's current state to its project's `sessions.jsonl` (display only; a failure is logged).
+    pub(super) fn note_orchestrator(&self, orch: &Orchestrator, native: Option<&str>, status: SessionStatus) -> Option<String> {
+        let id = self.orchestrator_record(orch)?;
+        let line = session_line(id.clone(), &orch.id, SessionKind::Orchestrator, None, native, None, orch.generation, status);
+        if self.projects.append_session(&line).is_err() {
+            self.note("session_record_failed", &[]);
+        }
+        Some(id)
+    }
+
+    /// A run of `project` started: one `kind: run` line, parented to the project's orchestrator.
+    pub(super) fn note_run(&self, project: &Project, run_id: &str, campaign: &str) {
+        let Ok(orch) = self.orchestrator(&project.id, Path::new(&project.root)) else { return };
+        let parent = self.orchestrator_record(&orch);
+        let Ok(id) = pc::fresh_id(pc::SESSION_PREFIX) else { return };
+        let line = session_line(id, &project.id, SessionKind::Run, parent, None, Some((run_id, campaign)), 1, SessionStatus::Running);
+        if self.projects.append_session(&line).is_err() {
+            self.note("session_record_failed", &[]);
+        }
     }
 
     /// The project's orchestrator, created on first use with generation 1 and no session yet (ADR-15 2.5). Its root is
@@ -115,6 +278,9 @@ impl App {
         }
         let dir = self.orchestrator_dir(pid);
         fsx::private_dir(&dir).map_err(io)?;
+        if MAP_STANDIN_IDS && pc::valid_project_id(pid) && !dir.join(ROOT_FILE).exists() {
+            self.map_standin(pid, root, &dir)?;
+        }
         let root = match read_text(&dir.join(ROOT_FILE)) {
             Some(r) if Path::new(&r).is_absolute() => PathBuf::from(r),
             Some(_) => return Err(LeadError::GuardMissing("the Director-General's project folder record is not valid".into())),
@@ -176,6 +342,7 @@ impl App {
         fsx::write_atomic(&orch.dir, GEN_FILE, next.to_string().as_bytes()).map_err(io)?;
         lock(&self.control).set_generation(&orch.id, next).map_err(|e| LeadError::Io(e.code().to_string()))?;
         drop(active);
+        self.note_orchestrator(&Orchestrator { generation: next, session: None, ..orch.clone() }, None, SessionStatus::Stopped);
         Ok(json!({"project_id": orch.id, "generation": next, "stream": stream(&orch.id, next)}))
     }
 }

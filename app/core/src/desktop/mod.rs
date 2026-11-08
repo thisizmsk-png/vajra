@@ -235,7 +235,7 @@ pub struct App {
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
     /// ADR-15: the project records under `<data>/projects`.
-    projects: crate::projects::store::Store,
+    projects: Arc<crate::projects::store::Store>,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
@@ -252,8 +252,13 @@ impl App {
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
-        let projects = crate::projects::store::Store::open(data, home)?;
+        let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
+        {
+            // FG-02c: every Director-General call is refused while its project is archived or gone from the store.
+            let store = projects.clone();
+            svc.set_project_gate(Box::new(move |pid: &str| orchestrator::project_gate(&store, pid)));
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             projects,
@@ -489,12 +494,14 @@ impl App {
         workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
+        // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently.
+        let project = self.project_of_folder(cwd).map_err(|e| e.to_json())?;
         self.within_caps(cwd, workers)?;
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
             // The run's project's Director-General sees and steers it (ADR-15 2.3).
-            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref(cwd).0) {
+            if let Err(e) = svc.set_project(session_id, &project.id) {
                 svc.end_session(session_id);
                 return Err(e.to_json());
             }
@@ -533,6 +540,7 @@ impl App {
         if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
+        self.note_run(&project, run_id, campaign);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
@@ -1769,6 +1777,15 @@ pub use state::Envelope;
 mod tests;
 #[cfg(test)]
 mod state_tests;
+
+/// Tests: make `dir` (created if needed) a project in the store under `data`, as the window's "Add project" does.
+/// Returns its `p_` id. Idempotent: the same folder again is the same project.
+#[cfg(test)]
+pub(crate) fn test_project(data: &Path, home: &Path, dir: &Path) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    paths::ensure_private_dir(data).unwrap();
+    crate::projects::store::Store::open(data, home).unwrap().add(dir, true).unwrap().project().id.clone()
+}
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.

@@ -106,6 +106,8 @@ impl Tmp {
         std::fs::create_dir_all(d.join("bin")).unwrap();
         // A canonical root: the macOS temp dir is a /var → /private/var symlink, and these tests compare paths.
         let d = std::fs::canonicalize(&d).unwrap();
+        // FG-02c: the Director-General serves a project; `repo` is this test's project.
+        super::super::test_project(&d.join("home/Library/Application Support/VajraDesktop"), &d.join("home"), &d.join("repo"));
         std::fs::write(d.join("home/.claude/skills/vajra/hooks/pre-tool-use.sh"), "#!/bin/bash\nexit 0\n").unwrap();
         let doctor = d.join("home/.claude/skills/vajra/scripts/vajra-doctor.sh");
         std::fs::write(&doctor, DOCTOR_OK).unwrap();
@@ -192,14 +194,14 @@ impl Drop for Tmp {
     }
 }
 
-/// The project id (stand-in) of the test repo.
+/// The store project id of the test repo.
 fn pid(t: &Tmp) -> String {
-    super::orchestrator::project_ref(&t.repo()).0
+    super::super::test_project(&t.data(), &t.home(), &t.repo())
 }
 
 /// The Director-General's guarded dir for the project of `repo`.
 fn orch_dir_of(t: &Tmp, repo: &Path) -> PathBuf {
-    t.data().join("control/projects").join(super::orchestrator::project_ref(repo).0).join("orchestrator")
+    t.data().join("control/projects").join(super::super::test_project(&t.data(), &t.home(), repo)).join("orchestrator")
 }
 
 fn orch_dir(t: &Tmp) -> PathBuf {
@@ -643,7 +645,7 @@ fn two_projects_asking_at_once_each_get_their_own_settings() {
     let app = t.app();
     let (sid_b, run_b) = ("2b8fad5b-d9cb-469f-a165-70867728950e", "20261106-0912");
     let repo_b = t.0.join("repo-b");
-    std::fs::create_dir_all(&repo_b).unwrap();
+    super::super::test_project(&t.data(), &t.home(), &repo_b);
     lock(&app.runs).insert(
         format!("run-{sid_b}"),
         Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-y".into(), cwd: repo_b.clone(), nonces: Redactor::default() },
@@ -675,7 +677,7 @@ fn two_projects_asking_at_once_each_get_their_own_settings() {
         let dir = orch_dir_of(&t, &repo);
         assert!(dir.join("settings.json").is_file());
         let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
-        let want = super::orchestrator::project_ref(&repo).0;
+        let want = super::super::test_project(&t.data(), &t.home(), &repo);
         assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_PROJECT"], want.as_str(), "each Director-General is bound to its own project");
     }
     for h in lock(&app.lead.active).values() {
@@ -850,6 +852,7 @@ fn a_data_dir_override_outside_the_guarded_location_is_refused() {
     let t = Tmp::new();
     let other = t.0.join("elsewhere");
     std::fs::create_dir_all(&other).unwrap();
+    super::super::test_project(&other, &t.home(), &t.repo());
     let app = App::open(&other, &t.home()).unwrap();
     app.lead.set_bin(Some(t.bin("claude")));
     app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
@@ -1181,7 +1184,7 @@ fn the_app_runs_at_most_two_director_general_turns() {
     let mut runs = vec![RUN_ID.to_string()];
     for (i, sid) in ["4d8fad5b-d9cb-469f-a165-70867728950e", "5e8fad5b-d9cb-469f-a165-70867728950e"].iter().enumerate() {
         let repo = t.0.join(format!("repo-{i}"));
-        std::fs::create_dir_all(&repo).unwrap();
+        super::super::test_project(&t.data(), &t.home(), &repo);
         let run = format!("20261106-092{i}");
         lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: (*sid).into(), run_id: run.clone(), campaign: format!("c{i}"), cwd: repo, nonces: Redactor::default() });
         runs.push(run);
@@ -1294,10 +1297,9 @@ fn a_runs_project_is_pinned_at_launch_and_a_bad_record_fails_closed() {
     app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
     let rec = t.data().join("control/lead").join(RUN_ID).join("project");
     assert_eq!(std::fs::read_to_string(&rec).unwrap(), pid(&t));
-    // The folder later looks like another project (a `.git` appears): the run stays with the project it was pinned to.
+    // The folder later looks like another repo (a `.git` appears): the run stays with the project it was pinned to.
     let pinned = pid(&t);
     std::fs::create_dir_all(t.repo().join(".git")).unwrap();
-    assert_ne!(pid(&t), pinned);
     let r = app.ask_lead(RUN_ID, "hi").unwrap();
     assert_eq!(r["project_id"], pinned.as_str());
     wait_until("the ask", || idle(&app));
@@ -1305,3 +1307,6 @@ fn a_runs_project_is_pinned_at_launch_and_a_bad_record_fails_closed() {
     crate::control::fsx::write_atomic(rec.parent().unwrap(), "project", b"../../elsewhere").unwrap();
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
 }
+
+#[path = "lead_store_tests.rs"]
+mod store;

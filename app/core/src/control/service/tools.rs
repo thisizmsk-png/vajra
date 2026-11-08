@@ -43,6 +43,9 @@ impl Service {
         if !crate::ids::valid_project_ref(project) {
             return Err(ControlError::InvalidArgs("project".into()));
         }
+        if let Some(gate) = &self.project_gate {
+            gate(project)?;
+        }
         if self.generations.get(project) != Some(&generation) {
             return Err(ControlError::StaleLeadGeneration);
         }
