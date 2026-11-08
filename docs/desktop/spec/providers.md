@@ -49,6 +49,16 @@ Tauri command only (not an MCP tool). Answer, at most 64 KiB, at most 8 provider
 }
 ```
 
+**Stable codes (wording stays in the UI).** `limits[].code`, `login.route_code` and `login.detail_code` are stable lowercase
+codes (`[a-z0-9_]{1,64}`); the UI maps them to its own approved strings and shows the core's `reason` / `route` / `detail`
+only for a code it does not know. All three are optional so older records still parse. Codes in use: limits
+`no_message_mid_run`, `no_redirect_mid_run`, `no_inspect`, `no_transcript`, `no_vajra_workflow`, `stop_ends_process`,
+`not_installed`, `not_supported`; route `uses_claude_login`, `uses_codex_login`; detail `check_unfinished`,
+`check_not_understood`.
+
+**Stop.** A provider whose `capabilities.stop` is `terminate` (Codex) ends the process and has no hook hand-off, so it
+carries a `stop` limit (code `stop_ends_process`) and the Stop button can say so. A `hook_block` provider (Claude) has none.
+
 Text fields (`name`, `route`, `reason`, `version`, `tested_range`, `detail`) are non-blank, at most 200 characters, with no
 control or invisible characters. `limits` has at most 16 entries; `control` is a label (`message`, `redirect`, `inspect`,
 `transcript`, `vajra_workflow`, `resume`, `start`). Every capability that is off has a matching `limits` entry so the UI
@@ -59,11 +69,23 @@ shows a disabled control with its reason instead of hiding it.
 The project's chosen provider, so one poll answers "can this project start, and with what?":
 
 ```json
-{"id": "codex", "installed": true, "login_state": "cannot_tell",
+{"id": "codex", "name": "Codex CLI", "installed": true, "tested": "untested", "login_state": "cannot_tell",
  "capabilities": { ... as above ... }, "limits": [ ... as above ... ]}
 ```
 
 Older readers ignore it (unknown fields are ignored). It is absent only when no provider is chosen yet.
+`name` and `tested` are there so Crew and Run can say "Codex" and mark an untested version without a second `provider_list`
+read.
+
+**No idle work.** `login_state` here is copied from the LAST `provider_list` answer (the core keeps it in memory); reading
+`project_state` never runs a CLI. The status commands run only when `provider_list` is called: Settings > Providers open,
+Recheck, or before a Start. Each run has a 5 second timeout, and nothing polls. Before the first `provider_list` the login
+state reads `cannot_tell`.
+
+**A chosen provider this build has no adapter for** (the preference names one that was removed or is from a newer build) is
+present, not absent (absent means "none chosen"): `installed = false`, `login_state = not_installed`, `tested = unknown`, all
+capabilities off, and `limits` for `start` and `resume` with code `not_supported`. Fixture:
+`project_state.provider.unsupported.v1.json`; the core builds it with `providers::detect::unsupported`.
 
 ## Versioning
 
@@ -103,7 +125,8 @@ G1 to G6, G10, G12 are exercised by the core push. This push covers G7 to G11 an
   - Anything else (a CLI too old to have the command, a timeout, a cut or unparseable answer) is `cannot_tell` with a one
     sentence `detail`, and does not block a start.
 - The status output can name an account; it is read for the one value above and never stored, logged or sent.
-- Choice: the effective `agent` preference (`claude` | `codex`, final key per vajra-20's settings contract) is read by the UI
+- Choice: the effective `agent` preference (`claude` | `codex`; the key is `agent`, written with `act_preferences_update` and the
+  FG-11 envelope, per vajra-20's settings contract) is read by the UI
   with `preferences_read({projectId})` when a launch form opens and passed as `provider` to `start_run` / `act_start_run`
   / `resume_run`. The core adds no settings store. `resume_targets` returns the `provider` that ran each campaign, and
   Resume passes it back, so a Codex run is never resumed on Claude.

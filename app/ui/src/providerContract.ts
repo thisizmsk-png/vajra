@@ -27,14 +27,18 @@ export interface CapabilityFlags {
 /** A control that is off, with the words to show beside it. Never hidden. */
 export interface Limit {
   control: string;
+  /** Stable code (`no_message_mid_run`, `stop_ends_process`, `not_installed`, `not_supported`): map it to approved wording; `reason` is the fallback for a code you do not know. */
+  code: string | null;
   reason: string;
 }
 
 export interface Login {
   route: string;
+  route_code: string | null;
   state: LoginState;
   checked_by: string;
   detail: string | null;
+  detail_code: string | null;
 }
 
 export interface BillingInfo {
@@ -64,7 +68,10 @@ export interface ProviderList {
 /** The additive `provider` object in `project_state`. */
 export interface ProjectProvider {
   id: string;
+  name: string;
   installed: boolean;
+  tested: Tested;
+  /** From the last provider_list check; reading project_state never runs a CLI. */
   login_state: LoginState;
   capabilities: CapabilityFlags;
   limits: Limit[];
@@ -125,12 +132,14 @@ function limits(v: unknown): Limit[] | null {
   const out: Limit[] = [];
   for (const x of v) {
     if (!isObj(x) || !str(x.control) || !str(x.reason)) return null;
-    out.push({ control: x.control, reason: x.reason });
+    if (!optStrOk(x.code)) return null;
+    out.push({ control: x.control, code: optStr(x.code), reason: x.reason });
   }
   return out;
 }
 
-const limitsOk = (l: Limit[]): boolean => l.length <= MAX_LIMITS && l.every((x) => validLabel(x.control) && textOk(x.reason));
+const validCode = (c: string): boolean => c !== "" && c.length <= 64 && whole(/[a-z0-9_]+/, c);
+const limitsOk = (l: Limit[]): boolean => l.length <= MAX_LIMITS && l.every((x) => validLabel(x.control) && textOk(x.reason) && (x.code === null || validCode(x.code)));
 
 function parseJson(text: string): { o: Record<string, unknown> } | Fail {
   if (byteLen(text) > MAX_BYTES) return bad("malformed", "answer too large");
@@ -155,13 +164,16 @@ function provider(o: unknown): ParseResult<ProviderInfo> {
   const lims = limits(o.limits);
   if (tested === null || caps === null || lims === null || !isObj(lg) || !isObj(bl)) return bad("malformed", "missing or mistyped field");
   const state = pick(lg.state, LOGIN, "cannot_tell" as LoginState);
-  if (state === null || !str(lg.route) || !str(lg.checked_by) || !optStrOk(lg.detail)) return bad("malformed", "login");
+  if (state === null || !str(lg.route) || !str(lg.checked_by) || !optStrOk(lg.detail) || !optStrOk(lg.route_code) || !optStrOk(lg.detail_code)) return bad("malformed", "login");
   if (!str(bl.source) || !optStrOk(bl.key_in_app_env)) return bad("malformed", "billing");
 
   if (!validProvider(o.id)) return bad("invalid", "provider id");
   if (!textOk(o.name) || !textOk(lg.route) || !validLabel(lg.checked_by)) return bad("invalid", "text");
   for (const [v, what] of [[o.version, "version"], [o.tested_range, "tested_range"], [lg.detail, "detail"]] as const) {
     if (str(v) && !textOk(v)) return bad("invalid", what);
+  }
+  for (const [c, what] of [[lg.route_code, "route_code"], [lg.detail_code, "detail_code"]] as const) {
+    if (str(c) && !validCode(c)) return bad("invalid", what);
   }
   const path = optStr(o.path);
   if (path !== null && (!path.startsWith("/") || byteLen(path) > 4096 || path.includes("\0"))) return bad("invalid", "path");
@@ -182,7 +194,7 @@ function provider(o: unknown): ParseResult<ProviderInfo> {
       tested_range: optStr(o.tested_range),
       capabilities: caps,
       limits: lims,
-      login: { route: lg.route, state, checked_by: lg.checked_by, detail: optStr(lg.detail) },
+      login: { route: lg.route, route_code: optStr(lg.route_code), state, checked_by: lg.checked_by, detail: optStr(lg.detail), detail_code: optStr(lg.detail_code) },
       billing: { source: bl.source, key_in_app_env: key },
     },
   };
@@ -214,8 +226,9 @@ export function parseProjectProvider(text: string): ParseResult<ProjectProvider>
   const caps = capabilities(o.capabilities);
   const lims = limits(o.limits);
   const state = pick(o.login_state, LOGIN, "cannot_tell" as LoginState);
-  if (!str(o.id) || typeof o.installed !== "boolean" || state === null || caps === null || lims === null) return bad("malformed", "missing or mistyped field");
-  if (!validProvider(o.id) || (state === "not_installed") === o.installed) return bad("invalid", "provider");
+  const tested = pick(o.tested, TESTED, "unknown" as Tested);
+  if (!str(o.id) || !str(o.name) || typeof o.installed !== "boolean" || tested === null || state === null || caps === null || lims === null) return bad("malformed", "missing or mistyped field");
+  if (!textOk(o.name) || !validProvider(o.id) || (state === "not_installed") === o.installed) return bad("invalid", "provider");
   if (!limitsOk(lims)) return bad("invalid", "limits");
-  return { ok: true, value: { id: o.id, installed: o.installed, login_state: state, capabilities: caps, limits: lims } };
+  return { ok: true, value: { id: o.id, name: o.name, installed: o.installed, tested, login_state: state, capabilities: caps, limits: lims } };
 }

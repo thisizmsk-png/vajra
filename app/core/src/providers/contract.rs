@@ -67,6 +67,10 @@ pub struct CapabilityFlags {
 pub struct Limit {
     /// A capability name: `message`, `redirect`, `inspect`, `transcript`, `vajra_workflow`, `resume` or `start`.
     pub control: String,
+    /// A stable code for this reason (`no_message_mid_run`, `stop_ends_process`, `not_installed`, `not_supported`), so a
+    /// UI can show its own approved wording. `reason` stays as the fallback text for a code the UI does not know.
+    #[serde(default)]
+    pub code: Option<String>,
     pub reason: String,
 }
 
@@ -74,11 +78,17 @@ pub struct Limit {
 pub struct Login {
     /// Plain words for the route, e.g. "Uses your Claude Code login". Never a credential.
     pub route: String,
+    /// Stable code for the route (`uses_claude_login`, `uses_codex_login`); `route` is the fallback text.
+    #[serde(default)]
+    pub route_code: Option<String>,
     pub state: LoginState,
     /// `cli_status` when the CLI's own status command answered, `none` when the CLI has no such command.
     pub checked_by: String,
     #[serde(default)]
     pub detail: Option<String>,
+    /// Stable code for `detail` (`check_unfinished`, `check_not_understood`); `detail` is the fallback text.
+    #[serde(default)]
+    pub detail_code: Option<String>,
 }
 
 /// Where usage is billed: always the CLI's own login. `key_in_app_env` names (never holds) a key the app saw and did
@@ -121,7 +131,11 @@ pub struct ProviderList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectProvider {
     pub id: String,
+    /// Display name ("Codex CLI") and whether the version is tested, so Crew and Run need no second `provider_list` read.
+    pub name: String,
     pub installed: bool,
+    pub tested: Tested,
+    /// From the LAST `provider_list` check; reading `project_state` never runs a CLI.
     pub login_state: LoginState,
     pub capabilities: CapabilityFlags,
     #[serde(default)]
@@ -132,12 +146,17 @@ fn text_ok(s: &str) -> bool {
     !s.trim().is_empty() && s.chars().count() <= MAX_TEXT_CHARS && !s.chars().any(|c| c.is_control() || crate::control::lead::invisible(c))
 }
 
+/// A stable code: lowercase letters, digits and underscores, 1 to 64.
+fn valid_code(c: &str) -> bool {
+    !c.is_empty() && c.len() <= 64 && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 fn limits_ok(l: &[Limit]) -> Result<(), ContractError> {
     if l.len() > MAX_LIMITS {
         return Err(ContractError::Invalid("limits"));
     }
     for x in l {
-        if !valid_label(&x.control) || !text_ok(&x.reason) {
+        if !valid_label(&x.control) || !text_ok(&x.reason) || x.code.as_deref().is_some_and(|c| !valid_code(c)) {
             return Err(ContractError::Invalid("limits"));
         }
     }
@@ -151,6 +170,11 @@ impl ProviderInfo {
         }
         if !text_ok(&self.name) || !text_ok(&self.login.route) || !valid_label(&self.login.checked_by) {
             return Err(ContractError::Invalid("text"));
+        }
+        for (c, what) in [(&self.login.route_code, "route_code"), (&self.login.detail_code, "detail_code")] {
+            if c.as_deref().is_some_and(|c| !valid_code(c)) {
+                return Err(ContractError::Invalid(what));
+            }
         }
         for (v, what) in [(&self.version, "version"), (&self.tested_range, "tested_range"), (&self.login.detail, "detail")] {
             if v.as_deref().is_some_and(|s| !text_ok(s)) {
@@ -176,7 +200,7 @@ impl ProviderInfo {
 
 impl ProjectProvider {
     pub fn validate(&self) -> Result<(), ContractError> {
-        if !valid_provider(&self.id) || (self.login_state == LoginState::NotInstalled) == self.installed {
+        if !text_ok(&self.name) || !valid_provider(&self.id) || (self.login_state == LoginState::NotInstalled) == self.installed {
             return Err(ContractError::Invalid("provider"));
         }
         limits_ok(&self.limits)
