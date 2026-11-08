@@ -132,12 +132,20 @@ impl App {
             Ok(Begin::Run(_)) => {
                 // `accepted` is now in the projection.
                 self.invalidate(&env.project_id);
-                let out = effect();
+                // A panicking effect may have half run: the receipt says unknown, not accepted for ever.
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(effect)).unwrap_or_else(|_| Err(fail("effect_panicked", "the action stopped unexpectedly")));
                 let (state, reason) = match &out {
                     Ok(_) => (State::Done, None),
                     Err(v) => {
                         let code = v["error"].as_str().unwrap_or("failed");
-                        (if FAILED_CODES.contains(&code) { State::Failed } else { State::Rejected }, Some(code.to_string()))
+                        let state = if code == "effect_panicked" {
+                            State::Unknown
+                        } else if FAILED_CODES.contains(&code) {
+                            State::Failed
+                        } else {
+                            State::Rejected
+                        };
+                        (state, Some(code.to_string()))
                     }
                 };
                 let detail = out.as_ref().err().and_then(|v| v["detail"].as_str().map(str::to_string));
@@ -152,7 +160,11 @@ impl App {
                 let rc = match h.store.finish_with_generation(&env.action_id, state, reason.as_deref(), detail.as_deref(), new_gen, rev, now_ms()) {
                     Ok(rc) => rc,
                     // The effect ran but its outcome could not be written: say so, never claim done.
-                    Err(_) => return json!({"receipt": null, "error": fail("io_error", "outcome not recorded"), "result": out.ok()}),
+                    Err(_) => {
+                        drop(h);
+                        self.emit_projects(vec![json!({"project_id": env.project_id, "rev": rev})]);
+                        return json!({"receipt": null, "error": fail("io_error", "outcome not recorded"), "result": out.ok()});
+                    }
                 };
                 drop(h);
                 self.emit_projects(vec![json!({"project_id": env.project_id, "rev": rev})]);

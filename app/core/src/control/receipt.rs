@@ -113,8 +113,8 @@ impl Store {
     pub fn open(path: &Path, now_ms: u64) -> io::Result<Self> {
         let records = Ledger::read_tail(path, TAIL_BYTES)?;
         let mut ledger = Ledger::open(path)?;
-        let mut s = Self { ledger: Ledger::open(path)?, by_id: HashMap::new(), order: VecDeque::new() };
-        std::mem::swap(&mut s.ledger, &mut ledger);
+        ledger.seal_torn_tail()?;
+        let mut s = Self { ledger, by_id: HashMap::new(), order: VecDeque::new() };
         for r in records {
             if r.get("kind").and_then(Value::as_str) != Some("receipt") {
                 continue;
@@ -255,7 +255,16 @@ impl Store {
         }
         rc.rev = rev;
         rc.ts_ms = now_ms;
-        self.persist(&rc)?;
+        if let Err(e) = self.persist(&rc) {
+            // The effect ran (or may have) but its outcome is not on disk. Say `unknown` in memory too, so a retry
+            // of this action_id is told to look first instead of waiting on an `accepted` that will never finish.
+            rc.state = State::Unknown;
+            rc.reason = Some("outcome_not_recorded".into());
+            rc.detail = Some("the action may have happened but its outcome could not be saved; check the project before acting again".into());
+            rc.retry = Retry::AfterRefresh;
+            self.insert(rc);
+            return Err(e);
+        }
         self.insert(rc.clone());
         Ok(rc)
     }
@@ -437,6 +446,32 @@ mod tests {
         let stale = done(s.begin(&req("act-0004-dddd", Some(2)), Some(3), 9, T0).unwrap());
         let want: Value = serde_json::from_str(include_str!("../../tests/contract/receipt_stale.json")).unwrap();
         assert_eq!(serde_json::to_value(&stale).unwrap(), want);
+    }
+
+    // Audit: an outcome that cannot be saved must not leave the receipt `accepted` for ever.
+    #[test]
+    fn an_unsaved_outcome_reads_unknown_on_retry() {
+        let d = tempdir();
+        let mut s = Store::open(&path(&d), T0).unwrap();
+        run(s.begin(&req("act-0010-jjjj", None), None, 1, T0).unwrap());
+        s.ledger.break_for_test();
+        assert!(s.finish("act-0010-jjjj", State::Done, None, None, 2, T0 + 1).is_err());
+        let r = done(s.begin(&req("act-0010-jjjj", None), None, 3, T0 + 2).unwrap());
+        assert_eq!((r.state, r.reason.as_deref(), r.retry), (State::Unknown, Some("outcome_not_recorded"), Retry::AfterRefresh));
+    }
+
+    // Audit: a crash mid-append leaves a line without a newline; the next record must not be glued onto it.
+    #[test]
+    fn a_torn_last_line_does_not_swallow_the_next_receipt() {
+        let d = tempdir();
+        let p = path(&d);
+        std::fs::write(&p, "{\"v\":1,\"kind\":\"receipt\",\"action_id\":\"act-torn-0001\",\"rec").unwrap();
+        {
+            let mut s = Store::open(&p, T0).unwrap();
+            run(s.begin(&req("act-0011-kkkk", None), None, 1, T0).unwrap());
+        }
+        let s = Store::open(&p, T0 + 1).unwrap();
+        assert_eq!(s.get("act-0011-kkkk").unwrap().state, State::Unknown, "the record after the fragment was read back");
     }
 
     #[test]

@@ -314,3 +314,16 @@ fn a_second_start_with_the_same_expected_generation_is_stale_after_the_first() {
     assert!(!second_ran.load(Ordering::SeqCst), "the stale start never ran");
     assert_eq!((state_of(&second), second["receipt"]["reason"].as_str(), second["receipt"]["current_generation"].as_u64()), ("rejected", Some("stale_generation"), Some(1)));
 }
+
+// Audit: a panicking effect leaves an `unknown` receipt (and the start gate usable), not an `accepted` one.
+#[test]
+fn a_panicking_effect_reads_unknown_and_does_not_wedge_later_starts() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = app.act(&env("run-0020-tttt", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || panic!("boom"));
+    assert_eq!((state_of(&r), r["receipt"]["retry"].as_str()), ("unknown", Some("after_refresh")));
+    let replay = app.act(&env("run-0020-tttt", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || Ok(json!({})));
+    assert_eq!(replay["receipt"]["state"], "unknown", "never re-run");
+    let next = app.act(&env("run-0021-uuuu", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || Ok(json!({})));
+    assert_eq!(state_of(&next), "done");
+}
