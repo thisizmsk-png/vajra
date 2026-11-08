@@ -613,6 +613,7 @@ impl App {
             })
             .collect();
         lock(&self.control).set_workers(infos);
+        self.workers_published();
     }
 
     /// Keep the control service's workers and the transcript tails current for the live run, without any UI view

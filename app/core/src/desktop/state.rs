@@ -34,6 +34,8 @@ pub(super) struct Hub {
     run_gen: HashMap<String, u64>,
     /// Held from judging a start run to recording its outcome, so two starts are decided one after the other.
     start_gate: std::sync::Arc<Mutex<()>>,
+    /// Fingerprint of the worker list `project_state` last showed, to notice a quiet change.
+    workers_fp: u64,
 }
 
 /// Where `act` gets the target's current generation.
@@ -57,7 +59,7 @@ impl Hub {
         // Recovered state: the highest revision any receipt carries, and each project's run generation (a done
         // start run records its new generation in `current_generation`).
         let mut base = now;
-        let mut run_gen: HashMap<String, u64> = HashMap::new();
+        let mut run_gen: HashMap<String, u64> = store.generations().clone();
         for r in store.all() {
             base = base.max(r.rev.saturating_add(1));
             if r.action == "start_run" && r.state == State::Done {
@@ -65,7 +67,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default() })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0 })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -150,14 +152,24 @@ impl App {
                 };
                 let detail = out.as_ref().err().and_then(|v| v["detail"].as_str().map(str::to_string));
                 let mut h = lock(&self.acts);
-                let mut new_gen = None;
+                // The generation to put in the receipt: a start's new project generation, or the one the effect
+                // itself found when it refused as stale.
+                let mut new_gen = out.as_ref().err().filter(|_| state == State::Rejected).and_then(|v| v["current_generation"].as_u64());
+                let mut recorded = Ok(());
                 if state == State::Done && action == "start_run" {
-                    let g = h.run_gen.entry(env.project_id.clone()).or_insert(0);
-                    *g += 1;
-                    new_gen = Some(*g);
+                    let g = h.run_gen.get(&env.project_id).copied().unwrap_or(0) + 1;
+                    // Durable first: the high-water mark must not be lost with the receipt that reports it.
+                    recorded = h.store.record_generation(&env.project_id, g);
+                    h.run_gen.insert(env.project_id.clone(), g);
+                    new_gen = Some(g);
                 }
                 let rev = h.bump(&env.project_id);
-                let rc = match h.store.finish_with_generation(&env.action_id, state, reason.as_deref(), detail.as_deref(), new_gen, rev, now_ms()) {
+                let finished = match recorded {
+                    Ok(()) => h.store.finish_with_generation(&env.action_id, state, reason.as_deref(), detail.as_deref(), new_gen, rev, now_ms()),
+                    // The generation could not be made durable: do not claim done.
+                    Err(_) => h.store.finish_with_generation(&env.action_id, State::Unknown, Some("outcome_not_recorded"), Some("the action may have happened but its outcome could not be saved; check the project before acting again"), None, rev, now_ms()),
+                };
+                let rc = match finished {
                     Ok(rc) => rc,
                     // The effect ran but its outcome could not be written: say so, never claim done.
                     Err(_) => {
@@ -174,6 +186,29 @@ impl App {
         match outcome {
             Ok(v) => json!({"receipt": rc, "result": v}),
             Err(e) => json!({"receipt": rc, "error": e}),
+        }
+    }
+
+    /// Called after the control service's worker list was replaced. If what `project_state` shows changed (even with
+    /// no transcript output on the bus), advance every known project's revision and notify, after the change.
+    pub(super) fn workers_published(&self) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for w in lock(&self.control).workers_view() {
+            w.to_string().hash(&mut hasher);
+        }
+        let fp = hasher.finish();
+        let projects = {
+            let mut h = lock(&self.acts);
+            if h.workers_fp == fp {
+                return;
+            }
+            h.workers_fp = fp;
+            let ids: Vec<String> = h.revs.keys().cloned().collect();
+            ids.into_iter().map(|p| json!({"project_id": p, "rev": h.bump(&p)})).collect::<Vec<_>>()
+        };
+        if !projects.is_empty() {
+            self.emit_projects(projects);
         }
     }
 

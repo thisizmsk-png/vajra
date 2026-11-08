@@ -101,6 +101,9 @@ pub struct Store {
     by_id: HashMap<String, Receipt>,
     order: VecDeque<String>,
     max: usize,
+    /// project_id -> highest generation ever recorded. Kept as its own ledger lines (`kind:"project_generation"`),
+    /// outside the dedupe index, so it never ages out with the receipts.
+    generations: HashMap<String, u64>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -120,8 +123,15 @@ impl Store {
         let records = Ledger::read_all(path)?;
         let mut ledger = Ledger::open(path)?;
         ledger.seal_torn_tail()?;
-        let mut s = Self { ledger, by_id: HashMap::new(), order: VecDeque::new(), max };
+        let mut s = Self { ledger, by_id: HashMap::new(), order: VecDeque::new(), max, generations: HashMap::new() };
         for r in records {
+            if r.get("kind").and_then(Value::as_str) == Some("project_generation") {
+                if let (Some(p), Some(g)) = (r.get("project_id").and_then(Value::as_str), r.get("generation").and_then(Value::as_u64)) {
+                    let e = s.generations.entry(p.to_string()).or_insert(0);
+                    *e = (*e).max(g);
+                }
+                continue;
+            }
             if r.get("kind").and_then(Value::as_str) != Some("receipt") {
                 continue;
             }
@@ -169,6 +179,19 @@ impl Store {
 
     fn persist(&mut self, rc: &Receipt) -> io::Result<()> {
         self.ledger.append(&json!({"v": 1, "kind": "receipt", "action_id": rc.action_id, "receipt": rc}))
+    }
+
+    /// Record that `project_id` reached `generation`. Written before the receipt that reports it, and kept for good.
+    pub fn record_generation(&mut self, project_id: &str, generation: u64) -> io::Result<()> {
+        self.ledger.append(&json!({"v": 1, "kind": "project_generation", "project_id": project_id, "generation": generation}))?;
+        let e = self.generations.entry(project_id.to_string()).or_insert(0);
+        *e = (*e).max(generation);
+        Ok(())
+    }
+
+    /// Every project's durable generation high-water mark.
+    pub fn generations(&self) -> &HashMap<String, u64> {
+        &self.generations
     }
 
     /// The newest receipts of one project, newest first, at most `n`.
@@ -480,6 +503,22 @@ mod tests {
         }
         let s = Store::open(&p, T0 + 5).unwrap();
         assert_eq!(s.get("act-0024-eeee").unwrap().state, State::Done);
+    }
+
+    // Review P2: a generation outlives the receipt that reported it.
+    #[test]
+    fn a_generation_survives_its_receipt_expiring() {
+        let d = tempdir();
+        let p = path(&d);
+        {
+            let mut s = Store::open(&p, T0).unwrap();
+            run(s.begin(&req("act-0030-ffff", None), None, 1, T0).unwrap());
+            s.record_generation("proj-1", 4).unwrap();
+            s.finish("act-0030-ffff", State::Done, None, None, 2, T0).unwrap();
+        }
+        let s = Store::open(&p, T0 + DEDUPE_MS + 1).unwrap();
+        assert!(s.get("act-0030-ffff").is_none(), "the receipt aged out");
+        assert_eq!(s.generations().get("proj-1"), Some(&4), "the generation did not");
     }
 
     #[test]

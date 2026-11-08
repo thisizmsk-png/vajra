@@ -208,6 +208,11 @@ fn a_worker_replaced_between_acceptance_and_effect_is_not_stopped() {
     });
     assert_eq!((state_of(&r), r["receipt"]["reason"].as_str(), r["receipt"]["retry"].as_str()), ("rejected", Some("stale_generation"), Some("after_refresh")));
     assert_eq!(r["error"]["current_generation"], 3);
+    // The receipt itself carries the generation the effect found, and so does its replay.
+    assert_eq!(r["receipt"]["current_generation"], 3);
+    let again = app.act(&e, Caller::Ui, true, "stop_worker", "bhima", Some(2), || panic!("never re-run"));
+    assert_eq!(again["receipt"]["current_generation"], 3);
+    assert_eq!(again["receipt"], r["receipt"]);
     let l = app.ledger().unwrap();
     assert!(!l["records"].as_array().unwrap().iter().any(|x| x["kind"] == "stop"), "attempt 3 was not stopped");
 }
@@ -326,4 +331,61 @@ fn a_panicking_effect_reads_unknown_and_does_not_wedge_later_starts() {
     assert_eq!(replay["receipt"]["state"], "unknown", "never re-run");
     let next = app.act(&env("run-0021-uuuu", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || Ok(json!({})));
     assert_eq!(state_of(&next), "done");
+}
+
+// Review P2: a worker list that changes with nothing on the bus (a status update from the journal) advances the
+// revision, after the list is published, and notifies; an unchanged list does not.
+#[test]
+fn a_quiet_worker_change_advances_the_revision_and_notifies() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let s2 = seen.clone();
+    app.set_change_sink(Box::new(move |p| s2.lock().unwrap().push(p)));
+    let rev0 = app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap();
+    app.workers_published(); // first sighting of the list
+    let rev1 = app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap();
+    assert!(rev1 > rev0);
+    let n = seen.lock().unwrap().len();
+    app.workers_published(); // nothing changed
+    assert_eq!(seen.lock().unwrap().len(), n);
+    assert_eq!(app.project_state("proj-a", Some(rev1)).unwrap()["unchanged"], true);
+    // The worker moves to attempt 2: no bus line, but the projection changed.
+    lock(&app.control).set_workers(vec![worker(2)]);
+    app.workers_published();
+    let ps = app.project_state("proj-a", Some(rev1)).unwrap();
+    assert_eq!(ps["unchanged"], false);
+    assert_eq!(ps["workers"][0]["round"], 2, "the state served at the new revision has the new list");
+    assert!(seen.lock().unwrap().len() > n);
+}
+
+// Review P2: a project's generation outlives a restart even after its receipts have aged out.
+#[test]
+fn project_generation_is_durable_independent_of_receipts() {
+    let t = Tmp::new();
+    {
+        let app = t.app();
+        let r = app.act(&env("run-0022-vvvv", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || Ok(json!({})));
+        assert_eq!(state_of(&r), "done");
+    }
+    // Age the receipt out of the dedupe window by rewriting its ts in the ledger, as seven days passing would.
+    let p = t.0.join("data/control/ledger.jsonl");
+    let old = std::fs::read_to_string(&p).unwrap();
+    let aged: String = old
+        .lines()
+        .map(|l| {
+            let mut v: Value = serde_json::from_str(l).unwrap();
+            if v["kind"] == "receipt" {
+                v["receipt"]["ts_ms"] = json!(1_000);
+            }
+            format!("{v}\n")
+        })
+        .collect();
+    std::fs::write(&p, aged).unwrap();
+    let app = t.app();
+    assert_eq!(app.project_state("proj-a", None).unwrap()["receipts"].as_array().unwrap().len(), 0, "the receipts aged out");
+    assert_eq!(app.project_state("proj-a", None).unwrap()["generations"]["project"], 1);
+    let stale = app.act_start_run(&env("run-0023-wwww", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None }, "/nonexistent");
+    assert_eq!(stale["receipt"]["reason"], "stale_generation");
 }

@@ -305,12 +305,14 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
                 loop {
-                    if let Some(mut payload) = collect_changes(&sub, Duration::from_secs(1)) {
+                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
+                    handle.state::<App>().refresh_workers();
+                    if let Some(mut payload) = changed {
                         // The revision each known project is now at, so a subscriber refetches `project_state`.
                         payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
                         let _ = handle.emit(CHANGED, payload);
                     }
-                    handle.state::<App>().refresh_workers();
                     // ADR-9 item 7: no App Nap while a run is active.
                     #[cfg(target_os = "macos")]
                     {
