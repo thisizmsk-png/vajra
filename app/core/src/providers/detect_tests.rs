@@ -111,7 +111,7 @@ fn g6_codex_lists_every_control_it_lacks_with_a_reason() {
     for c in ["message", "redirect", "inspect", "transcript", "vajra_workflow"] {
         assert!(off.contains(&c), "{c}: {off:?}");
     }
-    assert!(x.limits.iter().all(|l| l.reason.starts_with("Codex cannot ")));
+    assert!(x.limits.iter().filter(|l| l.control != "stop").all(|l| l.reason.starts_with("Codex cannot ")));
     assert!(get(&list(&both()), "claude").limits.is_empty());
 }
 
@@ -144,4 +144,31 @@ fn the_real_probe_runs_the_status_command_of_a_script_on_its_path_and_reads_its_
     assert_eq!((c.installed, c.version.as_deref(), c.login.state), (true, Some("2.0.5"), LoginState::SignedOut));
     assert!(!get(&list(&System::new(vec![d.clone()])), "codex").installed);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn every_limit_and_the_login_carry_a_stable_code_beside_the_text() {
+    let mut f = both();
+    f.answers.insert(("/bin/codex", "login status"), (2, "usage"));
+    let x = get(&list(&f), "codex");
+    assert_eq!(x.login.route_code.as_deref(), Some("uses_codex_login"));
+    assert_eq!((x.login.detail_code.as_deref(), x.login.state), (Some("check_not_understood"), LoginState::CannotTell));
+    assert!(x.limits.iter().all(|l| l.code.is_some()), "{:?}", x.limits);
+    let codes: Vec<&str> = x.limits.iter().map(|l| l.code.as_deref().unwrap()).collect();
+    for c in ["no_message_mid_run", "no_redirect_mid_run", "no_inspect", "no_transcript", "no_vajra_workflow", "stop_ends_process"] {
+        assert!(codes.contains(&c), "{c}: {codes:?}");
+    }
+    let c = get(&list(&f), "claude");
+    assert!(c.limits.is_empty(), "claude stops by a hook hand-off: no stop limit");
+    let mut g = both();
+    g.bins.remove("codex");
+    let nx = get(&list(&g), "codex");
+    assert!(nx.limits.iter().any(|l| l.code.as_deref() == Some("not_installed") && l.control == "start"));
+}
+
+#[test]
+fn an_unsupported_choice_validates_as_a_project_provider() {
+    let u = unsupported("gemini");
+    assert!(u.validate().is_ok());
+    assert!(unsupported("Bad Id").validate().is_err(), "an id that is not a provider id is still refused");
 }

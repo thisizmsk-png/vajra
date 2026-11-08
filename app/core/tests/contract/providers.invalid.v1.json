@@ -1,41 +1,382 @@
 {
   "note": "Each case patches providers.v1.json (kind providers) or project_state.provider.v1.json (kind project_provider). `at` is a dotted path into the document (providers.0.login); `set` replaces fields there, `unset` removes them. Both the core (tests/providers.rs) and the UI (tests/providerContract.test.ts) must reject every case for the named reason: malformed, invalid or unsupported_version.",
   "providers": [
-    {"case": "schema missing",              "at": "",                    "unset": ["schema"],                         "reason": "malformed"},
-    {"case": "schema of another major",     "at": "",                    "set": {"schema": "vajra.providers/2"},      "reason": "unsupported_version"},
-    {"case": "schema with a newline",       "at": "",                    "set": {"schema": "vajra.providers/1\n"},    "reason": "unsupported_version"},
-    {"case": "providers not a list",        "at": "",                    "set": {"providers": {}},                    "reason": "malformed"},
-    {"case": "id with a capital",           "at": "providers.0",         "set": {"id": "Claude"},                     "reason": "invalid"},
-    {"case": "id empty",                    "at": "providers.0",         "set": {"id": ""},                           "reason": "invalid"},
-    {"case": "id not a string",             "at": "providers.0",         "set": {"id": 5},                            "reason": "malformed"},
-    {"case": "name blank",                  "at": "providers.0",         "set": {"name": "  "},                      "reason": "invalid"},
-    {"case": "name with a control char",    "at": "providers.0",         "set": {"name": "a\nb"},                     "reason": "invalid"},
-    {"case": "installed missing",           "at": "providers.0",         "unset": ["installed"],                      "reason": "malformed"},
-    {"case": "installed without a path",    "at": "providers.0",         "unset": ["path"],                           "reason": "invalid"},
-    {"case": "path relative",               "at": "providers.0",         "set": {"path": "bin/claude"},               "reason": "invalid"},
-    {"case": "path not a string",           "at": "providers.0",         "set": {"path": 5},                          "reason": "malformed"},
-    {"case": "not installed but signed in", "at": "providers.0",         "set": {"installed": false, "path": null},  "reason": "invalid"},
-    {"case": "capabilities missing",        "at": "providers.0",         "unset": ["capabilities"],                   "reason": "malformed"},
-    {"case": "capability not a bool",       "at": "providers.0.capabilities", "set": {"message": "yes"},              "reason": "malformed"},
-    {"case": "tested missing",              "at": "providers.0",         "unset": ["tested"],                         "reason": "malformed"},
-    {"case": "login state missing",         "at": "providers.0.login",   "unset": ["state"],                          "reason": "malformed"},
-    {"case": "login state not a string",    "at": "providers.0.login",   "set": {"state": 1},                         "reason": "malformed"},
-    {"case": "login route blank",           "at": "providers.0.login",   "set": {"route": ""},                        "reason": "invalid"},
-    {"case": "checked_by with a slash",     "at": "providers.0.login",   "set": {"checked_by": "a/b"},                "reason": "invalid"},
-    {"case": "billing from a key",          "at": "providers.0.billing", "set": {"source": "api_key"},                "reason": "invalid"},
-    {"case": "key name that is a value",    "at": "providers.0.billing", "set": {"key_in_app_env": "sk-abc123"},      "reason": "invalid"},
-    {"case": "key name empty",              "at": "providers.0.billing", "set": {"key_in_app_env": ""},               "reason": "invalid"},
-    {"case": "limit control with a slash",  "at": "providers.1",         "set": {"limits": [{"control": "a/b", "reason": "x"}]}, "reason": "invalid"},
-    {"case": "limit reason blank",          "at": "providers.1",         "set": {"limits": [{"control": "message", "reason": " "}]}, "reason": "invalid"},
-    {"case": "limit missing its reason",    "at": "providers.1",         "set": {"limits": [{"control": "message"}]}, "reason": "malformed"},
-    {"case": "duplicate provider id",       "at": "providers.1",         "set": {"id": "claude"},                     "reason": "invalid"}
+    {
+      "case": "schema missing",
+      "at": "",
+      "unset": [
+        "schema"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "schema of another major",
+      "at": "",
+      "set": {
+        "schema": "vajra.providers/2"
+      },
+      "reason": "unsupported_version"
+    },
+    {
+      "case": "schema with a newline",
+      "at": "",
+      "set": {
+        "schema": "vajra.providers/1\n"
+      },
+      "reason": "unsupported_version"
+    },
+    {
+      "case": "providers not a list",
+      "at": "",
+      "set": {
+        "providers": {}
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "id with a capital",
+      "at": "providers.0",
+      "set": {
+        "id": "Claude"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "id empty",
+      "at": "providers.0",
+      "set": {
+        "id": ""
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "id not a string",
+      "at": "providers.0",
+      "set": {
+        "id": 5
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "name blank",
+      "at": "providers.0",
+      "set": {
+        "name": "  "
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "name with a control char",
+      "at": "providers.0",
+      "set": {
+        "name": "a\nb"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "installed missing",
+      "at": "providers.0",
+      "unset": [
+        "installed"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "installed without a path",
+      "at": "providers.0",
+      "unset": [
+        "path"
+      ],
+      "reason": "invalid"
+    },
+    {
+      "case": "path relative",
+      "at": "providers.0",
+      "set": {
+        "path": "bin/claude"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "path not a string",
+      "at": "providers.0",
+      "set": {
+        "path": 5
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "not installed but signed in",
+      "at": "providers.0",
+      "set": {
+        "installed": false,
+        "path": null
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "capabilities missing",
+      "at": "providers.0",
+      "unset": [
+        "capabilities"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "capability not a bool",
+      "at": "providers.0.capabilities",
+      "set": {
+        "message": "yes"
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "tested missing",
+      "at": "providers.0",
+      "unset": [
+        "tested"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "login state missing",
+      "at": "providers.0.login",
+      "unset": [
+        "state"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "login state not a string",
+      "at": "providers.0.login",
+      "set": {
+        "state": 1
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "login route blank",
+      "at": "providers.0.login",
+      "set": {
+        "route": ""
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "checked_by with a slash",
+      "at": "providers.0.login",
+      "set": {
+        "checked_by": "a/b"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "billing from a key",
+      "at": "providers.0.billing",
+      "set": {
+        "source": "api_key"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "key name that is a value",
+      "at": "providers.0.billing",
+      "set": {
+        "key_in_app_env": "sk-abc123"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "key name empty",
+      "at": "providers.0.billing",
+      "set": {
+        "key_in_app_env": ""
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "limit control with a slash",
+      "at": "providers.1",
+      "set": {
+        "limits": [
+          {
+            "control": "a/b",
+            "reason": "x"
+          }
+        ]
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "limit reason blank",
+      "at": "providers.1",
+      "set": {
+        "limits": [
+          {
+            "control": "message",
+            "reason": " "
+          }
+        ]
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "limit missing its reason",
+      "at": "providers.1",
+      "set": {
+        "limits": [
+          {
+            "control": "message"
+          }
+        ]
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "duplicate provider id",
+      "at": "providers.1",
+      "set": {
+        "id": "claude"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "limit code with a capital",
+      "at": "providers.1",
+      "set": {
+        "limits": [
+          {
+            "control": "message",
+            "code": "NoMessage",
+            "reason": "x"
+          }
+        ]
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "limit code not a string",
+      "at": "providers.1",
+      "set": {
+        "limits": [
+          {
+            "control": "message",
+            "code": 5,
+            "reason": "x"
+          }
+        ]
+      },
+      "reason": "malformed"
+    },
+    {
+      "case": "route code with a space",
+      "at": "providers.0.login",
+      "set": {
+        "route_code": "uses claude"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "detail code too long",
+      "at": "providers.1.login",
+      "set": {
+        "detail_code": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "reason": "invalid"
+    }
   ],
   "project_provider": [
-    {"case": "id invalid",                  "at": "",                    "set": {"id": "Codex"},                      "reason": "invalid"},
-    {"case": "login_state missing",         "at": "",                    "unset": ["login_state"],                    "reason": "malformed"},
-    {"case": "installed missing",           "at": "",                    "unset": ["installed"],                      "reason": "malformed"},
-    {"case": "not installed but signed in", "at": "",                    "set": {"installed": false, "login_state": "signed_in"}, "reason": "invalid"},
-    {"case": "capabilities missing",        "at": "",                    "unset": ["capabilities"],                   "reason": "malformed"},
-    {"case": "limit reason blank",          "at": "",                    "set": {"limits": [{"control": "message", "reason": ""}]}, "reason": "invalid"}
+    {
+      "case": "id invalid",
+      "at": "",
+      "set": {
+        "id": "Codex"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "login_state missing",
+      "at": "",
+      "unset": [
+        "login_state"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "installed missing",
+      "at": "",
+      "unset": [
+        "installed"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "not installed but signed in",
+      "at": "",
+      "set": {
+        "installed": false,
+        "login_state": "signed_in"
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "capabilities missing",
+      "at": "",
+      "unset": [
+        "capabilities"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "limit reason blank",
+      "at": "",
+      "set": {
+        "limits": [
+          {
+            "control": "message",
+            "reason": ""
+          }
+        ]
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "name missing",
+      "at": "",
+      "unset": [
+        "name"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "name blank",
+      "at": "",
+      "set": {
+        "name": " "
+      },
+      "reason": "invalid"
+    },
+    {
+      "case": "tested missing",
+      "at": "",
+      "unset": [
+        "tested"
+      ],
+      "reason": "malformed"
+    },
+    {
+      "case": "limit code invalid",
+      "at": "",
+      "set": {
+        "limits": [
+          {
+            "control": "stop",
+            "code": "a/b",
+            "reason": "x"
+          }
+        ]
+      },
+      "reason": "invalid"
+    }
   ]
 }

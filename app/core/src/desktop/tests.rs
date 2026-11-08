@@ -2801,3 +2801,33 @@ fn provider_list_answers_the_contract_from_the_machines_clis_without_touching_a_
     assert!(by("claude").installed && !by("codex").installed);
     assert_eq!(by("claude").login.state, crate::providers::contract::LoginState::SignedIn);
 }
+
+#[test]
+fn the_login_check_runs_only_when_provider_list_is_called_and_is_cached_otherwise() {
+    let t = Tmp::new();
+    let app = t.app();
+    let counter = t.0.join("auth-runs");
+    let d = t.0.join("counting");
+    fs::create_dir_all(&d).unwrap();
+    let script = format!("#!/bin/sh\ncase \"$1\" in --version) echo '2.0.1';; auth) echo x >> '{}'; echo '{{\"loggedIn\": true}}';; esac\n", counter.display());
+    fs::write(d.join("claude"), script).unwrap();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut fs::metadata(d.join("claude")).unwrap().permissions(), 0o755);
+    fs::set_permissions(d.join("claude"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut app = app;
+    app.provider_dirs = Some(vec![d]);
+    assert!(app.provider_cached().is_none());
+    let runs = || fs::read_to_string(&counter).map(|s| s.lines().count()).unwrap_or(0);
+    // Reading state and cache any number of times runs nothing.
+    for _ in 0..5 {
+        app.project_state("p_x", None).unwrap();
+        let _ = app.provider_cached();
+    }
+    assert_eq!(runs(), 0);
+    app.provider_list().unwrap();
+    assert_eq!(runs(), 1);
+    for _ in 0..5 {
+        app.project_state("p_x", None).unwrap();
+    }
+    assert_eq!(runs(), 1, "no idle work");
+    assert_eq!(app.provider_cached().unwrap().providers[0].login.state, crate::providers::contract::LoginState::SignedIn);
+}

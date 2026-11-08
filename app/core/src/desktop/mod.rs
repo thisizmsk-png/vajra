@@ -185,6 +185,9 @@ pub struct App {
     claude: PathBuf,
     /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
     provider_dirs: Option<Vec<PathBuf>>,
+    /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
+    /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
+    provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -278,6 +281,7 @@ impl App {
             reader: Mutex::new(None),
             claude,
             provider_dirs: None,
+            provider_cache: Mutex::new(None),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -550,7 +554,14 @@ impl App {
     /// CLI's own login check. Read-only; a missing or broken CLI is a row, not an error.
     pub fn provider_list(&self) -> Res {
         let l = crate::providers::detect::list(&self.provider_probe());
-        serde_json::to_value(l).map_err(|e| fail("internal", e))
+        let v = serde_json::to_value(&l).map_err(|e| fail("internal", e))?;
+        *lock(&self.provider_cache) = Some(l);
+        Ok(v)
+    }
+
+    /// The last `provider_list` answer, or `None` before the first. Never runs a process.
+    pub fn provider_cached(&self) -> Option<crate::providers::contract::ProviderList> {
+        lock(&self.provider_cache).clone()
     }
 
     /// The workflow takes only a commit sha, so a branch or ref is resolved

@@ -34,9 +34,24 @@ describe("provider contract fixtures", () => {
     expect(parseProviderList(" ".repeat(64 * 1024 + 1))).toMatchObject({ ok: false, reason: "malformed" });
   });
 
-  it("reads the project_state provider object", () => {
+  it("reads the project_state provider object, with its name and tested flag", () => {
     const r = parseProjectProvider(fx("project_state.provider.v1.json"));
-    expect(r.ok && [r.value.id, r.value.installed, r.value.login_state, r.value.limits.length]).toEqual(["codex", true, "cannot_tell", 2]);
+    expect(r.ok && [r.value.id, r.value.name, r.value.tested, r.value.installed, r.value.login_state, r.value.limits.length]).toEqual(["codex", "Codex CLI", "untested", true, "cannot_tell", 2]);
+  });
+
+  it("carries stable codes beside the fallback text, and a Stop limit for a provider that ends the process", () => {
+    const r = parseProviderList(fx("providers.v1.json"));
+    if (!r.ok) throw new Error("fixture");
+    const x = r.value.providers[1];
+    expect([x.login.route_code, x.login.detail_code]).toEqual(["uses_codex_login", "check_not_understood"]);
+    expect(x.limits.find((l) => l.control === "stop")).toMatchObject({ code: "stop_ends_process", reason: "Codex has no hand-off: Stop ends its process" });
+    const old = parseProviderList(fx("providers.v1.not-installed.json"));
+    expect(old.ok && [old.value.providers[0].login.route_code, old.value.providers[0].limits[0].code]).toEqual([null, null]);
+  });
+
+  it("reads a chosen provider this build does not know as present, not installed and unable to start", () => {
+    const r = parseProjectProvider(fx("project_state.provider.unsupported.v1.json"));
+    expect(r.ok && [r.value.installed, r.value.login_state, r.value.limits.map((l) => l.code)]).toEqual([false, "not_installed", ["not_supported", "not_supported"]]);
   });
 });
 

@@ -108,48 +108,63 @@ fn flags(c: adapter::Capabilities) -> CapabilityFlags {
     }
 }
 
-/// One reason per capability that is off, in the words shown beside the disabled control.
+/// One reason per control that is off or behaves differently, with a stable code for the UI's own wording.
 fn limits(name: &str, c: &CapabilityFlags, installed: bool) -> Vec<Limit> {
     let mut out = Vec::new();
-    let mut off = |control: &str, what: &str| out.push(Limit { control: control.into(), reason: format!("{name} cannot {what}") });
-    if !c.message {
-        off("message", "take a message mid-run");
+    let mut add = |control: &str, code: &str, reason: String| out.push(Limit { control: control.into(), code: Some(code.into()), reason });
+    for (on, control, code, what) in [
+        (c.message, "message", "no_message_mid_run", "take a message mid-run"),
+        (c.redirect, "redirect", "no_redirect_mid_run", "be redirected mid-run"),
+        (c.inspect, "inspect", "no_inspect", "be inspected mid-run"),
+        (c.transcript, "transcript", "no_transcript", "show a transcript"),
+        (c.vajra_workflow, "vajra_workflow", "no_vajra_workflow", "run the Vajra workflow"),
+    ] {
+        if !on {
+            add(control, code, format!("{name} cannot {what}"));
+        }
     }
-    if !c.redirect {
-        off("redirect", "be redirected mid-run");
-    }
-    if !c.inspect {
-        off("inspect", "be inspected mid-run");
-    }
-    if !c.transcript {
-        off("transcript", "show a transcript");
-    }
-    if !c.vajra_workflow {
-        off("vajra_workflow", "run the Vajra workflow");
+    if c.stop == StopKind::Terminate {
+        add("stop", "stop_ends_process", format!("{name} has no hand-off: Stop ends its process"));
     }
     if !installed {
-        out.push(Limit { control: "start".into(), reason: format!("{name} is not installed") });
-        out.push(Limit { control: "resume".into(), reason: format!("{name} is not installed") });
+        add("start", "not_installed", format!("{name} is not installed"));
+        add("resume", "not_installed", format!("{name} is not installed"));
     }
     out
+}
+
+/// A chosen provider id this build has no adapter for (the preference names something removed or from a newer build):
+/// present, not installed, and unable to start, rather than absent (absent means "none chosen").
+pub fn unsupported(id: &str) -> super::contract::ProjectProvider {
+    let off = CapabilityFlags { pty_attach: false, transcript: false, inspect: false, message: false, redirect: false, stop: StopKind::Other, resume: false, vajra_workflow: false };
+    let limit = |control: &str| Limit { control: control.into(), code: Some("not_supported".into()), reason: "This version of Vajra does not support that provider".into() };
+    super::contract::ProjectProvider {
+        id: id.into(),
+        name: id.into(),
+        installed: false,
+        tested: Tested::Unknown,
+        login_state: LoginState::NotInstalled,
+        capabilities: off,
+        limits: vec![limit("start"), limit("resume")],
+    }
 }
 
 /// Read the CLI's own status answer. Claude prints JSON with `loggedIn`; Codex answers by exit code and prints
 /// "Not logged in" when signed out. Anything else (a CLI too old to have the command exits with a usage error, a
 /// timeout, a cut answer, garbage) is `cannot_tell`.
-fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<String>) {
-    let unsure = |why: &str| (LoginState::CannotTell, Some(why.to_string()));
-    let Some(o) = out else { return unsure("The login check did not finish") };
+fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<(&'static str, &'static str)>) {
+    let unsure = |code, why| (LoginState::CannotTell, Some((code, why)));
+    let Some(o) = out else { return unsure("check_unfinished", "The login check did not finish") };
     match engine {
         Engine::Claude => match serde_json::from_str::<serde_json::Value>(&o.stdout).ok().and_then(|v| v.get("loggedIn").and_then(|b| b.as_bool())) {
             Some(true) if o.code == Some(0) => (LoginState::SignedIn, None),
             Some(false) => (LoginState::SignedOut, None),
-            _ => unsure("The login check gave an answer Vajra does not understand"),
+            _ => unsure("check_not_understood", "The login check gave an answer Vajra does not understand"),
         },
         Engine::Codex => match o.code {
             Some(0) => (LoginState::SignedIn, None),
             Some(1) if o.stdout.to_ascii_lowercase().contains("not logged in") => (LoginState::SignedOut, None),
-            _ => unsure("The login check gave an answer Vajra does not understand"),
+            _ => unsure("check_not_understood", "The login check gave an answer Vajra does not understand"),
         },
     }
 }
@@ -160,7 +175,14 @@ fn describe(m: &Meta, p: &dyn Probe) -> ProviderInfo {
     let bill = adapter.billing(&|k| p.env(k));
     let billing = BillingInfo { source: bill.source.into(), key_in_app_env: bill.key_in_app_env.map(str::to_string) };
     let path = p.find(m.engine.id());
-    let login = |state, checked_by: &str, detail: Option<String>| Login { route: m.route.into(), state, checked_by: checked_by.into(), detail };
+    let login = |state, checked_by: &str, detail: Option<(&str, &str)>| Login {
+        route: m.route.into(),
+        route_code: Some(format!("uses_{}_login", m.engine.id())),
+        state,
+        checked_by: checked_by.into(),
+        detail: detail.map(|d| d.1.to_string()),
+        detail_code: detail.map(|d| d.0.to_string()),
+    };
     let Some(path) = path else {
         return ProviderInfo {
             id: m.engine.id().into(),

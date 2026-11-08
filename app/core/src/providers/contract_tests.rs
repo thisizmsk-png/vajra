@@ -92,3 +92,24 @@ fn every_shared_invalid_case_is_rejected_for_its_reason() {
     }
     assert!(seen >= 30, "{seen}");
 }
+
+#[test]
+fn codes_ride_beside_the_fallback_text_and_stop_gets_its_own_limit() {
+    let l = parse_provider_list(&fixture("providers.v1.json")).unwrap();
+    let x = &l.providers[1];
+    assert_eq!(x.login.route_code.as_deref(), Some("uses_codex_login"));
+    assert_eq!(x.login.detail_code.as_deref(), Some("check_not_understood"));
+    let stop = x.limits.iter().find(|l| l.control == "stop").unwrap();
+    assert_eq!((stop.code.as_deref(), stop.reason.as_str()), (Some("stop_ends_process"), "Codex has no hand-off: Stop ends its process"));
+    // A record from before codes existed still parses, with no code.
+    let old = parse_provider_list(&fixture("providers.v1.not-installed.json")).unwrap();
+    assert!(old.providers[0].login.route_code.is_none() && old.providers[0].limits[0].code.is_none());
+}
+
+#[test]
+fn a_chosen_provider_this_build_does_not_know_is_present_and_cannot_start() {
+    let p = parse_project_provider(&fixture("project_state.provider.unsupported.v1.json")).unwrap();
+    assert_eq!((p.id.as_str(), p.installed, p.login_state), ("gemini", false, LoginState::NotInstalled));
+    assert!(p.limits.iter().all(|l| l.code.as_deref() == Some("not_supported")) && p.limits.iter().any(|l| l.control == "start"));
+    assert_eq!(p, crate::providers::detect::unsupported("gemini"), "the core answers exactly this");
+}

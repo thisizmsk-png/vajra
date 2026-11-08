@@ -1,10 +1,29 @@
 {
   "id": "codex",
+  "name": "Codex CLI",
   "installed": true,
+  "tested": "untested",
   "login_state": "cannot_tell",
-  "capabilities": {"pty_attach": true, "transcript": false, "inspect": false, "message": false, "redirect": false, "stop": "terminate", "resume": true, "vajra_workflow": false},
+  "capabilities": {
+    "pty_attach": true,
+    "transcript": false,
+    "inspect": false,
+    "message": false,
+    "redirect": false,
+    "stop": "terminate",
+    "resume": true,
+    "vajra_workflow": false
+  },
   "limits": [
-    {"control": "message", "reason": "Codex cannot take a message mid-run"},
-    {"control": "vajra_workflow", "reason": "Codex does not run the Vajra workflow"}
+    {
+      "control": "message",
+      "code": "no_message_mid_run",
+      "reason": "Codex cannot take a message mid-run"
+    },
+    {
+      "control": "stop",
+      "code": "stop_ends_process",
+      "reason": "Codex has no hand-off: Stop ends its process"
+    }
   ]
 }
