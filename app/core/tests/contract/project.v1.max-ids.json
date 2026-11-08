@@ -1,0 +1,10 @@
+{
+  "schema": "vajra.project/1",
+  "id": "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T",
+  "name": "edges",
+  "root": "/Users/u/src/edges",
+  "root_key": {"dev": "18446744073709551615", "ino": "9007199254740993", "git_common_dir": null},
+  "created": "2026-11-08T09:00:00Z",
+  "archived": null,
+  "rev": 9007199254740991
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "vajra.project/1",
+  "id": "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T",
+  "name": "vajra",
+  "root": "/Users/u/src/vajra",
+  "root_key": {"dev": "1", "ino": "2", "git_common_dir": null, "volume_uuid": "ignored"},
+  "created": "2026-11-08T09:00:00Z",
+  "rev": 1,
+  "color": "red",
+  "future": {"anything": [1, 2, 3]}
+}

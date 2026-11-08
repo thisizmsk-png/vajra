@@ -8,6 +8,7 @@ import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
+import { useCurrentProject } from "../../projects/current";
 import { PreflightList } from "../PreflightList";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
@@ -39,10 +40,24 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
+  // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
+  const { project } = useCurrentProject();
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
-  const [camps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
-  const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
-  const [d, setD] = useState<Draft>({ repo: "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
+  const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
+  // Inside a project the folders decide which campaigns are its own. Until they are read the list is loading, and if
+  // they cannot be read it says so: filtering without them would empty every project and put everything in Unsorted.
+  const inProject = (t: Record<string, ResumeTarget>) => (c: Campaign) => {
+    const root = t[c.slug]?.cwd?.trim().replace(/\/+$/, "");
+    return project?.bucket ? !root : root === project?.root;
+  };
+  const camps: Load<Campaign[]> = allCamps.state !== "ok" ? allCamps
+    : !project ? allCamps
+    : targets.state === "ok" ? { state: "ok", data: allCamps.data.filter(inProject(targets.data)) }
+    : targets;
+  const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
+  const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
+  const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
@@ -141,7 +156,7 @@ export function Home() {
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
-                {camps.state === "error" && <Problem title={S.home.campaignsFailed} detail={camps.text} retry={reloadCamps} />}
+                {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
                 {camps.state === "ok" && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
             ) : null}

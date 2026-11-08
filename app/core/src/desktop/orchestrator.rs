@@ -157,12 +157,14 @@ impl App {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
         let t = self.lead_target(run_id)?;
-        let orch = self.orchestrator_for_run(&t.run_id, &t.cwd)?;
-        // Under the ask lock: no turn can start between the busy check and the bump.
+        let found = self.orchestrator_for_run(&t.run_id, &t.cwd)?;
+        // Under the ask lock: no turn can start between the busy check and the bump, and the generation is read here,
+        // so two "New conversation" clicks bump it twice from what is current, never both from the same old value.
         let active = lock(&self.lead.active);
-        if active.contains_key(&orch.id) {
+        if active.contains_key(&found.id) {
             return Err(LeadError::Busy);
         }
+        let orch = self.orchestrator(&found.id, &found.root)?;
         let next = orch.generation.checked_add(1).filter(|g| *g <= MAX_GENERATION).ok_or_else(|| LeadError::Invalid("generation: too many conversations".into()))?;
         // The session goes first: a crash between the two leaves the old generation with no session (a fresh start),
         // never the new generation resuming the old conversation.

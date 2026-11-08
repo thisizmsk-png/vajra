@@ -58,9 +58,12 @@ pub enum ControlError {
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
     /// A Director-General's tool call carried an older conversation generation than the project's current one: the
-    /// process belongs to a conversation that was replaced, so it may not see or steer anything.
-    StaleGeneration,
+    /// process belongs to a conversation that was replaced, so it may not see or steer anything. Same wire code as a
+    /// stale worker attempt (`StaleGeneration`): the caller refreshes either way.
+    StaleLeadGeneration,
     ActionNotFound,
+    /// A stop that named the attempt it saw (`expect_generation`) found a different one at the moment of the stop.
+    StaleGeneration(u64),
     UnknownTool,
     InvalidArgs(String),
     Io(io::Error),
@@ -76,8 +79,9 @@ impl ControlError {
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
-            Self::StaleGeneration => "stale_generation",
+            Self::StaleLeadGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
+            Self::StaleGeneration(_) => "stale_generation",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
             Self::Io(_) => "io_error",
@@ -87,6 +91,7 @@ impl ControlError {
     pub fn to_json(&self) -> Value {
         match self {
             Self::InvalidArgs(m) => json!({"error": self.code(), "detail": m}),
+            Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
             _ => json!({"error": self.code()}),
         }
     }
