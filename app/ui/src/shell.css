@@ -42,8 +42,8 @@
 /* Home: a launcher, then the checks line, then the campaigns (DESIGN.md "Hierarchy per screen"). */
 .v-home__col { max-width: 800px; margin: 0 auto; padding: 48px var(--space-xl) var(--space-xl); display: flex; flex-direction: column; }
 .v-home__lede { margin: var(--space-xs) 0 18px; }
-.v-launch { border: 1px solid var(--c-border); border-radius: var(--radius-lg); background: var(--c-panel); box-shadow: 0 1px 2px var(--c-shadow-soft); transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out); }
-.v-launch:hover { border-color: color-mix(in srgb, var(--c-border) 50%, var(--c-border-strong)); }
+/* The launcher is the ask's only visible edge, so it keeps the 3:1 input outline (border-strong). */
+.v-launch { border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); background: var(--c-panel); box-shadow: 0 1px 2px var(--c-shadow-soft); transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out); }
 .v-launch__ask { padding: var(--space-lg) var(--space-lg) 0; }
 .v-launch__ask .v-field__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: 16px; line-height: 25px; resize: none; }
