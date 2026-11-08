@@ -13,10 +13,14 @@ export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "syst
   agent: "claude", model: "", workers: 4, rounds: 2, shortcuts: { palette: "Primary+K", settings: "Primary+," } };
 export const SHORTCUT_CHOICES = ["Primary+K", "Primary+,", "Primary+Shift+K", "Primary+Shift+P", "Primary+Shift+S", "F6", "F7"];
 export const shortcutKeys = (binding: string) => binding.split("+").map(k => k === "Primary" ? "⌘" : k === "Shift" ? "⇧" : k.toUpperCase());
-export function matchesShortcut(e: KeyboardEvent, binding: string): boolean {
+/** Read once: the platform modifier is Command on macOS and Control elsewhere (the same test Shell uses for the overlay). */
+export const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
+/** `Primary` is the platform modifier only. On macOS Control stays the terminal's key, so Control+K never opens the palette. */
+export function matchesShortcut(e: KeyboardEvent, binding: string, mac = IS_MAC): boolean {
   if (e.defaultPrevented || e.isComposing || (e.target instanceof Element && e.target.closest(".xterm, .xterm-helper-textarea, [data-terminal-input]"))) return false;
   const keys = binding.split("+"); const primary = keys.includes("Primary");
-  return (primary ? e.metaKey !== e.ctrlKey : !e.metaKey && !e.ctrlKey) && !e.altKey && e.shiftKey === keys.includes("Shift") && e.key.toUpperCase() === keys[keys.length - 1].toUpperCase();
+  const modifier = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  return (primary ? modifier : !e.metaKey && !e.ctrlKey) && !e.altKey && e.shiftKey === keys.includes("Shift") && e.key.toUpperCase() === keys[keys.length - 1].toUpperCase();
 }
 
 export function isPreferenceView(input: unknown): input is PreferenceView {
