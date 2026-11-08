@@ -180,10 +180,10 @@ Jobs: J1 start/resume, J2 crew, J3 Lead chat and control, J4 run view, J5 approv
 
 **US-5.2** As a Reviewer-approver, I want to approve a plan, so that execution proceeds under my control.
 - AC-5.2.1 GIVEN a pending plan, WHEN I open it, THEN the exact plan text (commands, rollback) is shown unabridged before the Approve button is enabled.
-- AC-5.2.2 GIVEN I press Approve, WHEN submitted, THEN the app submits a visible human turn "Execute approved plan <id>" to the run session (the turn is visible in that terminal) and does not itself run git push, open a PR or deploy.
+- AC-5.2.2 GIVEN I press Approve, WHEN submitted, THEN the app submits a visible human turn "Execute approved plan <run>.<idx> (<action>)" to the run session, where <action> is the approved plan's fixed-vocabulary action (the turn is visible in that terminal) and does not itself run git push, open a PR or deploy.
 - AC-5.2.3 GIVEN the plan includes push, PR or deploy, WHEN the run session proceeds, THEN Claude Code's own permission prompt still appears for each protected command.
 - AC-5.2.4 GIVEN approval, WHEN it happens, THEN a ledger entry and `audit.log` line record who, plan id and time.
-- AC-5.2.5 (PM-5) GIVEN a pending plan whose run session has ended, WHEN I press Approve, THEN the app starts `claude --resume <sid> 'Execute approved plan <id>'` as argv in the repo (nothing typed into a PTY) and Claude Code's permission prompts appear there. The Cmd-Q dialog counts sessions holding pending approvals. For runs started in a plain terminal, Approve shows the exact turn to copy into that terminal.
+- AC-5.2.5 (PM-5) GIVEN a pending plan whose run session has ended, WHEN I press Approve, THEN the app starts `claude --resume <sid> 'Execute approved plan <run>.<idx> (<action>)'` as argv in the repo (nothing typed into a PTY) and Claude Code's permission prompts appear there. The Cmd-Q dialog counts sessions holding pending approvals. For runs started in a plain terminal, Approve shows the exact turn to copy into that terminal.
 
 **US-5.3** As a Reviewer-approver, I want to reject a plan with a reason, so that the record shows why.
 - AC-5.3.1 GIVEN a pending plan, WHEN I press Reject, THEN a reason (non-empty) is required.

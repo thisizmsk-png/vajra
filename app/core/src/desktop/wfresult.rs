@@ -33,8 +33,8 @@ const TEXT_MAX: usize = 500;
 const MAX_PLANS: usize = crate::sessions::ApprovedPlanTurn::MAX_INDEX + 1;
 /// A plan entry bigger than this (as written) is shown in full but cannot be approved.
 const PLAN_MAX_BYTES: usize = 64 * 1024;
-/// `S.Action` of `workflows/vajra-deliver.js`.
-const ACTIONS: [&str; 9] = ["push", "pull_request", "deploy", "migration", "data_deletion", "secrets", "spend", "external_message", "other"];
+/// `S.Action` of `workflows/vajra-deliver.js` (shared with the approval turn).
+const ACTIONS: [&str; 9] = crate::sessions::PLAN_ACTIONS;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WfError {

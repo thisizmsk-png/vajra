@@ -383,7 +383,7 @@ fn take_over_changes_are_serialised_with_delivery() {
         t.join().unwrap();
     });
     assert!(sup.take_over("s-cat").unwrap());
-    let turn = ApprovedPlanTurn::new("20261106-0911", 0).unwrap();
+    let turn = ApprovedPlanTurn::new("20261106-0911", 0, "push").unwrap();
     assert_eq!(sup.submit_fixed_turn("s-cat", &turn), Err(SessionError::TakeOverActive));
     sup.kill("s-cat").unwrap();
 }
