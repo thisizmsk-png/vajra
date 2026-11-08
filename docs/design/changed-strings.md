@@ -165,3 +165,8 @@ Shell B frame (T4, wave 1).
 | Show or hide the project column / inspector; Go to project 1 to 9 | Settings > Keyboard, palette | new |
 | VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
 | (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
+
+"Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps
+its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become
+"Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
+"Director-General"; code and the contract keep `orchestrator`.
