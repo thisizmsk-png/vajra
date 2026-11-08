@@ -16,6 +16,27 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the project commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [], skipped: 0, unsupported: false, truncated: false } });
+    setTransport(f.transport);
+    await api.appInfo();
+    await api.projectList();
+    await api.projectAdd("/Users/me/src/a");
+    await api.projectAdd("/Users/me/src/a/b", true);
+    await api.projectRename("p_1", "New", 2);
+    await api.projectArchive("p_1");
+    await api.projectSessions("p_1");
+    expect(f.calls).toEqual([
+      { cmd: "app_info", args: undefined },
+      { cmd: "project_list", args: { includeArchived: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a", confirmNested: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a/b", confirmNested: true } },
+      { cmd: "project_rename", args: { id: "p_1", name: "New", expectRev: 2 } },
+      { cmd: "project_archive", args: { id: "p_1", expectRev: undefined } },
+      { cmd: "project_sessions", args: { id: "p_1" } },
+    ]);
+  });
+
   it("maps the Director-General commands to snake_case commands with camelCase args", async () => {
     const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false, name: "Director-General" }, new_conversation: { project_id: "k_0", generation: 2, stream: "orchestrator-k_0-g2" } });
     setTransport(f.transport);

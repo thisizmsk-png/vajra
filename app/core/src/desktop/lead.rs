@@ -28,7 +28,7 @@ use crate::crew::redact::Redactor;
 use crate::ids;
 use crate::lock;
 use crate::sessions::argv::{LeadArgv, build_lead_argv};
-use crate::sessions::scrubbed_env;
+use crate::sessions::user_env;
 use crate::vajra::bridge::Request;
 use crate::vajra::preflight::find_on_path;
 
@@ -94,7 +94,7 @@ impl LeadState {
         let path_dirs = crate::vajra::preflight::path_dirs();
         Self {
             bin: Mutex::new(resolve_claude(home, &path_dirs)),
-            env: Mutex::new(scrubbed_env(|k| std::env::var_os(k))),
+            env: Mutex::new(user_env()),
             active: Arc::new(Mutex::new(HashMap::new())),
             proven: Mutex::new(HashSet::new()),
             closing: AtomicBool::new(false),
@@ -136,12 +136,8 @@ pub fn resolve_claude(home: &Path, path_dirs: &[PathBuf]) -> Option<PathBuf> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ];
-    // nvm: newest node version last.
-    let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
-        .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path().join("bin")).collect())
-        .unwrap_or_default();
-    nvm.sort();
-    dirs.extend(nvm.into_iter().rev());
+    // nvm: newest node version first (numeric, so v22.18.0 beats v9.11.2).
+    dirs.extend(crate::userpath::nvm_bins(home));
     find_on_path("claude", &dirs)
 }
 

@@ -750,3 +750,17 @@ fn an_acknowledged_stop_settles_even_when_queue_is_unreadable() {
     assert_eq!(last_record(&s, &id)["state"].as_str(), Some("delivered"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Receipt lines (T2) share `control/ledger.jsonl`; rebuilding the control state from it must ignore them.
+#[test]
+fn rebuild_skips_receipt_lines() {
+    let dir = std::env::temp_dir().join(format!("vajra-svc-rc-{}-{}", std::process::id(), nonce::random_hex(4).unwrap()));
+    {
+        let mut s = Service::open(&dir, dir.join("audit.log"), None).unwrap();
+        s.start_session(SID, "20261105-1810").unwrap();
+    }
+    let mut l = Ledger::open(&dir.join("control/ledger.jsonl")).unwrap();
+    l.append(&json!({"v": 1, "kind": "receipt", "action_id": "act-0001-aaaa", "receipt": {"state": "accepted"}})).unwrap();
+    assert!(Service::open(&dir, dir.join("audit.log"), None).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}

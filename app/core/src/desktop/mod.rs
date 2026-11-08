@@ -30,6 +30,8 @@ use crate::vajra::state::Reader;
 
 /// Every command answers `Ok(value)` or `Err({error, detail?})`.
 pub type Res = Result<Value, Value>;
+/// Emits a `changed` payload to the UI (see `App::set_change_sink`).
+pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
@@ -232,6 +234,12 @@ pub struct App {
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// ADR-15: the project records under `<data>/projects`.
+    projects: crate::projects::store::Store,
+    /// Action receipts and per-project revisions (see `state`).
+    acts: Mutex<state::Hub>,
+    /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
+    sink: Mutex<Option<ChangeSink>>,
 }
 
 impl App {
@@ -245,7 +253,12 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let projects = crate::projects::store::Store::open(data, home)?;
+        let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            projects,
+            acts,
+            sink: Mutex::new(None),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
@@ -649,6 +662,7 @@ impl App {
             })
             .collect();
         lock(&self.control).set_workers(session_id, infos);
+        self.workers_published();
     }
 
     /// Keep the control service's workers and the transcript tails current for every live run, without any UI view
@@ -1254,6 +1268,11 @@ impl App {
         ctl(lock(&self.control).stop_worker(Actor::Human, worker, reason))
     }
 
+    /// `control_stop` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_stop_expecting(&self, worker: &str, reason: Option<&str>, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).stop_worker_expecting(Actor::Human, worker, reason, expect))
+    }
+
     pub fn confirm_stop(&self, action_id: &str) -> Res {
         ctl(lock(&self.control).confirm_stop(Actor::Human, action_id))
     }
@@ -1568,6 +1587,16 @@ impl App {
         Ok(json!({"stream": stream, "take_over": on}))
     }
 
+    /// The repository roots a terminal may open in: the run directories of the runs this app started or resumed in this
+    /// process (the in-memory map, never `runs.jsonl`, which a worker can write). Each root's own `.claude/worktrees/*`
+    /// folders are allowed too (see `terminal::policy::place`). ADR-15 replaces this with the project records.
+    pub fn terminal_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = lock(&self.runs).values().map(|r| r.cwd.clone()).collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     pub fn active_runs(&self) -> Res {
         self.reap_runs();
         let runs = lock(&self.runs).clone();
@@ -1726,14 +1755,19 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 mod caps;
 mod orchestrator;
 mod inbox;
+mod projects;
 mod wfresult;
 mod decide;
 mod lead;
 mod runindex;
 mod runview;
+mod state;
+pub use state::Envelope;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod state_tests;
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.

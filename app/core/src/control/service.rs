@@ -177,6 +177,21 @@ impl Service {
         self.sessions.values().filter(|s| self.scope.as_ref().is_none_or(|b| b.contains(&s.id)))
     }
 
+    /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
+    /// that is ambiguous across sessions has no generation (the caller must use the agent id).
+    pub fn worker_generation(&self, arg: &str) -> Option<u64> {
+        self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
+    }
+
+    /// The workers as `list_workers` shows them (every session in scope), without recording a list action (for
+    /// `project_state`).
+    pub fn workers_view(&self) -> Vec<Value> {
+        self.in_scope()
+            .flat_map(|s| s.workers.iter().map(move |w| (s.id.as_str(), w)))
+            .map(|(sid, w)| self.worker_json(sid, w))
+            .collect()
+    }
+
     /// The one worker `arg` names among the sessions in scope, with its session id. A name that matches live workers
     /// in two sessions (each run has a `t1`) is ambiguous: the caller must use the agent id.
     fn resolve(&self, arg: &str) -> Result<(String, WorkerInfo)> {

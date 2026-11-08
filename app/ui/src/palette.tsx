@@ -1,6 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { MutableRefObject, ReactNode } from "react";
-import { Icon, Kbd, ariaShortcut } from "../components/ui/base";
 import { CommandPalette } from "../components/ui/desktop";
 import type { Command } from "../components/ui/desktop";
 
@@ -47,7 +46,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
       e.preventDefault();
       setOpen((o) => !o);
     };
-    // A screen key (⌘1 to ⌘7) moves on while the palette is open; the palette then belongs to the old screen.
+    // A project key (⌘1 to ⌘9) or a link moves on while the palette is open; the palette then belongs to the old view.
     const onRoute = () => setOpen(false);
     window.addEventListener("keydown", onKey);
     window.addEventListener("hashchange", onRoute);
@@ -73,14 +72,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
   );
 }
 
-/** The palette for the mouse: a field-like button at the top of the sidebar that opens ⌘K. */
-export function PaletteButton({ label }: { label: string }) {
-  const { open } = useContext(Ctx);
-  return (
-    <button type="button" className="v-shell__search" title={label} onClick={open} aria-keyshortcuts={ariaShortcut(KEYS)}>
-      <Icon name="search" />
-      <span className="v-shell__label">{label}</span>
-      <Kbd keys={KEYS} decorative />
-    </button>
-  );
+/** Opens the palette: for a button that offers ⌘K to the mouse (the title bar's search field). */
+export function usePaletteOpener() {
+  return useContext(Ctx).open;
 }

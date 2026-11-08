@@ -30,6 +30,17 @@ impl Ledger {
         &self.path
     }
 
+    /// If a crash left a half-written last line, end it, so the next record starts on its own line instead of
+    /// being glued onto (and lost with) the fragment.
+    pub fn seal_torn_tail(&mut self) -> io::Result<()> {
+        match fsx::ends_with_newline(&self.path) {
+            Ok(false) => self.file.write_all(b"\n"),
+            Ok(true) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// One record, one line, one write.
     pub fn append(&mut self, rec: &Value) -> io::Result<()> {
         let mut line = serde_json::to_vec(rec).map_err(io::Error::other)?;

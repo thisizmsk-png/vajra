@@ -1215,7 +1215,7 @@ fn a_new_conversation_starts_the_next_generation_on_an_empty_stream() {
     assert_eq!(nc["stream"], super::orchestrator::stream(&pid(&t), 2));
     assert!(!orch_dir(&t).join("session").exists(), "the old conversation is not resumed");
     // A process of the old conversation can no longer see or steer anything.
-    assert!(matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleGeneration)));
+    assert!(matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleLeadGeneration)));
     let r = app.ask_lead(RUN_ID, "fresh start").unwrap();
     assert_ne!(r["lead_session_id"], old.as_str());
     assert_eq!((r["generation"].as_u64(), r["stream"].as_str()), (Some(2), nc["stream"].as_str()));
@@ -1260,7 +1260,7 @@ fn a_new_conversation_racing_an_ask_is_never_undone() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 6);
     assert!(argvs(&t).iter().all(|a| !(a.contains("--resume") && a.contains(&old))), "the old session was never resumed");
     assert!(
-        matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleGeneration)),
+        matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleLeadGeneration)),
         "the service was not put back on the old generation"
     );
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(orch_dir(&t).join("mcp.json")).unwrap()).unwrap();

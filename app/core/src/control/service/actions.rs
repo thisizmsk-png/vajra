@@ -130,11 +130,24 @@ impl Service {
     /// Human: the stop file is written now. Lead: only a request that waits
     /// for the human's `confirm_stop`.
     pub fn stop_worker(&mut self, actor: Actor, worker: &str, reason: Option<&str>) -> Result<Value> {
+        self.stop_worker_expecting(actor, worker, reason, None)
+    }
+
+    /// `stop_worker` that also refuses when the worker it resolves to is not on attempt `expect`. The comparison
+    /// happens here, under the same `&mut self` as the resolution and the stop publication, so a refresh cannot
+    /// swap the attempt in between (action receipts, FG-11).
+    pub fn stop_worker_expecting(&mut self, actor: Actor, worker: &str, reason: Option<&str>, expect: Option<u64>) -> Result<Value> {
         let reason = reason.map(|r| self.text_arg(r, MAX_REASON, "reason", true)).transpose()?;
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
         }
         let (sid, w) = self.resolve(worker)?;
+        if let Some(want) = expect {
+            let have = u64::from(w.round.unwrap_or(0));
+            if have != want {
+                return Err(ControlError::StaleGeneration(have));
+            }
+        }
         // A stop matches only on agent_id or cwd, never on agent_type (5.3).
         let mut m = Map::new();
         if !w.worker.agent_id.is_empty() {

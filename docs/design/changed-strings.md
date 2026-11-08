@@ -136,3 +136,50 @@ Polish pass (stacked on PR #39).
 | Terminal | Home campaign rows | short tag; replaces the visible "Started outside this app. Continue it from your terminal.", which stays as the tooltip and for screen readers |
 | Workers; N of M done | Crew details for the Lead, a run or a task | new; per-status counts of the workers under the selection |
 | (Goal column removed) | History | the goal now leads the Campaign cell, with the slug under it |
+
+Shell B frame (T4, wave 1).
+
+| String | Where | Note |
+|---|---|---|
+| Director-General | view tab, project column card, palette | new; the UI name for the project's orchestrator (owner, 2026-11-08). Code ids stay `orchestrator`/`orch` |
+| Leading run ID / No run active | Director-General card | new; honest until the core's orchestrator contract (C3) lands |
+| N of M | Director-General card meter | criteria passing; "N of M criteria passing" for screen readers |
+| 1 needs you / N need you | project tab pill | new |
+| Stopped / Failed | project tab | the newest campaign's state |
+| Unsorted | project tab, last | new; tooltip "Runs started outside the app, or before it recorded their folder. Nothing is moved until you sort them." |
+| Add project | title bar + button | tooltip "Start a run in another folder; the folder becomes a project" |
+| Search or jump | title bar ⌘K field | was "Search or run" in the sidebar |
+| Board / Review | view tabs | Review is the old Run screen; `#/run` still opens it |
+| Workers; N of M active | project column | new |
+| Workers appear once a run starts | project column, no run | new |
+| Sessions; Search NAME sessions | project column | new; the search shows past four sessions |
+| Today / Yesterday / Fri 6 Nov / Earlier; "1 done", "1 stopped" | session day groups | new |
+| Backlog / Running / Review / Done; Needs you; Only what needs you | Board | new |
+| Read-only: cards move when the work and its checks do | Board | new |
+| Plan to approve / Question; N of M criteria | Board cards | new |
+| No campaign in this project yet; Start a run from the Director-General view; its tasks appear here. | Board, empty | new |
+| Campaign, Criteria, Workers, Folder, Worktree, Branch; N more in Review | Inspector | new |
+| No runs active / 1 run active / N runs active | status bar | new |
+| Phone not connected | status bar | new; opens Settings > Mobile |
+| Providers / Models and capacity / Mobile / Notifications / Appearance / Keyboard / Diagnostics, each with a one-line lede | Settings sections | new; only Providers (the real checks) and Keyboard are built, the rest say "Not built yet" |
+| Show or hide the project column / inspector; Go to project 1 to 9 | Settings > Keyboard, palette | new |
+| VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
+| Project column / Inspector | status-bar and view-tab toggles (accessible name) | one constant name; aria-pressed carries the state. "Show/Hide …" stays in the tooltip and the palette commands (#86 review) |
+| (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
+| Could not read which folder each run used, so this project's runs cannot be listed. | Home inside a project, campaign list | new; shown with Try again when resume targets fail, instead of an empty project (#86 review) |
+
+"Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps
+its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become
+"Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
+"Director-General"; code and the contract keep `orchestrator`.
+
+Terminal dock (standalone component, `app/ui/src/terminal/`).
+
+| String | Where | Note |
+|---|---|---|
+| Terminal, Terminals, New terminal, Hide terminal, Terminal here | dock bar and the "Terminal here" action | new |
+| The shell ended. / The shell ended with code N. / The shell was stopped. | banner over an ended terminal | new |
+| Start a new shell | button on an ended terminal | new |
+| No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
+| This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
+| The shell is not reading input right now. What you typed was dropped. | transient note | new |
