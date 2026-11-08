@@ -88,6 +88,49 @@ fn an_envelope_naming_another_project_stores_nothing() {
     assert_eq!(t.count("ask.count"), 0);
 }
 
+/// Every path and file under `dir`, with its bytes.
+fn tree(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                todo.push(path.clone());
+                out.push((path, Vec::new()));
+            } else {
+                out.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A target that is no project's (a run the app never launched, an ask not running, a proposal not open) files no
+/// receipt under the envelope's project: its recent list stays as it was.
+#[test]
+fn an_unbound_target_files_no_receipt_under_the_envelopes_project() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    app.lead_status(RUN_ID).unwrap();
+    assert_eq!(app.act_new_conversation(&env("a_seed_000001", &p, Some(1)), RUN_ID)["receipt"]["state"], "done");
+    let recent = receipt_ids(&app, &p);
+    let ulid = "01J0000000000000000000000Z";
+    for r in [
+        app.act_ask_lead(&env("a_unbound_001", &p, None), "20990101-0000", "hi"),
+        app.act_new_conversation(&env("a_unbound_002", &p, None), "../x"),
+        app.act_cancel_ask(&env("a_unbound_003", &p, None), ulid),
+        app.act_start_proposal(&env("a_unbound_004", &p, None), "p_nope", &"0".repeat(64)),
+        app.act_dismiss_proposal(&env("a_unbound_005", &p, None), "p_nope"),
+    ] {
+        assert!(r["receipt"].is_null() && r["error"].is_object(), "{r}");
+    }
+    assert_eq!(receipt_ids(&app, &p), recent, "the recent list is unchanged");
+    assert_eq!(t.count("ask.count"), 0);
+}
+
 #[test]
 fn a_cancel_with_a_receipt_names_the_asks_project() {
     let t = Tmp::new();
@@ -101,9 +144,11 @@ fn a_cancel_with_a_receipt_names_the_asks_project() {
     let r = app.act_cancel_ask(&env("a_cancel_0002", &p, None), &ask);
     assert_eq!(r["receipt"]["state"], "done", "{r}");
     wait_until("cancelled", || idle(&app));
-    // Nothing left to cancel: a refusal receipt, not a crash.
+    // Nothing left to cancel: refused with no receipt (the ask is no project's now), not a crash.
     let gone = app.act_cancel_ask(&env("a_cancel_0003", &p, None), &ask);
-    assert_eq!((gone["receipt"]["state"].as_str(), gone["receipt"]["reason"].as_str()), (Some("rejected"), Some("ask_not_found")), "{gone}");
+    assert_eq!((gone["receipt"].is_null(), code(&gone["error"])), (true, "ask_not_found"), "{gone}");
+    // The receipt of the cancel that ran still replays.
+    assert_eq!(app.act_cancel_ask(&env("a_cancel_0002", &p, None), &ask)["replayed"], true);
 }
 
 #[test]
@@ -112,9 +157,20 @@ fn lead_status_by_project_needs_no_run_and_refuses_an_archived_project() {
     let app = t.app();
     let p = pid(&t);
     assert!(app.project_state(&p, None).unwrap()["generations"]["orchestrator"].is_null(), "no Director-General yet");
+    let quiet = crate::desktop::test_project(&t.data(), &t.home(), &t.0.join("quiet"));
+    let before = tree(&t.data());
     let s = app.lead_status_for_project(&p).unwrap();
     assert_eq!((s["available"].as_bool(), s["project_id"].as_str(), s["generation"].as_u64()), (Some(true), Some(p.as_str()), Some(1)), "{s}");
+    assert_eq!(s["state"], "running", "the fixture's run is going: {s}");
     assert_eq!(s["stream"], stream_name(&t));
+    // A project with no run and no question yet: not started.
+    let q = app.lead_status_for_project(&quiet).unwrap();
+    assert_eq!((q["state"].as_str(), q["generation"].as_u64()), (Some("not_started"), Some(1)), "{q}");
+    assert_eq!(tree(&t.data()), before, "a status read creates nothing");
+    assert!(app.project_state(&quiet, None).unwrap()["generations"]["orchestrator"].is_null());
+    assert!(app.project_state(&p, None).unwrap()["generations"]["orchestrator"].is_null(), "and carries nothing over");
+    // Once asked, it reads the recorded conversation.
+    app.lead_status(RUN_ID).unwrap();
     assert_eq!(app.project_state(&p, None).unwrap()["generations"]["orchestrator"], 1);
     assert_eq!(code(&app.lead_status_for_project("../x").unwrap_err()), "invalid_args");
     app.projects.archive(&p, None).unwrap();
