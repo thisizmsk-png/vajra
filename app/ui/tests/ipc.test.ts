@@ -79,6 +79,13 @@ describe("typed ipc", () => {
     expect(f.calls).toEqual([{ cmd: "inbox", args: undefined }]);
   });
 
+  it("says what is wrong with the projects folder and what to do", () => {
+    const detail = "The app's projects folder is a symbolic link, which the app never follows (it could point the app's records somewhere else), so projects are unavailable until it is fixed.";
+    const fix = 'Move /d/projects aside (for example: mv "/d/projects" "/d/projects.old"), then restart the app. A new projects folder is made at that path.';
+    expect(errorText({ error: "projects_unavailable", detail, fix, path: "/d/projects" })).toBe(`${detail} ${fix}`);
+    expect(errorText({ error: "projects_unavailable", detail })).toBe(detail);
+  });
+
   it("shows the sandbox message as one friendly line", () => {
     const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
     expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);

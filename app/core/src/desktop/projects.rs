@@ -42,10 +42,17 @@ fn refusal(e: StoreError) -> Value {
         StoreError::Invalid(ContractError::Invalid(why)) => invalid("name", why),
         StoreError::Invalid(e) => fail("bad_record", e),
         StoreError::Io(e) => fail("io", e),
+        StoreError::Unavailable(u) => json!({"error": "projects_unavailable", "detail": u.what(), "fix": u.fix(), "path": u.path}),
     }
 }
 
 impl App {
+    /// The preflight row for a refused projects folder (#77 follow-up), or `None` when the store is usable.
+    pub fn projects_row(&self) -> Option<Value> {
+        let u = self.projects.unavailable()?;
+        Some(json!({"name": "Projects folder", "ok": false, "detail": format!("{} ({})", u.what(), u.path.display()), "fix": u.fix()}))
+    }
+
     pub fn app_info(&self) -> Res {
         Ok(info())
     }

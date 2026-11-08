@@ -249,6 +249,8 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
+        // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = crate::projects::store::Store::open(data, home)?;
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
@@ -342,8 +344,11 @@ impl App {
         let allow = self.allow()?;
         let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
         let ok = preflight::start_enabled(&rows);
-        let rows: Vec<Value> =
+        let mut rows: Vec<Value> =
             rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+        // A refused projects folder is shown (what, where, what to do) but does not hold up starting a run: runs do not
+        // read the project store.
+        rows.extend(self.projects_row());
         Ok(json!({"rows": rows, "start_enabled": ok}))
     }
 

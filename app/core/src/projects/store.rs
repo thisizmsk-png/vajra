@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -34,6 +34,47 @@ pub enum StoreError {
     Identity(IdentityError),
     Invalid(ContractError),
     Io(io::Error),
+    /// `<data>/projects` is not a folder the store will use (#77 follow-up): every call refuses, nothing is written.
+    Unavailable(Unavailable),
+}
+
+/// Why the projects folder is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnavailableReason {
+    /// A symbolic link: the app's records could be pointed somewhere else, so it is never followed.
+    Symlink,
+    /// Something other than a folder is in its place.
+    NotAFolder,
+    /// It could not be created or opened (permissions, a full disk).
+    CannotOpen,
+}
+
+/// The projects folder the store refused at open, and why. The app still opens; the person is told what to do.
+#[derive(Clone, Debug)]
+pub struct Unavailable {
+    pub path: PathBuf,
+    pub reason: UnavailableReason,
+}
+
+impl Unavailable {
+    /// What is wrong, in words (no path: that is its own field).
+    pub fn what(&self) -> String {
+        let why = match self.reason {
+            UnavailableReason::Symlink => "is a symbolic link, which the app never follows (it could point the app's records somewhere else)",
+            UnavailableReason::NotAFolder => "is not a folder",
+            UnavailableReason::CannotOpen => "could not be opened",
+        };
+        format!("The app's projects folder {why}, so projects are unavailable until it is fixed.")
+    }
+
+    /// What to do, naming the path.
+    pub fn fix(&self) -> String {
+        let p = self.path.display();
+        match self.reason {
+            UnavailableReason::Symlink | UnavailableReason::NotAFolder => format!("Move {p} aside (for example: mv \"{p}\" \"{p}.old\"), then restart the app. A new projects folder is made at that path."),
+            UnavailableReason::CannotOpen => format!("Check that {p} is a folder you own and can write, then restart the app."),
+        }
+    }
 }
 
 impl std::fmt::Display for StoreError {
@@ -46,6 +87,7 @@ impl std::fmt::Display for StoreError {
             Self::Identity(e) => write!(f, "{e}"),
             Self::Invalid(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::Unavailable(u) => write!(f, "{}", u.what()),
         }
     }
 }
@@ -109,8 +151,8 @@ type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 
 pub struct Store {
     /// The projects folder, opened once; every project folder is opened relative to it, so replacing `<data>/projects`
-    /// afterwards (a rename plus a symlink) cannot redirect anything.
-    root: Pinned,
+    /// afterwards (a rename plus a symlink) cannot redirect anything. `Err` when the folder was refused at open.
+    root: std::result::Result<Pinned, Unavailable>,
     limits: (usize, usize),
     guard: Guard,
     /// Serialises every read-modify-write of a record within the process.
@@ -118,6 +160,20 @@ pub struct Store {
     /// Held by a whole migration confirm (see `migrate::confirm`), so two confirms never interleave.
     migrating: Mutex<()>,
     now: Clock,
+}
+
+/// Open (creating at 0700) the projects folder, or say why it is refused. A symbolic link or a non-folder is refused
+/// before anything is created or chmod-ed, and the open itself never follows a link (O_NOFOLLOW), so a link planted
+/// between the check and the open is refused too.
+fn open_root(dir: &Path) -> std::result::Result<Pinned, Unavailable> {
+    let refuse = |reason| Unavailable { path: dir.to_path_buf(), reason };
+    match fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_symlink() => return Err(refuse(UnavailableReason::Symlink)),
+        Ok(m) if !m.is_dir() => return Err(refuse(UnavailableReason::NotAFolder)),
+        _ => {}
+    }
+    fsx::private_dir(dir).map_err(|_| refuse(UnavailableReason::CannotOpen))?;
+    Pinned::open(dir, false).map_err(|e| refuse(if e.raw_os_error() == Some(libc::ELOOP) { UnavailableReason::Symlink } else { UnavailableReason::CannotOpen }))
 }
 
 impl Store {
@@ -134,12 +190,19 @@ impl Store {
     }
 
     pub fn with_clock(data: &Path, home: &Path, now: Clock) -> io::Result<Self> {
-        let dir = data.join("projects");
-        fsx::private_dir(&dir)?;
-        let root = Pinned::open(&dir, false)?;
+        let root = open_root(&data.join("projects"));
         // The guard compares against canonical paths; a data dir that is a symlink is compared by its target.
         let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now })
+    }
+
+    /// The projects folder refused at open, if it was: the app shows this and every call refuses.
+    pub fn unavailable(&self) -> Option<&Unavailable> {
+        self.root.as_ref().err()
+    }
+
+    fn root(&self) -> Result<&Pinned> {
+        self.root.as_ref().map_err(|u| StoreError::Unavailable(u.clone()))
     }
 
     /// The folders that can never be a project.
@@ -155,14 +218,18 @@ impl Store {
     /// Has the owner confirmed the migration? The marker is read through the pinned projects folder; anything but a
     /// clean "not there" counts as done, so a surprise never lets a second migration run.
     pub fn migration_done(&self) -> bool {
-        match self.root.read(".migrated-v1", 16) {
+        let Ok(root) = self.root.as_ref() else { return true };
+        match root.read(".migrated-v1", 16) {
             Ok(_) => true,
             Err(e) => e.kind() != io::ErrorKind::NotFound,
         }
     }
 
     pub fn mark_migrated(&self) -> io::Result<()> {
-        self.root.write_atomic(".migrated-v1", b"1\n")
+        match &self.root {
+            Ok(root) => root.write_atomic(".migrated-v1", b"1\n"),
+            Err(u) => Err(io::Error::other(u.what())),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -193,7 +260,7 @@ impl Store {
     fn read_all(&self) -> Result<Listing> {
         let (max_projects, max_entries) = self.limits;
         let mut out = Listing::default();
-        let names: Vec<String> = self.root.names()?.into_iter().filter(|n| !n.starts_with('.')).collect();
+        let names: Vec<String> = self.root()?.names()?.into_iter().filter(|n| !n.starts_with('.')).collect();
         out.truncated = names.len() > max_entries;
         for name in names.into_iter().take(max_entries) {
             if !contract::valid_project_id(&name) {
@@ -218,7 +285,7 @@ impl Store {
         if !contract::valid_project_id(id) {
             return Err(StoreError::NotFound);
         }
-        match self.root.child(id, false) {
+        match self.root()?.child(id, false) {
             Ok(d) => Ok(d),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound),
             Err(e) => Err(e.into()),
@@ -246,7 +313,7 @@ impl Store {
 
     fn write(&self, p: &Project) -> Result<()> {
         p.validate()?;
-        let dir = self.root.child(&p.id, true)?;
+        let dir = self.root()?.child(&p.id, true)?;
         let mut bytes = serde_json::to_vec_pretty(p).map_err(|e| StoreError::Io(io::Error::other(e)))?;
         bytes.push(b'\n');
         dir.write_atomic("project.json", &bytes)?;

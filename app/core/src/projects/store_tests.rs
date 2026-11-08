@@ -501,8 +501,10 @@ fn the_projects_folder_swapped_for_a_symlink_after_open_redirects_nothing() {
     assert_eq!(fs::read(outside.join(&p.id).join("project.json")).unwrap(), planted);
     assert!(!outside.join(&p.id).join("sessions.jsonl").exists());
     assert!(t.0.join("moved-projects").join(&p.id).join("sessions.jsonl").exists());
-    // A store opened afterwards refuses the symlinked folder.
-    assert!(Store::open(&t.data(), &t.home()).is_err());
+    // A store opened afterwards refuses the symlinked folder: it opens refusing (#77 follow-up), and reads nothing.
+    let later = Store::open(&t.data(), &t.home()).unwrap();
+    assert_eq!(later.unavailable().map(|u| u.reason), Some(UnavailableReason::Symlink));
+    assert!(matches!(later.get(&p.id), Err(StoreError::Unavailable(_))), "the planted record is never read");
 }
 
 #[test]
@@ -526,4 +528,39 @@ fn a_log_longer_than_the_read_window_says_it_was_cut() {
     assert!(log.truncated, "the caller can tell the history is incomplete");
     assert_eq!(log.skipped, 0, "the cut first line is not counted as damage");
     assert!(log.sessions.iter().all(|x| x.id == busy), "the old session is outside the window");
+}
+
+/// #77 follow-up: a `<data>/projects` that is a symbolic link (or not a folder) is still never used, but the store opens
+/// in a refusing state instead of failing the app's launch: every call says what is wrong, which path, and what to do,
+/// and nothing is ever written through the link.
+#[test]
+fn a_symlinked_or_non_folder_projects_dir_is_refused_by_every_call_without_failing_open() {
+    let t = Tmp::new("unavail");
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(t.data()).unwrap();
+    let dir = t.data().join("projects");
+    symlink(&elsewhere, &dir).unwrap();
+    let s = t.store();
+    let u = s.unavailable().expect("refusing, not open");
+    assert_eq!((u.path.as_path(), u.reason), (dir.as_path(), UnavailableReason::Symlink));
+    for r in [s.list(true).map(|_| ()), s.get("p_01M6YKE1Q5YEQZWJSJ91A6DQYT").map(|_| ()), s.add(&t.repo("src/a"), false).map(|_| ())] {
+        assert!(matches!(r, Err(StoreError::Unavailable(ref e)) if e.reason == UnavailableReason::Symlink), "{r:?}");
+    }
+    assert!(s.migration_done(), "no migration runs into a refused folder");
+    assert!(s.mark_migrated().is_err());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing was written through the link");
+    assert_ne!(mode(&elsewhere), 0o700, "the link's target was not touched");
+    let text = format!("{} {}", u.what(), u.fix());
+    assert!(text.contains("symbolic link") && u.fix().contains(dir.to_str().unwrap()), "{text}");
+
+    // A plain file in its place: refused the same way, with its own reason.
+    fs::remove_file(&dir).unwrap();
+    fs::write(&dir, b"x").unwrap();
+    assert_eq!(t.store().unavailable().map(|u| u.reason), Some(UnavailableReason::NotAFolder));
+    // Fixed (moved aside): the next open is a normal store.
+    fs::remove_file(&dir).unwrap();
+    let s = t.store();
+    assert!(s.unavailable().is_none());
+    assert!(s.list(true).unwrap().projects.is_empty());
 }

@@ -14,6 +14,11 @@ export function errorText(e: unknown): string {
   // The Lead's guard preconditions already carry a one-line "why and what to do" (for example the sandbox one), so
   // it is shown as it is, without the code in front.
   if (isIpcError(e) && e.error === "lead_guard_missing" && e.detail) return e.detail;
+  // A refused projects folder (#77 follow-up): what is wrong, then what to do (the fix names the path).
+  if (isIpcError(e) && e.error === "projects_unavailable" && e.detail) {
+    const fix = (e as { fix?: unknown }).fix;
+    return typeof fix === "string" && fix ? `${e.detail} ${fix}` : e.detail;
+  }
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }

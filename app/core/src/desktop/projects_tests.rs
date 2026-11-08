@@ -104,3 +104,27 @@ fn project_sessions_carries_the_truncated_flag() {
     assert_eq!(keys(&v), keys(&fx));
     let _ = fs::remove_dir_all(root);
 }
+
+/// #77 follow-up: the app opens with a symlinked projects folder; the project commands refuse with what is wrong, the
+/// path and what to do, and preflight shows it as a row (without disabling unrelated checks' start button).
+#[test]
+fn a_symlinked_projects_folder_does_not_stop_the_app_opening() {
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vajra-projcmd-unavail-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let (home, data, elsewhere) = (root.join("home"), root.join("data"), root.join("elsewhere"));
+    for d in [home.join(".claude"), data.clone(), elsewhere.clone()] {
+        fs::create_dir_all(d).unwrap();
+    }
+    std::os::unix::fs::symlink(&elsewhere, data.join("projects")).unwrap();
+    let app = App::open(&data, &home).expect("the app opens");
+    let e = err(app.project_list(false));
+    assert_eq!(e["error"], "projects_unavailable", "{e}");
+    assert_eq!(e["path"], data.join("projects").to_str().unwrap());
+    assert!(e["detail"].as_str().unwrap().contains("symbolic link") && e["fix"].as_str().is_some_and(|f| !f.is_empty()), "{e}");
+    assert_eq!(err(app.project_add(&repo(&root, "src/a"), false))["error"], "projects_unavailable");
+    let row = app.projects_row().expect("a preflight row");
+    assert_eq!((row["ok"].as_bool(), row["name"].as_str()), (Some(false), Some("Projects folder")), "{row}");
+    assert!(row["detail"].as_str().unwrap().contains(data.join("projects").to_str().unwrap()), "{row}");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(root);
+}
