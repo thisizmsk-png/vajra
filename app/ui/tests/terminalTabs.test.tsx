@@ -172,6 +172,35 @@ describe("durable layout", () => {
     expect(tabEls().filter((t) => t.getAttribute("aria-selected") === "true")).toHaveLength(1);
   });
 
+  it("GIVEN 16 tabs WHEN I press + or ask for Terminal here in a new folder THEN the active tab stays selected and the dock says it is full", async () => {
+    const tabs = Array.from({ length: 16 }, (_, i) => ({ cwd: `/w/${i}`, label: `w${i}`, kind: "shell" }));
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: 3, tabs }));
+    const { f } = mount();
+    await waitFor(() => expect(tabNames().length).toBe(16));
+    const active = () => tabEls().filter((t) => t.getAttribute("aria-selected") === "true").map((t) => t.textContent);
+    expect(active()).toEqual(["w3"]);
+    fireEvent.click(screen.getByRole("button", { name: "New terminal", hidden: true }));
+    expect(tabNames()).toHaveLength(16);
+    expect(active()).toEqual(["w3"]);
+    act(() => openTerminalHere({ cwd: "/w/new", label: "new" }));
+    expect(tabNames()).toHaveLength(16);
+    expect(active()).toEqual(["w3"]);
+    expect(screen.getByRole("status", { hidden: true }).textContent).toMatch(/too many terminals/i);
+    await waitFor(() => expect(f.named("term_open").length).toBe(1)); // only the active restored tab started; no 17th
+  });
+
+  it("GIVEN a dormant agent tab listed before a dormant shell tab in one folder WHEN one live shell returns THEN it binds to the shell tab", async () => {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: 1, tabs: [{ cwd: "/work/app", label: "app", kind: "agent" }, { cwd: "/work/app", label: "app", kind: "shell" }] }));
+    const { f } = mount({ term_list: { terminals: [{ id: 7, cwd: "/work/app", root: "/work/app", rows: 24, cols: 80, alive: true }] } });
+    await waitFor(() => expect(f.named("term_attach")[0]?.args).toEqual({ id: 7 }));
+    expect(tabNames()).toEqual(["app (agent)", "app"]);
+    act(() => void fireEvent.keyDown(window, { key: "`", code: "Backquote", ctrlKey: true }));
+    await act(async () => {});
+    expect(f.named("term_open")).toHaveLength(0); // the shell tab is the one that is live
+    fireEvent.click(tabEls()[0]);
+    await waitFor(() => expect(f.named("term_open")).toHaveLength(1)); // the agent tab was still dormant
+  });
+
   it("GIVEN storage is unavailable WHEN tabs change THEN the dock still works", async () => {
     const spy = vi.spyOn(memory, "setItem").mockImplementation(() => { throw new Error("quota"); });
     const { f } = mount();

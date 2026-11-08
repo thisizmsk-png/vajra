@@ -88,9 +88,16 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     back.current = null;
     if (el instanceof HTMLElement && el.isConnected) el.focus();
   }, []);
-  const add = useCallback((p: Place, attachId?: number) => {
+  /** Open a tab and select it, or at the cap say so and change nothing (no selection of a tab that does not exist). */
+  const add = useCallback((p: Place, attachId?: number): number | null => {
+    if (tabsRef.current.length >= MAX_TABS) {
+      setNote(S.terminal.errors.too_many_terminals);
+      return null;
+    }
     const key = ++seq;
-    setTabs((t) => (t.length >= MAX_TABS ? t : [...t, { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", live: true, attachId, gen: 0, state: { status: "starting" } }]));
+    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", live: true, attachId, gen: 0, state: { status: "starting" } };
+    tabsRef.current = [...tabsRef.current, tab]; // so a second add in the same tick sees the cap too
+    setTabs((t) => [...t, tab]);
     setCur(key);
     return key;
   }, []);
@@ -105,7 +112,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         const next = tabsRef.current.map((t) => ({ ...t }));
         let first: number | null = null;
         for (const i of r.terminals) {
-          const t = next.find((n) => !n.live && n.cwd === i.cwd);
+          // The core does not know kinds: prefer the plain shell tab, so a returning shell never lands on an agent tab.
+          const t = next.find((n) => !n.live && n.cwd === i.cwd && n.kind === "shell") ?? next.find((n) => !n.live && n.cwd === i.cwd);
           if (t) Object.assign(t, { live: true, attachId: i.id });
           else if (next.length < MAX_TABS) next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
           else continue;
