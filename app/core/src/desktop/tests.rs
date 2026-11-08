@@ -2679,3 +2679,18 @@ fn a_cut_verify_run_never_resumes_and_a_cut_diff_stays_viewable() {
 fn code_of_err(v: &Value) -> &str {
     v["error"].as_str().unwrap_or("")
 }
+
+#[test]
+fn terminal_roots_are_the_run_dirs_of_runs_this_app_started_not_the_worker_writable_index() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert!(app.terminal_roots().is_empty());
+    let (a, b) = (t.home().join("repo-a"), t.home().join("repo-b"));
+    for (k, cwd) in [("s1", &a), ("s2", &a), ("s3", &b)] {
+        lock(&app.runs).insert(k.into(), Run { session_id: k.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    }
+    assert_eq!(app.terminal_roots(), vec![a.clone(), b]);
+    // A line a worker appends to runs.jsonl names a dir; it grants nothing.
+    fs::write(t.0.join("data/runs.jsonl"), format!("{{\"campaign\":\"c\",\"session_id\":\"x\",\"run_id\":\"20261105-1231\",\"cwd\":\"{}\"}}\n", t.home().join("elsewhere").display())).unwrap();
+    assert!(!app.terminal_roots().iter().any(|r| r.ends_with("elsewhere")));
+}

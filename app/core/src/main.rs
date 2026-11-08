@@ -22,6 +22,7 @@ use vajra_desktop::desktop::{App, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
+use vajra_desktop::terminal::{Event as TermEvent, LoginEnv, Sink as TermSink, Terminals};
 
 /// The one event the UI listens to.
 const CHANGED: &str = "changed";
@@ -156,6 +157,89 @@ fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
     app.diff(&cwd, &base)
 }
 
+// User terminals (module `terminal`): off the bus, the control service and MCP, so no agent can reach them. Output goes
+// to the tab's own channel as raw bytes (an ArrayBuffer in the webview); the end of the shell is one JSON message
+// {"exit": code}. The core checks the cwd against the roots it knows and starts the login shell as argv; the UI never
+// names a program.
+
+/// The shell's environment base. Swap point for #70: return its resolved login-shell PATH from `path`.
+struct AppLoginEnv {
+    home: PathBuf,
+}
+
+impl LoginEnv for AppLoginEnv {
+    fn path(&self) -> Option<std::ffi::OsString> {
+        None
+    }
+    fn shell(&self) -> Option<PathBuf> {
+        std::env::var_os("SHELL").map(PathBuf::from)
+    }
+    fn home(&self) -> Option<PathBuf> {
+        Some(self.home.clone())
+    }
+}
+
+fn term_sink(ch: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> TermSink {
+    use tauri::ipc::InvokeResponseBody as Body;
+    std::sync::Arc::new(move |e| {
+        let _ = match e {
+            TermEvent::Data(d) => ch.send(Body::Raw(d)),
+            TermEvent::Exit(c) => ch.send(Body::Json(format!("{{\"exit\":{}}}", c.map_or("null".into(), |c| c.to_string())))),
+        };
+    })
+}
+
+fn term_err(e: vajra_desktop::terminal::TermError) -> serde_json::Value {
+    serde_json::json!({"error": e.code(), "detail": e.to_string()})
+}
+
+fn term_value(i: &vajra_desktop::terminal::TermInfo) -> serde_json::Value {
+    serde_json::to_value(i).unwrap_or_default()
+}
+
+#[tauri::command]
+fn term_open(
+    app: State<'_, App>,
+    terms: State<'_, Terminals>,
+    cwd: String,
+    rows: u16,
+    cols: u16,
+    on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Res {
+    terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
+}
+
+/// Re-bind a terminal that outlived its view (the webview reloaded, or a hidden dock came back).
+#[tauri::command]
+fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> Res {
+    terms.attach(id, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
+}
+
+#[tauri::command]
+fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Res {
+    terms.write(id, data.as_bytes()).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+#[tauri::command]
+fn term_resize(terms: State<'_, Terminals>, id: u32, rows: u16, cols: u16) -> Res {
+    terms.resize(id, rows, cols).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+#[tauri::command]
+fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
+    terms.ack(id, bytes).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+#[tauri::command(async)]
+fn term_close(terms: State<'_, Terminals>, id: u32) -> Res {
+    terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+#[tauri::command]
+fn term_list(terms: State<'_, Terminals>) -> Res {
+    Ok(serde_json::json!({"terminals": terms.list().iter().map(term_value).collect::<Vec<_>>()}))
+}
+
 #[tauri::command(async)]
 fn control_message(app: State<'_, App>, worker: String, text: String) -> Res {
     app.control_message(&worker, &text)
@@ -271,6 +355,7 @@ fn main() {
 
     let built = tauri::Builder::default()
         .manage(app)
+        .manage(Terminals::with(Default::default(), std::sync::Arc::new(AppLoginEnv { home: home.clone() })))
         .setup(move |a| {
             let handle = a.handle().clone();
             std::thread::spawn(move || {
@@ -335,6 +420,13 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            term_open,
+            term_attach,
+            term_list,
+            term_write,
+            term_resize,
+            term_ack,
+            term_close,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
@@ -357,6 +449,7 @@ fn main() {
             let app = handle.state::<App>();
             app.shutdown_lead();
             app.sup.shutdown();
+            handle.state::<Terminals>().shutdown();
         }
         _ => {}
     });
