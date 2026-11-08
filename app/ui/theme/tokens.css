@@ -13,6 +13,11 @@
   --c-text-muted: #8f929b;
   --c-primary: #7aa7ff;
   --c-text-on-primary: #0b1020;
+  /* The primary action is ink, like the native toolbar buttons around it; azure stays for focus, selection and live. */
+  --c-action: #ededef;
+  --c-text-on-action: #101113;
+  --c-panel: #141518;
+  --c-shadow-soft: rgb(0 0 0 / 0.3);
   --c-success: #5fd38d;
   --c-warning: #f0b44c;
   --c-danger: #ff7070;
@@ -22,6 +27,7 @@
   --c-live-tint: rgb(122 167 255 / 0.10);
   --c-warn-tint: rgb(240 180 76 / 0.08);
   --c-kbd-on-primary: rgb(0 0 0 / 0.25);
+  --c-kbd-on-action: rgb(16 17 19 / 0.3);
   --c-selection: rgb(122 167 255 / 0.30);
   --c-scrim: rgb(16 17 19 / 0.6);
 
@@ -56,6 +62,10 @@
   --c-text-muted: #5f626b;
   --c-primary: #2556c8;
   --c-text-on-primary: #ffffff;
+  --c-action: #18191c;
+  --c-text-on-action: #ffffff;
+  --c-panel: #ffffff;
+  --c-shadow-soft: rgb(24 25 28 / 0.06);
   --c-success: #1a7341;
   --c-warning: #855600;
   --c-danger: #c0282b;
@@ -65,6 +75,7 @@
   --c-live-tint: rgb(37 86 200 / 0.07);
   --c-warn-tint: rgb(133 86 0 / 0.07);
   --c-kbd-on-primary: rgb(255 255 255 / 0.4);
+  --c-kbd-on-action: rgb(255 255 255 / 0.35);
   --c-selection: rgb(37 86 200 / 0.18);
   --c-scrim: rgb(251 251 252 / 0.6);
 
@@ -93,6 +104,8 @@
   --radius-lg: 10px;
   --bar-h: 40px;
   --radius-sm: 4px;
+  --radius-pill: 999px;
+  --titlebar-h: 40px;
   --radius-md: 6px;
   --space-xs: 4px;
   --space-sm: 8px;
