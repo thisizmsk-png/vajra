@@ -487,7 +487,9 @@ fn lead_mcp_audit_line_per_call() {
     let without_one: String = with_guard.lines().filter(|l| !l.contains("mcp__vajra-desktop__redirect_worker")).map(|l| format!("{l}\n")).collect();
     fs::write(dir.join("audit.log"), without_one).unwrap();
     let rep = rp(&dir);
-    assert_eq!(rep.ledger_without_audit.len(), 1, "{rep:?}");
+    assert_eq!(rep.guard_absent.len(), 1, "{rep:?}");
+    assert!(rep.ledger_without_audit.is_empty(), "the app's own line is there; only the guard's is missing: {rep:?}");
+    assert!(!rep.is_clean(), "{rep:?}");
 
     // An app line for an id the ledger never recorded is flagged.
     fs::write(dir.join("audit.log"), format!("{with_guard}{} ALLOW desktop-control reason=\"mcp stop_worker id=aDEADBEEF\"\n", time::iso_secs(SystemTime::now()))).unwrap();
