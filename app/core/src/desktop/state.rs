@@ -279,7 +279,7 @@ impl App {
             "rev": rev,
             "unchanged": false,
             "active_runs": self.active_run_count(),
-            "generations": {"project": run_gen},
+            "generations": {"project": run_gen, "orchestrator": self.orchestrator_generation(project_id)},
             "workers": workers,
             "receipts": recent,
         }))

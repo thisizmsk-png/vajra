@@ -1350,3 +1350,6 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
 
 #[path = "lead_store_tests.rs"]
 mod store;
+
+#[path = "lead_acts_tests.rs"]
+mod acts;

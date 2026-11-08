@@ -261,3 +261,40 @@ fn proposals_belong_to_store_projects_and_old_ones_can_only_be_dismissed() {
     let old = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap();
     assert_eq!((old["project_id"].as_str(), old["project_name"].as_str(), old["actions"].clone()), (Some(pid.as_str()), Some("Harbor"), json!(["dismiss"])), "{old}");
 }
+
+/// FG-02c c3 (decision Q2): start and dismiss through receipts. A retried dismiss replays its receipt; a start that
+/// does not match what was shown is a rejected receipt and the proposal stays open; the envelope must name the
+/// project the inbox lists the proposal under (for an old one, the project its conversation went to).
+#[test]
+fn proposal_decisions_through_receipts_run_once_and_name_the_listed_project() {
+    use crate::desktop::state::Envelope;
+    let t = Tmp::new();
+    let (app, pid) = proposed(&t, &["one", "two"]);
+    let env = |a: &str, p: &str| Envelope { action_id: a.into(), project_id: p.into(), expect_generation: None };
+    let items = proposals(&app);
+    let (one, two) = (items[0]["id"].as_str().unwrap(), items[1]["id"].as_str().unwrap());
+    let other = super::super::test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
+    let r = app.act_dismiss_proposal(&env("a_dismiss_0001", &other), one);
+    assert_eq!((r["receipt"].is_null(), code(&r["error"])), (true, "project_mismatch"), "{r}");
+    let r = app.act_dismiss_proposal(&env("a_dismiss_0002", &pid), one);
+    assert_eq!((r["receipt"]["state"].as_str(), r["result"]["state"].as_str()), (Some("done"), Some("dismissed")), "{r}");
+    let again = app.act_dismiss_proposal(&env("a_dismiss_0002", &pid), one);
+    assert_eq!((again["replayed"].as_bool(), &again["receipt"]), (Some(true), &r["receipt"]), "a retry replays, it does not say already_decided");
+    // A start with a hash other than the one shown: rejected, nothing recorded, still open.
+    let bad = app.act_start_proposal(&env("a_start_bad_001", &pid), two, &"0".repeat(64));
+    assert_eq!((bad["receipt"]["state"].as_str(), bad["receipt"]["reason"].as_str()), (Some("rejected"), Some("proposal_changed")), "{bad}");
+    assert_eq!(states(&t, "approve"), Vec::<String>::new());
+    assert_eq!(proposals(&app).len(), 1);
+    // An old proposal carried over to this project: the receipt names this project, and it is dismiss-only.
+    let k = "k_0123456789abcdef0123456789abcdef";
+    let kdir = t.0.join("data/control/projects").join(k).join("orchestrator");
+    fs::create_dir_all(&kdir).unwrap();
+    fs::write(kdir.join("mapped-to"), &pid).unwrap();
+    let item = old_proposal(&t, k, '3');
+    let sha = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap()["proposal_sha256"].as_str().unwrap().to_string();
+    assert_eq!(code(&app.act_start_proposal(&env("a_start_old_001", k), &item, &sha)["error"]), "project_mismatch");
+    let s = app.act_start_proposal(&env("a_start_old_002", &pid), &item, &sha);
+    assert_eq!(s["receipt"]["reason"], "proposal_changed", "{s}");
+    let d = app.act_dismiss_proposal(&env("a_dismiss_old_01", &pid), &item);
+    assert_eq!(d["receipt"]["state"], "done", "{d}");
+}

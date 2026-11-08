@@ -305,6 +305,22 @@ impl App {
         read_text(&self.orchestrator_dir(k).join(MAPPED_TO)).filter(|p| pc::valid_project_id(p))
     }
 
+    /// The current generation of store project `pid`'s Director-General, without creating it: `None` when it has
+    /// never been used or its record is not valid (`project_state`'s `generations.orchestrator`).
+    pub(super) fn orchestrator_generation(&self, pid: &str) -> Option<u32> {
+        if !pc::valid_project_id(pid) {
+            return None;
+        }
+        let dir = self.orchestrator_dir(pid);
+        if !dir.join(ROOT_FILE).exists() {
+            return None;
+        }
+        match read_text(&dir.join(GEN_FILE)) {
+            None => Some(1),
+            Some(g) => g.parse::<u32>().ok().filter(|g| (1..=MAX_GENERATION).contains(g)),
+        }
+    }
+
     /// The project folder recorded for `pid`'s Director-General, if it has one.
     pub(super) fn orchestrator_root(&self, pid: &str) -> Option<PathBuf> {
         if !ids::valid_project_ref(pid) {
@@ -323,10 +339,12 @@ impl App {
     /// last one, on an empty stream. Refused while a turn is in flight. A process of the old generation that is still
     /// around can no longer see or steer anything (its MCP calls are `stale_generation`).
     pub fn new_conversation(&self, run_id: &str) -> Res {
-        self.new_conversation_inner(run_id).map_err(|e| e.to_json())
+        self.new_conversation_expecting(run_id, None).map_err(|e| e.to_json())
     }
 
-    fn new_conversation_inner(&self, run_id: &str) -> Result<Value, LeadError> {
+    /// `new_conversation` from conversation `expect` (a receipt's `expect_generation`), checked under the ask lock: two
+    /// clicks aimed at the same conversation start one new conversation, not two.
+    pub(super) fn new_conversation_expecting(&self, run_id: &str, expect: Option<u32>) -> Result<Value, LeadError> {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
@@ -339,6 +357,9 @@ impl App {
             return Err(LeadError::Busy);
         }
         let orch = self.orchestrator(&found.id, &found.root)?;
+        if expect.is_some_and(|g| g != orch.generation) {
+            return Err(LeadError::StaleGeneration(orch.generation));
+        }
         let next = orch.generation.checked_add(1).filter(|g| *g <= MAX_GENERATION).ok_or_else(|| LeadError::Invalid("generation: too many conversations".into()))?;
         // The session goes first: a crash between the two leaves the old generation with no session (a fresh start),
         // never the new generation resuming the old conversation.
