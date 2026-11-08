@@ -850,6 +850,12 @@ impl App {
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
     pub fn evidence_list(&self, slug: &str) -> Res {
+        self.evidence_list_with(slug, true)
+    }
+
+    /// `evidence_list`, or with `checks` false the same rows from what is already known: no check is started and no
+    /// git is run, so a criterion not checked yet (or whose repo state is not cached) reads `checking`, never pass.
+    pub(super) fn evidence_list_with(&self, slug: &str, checks: bool) -> Res {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
@@ -906,7 +912,7 @@ impl App {
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
-        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        let claimed = checks && self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
         struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
@@ -992,9 +998,17 @@ impl App {
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
         let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        let mut unknown: std::collections::HashSet<PathBuf> = Default::default();
         for (i, r) in &repo_of {
-            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r, deadline));
+            if verdict.get(i) == Some(&true) && !repos.contains_key(r) && !unknown.contains(r) {
+                if checks {
+                    repos.insert(r.clone(), self.worktree_state(r, deadline));
+                } else {
+                    match self.worktree_state_cached(r) {
+                        Some(st) => { repos.insert(r.clone(), st); }
+                        None => { unknown.insert(r.clone()); }
+                    }
+                }
             }
         }
         let mut pending = 0usize;
@@ -1008,6 +1022,8 @@ impl App {
                 "fail"
             } else if has_evidence {
                 match verdict.get(&i) {
+                    // Cache-only and the repo's state is not known: not yet a pass.
+                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(r)) => { pending += 1; "checking" }
                     Some(true) => {
                         // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
                         // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
@@ -1125,6 +1141,14 @@ impl App {
     /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
     /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
     /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
+    /// The cached repo state, if it is still fresh: `None` when nothing is cached (never runs git).
+    fn worktree_state_cached(&self, repo: &Path) -> Option<Option<(String, bool)>> {
+        let g = lock(&self.worktree_state);
+        let (at, st) = g.get(repo)?;
+        let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+        (at.elapsed() < ttl).then(|| st.clone())
+    }
+
     fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
@@ -1768,6 +1792,7 @@ mod projects;
 mod wfresult;
 mod decide;
 mod lead;
+mod board;
 mod lead_acts;
 mod runindex;
 mod runview;

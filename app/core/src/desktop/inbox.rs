@@ -35,7 +35,7 @@ const SEEN_FILE: &str = "inbox-seen.json";
 const SINCE: &str = "first seen by the app";
 
 /// Plain text for the UI: controls and invisible characters dropped, one cap.
-fn clean(text: &str, cap: usize) -> String {
+pub(super) fn clean(text: &str, cap: usize) -> String {
     sanitise(text, &Redactor::default()).chars().take(cap).collect()
 }
 

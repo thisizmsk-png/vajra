@@ -181,7 +181,17 @@ export type ProjectState =
       generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
+      /** ADR-15 4.2 board cards, computed by the core from cached verdicts (null for a non-store id). */
+      board: CoreBoard | null;
     };
+/** One board card as the core serves it (contract (b) of the board PR). Lanes: (c); Done only when verified. */
+export type CoreCard = {
+  key: string; kind: "task" | "plan" | "question"; local: string; title: string; owner: string | null; status: string;
+  lane: "backlog" | "running" | "review" | "done"; needs_you: boolean; criteria: { pass: number; total: number } | null;
+  project_id: string; campaign: string; task_id: string | null; attempt: number | null;
+};
+/** The project's newest campaigns (at most 5) and their cards (at most 200 in all); `truncated` says a level was cut. */
+export type CoreBoard = { campaigns: { campaign: string; run_id: string; cards: CoreCard[]; truncated: boolean }[]; truncated: boolean; error?: string };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
 

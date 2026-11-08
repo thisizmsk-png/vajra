@@ -2851,3 +2851,6 @@ fn a_run_starts_only_in_an_active_project_and_is_recorded_under_its_orchestrator
     assert_eq!((run.run_id.as_deref(), run.campaign.as_deref(), run.parent.as_deref()), (Some("20261105-1230"), Some("deliver-x"), Some(orch.as_str())));
     let _ = app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5));
 }
+
+#[path = "board_tests.rs"]
+mod board_cards;

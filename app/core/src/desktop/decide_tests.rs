@@ -976,3 +976,47 @@ fn lead_reply_lines_drop_the_same_invisible_characters() {
     let line = format!("all good{tags}\u{FE0F}\u{E0100}\u{2028}\u{2029}\u{034F}\u{3164}\u{FFF9}");
     assert_eq!(Redactor::default().clean(&line), "all good");
 }
+
+/// ADR-15 4.2 (c): a waiting plan is a review card with the needs-you badge on its project's board, keyed by the inbox
+/// id; reading the board marks nothing shown. Once decided it leaves the board.
+#[test]
+fn a_waiting_plan_is_a_review_card_that_needs_you() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    lock(&app.shown).clear();
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    let b = app.project_state(&pid, None).unwrap()["board"].clone();
+    let cards = b["campaigns"][0]["cards"].as_array().unwrap().clone();
+    let plan = cards.iter().find(|c| c["key"] == format!("inbox:{PLAN}")).unwrap_or_else(|| panic!("{b}"));
+    assert_eq!((plan["kind"].as_str(), plan["lane"].as_str(), plan["needs_you"].as_bool(), plan["campaign"].as_str()), (Some("plan"), Some("review"), Some(true), Some(CAMP)), "{plan}");
+    assert!(plan["task_id"].is_null() && plan["criteria"].is_null());
+    assert!(lock(&app.shown).is_empty(), "the board marks nothing shown");
+    // A decision needs what the inbox showed, so the inbox is read (as the window does) before rejecting.
+    app.inbox().unwrap();
+    t.campaign_script(0);
+    app.reject_plan(PLAN, "not now").unwrap();
+    let b = app.project_state(&pid, None).unwrap()["board"].clone();
+    assert!(!b["campaigns"][0]["cards"].as_array().unwrap().iter().any(|c| c["key"] == format!("inbox:{PLAN}")), "{b}");
+}
+
+/// ADR-15 4.2 (c): a waiting question is a review card with the needs-you badge.
+#[test]
+fn a_waiting_question_is_a_review_card_that_needs_you() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    let mut v = done(CAMP, json!([]));
+    v["result"] = json!({"status": "need_input", "node": "plan", "question": "which branch?", "artifacts": {"campaign": CAMP}});
+    t.result("wf_q.json", &v);
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    let b = app.project_state(&pid, None).unwrap()["board"].clone();
+    let q = b["campaigns"][0]["cards"].as_array().unwrap().iter().find(|c| c["key"] == format!("inbox:question:{RUN}")).cloned().unwrap_or_else(|| panic!("{b}"));
+    assert_eq!((q["kind"].as_str(), q["lane"].as_str(), q["needs_you"].as_bool()), (Some("question"), Some("review"), Some(true)), "{q}");
+}

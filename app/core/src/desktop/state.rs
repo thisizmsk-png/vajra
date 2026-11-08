@@ -282,6 +282,8 @@ impl App {
             "generations": {"project": run_gen, "orchestrator": self.orchestrator_generation(project_id)},
             "workers": workers,
             "receipts": recent,
+            // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`).
+            "board": self.board(project_id),
         }))
     }
 }
