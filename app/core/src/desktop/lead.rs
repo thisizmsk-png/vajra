@@ -409,7 +409,7 @@ impl App {
     /// The folders of the app's other projects, for the Lead's deny rules (ADR-15 D8): the cwd of every run this app
     /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
     /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
-    /// ancestor would deny the Lead its own project). One folder per project.
+    /// ancestor would deny the Lead its own project). Every distinct run folder, plus each project's main working tree.
     pub(super) fn other_project_roots(&self, repo: &Path) -> Vec<PathBuf> {
         const MAX_OTHER_ROOTS: usize = 256;
         let own = super::caps::project_key(repo);
@@ -418,20 +418,29 @@ impl App {
             .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
             .unwrap_or_default();
         runs.sort_unstable_by(|a, b| b.cmp(a));
-        let (mut keys, mut out) = (Vec::new(), Vec::new());
+        let mut out: Vec<PathBuf> = Vec::new();
         for run in runs {
             if out.len() >= MAX_OTHER_ROOTS {
                 break;
             }
             let Some(cwd) = self.read_run_cwd(&run) else { continue };
             let key = super::caps::project_key(&cwd);
-            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            if key == own || own_real.starts_with(&real) || keys.contains(&key) {
+            if key == own {
                 continue;
             }
-            keys.push(key);
-            out.push(cwd);
+            // Every distinct run folder (a subfolder, an outside worktree) and the project's main working tree (the
+            // folder that holds its `.git` dir), so a project whose runs were all elsewhere still has its main folder
+            // denied (#80 review).
+            let main = (key.file_name() == Some(std::ffi::OsStr::new(".git")) && key.is_dir()).then(|| key.parent().map(Path::to_path_buf)).flatten();
+            for dir in std::iter::once(cwd).chain(main) {
+                let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+                if own_real.starts_with(&real) || out.contains(&dir) {
+                    continue;
+                }
+                out.push(dir);
+            }
         }
+        out.truncate(MAX_OTHER_ROOTS);
         out
     }
 
