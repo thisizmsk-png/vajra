@@ -216,6 +216,12 @@ fn lead_status(app: State<'_, App>, run_id: String) -> Res {
     app.lead_status(&run_id)
 }
 
+/// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
+#[tauri::command(async)]
+fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
+    app.new_conversation(&run_id)
+}
+
 #[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
@@ -345,6 +351,7 @@ fn main() {
             ask_lead,
             cancel_ask,
             lead_status,
+            new_conversation,
             inbox,
             approve_plan,
             reject_plan,

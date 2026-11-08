@@ -2775,3 +2775,28 @@ fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
     app.launch_kind(SIDS[2], RUNS[2], "c2", &r[0], sleeper, false, true, 16).unwrap();
     app.sup.kill(&format!("run-{}", SIDS[2])).unwrap();
 }
+
+#[test]
+fn a_launched_run_belongs_to_its_projects_director_general() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["alpha", "beta"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, 2).unwrap();
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 2).unwrap();
+    let (pa, pb) = (orchestrator::project_ref(&r[0]).0, orchestrator::project_ref(&r[1]).0);
+    assert_ne!(pa, pb);
+    assert_eq!(std::fs::read_to_string(t.0.join("data/control/lead").join(RUNS[0]).join("project")).unwrap(), pa, "pinned in the guarded record");
+    {
+        let mut svc = lock(&app.control);
+        svc.set_generation(&pa, 1).unwrap();
+        svc.set_generation("k_00000000000000000000000000000000", 1).unwrap();
+        // Alpha's Director-General has a live session in scope (an unknown worker is "not found"); a project with no
+        // live run has none at all (control is off for it), so nothing falls back to every session.
+        let msg = json!({"worker": "nobody", "text": "x"});
+        assert!(matches!(svc.call_tool_for_project(&pa, 1, "message_worker", &msg), Err(crate::control::service::ControlError::WorkerNotFound)));
+        assert!(matches!(svc.call_tool_for_project("k_00000000000000000000000000000000", 1, "message_worker", &msg), Err(crate::control::service::ControlError::ControlDisabled)));
+    }
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
