@@ -6,6 +6,7 @@ import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
 import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
+import { usePreferences } from "../../preferences";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
@@ -40,6 +41,7 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
+  const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
@@ -58,12 +60,19 @@ export function Home() {
   const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
   const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
   const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  const defaultsApplied = useRef(false);
+  useEffect(() => {
+    if (!prefs.view || defaultsApplied.current) return;
+    defaultsApplied.current = true;
+    setD(x => ({ ...x, rounds: String(prefs.view!.effective.rounds), maxInFlight: String(prefs.view!.effective.workers) }));
+  }, [prefs.view]);
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
-  const set = (k: keyof Draft) => (v: string) => setD((x) => ({ ...x, [k]: v }));
+  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsApplied.current = true; setD((x) => ({ ...x, [k]: v })); };
   const errs = validate(d);
-  const ready = pre.state === "ok" && pre.data.start_enabled;
+  const unsupported = !!prefs.view && (prefs.view.effective.agent !== "claude" || prefs.view.effective.model !== "");
+  const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
   const inFlight = useRef(false);
@@ -107,6 +116,8 @@ export function Home() {
           <Text as="h1" variant="headline-lg">{S.home.start}</Text>
           <Text variant="body" muted className="v-home__lede">{S.home.lede}</Text>
 
+          {prefs.error && <p role="alert">{prefs.error}</p>}
+          {unsupported && <p role="alert">The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting.</p>}
           <form className="v-launch" aria-label={S.home.start} noValidate
             onSubmit={(e) => { e.preventDefault(); start(); }}
             onKeyDown={(e) => { if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) start(); } }}>
