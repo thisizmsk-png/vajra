@@ -129,12 +129,8 @@ pub fn resolve_claude(home: &Path, path_dirs: &[PathBuf]) -> Option<PathBuf> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ];
-    // nvm: newest node version last.
-    let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
-        .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path().join("bin")).collect())
-        .unwrap_or_default();
-    nvm.sort();
-    dirs.extend(nvm.into_iter().rev());
+    // nvm: newest node version first (numeric, so v22.18.0 beats v9.11.2).
+    dirs.extend(crate::userpath::nvm_bins(home));
     find_on_path("claude", &dirs)
 }
 

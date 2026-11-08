@@ -67,14 +67,25 @@ pub fn known_dirs(home: &Path) -> Vec<PathBuf> {
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
     if home.is_absolute() {
         dirs.extend([".npm-global/bin", ".volta/bin", ".bun/bin"].map(|d| home.join(d)));
-        // nvm: the newest node version first.
-        let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
-            .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path().join("bin")).collect())
-            .unwrap_or_default();
-        nvm.sort();
-        dirs.extend(nvm.into_iter().rev());
+        dirs.extend(nvm_bins(home));
     }
     dirs
+}
+
+/// `~/.nvm/versions/node/*/bin`, newest version first. Versions compare numerically (`v22.18.0` > `v22.9.0` >
+/// `v9.11.2`); a name that is not `v<n>.<n>.<n>` sorts after every real version.
+pub fn nvm_bins(home: &Path) -> Vec<PathBuf> {
+    let mut nvm: Vec<(Option<Vec<u64>>, PathBuf)> = std::fs::read_dir(home.join(".nvm/versions/node"))
+        .map(|r| r.filter_map(|e| e.ok()).map(|e| (node_version(&e.file_name().to_string_lossy()), e.path())).collect())
+        .unwrap_or_default();
+    // Some(..) > None, so descending puts real versions first, newest first; ties fall back to the name.
+    nvm.sort_by(|a, b| b.cmp(a));
+    nvm.into_iter().map(|(_, p)| p.join("bin")).collect()
+}
+
+fn node_version(name: &str) -> Option<Vec<u64>> {
+    let v: Option<Vec<u64>> = name.strip_prefix('v')?.split('.').map(|c| c.parse().ok()).collect();
+    v.filter(|v| !v.is_empty())
 }
 
 /// Login-shell PATH first (what the user's terminal sees), then the process PATH, then the install dirs that exist.
@@ -287,6 +298,24 @@ mod tests {
         let path = env.iter().find(|(k, _)| *k == "PATH").map(|(_, v)| v.clone()).unwrap();
         assert_eq!(Some(path.clone()), joined());
         assert!(std::env::split_paths(&path).all(|d| d.is_absolute()), "{path:?}");
+    }
+
+    #[test]
+    fn nvm_versions_are_newest_first_by_number_not_by_text() {
+        let home = tmp("nvm");
+        for v in ["v9.11.2", "v22.9.0", "v22.18.0", "v10.0.0", "v8.17.0", "system"] {
+            std::fs::create_dir_all(home.join(".nvm/versions/node").join(v).join("bin")).unwrap();
+        }
+        let names: Vec<String> = nvm_bins(&home)
+            .iter()
+            .map(|p| p.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["v22.18.0", "v22.9.0", "v10.0.0", "v9.11.2", "v8.17.0", "system"]);
+        // The same order reaches the fallback PATH.
+        let dirs = effective(None, &[], &home);
+        let at = |v: &str| dirs.iter().position(|d| d.ends_with(format!("{v}/bin"))).unwrap();
+        assert!(at("v22.18.0") < at("v22.9.0") && at("v22.9.0") < at("v9.11.2"), "{dirs:?}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
