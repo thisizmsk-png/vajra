@@ -136,6 +136,19 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// True when the file is empty or its last byte is a newline (a crash mid-append leaves neither).
+pub fn ends_with_newline(path: &Path) -> io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = open_regular(path)?;
+    if f.metadata()?.len() == 0 {
+        return Ok(true);
+    }
+    f.seek(SeekFrom::End(-1))?;
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b)?;
+    Ok(b[0] == b'\n')
+}
+
 /// Like `read_nofollow`, but a file longer than `cap` bytes is an `InvalidData` error and at most `cap + 1` bytes are
 /// ever read. For files a worker (same user) can write into the control directory.
 pub fn read_nofollow_capped(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
