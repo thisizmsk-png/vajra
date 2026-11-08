@@ -201,6 +201,24 @@ describe("durable layout", () => {
     await waitFor(() => expect(f.named("term_open")).toHaveLength(1)); // the agent tab was still dormant
   });
 
+  it("GIVEN a full saved layout AND live shells in other folders WHEN the dock mounts THEN every live shell gets a tab and dormant tabs make room", async () => {
+    const tabs = Array.from({ length: 16 }, (_, i) => ({ cwd: `/w/${i}`, label: `w${i}`, kind: "shell" }));
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: 0, tabs }));
+    const live = [91, 92].map((id) => ({ id, cwd: `/live/${id}`, root: `/live/${id}`, rows: 24, cols: 80, alive: true }));
+    const { f } = mount({ term_list: { terminals: live } });
+    await waitFor(() => expect(f.named("term_attach").map((c) => c.args)).toEqual(expect.arrayContaining([{ id: 91 }, { id: 92 }])));
+    expect(tabNames()).toHaveLength(16);
+    expect(tabNames()).toEqual(expect.arrayContaining(["91", "92"])); // a live shell's tab is named after its folder
+    expect(tabEls().filter((t) => t.getAttribute("aria-selected") === "true").map((t) => t.textContent)).toEqual(["w0"]); // the saved active tab is kept
+  });
+
+  it("GIVEN more live shells than the tab cap WHEN the dock mounts THEN none is left without a tab", async () => {
+    const live = Array.from({ length: 20 }, (_, i) => ({ id: 100 + i, cwd: `/live/${i}`, root: `/live/${i}`, rows: 24, cols: 80, alive: true }));
+    const { f } = mount({ term_list: { terminals: live } });
+    await waitFor(() => expect(new Set(f.named("term_attach").map((c) => (c.args as { id: number }).id)).size).toBe(20));
+    expect(tabNames()).toHaveLength(20);
+  });
+
   it("GIVEN storage is unavailable WHEN tabs change THEN the dock still works", async () => {
     const spy = vi.spyOn(memory, "setItem").mockImplementation(() => { throw new Error("quota"); });
     const { f } = mount();
