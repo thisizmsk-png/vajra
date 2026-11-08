@@ -3,21 +3,22 @@
 // idle: one status read and one stream window when the view opens, then it follows `changed` for its own stream, and
 // polls its status only while a turn is in flight.
 //
-// FG-02 addresses these commands by a run of the project (`runId`), so a project with no run yet cannot be asked; the
-// view says so. Start and Dismiss go through proposalAction (one place to swap in the receipt envelope).
+// Every read and action goes through dgApi (FG-02c's project-keyed shapes, each action with its envelope). Until FG-02c
+// lands the core addresses these by a run of the project (`runId`), so a project with no run yet cannot be asked; the
+// view says so.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, Icon, Kbd, ariaShortcut } from "../../../components/ui/base";
 import { S } from "../../../strings";
-import { api, errorText, isIpcError, onChanged } from "../../ipc";
+import { errorText } from "../../ipc";
 import type { InboxItem, LeadStatus } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
 import { useCommands } from "../../palette";
 import { toHash } from "../../router";
 import { Empty, Problem } from "../states";
 import { Home } from "../home/Home";
-import { proposalAction } from "./proposalAction";
-import type { Outcome } from "./proposalAction";
+import { actionId, dg, envelope, useDgReload } from "./dgApi";
+import type { Outcome, Target } from "./dgApi";
 import { turns } from "./transcript";
 import "./dg.css";
 
@@ -41,12 +42,10 @@ export function DirectorGeneral() {
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const end = useRef<HTMLDivElement>(null);
-  const last = useRef(0);
 
   const readStream = useCallback(async (s: string) => {
-    last.current = Date.now();
     try {
-      const w = await api.streamWindow(s, null, WINDOW_ROWS);
+      const w = await dg.window(s, WINDOW_ROWS);
       setLines(Array.isArray(w?.lines) ? w.lines.map((l) => l.text) : []);
     } catch {
       /* the status line already says whether it can be reached; an unreadable window leaves the last one */
@@ -56,7 +55,7 @@ export function DirectorGeneral() {
   const readStatus = useCallback(async () => {
     if (!dgRun) return;
     try {
-      const s = await api.leadStatus(dgRun);
+      const s = await dg.status({ projectId: null, runId: dgRun });
       setSt(s);
       setLoadErr("");
       if (!s.busy) setAskId(null);
@@ -75,18 +74,7 @@ export function DirectorGeneral() {
   useEffect(() => { if (stream) void readStream(stream); }, [stream, readStream]);
 
   // Follow its own stream only; anything else moving is not this view's business.
-  useEffect(() => {
-    if (!stream) return;
-    let later: ReturnType<typeof setTimeout> | undefined;
-    const off = onChanged((payload) => {
-      const p = payload as { streams?: unknown } | null;
-      if (!Array.isArray(p?.streams) || !p.streams.includes(stream)) return;
-      const wait = EVENT_MIN_GAP_MS - (Date.now() - last.current);
-      if (wait <= 0) void readStream(stream);
-      else if (later === undefined) later = setTimeout(() => { later = undefined; void readStream(stream); }, wait);
-    });
-    return () => { off(); clearTimeout(later); };
-  }, [stream, readStream]);
+  useDgReload(stream, () => { if (stream) void readStream(stream); }, EVENT_MIN_GAP_MS);
 
   const busy = !!askId || !!st?.busy;
   // While a turn runs, its status is the only way to learn it ended; nothing polls at idle.
@@ -103,41 +91,37 @@ export function DirectorGeneral() {
 
   const available = st?.available === true;
   const canAsk = available && !busy && !sending;
+  // The core's id once it has answered with one (the T1 project id); the run serves the interim calls.
+  const target: Target = { projectId: st?.project_id ?? null, runId: dgRun ?? null };
 
   const send = async () => {
     const text = draft.trim();
     if (!dgRun || !text || !canAsk) return;
     setSending(true);
     setAskErr("");
-    try {
-      const r = await api.askLead(dgRun, text);
-      setAskId(r.ask_id);
-      setEcho(text);
-      setDraft("");
-      if (typeof r.generation === "number") setGeneration(r.generation);
-      if (r.stream && r.stream !== stream) setStream(r.stream);
-    } catch (e) {
-      setAskErr(isIpcError(e) && e.error === "lead_busy" ? S.dg.busy : errorText(e));
-    } finally {
-      setSending(false);
-    }
+    const r = await dg.ask(target, envelope(target, actionId(), generation), text);
+    setSending(false);
+    if (!r.ok) { setAskErr(r.outcome.text); return; }
+    setAskId(r.value.ask_id);
+    setEcho(text);
+    setDraft("");
+    if (typeof r.value.generation === "number") setGeneration(r.value.generation);
+    if (r.value.stream && r.value.stream !== stream) setStream(r.value.stream);
   };
   const cancel = async () => {
     if (!askId) return;
-    try { await api.cancelAsk(askId); } catch (e) { setAskErr(errorText(e)); }
+    const r = await dg.cancel(target, envelope(target, actionId(), null), askId);
+    if (!r.ok) setAskErr(r.outcome.text);
     void readStatus();
   };
   const fresh = async () => {
     if (!dgRun || busy) return;
-    try {
-      const r = await api.newConversation(dgRun);
-      setGeneration(r.generation);
-      setLines([]);
-      setEcho(null);
-      setStream(r.stream);
-    } catch (e) {
-      setAskErr(isIpcError(e) && e.error === "lead_busy" ? S.dg.busy : errorText(e));
-    }
+    const r = await dg.newConversation(target, envelope(target, actionId(), generation));
+    if (!r.ok) { setAskErr(r.outcome.text); return; }
+    setGeneration(r.value.generation);
+    setLines([]);
+    setEcho(null);
+    setStream(r.value.stream);
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); }
@@ -161,7 +145,7 @@ export function DirectorGeneral() {
             {S.dg.noRunHint}
           </Empty>
         </div>
-        <Proposals items={proposals} />
+        <Proposals items={proposals} target={target} />
       </section>
     );
   }
@@ -195,7 +179,7 @@ export function DirectorGeneral() {
             {showEcho && <TurnView role="you" text={echo!} />}
             {busy && <p className="v-dgv__thinking" role="status"><i aria-hidden="true" />{S.dg.thinking}</p>}
           </div>
-          <Proposals items={proposals} />
+          <Proposals items={proposals} target={target} />
           <div ref={end} />
         </div>
       </div>
@@ -237,24 +221,34 @@ function TurnView({ role, text }: { role: "you" | "dg" | "tool" | "error"; text:
   );
 }
 
-function Proposals({ items }: { items: InboxItem[] }) {
+function Proposals({ items, target }: { items: InboxItem[]; target: Target }) {
   if (items.length === 0) return null;
   return (
     <section className="v-props" aria-label={S.dg.proposals}>
       <p className="v-props__lede">{S.dg.proposalLede}</p>
-      {items.map((p) => <ProposalCard key={p.id} item={p} />)}
+      {items.map((p) => <ProposalCard key={p.id} item={p} target={target} />)}
     </section>
   );
 }
 
-function ProposalCard({ item }: { item: InboxItem }) {
+function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   const [out, setOut] = useState<Outcome | null>(null);
+  // One action id per click. After an unknown outcome the same click is retried with the same id, so the core answers
+  // it once (it may already have started); any settled answer retires the id.
+  const ids = useRef<{ start?: string; dismiss?: string }>({});
   const pending = out?.kind === "pending";
   const settled = out?.kind === "done";
   const act = async (what: "start" | "dismiss") => {
     if (pending || settled) return;
     setOut({ kind: "pending", text: S.dg.receipt.pending });
-    setOut(await proposalAction(what, item));
+    const id = (ids.current[what] ??= actionId());
+    // Start is checked against the project's generation (FG-02c: project_state.generations.project, not the item's
+    // display generation); the interim core takes no envelope, so it is null until that read exists. Dismiss is
+    // idempotent and expects nothing.
+    const env = envelope(target, id, null);
+    const r = what === "start" ? await dg.startProposal(target, env, item) : await dg.dismissProposal(target, env, item);
+    if (r.kind !== "unknown") ids.current[what] = undefined;
+    setOut(r);
   };
   return (
     <article className="v-prop" aria-label={S.dg.proposal}>

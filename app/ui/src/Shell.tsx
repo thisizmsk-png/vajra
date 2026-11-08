@@ -6,7 +6,7 @@ import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { ProjectsProvider, useProjects } from "./projects/store";
-import { normRoot } from "./projects/adapter";
+import { proposalsFor } from "./screens/orch/dgApi";
 import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
@@ -65,8 +65,8 @@ function Frame() {
       .sort((a, b) => ((b.updated ?? b.created ?? "") > (a.updated ?? a.created ?? "") ? 1 : -1)) : [];
     const mine = P.crew && project && P.byCampaign[P.crew.campaign] === project.id ? P.crew : null;
     const dgRun = mine?.runId ?? campaigns.map((c) => P.runIds[c.slug]).find(Boolean) ?? null;
-    const root = project?.root ? normRoot(project.root) : null;
-    const proposals = root ? P.inbox.filter((i) => i.kind === "run_proposal" && typeof i.project === "string" && normRoot(i.project) === root) : [];
+    // Interim: by folder. Keyed by the core's project id once project_list (T1, #77) gives the shell one.
+    const proposals = project ? proposalsFor(P.inbox, null, project.root) : [];
     return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null, dgRun, proposals };
   }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox]);
   const crew = current.runId ? P.crew : null;
