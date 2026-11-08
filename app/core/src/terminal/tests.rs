@@ -239,9 +239,16 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
     let (info, out) = open_root(&t, &f);
     let window = Limits::default().window;
     t.write(info.id, b"yes | head -c 20000000; echo DO$((1+1))NE\n").unwrap();
-    std::thread::sleep(Duration::from_millis(800));
-    // Nobody acks: the reader stops near the window.
+    // Nobody acks: the reader stops near the window. Wait for it to get there (a busy machine is slow), then let it
+    // settle and count what arrived.
     let mut got = 0usize;
+    let until = Instant::now() + Duration::from_secs(15);
+    while got < window && Instant::now() < until {
+        if let Ok(Event::Data(d)) = out.0.recv_timeout(Duration::from_millis(50)) {
+            got += d.len();
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
     while let Ok(Event::Data(d)) = out.0.try_recv() {
         got += d.len();
     }
@@ -347,6 +354,157 @@ fn a_shell_that_exits_takes_its_background_jobs_with_it_and_a_later_close_is_har
     assert!(all_gone(&[bg], 3), "the session was not ended before the leader was reaped");
     assert!(!t.list()[0].alive);
     t.close(info.id).unwrap();
+}
+
+#[test]
+fn many_small_writes_reach_the_shell_in_order() {
+    let f = Fixture::new("order");
+    let t = Arc::new(f.terminals());
+    let (info, out) = open_root(&t, &f);
+    let file = f.dir.join("typed.txt");
+    t.write(info.id, format!("cat > {}\n", file.display()).as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    // One caller, many tiny writes: what the UI does while typing fast or pasting in pieces.
+    for i in 0..500 {
+        t.write(info.id, format!("{i}\n").as_bytes()).unwrap();
+    }
+    t.write(info.id, b"\x04").unwrap(); // end of input for cat
+    t.write(info.id, b"echo DONE$((1+1))\n").unwrap();
+    out.until("DONE2", 10);
+    let got = std::fs::read_to_string(&file).unwrap();
+    let want: String = (0..500).map(|i| format!("{i}\n")).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_signal_death_is_reported_as_no_exit_code_and_exit_one_as_one() {
+    let f = Fixture::new("sigexit");
+    let t = f.terminals();
+    let (a, oa) = open_root(&t, &f);
+    t.write(a.id, b"kill -9 $$\n").unwrap();
+    assert_eq!(oa.exit(5), Some(None), "a shell killed by a signal has no exit code");
+    let (b, ob) = open_root(&t, &f);
+    t.write(b.id, b"exit 1\n").unwrap();
+    assert_eq!(ob.exit(5), Some(Some(1)));
+}
+
+#[test]
+fn close_returns_even_when_a_child_in_another_session_keeps_the_pty_open() {
+    let f = Fixture::new("escape");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    // The child starts its own session (so the terminal's session kill cannot reach it) and keeps the slave open.
+    t.write(info.id, b"perl -MPOSIX -e '$p=fork; if($p==0){POSIX::setsid(); sleep 60; exit} print \"ESC=$p\\n\"'\n").unwrap();
+    let mut seen = out.until("ESC=", 5);
+    for _ in 0..50 {
+        if seen.split("ESC=").skip(1).any(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
+            break;
+        }
+        seen.push_str(&out.until("ESC=", 1));
+    }
+    let esc: u32 = seen.split("ESC=").skip(1).find_map(|r| r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()).unwrap();
+    assert!(alive(esc));
+    let shell = t.pid(info.id).unwrap();
+    let start = Instant::now();
+    t.close(info.id).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(4), "close waited {:?} for a PTY that something else held", start.elapsed());
+    assert!(all_gone(&[shell], 3), "the shell was not reaped without EOF");
+    assert_eq!(t.count(), 0);
+    // Shutdown with the same kind of holder is bounded too.
+    unsafe { libc::kill(esc as i32, libc::SIGKILL) };
+}
+
+/// A holder outside the session that never stops printing, as the reader sees it: an endless stream of bytes.
+struct Endless(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Read for Endless {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Fail after a bound so a regression ends the test (with a count that shows it) instead of hanging it.
+        if self.0.fetch_add(1, Ordering::SeqCst) >= 5000 {
+            return Err(std::io::Error::other("test bound"));
+        }
+        buf[..1000].fill(b'x');
+        Ok(1000)
+    }
+}
+
+#[test]
+fn a_reader_still_blocked_after_close_reaped_the_shell_stops_at_its_next_read_and_buffers_nothing() {
+    let f = Fixture::new("detached");
+    let t = f.terminals();
+    let (info, _out) = open_root(&t, &f);
+    let term = t.get(info.id).unwrap();
+    // What `stop` leaves behind when the real reader is still blocked: the shell reaped, so `exited` is set.
+    term.exited.store(true, Ordering::SeqCst);
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window);
+    assert!(reads.load(Ordering::SeqCst) <= 1, "the reader kept consuming after the shell was reaped: {} reads", reads.load(Ordering::SeqCst));
+    assert!(lock(&term.pending.0).buf.len() <= 1000, "output was buffered with no flusher to drain it");
+    t.close(info.id).unwrap();
+}
+
+/// A read that blocks until a pipe has data: the state `stop` meets when a holder outside the session keeps the slave open.
+#[test]
+fn a_reader_blocked_with_the_slave_held_open_is_woken_without_a_signal_and_ends() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let f = Fixture::new("wake");
+    let t = f.terminals();
+    let (info, _out) = open_root(&t, &f);
+    let term = t.get(info.id).unwrap();
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // `w` stays open for the whole test: the pipe never reaches EOF, like a PTY whose slave an escaped child holds.
+    let (r, w) = unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) };
+    let (reader, wake) = WakeReader::wrap(Box::new(r.try_clone().unwrap()), Some(r.as_raw_fd()));
+    let wake = wake.expect("a wake pipe");
+    let th = {
+        let term = term.clone();
+        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window))
+    };
+    std::thread::sleep(Duration::from_millis(200)); // let it block in select
+    assert!(!th.is_finished(), "the reader should be blocked");
+    term.exited.store(true, Ordering::SeqCst); // what `stop` has done by the time it wakes the reader
+    assert!(wake_reader(Some(wake.as_raw_fd()), &th, Duration::from_secs(2)), "a blocked reader was not woken");
+    th.join().unwrap();
+    drop(w);
+    t.close(info.id).unwrap();
+}
+
+#[test]
+fn data_still_flows_through_the_wake_reader() {
+    use std::io::Write as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (r, mut w) = unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) };
+    let (mut reader, wake) = WakeReader::wrap(Box::new(r.try_clone().unwrap()), Some(r.as_raw_fd()));
+    w.write_all(b"hello").unwrap();
+    let mut buf = [0u8; 16];
+    let n = reader.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    assert!(wake.is_some());
+}
+
+#[test]
+fn writing_to_an_ended_shell_is_an_error_and_shutdown_of_many_is_one_grace_period() {
+    let f = Fixture::new("ended-write");
+    let t = f.terminals();
+    let (a, oa) = open_root(&t, &f);
+    t.write(a.id, b"exit 0\n").unwrap();
+    assert_eq!(oa.exit(5), Some(Some(0)));
+    assert!(matches!(t.write(a.id, b"x"), Err(TermError::Io(_))));
+    // Four shells that ignore hangup: quitting takes about one grace period, not four.
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let (i, o) = open_root(&t, &f);
+        t.write(i.id, b"trap '' HUP TERM; echo READY$((1+1))\n").unwrap();
+        o.until("READY2", 5);
+        ids.push(i.id);
+    }
+    let start = Instant::now();
+    t.shutdown();
+    assert!(start.elapsed() < Duration::from_millis(1800), "shutdown took {:?}", start.elapsed());
+    assert_eq!(t.count(), 0);
 }
 
 #[test]

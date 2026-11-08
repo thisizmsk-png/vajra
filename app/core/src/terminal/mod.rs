@@ -20,6 +20,7 @@ pub mod policy;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -125,7 +126,15 @@ struct Term {
     credit_cv: Condvar,
     exited: AtomicBool,
     reaped: Mutex<bool>,
+    /// The shell's handle. Whoever takes it (the reader at EOF, or `stop` when the reader cannot finish) reaps it.
+    child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
+    /// Output the reader has taken from the PTY and the flusher has not sent yet.
+    pending: Arc<(Mutex<Pending>, Condvar)>,
+    flusher: Mutex<Option<JoinHandle<()>>>,
     reader: Mutex<Option<JoinHandle<()>>>,
+    /// Write end of the reader's wake pipe: a byte here makes a blocked reader return (None if the fds were too large for
+    /// `select`, in which case the reader cannot be woken and `stop` falls back to detaching it).
+    wake: Option<OwnedFd>,
 }
 
 impl Term {
@@ -154,22 +163,29 @@ struct Registry {
 }
 
 /// Releases an `open` slot on every path out of `open`.
-struct Slot<'a>(&'a Mutex<Registry>, PathBuf);
+struct Slot<'a>(&'a Mutex<Registry>, Option<PathBuf>);
 
 impl Slot<'_> {
-    fn release(self, r: &mut Registry) {
-        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
-            r.opening.swap_remove(i);
+    /// Give the slot back under a lock the caller already holds (`Drop` would take it again).
+    fn release(mut self, r: &mut Registry) {
+        if let Some(root) = self.1.take() {
+            r.forget_opening(&root);
         }
-        std::mem::forget(self);
     }
 }
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        let mut r = lock(self.0);
-        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
-            r.opening.swap_remove(i);
+        if let Some(root) = self.1.take() {
+            lock(self.0).forget_opening(&root);
+        }
+    }
+}
+
+impl Registry {
+    fn forget_opening(&mut self, root: &Path) {
+        if let Some(i) = self.opening.iter().position(|p| p == root) {
+            self.opening.swap_remove(i);
         }
     }
 }
@@ -246,7 +262,7 @@ impl Terminals {
                 return Err(TermError::TooMany);
             }
             r.opening.push(place.root.clone());
-            Slot(&self.map, place.root.clone())
+            Slot(&self.map, Some(place.root.clone()))
         };
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| TermError::Spawn(e.to_string()))?;
         drop(pair.slave); // so the reader sees EOF when the shell and its group are gone
@@ -260,6 +276,7 @@ impl Terminals {
                 return Err(TermError::Io(e.to_string()));
             }
         };
+        let (reader, wake) = WakeReader::wrap(reader, pair.master.as_raw_fd());
         let input = Arc::new((Mutex::new(Input::default()), Condvar::new()));
         let term = Arc::new(Term {
             pid,
@@ -273,23 +290,29 @@ impl Terminals {
             credit_cv: Condvar::new(),
             exited: AtomicBool::new(false),
             reaped: Mutex::new(false),
+            child: Mutex::new(Some(child)),
+            pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
+            flusher: Mutex::new(None),
             reader: Mutex::new(None),
+            wake,
         });
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let window = self.limits.window;
-        let handle = {
-            let term = term.clone();
-            std::thread::Builder::new()
-                .name(format!("term-{id}"))
-                .spawn(move || read_loop(reader, child, &term, window))
-                .map_err(|e| TermError::Io(e.to_string()))?
-        };
-        *lock(&term.reader) = Some(handle);
-        let writer_thread = {
-            let input = term.input.clone();
-            std::thread::Builder::new().name(format!("term-in-{id}")).spawn(move || write_loop(writer, &input)).ok()
-        };
-        *lock(&term.writer) = writer_thread;
+        // The three I/O threads are part of the terminal: if any cannot start, end the shell and what is started and
+        // report the error, instead of publishing a terminal that cannot deliver output or accept input.
+        let started = (|| -> std::io::Result<()> {
+            let t = term.clone();
+            *lock(&term.writer) = Some(std::thread::Builder::new().name(format!("term-in-{id}")).spawn(move || write_loop(writer, &t.input))?);
+            let t = term.clone();
+            *lock(&term.flusher) = Some(std::thread::Builder::new().name(format!("term-flush-{id}")).spawn(move || flush_loop(&t.pending, &t))?);
+            let t = term.clone();
+            *lock(&term.reader) = Some(std::thread::Builder::new().name(format!("term-{id}")).spawn(move || read_loop(reader, &t, window))?);
+            Ok(())
+        })();
+        if let Err(e) = started {
+            stop(&term);
+            return Err(TermError::Io(e.to_string()));
+        }
         let info = term.info(id);
         let mut r = lock(&self.map);
         if self.closing.load(Ordering::SeqCst) {
@@ -318,6 +341,9 @@ impl Terminals {
             return Err(TermError::TooLarge);
         }
         let t = self.get(id)?;
+        if t.exited.load(Ordering::SeqCst) {
+            return Err(TermError::Io("the shell has ended".into()));
+        }
         let (m, cv) = &*t.input;
         let mut q = lock(m);
         if q.closed {
@@ -377,9 +403,12 @@ impl Terminals {
         for t in &all {
             t.signal(libc::SIGHUP);
         }
-        for t in &all {
-            stop(t);
-        }
+        // In parallel, so quitting with several stuck shells takes one grace period, not one each.
+        std::thread::scope(|sc| {
+            for t in &all {
+                sc.spawn(move || stop(t));
+            }
+        });
     }
 
     /// Tests: the shell's pid.
@@ -393,6 +422,10 @@ impl Drop for Terminals {
         self.shutdown();
     }
 }
+
+/// How long `stop` waits for the reader to see EOF after the session is killed. Normally EOF is immediate; it is not if a
+/// descendant escaped the session (`setsid`) and still holds the PTY.
+const READER_GRACE: Duration = Duration::from_millis(400);
 
 fn stop(t: &Arc<Term>) {
     t.signal(libc::SIGHUP);
@@ -411,11 +444,52 @@ fn stop(t: &Arc<Term>) {
         q.chunks.clear();
         cv.notify_all();
     }
-    // Unblock a reader that is waiting for credit, then wait for it.
+    // Unblock a reader that is waiting for credit, then wait for it, but not for ever.
     *lock(&t.credit) = 0;
     t.credit_cv.notify_all();
-    if let Some(h) = lock(&t.reader).take() {
-        let _ = h.join();
+    let reader = lock(&t.reader).take();
+    let until = Instant::now() + READER_GRACE;
+    while reader.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    match reader {
+        Some(h) if h.is_finished() => {
+            let _ = h.join();
+        }
+        Some(h) => {
+            // Something outside the session (a descendant that called `setsid`) still holds the PTY slave, so the
+            // blocked read has no EOF coming. Reap the shell here without waiting for it, silence the sink, then wake
+            // the reader through its wake pipe (no signals) so it returns, the thread ends, and the PTY descriptors are
+            // released even though the slave stays open. Bounded: without a wake pipe, or if it does not end, the
+            // thread is detached and stops at its next read (`exited` is set).
+            *lock(&t.sink) = Arc::new(|_| {});
+            if let Some(child) = lock(&t.child).take() {
+                reap(t, child);
+            }
+            if wake_reader(t.wake.as_ref().map(|w| w.as_raw_fd()), &h, Duration::from_secs(1)) {
+                let _ = h.join();
+            }
+        }
+        None => {
+            if let Some(child) = lock(&t.child).take() {
+                reap(t, child); // the reader never started
+            }
+        }
+    }
+    // The reader (or this) is done with the pending buffer: let the flusher drain and end.
+    {
+        let (m, cv) = &*t.pending;
+        lock(m).eof = true;
+        cv.notify_all();
+    }
+    if let Some(h) = lock(&t.flusher).take() {
+        let until = Instant::now() + Duration::from_millis(200);
+        while !h.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if h.is_finished() {
+            let _ = h.join();
+        }
     }
     // Join the writer if it ends promptly. One stuck on a PTY that something outside the session still holds open must
     // not hang the close; it is detached and ends when that write fails.
@@ -428,6 +502,88 @@ fn stop(t: &Arc<Term>) {
             let _ = h.join();
         }
     }
+}
+
+/// A reader that can be woken without a signal: it waits in `select` on the PTY master and on a pipe, and a byte on the
+/// pipe makes `read` return 0 (end of input). `select` is used because `poll` is unreliable on macOS PTYs.
+struct WakeReader {
+    inner: Box<dyn Read + Send>,
+    watch: RawFd,
+    wake: OwnedFd,
+}
+
+impl WakeReader {
+    /// Wrap `inner` (a clone of the master's reader). Returns the wake pipe's write end, or the reader unchanged and no
+    /// wake end when a descriptor is too large for an `fd_set` or the pipe cannot be made.
+    fn wrap(inner: Box<dyn Read + Send>, watch: Option<RawFd>) -> (Box<dyn Read + Send>, Option<OwnedFd>) {
+        let Some(watch) = watch.filter(|fd| (*fd as usize) < libc::FD_SETSIZE) else { return (inner, None) };
+        let mut fds = [0 as libc::c_int; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return (inner, None);
+        }
+        // Close-on-exec, so no other shell or child inherits the wake pipe.
+        for fd in fds {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        if r.as_raw_fd() as usize >= libc::FD_SETSIZE {
+            return (inner, None);
+        }
+        (Box::new(Self { inner, watch, wake: r }), Some(w))
+    }
+}
+
+impl Read for WakeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let (a, b) = (self.watch, self.wake.as_raw_fd());
+            let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut set);
+                libc::FD_SET(a, &mut set);
+                libc::FD_SET(b, &mut set);
+            }
+            let n = unsafe { libc::select(a.max(b) + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if unsafe { libc::FD_ISSET(b, &set) } {
+                return Ok(0);
+            }
+            if unsafe { libc::FD_ISSET(a, &set) } {
+                return self.inner.read(buf);
+            }
+        }
+    }
+}
+
+/// Wake the reader through its pipe and wait for it to end, until `within` passes. Returns whether it ended.
+fn wake_reader(wake: Option<RawFd>, h: &JoinHandle<()>, within: Duration) -> bool {
+    if let Some(fd) = wake {
+        unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
+    }
+    let until = Instant::now() + within;
+    while !h.is_finished() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.is_finished()
+}
+
+/// End what is left of the session while the leader is still unreaped (an unreaped leader, even a zombie, holds its pid
+/// and so its session id), reap it, and mark the terminal not signalable: after this nothing can signal this pid, which
+/// may be recycled at once. Returns the shell's exit code, or None when a signal ended it.
+fn reap(t: &Term, mut child: Box<dyn portable_pty::Child + Send + Sync>) -> Option<i32> {
+    let mut reaped = lock(&t.reaped);
+    kill::signal_all(t.pid, true, libc::SIGKILL);
+    let status = child.wait();
+    *reaped = true;
+    t.exited.store(true, Ordering::SeqCst);
+    // portable-pty reports a signal death as `signal() != None` with a synthetic exit code of 1.
+    status.ok().filter(|s| s.signal().is_none()).map(|s| s.exit_code() as i32)
 }
 
 /// Typed bytes not yet written to the PTY.
@@ -495,12 +651,7 @@ fn flush_loop(pending: &(Mutex<Pending>, Condvar), t: &Term) {
     }
 }
 
-fn read_loop(mut reader: Box<dyn Read + Send>, mut child: Box<dyn portable_pty::Child + Send + Sync>, t: &Arc<Term>, window: usize) {
-    let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
-    let flusher = {
-        let (pending, t) = (pending.clone(), t.clone());
-        std::thread::Builder::new().name("term-flush".into()).spawn(move || flush_loop(&pending, &t)).ok()
-    };
+fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize) {
     let low = window / 2;
     let mut buf = vec![0u8; CHUNK];
     loop {
@@ -515,36 +666,29 @@ fn read_loop(mut reader: Box<dyn Read + Send>, mut child: Box<dyn portable_pty::
         }
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
+            Ok(_) if t.exited.load(Ordering::SeqCst) => break, // `stop` reaped the shell while this read was blocked (defensive: the tty is normally hung up when the leader exits, but a holder that keeps the PTY open must not make a closed terminal buffer output)
             Ok(n) => {
                 *lock(&t.credit) += n;
-                let (m, cv) = &*pending;
+                let (m, cv) = &*t.pending;
                 lock(m).buf.extend_from_slice(&buf[..n]);
                 cv.notify_one();
             }
         }
     }
     {
-        let (m, cv) = &*pending;
+        let (m, cv) = &*t.pending;
         lock(m).eof = true;
         cv.notify_all();
     }
-    if let Some(f) = flusher {
+    if let Some(f) = lock(&t.flusher).take() {
         let _ = f.join();
     }
-    // The PTY closed. Under the lock `signal` takes: end what is left of the session while the leader is still
-    // unreaped (an unreaped leader, even a zombie, holds its pid and so its session id), then reap it and mark the
-    // terminal not signalable. After this nothing can send a signal for this pid, which may be recycled at once.
-    let (status, code) = {
-        let mut reaped = lock(&t.reaped);
-        kill::signal_all(t.pid, true, libc::SIGKILL);
-        let status = child.wait();
-        *reaped = true;
-        t.exited.store(true, Ordering::SeqCst);
-        let code = status.as_ref().ok().map(|s| s.exit_code() as i32);
-        (status, code)
-    };
-    drop(status);
-    t.send(Event::Exit(code));
+    // The PTY closed. If `stop` already reaped the shell (this thread was blocked past its grace), there is nothing left
+    // to report; otherwise reap it here and say how it ended.
+    if let Some(child) = lock(&t.child).take() {
+        let code = reap(t, child);
+        t.send(Event::Exit(code));
+    }
 }
 
 #[cfg(test)]

@@ -216,8 +216,10 @@ fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Chann
     terms.attach(id, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
 }
 
-/// Async so a slow call never sits on the main thread; `write` itself only queues and never blocks.
-#[tauri::command(async)]
+/// Deliberately a plain (main-thread) command: sync commands run in arrival order, so typed bytes cannot be reordered, and
+/// `write` only takes a short lock and queues, so it never blocks. (An async command is a task per call; two in flight
+/// could swap.)
+#[tauri::command]
 fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Res {
     terms.write(id, data.as_bytes()).map(|()| serde_json::json!({})).map_err(term_err)
 }
