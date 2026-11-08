@@ -286,3 +286,31 @@ fn receipt_transitions_emit_changed_without_bus_output() {
     // And the revision the sink reported is the one project_state serves.
     assert_eq!(app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap(), *revs().last().unwrap());
 }
+
+// Review P2: the project generation is read with the receipt decision, and starts are decided one at a time.
+// A second start (new action id, same expected generation) that arrives while the first is running waits, then
+// is judged against the generation the first left behind: stale, and its effect never runs.
+#[test]
+fn a_second_start_with_the_same_expected_generation_is_stale_after_the_first() {
+    let t = Tmp::new();
+    let app = t.app();
+    let second_ran = std::sync::atomic::AtomicBool::new(false);
+    let second = std::thread::scope(|s| {
+        let h = std::cell::RefCell::new(None);
+        let first = app.act(&env("run-0018-rrrr", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || {
+            let j = s.spawn(|| {
+                app.act(&env("run-0019-ssss", Some(0)), Caller::Ui, false, "start_run", "proj-a", super::state::Gen::ProjectRuns, || {
+                    second_ran.store(true, Ordering::SeqCst);
+                    Ok(json!({}))
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            *h.borrow_mut() = Some(j);
+            Ok(json!({}))
+        });
+        assert_eq!(state_of(&first), "done");
+        h.into_inner().unwrap().join().unwrap()
+    });
+    assert!(!second_ran.load(Ordering::SeqCst), "the stale start never ran");
+    assert_eq!((state_of(&second), second["receipt"]["reason"].as_str(), second["receipt"]["current_generation"].as_u64()), ("rejected", Some("stale_generation"), Some(1)));
+}

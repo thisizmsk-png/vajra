@@ -15,6 +15,7 @@ use super::{App, Res, fail, lock};
 use crate::control::receipt::{Begin, Caller, Receipt, Request, State, Store};
 use crate::control::time::unix_ms;
 use crate::sessions::argv::RunInput;
+use std::sync::Mutex;
 
 /// Receipts shown in one projection.
 const RECENT: usize = 20;
@@ -31,6 +32,22 @@ pub(super) struct Hub {
     revs: HashMap<String, u64>,
     /// project_id -> runs started through a receipt (the project generation `start_run` is guarded by).
     run_gen: HashMap<String, u64>,
+    /// Held from judging a start run to recording its outcome, so two starts are decided one after the other.
+    start_gate: std::sync::Arc<Mutex<()>>,
+}
+
+/// Where `act` gets the target's current generation.
+pub(super) enum Gen {
+    /// Already read by the caller (a worker's attempt is rechecked under the control lock by the effect itself).
+    Given(Option<u64>),
+    /// The project's run count, read under the same lock as the receipt decision.
+    ProjectRuns,
+}
+
+impl From<Option<u64>> for Gen {
+    fn from(g: Option<u64>) -> Self {
+        Gen::Given(g)
+    }
 }
 
 impl Hub {
@@ -48,7 +65,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default() })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -85,10 +102,19 @@ impl App {
     /// Run `effect` at most once for `env.action_id`. Always returns the receipt; `result`/`error` carry what the
     /// effect returned when it ran. `current_generation` is the target's generation now.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn act(&self, env: &Envelope, caller: Caller, human_only: bool, action: &str, target: &str, current_generation: Option<u64>, effect: impl FnOnce() -> Res) -> Value {
+    pub(super) fn act(&self, env: &Envelope, caller: Caller, human_only: bool, action: &str, target: &str, current_generation: impl Into<Gen>, effect: impl FnOnce() -> Res) -> Value {
+        let current_generation = current_generation.into();
         let req = Request { action_id: &env.action_id, project_id: &env.project_id, action, target, expect_generation: env.expect_generation, caller, human_only };
+        // Start runs are judged and finished one at a time: a second start waits here, then sees the generation the
+        // first one left behind.
+        let gate = (action == "start_run").then(|| lock(&self.acts).start_gate.clone());
+        let _serial = gate.as_ref().map(|m| lock(m));
         let (begun, existed) = {
             let mut h = lock(&self.acts);
+            let current_generation = match current_generation {
+                Gen::Given(g) => g,
+                Gen::ProjectRuns => Some(h.run_gen.get(&env.project_id).copied().unwrap_or(0)),
+            };
             let rev = h.rev(&env.project_id);
             let existed = h.store.get(&env.action_id).is_some();
             (h.store.begin(&req, current_generation, rev, now_ms()), existed)
@@ -159,8 +185,7 @@ impl App {
     }
 
     pub fn act_start_run(&self, env: &Envelope, input: RunInput, cwd: &str) -> Value {
-        let cur = lock(&self.acts).run_gen.get(&env.project_id).copied().unwrap_or(0);
-        self.act(env, Caller::Ui, false, "start_run", &env.project_id, Some(cur), || self.start_run(input, cwd))
+        self.act(env, Caller::Ui, false, "start_run", &env.project_id, Gen::ProjectRuns, || self.start_run(input, cwd))
     }
 
     pub fn act_stop_worker(&self, env: &Envelope, worker: &str, reason: Option<&str>) -> Value {
