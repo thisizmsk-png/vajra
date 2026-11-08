@@ -19,7 +19,7 @@ impl Probe for Fake {
     }
     fn run(&self, path: &Path, args: &[&str]) -> Option<Out> {
         let key = (path.to_str().unwrap(), args.join(" "));
-        self.answers.iter().find(|((p, a), _)| *p == key.0 && *a == key.1).map(|(_, (c, s))| Out { code: Some(*c), stdout: (*s).into() })
+        self.answers.iter().find(|((p, a), _)| *p == key.0 && *a == key.1).map(|(_, (c, s))| Out { code: Some(*c), stdout: (*s).into(), stderr: String::new() })
     }
     fn env(&self, key: &str) -> Option<OsString> {
         self.env.get(key).map(OsString::from)
@@ -171,4 +171,19 @@ fn an_unsupported_choice_validates_as_a_project_provider() {
     let u = unsupported("gemini");
     assert!(u.validate().is_ok());
     assert!(unsupported("Bad Id").validate().is_err(), "an id that is not a provider id is still refused");
+}
+
+#[test]
+fn a_real_signed_out_codex_writes_not_logged_in_to_stderr_and_still_reads_as_signed_out() {
+    let d = std::env::temp_dir().join(format!("vajra-detect-err-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let bin = d.join("codex");
+    std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in --version) echo 'codex-cli 0.166.0';; login) echo 'Not logged in' >&2; exit 1;; esac\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(get(&list(&System::new(vec![d.clone()])), "codex").login.state, LoginState::SignedOut);
+    // Any other failure on stderr is still cannot_tell.
+    std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in --version) echo 'codex-cli 0.166.0';; login) echo 'config error' >&2; exit 1;; esac\n").unwrap();
+    assert_eq!(get(&list(&System::new(vec![d.clone()])), "codex").login.state, LoginState::CannotTell);
+    let _ = std::fs::remove_dir_all(&d);
 }

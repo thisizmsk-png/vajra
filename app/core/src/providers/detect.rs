@@ -18,6 +18,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Out {
     pub code: Option<i32>,
     pub stdout: String,
+    /// Codex prints "Not logged in" here, not on stdout.
+    pub stderr: String,
 }
 
 /// What detection needs from the machine; the tests supply a fake one.
@@ -53,7 +55,7 @@ impl Probe for System {
     fn run(&self, path: &Path, args: &[&str]) -> Option<Out> {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let o = crate::vajra::bridge::run_process_on_path(path, &argv, None, TIMEOUT, &self.dirs).ok()?;
-        o.whole().then_some(Out { code: o.code, stdout: o.stdout })
+        o.whole().then_some(Out { code: o.code, stdout: o.stdout, stderr: o.stderr })
     }
     fn env(&self, key: &str) -> Option<OsString> {
         std::env::var_os(key)
@@ -169,7 +171,7 @@ fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<(&'stati
         },
         Engine::Codex => match o.code {
             Some(0) => (LoginState::SignedIn, None),
-            Some(1) if o.stdout.to_ascii_lowercase().contains("not logged in") => (LoginState::SignedOut, None),
+            Some(1) if format!("{}\n{}", o.stdout, o.stderr).to_ascii_lowercase().contains("not logged in") => (LoginState::SignedOut, None),
             _ => unsure("check_not_understood", "The login check gave an answer Vajra does not understand"),
         },
     }
