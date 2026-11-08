@@ -100,6 +100,49 @@ export type InboxItem = {
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
+/** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
+export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
+export type Receipt = {
+  schema: "vajra.receipt/1";
+  action_id: string;
+  project_id: string;
+  action: string;
+  target: string;
+  expect_generation: number | null;
+  current_generation: number | null;
+  state: ReceiptState;
+  reason: string | null;
+  detail: string | null;
+  /** `safe`: retry with a NEW action_id; `after_refresh`: read project_state first; `no`: nothing to do. */
+  retry: "no" | "safe" | "after_refresh";
+  rev: number;
+  ts_ms: number;
+};
+/** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
+export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
+/** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
+/** `vajra.project_state/1`: the one revisioned projection every surface reads. */
+export type ProjectState =
+  | { schema: "vajra.project_state/1"; project_id: string; rev: number; unchanged: true }
+  | {
+      schema: "vajra.project_state/1";
+      project_id: string;
+      rev: number;
+      unchanged: false;
+      active_runs: number;
+      generations: { project: number };
+      workers: Json[];
+      receipts: Receipt[];
+    };
+/** The `changed` event payload: which streams moved, and the new revision of each known project. */
+export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
+
+/** A fresh action id (8..=64 of A-Z a-z 0-9 - _). One per user intent; reuse it only to retry the SAME click. */
+export function newActionId(): string {
+  return `act-${globalThis.crypto.randomUUID()}`;
+}
+
 export const api = {
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
@@ -110,6 +153,12 @@ export const api = {
   /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
   campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
+  /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
+  actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
+  actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
+  /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
+  projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),

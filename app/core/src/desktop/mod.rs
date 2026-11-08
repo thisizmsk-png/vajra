@@ -30,6 +30,8 @@ use crate::vajra::state::Reader;
 
 /// Every command answers `Ok(value)` or `Err({error, detail?})`.
 pub type Res = Result<Value, Value>;
+/// Emits a `changed` payload to the UI (see `App::set_change_sink`).
+pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
@@ -228,6 +230,10 @@ pub struct App {
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// Action receipts and per-project revisions (see `state`).
+    acts: Mutex<state::Hub>,
+    /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
+    sink: Mutex<Option<ChangeSink>>,
 }
 
 impl App {
@@ -241,7 +247,10 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            acts,
+            sink: Mutex::new(None),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
@@ -604,6 +613,7 @@ impl App {
             })
             .collect();
         lock(&self.control).set_workers(infos);
+        self.workers_published();
     }
 
     /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
@@ -1207,6 +1217,11 @@ impl App {
         ctl(lock(&self.control).stop_worker(Actor::Human, worker, reason))
     }
 
+    /// `control_stop` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_stop_expecting(&self, worker: &str, reason: Option<&str>, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).stop_worker_expecting(Actor::Human, worker, reason, expect))
+    }
+
     pub fn confirm_stop(&self, action_id: &str) -> Res {
         ctl(lock(&self.control).confirm_stop(Actor::Human, action_id))
     }
@@ -1692,9 +1707,13 @@ mod decide;
 mod lead;
 mod runindex;
 mod runview;
+mod state;
+pub use state::Envelope;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod state_tests;
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.
