@@ -125,3 +125,14 @@ Click crawl fixes (PR #39).
 |---|---|---|
 | Checked at TIME | under the checks on Home and Settings | new; a re-check that finds nothing new used to look like a dead click |
 | Tried again at TIME | in every "could not load" box, after Try again | new; a retry that fails the same way used to look like a dead click |
+
+Polish pass (stacked on PR #39).
+
+| String | Where | Note |
+|---|---|---|
+| Active / Done / Stopped / Failed / Abandoned | History status badges | were the raw lower-case states |
+| N/M (with "N of M" for screen readers) | History, Passing | beside a small progress bar |
+| 2 days ago (relative time) | History, Updated | was the stored timestamp; the exact time is the tooltip |
+| Terminal | Home campaign rows | short tag; replaces the visible "Started outside this app. Continue it from your terminal.", which stays as the tooltip and for screen readers |
+| Workers; N of M done | Crew details for the Lead, a run or a task | new; per-status counts of the workers under the selection |
+| (Goal column removed) | History | the goal now leads the Campaign cell, with the slug under it |
