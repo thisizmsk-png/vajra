@@ -89,7 +89,8 @@ fn a_terminal_gets_the_users_login_path_from_the_resolved_login_environment() {
 fn the_app_environment_is_the_resolved_login_environment_and_nothing_secret_goes_with_it() {
     let env = UserPathEnv::app(PathBuf::from("/home/someone"));
     assert_eq!(env.path(), crate::userpath::joined());
-    assert_eq!(env.shell(), crate::userpath::login_shell());
+    // The rule, not a machine's shell: the configured $SHELL when usable, else the resolved login shell.
+    assert_eq!(env.shell(), policy::pick_shell(std::env::var_os("SHELL").map(PathBuf::from), crate::userpath::login_shell()));
     assert_eq!(env.home(), Some(PathBuf::from("/home/someone")));
     // The variables a terminal may inherit from the app are the same four as before: no token, key or nonce.
     assert_eq!(policy::ENV_ALLOW, ["HOME", "USER", "LOGNAME", "LANG"]);
