@@ -91,7 +91,10 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
     started.then(
       (info) => {
         if (dead) {
-          void api.termClose(info.id).catch(() => undefined);
+          // This view was disposed before the answer came back. A terminal it opened itself is its own to end; one it
+          // only attached to belongs to whoever attached last (under StrictMode the next setup has already re-attached
+          // it), so closing it here would kill a live shell.
+          if (attachId === undefined) void api.termClose(info.id).catch(() => undefined);
           return;
         }
         id = info.id;

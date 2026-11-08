@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport, TERM_WRITE_CHUNK } from "../src/ipc";
@@ -232,6 +233,22 @@ describe("TerminalDock", () => {
     act(() => ctrlTick());
     expect(screen.getByRole("tab", { name: "app/w1" })).toBeTruthy();
     expect(f.named("term_open").length).toBe(0);
+  });
+
+  it("attaching under StrictMode (setup, cleanup, setup) does not close the terminal the second setup attached", async () => {
+    const f = fakeTerm({ term_list: { terminals: [{ id: 7, cwd: "/work/app", root: "/work/app", rows: 24, cols: 80, alive: true }] } });
+    setTransport(f.transport);
+    render(
+      <StrictMode>
+        <TerminalDock defaultPlace={PLACE} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(f.named("term_attach").length).toBeGreaterThanOrEqual(2)); // the disposed run and the live one
+    await act(async () => {});
+    expect(f.named("term_close")).toEqual([]);
+    act(() => ctrlTick());
+    expect(screen.getByRole("tab", { name: "app" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByText(S.terminal.ended(0))).toBeNull();
   });
 
   it("the empty state says what a terminal is and offers to open one", async () => {
