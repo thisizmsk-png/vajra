@@ -206,3 +206,14 @@ starts off and OS permission remains separate.
 | Preferences changed in another window. Reload and review before saving again. | conflict | no silent retry |
 | Action STATE. Reload and review the saved values before another action. / Unsupported preferences response. Reload before another action. | receipt/recovery errors | no new write before review |
 | The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | prevents unsupported adapter fallback |
+
+Terminal dock (standalone component, `app/ui/src/terminal/`).
+
+| String | Where | Note |
+|---|---|---|
+| Terminal, Terminals, New terminal, Hide terminal, Terminal here | dock bar and the "Terminal here" action | new |
+| The shell ended. / The shell ended with code N. / The shell was stopped. | banner over an ended terminal | new |
+| Start a new shell | button on an ended terminal | new |
+| No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
+| This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
+| The shell is not reading input right now. What you typed was dropped. | transient note | new |
