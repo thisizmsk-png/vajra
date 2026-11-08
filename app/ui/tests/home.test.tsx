@@ -72,6 +72,18 @@ describe("Home", () => {
     expect(window.location.hash).toContain("id=20261106-1500");
   });
 
+  it("starts once from Cmd+Return, however often it is pressed while the start is in flight", async () => {
+    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, start_run: () => new Promise(() => {}) });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/r"); fill(S.home.ask, "x");
+    const ask = screen.getByLabelText(S.home.ask);
+    fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(ask, { key: "Enter", metaKey: true, repeat: true });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_run")).toBe(true));
+    expect(f.calls.filter((c) => c.cmd === "start_run")).toHaveLength(1);
+  });
+
   it("shows the core's refusal and stays on Home", async () => {
     await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, start_run: () => { throw { error: "invalid_input", detail: "base: is not a branch or commit in this repository" }; } });
     await screen.findByText("registered");

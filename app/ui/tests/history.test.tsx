@@ -118,6 +118,16 @@ describe("History report and integrity (S6)", () => {
     expect(await screen.findByText(S.history.integrityFailed)).toBeTruthy();
   });
 
+  it("opens the report in a pane beside the table, and closes it again", async () => {
+    await open({ read_report: { slug: "a-camp", integrity: "ok", text: "body" } });
+    const pane = await screen.findByRole("complementary", { name: S.history.panel });
+    expect(await screen.findByRole("region", { name: S.history.reportTitle("a-camp") })).toBeTruthy();
+    expect(pane.textContent).toContain("a-camp");
+    fireEvent.click(screen.getByRole("button", { name: S.history.closeReport }));
+    expect(screen.queryByRole("complementary", { name: S.history.panel })).toBeNull();
+    expect(screen.getByRole("table")).toBeTruthy();
+  });
+
   it("renders the stored report as text with control characters escaped", async () => {
     const f = await open({ read_report: { slug: "a-camp", integrity: "ok", text: "Branch b\u0000\u001b[31mred\nline 2\ttab" } });
     const pre = await screen.findByRole("region", { name: S.history.reportTitle("a-camp") });

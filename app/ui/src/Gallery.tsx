@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import "./gallery.css";
+import { systemTheme } from "./theme";
 import {
   AlertDialog, Badge, Button, Card, Input, ListBox, ListRow, SegmentedControl, Section, Separator, Sheet, Skeleton, StatusDot, Switch, Text, ToastRegion,
   useToasts,
@@ -8,7 +10,8 @@ import { GalleryDesktop } from "./GalleryDesktop";
 
 /** Every base component in its states, for review and the click crawl (open with #kit). Not an app screen. */
 export function Gallery() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  // ?theme=light opens on light, for screenshots; the default stays dark.
+  const [theme, setTheme] = useState<"dark" | "light">(() => (new URLSearchParams(location.search).get("theme") === "light" ? "light" : "dark"));
   const [rounds, setRounds] = useState<"1" | "2" | "3">("2");
   const [on, setOn] = useState(true);
   const [text, setText] = useState("main");
@@ -16,13 +19,18 @@ export function Gallery() {
   const [stop, setStop] = useState(false);
   const [sel, setSel] = useState(0);
   const { toasts, push, dismiss } = useToasts();
-  document.documentElement.dataset.theme = theme;
+  // The page toggle is a demo: on leaving the gallery the root goes back to the OS theme. This effect is declared
+  // first; StrictMode runs effects in order (setup, cleanup, setup), so the theme effect below re-applies the choice.
+  useEffect(() => () => void (document.documentElement.dataset.theme = systemTheme()), []);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
   return (
-    <main style={{ padding: 24, display: "grid", gap: 16, maxWidth: 720 }}>
+    <main className="v-gallery">
       <Text as="h1" variant="headline-lg">Kit gallery</Text>
       <SegmentedControl label="Theme" value={theme} onChange={setTheme} options={[{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }]} />
       <Section title="Buttons">
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div className="v-gallery__wrap v-gallery__center">
           <Button variant="primary">Start run</Button>
           <Button>Message</Button>
           <Button variant="ghost">Cancel</Button>
@@ -33,22 +41,22 @@ export function Gallery() {
         </div>
       </Section>
       <Section title="Status">
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <div className="v-gallery__wrap v-gallery__wrap--loose">
           {(Object.keys(S.status) as Array<keyof typeof S.status>).map((k) => <StatusDot key={k} status={k} />)}
         </div>
       </Section>
       <Section title="Badges">
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="v-gallery__flex">
           <Badge>Default</Badge><Badge status="success">Pass</Badge><Badge status="warning">Needs approval</Badge><Badge status="danger">Fail</Badge><Badge status="info">Ready</Badge>
         </div>
       </Section>
       <Section title="Inputs">
-        <div style={{ display: "grid", gap: 12 }}>
+        <div className="v-gallery__stack">
           <Input label="Base branch" hint="A branch or commit" value={text} onChange={setText} />
           <Input label="Reason" error="Required" type="textarea" value="" onChange={() => {}} />
           <Input label="Engine" type="select" value="claude" options={[{ value: "claude", label: "Claude Code" }, { value: "codex", label: "Codex" }]} onChange={() => {}} />
           <SegmentedControl label="Max rounds" value={rounds} onChange={setRounds} options={[{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }]} />
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}><Switch label="Notifications" checked={on} onChange={setOn} /><Text variant="body">Notifications</Text></div>
+          <div className="v-gallery__flex v-gallery__center"><Switch label="Notifications" checked={on} onChange={setOn} /><Text variant="body">Notifications</Text></div>
         </div>
       </Section>
       <Section title="List">
@@ -59,15 +67,15 @@ export function Gallery() {
         </ListBox>
         <Separator />
         <Card><Text variant="body">Plain card</Text><Text variant="body-sm">Secondary text</Text></Card>
-        <div style={{ marginTop: 8 }}><Card interactive onClick={() => push("info", "Opened run")}><Text variant="label">Interactive card</Text></Card></div>
+        <div className="v-gallery__gap"><Card interactive onClick={() => push("info", "Opened run")}><Text variant="label">Interactive card</Text></Card></div>
       </Section>
       <Section title="Layers and feedback">
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="v-gallery__flex">
           <Button onClick={() => setSheet(true)}>Open sheet</Button>
           <Button onClick={() => push("success", "Stopped Backend at 14:22")}>Success toast</Button>
           <Button onClick={() => push("danger", "Could not write the queue entry")}>Error toast</Button>
         </div>
-        <div style={{ marginTop: 8, display: "grid", gap: 8 }}><Skeleton delay={0} /><Skeleton delay={0} variant="block" /></div>
+        <div className="v-gallery__gap v-gallery__stack v-gallery__stack--tight"><Skeleton delay={0} /><Skeleton delay={0} variant="block" /></div>
       </Section>
       <Sheet open={sheet} onClose={() => setSheet(false)} title="Message Backend" side="right">
         <Input label="Message" type="textarea" value="" onChange={() => {}} />
