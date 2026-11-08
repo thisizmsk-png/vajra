@@ -10,6 +10,11 @@
 #   vajra-replay.sh --list        # list available session logs
 
 set -uo pipefail
+# NFR-SEC-2: this script reads the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# its absolute path, whatever PATH the caller had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+OPENSSL="/usr/bin/openssl"
 command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 2; }
 
 VAJRA_DIR="${HOME}/.claude/vajra"
@@ -53,7 +58,7 @@ while IFS= read -r line; do
   # hmac validity
   if [ -n "$KEY" ] && [ -n "$lh" ]; then
     payload="$(printf '%s' "$line" | jq -c 'del(.hmac)')"
-    actual="$(printf '%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${KEY}" -hex 2>/dev/null | awk '{print $NF}')"
+    actual="$(printf '%s' "$payload" | "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:${KEY}" -hex 2>/dev/null | awk '{print $NF}')"
     [ "$actual" != "$lh" ] && { status="${status}/HMAC-BAD"; bad=$((bad+1)); }
   fi
   marker=" "; [ "$outcome" = "failure" ] && marker="✗"

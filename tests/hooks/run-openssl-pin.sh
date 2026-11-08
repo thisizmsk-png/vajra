@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NFR-SEC-2: the scripts that hold the HMAC key (scripts/vajra-campaign.sh, hooks/session-start.sh,
+# NFR-SEC-2: the scripts that hold the HMAC key (scripts/vajra-campaign.sh, scripts/vajra-replay.sh, hooks/session-start.sh,
 # hooks/pre-compact.sh) call openssl only at /usr/bin/openssl and pin PATH to the system dirs first,
 # so an openssl/jq/awk/tr/mktemp a same-uid worker plants in ~/.local/bin (or anywhere early on the
 # caller's PATH) never runs and never sees the key.
@@ -88,6 +88,17 @@ EV="$VS/events/pc1.jsonl"
 [ -s "$EV" ] && tail -n 1 "$EV" | jq -e '.kind == "checkpoint" and (.hmac | test("^[0-9a-f]{64}$"))' >/dev/null
 check "pre-compact: checkpoint event carries a 64-hex hmac" $?
 no_plant_ran; check "pre-compact: no planted tool ran" $?
+
+# 4. scripts/vajra-replay.sh: re-checks every event HMAC with the key.
+RS="$REPO/scripts/vajra-replay.sh"
+out="$(hostile "$RS" pc1 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "chain INTACT, all HMACs valid"; check "replay: the signed checkpoint verifies" $?
+no_plant_ran; check "replay: no planted tool ran" $?
+# The check is real: a changed event fails it.
+jq -c '.gitRef = "refs/vajra/compact/forged"' "$EV" > "$VS/events/pc2.jsonl"
+out="$(hostile "$RS" pc2 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "HMAC-BAD"; check "replay: a changed event is HMAC-BAD" $?
+no_plant_ran; check "replay (changed): no planted tool ran" $?
 
 echo "----------------------------------------"
 echo "openssl-pin: ${PASS} passed, ${FAIL} failed"
