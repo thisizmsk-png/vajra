@@ -73,10 +73,27 @@ pub struct Collect(pub mpsc::Receiver<Event>);
 pub fn sink() -> (Sink, Collect) {
     let (tx, rx) = mpsc::channel();
     let tx = Mutex::new(tx);
-    (Arc::new(move |e| { let _ = lock(&tx).send(e); }), Collect(rx))
+    (Arc::new(move |e| lock(&tx).send(e).is_ok()), Collect(rx))
 }
 
 impl Collect {
+    /// Everything that has arrived so far, without waiting.
+    pub fn now(&self) -> Vec<Event> {
+        std::iter::from_fn(|| self.0.try_recv().ok()).collect()
+    }
+
+    /// Everything that arrives in the next `ms` milliseconds.
+    pub fn for_ms(&self, ms: u64) -> Vec<Event> {
+        let end = Instant::now() + Duration::from_millis(ms);
+        let mut v = Vec::new();
+        while Instant::now() < end {
+            if let Ok(e) = self.0.recv_timeout(Duration::from_millis(20)) {
+                v.push(e);
+            }
+        }
+        v
+    }
+
     /// Read until `needle` appears in the output (or `secs` pass); returns everything seen.
     pub fn until(&self, needle: &str, secs: u64) -> String {
         let mut all = Vec::new();
@@ -124,4 +141,18 @@ pub fn all_gone(pids: &[u32], secs: u64) -> bool {
 
 pub fn path_of(p: &Path) -> String {
     p.display().to_string()
+}
+
+/// Wait until `path` exists (or `secs` pass).
+pub fn wait_file(path: &Path, secs: u64) -> bool {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while !path.exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    path.exists()
+}
+
+/// The bytes of every `Data` event, joined.
+pub fn data_of(events: &[Event]) -> Vec<u8> {
+    events.iter().filter_map(|e| if let Event::Data(d) = e { Some(d.as_slice()) } else { None }).flatten().copied().collect()
 }

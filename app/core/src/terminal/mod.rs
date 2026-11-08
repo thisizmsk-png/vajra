@@ -15,6 +15,7 @@
 //!   `attach` binds a new sink; until then the reader simply waits at the window and the shell blocks on its output.
 
 pub(crate) mod kill;
+pub(crate) mod hidden;
 pub mod policy;
 
 use std::collections::HashMap;
@@ -94,13 +95,41 @@ impl std::fmt::Display for TermError {
 
 impl std::error::Error for TermError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Data(Vec<u8>),
+    /// A pane that was hidden is shown again: `bytes` of its output are not coming (only the newest are), and `alt` says
+    /// the program entered (`Some(true)`) or left (`Some(false)`) the alternate screen while nobody was looking.
+    Skipped { bytes: u64, alt: Option<bool> },
+    /// New output arrived in a hidden pane (at most twice a second), for an unread mark on its tab.
+    Activity,
     /// The shell ended (exit code, or None when killed by a signal).
     Exit(Option<i32>),
 }
 
-pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
+/// Where a terminal's output goes. Returns false when nobody is listening any more (the webview is gone).
+pub type Sink = Arc<dyn Fn(Event) -> bool + Send + Sync>;
+
+/// How often a hidden pane may report new output.
+const ACTIVITY_EVERY: Duration = Duration::from_millis(500);
+
+/// What a pane keeps while nobody is looking at it.
+#[derive(Default)]
+struct Hide {
+    on: bool,
+    ring: hidden::Ring,
+    alt: hidden::AltTrack,
+    /// Whether the view was on the alternate screen when it was hidden (it says so; the core does not watch visible output).
+    alt_at_hide: bool,
+    last_activity: Option<Instant>,
+}
+
+impl Hide {
+    fn push(&mut self, data: &[u8]) {
+        self.alt.feed(data);
+        self.ring.push(data);
+    }
+}
 
 /// What `list` and `open` say about a terminal.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -139,6 +168,11 @@ struct Term {
     /// Write end of the reader's wake pipe: a byte here makes a blocked reader return (None if the fds were too large for
     /// `select`, in which case the reader cannot be woken and `stop` falls back to detaching it).
     wake: Option<OwnedFd>,
+    /// True while the pane is hidden (or its view is gone): the reader keeps the newest output in `hide` and sends nothing.
+    hidden: AtomicBool,
+    hide: Mutex<Hide>,
+    /// Held while output is sent, and while a hidden pane is shown, so older output can never arrive after a newer tail.
+    order: Mutex<()>,
 }
 
 impl Term {
@@ -147,9 +181,101 @@ impl Term {
         kill::signal_all(self.pid, !*reaped, sig);
     }
 
-    fn send(&self, e: Event) {
+    fn send(&self, e: Event) -> bool {
         let sink = lock(&self.sink).clone();
-        sink(e);
+        sink(e)
+    }
+
+    /// Start keeping output instead of sending it. Output the flusher has not sent yet is older than anything the reader
+    /// will keep from now on, so it goes into the ring first (those bytes were counted as unacknowledged when read, and
+    /// will never be acknowledged: give them back). Needs `order` held by the caller.
+    fn conceal(&self, h: &mut Hide, alt: bool) {
+        if h.on {
+            return;
+        }
+        h.ring = hidden::Ring::default();
+        h.alt = hidden::AltTrack::new(alt);
+        h.alt_at_hide = alt;
+        h.last_activity = None;
+        let old = std::mem::take(&mut lock(&self.pending.0).buf);
+        if !old.is_empty() {
+            h.push(&old);
+            let mut c = lock(&self.credit);
+            *c = c.saturating_sub(old.len());
+        }
+        h.on = true;
+        self.hidden.store(true, Ordering::SeqCst);
+        self.credit_cv.notify_all(); // a reader waiting for credit has no need of it any more
+    }
+
+    /// The reader's side: keep `data` if the pane is hidden. Returns (kept, report activity).
+    fn keep(&self, data: &[u8]) -> (bool, bool) {
+        let mut h = lock(&self.hide);
+        if !h.on {
+            return (false, false);
+        }
+        h.push(data);
+        let due = h.last_activity.is_none_or(|t| t.elapsed() >= ACTIVITY_EVERY);
+        if due {
+            h.last_activity = Some(Instant::now());
+        }
+        (true, due)
+    }
+
+    /// Show a hidden pane: the older unsent output, then how much was left out, then the newest tail, once. A program on
+    /// the alternate screen that had output while hidden is asked to redraw (its output is a screen, not a log).
+    fn reveal(&self) {
+        let _o = lock(&self.order);
+        let mut h = lock(&self.hide);
+        if !h.on {
+            return;
+        }
+        let mut tail = h.ring.take();
+        let (was, now) = (h.alt_at_hide, h.alt.on);
+        let alt = (was != now).then_some(now);
+        let missed = !tail.bytes.is_empty() || tail.skipped > 0 || alt.is_some();
+        if now {
+            // A screen is not a log: the tail of a full-screen program's output is half a frame. Send none (and no count);
+            // the redraw below paints the whole screen.
+            tail = hidden::Tail { bytes: Vec::new(), skipped: 0 };
+        }
+        h.on = false;
+        self.hidden.store(false, Ordering::SeqCst);
+        let mut ok = true;
+        if tail.skipped > 0 || alt.is_some() {
+            ok = self.send(Event::Skipped { bytes: tail.skipped, alt });
+        }
+        if !tail.bytes.is_empty() {
+            let len = tail.bytes.len();
+            *lock(&self.credit) += len;
+            ok = ok && self.send(Event::Data(tail.bytes));
+            if !ok {
+                // Nobody took it, so nothing is owed an acknowledgement for it.
+                let mut c = lock(&self.credit);
+                *c = c.saturating_sub(len);
+            }
+        }
+        if !ok {
+            // The view is gone: keep hiding. What was in the tail is not kept again (it is the view's loss), but new output is.
+            h.on = true;
+            h.alt = hidden::AltTrack::new(now);
+            h.alt_at_hide = false;
+            self.hidden.store(true, Ordering::SeqCst);
+            return;
+        }
+        drop(h);
+        if now && missed {
+            self.nudge();
+        }
+    }
+
+    /// Make a full-screen program redraw: a size change is a SIGWINCH, and the size is put back at once.
+    fn nudge(&self) {
+        let (r, c) = *lock(&self.size);
+        let (tr, tc) = if r > 1 { (r - 1, c) } else { (r, c.saturating_add(1)) };
+        let m = lock(&self.master);
+        let _ = m.resize(PtySize { rows: tr, cols: tc, pixel_width: 0, pixel_height: 0 });
+        let _ = m.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
     }
 
     fn info(&self, id: u32) -> TermInfo {
@@ -299,9 +425,12 @@ impl Terminals {
             flusher: Mutex::new(None),
             reader: Mutex::new(None),
             wake,
+            hidden: AtomicBool::new(false),
+            hide: Mutex::new(Hide::default()),
+            order: Mutex::new(()),
         });
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        let (window, rate) = (self.limits.window, self.limits.max_rate);
+        let (window, rate, hidden_rate) = (self.limits.window, self.limits.max_rate, self.limits.hidden_rate);
         // The three I/O threads are part of the terminal: if any cannot start, end the shell and what is started and
         // report the error, instead of publishing a terminal that cannot deliver output or accept input.
         let started = (|| -> std::io::Result<()> {
@@ -310,7 +439,7 @@ impl Terminals {
             let t = term.clone();
             *lock(&term.flusher) = Some(std::thread::Builder::new().name(format!("term-flush-{id}")).spawn(move || flush_loop(&t.pending, &t))?);
             let t = term.clone();
-            *lock(&term.reader) = Some(std::thread::Builder::new().name(format!("term-{id}")).spawn(move || read_loop(reader, &t, window, rate))?);
+            *lock(&term.reader) = Some(std::thread::Builder::new().name(format!("term-{id}")).spawn(move || read_loop(reader, &t, window, rate, hidden_rate))?);
             Ok(())
         })();
         if let Err(e) = started {
@@ -383,13 +512,31 @@ impl Terminals {
         Ok(())
     }
 
+    /// The view shows or hides this pane (the dock is hidden, or another tab is selected). While hidden the shell keeps
+    /// running at full speed: the core keeps the newest 256 KiB of its output and sends nothing, and showing the pane sends
+    /// how much was left out, then that tail, once. `alt` says whether the view was on the alternate screen when it hid.
+    /// An unknown id is an error and changes nothing.
+    pub fn set_visible(&self, id: u32, visible: bool, alt: bool) -> Result<(), TermError> {
+        let t = self.get(id)?;
+        if visible {
+            t.reveal();
+        } else {
+            let _o = lock(&t.order);
+            let mut h = lock(&t.hide);
+            t.conceal(&mut h, alt);
+        }
+        Ok(())
+    }
+
     /// Bind a new sink to a terminal that outlived its view (the webview reloaded, or a hidden dock came back). The
-    /// unacknowledged count restarts at zero; output produced while no view was attached is not replayed.
+    /// unacknowledged count restarts at zero. Output produced while no view was listening was kept (newest 256 KiB) and is
+    /// sent to the new view now.
     pub fn attach(&self, id: u32, sink: Sink) -> Result<TermInfo, TermError> {
         let t = self.get(id)?;
         *lock(&t.sink) = sink;
         *lock(&t.credit) = 0;
         t.credit_cv.notify_all();
+        t.reveal();
         Ok(t.info(id))
     }
 
@@ -466,7 +613,7 @@ fn stop(t: &Arc<Term>) {
             // the reader through its wake pipe (no signals) so it returns, the thread ends, and the PTY descriptors are
             // released even though the slave stays open. Bounded: without a wake pipe, or if it does not end, the
             // thread is detached and stops at its next read (`exited` is set).
-            *lock(&t.sink) = Arc::new(|_| {});
+            *lock(&t.sink) = Arc::new(|_| true);
             if let Some(child) = lock(&t.child).take() {
                 reap(t, child);
             }
@@ -648,44 +795,90 @@ fn flush_loop(pending: &(Mutex<Pending>, Condvar), t: &Term) {
         while p.buf.len() < CHUNK && !p.eof && first.elapsed() < BATCH_WAIT {
             p = cv.wait_timeout(p, BATCH_WAIT.saturating_sub(first.elapsed())).unwrap_or_else(|e| e.into_inner()).0;
         }
+        drop(p);
+        // `order` first, so a pane being hidden or shown cannot slip its bytes in between this take and this send.
+        let _o = lock(&t.order);
+        let mut p = lock(m);
         let take = p.buf.len().min(CHUNK * 4);
+        if take == 0 {
+            continue; // a hide or show took it
+        }
         let data: Vec<u8> = p.buf.drain(..take).collect();
         drop(p);
-        t.send(Event::Data(data));
+        let len = data.len();
+        if !t.send(Event::Data(data)) {
+            // The view is gone (the webview reloaded or closed): what could not be sent was never read by anyone, so it is
+            // not owed an acknowledgement; keep what comes next for the view that attaches.
+            let mut c = lock(&t.credit);
+            *c = c.saturating_sub(len);
+            drop(c);
+            let mut h = lock(&t.hide);
+            t.conceal(&mut h, false);
+        }
     }
 }
 
-fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize, rate: usize) {
+/// Token bucket as a clock: `due` is when the bytes read so far have been paid for at `rate`. It may lag `now` by up to
+/// one burst, so time lost to a sleep that overshoots (small reads) is repaid instead of lowering the rate.
+struct Pace {
+    rate: usize,
+    ahead: Duration,
+    due: Instant,
+}
+
+impl Pace {
+    fn new(rate: usize) -> Self {
+        let ahead = if rate > 0 { Duration::from_secs_f64(RATE_BURST as f64 / rate as f64) } else { Duration::ZERO };
+        Self { rate, ahead, due: Instant::now() }
+    }
+
+    fn pay(&mut self, n: usize) {
+        if self.rate > 0 {
+            let now = Instant::now();
+            self.due = self.due.max(now.checked_sub(self.ahead).unwrap_or(now)) + Duration::from_secs_f64(n as f64 / self.rate as f64);
+        }
+    }
+}
+
+fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize, rate: usize, hidden_rate: usize) {
     let low = window / 2;
-    // Token bucket as a clock: `due` is when the bytes read so far have been paid for at `rate`. It may lag `now` by up to
-    // one burst, so time lost to a sleep that overshoots (small reads) is repaid instead of lowering the rate.
-    let ahead = if rate > 0 { Duration::from_secs_f64(RATE_BURST as f64 / rate as f64) } else { Duration::ZERO };
-    let mut due = Instant::now();
+    // A visible pane is held to `rate`; a hidden one to `hidden_rate` (0, the default: not held, so a build in a background
+    // tab runs at full speed). Each has its own clock, so switching does not carry a debt over.
+    let (mut seen, mut unseen) = (Pace::new(rate), Pace::new(hidden_rate));
     let mut buf = vec![0u8; CHUNK];
     loop {
         {
             // Stop at the window and resume at half of it, so acks do not turn into stop-and-go.
             let mut c = lock(&t.credit);
             if *c >= window {
-                while *c > low && !t.exited.load(Ordering::SeqCst) {
+                while *c > low && !t.exited.load(Ordering::SeqCst) && !t.hidden.load(Ordering::SeqCst) {
                     c = t.credit_cv.wait_timeout(c, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner()).0;
                 }
             }
         }
-        if rate > 0 {
-            // Ahead of the pace: wait, in slices so a close is never held up by it.
-            while due > Instant::now() && !t.exited.load(Ordering::SeqCst) {
-                std::thread::sleep((due - Instant::now()).min(Duration::from_millis(10)));
+        // Ahead of the pace: wait, in slices so a close is never held up by it (and a hide or show is noticed).
+        let was_hidden = t.hidden.load(Ordering::SeqCst);
+        let pace = if was_hidden { &unseen } else { &seen };
+        if pace.rate > 0 {
+            while pace.due > Instant::now() && !t.exited.load(Ordering::SeqCst) && t.hidden.load(Ordering::SeqCst) == was_hidden {
+                std::thread::sleep((pace.due - Instant::now()).min(Duration::from_millis(10)));
             }
         }
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(_) if t.exited.load(Ordering::SeqCst) => break, // `stop` reaped the shell while this read was blocked (defensive: the tty is normally hung up when the leader exits, but a holder that keeps the PTY open must not make a closed terminal buffer output)
             Ok(n) => {
-                if rate > 0 {
-                    let now = Instant::now();
-                    due = due.max(now.checked_sub(ahead).unwrap_or(now)) + Duration::from_secs_f64(n as f64 / rate as f64);
+                if t.hidden.load(Ordering::SeqCst) {
+                    let (kept, report) = t.keep(&buf[..n]);
+                    if kept {
+                        unseen.pay(n);
+                        if report {
+                            t.send(Event::Activity);
+                        }
+                        continue;
+                    }
                 }
+                seen.pay(n);
                 *lock(&t.credit) += n;
                 let (m, cv) = &*t.pending;
                 lock(m).buf.extend_from_slice(&buf[..n]);
@@ -713,3 +906,5 @@ fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize, rat
 mod harness;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_hidden;

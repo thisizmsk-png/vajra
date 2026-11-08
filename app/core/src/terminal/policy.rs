@@ -22,11 +22,15 @@ pub struct Limits {
     /// reader waits, the PTY fills and the shell blocks on its write: a flood costs a few percent of a core instead of
     /// all of it, and nothing is dropped. No view can paint faster than this anyway; 0 turns it off.
     pub max_rate: usize,
+    /// The same limit for a pane nobody is looking at. 0 (the default) does not hold it: a build in a background tab runs
+    /// at full speed and the core keeps the newest 256 KiB. A flood into a hidden pane then costs the reader's own work
+    /// (about 60% of a core for `yes`); set this to trade some of that speed for CPU.
+    pub hidden_rate: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024, write_queue: 1024 * 1024, max_rate: 8 * 1024 * 1024 }
+        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024, write_queue: 1024 * 1024, max_rate: 8 * 1024 * 1024, hidden_rate: 0 }
     }
 }
 
