@@ -111,7 +111,7 @@ export type LeadStatus = { available: boolean; read_only_reason?: string; busy: 
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
   id: string; kind: "task" | "plan" | "question"; campaign: string;
-  /** The project this item belongs to (ADR-15 §2.6). A placeholder `p_<8hex>` until the project store hands out ids; `p_unsorted` for a run no folder owns. */
+  /** The project this item belongs to (ADR-15 §2.6): the store's id of the project that owns the run's folder; `p_unsorted` for a run no project owns. */
   project_id?: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
   title: string; body: string; context?: string[]; actions: string[];
   /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */

@@ -47,19 +47,13 @@ fn valid_task_id(id: &str) -> bool {
 /// The id of a campaign no known folder owns (a terminal-started run, or one from before the app recorded folders).
 pub(super) const UNSORTED_PROJECT: &str = "p_unsorted";
 
-/// A project id for a folder, until the project store (#77, ADR-15 section 1) hands out ULIDs. It is the same FNV-1a of the
-/// trimmed, slash-stripped path that the UI adapter's `projectId` computes, so a core id and a window id agree today
-/// and the store replaces both. STUB: swap the source (the store's id for the run's folder), not the shape.
-pub(super) fn placeholder_project_id(root: &str) -> String {
-    let t = root.trim();
-    let s = t.trim_end_matches('/');
-    let norm = if s.is_empty() && t.starts_with('/') { "/" } else { s };
-    let mut h: u32 = 0x811c_9dc5;
-    for ch in norm.chars() {
-        h ^= ch as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    format!("p_{h:08x}")
+/// The project id of a run's folder, from the project store. A folder no project owns (or one that is gone, or refused)
+/// is Unsorted (ADR-15): it is never guessed into a project and never creates one. One lookup per folder per read.
+fn project_of(app: &App, cache: &mut HashMap<std::path::PathBuf, String>, cwd: &std::path::Path) -> String {
+    cache
+        .entry(cwd.to_path_buf())
+        .or_insert_with(|| app.projects.find(cwd).ok().flatten().map_or_else(|| UNSORTED_PROJECT.to_string(), |p| p.id))
+        .clone()
 }
 
 /// Shown with every item that comes from the workflow result file.
@@ -154,6 +148,7 @@ impl App {
         let before = seen.clone();
         let mut waiting: std::collections::BTreeSet<String> = Default::default();
         let launched = runindex::latest(&self.data.join("runs.jsonl"));
+        let mut folders: HashMap<std::path::PathBuf, String> = HashMap::new();
         let mut items: Vec<(i64, String, Value)> = Vec::new();
         self.with_reader(|r| {
             for slug in r.campaigns().map_err(|e| fail("io_error", e))? {
@@ -177,7 +172,7 @@ impl App {
                         item_id.clone(),
                         json!({
                             "id": item_id, "kind": "task", "campaign": slug, "origin": origin,
-                            "project_id": launched.get(&slug).map_or_else(|| UNSORTED_PROJECT.to_string(), |e| placeholder_project_id(&e.cwd.to_string_lossy())),
+                            "project_id": launched.get(&slug).map_or_else(|| UNSORTED_PROJECT.to_string(), |e| project_of(self, &mut folders, &e.cwd)),
                             "status": status,
                             "since": SINCE, "created": crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(created.max(0) as u64)), "age_s": (now - created).max(0),
                             "title": clean(&text(t.get("title")), TITLE_MAX),
@@ -198,7 +193,7 @@ impl App {
                 let first = *seen.entry(key.clone()).or_insert(now);
                 waiting.insert(key);
                 let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
-                (first, json!({"id": id, "kind": kind, "campaign": slug, "project_id": placeholder_project_id(&e.cwd.to_string_lossy()), "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
+                (first, json!({"id": id, "kind": kind, "campaign": slug, "project_id": project_of(self, &mut folders, &e.cwd), "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
             };
             if let Some(q) = &w.question {
                 let id = format!("question:{}", e.run_id);

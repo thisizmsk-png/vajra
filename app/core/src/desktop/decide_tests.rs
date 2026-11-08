@@ -988,31 +988,35 @@ fn act_env(id: &str, expect: Option<u64>, project: &str) -> Envelope {
     Envelope { action_id: id.into(), project_id: project.into(), expect_generation: expect }
 }
 
-fn my_project(t: &Tmp) -> String {
-    super::super::inbox::placeholder_project_id(&t.cwd().to_string_lossy())
+/// The store's id for the run folder (the folder is added as a project if it is not one yet; adding is idempotent).
+fn my_project(app: &App, t: &Tmp) -> String {
+    app.projects.add(&t.cwd(), false).unwrap().project().id.clone()
 }
 
-// The id a folder gets is the one the window computes for the same path, so the two agree until the store replaces both.
-#[test]
-fn the_placeholder_project_id_matches_the_window_adapter() {
-    use super::super::inbox::placeholder_project_id as id;
-    assert_eq!(id("/src/api"), "p_ac4c67fb");
-    assert_eq!(id("/src/web"), "p_ea65e8a5");
-    assert_eq!(id("/src/api/"), id("/src/api"), "a trailing slash is the same folder");
-    assert_eq!(id("  /src/api "), id("/src/api"));
-}
-
-// Given plans and task items, Then each carries the project_id of the folder its run was launched in; a campaign no
-// launched run owns is Unsorted.
+// Given plans and task items, Then each carries the store's id of the project that owns the folder its run was launched
+// in; a campaign no launched run owns, or a folder no project owns, is Unsorted (never guessed, never created).
 #[test]
 fn inbox_items_carry_the_project_id_of_their_folder() {
     let t = Tmp::new();
     let app = t.app();
+    let mine = my_project(&app, &t);
+    assert!(mine.starts_with("p_") && mine.len() == 28, "a store id, not a path hash: {mine}");
     ready(&t, &app);
     t.campaign("terminal-run", "2026-11-01T00:00:00Z", json!([{"id": "t9", "status": "blocked", "title": "stuck"}]));
     let inbox = app.inbox().unwrap();
-    assert_eq!(item(&inbox, PLAN)["project_id"], my_project(&t));
+    assert_eq!(item(&inbox, PLAN)["project_id"], mine);
     assert_eq!(item(&inbox, "task:terminal-run.t9")["project_id"], "p_unsorted");
+}
+
+// Given the run's folder is not a project, Then its plan is Unsorted and the read created no project.
+#[test]
+fn a_folder_no_project_owns_is_unsorted_and_stays_so() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    let inbox = app.inbox().unwrap();
+    assert_eq!(item(&inbox, PLAN)["project_id"], "p_unsorted");
+    assert!(app.projects.list(true).unwrap().projects.is_empty(), "reading the inbox adds no project");
 }
 
 // Given a plan is rejected through a receipt, Then the reject runs once, the receipt is done, and the same action id
@@ -1023,7 +1027,7 @@ fn act_reject_plan_runs_once_and_replays() {
     let app = t.app();
     ready(&t, &app);
     let log = t.campaign_script(0);
-    let e = act_env("rej-0001-aaaa", None, &my_project(&t));
+    let e = act_env("rej-0001-aaaa", None, &my_project(&app, &t));
     let first = app.act_reject_plan(&e, PLAN, "too risky");
     assert_eq!(first["receipt"]["state"], "done", "{first}");
     assert_eq!(first["receipt"]["action"], "reject_plan");
@@ -1043,11 +1047,11 @@ fn act_reject_plan_with_a_stale_generation_is_refused_before_it_runs() {
     let sha = ready(&t, &app);
     let log = t.campaign_script(0);
     let stale = u64::from_str_radix(&"f".repeat(16), 16).unwrap();
-    let r = app.act_reject_plan(&act_env("rej-0002-bbbb", Some(stale), &my_project(&t)), PLAN, "no");
+    let r = app.act_reject_plan(&act_env("rej-0002-bbbb", Some(stale), &my_project(&app, &t)), PLAN, "no");
     assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("stale_generation")), "{r}");
     assert!(!log.exists() && states(&t, "reject").is_empty(), "nothing ran");
     let right = u64::from_str_radix(&sha[..16], 16).unwrap();
-    assert_eq!(app.act_reject_plan(&act_env("rej-0003-cccc", Some(right), &my_project(&t)), PLAN, "no")["receipt"]["state"], "done");
+    assert_eq!(app.act_reject_plan(&act_env("rej-0003-cccc", Some(right), &my_project(&app, &t)), PLAN, "no")["receipt"]["state"], "done");
 }
 
 // Given a plan already decided, a new reject action is refused with the core's reason; a bad reason is invalid_args.
@@ -1057,7 +1061,7 @@ fn act_reject_plan_refusals_are_receipts_with_their_codes() {
     let app = t.app();
     ready(&t, &app);
     t.campaign_script(0);
-    let p = my_project(&t);
+    let p = my_project(&app, &t);
     let bad = app.act_reject_plan(&act_env("rej-0004-dddd", None, &p), PLAN, "   ");
     assert_eq!((bad["receipt"]["state"].as_str(), bad["receipt"]["reason"].as_str()), (Some("rejected"), Some("invalid_args")));
     assert_eq!(app.act_reject_plan(&act_env("rej-0005-eeee", None, &p), PLAN, "no")["receipt"]["state"], "done");
@@ -1083,7 +1087,7 @@ fn reject_plan_is_human_only() {
 fn project_state_carries_the_projects_own_inbox_and_its_revision_moves() {
     let t = Tmp::new();
     let app = t.app();
-    let mine = my_project(&t);
+    let mine = my_project(&app, &t);
     let before = app.project_state(&mine, None).unwrap();
     assert_eq!((before["inbox"]["ok"].clone(), before["inbox"]["count"].clone()), (json!(true), json!(0)));
     ready(&t, &app);
@@ -1107,6 +1111,7 @@ fn project_state_carries_the_projects_own_inbox_and_its_revision_moves() {
 fn a_burst_of_new_items_is_one_inbox_new_event_with_no_item_text() {
     let t = Tmp::new();
     let app = t.app();
+    let mine = my_project(&app, &t);
     app.events.set_window_ms(60);
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
     let sink = seen.clone();
@@ -1117,7 +1122,7 @@ fn a_burst_of_new_items_is_one_inbox_new_event_with_no_item_text() {
     let got = seen.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].0, "inbox_new");
-    assert_eq!(got[0].1, json!({"project_id": my_project(&t), "kind": "plan", "count": 2}));
+    assert_eq!(got[0].1, json!({"project_id": mine, "kind": "plan", "count": 2}));
     // Reading again with nothing new says nothing more.
     app.inbox().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(200));
