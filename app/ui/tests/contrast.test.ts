@@ -46,6 +46,14 @@ describe.each(["dark", "light"] as const)("%s theme contrast", (theme) => {
   it("the label on a primary button reaches 4.5:1", () => {
     expect(ratio(t["c-text-on-primary"], t["c-primary"])).toBeGreaterThanOrEqual(4.5);
   });
+  it("the ink primary: its label reaches 4.5:1 and its fill 3:1 against the surfaces it sits on", () => {
+    expect(ratio(t["c-text-on-action"], t["c-action"])).toBeGreaterThanOrEqual(4.5);
+    for (const bg of [...BGS, "panel"]) expect(ratio(t["c-action"], t[`c-${bg}`]), `action on ${bg}`).toBeGreaterThanOrEqual(3);
+  });
+  it("text, status colors and border-strong hold on a panel", () => {
+    for (const fg of TEXT_ROWS.filter((r) => r !== "focus-ring")) expect(ratio(t[`c-${fg}`], t["c-panel"]), `${fg} on panel`).toBeGreaterThanOrEqual(4.5);
+    for (const fg of ["border-strong", "focus-ring"]) expect(ratio(t[`c-${fg}`], t["c-panel"]), `${fg} on panel`).toBeGreaterThanOrEqual(3);
+  });
   it("all 16 ANSI colors reach 4.5:1 on the background", () => {
     const ansi = Object.entries(t).filter(([k]) => k.startsWith("ansi-"));
     expect(ansi).toHaveLength(16);

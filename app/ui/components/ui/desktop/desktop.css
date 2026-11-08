@@ -20,6 +20,14 @@
 .v-table { width: 100%; border-collapse: collapse; font: 400 13px/19px var(--font-ui); color: var(--c-text); }
 .v-table th, .v-table td { text-align: left; padding: 0 var(--space-sm); height: var(--row-h); border-bottom: 1px solid var(--c-border); }
 .v-table th { font-weight: 500; color: var(--c-text-secondary); }
+/* In a panel the table runs edge to edge: a quiet header band, roomier rows, no rule under the last row. */
+.v-panel > .v-table th { height: 34px; background: var(--c-surface); color: var(--c-text-muted); font-size: 12px; }
+.v-panel > .v-table td { height: 52px; }
+.v-panel > .v-table :is(th, td):first-child { padding-left: var(--space-lg); }
+.v-panel > .v-table :is(th, td):last-child { padding-right: var(--space-lg); }
+.v-panel > .v-table tbody tr:last-child td { border-bottom: 0; }
+.v-panel > .v-table tbody tr { transition: background-color var(--t-fast) var(--ease-out); }
+.v-panel > .v-table tbody tr:hover { background: var(--c-surface); }
 .v-table .v-num { text-align: right; }
 .v-th-button { background: transparent; border: 0; padding: 0; color: inherit; font: inherit; min-height: var(--target-min); }
 .v-th-button:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
@@ -88,5 +96,5 @@
 .v-actionbar__ctx b { color: var(--c-text); font-weight: 600; }
 .v-actionbar__acts { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .v-actionbar__act { height: 28px; color: var(--c-text-secondary); }
-.v-actionbar__act--primary { color: var(--c-primary); }
+.v-actionbar__act--primary { color: var(--c-text); font-weight: 600; }
 .v-actionbar__act--primary + .v-actionbar__act { margin-left: var(--space-sm); }
