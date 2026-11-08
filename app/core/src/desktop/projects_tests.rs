@@ -70,3 +70,23 @@ fn refusals_carry_a_code_the_window_can_act_on() {
     assert_eq!(err(app.project_rename("p_01JC5X8Z3A9K2M4N6P7Q8R9S0T", "x", None))["error"], "not_found");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn migration_suggests_then_confirms_once_through_the_commands() {
+    let (root, app) = setup("migrate");
+    let a = repo(&root, "src/alpha");
+    // A campaign dir the reader lists, and a launch line that names alpha as its folder.
+    let camp = root.join("home/.claude/vajra/campaigns/old-one");
+    fs::create_dir_all(&camp).unwrap();
+    fs::write(root.join("data/runs.jsonl"), format!("{{\"campaign\":\"old-one\",\"session_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"run_id\":\"20261101-0900\",\"cwd\":\"{a}\"}}\n")).unwrap();
+    let s = app.project_migration_suggest().unwrap();
+    assert_eq!(s["done"], false);
+    let groups = s["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "{s}");
+    assert_eq!(groups[0]["root"], a.as_str());
+    let out = app.project_migration_confirm(std::slice::from_ref(&a)).unwrap();
+    assert_eq!(out["projects"][0]["sessions"], 1);
+    assert_eq!(app.project_migration_suggest().unwrap()["done"], true);
+    assert_eq!(err(app.project_migration_confirm(&[a]))["error"], "already_migrated");
+    let _ = fs::remove_dir_all(root);
+}

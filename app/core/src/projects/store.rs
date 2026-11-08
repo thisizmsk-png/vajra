@@ -121,6 +121,11 @@ impl Store {
         Ok(Self { dir, guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), now })
     }
 
+    /// The folders that can never be a project.
+    pub fn guard(&self) -> &Guard {
+        &self.guard
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
         self.lock.lock().unwrap_or_else(|p| p.into_inner())
     }
