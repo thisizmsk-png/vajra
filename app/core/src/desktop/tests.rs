@@ -73,9 +73,9 @@ fn pages_are_capped_at_64_kib() {
 }
 
 #[test]
-fn one_active_run_at_a_time() {
-    // The control service steers one session; a second concurrent run would
-    // get the first run's messages and stops (review #4).
+fn one_active_run_per_project() {
+    // ADR-15 D5: a second run in the same project is held (two workflows would fight over its branches and
+    // worktrees), with a reason; it is never queued.
     let t = Tmp::new();
     let app = t.app();
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -86,9 +86,11 @@ fn one_active_run_at_a_time() {
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let cwd = t.0.to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
-    assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
+    let held = app.start_run(input, &cwd).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
+    assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    assert_eq!(code(&app.resume_run(other, "c2", &cwd).unwrap_err()), "run_active");
+    assert_eq!(app.resume_run(other, "c2", &cwd).unwrap_err()["reason"], "project_busy");
     // A past run's crew view never retargets the control service.
     let before = lock(&app.control).nonce(sid).map(str::to_string);
     let _ = app.crew("c-old", "20261101-0000");
@@ -2703,4 +2705,73 @@ fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
     drop(svc);
     app.refresh_workers(); // every live run is refreshed; must not panic or touch the ended one
     app.sup.kill(&format!("run-{b}")).unwrap();
+}
+
+/// Two folders, each its own project (a `.git` dir), under the test's temp dir.
+fn repos(t: &Tmp, names: &[&str]) -> Vec<PathBuf> {
+    names.iter().map(|n| {
+        let d = t.0.join(n);
+        fs::create_dir_all(d.join(".git")).unwrap();
+        d
+    }).collect()
+}
+
+const SIDS: [&str; 3] = ["1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7"];
+const RUNS: [&str; 3] = ["20261108-1000", "20261108-1001", "20261108-1002"];
+
+fn sleeper(_: &str) -> Result<Vec<String>, Value> {
+    Ok(vec!["sleep".into(), "5".into()])
+}
+
+/// ADR-15 D5: runs in two projects go at once (2 by default); a third is held until the setting allows it.
+#[test]
+fn two_projects_run_at_once_and_the_app_cap_holds_a_third() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two", "three"]);
+    // Two workers each, so the worker ceiling (8) is not what holds the third run.
+    let go = |i: usize, repo: &Path| app.launch_kind(SIDS[i], RUNS[i], &format!("c{i}"), repo, sleeper, false, true, 2);
+    go(0, &r[0]).unwrap();
+    go(1, &r[1]).unwrap();
+    assert_eq!(app.active_run_count(), 2);
+    {
+        let svc = lock(&app.control);
+        assert!(svc.has_session(SIDS[0]) && svc.has_session(SIDS[1]));
+        assert_ne!(svc.nonce(SIDS[0]), svc.nonce(SIDS[1]));
+        assert!(caps::project_key(&r[0]) != caps::project_key(&r[1]));
+    }
+    let held = go(2, &r[2]).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("app_runs_full")), "{held}");
+    assert!(!lock(&app.control).has_session(SIDS[2]), "a held start takes no control session");
+    assert_eq!(app.active_run_count(), 2, "nothing running was stopped");
+    assert_eq!(code(&app.set_run_limits(5).unwrap_err()), "invalid_input");
+    assert_eq!(app.set_run_limits(3).unwrap()["max_runs"], 3);
+    go(2, &r[2]).unwrap();
+    assert_eq!(app.active_run_count(), 3);
+    // A lower cap never stops running work; it only holds new starts.
+    app.set_run_limits(1).unwrap();
+    assert_eq!(app.active_run_count(), 3);
+    for s in SIDS {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
+
+/// ADR-15 D5: the worker ceiling (8) counts every concurrent run's maxInFlight; a lone run is never held by it.
+#[test]
+fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, 6).unwrap();
+    let held = app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 4).unwrap_err();
+    assert_eq!(held["reason"], "workers_full", "{held}");
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 2).unwrap();
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+    // With both ended, a lone run may use more than the ceiling (today's 1 to 16 range).
+    app.sup.wait(&format!("run-{}", SIDS[0]), Duration::from_secs(5)).unwrap();
+    app.sup.wait(&format!("run-{}", SIDS[1]), Duration::from_secs(5)).unwrap();
+    app.launch_kind(SIDS[2], RUNS[2], "c2", &r[0], sleeper, false, true, 16).unwrap();
+    app.sup.kill(&format!("run-{}", SIDS[2])).unwrap();
 }

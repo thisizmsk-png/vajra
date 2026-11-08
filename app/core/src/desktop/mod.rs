@@ -205,6 +205,10 @@ pub struct App {
     /// Held from the one-active-run check until the run is recorded, so two
     /// Start clicks cannot both pass the check.
     launching: Mutex<()>,
+    /// The run caps (ADR-15 D5); in memory until the settings store (FG-08) persists them.
+    limits: Mutex<caps::RunLimits>,
+    /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
+    run_workers: Mutex<HashMap<String, u32>>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -272,6 +276,8 @@ impl App {
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            limits: Mutex::new(caps::RunLimits::default()),
+            run_workers: Mutex::new(HashMap::new()),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -373,13 +379,39 @@ impl App {
         Ok(json!({"campaigns": list}))
     }
 
-    /// The control service steers one session, so one run is active at a time.
-    fn no_active_run(&self) -> Result<(), Value> {
+    /// ADR-15 D5: may a run in `cwd` with `workers` start now? One run per project, `max_runs` in the app, and the
+    /// worker ceiling across concurrent runs. Over a cap the start is held with a reason (`run_held`), never queued.
+    /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
+    /// concurrent run safe; the caps bound what runs at once.
+    fn within_caps(&self, cwd: &Path, workers: u32) -> Result<(), Value> {
         self.reap_locked();
-        if self.active_run_count() > 0 {
-            return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
+        let active: Vec<caps::Active> = {
+            let runs = lock(&self.runs);
+            let per = lock(&self.run_workers);
+            runs.iter()
+                .filter(|(s, _)| self.sup.is_running(s).unwrap_or(false))
+                .map(|(s, r)| caps::Active { project: caps::project_key(&r.cwd), workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) })
+                .collect()
+        };
+        // Forget the worker counts of runs that ended.
+        {
+            let runs = lock(&self.runs);
+            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
-        Ok(())
+        let limits = *lock(&self.limits);
+        caps::check(limits, &active, &caps::project_key(cwd), workers).map_err(|h| h.to_json())
+    }
+
+    /// The run caps and their bounds.
+    pub fn run_limits(&self) -> Res {
+        Ok(lock(&self.limits).to_json())
+    }
+
+    /// Set the app-wide run cap (1 to 4). Running work is never stopped: a lower cap only holds new starts.
+    pub fn set_run_limits(&self, max_runs: u32) -> Res {
+        let l = caps::RunLimits::with_max_runs(max_runs)?;
+        *lock(&self.limits) = l;
+        Ok(l.to_json())
     }
 
     /// Runs whose PTY is still open.
@@ -426,7 +458,7 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, caps::DEFAULT_RUN_WORKERS)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -441,9 +473,10 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
         workflow: bool,
+        workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
-        self.no_active_run()?;
+        self.within_caps(cwd, workers)?;
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -467,6 +500,7 @@ impl App {
             lock(&self.control).end_session(session_id);
             return Err(e);
         }
+        lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
@@ -519,9 +553,10 @@ impl App {
         let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
-        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
+        let workers = input.max_in_flight;
+        let r = self.launch_kind(&session_id, &run_id, &campaign, &cwd, |n| {
             argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
-        }, false)?;
+        }, false, true, workers)?;
         self.note("run_started", &[]);
         Ok(r)
     }
@@ -1683,6 +1718,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod caps;
 mod inbox;
 mod wfresult;
 mod decide;
