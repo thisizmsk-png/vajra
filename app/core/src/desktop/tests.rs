@@ -2771,19 +2771,26 @@ fn an_unknown_provider_is_invalid_not_defaulted() {
 }
 
 #[test]
-fn the_chosen_provider_is_recorded_with_the_run_and_offered_again_on_resume() {
+fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     let t = Tmp::new();
     let app = t.app();
     let cwd = t.0.to_string_lossy().into_owned();
     assert_eq!(app.chosen_engine(None).unwrap(), Engine::Claude, "no preference means claude");
     assert_eq!(app.chosen_engine(Some("codex")).unwrap(), Engine::Codex);
-    app.launch_engine(Engine::Codex, PSID, "20261108-1200", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    app.launch_engine(Engine::Claude, PSID, "20261108-1200", "deliver-claude", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    let other = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    app.launch_engine(Engine::Codex, other, "20261108-1201", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    let idx = fs::read_to_string(t.0.join("data/runs.jsonl")).unwrap();
+    assert!(idx.contains("\"provider\":\"codex\""), "the run is still recorded with its provider");
     let targets = app.resume_targets().unwrap();
-    assert_eq!(targets["targets"]["deliver-codex"]["provider"], "codex");
+    assert_eq!(targets["targets"]["deliver-claude"]["provider"], "claude");
+    assert!(targets["targets"].get("deliver-codex").is_none(), "the app-made id means nothing to codex resume: {targets}");
+    // And a direct resume of it is refused, never handed to `codex resume <app uuid>`.
+    let e = app.resume_run(other, "deliver-codex", &cwd, Some("codex")).unwrap_err();
+    assert_eq!(code(&e), "provider_cannot_resume", "{e}");
     // A line written before providers existed reads as claude; an unknown id in the index is not believed.
-    let idx = t.0.join("data/runs.jsonl");
-    let mut f = fs::OpenOptions::new().append(true).open(&idx).unwrap();
-    let line = |c: &str, p: Option<&str>| json!({"campaign": c, "session_id": "1a8fad5b-d9cb-469f-a165-70867728950f", "run_id": "20261108-1201", "cwd": cwd, "provider": p}).to_string();
+    let mut f = fs::OpenOptions::new().append(true).open(t.0.join("data/runs.jsonl")).unwrap();
+    let line = |c: &str, p: Option<&str>| json!({"campaign": c, "session_id": "2b8fad5b-d9cb-469f-a165-70867728950f", "run_id": "20261108-1202", "cwd": cwd, "provider": p}).to_string();
     std::io::Write::write_all(&mut f, format!("{}\n{}\n", line("old", None), line("forged", Some("evil"))).as_bytes()).unwrap();
     let targets = app.resume_targets().unwrap();
     assert_eq!(targets["targets"]["old"]["provider"], "claude");

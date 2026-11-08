@@ -126,6 +126,9 @@ fn limits(name: &str, c: &CapabilityFlags, installed: bool) -> Vec<Limit> {
     if c.stop == StopKind::Terminate {
         add("stop", "stop_ends_process", format!("{name} has no hand-off: Stop ends its process"));
     }
+    if installed && !c.resume {
+        add("resume", "no_resume_session", format!("{name} cannot be resumed: Vajra does not get its session id"));
+    }
     if !installed {
         add("start", "not_installed", format!("{name} is not installed"));
         add("resume", "not_installed", format!("{name} is not installed"));

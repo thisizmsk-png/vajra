@@ -40,7 +40,7 @@ fn another_major_is_reported_not_misread() {
 fn the_project_state_provider_object_parses() {
     let p = parse_project_provider(&fixture("project_state.provider.v1.json")).unwrap();
     assert_eq!((p.id.as_str(), p.installed, p.login_state), ("codex", true, LoginState::CannotTell));
-    assert_eq!(p.limits.len(), 2);
+    assert_eq!(p.limits.len(), 3);
 }
 
 #[test]

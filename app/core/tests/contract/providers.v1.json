@@ -47,7 +47,7 @@
         "message": false,
         "redirect": false,
         "stop": "terminate",
-        "resume": true,
+        "resume": false,
         "vajra_workflow": false
       },
       "limits": [
@@ -70,6 +70,11 @@
           "control": "stop",
           "code": "stop_ends_process",
           "reason": "Codex has no hand-off: Stop ends its process"
+        },
+        {
+          "control": "resume",
+          "code": "no_resume_session",
+          "reason": "Codex cannot be resumed: Vajra does not get its session id"
         }
       ],
       "login": {

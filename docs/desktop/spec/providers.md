@@ -53,7 +53,7 @@ Tauri command only (not an MCP tool). Answer, at most 64 KiB, at most 8 provider
 codes (`[a-z0-9_]{1,64}`); the UI maps them to its own approved strings and shows the core's `reason` / `route` / `detail`
 only for a code it does not know. All three are optional so older records still parse. Codes in use: limits
 `no_message_mid_run`, `no_redirect_mid_run`, `no_inspect`, `no_transcript`, `no_vajra_workflow`, `stop_ends_process`,
-`not_installed`, `not_supported`; route `uses_claude_login`, `uses_codex_login`; detail `check_unfinished`,
+`no_resume_session`, `not_installed`, `not_supported`; route `uses_claude_login`, `uses_codex_login`; detail `check_unfinished`,
 `check_not_understood`.
 
 **Stop.** A provider whose `capabilities.stop` is `terminate` (Codex) ends the process and has no hook hand-off, so it
@@ -132,6 +132,9 @@ G1 to G6, G10, G12 are exercised by the core push. This push covers G7 to G11 an
   Resume passes it back, so a Codex run is never resumed on Claude.
 - Refusals: unknown id is `invalid_args` (field `provider`); a CLI that is not installed is `provider_not_installed`. Neither
   tries another provider.
+- Resume: Codex has `resume = false` with limit `no_resume_session`. Vajra starts it as `codex -- <ask>` and never learns its session
+  id (the app-made id means nothing to `codex resume`), so `resume_targets` omits Codex runs and `resume_run` refuses with
+  `provider_cannot_resume`. Capturing Codex's real session id would lift this later.
 - Recorded: the run index line carries `provider` (a hint, like the rest of that worker-writable file: only `claude` and
   `codex` are believed, absent reads as `claude`).
 

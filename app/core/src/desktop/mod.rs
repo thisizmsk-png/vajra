@@ -527,6 +527,8 @@ impl App {
         let targets: serde_json::Map<String, Value> = runindex::latest(&self.data.join("runs.jsonl"))
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
+            // Only a provider that can resume is offered: a Codex run's app-made id means nothing to `codex resume`.
+            .filter(|(_, e)| Engine::from_id(e.provider.as_deref().unwrap_or("claude")).is_some_and(|g| adapter_for(g).capabilities().resume))
             .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": e.provider.as_deref().unwrap_or("claude")})))
             .collect();
         Ok(json!({"targets": targets}))

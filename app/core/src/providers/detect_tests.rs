@@ -155,7 +155,7 @@ fn every_limit_and_the_login_carry_a_stable_code_beside_the_text() {
     assert_eq!((x.login.detail_code.as_deref(), x.login.state), (Some("check_not_understood"), LoginState::CannotTell));
     assert!(x.limits.iter().all(|l| l.code.is_some()), "{:?}", x.limits);
     let codes: Vec<&str> = x.limits.iter().map(|l| l.code.as_deref().unwrap()).collect();
-    for c in ["no_message_mid_run", "no_redirect_mid_run", "no_inspect", "no_transcript", "no_vajra_workflow", "stop_ends_process"] {
+    for c in ["no_message_mid_run", "no_redirect_mid_run", "no_inspect", "no_transcript", "no_vajra_workflow", "stop_ends_process", "no_resume_session"] {
         assert!(codes.contains(&c), "{c}: {codes:?}");
     }
     let c = get(&list(&f), "claude");
