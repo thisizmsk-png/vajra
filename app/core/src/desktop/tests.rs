@@ -19,7 +19,22 @@ impl Tmp {
         self.0.join("home")
     }
     fn app(&self) -> App {
-        App::open(&self.0.join("data"), &self.home()).unwrap()
+        let mut app = App::open(&self.0.join("data"), &self.home()).unwrap();
+        // Provider CLIs are looked for in a temp dir holding fakes, never on the machine's real PATH.
+        app.provider_dirs = Some(vec![self.fake_clis(&["claude", "codex"])]);
+        app
+    }
+    /// A dir holding fake provider CLIs (version and a signed-in status); only the named ones exist.
+    fn fake_clis(&self, names: &[&str]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let d = self.0.join(format!("fakebin-{}", names.join("-")));
+        fs::create_dir_all(&d).unwrap();
+        for n in names {
+            let body = "#!/bin/sh\ncase \"$1\" in --version) echo '2.0.1 (fake)';; auth) echo '{\"loggedIn\": true}';; login) echo 'Logged in';; esac\n";
+            fs::write(d.join(n), body).unwrap();
+            fs::set_permissions(d.join(n), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        d
     }
 }
 
@@ -85,10 +100,10 @@ fn one_active_run_at_a_time() {
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let cwd = t.0.to_string_lossy().to_string();
-    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    assert_eq!(code(&app.resume_run(other, "c2", &cwd).unwrap_err()), "run_active");
+    assert_eq!(code(&app.resume_run(other, "c2", &cwd, None).unwrap_err()), "run_active");
     // A past run's crew view never retargets the control service.
     let before = lock(&app.control).nonce(sid).map(str::to_string);
     let _ = app.crew("c-old", "20261101-0000");
@@ -142,6 +157,7 @@ fn start_run_rejects_bad_input_before_creating_a_session() {
         base: "main".into(),
         max_in_flight: 4,
         campaign: None,
+        provider: None,
     };
     let cwd = t.0.to_string_lossy().into_owned();
     assert_eq!(code(&app.start_run(input("   "), &cwd).unwrap_err()), "invalid_args");
@@ -155,9 +171,9 @@ fn resume_run_validates_ids() {
     let t = Tmp::new();
     let app = t.app();
     let cwd = t.0.to_string_lossy().into_owned();
-    let e = app.resume_run("bad id;rm", "deliver-x", &cwd).unwrap_err();
+    let e = app.resume_run("bad id;rm", "deliver-x", &cwd, None).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
-    let e = app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "../x", &cwd).unwrap_err();
+    let e = app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "../x", &cwd, None).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
 }
 
@@ -1898,7 +1914,7 @@ fn a_run_id_recorded_before_a_restart_is_not_issued_again() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     std::fs::create_dir_all(t.0.join("data")).ok();
     let app = t.app();
-    let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-old".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: t.0.clone(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data").join("runs.jsonl"), &entry).ok();
     let now = 1_793_881_859; // 2026-11-05 12:30:59 UTC, minute 20261105-1230
     let (_, id) = app.fresh_run_id(now).unwrap();
@@ -2299,7 +2315,7 @@ fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
     let index = t.0.join("data/runs.jsonl");
     let _ = std::fs::remove_file(&index);
     for k in 1..120u64 {
-        let e = runindex::Entry { campaign: "deliver-forged".into(), session_id: "1f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: ids::run_id_at(at + 60 * k), cwd: t.0.clone(), lead_session_id: None };
+        let e = runindex::Entry { campaign: "deliver-forged".into(), session_id: "1f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: ids::run_id_at(at + 60 * k), cwd: t.0.clone(), lead_session_id: None, provider: None };
         runindex::append(&index, &e).unwrap();
     }
     let app = t.app();
@@ -2718,4 +2734,70 @@ fn terminal_roots_are_the_run_dirs_of_runs_this_app_started_not_the_worker_writa
     // A line a worker appends to runs.jsonl names a dir; it grants nothing.
     fs::write(t.0.join("data/runs.jsonl"), format!("{{\"campaign\":\"c\",\"session_id\":\"x\",\"run_id\":\"20261105-1231\",\"cwd\":\"{}\"}}\n", t.home().join("elsewhere").display())).unwrap();
     assert!(!app.terminal_roots().iter().any(|r| r.ends_with("elsewhere")));
+}
+
+
+// ---- FG-09: the provider a run starts and resumes on
+
+const PSID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+fn input_for(provider: Option<&str>) -> RunInput {
+    RunInput { ask: "do it".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: provider.map(str::to_string) }
+}
+
+#[test]
+fn g12_a_provider_that_is_not_installed_is_refused_and_no_other_one_is_tried() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    app.provider_dirs = Some(vec![t.fake_clis(&["claude"])]); // claude is there, codex is not
+    let cwd = t.0.to_string_lossy().into_owned();
+    let e = app.start_run(input_for(Some("codex")), &cwd).unwrap_err();
+    assert_eq!(code(&e), "provider_not_installed", "{e}");
+    let e = app.resume_run(PSID, "deliver-x", &cwd, Some("codex")).unwrap_err();
+    assert_eq!(code(&e), "provider_not_installed", "{e}");
+    assert_eq!(app.active_runs().unwrap(), json!({"count": 0, "runs": []}), "nothing was started on claude instead");
+    assert!(!t.0.join("data/runs.jsonl").exists());
+}
+
+#[test]
+fn an_unknown_provider_is_invalid_not_defaulted() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.to_string_lossy().into_owned();
+    for bad in ["gemini", "", "Claude", "claude "] {
+        let e = app.start_run(input_for(Some(bad)), &cwd).unwrap_err();
+        assert_eq!(code(&e), "invalid_args", "{bad:?}: {e}");
+    }
+}
+
+#[test]
+fn the_chosen_provider_is_recorded_with_the_run_and_offered_again_on_resume() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.to_string_lossy().into_owned();
+    assert_eq!(app.chosen_engine(None).unwrap(), Engine::Claude, "no preference means claude");
+    assert_eq!(app.chosen_engine(Some("codex")).unwrap(), Engine::Codex);
+    app.launch_engine(Engine::Codex, PSID, "20261108-1200", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
+    let targets = app.resume_targets().unwrap();
+    assert_eq!(targets["targets"]["deliver-codex"]["provider"], "codex");
+    // A line written before providers existed reads as claude; an unknown id in the index is not believed.
+    let idx = t.0.join("data/runs.jsonl");
+    let mut f = fs::OpenOptions::new().append(true).open(&idx).unwrap();
+    let line = |c: &str, p: Option<&str>| json!({"campaign": c, "session_id": "1a8fad5b-d9cb-469f-a165-70867728950f", "run_id": "20261108-1201", "cwd": cwd, "provider": p}).to_string();
+    std::io::Write::write_all(&mut f, format!("{}\n{}\n", line("old", None), line("forged", Some("evil"))).as_bytes()).unwrap();
+    let targets = app.resume_targets().unwrap();
+    assert_eq!(targets["targets"]["old"]["provider"], "claude");
+    assert_eq!(targets["targets"]["forged"]["provider"], "claude");
+}
+
+#[test]
+fn provider_list_answers_the_contract_from_the_machines_clis_without_touching_a_real_home() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    app.provider_dirs = Some(vec![t.fake_clis(&["claude"])]);
+    let v = app.provider_list().unwrap();
+    let l = crate::providers::contract::parse_provider_list(v.to_string().as_bytes()).unwrap();
+    let by = |id: &str| l.providers.iter().find(|p| p.id == id).unwrap();
+    assert!(by("claude").installed && !by("codex").installed);
+    assert_eq!(by("claude").login.state, crate::providers::contract::LoginState::SignedIn);
 }

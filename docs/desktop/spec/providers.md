@@ -92,9 +92,27 @@ G1 to G6, G10, G12 are exercised by the core push. This push covers G7 to G11 an
 (`providers.v1*.json`, `providers.v2.json`, `providers.invalid.v1.json`, `project_state.provider.v1.json`), parsed by
 `app/core/src/providers/contract_tests.rs` and `app/ui/tests/providerContract.test.ts`.
 
-## Open for the core push
+## How the core fills it (verified against the installed CLIs)
 
-- The exact read-only status command per CLI must be verified against the installed CLIs (not invented here). If a CLI has
-  none, `checked_by = none` and the state is `cannot_tell`.
-- The per-project choice is read from the preferences snapshot (key `agent`, values `claude` or `codex`); the spec text for
-  S9.3 says `agent.provider`. Asking vajra-20 which spelling is final before the core push.
+- Install: the CLI named `claude` / `codex` on the user's resolved PATH (`userpath`). `--version` gives `version`; the first
+  `x.y` token is compared with the adapter's tested range (Claude `2.x`, Codex `0.166`). Outside it is `untested`, a version
+  that could not be read is `unknown`. Both stay selectable.
+- Login, read-only, 5 second timeout, scrubbed environment (`ENV_ALLOW` unchanged), output dropped after reading one value:
+  - Claude: `claude auth status --json`. `loggedIn: true` with exit 0 is `signed_in`, `loggedIn: false` is `signed_out`.
+  - Codex: `codex login status`. Exit 0 is `signed_in`; exit 1 with "Not logged in" is `signed_out`.
+  - Anything else (a CLI too old to have the command, a timeout, a cut or unparseable answer) is `cannot_tell` with a one
+    sentence `detail`, and does not block a start.
+- The status output can name an account; it is read for the one value above and never stored, logged or sent.
+- Choice: the effective `agent` preference (`claude` | `codex`, final key per vajra-20's settings contract) is read by the UI
+  with `preferences_read({projectId})` when a launch form opens and passed as `provider` to `start_run` / `act_start_run`
+  / `resume_run`. The core adds no settings store. `resume_targets` returns the `provider` that ran each campaign, and
+  Resume passes it back, so a Codex run is never resumed on Claude.
+- Refusals: unknown id is `invalid_args` (field `provider`); a CLI that is not installed is `provider_not_installed`. Neither
+  tries another provider.
+- Recorded: the run index line carries `provider` (a hint, like the rest of that worker-writable file: only `claude` and
+  `codex` are believed, absent reads as `claude`).
+
+## Still to do
+
+- `project_state.provider` (shape above) is not yet filled by the core; it needs the project's effective `agent`, which the
+  core only gets from the caller until the preferences store is on this branch.
