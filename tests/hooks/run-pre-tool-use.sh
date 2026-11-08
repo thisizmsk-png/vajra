@@ -305,7 +305,14 @@ glob_case BLOCK "Glob ** can pass through a symlink that points at ~/.claude"   
 glob_case ALLOW "Glob src/* is unaffected by that symlink"                       "src/*" "$PROJ"
 glob_case ALLOW "Glob **/*.md through that symlink lists only .md names"         "**/*.md" "$PROJ"
 glob_case ALLOW "Glob brace extension list"                                      "src/**/*.{ts,tsx,js,jsx,json}" "$PROJ"
-rm -f "$PROJ/lnk-claude"
+mkdir -p "$H/.claude/sub"
+ln -s "$H/.claude/sub" "$PROJ/lnk-sub"
+glob_case BLOCK "Glob symlink into a subdir of ~/.claude then .. back to the state dir"   "lnk-s*/../vajra/*" "$PROJ"
+glob_case BLOCK "Glob symlink into a subdir then .. then the log name"                    "lnk-s*/../vajra/audit.log" "$PROJ"
+glob_case BLOCK "Glob globstar can take the subdir symlink then .. to the state dir"      "**/../vajra/.h*" "$PROJ"
+glob_case ALLOW "Glob symlink into a subdir then a name below it"                         "lnk-s*/x/*" "$PROJ"
+rm -f "$PROJ/lnk-claude" "$PROJ/lnk-sub"
+rmdir "$H/.claude/sub" 2>/dev/null
 path_case ALLOW "Glob path=HOME"            Glob "$H"
 bash_case BLOCK "grep -r on state dir"      'grep -r "" ~/.claude/vajra'
 bash_case BLOCK "grep -rn on ~/.claude"     'grep -rn . ~/.claude'

@@ -325,11 +325,13 @@ glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can li
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
   # Each other component descends one level, "**" and "." none (they may match zero directories).
-  local IFS=/ a b common=0 depth min c
+  # $2 = index of the first glob component to count (a followed symlink already used the first one).
+  local IFS=/ a b common=0 depth min c i start="${2:-0}"
   set -f; a=($1); b=($VS_C); set +f
   while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
   depth=${#a[@]}; min=$depth
-  for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
+  for ((i = start; i < GLOB_N; i++)); do
+    c="${GLOB_R[$i]}"
     if glob_climbs "$c"; then depth=$((depth - 1)); elif glob_stays "$c" || glob_star "$c"; then :; else depth=$((depth + 1)); fi
     [ "$depth" -lt "$min" ] && min=$depth
   done
@@ -349,8 +351,8 @@ glob_walk() { # directory first-component-index -> 0 if the pattern, taken from 
   for r in "${ROOTS[@]}"; do [ "${r%/*}" = "$VS_C" ] && PNAMES[${#PNAMES[@]}]="${r##*/}"; done
   glob_chain "$start" 0
 }
-glob_symlinks() { # literal directory -> blocks if the first glob component can match a symlink that leads to the state dir or above
-  local base="$1" first="${GLOB_R[0]}" ent name start
+glob_symlinks() { # literal directory, 1 if the pattern has a ".." after a glob character -> blocks if the first glob component can match a symlink that leads to the state dir or above
+  local base="$1" dotdot="${2:-0}" first="${GLOB_R[0]}" ent name start
   [ -d "$base" ] || return 0
   for ent in "$base"/* "$base"/.[!.]*; do
     [ -L "$ent" ] || continue
@@ -358,6 +360,8 @@ glob_symlinks() { # literal directory -> blocks if the first glob component can 
     glob_star "$first" || glob_comp_match "$first" "$name" || continue
     canon "$ent" "$base"
     start=1; glob_star "$first" && start=0
+    # ".." resolves physically, so from the symlink's target it climbs out of the target's own parent chain.
+    if [ "$dotdot" = 1 ] && glob_dotdot_reaches "$CANON" "$start"; then shopt -u nocasematch; block "Glob pattern steps back with .. after the symlink $ent far enough to reach a directory that holds the Vajra state directory"; fi
     if glob_walk "$CANON" "$start"; then shopt -u nocasematch; block "Glob pattern can follow the symlink $ent into the Vajra state directory, including the HMAC key and audit log file names"; fi
   done
 }
@@ -395,7 +399,7 @@ glob_check_one() { # one brace-free pattern, canonical search root
   canon "$lit" "$root"
   local base="$CANON"
   if [ "$dotdot" = 1 ] && glob_dotdot_reaches "$base"; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character far enough to reach a directory that holds the Vajra state directory"; fi
-  glob_symlinks "$base"
+  glob_symlinks "$base" "$dotdot"
   if glob_walk "$base" 0; then shopt -u nocasematch; block "Glob pattern would list the Vajra state directory ($VS_C), including the HMAC key and audit log file names"; fi
   return 0
 }
