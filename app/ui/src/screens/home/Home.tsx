@@ -8,6 +8,7 @@ import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
+import { useCurrentProject } from "../../projects/current";
 import { PreflightList } from "../PreflightList";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
@@ -39,10 +40,19 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
+  // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
+  const { project } = useCurrentProject();
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
-  const [camps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
+  const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
-  const [d, setD] = useState<Draft>({ repo: "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  const inProject = (c: Campaign) => {
+    if (!project) return true;
+    const cwd = targets.state === "ok" ? targets.data[c.slug]?.cwd : undefined;
+    const root = cwd?.trim().replace(/\/+$/, "");
+    return project.bucket ? !root : root === project.root;
+  };
+  const camps: Load<Campaign[]> = allCamps.state === "ok" ? { state: "ok", data: allCamps.data.filter(inProject) } : allCamps;
+  const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
