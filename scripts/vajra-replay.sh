@@ -11,9 +11,9 @@
 
 set -uo pipefail
 # NFR-SEC-2: this script reads the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
-# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs and openssl from
 # its absolute path, whatever PATH the caller had.
-PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
 OPENSSL="/usr/bin/openssl"
 command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 2; }
 

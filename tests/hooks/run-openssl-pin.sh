@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # NFR-SEC-2: the hooks and scripts that hold or reach the HMAC key (every hook, vajra-campaign.sh, vajra-replay.sh,
-# vajra-doctor.sh, vajra-verify-work.sh's signing step) call openssl and python3 only at /usr/bin and pin PATH to the system dirs first,
+# vajra-doctor.sh, vajra-verify-work.sh's signing step) call openssl and python3 only at /usr/bin and pin PATH to the root-owned system
+# dirs only (never the same-uid-writable Homebrew prefix),
 # so an openssl/jq/awk/tr/mktemp a same-uid worker plants in ~/.local/bin (or anywhere early on the
 # caller's PATH) never runs and never sees the key.
 #
@@ -150,24 +151,85 @@ for h in pre-tool-use session-start; do
 done
 err="$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/tmp/x"},"cwd":"/tmp"}' | /bin/bash "$SK/hooks/pre-tool-use-notools.sh" 2>&1 >/dev/null)"; rc=$?
 [ "$rc" -eq 2 ]; check "no jq: the guard fails closed (exit 2)" $?
-printf '%s' "$err" | grep -q "every tool call is blocked" && printf '%s' "$err" | grep -q "/opt/homebrew/bin or /usr/local/bin" \
+printf '%s' "$err" | grep -q "every tool call is blocked" && printf '%s' "$err" | grep -q "a jq in /opt/homebrew/bin, /usr/local/bin" \
   && printf '%s' "$err" | grep -q "~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim"; check "no jq: the guard says where jq must be" $?
 out="$(printf '%s' '{"session_id":"s","source":"startup"}' | /bin/bash "$SK/hooks/session-start-notools.sh" 2>/dev/null)"
 printf '%s' "$out" | grep -q "^Vajra: jq was not found, so the guard blocks every tool call"; check "no jq: session-start says so" $?
 printf '%s' "$out" | grep -q "^Vajra: python3 was not found at $NOBIN/python3"; check "no python3: session-start says so" $?
 
-# 9. One PATH everywhere: every hook is pinned, every pin is the same string, and it is the bridge's BASE_PATH (#70)
-# when that is present, so the engine and the app can never drift apart.
-WANT="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+# 8d. The system dirs have no jq (macOS 14) and a same-uid-writable dir that used to be on the pin (the Homebrew prefix)
+# holds a planted jq. Copies whose system dirs point at SYS (every system tool except jq) and whose /opt/homebrew/bin
+# points at the writable plant dir: the plant never runs, and the guard still decides through /usr/bin/python3.
+SYS="$TEST_HOME/sys-nojq"; WPLANT="$TEST_HOME/brew-bin"; mkdir -p "$SYS" "$WPLANT"
+for d in /usr/bin /bin /usr/sbin /sbin; do
+  for f in "$d"/*; do b="${f##*/}"; [ "$b" = jq ] || [ -e "$SYS/$b" ] || ln -s "$f" "$SYS/$b"; done
+done
+printf '#!/bin/sh\necho jq >> "%s"\nexit 97\n' "$MARK" > "$WPLANT/jq"; chmod 755 "$WPLANT/jq"
+nojq_copy() { # src dst
+  sed -e "s#/usr/bin:/bin:/usr/sbin:/sbin#$SYS#g" -e "s#/opt/homebrew/bin#$WPLANT#g" "$1" > "$2"
+}
+[ ! -e "$SYS/jq" ] && [ -x "$SYS/python3" ]; check "sanity: SYS has python3 and no jq" $?
+for h in pre-tool-use session-start pre-compact desktop-control post-tool-use user-prompt-submit; do
+  nojq_copy "$REPO/hooks/$h.sh" "$SK/hooks/$h-sysnojq.sh"
+done
+for sc in vajra-verify-work vajra-replay vajra-doctor vajra-campaign atman; do
+  nojq_copy "$REPO/scripts/$sc.sh" "$SK/scripts/$sc-sysnojq.sh"
+done
+G="$SK/hooks/pre-tool-use-sysnojq.sh"
+same=0; n=0
+while IFS= read -r p; do
+  n=$((n + 1))
+  a_err="$(printf '%s' "$p" | /bin/bash "$SK/hooks/pre-tool-use.sh" 2>&1 >/dev/null)"; a_rc=$?
+  b_err="$(printf '%s' "$p" | /bin/bash "$G" 2>&1 >/dev/null)"; b_rc=$?
+  # A payload jq cannot parse blocks on both paths; only the wording differs (the python path names the missing jq).
+  case "$a_err" in *"unparseable hook payload"*) a_err="unparseable"; case "$b_err" in *"jq was not found"*) b_err="unparseable" ;; esac ;; esac
+  if [ "$a_rc" = "$b_rc" ] && [ "$a_err" = "$b_err" ]; then same=$((same + 1)); else echo "  differs ($a_rc vs $b_rc): $p"; fi
+done <<EOF
+{"tool_name":"Read","tool_input":{"file_path":"$TEST_HOME/x"},"cwd":"$TEST_HOME"}
+{"tool_name":"Read","tool_input":{"file_path":"$VS/.hmac-key"},"cwd":"$TEST_HOME"}
+{"tool_name":"Bash","tool_input":{"command":"cat ~/.claude/vajra/.hmac-key"},"cwd":"$TEST_HOME"}
+{"tool_name":"Bash","tool_input":{"command":"echo 'it s' && echo don't; ls"},"cwd":"$TEST_HOME"}
+{"tool_name":"Grep","tool_input":{"pattern":"x","path":"$VS"},"cwd":"$TEST_HOME","agent_id":"a1"}
+{"tool_name":"Edit","tool_input":{"file_path":"$SK/hooks/pre-tool-use.sh"},"cwd":"$TEST_HOME"}
+{"tool_name":"Bash","tool_input":{"command":"echo \$(printf %s x)\nrm -rf /"},"cwd":"$TEST_HOME"}
+{"tool_name":"NotebookEdit","tool_input":{"notebook_path":7},"cwd":null}
+{"tool_name":"Read","tool_input":"not an object","cwd":"$TEST_HOME"}
+{"tool_input":{"file_path":"/tmp/x"}}
+[1,2]
+not json
+EOF
+[ "$same" = "$n" ]; check "no system jq: the python3 guard decides every payload as the jq guard does ($same/$n)" $?
+jq -cn --arg f "$TEST_HOME/x" --arg d "$TEST_HOME" '{tool_name:"Read",tool_input:{file_path:$f},cwd:$d}' | /bin/bash "$G" >/dev/null 2>&1
+check "no system jq: the guard still allows a plain read" $?
+jq -cn --arg f "$VS/.hmac-key" --arg d "$TEST_HOME" '{tool_name:"Read",tool_input:{file_path:$f},cwd:$d}' | /bin/bash "$G" >/dev/null 2>&1
+[ $? -eq 2 ]; check "no system jq: the guard still blocks a key read" $?
+p='{"session_id":"s8d","source":"startup","cwd":"'"$TEST_HOME"'","hook_event_name":"PostToolUse","tool_name":"Read","tool":"testing","prompt":"hi"}'
+out="$(printf '%s' "$p" | /bin/bash "$SK/hooks/session-start-sysnojq.sh" 2>/dev/null)"
+printf '%s' "$out" | grep -q "^Vajra: jq was not found in /usr/bin, /bin, /usr/sbin or /sbin. The guard parses with /usr/bin/python3"
+check "no system jq: session-start says the guard uses python3 and what needs jq" $?
+for h in pre-compact desktop-control post-tool-use user-prompt-submit; do
+  printf '%s' "$p" | /bin/bash "$SK/hooks/$h-sysnojq.sh" >/dev/null 2>&1
+done
+( cd "$TEST_HOME" && VAJRA_WALKTHROUGH_DIR="$TEST_HOME/wt" /bin/bash "$SK/scripts/vajra-verify-work-sysnojq.sh" pin8d "true" ) >/dev/null 2>&1
+for sc in vajra-replay vajra-doctor atman; do /bin/bash "$SK/scripts/$sc-sysnojq.sh" >/dev/null 2>&1 </dev/null; done
+/bin/bash "$SK/scripts/vajra-campaign-sysnojq.sh" verify pin-check >/dev/null 2>&1
+no_plant_ran; check "no system jq: the planted jq in the writable dir never ran (hooks and scripts)" $?
+rm -f "$MARK"
+
+# 9. One PATH everywhere: every hook is pinned, every pin is the same string of root-owned system dirs (none of them
+# writable by this uid), and the bridge's BASE_PATH (#70), when present, starts with it.
+WANT="/usr/bin:/bin:/usr/sbin:/sbin"
 for h in "$REPO"/hooks/*.sh; do
   grep -qxF "PATH=\"$WANT\"; export PATH" "$h"; check "pinned: ${h##*/}" $?
 done
 others="$(grep -rhoE '(PATH="|os\.environ\["PATH"\] = ")/usr/bin[^"]*"' "$REPO/hooks" "$REPO/scripts" "$REPO/atman" | sed -E 's/.*"(\/usr\/bin[^"]*)"/\1/' | sort -u)"
 [ "$others" = "$WANT" ]; check "every pinned PATH is the same string" $?
+nw=0; IFS=: read -r -a pin_dirs <<<"$WANT"; for d in "${pin_dirs[@]}"; do [ -w "$d" ] && nw=1; done
+[ "$nw" = 0 ]; check "no pinned dir is writable by this uid" $?
 BR="$REPO/app/core/src/vajra/bridge.rs"
 if grep -q 'BASE_PATH: \[' "$BR" 2>/dev/null; then
   base="$(grep -E 'BASE_PATH: \[' "$BR" | sed -E 's/.*= \[(.*)\];.*/\1/' | tr -d '" ' | tr ',' ':')"
-  [ "$base" = "$WANT" ]; check "the pin equals bridge::BASE_PATH" $?
+  case "$base" in "$WANT"|"$WANT":*) true ;; *) false ;; esac; check "bridge::BASE_PATH starts with the pin" $?
 fi
 
 echo "----------------------------------------"

@@ -129,7 +129,7 @@ KEY_FILE="${HOME}/.claude/vajra/.hmac-key"
 # ~/.local/bin/python3 would get the key). The test commands above keep the caller's PATH.
 PYTHON3="/usr/bin/python3"
 if [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && [ -x "$PYTHON3" ]; then
-  PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin" "$PYTHON3" -I -c '
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
 import hashlib, hmac, json, os, re, sys
 path, keyf = sys.argv[1], sys.argv[2]
 k = open(keyf, encoding="utf-8").read().strip()

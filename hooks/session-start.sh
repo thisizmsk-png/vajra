@@ -20,9 +20,9 @@
 set -uo pipefail
 
 # NFR-SEC-2: this script handles the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
-# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs and openssl from
 # its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
-PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
 OPENSSL="/usr/bin/openssl"
 PYTHON3="/usr/bin/python3"
 
@@ -52,9 +52,15 @@ sha256_of() {
 }
 
 # A tool the hooks need that is not in the pinned dirs: say so in every session (the guard blocks every tool call
-# without jq; without python3 the router, atman and the knowledge prime are off), never a silent break.
+# without both jq and python3; without python3 the router, atman and the knowledge prime are off), never a silent break.
 missing_tools() {
-  command -v jq >/dev/null 2>&1 || echo "Vajra: jq was not found, so the guard blocks every tool call. Vajra's hooks look only in /usr/bin, /bin, /usr/sbin, /sbin, /opt/homebrew/bin or /usr/local/bin; a copy in ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is not used. Install jq in one of those dirs (macOS 15+ ships /usr/bin/jq; or: brew install jq)."
+  if ! command -v jq >/dev/null 2>&1; then
+    if [ -x "$PYTHON3" ]; then
+      echo "Vajra: jq was not found in /usr/bin, /bin, /usr/sbin or /sbin. The guard parses with /usr/bin/python3, but the integrity check, campaigns, replay and Vajra Desktop's control hook need jq. Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq."
+    else
+      echo "Vajra: jq was not found, so the guard blocks every tool call. Vajra's hooks use only /usr/bin, /bin, /usr/sbin and /sbin: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses."
+    fi
+  fi
   [ -x "$PYTHON3" ] || echo "Vajra: python3 was not found at $PYTHON3, so the router, atman and the knowledge prime are off. Vajra uses only /usr/bin/python3 (xcode-select --install provides it)."
 }
 

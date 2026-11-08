@@ -35,9 +35,9 @@ import subprocess
 import sys
 import time
 
-# NFR-SEC-2: this module reads the HMAC key. Its children (git, the knowledge ledger) come from the system dirs first,
-# whatever PATH started it: a same-uid worker can write user dirs such as ~/.local/bin.
-os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+# NFR-SEC-2: this module reads the HMAC key. Its children (git, the knowledge ledger) come only from the root-owned system dirs,
+# whatever PATH started it: a same-uid worker can write user dirs such as ~/.local/bin or the Homebrew prefix.
+os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 # --------------------------------------------------------------------------
 # Paths and limits
