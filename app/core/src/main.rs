@@ -18,7 +18,8 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp, service, socket};
-use vajra_desktop::desktop::{App, Res, collect_changes};
+use serde_json::Value;
+use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -40,6 +41,28 @@ fn inbox(app: State<'_, App>) -> Res {
 #[tauri::command(async)]
 fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
     app.approve_plan(&id, &plan_sha256)
+}
+
+/// Receipt-wrapped actions (FG-11): the answer is always a `vajra.receipt/1`; see `desktop::state`.
+#[tauri::command(async)]
+fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sha256: String) -> Value {
+    app.act_approve_plan(&envelope, &id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
+    app.act_stop_worker(&envelope, &worker, reason.as_deref())
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+}
+
+#[tauri::command(async)]
+fn project_state(app: State<'_, App>, project_id: String, since_rev: Option<u64>) -> Res {
+    app.project_state(&project_id, since_rev)
 }
 
 #[tauri::command(async)]
@@ -277,7 +300,9 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
                 loop {
-                    if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
+                    if let Some(mut payload) = collect_changes(&sub, Duration::from_secs(1)) {
+                        // The revision each known project is now at, so a subscriber refetches `project_state`.
+                        payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
                         let _ = handle.emit(CHANGED, payload);
                     }
                     handle.state::<App>().refresh_workers();
@@ -335,6 +360,10 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            act_approve_plan,
+            act_stop_worker,
+            act_start_run,
+            project_state,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {

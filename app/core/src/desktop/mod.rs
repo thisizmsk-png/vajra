@@ -228,6 +228,8 @@ pub struct App {
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// Action receipts and per-project revisions (see `state`).
+    acts: Mutex<state::Hub>,
 }
 
 impl App {
@@ -241,7 +243,9 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            acts,
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
@@ -1682,9 +1686,13 @@ mod decide;
 mod lead;
 mod runindex;
 mod runview;
+mod state;
+pub use state::Envelope;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod state_tests;
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.

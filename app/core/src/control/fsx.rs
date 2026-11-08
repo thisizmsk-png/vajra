@@ -136,6 +136,25 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The last `max` bytes of a regular file (never through a symlink), cut to whole lines: when the read starts
+/// mid-file the first partial line is dropped. Bounded, so a long ledger never costs a full read at startup.
+pub fn read_tail_nofollow(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = open_regular(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(max);
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    f.take(max + 1).read_to_end(&mut buf)?;
+    if start > 0 {
+        match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => buf.drain(..=i),
+            None => buf.drain(..),
+        };
+    }
+    Ok(buf)
+}
+
 /// Like `read_nofollow`, but a file longer than `cap` bytes is an `InvalidData` error and at most `cap + 1` bytes are
 /// ever read. For files a worker (same user) can write into the control directory.
 pub fn read_nofollow_capped(path: &Path, cap: u64) -> io::Result<Vec<u8>> {

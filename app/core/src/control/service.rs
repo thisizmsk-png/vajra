@@ -161,6 +161,16 @@ impl Service {
         self.session.as_ref().ok_or(ControlError::ControlDisabled)
     }
 
+    /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line.
+    pub fn worker_generation(&self, arg: &str) -> Option<u64> {
+        self.resolve(arg).ok().map(|w| u64::from(w.round.unwrap_or(0)))
+    }
+
+    /// The workers as `list_workers` shows them, without recording a list action (for `project_state`).
+    pub fn workers_view(&self) -> Vec<Value> {
+        self.workers.iter().map(|w| self.worker_json(w)).collect()
+    }
+
     fn resolve(&self, arg: &str) -> Result<&WorkerInfo> {
         if arg.is_empty() || arg.chars().count() > MAX_WORKER {
             return Err(ControlError::InvalidArgs("worker".into()));

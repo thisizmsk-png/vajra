@@ -37,6 +37,20 @@ impl Ledger {
         self.file.write_all(&line)
     }
 
+    /// The parseable records in the last `max_bytes` of the file, in order. Startup caches (receipts) use this so a
+    /// long-lived ledger is never read whole.
+    pub fn read_tail(path: &Path, max_bytes: u64) -> io::Result<Vec<Value>> {
+        let body = match fsx::read_tail_nofollow(path, max_bytes) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            r => r?,
+        };
+        Ok(String::from_utf8_lossy(&body)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(Value::is_object)
+            .collect())
+    }
+
     /// Every parseable record, in order. A torn or foreign line is skipped.
     pub fn read_all(path: &Path) -> io::Result<Vec<Value>> {
         let body = match fsx::read_nofollow(path) {
