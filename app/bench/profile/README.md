@@ -36,7 +36,7 @@ Raw samples for the numbers below are in `results/`.
   quit by pid when the run ends. Every launch uses a temp HOME and data dir; the real ones, the installer and the
   manifest generator are not touched.
 
-## Results (2026-11-08, `ao/integration/batch-3` @ ca438c5, release build, Apple M3 Max, macOS 26.3.1)
+## Results (2026-11-08, `ao/integration/batch-3` @ ca438c5 and a4efc78, release build, Apple M3 Max, macOS 26.3.1)
 The machine was shared (load 4 to 12, other sessions building). Medians of 60 s of 2 s samples after a 25 s settle.
 
 ### The shipping app, idle (3 launches, hidden window, no run) against the CI memory gate
@@ -52,20 +52,24 @@ CI baseline and about 0.5 MiB over the real-machine budget, with the window hidd
 does not apply here: this machine runs the GPU helper. CPU is effectively zero.
 
 ### Core only (no window), by scenario
+`idle` and `run4` were taken at `ca438c5`. `run1` and the three terminal scenarios were **rerun on `a4efc78`** (batch-3 after #89,
+so terminals start from `UserPathEnv::app(home)`, the environment the app really gives them); the earlier terminal rows
+(26.8, 25.5, 45.5 MiB; flood 138% of a core) agree within 1.1 MiB. `run1` ran at load 11.8 (2 clean samples); the three
+terminal scenarios at load 3 to 4.6.
 | scenario | app process | run tree | each terminal | total MiB | CPU % of a core (whole tree) |
 |---|---|---|---|---|---|
 | idle | 6.0 | | | **6.0** | 0.00 |
-| run1 (one run) | 6.5 | 14.4 | | **20.9** | 0.02 |
+| run1 (one run) | 6.5 | 14.1 | | **20.7** | 0.00 |
 | run4 (one run, 4 workers at 20 lines/s) | 8.4 | 14.3 | | **22.7** | 0.84 |
-| term_flood (acked, full speed) | 7.9 | 14.6 | 4.3 | **26.8** | **138** (the core 90, `yes` about 48) |
-| term_flood_unacked (no view reading) | 6.9 | 14.4 | 4.3 | **25.5** | 0.03 |
-| terms8 (8 idle terminals) | 7.4 | 14.7 | 2.9 each | **45.5** | 0.02 |
+| term_flood (acked, full speed) | 7.1 | 14.3 | 4.3 | **25.7** | **153** (the core 98, `yes` about 55) |
+| term_flood_unacked (no view reading) | 6.9 | 14.3 | 4.3 | **25.5** | 0.05 |
+| terms8 (8 idle terminals) | 7.5 | 14.3 | 2.9 to 3.0 each | **45.4** | 0.03 |
 
 What it says:
 - **Per unit:** a run costs the app +0.5 MiB and four streaming workers +2 MiB more at under 1% of a core. The agent
   here is a 14 MiB stand-in: a real `claude` is 160 to 520 MiB (about 430 median on this Mac), so the agent side of two
   runs and two Lead turns is roughly 1.7 GiB against the app's 200. An idle `zsh -l` terminal is 2.9 MiB.
-- **A flooded, watched terminal is expensive in CPU, not memory:** about 90% of a core in the core itself to read, batch
+- **A flooded, watched terminal is expensive in CPU, not memory:** about 100% of a core in the core itself to read, batch
   and acknowledge the output, plus the shell's `yes`. RSS stays within 1.4 MiB of an idle terminal.
 - **An unwatched flood is held by the credit window:** with no acknowledgements the CPU falls to 0.03% and memory stays
   at 25.5 MiB. That is the bound the 1 MiB flow window gives; nothing is dropped or killed.

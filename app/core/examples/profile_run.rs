@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vajra_desktop::desktop::{collect_changes, App};
-use vajra_desktop::terminal::{Event, Limits, ProcessEnv, Terminals};
+use vajra_desktop::terminal::{Event, Limits, Terminals, UserPathEnv};
 
 const SIDS: [&str; 1] = ["1b4e28ba-2fa1-41d2-883f-0016d3cca427"];
 
@@ -60,7 +60,7 @@ fn main() {
     println!("RUNS {pids:?}");
 
     // Terminals: the real module, a real login shell, the credit window at its default.
-    let terms_core = Arc::new(Terminals::with(Limits::default(), Arc::new(ProcessEnv)));
+    let terms_core = Arc::new(Terminals::with(Limits::default(), Arc::new(UserPathEnv::app(home.clone()))));
     let received = Arc::new(AtomicU64::new(0));
     let unacked = scenario == "term_flood_unacked";
     let roots = app.terminal_roots();
