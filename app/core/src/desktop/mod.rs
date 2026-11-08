@@ -1525,6 +1525,16 @@ impl App {
         Ok(json!({"stream": stream, "take_over": on}))
     }
 
+    /// The repository roots a terminal may open in: the run directories of the runs this app started or resumed in this
+    /// process (the in-memory map, never `runs.jsonl`, which a worker can write). Each root's own `.claude/worktrees/*`
+    /// folders are allowed too (see `terminal::policy::place`). ADR-15 replaces this with the project records.
+    pub fn terminal_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = lock(&self.runs).values().map(|r| r.cwd.clone()).collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     pub fn active_runs(&self) -> Res {
         self.reap_runs();
         let runs = lock(&self.runs).clone();
