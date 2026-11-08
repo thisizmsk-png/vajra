@@ -96,21 +96,26 @@ function Frame() {
   const showInspector = inspectable && inspector;
   const reviewParams: Record<string, string> = current.focus ? { slug: current.focus } : {};
 
+  // The window shortcuts read this render's projects and state through a ref, and the listener is attached once on
+  // mount. Re-attaching it in an effect on every render left a gap after each render where a key (⌘1..9, ⌘B) was
+  // handled with the previous render's state, or not at all (the flaky CI run on #86).
+  const onKeyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  onKeyRef.current = (e: KeyboardEvent) => {
+    if (!e.metaKey || e.altKey || e.ctrlKey || e.defaultPrevented || e.isComposing) return;
+    const k = e.key.toLowerCase();
+    const n = Number(e.key);
+    if (!e.shiftKey && Number.isInteger(n) && n >= 1 && n <= 9) {
+      const p = P.projects[n - 1];
+      if (p) { e.preventDefault(); goProject(p.id); }
+    } else if (!e.shiftKey && k === "b" && project) { e.preventDefault(); setCompact((c) => !c); }
+    else if (!e.shiftKey && k === "i" && inspectable) { e.preventDefault(); setInspector((x) => !x); }
+    else if (!e.shiftKey && e.key === ",") { e.preventDefault(); openSettings(); }
+  };
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.altKey || e.ctrlKey || e.defaultPrevented || e.isComposing) return;
-      const k = e.key.toLowerCase();
-      const n = Number(e.key);
-      if (!e.shiftKey && Number.isInteger(n) && n >= 1 && n <= 9) {
-        const p = P.projects[n - 1];
-        if (p) { e.preventDefault(); goProject(p.id); }
-      } else if (!e.shiftKey && k === "b" && project) { e.preventDefault(); setCompact((c) => !c); }
-      else if (!e.shiftKey && k === "i" && inspectable) { e.preventDefault(); setInspector((x) => !x); }
-      else if (!e.shiftKey && e.key === ",") { e.preventDefault(); openSettings(); }
-    };
+    const onKey = (e: KeyboardEvent) => onKeyRef.current(e);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
   // ⌘K: every project with its key, the views, the panels, Settings. The place you are on is not a place to go to.
   const commands = [
