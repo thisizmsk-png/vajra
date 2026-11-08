@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Section, Text } from "../../../components/ui/base";
+import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
@@ -156,7 +156,7 @@ export function Crew() {
   useCommands(root ? agents(root).map((n) => ({ id: n.id, label: S.palette.goWorker(n.title), hint: statusLabel(n), run: () => setSelected(n.id) })) : []);
 
   const head = (title?: string) => (
-    <header className="v-crew__head">
+    <header className="v-crew__head" data-tauri-drag-region>
       <Text as="h1" variant="label" className={title ? "v-crew__title" : undefined}>{S.crew.title}</Text>
       {title && <span className="v-crew__run">{title}</span>}
       {target && <span className="v-crew__id">{target.runId}</span>}
@@ -204,6 +204,29 @@ export function Crew() {
                 {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
               </dl>
             </Section>
+            {(() => {
+              // How the workers under the selection stand, counted from the same tree (the tree names them).
+              const ws = agents(picked);
+              if (ws.length === 0) return null;
+              const counts = new Map<StatusKey, number>();
+              for (const w of ws) counts.set(statusOf(w.status), (counts.get(statusOf(w.status)) ?? 0) + 1);
+              return (
+                <section className="v-panel v-crew__workers" aria-labelledby="v-crew-workers">
+                  <div className="v-panel__bar">
+                    <h3 id="v-crew-workers" className="v-panel__title">{S.crew.workers}</h3>
+                    <span className="v-panel__meta">{S.crew.workersDone(counts.get("done") ?? 0, ws.length)}</span>
+                  </div>
+                  <div className="v-crew__meter" aria-hidden="true">
+                    {[...counts].map(([k, n]) => <span key={k} className={`v-status--${k}`} style={{ flexGrow: n }} />)}
+                  </div>
+                  <ul>
+                    {[...counts].map(([k, n]) => (
+                      <li key={k}><StatusDot status={k} /><span className="v-num">{n}</span></li>
+                    ))}
+                  </ul>
+                </section>
+              );
+            })()}
           </div>
         ))}
       </div>
