@@ -47,13 +47,13 @@ fn main() {
         other => panic!("unknown scenario {other}"),
     };
     let mut repos = Vec::new();
-    for i in 0..runs {
+    for (i, sid) in SIDS.iter().enumerate().take(runs) {
         let repo = home.join(format!("repo{i}"));
         std::fs::create_dir_all(&repo).unwrap();
         let (h, r) = (home.display().to_string(), repo.display().to_string());
         let rate = if workers > 0 { 20.0 } else { 0.0 };
-        let argv = vec!["env".to_string(), format!("FG12_FIXTURE={fixture}"), "python3".into(), agent.clone(), h, r, SIDS[i].into(), workers.to_string(), rate.to_string(), secs.to_string()];
-        app.launch(SIDS[i], "20261108-0900", &format!("deliver-20261108-0900-{i}"), &repo, |_| Ok(argv), false).unwrap();
+        let argv = vec!["env".to_string(), format!("FG12_FIXTURE={fixture}"), "python3".into(), agent.clone(), h, r, (*sid).into(), workers.to_string(), rate.to_string(), secs.to_string()];
+        app.launch(sid, "20261108-0900", &format!("deliver-20261108-0900-{i}"), &repo, |_| Ok(argv), false).unwrap();
         repos.push(repo);
     }
     let pids: Vec<u32> = SIDS.iter().take(runs).filter_map(|s| app.sup.pid(&format!("run-{s}")).ok()).collect();
