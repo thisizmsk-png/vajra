@@ -31,6 +31,8 @@ export function StreamTab({ stream }: { stream: string }) {
   /** The `from` the view most recently asked for (null = the tail). A response for any other `from` is stale. */
   const want = useRef<number | null | undefined>(undefined);
   const queued = useRef(false);
+  /** The `from` of a scroll request that has not been answered yet: a background refresh re-asks for it, never for the old window's start. */
+  const nav = useRef<number | null>(null);
   const last = useRef(0);
 
   const fetchWin = useCallback(async (from: number | null) => {
@@ -44,6 +46,7 @@ export function StreamTab({ stream }: { stream: string }) {
       if (g !== gen.current || want.current !== from) return;
       setErr("");
       winRef.current = w;
+      if (nav.current === from) nav.current = null;
       setWin(w);
     } catch (e) {
       if (g === gen.current) setErr(errorText(e));
@@ -58,7 +61,7 @@ export function StreamTab({ stream }: { stream: string }) {
   /** Re-read what the view is on: the tail while following, otherwise the rows from the held start. */
   const refresh = useCallback(() => {
     const w = winRef.current;
-    void fetchWin(followRef.current || !w ? null : w.lines[0]?.seq ?? w.first_seq);
+    void fetchWin(followRef.current || !w ? null : nav.current ?? w.lines[0]?.seq ?? w.first_seq);
   }, [fetchWin]);
 
   useEffect(() => {
@@ -88,7 +91,7 @@ export function StreamTab({ stream }: { stream: string }) {
     const needRight = !w.at_end && s1 + EDGE > held1;
     if (!needLeft && !needRight) return;
     const from = Math.max(w.first_seq, s0 - MARGIN);
-    if (from !== held0) void fetchWin(from);
+    if (from !== held0) { nav.current = from; void fetchWin(from); }
   }, [fetchWin]);
 
   /** Back to the live tail: forget the held window and read the newest rows. */
@@ -96,6 +99,7 @@ export function StreamTab({ stream }: { stream: string }) {
     gen.current += 1;
     busy.current = false;
     queued.current = false;
+    nav.current = null;
     followRef.current = true;
     winRef.current = null;
     setFollowing(true);

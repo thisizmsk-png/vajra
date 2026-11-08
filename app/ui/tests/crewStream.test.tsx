@@ -210,4 +210,25 @@ describe("Stream tab: a window served by the core (#45)", () => {
     act(() => f.emit("changed", { streams: ["w-a1"], snapshot_needed: false }));
     await waitFor(() => expect(wins(f).length).toBeGreaterThan(before));
   });
+
+  it("a poll or event while a scroll answer is pending re-asks for the scrolled rows, not the old window", async () => {
+    let release: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => { release = r; });
+    const f = await openBackend({
+      stream_window: (a?: Record<string, unknown>) => (a?.from === null || a?.from === 4781 ? core(5000)(a) : slow.then(() => core(5000)(a))),
+    });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(2000);
+    await waitFor(() => expect(wins(f).some((c) => typeof c.args?.from === "number" && c.args.from < 4000)).toBe(true));
+    const asked = wins(f).find((c) => typeof c.args?.from === "number" && c.args.from < 4000)!.args?.from as number;
+    // A changed event and a poll tick arrive before the scroll answer does.
+    act(() => f.emit("changed", { streams: ["w-a1"], snapshot_needed: false }));
+    await new Promise((r) => setTimeout(r, 1300));
+    await act(async () => { release(null); await Promise.resolve(); });
+    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 2001"));
+    // Nothing went back to the old window's start (4781) once the scroll was asked.
+    const after = wins(f).slice(wins(f).findIndex((c) => c.args?.from === asked));
+    expect(after.some((c) => c.args?.from === 4781 || c.args?.from === null)).toBe(false);
+  });
 });
