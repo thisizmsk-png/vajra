@@ -114,6 +114,7 @@ impl App {
             "sessions": serde_json::to_value(s.sessions).unwrap_or_else(|_| json!([])),
             "skipped": s.skipped,
             "unsupported": s.unsupported,
+            "truncated": s.truncated,
         }))
     }
 }

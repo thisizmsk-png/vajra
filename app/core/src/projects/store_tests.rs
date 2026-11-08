@@ -504,3 +504,26 @@ fn the_projects_folder_swapped_for_a_symlink_after_open_redirects_nothing() {
     // A store opened afterwards refuses the symlinked folder.
     assert!(Store::open(&t.data(), &t.home()).is_err());
 }
+
+#[test]
+fn a_log_longer_than_the_read_window_says_it_was_cut() {
+    use std::io::Write;
+    let t = Tmp::new("longlog");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let old = contract::fresh_id("s").unwrap();
+    s.append_session(&session(&p.id, &old, SessionStatus::Running)).unwrap();
+    assert!(!s.sessions(&p.id).unwrap().truncated, "a short log is complete");
+    // Enough newer lines (updates of another session) to push the first one out of the 1 MiB window.
+    let busy = contract::fresh_id("s").unwrap();
+    let line = format!("{}\n", serde_json::to_string(&session(&p.id, &busy, SessionStatus::Running)).unwrap());
+    let mut f = fs::OpenOptions::new().append(true).open(t.data().join("projects").join(&p.id).join("sessions.jsonl")).unwrap();
+    for _ in 0..(SESSIONS_READ_CAP as usize / line.len() + 10) {
+        f.write_all(line.as_bytes()).unwrap();
+    }
+    drop(f);
+    let log = s.sessions(&p.id).unwrap();
+    assert!(log.truncated, "the caller can tell the history is incomplete");
+    assert_eq!(log.skipped, 0, "the cut first line is not counted as damage");
+    assert!(log.sessions.iter().all(|x| x.id == busy), "the old session is outside the window");
+}

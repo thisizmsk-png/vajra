@@ -95,3 +95,11 @@ describe("shared invalid fixtures", () => {
     expect(schemaMajor("vajra.project/1 ", "project")).toBeNull();
   });
 });
+
+describe("project_sessions response fixture", () => {
+  it("documents skipped, unsupported and truncated next to the sessions", () => {
+    const r = JSON.parse(fx("project_sessions.v1.json")) as { sessions: unknown[]; skipped: number; unsupported: boolean; truncated: boolean };
+    expect(Object.keys(r).sort()).toEqual(["sessions", "skipped", "truncated", "unsupported"]);
+    expect([r.skipped, r.unsupported, r.truncated]).toEqual([2, true, true]);
+  });
+});

@@ -343,13 +343,18 @@ impl Store {
         let _g = self.lock();
         let dir = self.pin(project_id)?;
         self.read_pinned(&dir, project_id)?;
-        let buf = match dir.read_tail("sessions.jsonl", SESSIONS_READ_CAP) {
+        let (buf, truncated) = match dir.read_tail("sessions.jsonl", SESSIONS_READ_CAP) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionLog::default()),
             Err(e) => return Err(e.into()),
         };
-        let lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
-        Ok(contract::latest_sessions_of(Some(project_id), &lines))
+        let mut lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
+        if truncated && !lines.is_empty() {
+            lines.remove(0); // the cut start: a partial line, not a damaged one
+        }
+        let mut log = contract::latest_sessions_of(Some(project_id), &lines);
+        log.truncated = truncated;
+        Ok(log)
     }
 }
 
