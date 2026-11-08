@@ -84,9 +84,22 @@ impl Pinned {
     /// Append to `name` (created at 0600, tightened to 0600 if it exists wider).
     pub fn append(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        let mut f = self.openat(name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT, 0o600)?;
+        use std::os::unix::fs::FileExt;
+        let mut f = self.openat(name, libc::O_RDWR | libc::O_APPEND | libc::O_CREAT, 0o600)?;
         if f.metadata()?.permissions().mode() & 0o777 != 0o600 {
             f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        // A crash mid-append leaves a fragment with no newline; the next record would join it and both would be lost.
+        // Seal the fragment onto its own (malformed, skipped) line first, in the same write as the new record.
+        let torn = f.metadata()?.len() > 0 && {
+            let mut last = [0u8; 1];
+            f.read_at(&mut last, f.metadata()?.len() - 1)? == 1 && last[0] != b'\n'
+        };
+        if torn {
+            let mut buf = Vec::with_capacity(bytes.len() + 1);
+            buf.push(b'\n');
+            buf.extend_from_slice(bytes);
+            return f.write_all(&buf);
         }
         f.write_all(bytes)
     }
