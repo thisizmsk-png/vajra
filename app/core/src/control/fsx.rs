@@ -35,7 +35,8 @@ pub fn open_append(path: &Path) -> io::Result<File> {
     let f = OpenOptions::new()
         .append(true)
         .create(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // O_NONBLOCK: opening a planted FIFO for writing would otherwise wait for a reader.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .mode(0o600)
         .open(path)?;
     let m = f.metadata()?;
@@ -66,6 +67,11 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
 pub struct DirHandle(File);
 
 impl DirHandle {
+    /// Wrap a descriptor that was opened as a directory without following a symlink.
+    pub fn from_file(f: File) -> Self {
+        Self(f)
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).map(Self).map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
@@ -133,6 +139,18 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     let mut f = open_regular(path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// The last `cap` bytes of a regular file (all of it if shorter), opened without following a symlink or blocking on a
+/// FIFO. The first line may be cut; the caller skips what does not parse.
+pub fn read_tail_nofollow(path: &Path, cap: u64) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = open_regular(path)?;
+    let len = f.metadata()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(cap)))?;
+    let mut buf = Vec::new();
+    f.take(cap).read_to_end(&mut buf)?;
     Ok(buf)
 }
 

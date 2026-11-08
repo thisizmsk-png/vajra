@@ -4,6 +4,7 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
@@ -234,6 +235,24 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  /** Which record versions this build reads (`vajra.app_info/1`). */
+  appInfo: () => call<AppInfo>("app_info"),
+  /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
+  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
+  projectAdd: (path: string, confirmNested = false) =>
+    call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),
+  /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
+  projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
+  projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** Suggested projects for campaigns from before projects existed. Writes nothing; `done` once confirmed. `terminal` campaigns are read-only and never adopted. */
+  projectMigrationSuggest: () =>
+    call<{ done: boolean; groups: { root: string; name: string; campaigns: string[] }[]; unsorted: string[]; terminal: string[] }>("project_migration_suggest"),
+  /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
+  projectMigrationConfirm: (roots: string[]) =>
+    call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */
