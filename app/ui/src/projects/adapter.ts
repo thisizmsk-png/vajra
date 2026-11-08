@@ -73,7 +73,7 @@ export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: Inb
   const out = new Map<ProjectId, ProjectSummary>();
   for (const p of index.projects) out.set(p.id, { needsYou: 0, state: null, pips: [], live: false });
   for (const item of inbox) {
-    const s = out.get(index.byCampaign[item.campaign]);
+    const s = item.campaign ? out.get(index.byCampaign[item.campaign]) : undefined;
     if (s) s.needsYou += 1;
   }
   const newest = new Map<ProjectId, Campaign>();
