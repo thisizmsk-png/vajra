@@ -44,7 +44,7 @@ impl Service {
             return Err(ControlError::InvalidArgs("project".into()));
         }
         if self.generations.get(project) != Some(&generation) {
-            return Err(ControlError::StaleGeneration);
+            return Err(ControlError::StaleLeadGeneration);
         }
         let bound: Vec<String> = self.sessions.values().filter(|s| s.project.as_deref() == Some(project)).map(|s| s.id.clone()).collect();
         self.call_scoped(Some(bound), tool, args)
