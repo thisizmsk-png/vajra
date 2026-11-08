@@ -181,11 +181,20 @@ enum RecordedTree {
 /// `check-evidence` itself reads at most this much of an evidence file (vajra_tasks.py / vajra_kb.py: 5,000,000 bytes).
 const EVIDENCE_READ_MAX: u64 = 5_000_000;
 
+/// Open `path` for reading only if it is a regular file, deciding on the OPENED handle: never following a symlink at the last
+/// component (`O_NOFOLLOW`) and never blocking on a FIFO or device (`O_NONBLOCK`; a FIFO opened this way is refused by the
+/// type check). A separate check of the path followed by an open of the path would let a swap in between redirect the read to
+/// another file or block it for good.
+fn open_regular(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}
+
 /// The evidence file's bytes (a regular file, at most `EVIDENCE_READ_MAX`), or `None` when it cannot be read within that bound.
 fn evidence_snapshot(path: &Path) -> Option<Vec<u8>> {
-    std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path).ok()?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(open_regular(path)?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
     (bytes.len() as u64 <= EVIDENCE_READ_MAX).then_some(bytes)
 }
 
@@ -814,7 +823,7 @@ impl App {
         // unchanged while changing what the check sees. A file too large or unreadable is never cached.
         let key = |req: &Request| -> Option<EvKey> {
             let Request::CheckEvidence { path, head, archived, repo } = req else { return None };
-            let f = std::fs::File::open(path).ok()?;
+            let f = open_regular(path)?;
             if f.metadata().ok()?.len() > EVIDENCE_KEY_MAX {
                 return None;
             }
@@ -844,6 +853,15 @@ impl App {
                 };
                 if let Request::CheckEvidence { repo: Some(r), .. } = &req {
                     repo_of.insert(i, r.clone());
+                }
+                // A FIFO or device standing in for the evidence file would only block the check until its timeout: it is not evidence.
+                if let Request::CheckEvidence { path, .. } = &req {
+                    use std::os::unix::fs::FileTypeExt;
+                    if std::fs::symlink_metadata(path).is_ok_and(|m| { let ft = m.file_type(); ft.is_fifo() || ft.is_socket() || ft.is_char_device() || ft.is_block_device() }) {
+                        verdict.insert(i, false);
+                        why.insert(i, reason("io_error", None, None));
+                        continue;
+                    }
                 }
                 let k = key(&req);
                 if let Request::CheckEvidence { path, .. } = &req {
@@ -1067,24 +1085,27 @@ impl App {
         let mut out = json!({"task": task_id, "commands": [], "notes": notes, "truncated": false});
         // The same path rules as the check (no `..`, an archived bundle or the run repo); anything else shows no commands.
         let Some(Request::CheckEvidence { path, .. }) = self.evidence_request(slug, &task) else { return Ok(out) };
-        let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-        if !regular(&path) {
-            return Ok(out);
-        }
+        // Each file is opened once, as a regular file, and read from that handle.
+        let Some(evf) = open_regular(&path) else { return Ok(out) };
         let read_tail = |p: &Path, max: u64| -> Option<String> {
             use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(p).ok()?;
+            let mut f = open_regular(p)?;
             let len = f.metadata().ok()?.len();
             f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
             let mut b = Vec::new();
             f.take(max).read_to_end(&mut b).ok()?;
             Some(String::from_utf8_lossy(&b).into_owned())
         };
-        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
+        if evf.metadata().map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
             out["truncated"] = json!(true);
             return Ok(out);
         }
-        let Some(doc) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return Ok(out) };
+        let mut raw = Vec::new();
+        if std::io::Read::read_to_end(&mut std::io::Read::take(evf, PROOF_FILE_MAX + 1), &mut raw).is_err() || raw.len() as u64 > PROOF_FILE_MAX {
+            out["truncated"] = json!(true);
+            return Ok(out);
+        }
+        let Some(doc) = serde_json::from_slice::<Value>(&raw).ok() else { return Ok(out) };
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let cmds: Vec<Value> = doc
             .get("commands")
@@ -1098,7 +1119,7 @@ impl App {
                         let log = c.get("log").and_then(Value::as_str).filter(|n| {
                             !n.is_empty() && n.len() <= 64 && !n.contains(['/', '\\']) && *n != "." && *n != ".."
                         });
-                        let tail = if passed { None } else { log.map(|n| dir.join(n)).filter(|p| regular(p)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
+                        let tail = if passed { None } else { log.map(|n| dir.join(n)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
                         json!({
                             "cmd": c.get("cmd").and_then(Value::as_str).map(|s| text(s, PROOF_TEXT_MAX)),
                             "exit_code": exit,

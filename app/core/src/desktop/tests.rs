@@ -1576,6 +1576,27 @@ fn large_evidence_is_bound_by_a_second_read_and_still_reads_current() {
     assert_eq!(status_of(&app, &slug), "stale");
 }
 
+#[test]
+fn evidence_replaced_by_a_fifo_never_blocks_the_list_and_reads_unverified() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    fs::remove_file(&ev).unwrap();
+    let c = CString::new(ev.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app = std::sync::Arc::new(app);
+    let a2 = app.clone();
+    std::thread::spawn(move || { let _ = tx.send(a2.evidence_list(&slug).map(|v| v["rows"][0]["status"].as_str().unwrap_or("").to_string())); });
+    let got = rx.recv_timeout(Duration::from_secs(5));
+    // Release a reader stuck in open() so a failing run does not leave the thread behind.
+    { use std::os::unix::fs::OpenOptionsExt; let _ = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&ev); }
+    let got = got.expect("evidence_list blocked on a FIFO standing in for the evidence file");
+    assert_eq!(got.unwrap(), "unverified");
+}
+
 /// A "git" that never answers, to stand in for a slow repo.
 fn slow_git(t: &Tmp) -> std::path::PathBuf {
     let p = t.home().join("slow-git.sh");
