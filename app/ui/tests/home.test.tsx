@@ -65,7 +65,7 @@ describe("Home", () => {
     fill(S.home.base, "main");
     fireEvent.click(screen.getByLabelText("2"));
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
-    await waitFor(() => expect(window.location.hash).toContain("#/run?"));
+    await waitFor(() => expect(window.location.hash).toContain("#/review?"));
     const call = f.calls.find((c) => c.cmd === "start_run")!;
     expect(call.args).toMatchObject({ ask: "fix the bug", maxRounds: 2, base: "main", maxInFlight: 4, campaign: null, cwd: "/r" });
     expect(window.location.hash).toContain("slug=deliver-20261106-1500");
@@ -106,7 +106,7 @@ describe("Home", () => {
     expect(await screen.findByText("2 of 5 passing")).toBeTruthy();
     expect(screen.getByText("unreadable")).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: S.home.resume }));
-    await waitFor(() => expect(window.location.hash).toContain("#/run?"));
+    await waitFor(() => expect(window.location.hash).toContain("#/review?"));
     expect(f.calls.find((c) => c.cmd === "resume_run")!.args).toEqual({ sessionId: SID, campaign: "c1", cwd: "/work/repo" });
     expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false); // never a fresh session
   });

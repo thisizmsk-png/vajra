@@ -96,9 +96,51 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
       { slug: "deliver-20261104-0930", goal: "Move invoice export to a background job", status: "stopped", passing: 3, total: 5, updated: "2026-11-04 10:30", integrity: "ok" },
       { slug: "deliver-20261103-1120", goal: "Upgrade to Node 22 and fix the test runner", status: "done", passing: 4, total: 4, updated: "2026-11-03 12:20", integrity: "ok" },
       { slug: "deliver-20261102-1505", goal: "Add an audit log for admin actions", status: "failed", passing: 2, total: 7, updated: "2026-11-02 16:05", integrity: "failed" },
+      { slug: "deliver-20261107-1840", goal: "Ship the usage dashboard", status: "done", passing: 5, total: 5, created: "2026-11-01 08:00", updated: "2026-11-07 19:40", integrity: "ok" },
+      { slug: "deliver-20261106-0915", goal: "Stop the flaky checkout test", status: "stopped", passing: 1, total: 3, created: "2026-11-01 08:30", updated: "2026-11-06 09:15", integrity: "ok" },
+      { slug: "deliver-20261031-1200", goal: "Rename the billing tables", status: "done", passing: 3, total: 3, updated: "2026-10-31 12:00", integrity: "unknown" },
     ],
   }),
-  resume_targets: () => ({ targets: { "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api" } } }),
+  // Three folders: harbor-api (the live run), harbor-web, and one campaign started in a terminal (Unsorted).
+  resume_targets: () => ({ targets: {
+    [SLUG]: { session_id: "s-2140", run_id: RUN, cwd: "~/code/harbor-api" },
+    "deliver-20261105-1610": { session_id: "s-1610", run_id: "20261105-1610", cwd: "~/code/harbor-api" },
+    "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api" },
+    "deliver-20261103-1120": { session_id: "s-1120", run_id: "20261103-1120", cwd: "~/code/harbor-api/" },
+    "deliver-20261102-1505": { session_id: "s-1505", run_id: "20261102-1505", cwd: "~/code/harbor-api" },
+    "deliver-20261107-1840": { session_id: "s-1840", run_id: "20261107-1840", cwd: "~/code/harbor-web" },
+    "deliver-20261106-0915": { session_id: "s-0915", run_id: "20261106-0915", cwd: "~/code/harbor-web" },
+  } }),
+  stream_window: () => {
+    const text = [
+      "Reading src/middleware/index.ts", "Adding TokenBucket with capacity and refill per key", "Wrote src/middleware/rateLimit.ts (84 lines)",
+      "Running npm test -- rateLimit", "PASS tests/rateLimit.test.ts (6 tests)", "Next: wire the limiter into the router",
+    ];
+    return { lines: text.map((t, i) => ({ seq: i + 1, text: t })), head_seq: text.length, first_seq: 1, at_start: true, at_end: true, gap: false };
+  },
+  inbox: () => ({ count: 1, items: [
+    { id: "q-t4", kind: "question", campaign: SLUG, origin: "app", created: "2026-11-06T22:01:00Z", age_s: 240, title: "Should the 429 body name the limit and the reset time?", body: "", actions: ["answer"] },
+  ] }),
+  run_overview: () => ({
+    slug: SLUG, run_id: RUN, stale: false,
+    timeline: { phases: [{ name: "Plan", state: "done" }, { name: "Execute", state: "current", round: 1, max_rounds: 3 }, { name: "Verify", state: "pending" }], current: "Execute", status: "active" },
+    graph: { waves: 3, tasks: [
+      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "arjuna", status: "done", deps: [], wave: 1 },
+      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "bhima", status: "in_progress", deps: ["t1"], wave: 2 },
+      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "nakula", status: "in_progress", deps: ["t1"], wave: 2 },
+      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "sepoy-backend-1", status: "question", deps: ["t2"], wave: 2 },
+      { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "vidura", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
+      { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "bhima", status: "pending", deps: ["t2"], wave: 3 },
+      { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "bhima", status: "done", deps: ["t1"], wave: 2 },
+    ] },
+  }),
+  evidence_list: () => ({ slug: SLUG, stale: false, rows: [
+    { task: `${RUN}.t1`, title: "Design the limiter", owner: "arjuna", criterion: "AC-2", status: "pass", head: "4e1c9a2", path: null, commands: 1, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-4", status: "pass", head: "4e1c9a2", path: null, commands: 2, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-5", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t2`, title: "Token bucket middleware", owner: "bhima", criterion: "AC-1", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t3`, title: "Show limits on the API keys page", owner: "nakula", criterion: "AC-3", status: "not_run", head: null, path: null, commands: null, report: null },
+  ] }),
   active_runs: () => ({ count: 1, runs: [{ run_id: RUN, campaign: SLUG }] }),
   crew: () => crew,
   worktree_info: (a) => ({ worker: String(a?.worker), worktree: `.claude/worktrees/${String(a?.worker)}`, branch: `vajra/${RUN}/t2`, base: "4e1c9a2" }),
@@ -120,7 +162,7 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
 
 /** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
 export function installFixture(mode = "") {
-  const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }) };
+  const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }), inbox: () => ({ count: 0, items: [] }) };
   const t: Transport = {
     async call(cmd, args) {
       // A core that does not answer: Tauri rejects with a plain string, not the core's {error, detail}.
