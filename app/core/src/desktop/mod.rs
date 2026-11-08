@@ -202,6 +202,9 @@ fn evidence_tree(path: &Path) -> RecordedTree {
 /// (then the tree is not computed).
 type RepoState = (String, Option<String>, bool);
 
+/// A run repo and the walkthrough base directory its evidence sits under (what is left out of the tree).
+type StateKey = (PathBuf, Option<PathBuf>);
+
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -253,7 +256,7 @@ pub struct App {
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>>,
+    worktree_state: Mutex<HashMap<StateKey, (std::time::Instant, Option<RepoState>)>>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
@@ -936,10 +939,17 @@ impl App {
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
-        let mut repos: HashMap<PathBuf, Option<RepoState>> = HashMap::new();
+        // The walkthrough base directory an evidence file sits under: `<base>/<slug>/evidence.json`.
+        let base_of = |i: usize| -> Option<PathBuf> {
+            let p = tasks.get(i)?.get("evidence")?.get("path")?.as_str()?;
+            Path::new(p).parent()?.parent().map(Path::to_path_buf)
+        };
+        let mut repos: HashMap<StateKey, Option<RepoState>> = HashMap::new();
         for (i, r) in &repo_of {
-            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r, deadline));
+            let k = (r.clone(), base_of(*i));
+            if verdict.get(i) == Some(&true) && !repos.contains_key(&k) {
+                let st = self.worktree_state(r, k.1.as_deref(), deadline);
+                repos.insert(k, st);
             }
         }
         let mut pending = 0usize;
@@ -963,7 +973,7 @@ impl App {
                         let recorded = ev.and_then(|e| e.get("path")).and_then(Value::as_str).map(|p| evidence_tree(Path::new(p))).unwrap_or(RecordedTree::None);
                         let unreadable = matches!(recorded, RecordedTree::Unreadable);
                         let want_tree = match recorded { RecordedTree::Id(t) => Some(t), _ => None };
-                        let state = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref);
+                        let state = repo_of.get(&i).and_then(|r| repos.get(&(r.clone(), base_of(i)))).and_then(Option::as_ref);
                         let stale = !unreadable && state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
                             (Some(w), Some(c)) => w != c,
                             (Some(_), None) => false,
@@ -1083,8 +1093,9 @@ impl App {
     /// `git.worktreeTree`. The tree is `None` when it cannot be computed in time. `None` overall when git fails or times
     /// out: the caller then shows the check's own verdict, never `stale`, and nothing is remembered. Both reads count
     /// against the call's `deadline`.
-    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<RepoState> {
-        if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
+    fn worktree_state(&self, repo: &Path, base: Option<&Path>, deadline: std::time::Instant) -> Option<RepoState> {
+        let key = (repo.to_path_buf(), base.map(Path::to_path_buf));
+        if let Some((at, st)) = lock(&self.worktree_state).get(&key) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
             if at.elapsed() < ttl {
                 return st.clone();
@@ -1111,13 +1122,17 @@ impl App {
             bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
             // A repo whose own config defines a filter is never asked for its tree (`add` would run the filter).
             let filtered = bridge.repo_filters(repo, bridge.timeout);
-            let tree = if filtered { None } else { bridge.tree_id(repo, &VERIFY_EXCLUDES) };
+            // Left out of the tree: the walkthrough base directory the evidence was written under (the verifier excludes
+            // whatever `VAJRA_WALKTHROUGH_DIR` pointed at), else the default.
+            let base_str = base.map(|b| b.to_string_lossy().into_owned());
+            let excludes: Vec<&str> = match &base_str { Some(b) => vec![b.as_str()], None => VERIFY_EXCLUDES.to_vec() };
+            let tree = if filtered { None } else { bridge.tree_id(repo, &excludes) };
             Some((head, tree, filtered))
         };
         let st = read();
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
-            lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+            lock(&self.worktree_state).insert(key, (std::time::Instant::now(), st.clone()));
         }
         st
     }

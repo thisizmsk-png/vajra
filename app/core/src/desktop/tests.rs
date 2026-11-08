@@ -1485,9 +1485,9 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     let t = Tmp::new();
     let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
     // Deadline already passed: git is not even started, nothing is remembered.
-    assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
+    assert!(app.worktree_state(&repo, None, std::time::Instant::now()).is_none());
     assert!(lock(&app.worktree_state).is_empty());
-    let (head, tree, filtered) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    let (head, tree, filtered) = app.worktree_state(&repo, None, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
     assert_eq!(head.len(), 40);
     assert_eq!(tree.map(|t| t.len()), Some(40));
     assert!(!filtered);
@@ -1513,6 +1513,31 @@ fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
     run(&["read-tree", "HEAD"]);
     run(&["add", "-A", "--", ".", ":(exclude)data/walkthroughs"]);
     assert_eq!(run(&["write-tree"]), tree);
+}
+
+#[test]
+fn the_tree_id_leaves_out_the_walkthrough_directory_the_evidence_was_written_under_like_the_verifier() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let custom = repo.join("out/proofs");
+    fs::create_dir_all(&custom).unwrap();
+    let custom_s = custom.to_string_lossy().into_owned();
+    let tree = |ex: &[&str]| app.bridge.tree_id(&repo, ex).expect("tree id");
+    let base_custom = tree(&[&custom_s]);
+    // The custom directory is inside the repo: the verifier leaves it out, so writing evidence there changes nothing.
+    fs::write(custom.join("evidence.json"), b"{}").unwrap();
+    assert_eq!(tree(&[&custom_s]), base_custom, "the custom output dir must be excluded like the verifier excludes it");
+    // And it is the custom dir that is left out, not the default one: a file under data/walkthroughs now counts.
+    fs::create_dir_all(repo.join("data/walkthroughs/x")).unwrap();
+    fs::write(repo.join("data/walkthroughs/x/note.txt"), b"real change").unwrap();
+    assert_ne!(tree(&[&custom_s]), base_custom, "data/walkthroughs is not the excluded dir for this evidence");
+    // Left out by default when no base is known.
+    assert_eq!(tree(&VERIFY_EXCLUDES), tree(&["data/walkthroughs"]));
+    // A base outside the repo leaves nothing out (the verifier only excludes a directory inside the repository).
+    let outside = t.home().join("elsewhere-walkthroughs");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_s = outside.to_string_lossy().into_owned();
+    assert_eq!(tree(&[&outside_s]), tree(&[]));
 }
 
 /// A "git" that never answers, to stand in for a slow repo.
@@ -2845,7 +2870,7 @@ fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
     cut_exe(&app.bridge.git, "#!/bin/sh", &sha, 0);
     assert!(app.resolve_base(&t.home(), "main").is_err());
     // worktree_state (evidence staleness) learns nothing from a cut head or status.
-    assert_eq!(app.worktree_state(&t.home(), std::time::Instant::now() + Duration::from_secs(10)), None);
+    assert_eq!(app.worktree_state(&t.home(), None, std::time::Instant::now() + Duration::from_secs(10)), None);
     // worktree_info: no branch and no base from a cut run.
     let t2 = Tmp::new();
     let (mut app2, _repo, _wt) = crew_fixture(&t2, &|r| r.join(".claude/worktrees/w1"));

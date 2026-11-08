@@ -271,9 +271,6 @@ impl Bridge {
                 };
                 run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| o.exit() == Some(0))
             };
-            // verify-work excludes its walkthrough dir relative to the RUN's cwd (`<top>/<prefix>data/walkthroughs`), so the
-            // exclusions below are prefixed with the cwd's path under the top level (empty at the root).
-            let prefix = git(&["rev-parse", "--show-prefix"], false)?.stdout.trim().to_string();
             let root = git(&["rev-parse", "--show-toplevel"], false)?.stdout.trim().to_string();
             *top.borrow_mut() = Path::new(&root).canonicalize().ok().filter(|p| p.is_absolute())?;
             // The repo's object dir as an absolute path (`--git-path` answers relative to the top level for a plain checkout).
@@ -286,7 +283,15 @@ impl Bridge {
                 git(&["read-tree", &head], true)?;
             }
             let mut add = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
-            add.extend(exclude.iter().map(|d| format!(":(exclude){prefix}{d}")));
+            // verify-work excludes its walkthrough base directory only when that directory lies inside the repository (its
+            // `case "$BASE_ABS/" in "$TOP"/*`), as a path relative to the top level. The same rule here: an `exclude` entry is an
+            // absolute directory or one relative to the run's directory (`repo`), and one outside the repository leaves nothing out.
+            let top_dir = top.borrow().clone();
+            add.extend(exclude.iter().filter_map(|d| {
+                let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
+                let abs = abs.canonicalize().unwrap_or(abs);
+                abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude){}", r.display()))
+            }));
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
             git(&add, true)?;
             let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
