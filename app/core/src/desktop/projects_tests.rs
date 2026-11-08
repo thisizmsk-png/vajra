@@ -70,3 +70,17 @@ fn refusals_carry_a_code_the_window_can_act_on() {
     assert_eq!(err(app.project_rename("p_01JC5X8Z3A9K2M4N6P7Q8R9S0T", "x", None))["error"], "not_found");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn project_sessions_carries_the_truncated_flag() {
+    let (root, app) = setup("trunc");
+    let a = repo(&root, "src/alpha");
+    let id = app.project_add(&a, false).unwrap()["project"]["id"].as_str().unwrap().to_string();
+    let v = app.project_sessions(&id).unwrap();
+    assert_eq!((v["truncated"].clone(), v["skipped"].clone(), v["unsupported"].clone()), (false.into(), 0.into(), false.into()));
+    // The response has exactly the fields the shared fixture (also read by the UI tests) documents.
+    let fx: Value = serde_json::from_slice(&fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/contract/project_sessions.v1.json")).unwrap()).unwrap();
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(keys(&v), keys(&fx));
+    let _ = fs::remove_dir_all(root);
+}

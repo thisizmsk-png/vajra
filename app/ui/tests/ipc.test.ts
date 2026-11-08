@@ -17,7 +17,7 @@ describe("typed ipc", () => {
   });
 
   it("maps the project commands to snake_case commands with camelCase args", async () => {
-    const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [] } });
+    const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [], skipped: 0, unsupported: false, truncated: false } });
     setTransport(f.transport);
     await api.appInfo();
     await api.projectList();

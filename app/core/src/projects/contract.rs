@@ -328,6 +328,9 @@ pub struct SessionLog {
     pub skipped: usize,
     /// At least one skipped line was another major version of the session record.
     pub unsupported: bool,
+    /// Only the tail of a longer log was read, so sessions whose lines are all older than that window are NOT listed.
+    /// Set by the store (the parser sees only the lines it is given).
+    pub truncated: bool,
 }
 
 /// The newest line per session id wins (`sessions.jsonl` is append-only). A line that fails to parse is skipped, not

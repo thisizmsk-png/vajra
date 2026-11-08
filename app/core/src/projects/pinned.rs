@@ -100,14 +100,15 @@ impl Pinned {
         Ok(buf)
     }
 
-    /// The last `cap` bytes (all of it if shorter). The first line may be cut.
-    pub fn read_tail(&self, name: &str, cap: u64) -> io::Result<Vec<u8>> {
+    /// The last `cap` bytes (all of it if shorter) and whether the file was longer, i.e. the start was cut off. When cut,
+    /// the first line is probably partial.
+    pub fn read_tail(&self, name: &str, cap: u64) -> io::Result<(Vec<u8>, bool)> {
         let mut f = self.openat(name, libc::O_RDONLY, 0)?;
         let len = f.metadata()?.len();
         f.seek(SeekFrom::Start(len.saturating_sub(cap)))?;
         let mut buf = Vec::new();
         f.take(cap).read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok((buf, len > cap))
     }
 
     /// Append to `name` (created at 0600, tightened to 0600 if it exists wider).
