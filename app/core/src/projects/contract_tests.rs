@@ -216,10 +216,25 @@ fn the_newest_line_per_session_wins_and_a_bad_line_is_skipped() {
     let l = |s: &Session| serde_json::to_vec(s).unwrap();
     let (la, la2, lb) = (l(&a), l(&a2), l(&b));
     let lines: Vec<&[u8]> = vec![&la, b"not json", &lb, br#"{"schema":"vajra.session/2","id":"s_01JC5X8Z3D2K2M4N6P7Q8R9S0T"}"#, &la2];
-    let got = latest_sessions(&lines);
+    let log = latest_sessions(&lines);
+    assert_eq!((log.skipped, log.unsupported), (2, true), "garbage and the version-2 line are counted, and the second is flagged");
+    let got = log.sessions;
     assert_eq!(got.len(), 2, "{got:?}");
     assert_eq!((got[0].id.as_str(), got[0].status), (S2, SessionStatus::Done), "first-seen order, newest content");
     assert_eq!(got[1].id, S1);
+}
+
+#[test]
+fn a_newer_major_line_for_a_known_session_is_flagged_not_silently_hidden() {
+    let l = |s: &Session| serde_json::to_vec(s).unwrap();
+    let v1 = l(&session());
+    let v2 = br#"{"schema":"vajra.session/2","id":"s_01JC5X8Z3B0K2M4N6P7Q8R9S0T","status":"done"}"#;
+    let log = latest_sessions(&[&v1, v2]);
+    assert_eq!(log.sessions.len(), 1);
+    assert_eq!(log.sessions[0].status, SessionStatus::Running, "the old line is all this build can show");
+    assert!(log.unsupported, "so the caller must be told it may be out of date");
+    let clean = latest_sessions(&[&v1]);
+    assert_eq!((clean.skipped, clean.unsupported), (0, false));
 }
 
 // -------------------------------------------------------------------------------------------------- app_info
