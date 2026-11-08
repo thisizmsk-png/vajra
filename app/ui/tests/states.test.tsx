@@ -61,7 +61,7 @@ describe("History states", () => {
     render(<History />);
     expect(await screen.findByText(S.history.emptyHint)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: S.states.goHome }));
-    expect(window.location.hash).toBe("#/home");
+    expect(window.location.hash).toBe("#/orch");
   });
 
   it("shows loading rows until the campaigns arrive", async () => {
@@ -86,21 +86,18 @@ describe("Check again", () => {
   });
 });
 
-describe("Screens not built yet", () => {
-  it("the Run view right after a start opens on that run's evidence", async () => {
+describe("Review view", () => {
+  it("right after a start opens on that run's evidence", async () => {
     window.location.hash = "#/run?slug=camp&id=r1";
     const f = fakeIpc({ evidence_list: { slug: "camp", stale: false, rows: [] } });
     setTransport(f.transport);
-    const Run = REGISTRY.run;
+    const Run = REGISTRY.review;
     render(<Run />);
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "evidence_list" && c.args?.slug === "camp")).toBe(true));
     expect(await screen.findByText(S.run.none)).toBeTruthy();
   });
 
-  it("without a run, it says so and offers Home", () => {
-    const Inbox = REGISTRY.inbox;
-    render(<Inbox />);
-    expect(screen.getByText(S.shell.notBuilt)).toBeTruthy();
-    expect(screen.getByRole("button", { name: S.states.goHome })).toBeTruthy();
+  it("every view the router knows has a component: no placeholder screens are left", () => {
+    for (const v of ["orch", "board", "review", "worker", "crew", "history", "settings"] as const) expect(typeof REGISTRY[v]).toBe("function");
   });
 });

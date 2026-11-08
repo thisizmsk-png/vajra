@@ -86,3 +86,12 @@ fn every_shared_invalid_case_is_rejected_for_its_reason() {
     }
     assert!(seen >= 60, "{seen}");
 }
+
+#[test]
+fn the_widest_device_inode_and_rev_are_valid_and_survive_a_round_trip() {
+    let p = parse_project(&fixture("project.v1.max-ids.json")).unwrap();
+    assert_eq!((p.root_key.dev, p.root_key.ino, p.rev), (u64::MAX, 9_007_199_254_740_993, 9_007_199_254_740_991));
+    let again = parse_project(&serde_json::to_vec(&p).unwrap()).unwrap();
+    assert_eq!(again, p);
+    assert!(String::from_utf8(serde_json::to_vec(&p).unwrap()).unwrap().contains("\"dev\":\"18446744073709551615\""), "dev is a string on the wire");
+}
