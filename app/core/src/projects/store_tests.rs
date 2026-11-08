@@ -151,6 +151,7 @@ fn a_worktree_of_a_project_finds_that_project_and_never_makes_its_own() {
     let wt = t.home().join("work/w1");
     fs::create_dir_all(&wt).unwrap();
     fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
     let first = s.add(&main, false).unwrap();
     let from_wt = s.add(&wt, false).unwrap();
     assert_eq!(from_wt.outcome(), "existing");
