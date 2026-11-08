@@ -165,8 +165,10 @@ fn discovery_marking_a_worker_finished_expires_its_queued_messages() {
 
 // ---- delivery state machine (Opus design, ADR note on #5) -------------------------------------------------------
 // The hook claims queue/ -> inflight/, writes acks/, then removes inflight/. check() observes in the order
-// queue, inflight, ack, expired: an "all absent" reading then proves the file was never published, because a hook that
-// ran between the reads would have left an ack behind. Q = queue/, I = inflight/, A = acks/, E = expired/.
+// queue, inflight, ack, expired. A hook that ran between the reads would have left an ack behind, but an "all absent"
+// reading is not proof of non-publication (after power loss an unsynced ack looks the same): it settles as
+// delivery_unknown, and only the app's own expired/ rename is a firm not_delivered. Q = queue/, I = inflight/,
+// A = acks/, E = expired/.
 
 #[derive(Clone, Copy)]
 enum Ack { None, Valid, Big, Array, Text, Symlink }
@@ -592,5 +594,157 @@ fn a_check_failure_is_logged_once_per_distinct_error() {
     let text = fs::read_to_string(logs.join("app.log")).unwrap();
     let n = text.lines().filter(|l| l.contains(" control_check_failed ")).count();
     assert_eq!(n, 1, "four ticks, one error: one line\n{text}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 item 4: a resume records first and removes the stop file last. If the removal fails after the ledger and audit
+/// lines were written, the stop stays in force and a retry adds a second resume record. That duplicate is the accepted
+/// cost (never a cleared stop without its records); this pins it so it cannot grow into a second stop-lift.
+#[test]
+fn a_resume_retry_after_a_failed_stop_removal_adds_a_second_record_and_lifts_the_stop_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut s, dir) = svc();
+    s.stop_worker(Actor::Human, "bhima", None).unwrap();
+    let stops = dir.join("control").join(SID).join("stops");
+    fs::set_permissions(&stops, fs::Permissions::from_mode(0o500)).unwrap();
+    if fs::File::create(stops.join("probe")).is_ok() {
+        // Running as root: a read-only directory does not stop the removal, so there is nothing to observe.
+        let _ = fs::remove_file(stops.join("probe"));
+        fs::set_permissions(&stops, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    assert!(s.resume_worker(Actor::Human, "bhima").is_err(), "the stop file could not be removed");
+    assert_eq!(files(&dir, "stops"), 1, "the stop stays in force");
+    fs::set_permissions(&stops, fs::Permissions::from_mode(0o700)).unwrap();
+    s.resume_worker(Actor::Human, "bhima").unwrap();
+    assert_eq!(files(&dir, "stops"), 0, "the retry lifts it");
+    let resumes = crate::control::ledger::Ledger::read_all(&dir.join("control").join("ledger.jsonl")).unwrap().iter().filter(|r| r["kind"] == "resume").count();
+    assert_eq!(resumes, 2, "the failed attempt's record and the retry's");
+    assert!(matches!(s.resume_worker(Actor::Human, "bhima"), Err(ControlError::NotStopped)), "a third resume finds nothing to lift");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 C3-1: a stop whose file is gone (never made it to disk, or removed behind the app's back) and that no hook ever
+/// acked stayed `queued` forever. After the TTL it settles as `delivery_unknown` (`stop_file_missing`): nothing says it is
+/// in force. A stop whose file is there is the opposite: sticky, it stays pending however long no tool call acks it.
+#[test]
+fn a_stop_with_no_file_and_no_ack_settles_as_unknown_after_the_ttl() {
+    let (mut s, dir) = svc();
+    let id = s.stop_worker(Actor::Human, "bhima", None).unwrap()["action_id"].as_str().unwrap().to_string();
+    let later = SystemTime::now() + s.ttl + Duration::from_secs(1);
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "a stop in force waits for its ack");
+    s.tick_at(later);
+    assert!(s.pending.contains_key(&id), "a stop whose file is in force stays pending past the TTL");
+    let key = s.pending[&id].worker.clone();
+    fs::remove_file(s.session().unwrap().dir.stop_path(&key)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "inside the TTL the missing file is not judged yet");
+    s.tick_at(later);
+    assert!(!s.pending.contains_key(&id), "past the TTL the stop is settled");
+    let r = last_record(&s, &id);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("stop_file_missing")));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 C4-3: an ack the app cannot open for a reason that says nothing about its content (here a permission error, as
+/// EMFILE or EIO would be) is not an invalid ack. It used to settle terminally as `ack_invalid`; now the check fails, is
+/// retried like any other failed scan, and delivers once the file reads.
+#[test]
+fn an_ack_that_cannot_be_opened_for_now_is_retried_not_settled_invalid() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads any file
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let qf = fs::read_dir(root.join("queue")).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(&qf).unwrap();
+    let ack = root.join("acks").join(format!("{id}.json"));
+    fs::write(&ack, json!({"action_id": id, "consumed_at": "2026-11-07T10:00:00Z", "tool_name": "Bash"}).to_string()).unwrap();
+    fs::set_permissions(&ack, fs::Permissions::from_mode(0o000)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "an unreadable ack is not an invalid one");
+    fs::set_permissions(&ack, fs::Permissions::from_mode(0o600)).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(!s.pending.contains_key(&id));
+    let r = last_record(&s, &id);
+    assert_eq!(r["state"].as_str(), Some("delivered"), "{r}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 C3-4: a crash between the temp write and the rename leaves `.<name>.<pid>.tmp` in queue/ for good. Starting the
+/// session sweeps those (the hook ignores dot files, so nothing live is touched).
+#[test]
+fn start_session_sweeps_stale_temp_files_from_queue() {
+    let (mut s, dir) = svc();
+    let q = dir.join("control").join(SID).join("queue");
+    let stale = q.join(".7-abc.json.4242.tmp");
+    let keep = q.join("7-abc.json");
+    fs::write(&stale, "x").unwrap();
+    fs::write(&keep, "{}").unwrap();
+    s.start_session(SID, "run-1").unwrap();
+    assert!(!stale.exists(), "the stale temp file is gone");
+    assert!(keep.exists(), "a real queue file stays");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 C4-4: queue/ swapped for a symlink (to a directory the worker controls) is not listed. The check fails and is
+/// retried instead of settling from whatever the link points at.
+#[test]
+fn a_queue_dir_swapped_for_a_symlink_is_not_trusted() {
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    let elsewhere = dir.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::rename(root.join("queue"), dir.join("moved-queue")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("queue")).unwrap();
+    s.tick_at(SystemTime::now());
+    assert!(s.pending.contains_key(&id), "a symlinked queue/ settles nothing");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #13 review (P2): the queue/ and inflight/ scans fail independently. A queued message stays queued when only
+/// inflight/ is unreadable (queue/ already proves it), and a stop with a valid ack settles even when queue/ is unreadable
+/// (a stop never uses queue/).
+#[test]
+fn a_queued_message_with_an_unreadable_inflight_dir_stays_queued() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (mut s, dir) = svc();
+    let id = s.message_worker(Actor::Human, "bhima", "x").unwrap()["action_id"].as_str().unwrap().to_string();
+    let inflight = dir.join("control").join(SID).join("inflight");
+    fs::set_permissions(&inflight, fs::Permissions::from_mode(0o000)).unwrap();
+    let t0 = SystemTime::now();
+    for i in 0..8u64 {
+        s.tick_at(t0 + Duration::from_secs(i * 10));
+    }
+    fs::set_permissions(&inflight, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(s.pending.contains_key(&id), "queue/ proves it queued; inflight/ errors must not settle it");
+    assert!(s.pending[&id].check_failed.is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_acknowledged_stop_settles_even_when_queue_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (mut s, dir) = svc();
+    let id = s.stop_worker(Actor::Human, "bhima", None).unwrap()["action_id"].as_str().unwrap().to_string();
+    let root = dir.join("control").join(SID);
+    fs::write(root.join("acks").join(format!("{id}.json")), json!({"action_id": id, "consumed_at": "2026-11-07T10:00:00Z", "tool_name": "Bash"}).to_string()).unwrap();
+    let queue = root.join("queue");
+    fs::set_permissions(&queue, fs::Permissions::from_mode(0o000)).unwrap();
+    s.tick_at(SystemTime::now());
+    fs::set_permissions(&queue, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!s.pending.contains_key(&id), "a stop never reads queue/");
+    assert_eq!(last_record(&s, &id)["state"].as_str(), Some("delivered"));
     let _ = fs::remove_dir_all(&dir);
 }

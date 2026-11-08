@@ -2290,3 +2290,372 @@ fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
     let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
     assert_eq!(rec.trim(), "deliver-x");
 }
+
+/// #13 item 3: `evidence_request` decides between an archived bundle and a repo path with a lexical `starts_with`, so a
+/// path that climbs out of the archive with `..` must never be treated as archived (nor handed to the checker at all).
+#[test]
+fn evidence_request_refuses_a_path_that_climbs_out_of_the_archive() {
+    use crate::vajra::bridge::Request;
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let archive = app.allow().unwrap().campaigns_dir().join(&slug).join("evidence");
+    let task = |p: PathBuf| json!({"evidence": {"path": p, "head": "a".repeat(40)}});
+    let inside = app.evidence_request(&slug, &task(archive.join("green.json")));
+    assert!(matches!(inside, Some(Request::CheckEvidence { archived: Some(_), repo: None, .. })), "{inside:?}");
+    // Lexically under the archive, physically somewhere else.
+    for climbing in [archive.join("..").join("..").join("other").join("evidence").join("green.json"), archive.join("..").join("tasks.json")] {
+        assert!(app.evidence_request(&slug, &task(climbing.clone())).is_none(), "{}", climbing.display());
+    }
+}
+
+// ---------------------------------------------------------------- verify reasons (report and evidence)
+
+fn campaign_script_body(t: &Tmp, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let sh = t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
+    fs::write(&sh, format!("#!/bin/bash\n{body}\n")).unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A signed real campaign, then `break_it` damages the install or the files; returns `read_report`'s answer.
+fn report_after(timeout_ms: Option<u64>, break_it: impl Fn(&Tmp)) -> Option<Value> {
+    let (t, run) = real_script_home()?;
+    real_campaign_with_report(&run, "Delivered on branch b");
+    break_it(&t);
+    let mut app = t.app();
+    if let Some(ms) = timeout_ms {
+        app.verify_timeout = Duration::from_millis(ms);
+    }
+    Some(app.read_report("real1").unwrap())
+}
+
+#[test]
+fn report_unknown_says_spawn_failed_when_the_script_is_missing() {
+    let Some(r) = report_after(None, |t| fs::remove_file(t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh")).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "the old field stays: {r}");
+    assert_eq!(r["reason"]["code"], "spawn_failed", "{r}");
+}
+
+#[test]
+fn report_unknown_says_bad_exit_with_the_exit_code_and_the_scripts_message() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "echo 'verify-digest exploded' >&2\nexit 7")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "bad_exit", "{r}");
+    assert_eq!(r["reason"]["exit_code"], 7, "{r}");
+    assert!(r["reason"]["detail"].as_str().unwrap().contains("exploded"), "{r}");
+}
+
+#[test]
+fn report_unknown_says_timeout_when_the_check_overruns() {
+    let Some(r) = report_after(Some(300), |t| campaign_script_body(t, "sleep 30")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "timeout", "{r}");
+}
+
+#[test]
+fn report_unknown_says_oversize_when_the_report_is_over_its_cap() {
+    let Some(r) = report_after(None, |t| fs::write(camp_file(t, "report.md"), vec![b'x'; 70 * 1024]).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+    assert_eq!(r["reason"]["detail"], "report.md", "{r}");
+}
+
+#[test]
+fn report_unknown_says_io_error_when_a_campaign_file_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root can read a mode-000 file, so this case only means something for an ordinary user.
+    if unsafe { libc::getuid() } == 0 {
+        return;
+    }
+    let Some(r) = report_after(None, |t| fs::set_permissions(camp_file(t, "progress.md"), fs::Permissions::from_mode(0o000)).unwrap()) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "io_error", "{r}");
+    assert!(r["reason"].get("detail").is_none(), "no OS error text, it carries paths: {r}");
+}
+
+#[test]
+fn bridge_failures_map_to_fixed_codes() {
+    use crate::vajra::bridge::BridgeError;
+    let spawn = BridgeError::Spawn(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert_eq!(bridge_failure(&spawn), "spawn_failed");
+    assert_eq!(bridge_failure(&BridgeError::Invalid("jq not found".into())), "jq_missing");
+    assert_eq!(bridge_failure(&BridgeError::Invalid("bad name: \"x\"".into())), "io_error");
+}
+
+#[test]
+fn reason_text_is_bounded_cleaned_and_free_of_the_home_path() {
+    let home = Path::new("/Users/someone");
+    let raw = format!("line one\x1b[31m /Users/someone/.claude/vajra/.hmac-key {}\nsecond line", "y".repeat(500));
+    let d = reason_detail(&raw, home);
+    assert!(d.chars().count() <= 200, "{}", d.len());
+    assert!(!d.contains('\x1b') && !d.contains('\n'), "{d:?}");
+    assert!(!d.contains("/Users/someone"), "{d}");
+    assert!(d.starts_with("line one"), "{d}");
+}
+
+#[test]
+fn report_reason_text_has_no_home_path() {
+    let Some((t, run)) = real_script_home() else { return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    campaign_script_body(&t, "echo \"cannot open $HOME/.claude/vajra/x\" >&2\nexit 9");
+    let r = t.app().read_report("real1").unwrap();
+    let d = r["reason"]["detail"].as_str().unwrap();
+    assert_eq!(d, "cannot open ~/.claude/vajra/x", "{r}");
+}
+
+#[test]
+fn evidence_without_a_registered_run_says_no_run_registered() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/green.json"); // live evidence, not an archived bundle
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "the old field stays: {r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "no_run_registered", "{r}");
+}
+
+#[test]
+fn evidence_that_climbs_out_says_outside_campaign() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let mut task = ev_task(&d, "t1", "done", &["ac-1"], "green");
+    task["evidence"]["path"] = json!("/tmp/../etc/green.json");
+    let (app, slug) = campaign_with_tasks(&t, vec![task]);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "outside_campaign", "{r}");
+}
+
+#[test]
+fn evidence_keeps_the_scripts_reason_when_the_check_is_not_green() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t2", "done", &["ac-3"], "red")]);
+    let r = app.evidence_list(&slug).unwrap();
+    let w = &row(&r, "t2", "ac-3")["why"];
+    assert_eq!((w["code"].as_str(), w["detail"].as_str()), (Some("refused"), Some("a check failed")), "{r}");
+}
+
+#[test]
+fn evidence_says_bad_exit_when_the_check_itself_fails() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t4", "done", &["ac-5"], "boom")]);
+    let r = app.evidence_list(&slug).unwrap();
+    let w = &row(&r, "t4", "ac-5")["why"];
+    assert_eq!((w["code"].as_str(), w["exit_code"].as_i64(), w["detail"].as_str()), (Some("bad_exit"), Some(1), Some("unreadable")), "{r}");
+}
+
+#[test]
+fn evidence_says_timeout_for_a_check_that_ran_out_its_time() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (mut app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "s1", "done", &["ac"], "slow")]);
+    app.evidence_timeout = Duration::from_millis(400);
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "s1", "ac")["why"]["code"], "timeout", "{r}");
+}
+
+#[test]
+fn evidence_says_spawn_failed_when_the_check_script_is_not_installed() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    fs::remove_file(t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py")).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "spawn_failed", "{r}");
+}
+
+#[test]
+fn evidence_why_survives_the_verdict_cache_and_is_absent_for_other_statuses() {
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green"), ev_task(&d, "t2", "done", &["ac-3"], "red"), ev_task(&d, "t3", "in_progress", &["ac-4"], "")]);
+    for _ in 0..2 {
+        let r = app.evidence_list(&slug).unwrap();
+        assert_eq!(row(&r, "t2", "ac-3")["why"]["code"], "refused", "the second call answers from the cache and still says why: {r}");
+        assert!(row(&r, "t1", "ac-1").get("why").is_none_or(Value::is_null), "{r}");
+        assert!(row(&r, "t3", "ac-4").get("why").is_none_or(Value::is_null), "{r}");
+    }
+}
+
+#[test]
+fn report_unknown_says_jq_missing_before_the_digest_script_runs() {
+    // The campaign script dies on a missing jq before it dispatches verify-digest, so the digest step must not be the one to find out.
+    let (t, run) = match real_script_home() { Some(x) => x, None => return };
+    real_campaign_with_report(&run, "Delivered on branch b");
+    let marker = t.0.join("ran-script");
+    campaign_script_body(&t, &format!("touch '{}'\nexit 0", marker.display()));
+    let mut app = t.app();
+    app.bridge.jq_candidates.clear(); // no jq on this machine
+    let r = app.read_report("real1").unwrap();
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "jq_missing", "{r}");
+    assert!(!marker.exists(), "jq is checked before any script runs");
+}
+
+#[test]
+fn report_unknown_says_jq_missing_when_the_script_itself_reports_it() {
+    // A jq the app found but the script's own PATH did not: the script's "jq is required" is a missing dependency, not a bad exit.
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "echo 'vajra-campaign: jq is required' >&2\nexit 1")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "jq_missing", "{r}");
+}
+
+#[test]
+fn report_unknown_says_oversize_when_the_scripts_output_hits_the_cap() {
+    // Output cut at the bridge's cap is not a verifier failure: the exit code and the partial text say nothing reliable.
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x'\nexit 7")) else { return };
+    assert_eq!(r["integrity"], "unknown", "{r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+    assert!(r["reason"].get("exit_code").is_none(), "no exit code is reported for a cut run: {r}");
+    assert!(r["reason"]["detail"].as_str().is_some_and(|d| d.contains("output")), "{r}");
+}
+
+#[test]
+fn a_cut_verify_digest_that_exits_3_is_unknown_not_a_tamper() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x'\nexit 3")) else { return };
+    assert_eq!(r["integrity"], "unknown", "a cut exit 3 is not a tamper: {r}");
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+}
+
+#[test]
+fn report_unknown_says_oversize_when_only_stderr_hits_the_cap() {
+    let Some(r) = report_after(None, |t| campaign_script_body(t, "head -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 7")) else { return };
+    assert_eq!(r["reason"]["code"], "oversize", "{r}");
+}
+
+#[test]
+fn evidence_cut_output_that_still_parses_as_green_is_oversize_not_a_verdict() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let py = t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py");
+    fs::write(&py, "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('{\"green\": true}')\nsys.stderr.write('x' * 2200000)\nsys.exit(0)\n").unwrap();
+    fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "oversize", "{r}");
+}
+
+#[test]
+fn evidence_says_oversize_when_the_check_output_hits_the_cap() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let d = PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let py = t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py");
+    fs::write(&py, "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('x' * 2200000)\nsys.exit(0)\n").unwrap();
+    fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+    let r = app.evidence_list(&slug).unwrap();
+    assert_eq!(row(&r, "t1", "ac-1")["status"], "unverified", "{r}");
+    assert_eq!(row(&r, "t1", "ac-1")["why"]["code"], "oversize", "{r}");
+}
+
+// ------------------------------------------------ output cut at the cap is never interpreted
+// Every reader of a bridge `Output` goes through `Output::exit` / `stdout_whole` (or checks `truncated` first). Each test
+// below makes the tool print a plausible, parseable answer and then overflow the cap on stderr, so the kept stdout and
+// the exit code look right and only `truncated` says otherwise.
+
+/// An executable that prints `answer` on stdout, floods stderr past the cap, and exits with `code`.
+fn cut_exe(path: &Path, interpreter_line: &str, answer: &str, code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+    let body = if interpreter_line.contains("python") {
+        format!("{interpreter_line}\nimport sys\nsys.stdout.write({answer:?})\nsys.stderr.write('x' * 2200000)\nsys.exit({code})\n")
+    } else {
+        format!("{interpreter_line}\nprintf '%s' '{answer}'\nhead -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit {code}\n")
+    };
+    fs::write(path, body).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn output_exit_and_stdout_whole_hide_a_cut_or_killed_run() {
+    use crate::vajra::bridge::Output;
+    let o = |truncated, timed_out| Output { code: Some(0), stdout: "{}".into(), stderr: String::new(), truncated, timed_out };
+    assert_eq!((o(false, false).exit(), o(false, false).stdout_whole()), (Some(0), Some("{}")));
+    // A killed run that still carries a status (3, the tamper code) is not read as that status.
+    let killed = Output { code: Some(3), stdout: String::new(), stderr: String::new(), truncated: false, timed_out: true };
+    assert_eq!(killed.exit(), None);
+    for cut in [o(true, false), o(false, true), o(true, true)] {
+        assert_eq!((cut.exit(), cut.stdout_whole()), (None, None), "{cut:?}");
+    }
+}
+
+#[test]
+fn a_cut_campaign_verify_that_exits_3_is_unknown_not_failed() {
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    cut_exe(&dir.join("vajra-campaign.sh"), "#!/bin/bash", "", 3);
+    let app = t.app();
+    assert_eq!(app.integrity_run("deliver-20261105-1810", true).0, "unknown");
+}
+
+#[test]
+fn a_cut_task_evidence_check_gives_no_code_and_no_result() {
+    let t = Tmp::new();
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(Path::new("/x"), "t1", "done", &["ac-1"], "green")]);
+    cut_exe(&t.home().join(".claude/skills/vajra/scripts/vajra_tasks.py"), "#!/usr/bin/env python3", "{\"ok\": true, \"green\": true, \"reasons\": []}", 0);
+    let r = app.task(&slug, "t1").unwrap();
+    assert_eq!(r["evidence"]["truncated"], true, "{r}");
+    assert!(r["evidence"]["code"].is_null() && r["evidence"]["result"].is_null(), "a cut check has no code and no result: {r}");
+}
+
+#[test]
+fn a_cut_kb_search_returns_no_hits() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.home().join(".claude/skills/vajra/scripts")).unwrap();
+    cut_exe(&t.home().join(".claude/skills/vajra/scripts/vajra_kb.py"), "#!/usr/bin/env python3", "kb-abcdef fact a title\n", 0);
+    let app = t.app();
+    let r = app.kb_search("q", 5, t.home().to_str().unwrap()).unwrap();
+    assert_eq!(r["truncated"], true, "{r}");
+    assert!(r["hits"].as_array().unwrap().is_empty() && r["code"].is_null(), "a cut search lists nothing: {r}");
+}
+
+#[test]
+fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
+    let sha = "a".repeat(40);
+    // resolve_base: a 40-hex answer from a cut run is not trusted.
+    let t = Tmp::new();
+    let mut app = t.app();
+    app.bridge.git = t.home().join("cut-git.sh");
+    cut_exe(&app.bridge.git, "#!/bin/sh", &sha, 0);
+    assert!(app.resolve_base(&t.home(), "main").is_err());
+    // worktree_state (evidence staleness) learns nothing from a cut head or status.
+    assert_eq!(app.worktree_state(&t.home(), std::time::Instant::now() + Duration::from_secs(10)), None);
+    // worktree_info: no branch and no base from a cut run.
+    let t2 = Tmp::new();
+    let (mut app2, _repo, _wt) = crew_fixture(&t2, &|r| r.join(".claude/worktrees/w1"));
+    app2.bridge.git = t2.home().join("cut-git.sh");
+    cut_exe(&app2.bridge.git, "#!/bin/sh", &sha, 0);
+    let i = app2.worktree_info("aa870dd40540481f0").unwrap();
+    assert!(i["branch"].is_null() && i["base"].is_null(), "{i}");
+}
+
+#[test]
+fn a_cut_verify_run_never_resumes_and_a_cut_diff_stays_viewable() {
+    let t = Tmp::new();
+    let dir = t.home().join(".claude/skills/vajra/scripts");
+    fs::create_dir_all(&dir).unwrap();
+    for code in [0, 3] {
+        cut_exe(&dir.join("vajra-campaign.sh"), "#!/bin/bash", "", code);
+        let app = t.app();
+        let e = app.verify_campaign("deliver-20261105-1810").unwrap_err();
+        assert_eq!(code_of_err(&e), "verify_failed", "a cut exit {code} is neither ok nor a signature failure: {e}");
+    }
+    // diff stays viewable: a cut `git diff` keeps its code and partial text and says `truncated`, for the UI's notice.
+    let mut app = t.app();
+    app.bridge.git = t.home().join("cut-git.sh");
+    cut_exe(&app.bridge.git, "#!/bin/sh", "diff --git a/f b/f\n", 0);
+    let d = app.diff(t.home().to_str().unwrap(), "main").unwrap();
+    assert_eq!((d["truncated"].clone(), d["code"].clone()), (json!(true), json!(0)), "{d}");
+    assert!(d["diff"].as_str().unwrap().starts_with("diff --git"), "{d}");
+}
+
+fn code_of_err(v: &Value) -> &str {
+    v["error"].as_str().unwrap_or("")
+}

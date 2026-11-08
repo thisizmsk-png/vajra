@@ -59,6 +59,74 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
     Ok(f)
 }
 
+/// A directory opened with O_DIRECTORY | O_NOFOLLOW, so a symlink in its place (a worker can swap one in) is an
+/// `InvalidInput` error. The entries are read from this descriptor (fdopendir), and removals go through it
+/// (unlinkat), never through the path again: a symlink swapped in after the open is not followed.
+#[derive(Debug)]
+pub struct DirHandle(File);
+
+impl DirHandle {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).map(Self).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
+                io::Error::new(io::ErrorKind::InvalidInput, "control subdirectory is not a directory")
+            } else {
+                e
+            }
+        })
+    }
+
+    /// The entry names (UTF-8 only, no `.` or `..`), read from the held descriptor.
+    pub fn names(&self) -> io::Result<Vec<String>> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: dup gives fdopendir its own descriptor to own; the DIR is closed before returning.
+        let fd = unsafe { libc::dup(self.0.as_raw_fd()) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let dir = unsafe { libc::fdopendir(fd) };
+        if dir.is_null() {
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(e);
+        }
+        unsafe { libc::rewinddir(dir) };
+        let mut out = Vec::new();
+        let result = loop {
+            unsafe { *errno_location() = 0 };
+            let ent = unsafe { libc::readdir(dir) };
+            if ent.is_null() {
+                let code = unsafe { *errno_location() };
+                break if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code)) };
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+            if let Ok(n) = name.to_str() {
+                if n != "." && n != ".." {
+                    out.push(n.to_string());
+                }
+            }
+        };
+        unsafe { libc::closedir(dir) };
+        result.map(|()| out)
+    }
+
+    /// Remove a non-directory entry by name, relative to the held descriptor.
+    pub fn unlink(&self, name: &str) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let c = std::ffi::CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), c.as_ptr(), 0) } == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+#[cfg(not(target_os = "macos"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
 /// Read a regular file without following a symlink.
 pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     use std::io::Read;
@@ -103,4 +171,31 @@ pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf>
         let _ = fs::remove_file(&tmp);
     }
     res
+}
+
+#[cfg(test)]
+mod dir_handle_tests {
+    use super::*;
+
+    /// The entries come from the directory that was checked and opened, not from the path afterwards: swap the
+    /// directory for a symlink to another one after the open and the handle still lists the original.
+    #[test]
+    fn names_are_read_from_the_opened_directory_not_the_path() {
+        let base = std::env::temp_dir().join(format!("vajra-dirhandle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (real, other) = (base.join("real"), base.join("other"));
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(real.join("mine.json"), "").unwrap();
+        fs::write(other.join("theirs.json"), "").unwrap();
+        let h = DirHandle::open(&real).unwrap();
+        fs::rename(&real, base.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&other, &real).unwrap();
+        assert_eq!(h.names().unwrap(), vec!["mine.json".to_string()]);
+        assert_eq!(DirHandle::open(&real).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        h.unlink("mine.json").unwrap();
+        assert!(base.join("moved").read_dir().unwrap().next().is_none(), "the unlink went through the descriptor");
+        assert!(other.join("theirs.json").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
 }
