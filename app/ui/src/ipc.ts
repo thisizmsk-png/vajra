@@ -1,7 +1,7 @@
 // The one place that names the core's IPC commands. Screens call `api.*`, never `invoke`, so a screen can be tested
 // against `setTransport(fake)` and a command rename is a one-file change. Argument names are camelCase here; Tauri maps
 // them to the snake_case parameters of the Rust commands.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -21,10 +21,18 @@ export interface Transport {
   call(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
   /** Subscribe to a core event; returns the unsubscribe function. */
   on(event: string, cb: (payload: unknown) => void): () => void;
+  /** Like `call`, for a command that streams to a Tauri `Channel`: `onMessage` gets each channel message (raw output
+   *  bytes, or the JSON `{exit}`). A transport without it cannot open terminals. */
+  channel?(cmd: string, args: Record<string, unknown>, onMessage: (m: unknown) => void): Promise<unknown>;
 }
 
 const tauri: Transport = {
   call: (cmd, args) => invoke(cmd, args),
+  channel(cmd, args, onMessage) {
+    const ch = new Channel<unknown>();
+    ch.onmessage = onMessage;
+    return invoke(cmd, { ...args, onEvent: ch });
+  },
   on(event, cb) {
     let off: (() => void) | null = null;
     let dead = false;
@@ -42,6 +50,17 @@ export const setTransport = (t?: Transport) => void (transport = t ?? tauri);
 
 const call = <T>(cmd: string, args?: Record<string, unknown>) => transport.call(cmd, args) as Promise<T>;
 
+function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermMsg) => void): Promise<TermInfo> {
+  if (!transport.channel) return Promise.reject({ error: "no_terminal_transport", detail: "this backend cannot stream" });
+  const bytes = (m: unknown): Uint8Array | null =>
+    Object.prototype.toString.call(m) === "[object ArrayBuffer]" ? new Uint8Array(m as ArrayBuffer) : ArrayBuffer.isView(m) ? new Uint8Array(m.buffer, m.byteOffset, m.byteLength) : Array.isArray(m) ? Uint8Array.from(m as number[]) : null;
+  return transport.channel(cmd, args, (m) => {
+    const b = bytes(m);
+    if (b) onMsg({ data: b });
+    else if (typeof m === "object" && m !== null && "exit" in m) onMsg({ exit: (m as { exit: number | null }).exit });
+  }) as Promise<TermInfo>;
+}
+
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
 export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
@@ -56,6 +75,13 @@ export type Report = { slug: string; integrity: ReportIntegrity; text?: string }
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+/** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
+export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+/** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
+export type TermMsg = { data: Uint8Array } | { exit: number | null };
+/** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
+export const TERM_WRITE_CHUNK = 32 * 1024;
+
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
@@ -100,6 +126,49 @@ export type InboxItem = {
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
+/** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
+export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
+export type Receipt = {
+  schema: "vajra.receipt/1";
+  action_id: string;
+  project_id: string;
+  action: string;
+  target: string;
+  expect_generation: number | null;
+  current_generation: number | null;
+  state: ReceiptState;
+  reason: string | null;
+  detail: string | null;
+  /** `safe`: retry with a NEW action_id; `after_refresh`: read project_state first; `no`: nothing to do. */
+  retry: "no" | "safe" | "after_refresh";
+  rev: number;
+  ts_ms: number;
+};
+/** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
+export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
+/** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
+/** `vajra.project_state/1`: the one revisioned projection every surface reads. */
+export type ProjectState =
+  | { schema: "vajra.project_state/1"; project_id: string; rev: number; unchanged: true }
+  | {
+      schema: "vajra.project_state/1";
+      project_id: string;
+      rev: number;
+      unchanged: false;
+      active_runs: number;
+      generations: { project: number };
+      workers: Json[];
+      receipts: Receipt[];
+    };
+/** The `changed` event payload: which streams moved, and the new revision of each known project. */
+export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
+
+/** A fresh action id (8..=64 of A-Z a-z 0-9 - _). One per user intent; reuse it only to retry the SAME click. */
+export function newActionId(): string {
+  return `act-${globalThis.crypto.randomUUID()}`;
+}
+
 export const api = {
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
@@ -110,6 +179,12 @@ export const api = {
   /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
   campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
+  /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
+  actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
+  actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
+  /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
+  projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
@@ -125,6 +200,14 @@ export const api = {
   evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
   runOverview: (slug: string) => call<RunOverview>("run_overview", { slug }),
   evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
+  // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
+  termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
+  termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  termList: () => call<{ terminals: TermInfo[] }>("term_list"),
+  termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
+  termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
+  termAck: (id: number, bytes: number) => call<Json>("term_ack", { id, bytes }),
+  termClose: (id: number) => call<Json>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
