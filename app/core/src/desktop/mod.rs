@@ -544,6 +544,10 @@ impl App {
         if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
+        // A resume of this campaign counts at the same maxInFlight (#80 review); without the record it counts at the default.
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            self.note("run_workers_record_failed", &[]);
+        }
         self.note_run(&project, run_id, campaign);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
@@ -605,9 +609,11 @@ impl App {
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
         let claude = adapter_for(Engine::Claude);
-        let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
+        // Counted at the maxInFlight the campaign's run was started with, not the default (#80 review).
+        let workers = self.original_workers(session_id, campaign);
+        let r = self.launch_kind(session_id, run_id, campaign, &cwd, |n| {
             claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true)?;
+        }, true, true, workers)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }

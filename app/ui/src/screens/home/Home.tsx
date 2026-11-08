@@ -3,7 +3,8 @@ import { Badge, Button, Input, Kbd, SegmentedControl, StatusDot, Text, ariaShort
 import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
-import { api, onChanged } from "../../ipc";
+import { api, newActionId, onChanged } from "../../ipc";
+import { projectId } from "../../projects/adapter";
 import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { useCommands } from "../../palette";
@@ -82,9 +83,18 @@ export function Home() {
     }
   };
 
+  // Start goes through an action receipt (FG-11): one fresh action id per click, so a retried call never starts twice.
+  // The envelope names the folder the run starts in (the core's project ids replace this when the board reads them,
+  // wave 3) and asks for no generation check, so what the person sees is unchanged: the run opens, or the refusal shows.
+  const startViaReceipt = async () => {
+    const cwd = d.repo.trim();
+    const r = await api.actStartRun({ action_id: newActionId(), project_id: projectId(cwd), expect_generation: null }, toInput(d), cwd);
+    if (r.receipt?.state === "done" && r.result) return r.result;
+    throw r.error ?? { error: r.receipt?.reason ?? "failed", detail: r.receipt?.detail ?? undefined };
+  };
   const start = () => {
     setShown(true);
-    if (Object.keys(errs).length === 0 && ready) void launch("start", () => api.startRun(toInput(d), d.repo.trim()));
+    if (Object.keys(errs).length === 0 && ready) void launch("start", startViaReceipt);
   };
   // Resume continues the session that ran the campaign (claude --resume), in the directory it ran in. Only a campaign
   // this app started has a recorded session; any other cannot be resumed from here.
