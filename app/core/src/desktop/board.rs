@@ -103,7 +103,8 @@ impl App {
         }
         let prefix = format!("{run_id}.");
         for t in scoped.iter().flatten() {
-            let Some(id) = t.get("id").and_then(Value::as_str) else { continue };
+            // An id the engine could not have written is no card (it would ride in the key and `task_id` raw).
+            let Some(id) = t.get("id").and_then(Value::as_str).filter(|id| super::inbox::valid_task_id(id)) else { continue };
             let raw = t.get("status").and_then(Value::as_str).unwrap_or("");
             let status = if STATUSES.contains(&raw) { raw } else { "unknown" };
             let criteria = crit.get(id).copied().filter(|(_, total)| *total > 0);
@@ -114,7 +115,7 @@ impl App {
             let card = json!({
                 "key": format!("{slug}/{id}/{attempt}"), "kind": "task", "local": super::inbox::clean(local, TITLE_MAX),
                 "title": super::inbox::clean(title, TITLE_MAX),
-                "owner": t.get("owner_agent").and_then(Value::as_str).map(crate::crew::names::ui_name),
+                "owner": t.get("owner_agent").and_then(Value::as_str).map(|o| super::inbox::clean(&crate::crew::names::ui_name(o), TITLE_MAX)),
                 "status": status, "lane": lane, "needs_you": needs_you,
                 "criteria": criteria.map(|(pass, total)| json!({"pass": pass, "total": total})),
                 "project_id": project_id, "campaign": slug, "task_id": id, "attempt": attempt,

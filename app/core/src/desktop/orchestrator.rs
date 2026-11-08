@@ -150,7 +150,7 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 
 impl App {
     /// `<data>/control/projects/<pid>/orchestrator/`.
-    fn orchestrator_dir(&self, pid: &str) -> PathBuf {
+    pub(super) fn orchestrator_dir(&self, pid: &str) -> PathBuf {
         self.data.join("control").join("projects").join(pid).join("orchestrator")
     }
 
@@ -319,6 +319,19 @@ impl App {
             None => Some(1),
             Some(g) => g.parse::<u32>().ok().filter(|g| (1..=MAX_GENERATION).contains(g)),
         }
+    }
+
+    /// Store project `pid`'s Director-General as recorded, creating nothing and carrying nothing over: `Ok(None)` when
+    /// it has never been used. A record that is there but not valid fails closed.
+    pub(super) fn recorded_orchestrator(&self, pid: &str) -> Result<Option<Orchestrator>, LeadError> {
+        let dir = self.orchestrator_dir(pid);
+        if !pc::valid_project_id(pid) || !dir.join(ROOT_FILE).exists() {
+            return Ok(None);
+        }
+        let root = self.orchestrator_root(pid).ok_or_else(|| LeadError::GuardMissing("the Director-General's project folder record is not valid".into()))?;
+        let generation = self.orchestrator_generation(pid).ok_or_else(|| LeadError::GuardMissing("the Director-General's generation record is not valid".into()))?;
+        let session = read_text(&dir.join(SESSION_FILE)).filter(|s| ids::valid_session_id(s));
+        Ok(Some(Orchestrator { id: pid.to_string(), root, dir, generation, session }))
     }
 
     /// The project folder recorded for `pid`'s Director-General, if it has one.
