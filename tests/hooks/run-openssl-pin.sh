@@ -129,11 +129,13 @@ check "desktop-control: exit 0" $?
 no_plant_ran; check "pre-tool-use / desktop-control: no planted tool ran" $?
 
 # 8. scripts/vajra-verify-work.sh signs evidence.json with the key. Its test commands keep the caller's PATH (a
-# worker's own tools), so only python3 is planted here: the python that reads the key must never be it.
+# worker's own tools), so only python3 and env are planted here: neither may run at the key boundary (a bare
+# `env PATH=... python3` is looked up on the caller's PATH before env applies its PATH). The launcher is /usr/bin/env.
 PY_ONLY="$TEST_HOME/py-only"; mkdir -p "$PY_ONLY"; cp "$PLANT/python3" "$PY_ONLY/"
-( cd "$TEST_HOME" && VAJRA_WALKTHROUGH_DIR="$TEST_HOME/wt" env PATH="$PY_ONLY:$PATH" "$BASH_BIN" "$REPO/scripts/vajra-verify-work.sh" pin8 "true" ) >/dev/null 2>&1
+printf '#!/bin/sh\necho env >> "%s"\nexit 97\n' "$MARK" > "$PY_ONLY/env"; chmod 755 "$PY_ONLY/env"
+( cd "$TEST_HOME" && VAJRA_WALKTHROUGH_DIR="$TEST_HOME/wt" /usr/bin/env PATH="$PY_ONLY:$PATH" "$BASH_BIN" "$REPO/scripts/vajra-verify-work.sh" pin8 "true" ) >/dev/null 2>&1
 jq -e '.hmac | test("^[0-9a-f]{64}$")' "$TEST_HOME/wt/pin8/evidence.json" >/dev/null 2>&1; check "verify-work: evidence.json is signed" $?
-no_plant_ran; check "verify-work: the planted python3 never ran" $?
+no_plant_ran; check "verify-work: neither the planted python3 nor the planted env ran" $?
 
 # 8b. scripts/atman.sh (the Atman CLI) starts atman.py, which reads the key: never a planted python3.
 hostile "$REPO/scripts/atman.sh" verify >/dev/null 2>&1; check "atman.sh verify: exit 0" $?
