@@ -25,9 +25,13 @@ impl Service {
         }
         // Every unsettled message, in the session dir it was published to: a claimed message outlives its session.
         let ids: Vec<String> = self.pending.values().filter(|a| a.state == State::Queued).map(|a| a.id.clone()).collect();
+        // Each session's queue/ and inflight/ are listed once per tick, not once per message.
+        let mut listings: HashMap<String, Listing> = HashMap::new();
         for id in ids {
             let Some(sid) = self.pending.get(&id).map(|a| a.session_id.clone()) else { continue };
-            match self.check(&id, &SessionDir { root: self.control_root.join(sid) }, now) {
+            let dir = SessionDir { root: self.control_root.join(&sid) };
+            let listing = listings.entry(sid).or_insert_with(|| dir.listing());
+            match self.check(&id, &dir, listing, now) {
                 Ok(()) => {
                     if let Some(a) = self.pending.get_mut(&id) {
                         a.check_failed = None;
@@ -67,25 +71,31 @@ impl Service {
     }
 
     /// Settle one queued action from file evidence alone. The hook moves queue/ -> inflight/, writes the ack, then
-    /// removes inflight/, so reading in the order queue, inflight, ack makes "all absent" proof that the file was never
-    /// published (a hook that ran in between would have left an ack). Queue wins over everything: an honest hook cannot
-    /// ack before it claims. A stop has no queue file; only its ack settles it.
-    pub(super) fn check(&mut self, id: &str, dir: &SessionDir, now: SystemTime) -> Result<()> {
+    /// removes inflight/. Reading in the order queue, inflight, ack means a hook that ran in between has left an ack, but
+    /// "all absent" is still not proof of non-publication: after power loss an ack and a claim removal that were never
+    /// made durable look the same. So absence settles as `delivery_unknown` (`no_evidence`), and only the app's own
+    /// `expired/` rename is a firm `not_delivered`. Queue wins over everything: an honest hook cannot ack before it
+    /// claims. A stop has no queue file; only its ack settles it.
+    pub(super) fn check(&mut self, id: &str, dir: &SessionDir, listing: &Listing, now: SystemTime) -> Result<()> {
         let Some(a) = self.pending.get(id).cloned() else { return Ok(()) };
         let stop = a.kind == Kind::Stop;
-        if !stop && dir.queued(id)?.is_some() {
+        if !stop && listing.queued(id)? {
             if now.duration_since(a.created).unwrap_or_default() >= self.ttl {
                 self.expire(id, now, "expired");
             }
             return Ok(());
         }
-        let claimed = dir.inflight(id)?.is_some();
+        let claimed = listing.inflight(id)?;
         let (delivered, invalid) = match fsx::read_nofollow_capped(&dir.ack_path(id), MAX_ACK_BYTES) {
             Ok(b) => match serde_json::from_slice::<Value>(&b) {
                 Ok(v) if v.is_object() && v.get("action_id").is_none_or(|x| x == id) => (Some(v), false),
                 _ => (None, true),
             },
-            Err(e) => (None, e.kind() != std::io::ErrorKind::NotFound),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, false),
+            // The file itself is bad: too large, not a regular file, or a symlink. That is the hook's doing and final.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput) || e.raw_os_error() == Some(libc::ELOOP) => (None, true),
+            // Anything else (EACCES, EMFILE, EIO) says nothing about the ack: fail the check so it is retried.
+            Err(e) => return Err(e.into()),
         };
         if let Some(ack) = delivered {
             let audit_ref = json!({"kind": "desktop-control", "ts": str_field(&ack, "consumed_at"), "tool": str_field(&ack, "tool_name")});
@@ -93,7 +103,19 @@ impl Service {
         } else if invalid {
             self.record(&a, State::DeliveryUnknown, json!({"reason": "ack_invalid"}), now)?;
         } else if stop {
-            return Ok(());
+            // A stop in force waits for the ack of the first tool call it blocks, however long that takes. A stop whose
+            // file is gone (it never reached the disk, or was removed behind the app's back) has nothing in force and
+            // nothing to wait for: after the TTL it settles as unknown instead of staying queued forever.
+            if now.duration_since(a.created).unwrap_or_default() < self.ttl {
+                return Ok(());
+            }
+            match fs::symlink_metadata(dir.stop_path(&a.worker)) {
+                Ok(_) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.record(&a, State::DeliveryUnknown, json!({"reason": "stop_file_missing"}), now)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         } else if claimed {
             let Some(p) = self.pending.get_mut(id) else { return Ok(()) };
             let seen = *p.inflight_seen.get_or_insert(now);

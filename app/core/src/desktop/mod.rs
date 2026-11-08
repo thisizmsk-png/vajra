@@ -340,6 +340,7 @@ impl App {
         // The guarded run record (`control/lead/<id>/`) counts too: the index is worker-writable and can be emptied, and
         // reusing an id would keep that record's Lead session and approval-only marker for a different run.
         let recorded = |id: &str| self.data.join("control").join("lead").join(id).symlink_metadata().is_ok();
+        // `deliver-{id}` is the workflow's default campaign name (`CAMPAIGN = RESUME || deliver-${RUN}` in workflows/vajra-deliver.js).
         let used = |id: &str| lock(&self.runs).values().any(|r| r.run_id == id) || lock(&self.issued).contains(id) || indexed.contains(id) || on_disk.iter().any(|c| c == &format!("deliver-{id}")) || recorded(id);
         let pick = (0..120u64)
             .map(|k| now + 60 * k)
@@ -530,7 +531,7 @@ impl App {
         let args = vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), format!("{base}^{{commit}}")];
         let out = self.bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).map_err(|e| fail("io_error", e))?;
         let sha = out.stdout.trim();
-        if out.exit() == Some(0) && sha.len() == 40 && argv::is_sha(sha) {
+        if out.exit() == Some(0) && argv::is_full_sha(sha) {
             Ok(sha.to_string())
         } else {
             Err(invalid("base", "is not a branch or commit in this repository"))
