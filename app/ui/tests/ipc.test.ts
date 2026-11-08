@@ -50,6 +50,17 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the migration commands", async () => {
+    const f = fakeIpc({ project_migration_suggest: { done: false, groups: [], unsorted: [], terminal: [] }, project_migration_confirm: {} });
+    setTransport(f.transport);
+    await api.projectMigrationSuggest();
+    await api.projectMigrationConfirm(["/Users/me/src/a"]);
+    expect(f.calls).toEqual([
+      { cmd: "project_migration_suggest", args: undefined },
+      { cmd: "project_migration_confirm", args: { roots: ["/Users/me/src/a"] } },
+    ]);
+  });
+
   it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
     const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
     setTransport(f.transport);
