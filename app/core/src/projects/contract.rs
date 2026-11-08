@@ -26,6 +26,9 @@ pub const SESSION_MAJOR: u32 = 1;
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// A project name longer than this (in characters) is refused.
 pub const MAX_NAME_CHARS: usize = 200;
+/// The largest integer a record may carry in `dev`, `ino` or `rev`: 2^53 - 1, the most a JSON reader in JavaScript holds
+/// exactly. It is part of the contract, so the core refuses what the window could not read.
+pub const MAX_JSON_INT: u64 = 9_007_199_254_740_991;
 /// The longest path accepted in a record.
 pub const MAX_PATH_BYTES: usize = 4096;
 
@@ -171,8 +174,11 @@ impl Project {
         if let Some(a) = &self.archived {
             valid_time(a)?;
         }
-        if self.rev == 0 {
+        if self.rev == 0 || self.rev > MAX_JSON_INT {
             return Err(ContractError::Invalid("rev"));
+        }
+        if self.root_key.dev > MAX_JSON_INT || self.root_key.ino > MAX_JSON_INT {
+            return Err(ContractError::Invalid("root_key"));
         }
         Ok(())
     }
@@ -257,6 +263,10 @@ impl Session {
         if self.parent.as_deref().is_some_and(|p| !valid_session_id(p) || p == self.id) {
             return Err(ContractError::Invalid("parent"));
         }
+        // The orchestrator is the top of a project's tree: a run's parent is the orchestrator, a worker's is its run.
+        if self.kind == SessionKind::Orchestrator && self.parent.is_some() {
+            return Err(ContractError::Invalid("parent"));
+        }
         if !valid_provider(&self.provider) {
             return Err(ContractError::Invalid("provider"));
         }
@@ -290,20 +300,41 @@ pub fn parse_session(line: &[u8]) -> Result<Session, ContractError> {
     Ok(s)
 }
 
+/// What `latest_sessions` read: the sessions, and what it could not use. A caller that shows sessions must also show that
+/// something was skipped, and `unsupported` means a newer build wrote records this one cannot read ("update needed"):
+/// the session list may then be out of date, for example a session shown as running that a newer build marked done.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionLog {
+    pub sessions: Vec<Session>,
+    /// Lines that did not parse or validate (unsupported-major lines included).
+    pub skipped: usize,
+    /// At least one skipped line was another major version of the session record.
+    pub unsupported: bool,
+}
+
 /// The newest line per session id wins (`sessions.jsonl` is append-only). A line that fails to parse is skipped, not
-/// fatal: one bad line must not hide a project's history. Order of first appearance is kept.
-pub fn latest_sessions(lines: &[&[u8]]) -> Vec<Session> {
+/// fatal: one bad line must not hide a project's history. But it is counted, and a line of another major is flagged,
+/// never silently dropped. Order of first appearance is kept.
+pub fn latest_sessions(lines: &[&[u8]]) -> SessionLog {
     let mut order: Vec<String> = Vec::new();
     let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
+    let mut log = SessionLog::default();
     for l in lines {
-        if let Ok(s) = parse_session(l) {
-            if !by_id.contains_key(&s.id) {
-                order.push(s.id.clone());
+        match parse_session(l) {
+            Ok(s) => {
+                if !by_id.contains_key(&s.id) {
+                    order.push(s.id.clone());
+                }
+                by_id.insert(s.id.clone(), s);
             }
-            by_id.insert(s.id.clone(), s);
+            Err(e) => {
+                log.skipped += 1;
+                log.unsupported |= matches!(e, ContractError::UnsupportedVersion { .. });
+            }
         }
     }
-    order.into_iter().filter_map(|id| by_id.remove(&id)).collect()
+    log.sessions = order.into_iter().filter_map(|id| by_id.remove(&id)).collect();
+    log
 }
 
 // ----------------------------------------------------------------------------------------------------- app_info
@@ -340,14 +371,16 @@ fn check_tag(bytes: &[u8], thing: &str, supported: u32) -> Result<(), ContractEr
 
 fn valid_name(n: &str) -> Result<(), ContractError> {
     let t = n.trim();
-    if t.is_empty() || t.chars().count() > MAX_NAME_CHARS || n.chars().any(char::is_control) {
+    if t.is_empty() || t.chars().count() > MAX_NAME_CHARS || n.chars().any(|c| c.is_control() || crate::control::lead::invisible(c)) {
         return Err(ContractError::Invalid("name"));
     }
     Ok(())
 }
 
 fn valid_abs_path(p: &str) -> Result<(), ContractError> {
-    if !p.starts_with('/') || p.len() > MAX_PATH_BYTES || p.contains('\0') || p.split('/').any(|c| c == "..") {
+    // Absolute and already in canonical form: no `..`, `.` or empty component (`//`, a trailing `/`) anywhere.
+    let canonical = p == "/" || p.strip_prefix('/').is_some_and(|r| r.split('/').all(|c| !c.is_empty() && c != "." && c != ".."));
+    if !canonical || p.len() > MAX_PATH_BYTES || p.contains('\0') {
         return Err(ContractError::Invalid("path"));
     }
     Ok(())

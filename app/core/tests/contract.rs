@@ -42,7 +42,47 @@ fn the_session_fixtures_parse() {
 fn the_jsonl_fixture_keeps_the_newest_line_per_session_and_skips_bad_ones() {
     let bytes = fixture("sessions.v1.jsonl");
     let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
-    let got = latest_sessions(&lines);
+    let log = latest_sessions(&lines);
+    // One garbage line, a version-2 line for a session that has version-1 lines, and one for a new id: never silent.
+    assert_eq!((log.skipped, log.unsupported), (3, true));
+    let got = log.sessions;
     let ids: Vec<(&str, SessionStatus)> = got.iter().map(|s| (s.id.as_str(), s.status)).collect();
     assert_eq!(ids, vec![("s_01JC5X8Z3C1K2M4N6P7Q8R9S0T", SessionStatus::Done), ("s_01JC5X8Z3B0K2M4N6P7Q8R9S0T", SessionStatus::Running)]);
+}
+
+fn patched(base: &[u8], case: &serde_json::Value) -> Vec<u8> {
+    let mut v: serde_json::Value = serde_json::from_slice(base).unwrap();
+    for (k, x) in case.get("set").and_then(|s| s.as_object()).into_iter().flatten() {
+        v[k] = x.clone();
+    }
+    for k in case.get("unset").and_then(|u| u.as_array()).into_iter().flatten() {
+        v.as_object_mut().unwrap().remove(k.as_str().unwrap());
+    }
+    serde_json::to_vec(&v).unwrap()
+}
+
+fn reason(e: &ContractError) -> &'static str {
+    match e {
+        ContractError::Malformed(_) => "malformed",
+        ContractError::Invalid(_) => "invalid",
+        ContractError::UnsupportedVersion { .. } => "unsupported_version",
+        ContractError::TooLarge => "too_large",
+    }
+}
+
+#[test]
+fn every_shared_invalid_case_is_rejected_for_its_reason() {
+    let cases: serde_json::Value = serde_json::from_slice(&fixture("invalid.v1.json")).unwrap();
+    let (project, session) = (fixture("project.v1.json"), fixture("session.v1.json"));
+    let mut seen = 0;
+    for (key, base) in [("project", &project), ("session", &session)] {
+        for c in cases[key].as_array().unwrap() {
+            let bytes = patched(base, c);
+            let got = if key == "project" { parse_project(&bytes).map(|_| ()) } else { parse_session(&bytes).map(|_| ()) };
+            let e = got.expect_err(&format!("{key}: {} was accepted", c["case"]));
+            assert_eq!(reason(&e), c["reason"].as_str().unwrap(), "{key}: {} -> {e:?}", c["case"]);
+            seen += 1;
+        }
+    }
+    assert!(seen >= 60, "{seen}");
 }

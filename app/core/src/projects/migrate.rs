@@ -166,6 +166,7 @@ pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], c
         let project = added.project().clone();
         let mut have: HashSet<(String, &'static str)> = store
             .sessions(&project.id)?
+            .sessions
             .iter()
             .filter_map(|s| Some((s.run_id.clone()?, kind_name(&s.kind))))
             .collect();

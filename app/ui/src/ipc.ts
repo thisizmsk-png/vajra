@@ -165,7 +165,8 @@ export const api = {
   /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
   projectMigrationConfirm: (roots: string[]) =>
     call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
-  projectSessions: (id: string) => call<{ sessions: Session[] }>("project_sessions", { id }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed". */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */

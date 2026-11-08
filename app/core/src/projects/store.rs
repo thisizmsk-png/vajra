@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use super::contract::{self, ContractError, Project, Session};
+use super::contract::{self, ContractError, Project, Session, SessionLog};
 use super::identity::{self, Guard, IdentityError};
 use crate::control::{fsx, time};
 
@@ -280,14 +280,14 @@ impl Store {
     }
 
     /// The project's sessions, the newest line per id, in first-seen order. Only the tail of the file is read; a damaged
-    /// line is skipped.
-    pub fn sessions(&self, project_id: &str) -> Result<Vec<Session>> {
+    /// line is skipped but counted, and a line of another major version is flagged (`unsupported`).
+    pub fn sessions(&self, project_id: &str) -> Result<SessionLog> {
         let _g = self.lock();
         self.read_one(project_id)?;
         let path = self.project_dir(project_id).join("sessions.jsonl");
         let mut f = match fs::File::open(&path) {
             Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionLog::default()),
             Err(e) => return Err(e.into()),
         };
         let len = f.metadata()?.len();

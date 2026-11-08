@@ -129,7 +129,7 @@ fn confirming_creates_the_project_with_run_and_orchestrator_sessions_and_touches
     let out = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]).unwrap();
     assert_eq!(out.projects.len(), 1);
     assert_eq!((out.projects[0].name.as_str(), out.projects[0].outcome, out.projects[0].sessions), ("alpha", "created", 3));
-    let sessions = s.sessions(&out.projects[0].id).unwrap();
+    let sessions = s.sessions(&out.projects[0].id).unwrap().sessions;
     let orch: Vec<_> = sessions.iter().filter(|x| x.kind == SessionKind::Orchestrator).collect();
     let runs_s: Vec<_> = sessions.iter().filter(|x| x.kind == SessionKind::Run).collect();
     assert_eq!((orch.len(), runs_s.len()), (1, 2));
@@ -155,7 +155,7 @@ fn it_runs_once_and_a_second_confirm_changes_nothing() {
     let again = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]);
     assert!(matches!(again, Err(MigrateError::AlreadyDone)));
     let id = s.list(true).unwrap().projects[0].id.clone();
-    assert_eq!(s.sessions(&id).unwrap().len(), 1);
+    assert_eq!(s.sessions(&id).unwrap().sessions.len(), 1);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn a_forged_lead_session_file_or_run_id_is_not_trusted() {
     let cs = vec!["c1".to_string()];
     let s = t.store();
     let out = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]).unwrap();
-    let sessions = s.sessions(&out.projects[0].id).unwrap();
+    let sessions = s.sessions(&out.projects[0].id).unwrap().sessions;
     assert_eq!(sessions.len(), 1, "no orchestrator for a bad lead id, no session for a bad run id");
     assert_eq!(sessions[0].kind, SessionKind::Run);
 }

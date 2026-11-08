@@ -95,8 +95,8 @@ fn each_project_keeps_its_own_sessions() {
     s.append_session(&session(&pa.id, &sid_a, SessionStatus::Running)).unwrap();
     s.append_session(&session(&pa.id, &sid_a, SessionStatus::Done)).unwrap();
     s.append_session(&session(&pb.id, &sid_b, SessionStatus::Running)).unwrap();
-    let a = s.sessions(&pa.id).unwrap();
-    let b = s.sessions(&pb.id).unwrap();
+    let a = s.sessions(&pa.id).unwrap().sessions;
+    let b = s.sessions(&pb.id).unwrap().sessions;
     assert_eq!((a.len(), a[0].status), (1, SessionStatus::Done), "the newest line per id wins");
     assert_eq!((b.len(), b[0].id.as_str()), (1, sid_b.as_str()));
     // A session for a project that does not exist, or one that fails validation, is refused.
@@ -104,7 +104,7 @@ fn each_project_keeps_its_own_sessions() {
     let mut bad = session(&pa.id, &sid_a, SessionStatus::Running);
     bad.provider = "NOT OK".into();
     assert!(matches!(s.append_session(&bad), Err(StoreError::Invalid(_))));
-    assert!(s.sessions(&pb.id).unwrap().iter().all(|x| x.project_id == pb.id));
+    assert!(s.sessions(&pb.id).unwrap().sessions.iter().all(|x| x.project_id == pb.id));
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn archiving_hides_the_project_deletes_nothing_and_adding_it_again_restores_it()
     assert_eq!(s.archive(&p.id, None).unwrap().rev, 2, "archiving twice changes nothing");
     assert!(s.list(false).unwrap().projects.is_empty());
     assert_eq!(s.list(true).unwrap().projects.len(), 1);
-    assert_eq!(s.sessions(&p.id).unwrap().len(), 1, "its history is still there");
+    assert_eq!(s.sessions(&p.id).unwrap().sessions.len(), 1, "its history is still there");
     assert!(repo.join(".git/HEAD").exists(), "the folder is untouched");
     let back = s.add(&repo, false).unwrap();
     assert_eq!(back.outcome(), "restored");
@@ -316,7 +316,8 @@ fn a_damaged_sessions_line_does_not_hide_the_rest() {
     use std::io::Write;
     let mut f = fs::OpenOptions::new().append(true).open(t.data().join("projects").join(&p.id).join("sessions.jsonl")).unwrap();
     f.write_all(b"garbage line\n{\"schema\":\"vajra.session/9\"}\n").unwrap();
-    assert_eq!(s.sessions(&p.id).unwrap().len(), 1);
+    let log = s.sessions(&p.id).unwrap();
+    assert_eq!((log.sessions.len(), log.skipped, log.unsupported), (1, 2, true), "the damaged and the newer-major line are counted");
 }
 
 #[test]
