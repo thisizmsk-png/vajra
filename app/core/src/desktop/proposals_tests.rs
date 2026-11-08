@@ -191,7 +191,7 @@ fn a_lead_bound_to_another_project_cannot_reach_this_projects_proposals() {
     svc.call_tool_for_project(other, 1, "propose_run", &json!({"ask": "theirs"})).unwrap();
     assert_eq!(svc.open_proposals(Some(&pid)).unwrap().len(), 1);
     assert!(matches!(svc.call_tool_for_project(other, 1, "start_proposal", &json!({})), Err(ControlError::UnknownTool)));
-    assert!(matches!(svc.call_tool_for_project(&pid, 2, "propose_run", &json!({"ask": "stale"})), Err(ControlError::StaleGeneration)));
+    assert!(matches!(svc.call_tool_for_project(&pid, 2, "propose_run", &json!({"ask": "stale"})), Err(ControlError::StaleLeadGeneration)));
 }
 
 /// #90 review: the UI matches a proposal to its project by the project's full recorded root, so `project` is that root
