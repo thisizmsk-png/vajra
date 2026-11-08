@@ -14,6 +14,10 @@
 #   atman.sh observe | dream | verify
 #
 # Nothing here writes to config/, the skill core, skills or agents.
+# NFR-SEC-2: atman.py reads the HMAC key, so it is started as /usr/bin/python3 on the system PATH, never a python3 a
+# same-uid worker planted in a user dir such as ~/.local/bin.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+PYTHON3="/usr/bin/python3"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-command -v python3 >/dev/null 2>&1 || { echo "atman: python3 is required" >&2; exit 1; }
-exec python3 -I "${HERE}/../atman/atman.py" "$@"
+[ -x "$PYTHON3" ] || { echo "atman: python3 is required at $PYTHON3 (xcode-select --install provides it)" >&2; exit 1; }
+exec "$PYTHON3" -I "${HERE}/../atman/atman.py" "$@"
