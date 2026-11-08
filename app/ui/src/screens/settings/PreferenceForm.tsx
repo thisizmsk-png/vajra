@@ -11,7 +11,16 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
   const prefs = usePreferenceScope(projectId, false);
   const [patch, setPatch] = useState<PreferencePatch>({}); const [message, setMessage] = useState("");
   const dirty = Object.keys(patch).length > 0;
-  useEffect(() => { setPatch({}); setMessage(""); }, [projectId, prefs.view?.rev]);
+  // Reset during render, not in an effect: an effect runs after paint, so an edit made in that gap (the form has just
+  // appeared) would be wiped. The first load of a scope clears nothing; a new scope clears the draft and the message;
+  // a new revision (another window saved, or our own save landed) clears only the draft, so our own "Saved." stays.
+  const scope = projectId ?? ""; const rev = prefs.view?.rev;
+  const [seen, setSeen] = useState<{ scope: string; rev: number | undefined }>({ scope, rev });
+  if (seen.scope !== scope || seen.rev !== rev) {
+    setSeen({ scope, rev });
+    if (seen.scope !== scope) { setPatch({}); setMessage(""); }
+    else if (seen.rev !== undefined && rev !== undefined) setPatch({});
+  }
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
   if (!prefs.view) return <div className="v-pref">{prefs.error ? <><p role="alert">{prefs.error}</p><Button onClick={prefs.reload}>{C.reload}</Button></> : <p role="status">{C.reading}</p>}</div>;
   const view = prefs.view;
