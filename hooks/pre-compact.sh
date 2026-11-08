@@ -19,6 +19,7 @@ set -uo pipefail
 # its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
 OPENSSL="/usr/bin/openssl"
+PYTHON3="/usr/bin/python3"
 
 VAJRA_DIR="${HOME}/.claude/vajra"
 HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"

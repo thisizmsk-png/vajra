@@ -39,6 +39,7 @@ umask 077
 # its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
 OPENSSL="/usr/bin/openssl"
+PYTHON3="/usr/bin/python3"
 
 VAJRA_DIR="${HOME}/.claude/vajra"
 ROOT="${VAJRA_DIR}/campaigns"
@@ -388,7 +389,7 @@ cmd_close() {
 # signed state; it is not proof that the workflow wrote it.
 REPORT_MAX=65536
 # FNV-1a 32 of $1 (ASCII), as the workflow's fnv(): a copy check, not a security property.
-fnv32() { python3 -I -c 'import sys
+fnv32() { "$PYTHON3" -I -c 'import sys
 h = 0x811c9dc5
 for b in sys.argv[1].encode(): h = ((h ^ b) * 0x01000193) & 0xffffffff
 print("%08x" % h)' "$1"; }
@@ -460,7 +461,7 @@ cmd_archive_evidence() {
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   # vajra_tasks.py judges the bundle (signed, green for head, a task closed on it), copies exactly
   # those bytes without following links, and signs the manifest; this keeps the state signed.
-  out="$(python3 -I "$SCRIPT_DIR/vajra_tasks.py" archive-evidence --campaign "$SLUG" "$src" --head "$head" --setup "$setup")" \
+  out="$("$PYTHON3" -I "$SCRIPT_DIR/vajra_tasks.py" archive-evidence --campaign "$SLUG" "$src" --head "$head" --setup "$setup")" \
     || die "evidence archive refused"
   append_progress "evidence archived: ${out#evidence archived for "$SLUG": }"; touch_updated; sign_state "$DIR"
   echo "$out"

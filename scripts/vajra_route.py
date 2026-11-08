@@ -52,6 +52,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# NFR-SEC-2: this module reads the HMAC key. Its children (git, the knowledge ledger) come from the system dirs first,
+# whatever PATH started it: a same-uid worker can write user dirs such as ~/.local/bin.
+os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+
 SKILL_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = SKILL_DIR / "config" / "default.json"
 CAMPAIGN_SCRIPT = SKILL_DIR / "scripts" / "vajra-campaign.sh"

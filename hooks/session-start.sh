@@ -24,6 +24,7 @@ set -uo pipefail
 # its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
 PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
 OPENSSL="/usr/bin/openssl"
+PYTHON3="/usr/bin/python3"
 
 SKILL_DIR="${HOME}/.claude/skills/vajra"
 VAJRA_DIR="${HOME}/.claude/vajra"
@@ -164,7 +165,7 @@ fi
 # 5 seconds and 8000 characters, and its output is always (re)wrapped in one
 # <untrusted-data source="vajra-kb"> block: it is data, not instructions.
 KB_SH="${SKILL_DIR}/scripts/vajra_kb.py"
-if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && command -v python3 >/dev/null 2>&1; then
+if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && [ -x "$PYTHON3" ]; then
   KB_CWD=""
   if command -v jq >/dev/null 2>&1 && [ -n "$PAYLOAD" ]; then
     KB_CWD="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || true)"
@@ -172,7 +173,7 @@ if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && command -v python3 >/dev/null 
   { [ -n "$KB_CWD" ] && [ -d "$KB_CWD" ]; } || KB_CWD="$PWD"
   KB_TMP="$(mktemp "${TMPDIR:-/tmp}/vajra-prime-XXXXXX" 2>/dev/null)" || KB_TMP=""
   if [ -n "$KB_TMP" ]; then
-    ( cd "$KB_CWD" 2>/dev/null && exec python3 -I "$KB_SH" prime --budget 1500 ) > "$KB_TMP" 2>/dev/null </dev/null &
+    ( cd "$KB_CWD" 2>/dev/null && exec "$PYTHON3" -I "$KB_SH" prime --budget 1500 ) > "$KB_TMP" 2>/dev/null </dev/null &
     kb_pid=$!
     kb_waited=0
     while kill -0 "$kb_pid" 2>/dev/null && [ "$kb_waited" -lt 50 ]; do sleep 0.1; kb_waited=$((kb_waited + 1)); done
