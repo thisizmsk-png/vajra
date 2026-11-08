@@ -164,6 +164,7 @@ Shell B frame (T4, wave 1).
 | Providers / Models and capacity / Mobile / Notifications / Appearance / Keyboard / Diagnostics, each with a one-line lede | Settings sections | new; only Providers (the real checks) and Keyboard are built, the rest say "Not built yet" |
 | Show or hide the project column / inspector; Go to project 1 to 9 | Settings > Keyboard, palette | new |
 | VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
+| Project column / Inspector | status-bar and view-tab toggles (accessible name) | one constant name; aria-pressed carries the state. "Show/Hide …" stays in the tooltip and the palette commands (#86 review) |
 | (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
 
 "Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps

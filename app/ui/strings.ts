@@ -56,6 +56,7 @@ export const S = {
     inspector: "Inspector",
     showInspector: "Show inspector",
     hideInspector: "Hide inspector",
+    column: "Project column",
     showColumn: "Show project column",
     hideColumn: "Hide project column",
     goProject: (name: string) => `Go to project ${name}`,

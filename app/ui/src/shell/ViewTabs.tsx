@@ -40,7 +40,7 @@ export function ViewTabs({ route, project, review, workers, onClose, inspector, 
         })}
       </nav>
       {inspector !== null && (
-        <button type="button" className="v-icon-btn" aria-pressed={inspector} aria-label={inspector ? S.frame.hideInspector : S.frame.showInspector}
+        <button type="button" className="v-icon-btn" aria-pressed={inspector} aria-label={S.frame.inspector}
           title={`${inspector ? S.frame.hideInspector : S.frame.showInspector} (⌘I)`} aria-keyshortcuts={ariaShortcut(["⌘", "I"])} onClick={onInspector}>
           <Icon name="panelRight" />
         </button>

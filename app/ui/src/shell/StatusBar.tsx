@@ -9,7 +9,7 @@ export function StatusBar({ runs, compact, onColumn, onPhone, onSettings }: {
   return (
     <footer className="v-sbar" aria-label={S.frame.status}>
       {compact !== null && (
-        <button type="button" className="v-sb-btn" aria-pressed={!compact} aria-label={compact ? S.frame.showColumn : S.frame.hideColumn}
+        <button type="button" className="v-sb-btn" aria-pressed={!compact} aria-label={S.frame.column}
           title={`${compact ? S.frame.showColumn : S.frame.hideColumn} (⌘B)`} aria-keyshortcuts={ariaShortcut(["⌘", "B"])} onClick={onColumn}>
           <Icon name="panelLeft" size={12} />
         </button>

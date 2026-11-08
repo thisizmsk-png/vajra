@@ -132,6 +132,19 @@ describe("Shell B frame (FG-03)", () => {
     expect(screen.getByRole("complementary", { name: S.frame.inspector })).toBeTruthy();
   });
 
+  it("the column and inspector toggles keep one name; aria-pressed carries the state (WCAG 4.1.2)", async () => {
+    boot();
+    await screen.findByRole("complementary", { name: S.column.label("api") });
+    const column = screen.getByRole("button", { name: S.frame.column });
+    const inspector = screen.getByRole("button", { name: S.frame.inspector });
+    expect(column.getAttribute("aria-pressed")).toBe("true");
+    expect(inspector.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(column);
+    fireEvent.click(inspector);
+    expect(screen.getByRole("button", { name: S.frame.column }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: S.frame.inspector }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("opens the inspector by default from 1440 px", async () => {
     boot();
     expect(await screen.findByRole("complementary", { name: S.frame.inspector })).toBeTruthy();
