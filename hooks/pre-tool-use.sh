@@ -266,6 +266,10 @@ glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can li
   glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
   glob_chain $((ri + 1)) $((si + 1))
 }
+glob_climbs() { # pattern-component -> 0 if it is ".." or a brace alternation with a ".." alternative ({..,x}, {x,..}, {..})
+  [ "$1" = .. ] && return 0
+  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.\.([,}]|$) ]]
+}
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
   # Each other component descends one level, "**" none (it may match zero directories).
@@ -274,7 +278,7 @@ glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob pa
   while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
   depth=${#a[@]}; min=$depth
   for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
-    case "$c" in ..) depth=$((depth - 1)) ;; *\*\**) ;; *) depth=$((depth + 1)) ;; esac
+    if glob_climbs "$c"; then depth=$((depth - 1)); else case "$c" in *\*\**) ;; *) depth=$((depth + 1)) ;; esac; fi
     [ "$depth" -lt "$min" ] && min=$depth
   done
   [ "$min" -le "$common" ]
@@ -295,7 +299,8 @@ glob_pattern_check() { # canonical search root
     rest_started=1
     # After the first glob character the filesystem walks the pattern: "." is a no-op, ".." steps back out of whatever
     # the glob matched, which cannot be followed statically.
-    case "$c" in .) continue ;; ..) dotdot=1 ;; esac
+    [ "$c" = . ] && continue
+    glob_climbs "$c" && dotdot=1
     GLOB_R[$GLOB_N]="$c"; GLOB_N=$((GLOB_N + 1))
   done
   set +f
