@@ -1211,6 +1211,11 @@ impl App {
         ctl(lock(&self.control).stop_worker(Actor::Human, worker, reason))
     }
 
+    /// `control_stop` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_stop_expecting(&self, worker: &str, reason: Option<&str>, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).stop_worker_expecting(Actor::Human, worker, reason, expect))
+    }
+
     pub fn confirm_stop(&self, action_id: &str) -> Res {
         ctl(lock(&self.control).confirm_stop(Actor::Human, action_id))
     }

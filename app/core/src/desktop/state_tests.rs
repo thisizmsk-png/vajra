@@ -191,3 +191,23 @@ fn approve_plan_receipt_replays_on_a_second_click() {
     let b = app.act_approve_plan(&env("appr-0010-jjjj", None), "plan:not-a-plan", &"a".repeat(64));
     assert_eq!((b["replayed"].clone(), b["receipt"].clone()), (json!(true), a["receipt"].clone()));
 }
+
+// Review P1: the attempt is checked under the control lock, together with resolving the worker and publishing the
+// stop. A refresh that swaps attempt 2 for attempt 3 between the receipt being accepted and the effect must be
+// rejected, and must not stop the replacement.
+#[test]
+fn a_worker_replaced_between_acceptance_and_effect_is_not_stopped() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 2);
+    let e = env("stop-0011-kkkk", Some(2));
+    // The generation read at begin sees attempt 2; the replacement lands before the effect runs.
+    let r = app.act(&e, Caller::Ui, true, "stop_worker", "bhima", Some(2), || {
+        lock(&app.control).set_workers(vec![worker(3)]);
+        app.control_stop_expecting("bhima", None, e.expect_generation)
+    });
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str(), r["receipt"]["retry"].as_str()), ("rejected", Some("stale_generation"), Some("after_refresh")));
+    assert_eq!(r["error"]["current_generation"], 3);
+    let l = app.ledger().unwrap();
+    assert!(!l["records"].as_array().unwrap().iter().any(|x| x["kind"] == "stop"), "attempt 3 was not stopped");
+}

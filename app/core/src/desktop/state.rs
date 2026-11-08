@@ -120,7 +120,7 @@ impl App {
 
     pub fn act_stop_worker(&self, env: &Envelope, worker: &str, reason: Option<&str>) -> Value {
         let cur = lock(&self.control).worker_generation(worker);
-        self.act(env, Caller::Ui, true, "stop_worker", worker, cur, || self.control_stop(worker, reason))
+        self.act(env, Caller::Ui, true, "stop_worker", worker, cur, || self.control_stop_expecting(worker, reason, env.expect_generation))
     }
 
     pub fn act_approve_plan(&self, env: &Envelope, id: &str, plan_sha256: &str) -> Value {
