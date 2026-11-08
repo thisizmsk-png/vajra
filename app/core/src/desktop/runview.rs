@@ -516,7 +516,7 @@ mod tests {
             };
             let verified = line_with("criteria passing");
             // 1/3 in the fixture, but the writer emits this line only after a failed gate, whatever the count.
-            assert_eq!(run(&[verified.clone()]), ("Fix", Outcome::Active, Some(3), None), "{verified}");
+            assert_eq!(run(std::slice::from_ref(&verified)), ("Fix", Outcome::Active, Some(3), None), "{verified}");
             assert_eq!(run(&[line_with("waiting for the user")]).1, Outcome::NeedInput);
             assert_eq!(run(&[line_with("review rejected")]).1, Outcome::Rejected);
             assert_eq!(run(&[verified.clone(), line_with("no verified delivery")]), ("Fix", Outcome::NeedInput, Some(3), Some(3)));

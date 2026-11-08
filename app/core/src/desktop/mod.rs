@@ -170,6 +170,10 @@ enum Outcome {
     Failed(&'static str),
 }
 
+/// `(HEAD, dirty)` of a repo.
+type RepoState = (String, bool);
+/// Per repo: when `RepoState` was read and what it was (`None`: the read failed).
+type WorktreeCache = HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -221,7 +225,7 @@ pub struct App {
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
-    worktree_state: Mutex<HashMap<PathBuf, (std::time::Instant, Option<(String, bool)>)>>,
+    worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
 }
