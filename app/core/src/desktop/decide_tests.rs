@@ -1128,3 +1128,28 @@ fn a_burst_of_new_items_is_one_inbox_new_event_with_no_item_text() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+// Given more than 200 items waiting in all, and a project whose only item sorts after the 200-item cut, Then the
+// project's projection still lists it and counts the true number waiting in that project.
+#[test]
+fn a_projects_inbox_is_counted_before_the_global_cut() {
+    let t = Tmp::new();
+    let app = t.app();
+    let mine = my_project(&app, &t);
+    for i in 0..205 {
+        t.campaign(&format!("fill-{i:03}"), "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "filler"}]));
+    }
+    // Sorts after every filler item (same first-seen time, larger id) and belongs to the real project.
+    let e = runindex::Entry { campaign: "zzz-mine".into(), session_id: SID.into(), run_id: "20261106-0912".into(), cwd: t.cwd(), lead_session_id: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+    t.campaign("zzz-mine", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "mine"}]));
+    let all = app.inbox().unwrap();
+    assert_eq!(all["count"], 206);
+    assert_eq!(all["items"].as_array().unwrap().len(), 200, "the global read is still cut");
+    let ps = app.project_state(&mine, None).unwrap();
+    assert_eq!(ps["inbox"]["count"], 1, "{}", ps["inbox"]);
+    assert_eq!(ps["inbox"]["items"][0]["id"], "task:zzz-mine.t1");
+    let unsorted = app.project_state("p_unsorted", None).unwrap();
+    assert_eq!(unsorted["inbox"]["count"], 205);
+    assert_eq!(unsorted["inbox"]["items"].as_array().unwrap().len(), 50);
+}

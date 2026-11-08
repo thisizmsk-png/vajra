@@ -271,8 +271,8 @@ impl App {
         if id.starts_with("question:") {
             return Err(super::fail("not_answerable", "this question belongs to the whole run; answer it in the Director-General conversation"));
         }
-        let inbox = self.inbox()?;
-        let item = inbox["items"].as_array().and_then(|a| a.iter().find(|i| i["id"] == id && i["kind"] == "task")).ok_or_else(|| super::fail("not_found", "that item is no longer waiting"))?;
+        let inbox = self.inbox_all()?;
+        let item = inbox.iter().find(|i| i["id"] == id && i["kind"] == "task").ok_or_else(|| super::fail("not_found", "that item is no longer waiting"))?;
         let campaign = item["campaign"].as_str().unwrap_or_default();
         id.strip_prefix("task:").and_then(|r| r.strip_prefix(campaign)).and_then(|r| r.strip_prefix('.')).filter(|t| !t.is_empty()).map(str::to_string).ok_or_else(|| super::invalid("id", "not a task item"))
     }
@@ -329,9 +329,10 @@ impl App {
         }
         // Read the inbox first: a project whose waiting items changed bumps its revision, and the revision below must be
         // the one that already includes it.
-        let inbox = match self.inbox() {
+        let inbox = match self.inbox_all() {
             Ok(v) => {
-                let mine: Vec<&Value> = v["items"].as_array().into_iter().flatten().filter(|i| i["project_id"] == project_id).collect();
+                // Counted and picked from the whole list: the global 200-item cut belongs to `inbox`, not to a project.
+                let mine: Vec<&Value> = v.iter().filter(|i| i["project_id"] == project_id).collect();
                 json!({"ok": true, "count": mine.len(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()})
             }
             // Never "nothing waiting" on a failed read.

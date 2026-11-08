@@ -140,6 +140,18 @@ impl App {
     }
 
     fn inbox_at(&self, now: i64) -> Res {
+        let all = self.inbox_all_at(now)?;
+        let count = all.len();
+        Ok(json!({"count": count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
+    }
+
+    /// Every waiting item, oldest first, with no cut: a caller that counts or picks (a project's projection, the item an
+    /// answer targets) does it here, and cuts only what it sends out.
+    pub(super) fn inbox_all(&self) -> Result<Vec<Value>, Value> {
+        self.inbox_all_at(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
+    }
+
+    fn inbox_all_at(&self, now: i64) -> Result<Vec<Value>, Value> {
         let seen_path = self.data.join(SEEN_FILE);
         let mut seen: std::collections::BTreeMap<String, i64> = crate::control::fsx::read_nofollow_capped(&seen_path, 1 << 20)
             .ok()
@@ -235,9 +247,7 @@ impl App {
         items.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         self.events.observe(items.iter().map(|(_, _, v)| arrival_key(v)));
         self.inbox_read(project_fingerprints(items.iter().map(|(_, _, v)| arrival_key(v))));
-        let count = items.len();
-        let list: Vec<Value> = items.into_iter().take(MAX_ITEMS).map(|(_, _, v)| v).collect();
-        Ok(json!({"count": count, "items": list}))
+        Ok(items.into_iter().map(|(_, _, v)| v).collect())
     }
 }
 
