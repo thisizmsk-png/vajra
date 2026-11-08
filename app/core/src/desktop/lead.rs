@@ -429,15 +429,19 @@ impl App {
 
     /// The folders of the app's other projects, for the Director-General's deny rules (ADR-15 D8, FG-02c): the recorded
     /// root of every other project in the store, archived ones too (archiving hides a project, it does not make its
-    /// folder readable to others). Never `repo`'s own root, and never a project root that holds `repo` (denying an
-    /// ancestor would deny the Director-General its own project). A store that cannot be listed in full refuses the ask:
-    /// a partial list would leave some project readable.
+    /// folder readable to others), and every distinct folder a run of another project was launched in (a worktree
+    /// outside its project's root, #80 review), newest first, at most `MAX_RUN_FOLDERS`. Never `repo`'s own root or
+    /// a run of its own project, and never a folder that holds `repo` (denying an ancestor would deny the
+    /// Director-General its own project). A store that cannot be listed in full refuses the ask: a partial list would
+    /// leave some project readable.
     pub(super) fn other_project_roots(&self, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        const MAX_RUN_FOLDERS: usize = 256;
         let listing = self.projects.list(true).map_err(|_| LeadError::GuardMissing("the project list could not be read for the deny rules".into()))?;
         if listing.truncated {
             return Err(LeadError::GuardMissing("the project list is too large to build the deny rules".into()));
         }
         let own = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let own_key = super::caps::project_key(repo);
         let mut out: Vec<PathBuf> = Vec::new();
         for p in listing.projects {
             let root = PathBuf::from(&p.root);
@@ -446,6 +450,27 @@ impl App {
                 continue;
             }
             out.push(root);
+        }
+        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
+            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
+            .unwrap_or_default();
+        runs.sort_unstable_by(|a, b| b.cmp(a));
+        let mut added = 0;
+        for run in runs {
+            if added >= MAX_RUN_FOLDERS {
+                break;
+            }
+            let Some(cwd) = self.read_run_cwd(&run) else { continue };
+            if super::caps::project_key(&cwd) == own_key {
+                continue;
+            }
+            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            // Inside its own root is its own project (an inner project's root is denied above, from the store).
+            if own.starts_with(&real) || real.starts_with(&own) || out.contains(&cwd) {
+                continue;
+            }
+            out.push(cwd);
+            added += 1;
         }
         Ok(out)
     }
