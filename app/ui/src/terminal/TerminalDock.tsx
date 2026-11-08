@@ -71,6 +71,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const [note, setNote] = useState("");
   const [life, setLife] = useState<Lifecycle | null>(null);
   const back = useRef<Element | null>(null);
+  const curRef = useRef(cur);
+  curRef.current = cur;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const openRef = useRef(open);
@@ -109,16 +111,20 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     api.termList().then(
       (r) => {
         if (dead || !r.terminals.length) return;
-        // Bind each live shell to the restored tab for its folder (keeping that tab's kind); the rest stay dormant.
+        // Bind each live shell to the restored tab for its folder (keeping that tab's kind). A live shell is never left
+        // without a tab, or nothing could show or close it: it gets one even past the cap, and dormant tabs (no shell,
+        // nothing lost) make room for it, never the selected one.
         const next = tabsRef.current.map((t) => ({ ...t }));
         let first: number | null = null;
         for (const i of r.terminals) {
           // The core does not know kinds: prefer the plain shell tab, so a returning shell never lands on an agent tab.
           const t = next.find((n) => !n.live && n.cwd === i.cwd && n.kind === "shell") ?? next.find((n) => !n.live && n.cwd === i.cwd);
           if (t) Object.assign(t, { live: true, attachId: i.id });
-          else if (next.length < MAX_TABS) next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
-          else continue;
+          else next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
           first ??= (t ?? next[next.length - 1]).key;
+        }
+        for (let k = next.length - 1; k >= 0 && next.length > MAX_TABS; k--) {
+          if (!next[k].live && next[k].key !== curRef.current) next.splice(k, 1);
         }
         setTabs(next);
         if (!tabsRef.current.length && first !== null) setCur(first);
