@@ -1040,11 +1040,14 @@ impl App {
                             (Some(_), None) => false,
                             (None, _) => want_head.is_some_and(|w| w != head),
                         });
-                        // A repo with its own executable filter cannot be compared by tree without running it: the evidence
-                        // cannot be shown current, so it is never `pass` (it is not claimed stale either).
+                        // With a recorded tree, `pass` means the trees were compared and match. A repo with its own executable
+                        // filter cannot be compared without running it, and a current tree that could not be computed (a timeout
+                        // or an I/O failure) has not been compared at all: HEAD alone does not show the working tree is the one
+                        // verified. Neither is `pass`, and neither is claimed stale.
                         let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
+                        let tree_unavailable = want_tree.is_some() && state.is_some_and(|(_, tree, _)| tree.is_none());
                         // Evidence whose tree cannot be read is never assumed current either (a green check proves the file, not the tree).
-                        if stale { "stale" } else if filtered || (unreadable && state.is_some()) { "unverified" } else { "pass" }
+                        if stale { "stale" } else if filtered || tree_unavailable || (unreadable && state.is_some()) { "unverified" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }

@@ -1455,6 +1455,41 @@ fn evidence_is_stale_when_the_working_tree_differs_from_the_tree_it_was_verified
     assert_eq!(status_of(&app, &slug), "pass");
 }
 
+/// A `git` that behaves like the real one except that it fails `write-tree`: the repo is readable, HEAD is known, but the
+/// current working tree's id cannot be computed (a timeout or an I/O failure in the real world).
+fn git_without_write_tree(t: &Tmp) -> std::path::PathBuf {
+    let real = String::from_utf8(std::process::Command::new("which").arg("git").output().unwrap().stdout).unwrap().trim().to_string();
+    let p = t.home().join("no-write-tree-git.sh");
+    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = write-tree ] && exit 1; done\nexec {real} \"$@\"\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+// Review on #53: with a recorded tree, `pass` means the trees were compared and match. A repo whose HEAD reads but whose
+// current tree cannot be computed has not been compared, so the row is `unverified`, never `pass` on the commit alone.
+#[test]
+fn recorded_tree_with_an_uncomputable_current_tree_is_unverified_not_pass() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (mut app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass", "baseline: the trees match");
+    app.bridge.git = git_without_write_tree(&t);
+    assert_eq!(status_of(&app, &slug), "unverified", "HEAD matches but the tree could not be compared");
+    // A different commit with the tree uncomputable is not claimed stale either (nothing was compared).
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "unverified");
+}
+
+// And evidence with no recorded tree still falls back to its commit when the tree cannot be computed (nothing to compare).
+#[test]
+fn evidence_without_a_recorded_tree_still_passes_on_its_commit_when_the_tree_cannot_be_computed() {
+    let t = Tmp::new();
+    let (mut app, slug, _repo, _head) = live_evidence_repo(&t, true, false);
+    app.bridge.git = git_without_write_tree(&t);
+    assert_eq!(status_of(&app, &slug), "pass");
+}
+
 #[test]
 fn evidence_verified_on_an_uncommitted_tree_is_pass_and_survives_committing_that_same_tree() {
     if !have_jq() { eprintln!("skipped: no jq"); return; }
