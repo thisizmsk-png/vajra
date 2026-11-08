@@ -56,6 +56,9 @@ fn cards_come_from_tasks_and_cached_verdicts_and_carry_clean_text() {
     let d = std::path::PathBuf::from("/x");
     let mut evil = ev_task(&d, "t6", "pending", &[], "");
     evil["title"] = json!("\u{1b}[31mRed\u{202e} title\u{0}");
+    let bad_id = ev_task(&d, "t\u{202e}7\u{1b}", "pending", &[], "");
+    let mut bad_owner = ev_task(&d, "t8", "pending", &[], "");
+    bad_owner["owner_agent"] = json!("ev\u{202e}il\u{1b}[2J\u{0}");
     let (app, slug) = campaign_with_tasks(&t, vec![
         ev_task(&d, "t1", "done", &["ac-1", "ac-2"], "green"),
         ev_task(&d, "t2", "done", &["ac-3"], "red"),
@@ -63,6 +66,8 @@ fn cards_come_from_tasks_and_cached_verdicts_and_carry_clean_text() {
         ev_task(&d, "t4", "blocked", &["ac-5"], ""),
         ev_task(&d, "t5", "failed", &["ac-6"], ""),
         evil,
+        bad_id,
+        bad_owner,
     ]);
     let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
     fs::write(ev_dir.join("green.json"), b"{}").unwrap();
@@ -85,6 +90,12 @@ fn cards_come_from_tasks_and_cached_verdicts_and_carry_clean_text() {
     let title = card(&b, "t6")["title"].as_str().unwrap().to_string();
     assert!(!title.chars().any(|c| c.is_control() || c == '\u{202e}'), "{title:?}");
     assert!(title.contains("Red") && title.contains("title"), "{title:?}");
+    // A task id the engine could not have written is no card; an owner is clean text.
+    let all: Vec<&Value> = b["campaigns"].as_array().unwrap().iter().flat_map(|c| c["cards"].as_array().unwrap()).collect();
+    assert!(all.iter().all(|c| c["task_id"].as_str().is_none_or(|id| !id.contains('\u{202e}')) && !c["key"].as_str().unwrap().contains('\u{1b}')), "{b}");
+    assert_eq!(all.iter().filter(|c| c["kind"] == "task").count(), 7, "t1..t6 and t8");
+    let owner = card(&b, "t8")["owner"].as_str().unwrap().to_string();
+    assert!(!owner.chars().any(|c| c.is_control() || c == '\u{202e}') && owner.starts_with("Evil"), "{owner:?}");
     // A non-store id has no board.
     assert!(app.project_state("k_0123", None).unwrap()["board"].is_null());
 }

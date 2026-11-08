@@ -239,17 +239,32 @@ impl App {
         self.orchestrator_status(&orch)
     }
 
-    /// `lead_status` by project (FG-02c, decision Q2): the project's Director-General, with no run needed. The stream is
-    /// not rebuilt from the transcript here (that needs a run's nonces to redact); the run form does it.
+    /// `lead_status` by project (FG-02c, decision Q2): the project's Director-General, with no run needed. A read only:
+    /// nothing is created and no stand-in conversation is carried over (the first ask does that), so a project never
+    /// asked reads `not_started`. The stream is not rebuilt from the transcript here (that needs a run's nonces to
+    /// redact); the run form does it.
     pub fn lead_status_for_project(&self, project_id: &str) -> Res {
         if !crate::projects::contract::valid_project_id(project_id) {
             return Err(super::invalid("project_id", "must be a project id"));
         }
-        let orch = match self.active_project(project_id).and_then(|p| self.orchestrator(&p.id, Path::new(&p.root))) {
-            Ok(o) => o,
+        let project = match self.active_project(project_id) {
+            Ok(p) => p,
             Err(e) => return store_refusal(&e),
         };
-        self.orchestrator_status(&orch)
+        match self.recorded_orchestrator(project_id) {
+            Ok(Some(orch)) => self.orchestrator_status(&orch),
+            Ok(None) => {
+                // Shown as conversation 1 in the project's folder, which is what its first ask starts.
+                let orch = Orchestrator { id: project.id.clone(), root: PathBuf::from(&project.root), dir: self.orchestrator_dir(&project.id), generation: 1, session: None };
+                let mut v = self.orchestrator_status(&orch)?;
+                if v["state"] == "idle" {
+                    v["state"] = json!("not_started");
+                    v["reason"] = json!("not asked yet");
+                }
+                Ok(v)
+            }
+            Err(e) => status_off(e.detail().unwrap_or_else(|| e.code().to_string())),
+        }
     }
 
     /// The ADR-15 2.1 state of one Director-General.
