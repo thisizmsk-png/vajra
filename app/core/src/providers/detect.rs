@@ -18,6 +18,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Out {
     pub code: Option<i32>,
     pub stdout: String,
+    /// Codex prints "Not logged in" here, not on stdout.
+    pub stderr: String,
 }
 
 /// What detection needs from the machine; the tests supply a fake one.
@@ -53,7 +55,7 @@ impl Probe for System {
     fn run(&self, path: &Path, args: &[&str]) -> Option<Out> {
         let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let o = crate::vajra::bridge::run_process_on_path(path, &argv, None, TIMEOUT, &self.dirs).ok()?;
-        o.whole().then_some(Out { code: o.code, stdout: o.stdout })
+        o.whole().then_some(Out { code: o.code, stdout: o.stdout, stderr: o.stderr })
     }
     fn env(&self, key: &str) -> Option<OsString> {
         std::env::var_os(key)
@@ -126,6 +128,9 @@ fn limits(name: &str, c: &CapabilityFlags, installed: bool) -> Vec<Limit> {
     if c.stop == StopKind::Terminate {
         add("stop", "stop_ends_process", format!("{name} has no hand-off: Stop ends its process"));
     }
+    if installed && !c.resume {
+        add("resume", "no_resume_session", format!("{name} cannot be resumed: Vajra does not get its session id"));
+    }
     if !installed {
         add("start", "not_installed", format!("{name} is not installed"));
         add("resume", "not_installed", format!("{name} is not installed"));
@@ -156,6 +161,9 @@ fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<(&'stati
     let unsure = |code, why| (LoginState::CannotTell, Some((code, why)));
     let Some(o) = out else { return unsure("check_unfinished", "The login check did not finish") };
     match engine {
+        // Asymmetric on purpose: `signed_in` needs BOTH `loggedIn: true` and exit 0 (the one state that says things are fine,
+        // so it must be earned twice), while `loggedIn: false` is signed out whatever the exit code (the CLI said so
+        // itself, and signed out only shows a hint, it never blocks a start). Anything else is `cannot_tell`.
         Engine::Claude => match serde_json::from_str::<serde_json::Value>(&o.stdout).ok().and_then(|v| v.get("loggedIn").and_then(|b| b.as_bool())) {
             Some(true) if o.code == Some(0) => (LoginState::SignedIn, None),
             Some(false) => (LoginState::SignedOut, None),
@@ -163,7 +171,7 @@ fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<(&'stati
         },
         Engine::Codex => match o.code {
             Some(0) => (LoginState::SignedIn, None),
-            Some(1) if o.stdout.to_ascii_lowercase().contains("not logged in") => (LoginState::SignedOut, None),
+            Some(1) if format!("{}\n{}", o.stdout, o.stderr).to_ascii_lowercase().contains("not logged in") => (LoginState::SignedOut, None),
             _ => unsure("check_not_understood", "The login check gave an answer Vajra does not understand"),
         },
     }

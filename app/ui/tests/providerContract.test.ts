@@ -36,7 +36,7 @@ describe("provider contract fixtures", () => {
 
   it("reads the project_state provider object, with its name and tested flag", () => {
     const r = parseProjectProvider(fx("project_state.provider.v1.json"));
-    expect(r.ok && [r.value.id, r.value.name, r.value.tested, r.value.installed, r.value.login_state, r.value.limits.length]).toEqual(["codex", "Codex CLI", "untested", true, "cannot_tell", 2]);
+    expect(r.ok && [r.value.id, r.value.name, r.value.tested, r.value.installed, r.value.login_state, r.value.limits.length]).toEqual(["codex", "Codex CLI", "untested", true, "cannot_tell", 3]);
   });
 
   it("carries stable codes beside the fallback text, and a Stop limit for a provider that ends the process", () => {

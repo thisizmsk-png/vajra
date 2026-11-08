@@ -23,7 +23,7 @@ fn claude_has_every_capability() {
 #[test]
 fn codex_flags_are_honest() {
     let c = adapter_for(Engine::Codex).capabilities();
-    assert!(c.pty_attach && c.resume);
+    assert!(c.pty_attach && !c.resume, "a Codex run Vajra started has no session id Codex knows, so Resume is off");
     // No hook channel and no transcript parser for Codex: no steering, no inspector,
     // and a stop is a terminate, not a sticky block.
     assert!(!c.transcript && !c.inspect && !c.message && !c.redirect && !c.vajra_workflow);
