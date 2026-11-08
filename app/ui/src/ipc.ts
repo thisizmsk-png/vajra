@@ -159,7 +159,8 @@ export const api = {
   /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
   projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
   projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
-  projectSessions: (id: string) => call<{ sessions: Session[] }>("project_sessions", { id }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed". */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */

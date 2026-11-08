@@ -69,7 +69,11 @@ impl App {
 
     pub fn project_sessions(&self, id: &str) -> Res {
         let s = self.projects.sessions(id).map_err(refusal)?;
-        Ok(json!({"sessions": serde_json::to_value(s).unwrap_or_else(|_| json!([]))}))
+        Ok(json!({
+            "sessions": serde_json::to_value(s.sessions).unwrap_or_else(|_| json!([])),
+            "skipped": s.skipped,
+            "unsupported": s.unsupported,
+        }))
     }
 }
 
