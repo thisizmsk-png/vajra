@@ -1225,6 +1225,11 @@ impl App {
         ctl(lock(&self.control).message_worker(Actor::Human, worker, text))
     }
 
+    /// `control_message` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_message_expecting(&self, worker: &str, text: &str, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).message_worker_expecting(Actor::Human, worker, text, expect))
+    }
+
     pub fn control_redirect(&self, worker: &str, text: &str) -> Res {
         ctl(lock(&self.control).redirect_worker(Actor::Human, worker, text))
     }

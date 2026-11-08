@@ -40,6 +40,8 @@ pub(super) struct Hub {
     workers_fp: u64,
     /// project_id -> fingerprint of the waiting items last read, so an item that arrives or leaves moves the revision.
     inbox_fp: HashMap<String, u64>,
+    /// Whether the last inbox read worked (it starts true).
+    inbox_ok: bool,
 }
 
 /// Where `act` gets the target's current generation.
@@ -71,7 +73,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new() })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new(), inbox_ok: true })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -248,7 +250,7 @@ impl App {
     /// that holds the hash it read passes its first 16 hex chars as `expect_generation` and a changed plan is refused.
     pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str) -> Value {
         let shown = lock(&self.shown).get(id).and_then(|s| sha_generation(s));
-        self.act(env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan(id, reason))
+        self.act(env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan_expecting(id, reason, env.expect_generation))
     }
 
     /// Answer a waiting task (a question or a block) from the inbox: the text goes to that task's worker as a control
@@ -262,7 +264,7 @@ impl App {
             if text.trim().is_empty() {
                 return Err(super::invalid("text", "an answer cannot be empty"));
             }
-            self.control_message(&worker, text)
+            self.control_message_expecting(&worker, text, env.expect_generation)
         })
     }
 
@@ -308,6 +310,25 @@ impl App {
         }
     }
 
+    /// The inbox read worked or failed. A change of availability moves every known project's revision (and this
+    /// one's), so a projection built from a failed read is never answered `unchanged` from a cached good one, and the
+    /// recovery is seen too.
+    fn inbox_availability(&self, ok: bool, project_id: &str) {
+        let moved: Vec<Value> = {
+            let mut h = lock(&self.acts);
+            if h.inbox_ok == ok {
+                return;
+            }
+            h.inbox_ok = ok;
+            let mut ids: Vec<String> = h.revs.keys().cloned().collect();
+            if !ids.iter().any(|p| p == project_id) {
+                ids.push(project_id.to_string());
+            }
+            ids.into_iter().map(|p| json!({"project_id": p, "rev": h.bump(&p)})).collect()
+        };
+        self.emit_projects(moved);
+    }
+
     /// The shell hands in how to emit named events (`inbox_new`), next to the `changed` sink.
     pub fn set_event_sink(&self, sink: super::EventSink) {
         self.events.set_sink(sink);
@@ -337,7 +358,9 @@ impl App {
         }
         // Read the inbox first: a project whose waiting items changed bumps its revision, and the revision below must be
         // the one that already includes it.
-        let inbox = match self.inbox_all() {
+        let read = self.inbox_all();
+        self.inbox_availability(read.is_ok(), project_id);
+        let inbox = match read {
             Ok(v) => {
                 // Counted and picked from the whole list: the global 200-item cut belongs to `inbox`, not to a project.
                 let mine: Vec<&Value> = v.iter().filter(|i| i["project_id"] == project_id).collect();

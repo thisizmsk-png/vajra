@@ -1153,3 +1153,50 @@ fn a_projects_inbox_is_counted_before_the_global_cut() {
     assert_eq!(unsorted["inbox"]["count"], 205);
     assert_eq!(unsorted["inbox"]["items"].as_array().unwrap().len(), 50);
 }
+
+// Given plan A was read and the workflow file now holds plan B (no inbox read in between), When the human rejects with
+// A's generation, Then it is refused as stale before any decision line or progress call, and B stays waiting.
+#[test]
+fn rejecting_a_plan_that_changed_after_the_last_read_is_refused_without_effect() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha_a = ready(&t, &app);
+    let log = t.campaign_script(0);
+    // Plan B replaces the file (a later result, same index 0, different content); nobody reads the inbox.
+    let b = json!([{"action": "deploy", "why": "a different plan", "plan": deploy_plan()}, {"action": "push", "why": "ship"}]);
+    t.result_at("wf_b.json", &done(CAMP, b), RUN, 120);
+    let a_gen = u64::from_str_radix(&sha_a[..16], 16).unwrap();
+    let r = app.act_reject_plan(&act_env("rej-3000-aaaa", Some(a_gen), &my_project(&app, &t)), PLAN, "no");
+    assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("stale_generation")), "{r}");
+    assert!(r["receipt"]["current_generation"].is_number(), "the receipt names the plan's current generation");
+    assert!(!log.exists() && states(&t, "reject").is_empty(), "no progress call, no decision line");
+    // After a read the human sees B; rejecting with B's generation works.
+    let sha_b = item(&app.inbox().unwrap(), PLAN)["plan_sha256"].as_str().unwrap().to_string();
+    assert_ne!(sha_a, sha_b);
+    let b_gen = u64::from_str_radix(&sha_b[..16], 16).unwrap();
+    assert_eq!(app.act_reject_plan(&act_env("rej-3001-bbbb", Some(b_gen), &my_project(&app, &t)), PLAN, "no")["receipt"]["state"], "done");
+}
+
+// Given a successful inbox read and then a failed one, When the caller holds the last good revision, Then it is NOT told
+// unchanged: it gets the failed-read projection; and recovery moves the revision again.
+#[test]
+fn a_failed_inbox_read_moves_the_revision_and_so_does_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let app = t.app();
+    let mine = my_project(&app, &t);
+    let good = app.project_state(&mine, None).unwrap();
+    assert_eq!(good["inbox"]["ok"], true);
+    let rev = good["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&mine, Some(rev)).unwrap()["unchanged"], true, "nothing changed yet");
+    let camps = t.home().join(".claude/vajra/campaigns");
+    fs::set_permissions(&camps, fs::Permissions::from_mode(0o000)).unwrap();
+    let bad = app.project_state(&mine, Some(rev)).unwrap();
+    fs::set_permissions(&camps, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(bad["unchanged"], false, "a failed read is never answered unchanged: {bad}");
+    assert_eq!(bad["inbox"]["ok"], false);
+    let bad_rev = bad["rev"].as_u64().unwrap();
+    assert!(bad_rev > rev);
+    let back = app.project_state(&mine, Some(bad_rev)).unwrap();
+    assert_eq!((back["unchanged"].clone(), back["inbox"]["ok"].clone()), (json!(false), json!(true)), "recovery is seen too");
+}

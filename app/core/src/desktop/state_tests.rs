@@ -547,3 +547,20 @@ fn two_campaigns_sharing_a_task_name_are_answered_separately() {
     assert_eq!(state_of(&app.act_answer_question(&env("ans-2003-dddd", None), "task:c2.t1", "two")), "done");
     assert_eq!(message_workers(&app), ["bbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaa"]);
 }
+
+// Given the worker moved to a newer attempt between the receipt's check and the message's publication, Then the
+// message path itself refuses (the check is under the control lock), and nothing is queued.
+#[test]
+fn an_answer_is_checked_against_the_attempt_at_publication() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 2); // the worker is now on attempt 2
+    waiting_task(&t, "question");
+    // The receipt's own pre-check saw attempt 1 (the stale read it was given), so it lets the effect run...
+    let r = app.act(&env("ans-4000-aaaa", Some(1)), Caller::Ui, true, "answer_question", "task:c1.t1", Some(1), || app.control_message_expecting("t1", "old answer", Some(1)));
+    // ...and the message path refuses it.
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")), "{r}");
+    assert!(queued_messages(&app).is_empty());
+    let ok = app.act_answer_question(&env("ans-4001-bbbb", Some(2)), "task:c1.t1", "new answer");
+    assert_eq!(state_of(&ok), "done", "{ok}");
+}
