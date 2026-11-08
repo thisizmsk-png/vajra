@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use super::allowlist::Allowlist;
-use super::bridge::{Bridge, Request, run_process};
+use super::bridge::{Bridge, Request, run_process_on_path};
 
 pub const INSTALL_CMD: &str = "bash ~/.claude/skills/vajra/scripts/install.sh";
 
@@ -49,7 +49,7 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
 
     rows.push(match find_on_path("claude", dirs) {
         None => row("claude", false, CLAUDE_MISSING, "Install Claude Code: https://claude.com/claude-code"),
-        Some(p) => match run_process(&p, &["--version".to_string()], None, bridge.timeout) {
+        Some(p) => match run_process_on_path(&p, &["--version".to_string()], None, bridge.timeout, dirs) {
             Ok(o) if o.exit() == Some(0) => row("claude", true, o.stdout.trim(), ""),
             _ => row("claude", false, "`claude --version` failed", "Reinstall Claude Code: https://claude.com/claude-code"),
         },
@@ -161,6 +161,43 @@ mod tests {
         let r = claude_row(&home, &dirs);
         assert!(r.ok && r.detail == "9.9.9 (Claude Code)", "{r:?}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// An npm install: `claude` is `#!/usr/bin/env <node>` and that node exists only in a dir the resolved PATH names.
+    #[test]
+    fn an_npm_claude_whose_node_is_only_on_the_resolved_path_passes_version() {
+        let home = std::env::temp_dir().join(format!("vajra-preflight-npm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["nvm/bin", "other"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let home = home.canonicalize().unwrap();
+        let node = "vajra-fake-node";
+        exe(&home.join("nvm/bin").join(node), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n");
+        exe(&home.join("nvm/bin/claude"), &format!("#!/usr/bin/env {node}\n"));
+        let shell = home.join("zsh");
+        exe(&shell, &format!("#!/bin/sh\nprintf '%s' '__VAJRA_PATH_BEGIN__{}:/usr/bin:/bin__VAJRA_PATH_END__'\n", home.join("nvm/bin").display()));
+        let minimal: Vec<PathBuf> = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from).to_vec();
+        let login = crate::userpath::detect(&shell, &home, std::time::Duration::from_secs(5));
+        let dirs = crate::userpath::effective(login, &minimal, &home);
+        let r = claude_row(&home, &dirs);
+        assert!(r.ok && r.detail == "9.9.9 (Claude Code)", "{r:?}");
+
+        // Control: the same claude run without its node dir on PATH fails the version check.
+        exe(&home.join("other/claude"), &format!("#!/usr/bin/env {node}\n"));
+        let r = claude_row(&home, &[home.join("other")]);
+        assert!(!r.ok && r.detail.contains("--version"), "{r:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bridge_path_keeps_the_user_dirs_first_and_drops_relative_ones() {
+        let p = super::super::bridge::bridge_path(&[PathBuf::from("/x/nvm/bin"), PathBuf::from("."), PathBuf::from("/usr/bin")]);
+        let dirs: Vec<PathBuf> = std::env::split_paths(&p).collect();
+        assert_eq!(dirs[0], PathBuf::from("/x/nvm/bin"));
+        assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
+        assert_eq!(dirs.iter().filter(|d| *d == Path::new("/usr/bin")).count(), 1);
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")), "base dirs stay: {dirs:?}");
     }
 
     #[test]

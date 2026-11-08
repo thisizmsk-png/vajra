@@ -224,9 +224,24 @@ fn name(s: &str) -> Result<String, BridgeError> {
     if ok { Ok(s.to_string()) } else { Err(BridgeError::Invalid(format!("bad name: {s:?}"))) }
 }
 
-fn scrubbed_env(cmd: &mut Command, home: Option<&Path>) {
+/// The dirs every bridged program can count on, kept after the user's own PATH.
+const BASE_PATH: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
+
+/// `user` (the resolved login-shell PATH, so an npm `claude` finds its `node` on a Finder launch) followed by the
+/// base dirs it lacks. Relative entries are dropped: a bridged program never resolves anything from its cwd.
+pub fn bridge_path(user: &[PathBuf]) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for d in user.iter().cloned().chain(BASE_PATH.map(PathBuf::from)) {
+        if d.is_absolute() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(&dirs).unwrap_or_else(|_| BASE_PATH.join(":").into())
+}
+
+fn scrubbed_env(cmd: &mut Command, home: Option<&Path>, path: &[PathBuf]) {
     cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
+    cmd.env("PATH", bridge_path(path));
     cmd.env("LC_ALL", "C.UTF-8");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
@@ -285,9 +300,32 @@ pub fn run_process_full(
     home: Option<&Path>,
     stdin: Option<&[u8]>,
 ) -> Result<Output, BridgeError> {
+    run_process_inner(program, argv, cwd, timeout, home, stdin, &crate::userpath::current())
+}
+
+/// As `run_process`, with `PATH` built from `path` (absolute dirs) instead of the startup-resolved user PATH.
+pub fn run_process_on_path(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    path: &[PathBuf],
+) -> Result<Output, BridgeError> {
+    run_process_inner(program, argv, cwd, timeout, None, None, path)
+}
+
+fn run_process_inner(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    home: Option<&Path>,
+    stdin: Option<&[u8]>,
+    path: &[PathBuf],
+) -> Result<Output, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(argv).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
-    scrubbed_env(&mut cmd, home);
+    scrubbed_env(&mut cmd, home, path);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
