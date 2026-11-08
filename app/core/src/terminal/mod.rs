@@ -159,22 +159,29 @@ struct Registry {
 }
 
 /// Releases an `open` slot on every path out of `open`.
-struct Slot<'a>(&'a Mutex<Registry>, PathBuf);
+struct Slot<'a>(&'a Mutex<Registry>, Option<PathBuf>);
 
 impl Slot<'_> {
-    fn release(self, r: &mut Registry) {
-        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
-            r.opening.swap_remove(i);
+    /// Give the slot back under a lock the caller already holds (`Drop` would take it again).
+    fn release(mut self, r: &mut Registry) {
+        if let Some(root) = self.1.take() {
+            r.forget_opening(&root);
         }
-        std::mem::forget(self);
     }
 }
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        let mut r = lock(self.0);
-        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
-            r.opening.swap_remove(i);
+        if let Some(root) = self.1.take() {
+            lock(self.0).forget_opening(&root);
+        }
+    }
+}
+
+impl Registry {
+    fn forget_opening(&mut self, root: &Path) {
+        if let Some(i) = self.opening.iter().position(|p| p == root) {
+            self.opening.swap_remove(i);
         }
     }
 }
@@ -251,7 +258,7 @@ impl Terminals {
                 return Err(TermError::TooMany);
             }
             r.opening.push(place.root.clone());
-            Slot(&self.map, place.root.clone())
+            Slot(&self.map, Some(place.root.clone()))
         };
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| TermError::Spawn(e.to_string()))?;
         drop(pair.slave); // so the reader sees EOF when the shell and its group are gone
