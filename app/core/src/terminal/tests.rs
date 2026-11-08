@@ -17,8 +17,7 @@ fn types_a_command_and_sees_its_output_in_the_root_with_the_temp_home() {
 fn a_worker_worktree_is_a_valid_place() {
     let f = Fixture::new("wt");
     let t = f.terminals();
-    let (s, out) = sink();
-    let info = t.open(&f.worktree, &f.roots(), 24, 80, s).unwrap();
+    let (info, out) = open_at(&t, &f, &f.worktree);
     assert_eq!((info.cwd.clone(), info.root.clone()), (f.worktree.clone(), f.root.clone()));
     t.write(info.id, b"pwd\n").unwrap();
     assert!(out.until("w1", 5).contains("worktrees/w1"));
@@ -268,8 +267,9 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
 /// A shell running `sleep` in the foreground does not read its input, so a PTY write of any size would block.
 fn sleeping_terminal(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
     let (info, out) = open_root(t, f);
-    t.write(info.id, b"sleep 60\n").unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    t.write(info.id, b"echo SLEEPING$((1+1)); sleep 60\n").unwrap();
+    out.until("SLEEPING2", 5);
+    std::thread::sleep(Duration::from_millis(100)); // the shell has printed; give it a moment to start `sleep`
     (info, out)
 }
 
@@ -362,8 +362,8 @@ fn many_small_writes_reach_the_shell_in_order() {
     let t = Arc::new(f.terminals());
     let (info, out) = open_root(&t, &f);
     let file = f.dir.join("typed.txt");
-    t.write(info.id, format!("cat > {}\n", file.display()).as_bytes()).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    t.write(info.id, format!("echo CATRDY$((1+1)); cat > {}\n", file.display()).as_bytes()).unwrap();
+    out.until("CATRDY2", 5);
     // One caller, many tiny writes: what the UI does while typing fast or pasting in pieces.
     for i in 0..500 {
         t.write(info.id, format!("{i}\n").as_bytes()).unwrap();
