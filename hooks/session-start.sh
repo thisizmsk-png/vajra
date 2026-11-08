@@ -127,7 +127,13 @@ esac
 # the "Vajra campaign:" prefix exactly once, even if the brief already has it.
 CAMPAIGN_SH="${SKILL_DIR}/scripts/vajra-campaign.sh"
 if [ -f "$CAMPAIGN_SH" ]; then
-  line="$(bash "$CAMPAIGN_SH" active --brief 2>/dev/null | head -1)"
+  # The pointer is per repo: ask from the session's own cwd (the payload's), not the hook's.
+  CAMPAIGN_CWD=""
+  if command -v jq >/dev/null 2>&1 && [ -n "${PAYLOAD:-}" ]; then
+    CAMPAIGN_CWD="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  fi
+  { [ -n "$CAMPAIGN_CWD" ] && [ -d "$CAMPAIGN_CWD" ]; } || CAMPAIGN_CWD="$PWD"
+  line="$(cd "$CAMPAIGN_CWD" 2>/dev/null && bash "$CAMPAIGN_SH" active --brief 2>/dev/null | head -1)"
   while :; do
     case "$line" in
       [[:space:]]*) line="${line#?}" ;;

@@ -49,7 +49,7 @@ fn worker(round: u32) -> WorkerInfo {
 fn seed_session(app: &App, round: u32) {
     let mut c = lock(&app.control);
     c.start_session(SID, "20261105-1810").unwrap();
-    c.set_workers(vec![worker(round)]);
+    c.set_workers(SID, vec![worker(round)]);
 }
 
 fn state_of(v: &Value) -> &str {
@@ -203,7 +203,7 @@ fn a_worker_replaced_between_acceptance_and_effect_is_not_stopped() {
     let e = env("stop-0011-kkkk", Some(2));
     // The generation read at begin sees attempt 2; the replacement lands before the effect runs.
     let r = app.act(&e, Caller::Ui, true, "stop_worker", "bhima", Some(2), || {
-        lock(&app.control).set_workers(vec![worker(3)]);
+        lock(&app.control).set_workers(SID, vec![worker(3)]);
         app.control_stop_expecting("bhima", None, e.expect_generation)
     });
     assert_eq!((state_of(&r), r["receipt"]["reason"].as_str(), r["receipt"]["retry"].as_str()), ("rejected", Some("stale_generation"), Some("after_refresh")));
@@ -352,7 +352,7 @@ fn a_quiet_worker_change_advances_the_revision_and_notifies() {
     assert_eq!(seen.lock().unwrap().len(), n);
     assert_eq!(app.project_state("proj-a", Some(rev1)).unwrap()["unchanged"], true);
     // The worker moves to attempt 2: no bus line, but the projection changed.
-    lock(&app.control).set_workers(vec![worker(2)]);
+    lock(&app.control).set_workers(SID, vec![worker(2)]);
     app.workers_published();
     let ps = app.project_state("proj-a", Some(rev1)).unwrap();
     assert_eq!(ps["unchanged"], false);

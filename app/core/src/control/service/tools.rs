@@ -16,20 +16,27 @@ impl Service {
     }
 
     /// `call_tool` for a Lead that was started for one run (`VAJRA_LEAD_RUN` in its MCP config, sent with every
-    /// request). The service has one control session, so the run id in the prompt proves nothing: the call is
-    /// refused unless that run is the current session's run, checked here on every call under the service lock.
+    /// request). The run id in the prompt proves nothing: the call is refused unless that run is a live session, and
+    /// it then sees and steers **only that session's** workers, checked here on every call under the service lock.
     /// A Lead asked about a finished run, or one that outlives its run, can never see or steer another run's workers.
+    /// An unbound call is served only while exactly one session is live: with two it could not say which run it means.
     pub fn call_tool_for_run(&mut self, run: Option<&str>, tool: &str, args: &Value) -> Result<Value> {
-        if let Some(r) = run {
-            if !crate::ids::valid_run_id(r) {
-                return Err(ControlError::InvalidArgs("run".into()));
+        let bound = match run {
+            Some(r) => {
+                if !crate::ids::valid_run_id(r) {
+                    return Err(ControlError::InvalidArgs("run".into()));
+                }
+                let s = self.sessions.values().find(|s| s.run_id == r).ok_or(ControlError::RunNotCurrent)?;
+                Some(s.id.clone())
             }
-            if self.session.as_ref().is_none_or(|s| s.run_id != r) {
-                return Err(ControlError::RunNotCurrent);
-            }
-        }
+            None if self.sessions.len() > 1 => return Err(ControlError::RunNotCurrent),
+            None => None,
+        };
         self.last_recorded = None;
-        let out = self.dispatch_tool(tool, args)?;
+        let prev = std::mem::replace(&mut self.scope, bound);
+        let out = self.dispatch_tool(tool, args);
+        self.scope = prev;
+        let out = out?;
         let id = out.get("action_id").and_then(Value::as_str).map(str::to_string).or_else(|| self.last_recorded.take());
         if let Some(id) = id {
             if audit::append_line(&self.audit_log, "ALLOW", &format!("mcp {tool} id={id}"), SystemTime::now()).is_err() {
