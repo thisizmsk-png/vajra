@@ -4,7 +4,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { S } from "../../strings";
 import { api } from "../ipc";
-import type { TermInfo } from "../ipc";
+import type { Lifecycle, TermInfo } from "../ipc";
 import type { ViewState } from "./TerminalView";
 import "./terminal.css";
 
@@ -69,6 +69,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const [cur, setCur] = useState<number | null>(init.cur);
   const [focusToken, setFocusToken] = useState(0);
   const [note, setNote] = useState("");
+  const [life, setLife] = useState<Lifecycle | null>(null);
   const back = useRef<Element | null>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -124,6 +125,19 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     if (open && cur !== null) setTabs((all) => (all.some((t) => t.key === cur && !t.live) ? all.map((t) => (t.key === cur ? { ...t, live: true } : t)) : all));
   }, [open, cur]);
   useEffect(() => writeLayout(tabs, cur), [tabs, cur]);
+
+  // Ask the core what a close, a quit or an archive would do: once when the dock is shown and again when a shell starts,
+  // ends or goes. Never while hidden, never on a timer.
+  const shape = tabs.map((t) => `${t.key}:${t.state.status}`).join(",");
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    api.lifecycle().then(
+      (r) => !stale && setLife(r),
+      () => !stale && setLife(null),
+    );
+    return () => void (stale = true);
+  }, [open, shape]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -199,6 +213,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
+      <Lifecycle life={life} />
       <div className="v-term__body">
         {!tabs.length && (
           <div className="v-term__state">
@@ -228,5 +243,33 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       </div>
       <p role="status" className="v-term__sr">{note}</p>
     </section>
+  );
+}
+
+const nameOf = (p: string) => base(p);
+
+/** One honest line from the core's own report, and a list of the shells behind it. Nothing renders when nothing would be affected. */
+function Lifecycle({ life }: { life: Lifecycle | null }) {
+  if (!life) return null;
+  const { terminals: t, runs: r } = life.close_keeps;
+  const keeps = [t && S.terminal.lifecycle.terminals(t), r && S.terminal.lifecycle.runs(r)].filter(Boolean).join(" and ");
+  const leaves = life.terminals.filter((x) => life.archive_leaves.includes(x.id)).map((x) => nameOf(x.cwd)).join(", ");
+  if (!keeps && !leaves) return null;
+  return (
+    <div className="v-term__life" data-testid="v-term-lifecycle">
+      <p>
+        {keeps && S.terminal.lifecycle.keeps(keeps, t + r > 1 || (t > 0 && r > 0))} {leaves && S.terminal.lifecycle.archive(leaves)}
+      </p>
+      <details>
+        <summary>{S.terminal.lifecycle.details}</summary>
+        <ul>
+          {life.terminals.map((x) => (
+            <li key={x.id}>
+              {x.cwd} · {S.terminal.lifecycle.pid(x.pid)} · {x.alive ? S.terminal.lifecycle.running : S.terminal.lifecycle.endedState}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
   );
 }

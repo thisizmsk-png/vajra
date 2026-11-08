@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod ids;
+pub mod lifecycle_report;
 pub mod logging;
 pub mod nap;
 pub mod paths;

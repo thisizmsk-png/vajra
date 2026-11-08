@@ -104,6 +104,8 @@ pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TermInfo {
     pub id: u32,
+    /// The shell's process id, for diagnostics.
+    pub pid: u32,
     pub cwd: PathBuf,
     pub root: PathBuf,
     pub rows: u16,
@@ -150,7 +152,7 @@ impl Term {
 
     fn info(&self, id: u32) -> TermInfo {
         let (rows, cols) = *lock(&self.size);
-        TermInfo { id, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst) }
+        TermInfo { id, pid: self.pid, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst) }
     }
 }
 

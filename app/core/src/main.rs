@@ -244,6 +244,12 @@ fn term_list(terms: State<'_, Terminals>) -> Res {
     Ok(serde_json::json!({"terminals": terms.list().iter().map(term_value).collect::<Vec<_>>()}))
 }
 
+/// What keeps running after the window closes, after a quit and after an archive. On demand: nothing polls it.
+#[tauri::command]
+fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>) -> Res {
+    serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), app.active_run_count())).map_err(|e| serde_json::json!({"error": "internal", "detail": e.to_string()}))
+}
+
 #[tauri::command(async)]
 fn control_message(app: State<'_, App>, worker: String, text: String) -> Res {
     app.control_message(&worker, &text)
@@ -427,6 +433,7 @@ fn main() {
             term_open,
             term_attach,
             term_list,
+            lifecycle,
             term_write,
             term_resize,
             term_ack,
