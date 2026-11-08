@@ -270,6 +270,9 @@ glob_climbs() { # pattern-component -> 0 if it is ".." or a brace alternation wi
   [ "$1" = .. ] && return 0
   [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.\.([,}]|$) ]]
 }
+glob_stays() { # pattern-component -> 0 if it is a brace alternation with a "." alternative, which may not descend at all
+  [[ "$1" == *[{,}]* && "$1" =~ (^|[{,])\.([,}]|$) ]]
+}
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
   # Each other component descends one level, "**" none (it may match zero directories).
@@ -278,7 +281,7 @@ glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob pa
   while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
   depth=${#a[@]}; min=$depth
   for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
-    if glob_climbs "$c"; then depth=$((depth - 1)); else case "$c" in *\*\**) ;; *) depth=$((depth + 1)) ;; esac; fi
+    if glob_climbs "$c"; then depth=$((depth - 1)); elif glob_stays "$c"; then :; else case "$c" in *\*\**) ;; *) depth=$((depth + 1)) ;; esac; fi
     [ "$depth" -lt "$min" ] && min=$depth
   done
   [ "$min" -le "$common" ]
