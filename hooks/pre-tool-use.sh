@@ -65,7 +65,7 @@ allow() {
 }
 
 TOOL=""
-command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
+command -v jq >/dev/null 2>&1 || block "jq was not found, so the payload cannot be checked and every tool call is blocked (fail-closed). Vajra's hooks look only in /usr/bin, /bin, /usr/sbin, /sbin, /opt/homebrew/bin or /usr/local/bin; a copy in ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is not used. Install jq in one of those dirs (macOS 15+ ships /usr/bin/jq; or: brew install jq), then retry."
 
 PAYLOAD="$(cat)"
 CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""

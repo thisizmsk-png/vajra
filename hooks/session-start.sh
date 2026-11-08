@@ -51,6 +51,13 @@ sha256_of() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# A tool the hooks need that is not in the pinned dirs: say so in every session (the guard blocks every tool call
+# without jq; without python3 the router, atman and the knowledge prime are off), never a silent break.
+missing_tools() {
+  command -v jq >/dev/null 2>&1 || echo "Vajra: jq was not found, so the guard blocks every tool call. Vajra's hooks look only in /usr/bin, /bin, /usr/sbin, /sbin, /opt/homebrew/bin or /usr/local/bin; a copy in ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is not used. Install jq in one of those dirs (macOS 15+ ships /usr/bin/jq; or: brew install jq)."
+  [ -x "$PYTHON3" ] || echo "Vajra: python3 was not found at $PYTHON3, so the router, atman and the knowledge prime are off. Vajra uses only /usr/bin/python3 (xcode-select --install provides it)."
+}
+
 # One line per problem; empty output = clean.
 integrity_problems() {
   if ! command -v jq >/dev/null 2>&1 || [ ! -x "$OPENSSL" ]; then
@@ -107,6 +114,8 @@ if [ "$CHECK_ONLY" = 1 ]; then
 fi
 
 mkdir -p "$VAJRA_DIR" 2>/dev/null || true
+
+missing_tools
 
 case "$PROBLEMS" in
   "")

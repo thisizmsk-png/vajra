@@ -49,9 +49,9 @@ warn() { printf 'WARN  %s\n' "$1"; WARNS=$((WARNS + 1)); }
 
 # --- Dependencies -------------------------------------------------------------
 for dep in bash git jq openssl; do
-  if command -v "$dep" >/dev/null 2>&1; then pass "dependency: $dep"; else fail "dependency: $dep not found"; fi
+  if command -v "$dep" >/dev/null 2>&1; then pass "dependency: $dep"; else fail "dependency: $dep not found. Vajra's hooks look only in /usr/bin, /bin, /usr/sbin, /sbin, /opt/homebrew/bin or /usr/local/bin; a copy in ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is not used. Install $dep in one of those dirs"; fi
 done
-if [ -x "$PYTHON3" ]; then pass "dependency: python3"; else warn "dependency: python3 not found (router disabled)"; fi
+if [ -x "$PYTHON3" ]; then pass "dependency: python3"; else warn "dependency: python3 not found at $PYTHON3: the router, atman and the knowledge prime are off. Vajra uses only /usr/bin/python3 (xcode-select --install provides it); a python3 elsewhere is not used"; fi
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 
 # --- Skill files --------------------------------------------------------------

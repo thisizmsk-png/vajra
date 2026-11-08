@@ -135,6 +135,25 @@ PY_ONLY="$TEST_HOME/py-only"; mkdir -p "$PY_ONLY"; cp "$PLANT/python3" "$PY_ONLY
 jq -e '.hmac | test("^[0-9a-f]{64}$")' "$TEST_HOME/wt/pin8/evidence.json" >/dev/null 2>&1; check "verify-work: evidence.json is signed" $?
 no_plant_ran; check "verify-work: the planted python3 never ran" $?
 
+# 8b. scripts/atman.sh (the Atman CLI) starts atman.py, which reads the key: never a planted python3.
+hostile "$REPO/scripts/atman.sh" verify >/dev/null 2>&1; check "atman.sh verify: exit 0" $?
+no_plant_ran; check "atman.sh: no planted tool ran" $?
+
+# 8c. A tool the hooks need is missing from the pinned dirs: never a silent break. Copies whose pinned PATH (and python3)
+# point at an empty dir stand in for a machine where jq and python3 live only in a user dir.
+NOBIN="$TEST_HOME/nobin"; mkdir -p "$NOBIN"
+for h in pre-tool-use session-start; do
+  sed -e "s#^PATH=\"/usr/bin[^\"]*\"; export PATH\$#PATH=\"$NOBIN\"; export PATH#" -e "s#^PYTHON3=\"/usr/bin/python3\"\$#PYTHON3=\"$NOBIN/python3\"#" \
+    "$SK/hooks/$h.sh" > "$SK/hooks/$h-notools.sh"
+done
+err="$(printf '%s' '{"tool_name":"Read","tool_input":{"file_path":"/tmp/x"},"cwd":"/tmp"}' | /bin/bash "$SK/hooks/pre-tool-use-notools.sh" 2>&1 >/dev/null)"; rc=$?
+[ "$rc" -eq 2 ]; check "no jq: the guard fails closed (exit 2)" $?
+printf '%s' "$err" | grep -q "every tool call is blocked" && printf '%s' "$err" | grep -q "/opt/homebrew/bin or /usr/local/bin" \
+  && printf '%s' "$err" | grep -q "~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim"; check "no jq: the guard says where jq must be" $?
+out="$(printf '%s' '{"session_id":"s","source":"startup"}' | /bin/bash "$SK/hooks/session-start-notools.sh" 2>/dev/null)"
+printf '%s' "$out" | grep -q "^Vajra: jq was not found, so the guard blocks every tool call"; check "no jq: session-start says so" $?
+printf '%s' "$out" | grep -q "^Vajra: python3 was not found at $NOBIN/python3"; check "no python3: session-start says so" $?
+
 # 9. One PATH everywhere: every hook is pinned, every pin is the same string, and it is the bridge's BASE_PATH (#70)
 # when that is present, so the engine and the app can never drift apart.
 WANT="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
