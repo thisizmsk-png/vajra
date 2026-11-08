@@ -104,7 +104,9 @@ export type InboxItem = {
   /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
   /** ADR-15 2.4 `run_proposal` items: the exact run a Director-General proposed. `ask` is what starts, byte for byte. */
-  ask?: string; base?: string; rounds?: number; project_id?: string; project?: string | null; generation?: number;
+  ask?: string; base?: string; rounds?: number; project_id?: string;
+  /** The project's full recorded root: what the UI matches projects on. `project_name` is only its label. */
+  project?: string | null; project_name?: string | null; generation?: number;
   /** What `start_proposal` must be given back: the hash of exactly what was shown. */
   proposal_sha256?: string;
 };
