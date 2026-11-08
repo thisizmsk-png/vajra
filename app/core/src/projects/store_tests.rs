@@ -365,3 +365,47 @@ fn a_symlink_or_a_fifo_in_place_of_sessions_jsonl_is_refused_without_hanging() {
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "a FIFO is refused, not waited on");
     assert!(s.list(true).is_ok(), "the store is still usable");
 }
+
+#[test]
+fn a_symlinked_project_folder_is_refused_and_the_outside_target_is_untouched() {
+    let t = Tmp::new("symdir");
+    let s = t.store();
+    let real = s.add(&t.repo("src/real"), false).unwrap().project().clone();
+    let projects = t.data().join("projects");
+    // An outside folder holding a perfectly valid record, and a symlink under a valid-looking id pointing at it.
+    let outside = t.0.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let id = "p_01JC5X8Z3B0K2M4N6P7Q8R9S0T";
+    let mut forged = real.clone();
+    forged.id = id.into();
+    fs::write(outside.join("project.json"), serde_json::to_vec(&forged).unwrap()).unwrap();
+    symlink(&outside, projects.join(id)).unwrap();
+    let before: Vec<_> = fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(s.get(id).is_err(), "the record behind a folder symlink is not served");
+    let l = s.list(true).unwrap();
+    assert_eq!((l.projects.len(), l.skipped), (1, 1), "and it is skipped when listing");
+    assert!(s.rename(id, "x", None).is_err());
+    assert!(s.archive(id, None).is_err());
+    assert!(s.sessions(id).is_err());
+    assert!(s.append_session(&session(id, &contract::fresh_id("s").unwrap(), SessionStatus::Running)).is_err());
+    let after: Vec<_> = fs::read_dir(&outside).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(before, after, "nothing was created or changed outside the store");
+    assert_eq!(fs::read(outside.join("project.json")).unwrap(), serde_json::to_vec(&forged).unwrap());
+    // Adding a folder is unaffected, and the real project still works.
+    assert_eq!(s.get(&real.id).unwrap().id, real.id);
+}
+
+#[test]
+fn a_project_folder_swapped_for_a_symlink_after_the_store_opened_is_not_followed_by_writes() {
+    let t = Tmp::new("swapdir");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let dir = t.data().join("projects").join(&p.id);
+    let outside = t.0.join("outside2");
+    fs::create_dir_all(&outside).unwrap();
+    fs::rename(&dir, t.0.join("moved")).unwrap();
+    symlink(&outside, &dir).unwrap();
+    assert!(s.rename(&p.id, "other", None).is_err());
+    assert!(s.append_session(&session(&p.id, &contract::fresh_id("s").unwrap(), SessionStatus::Running)).is_err());
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0, "nothing was written through the swapped folder");
+}

@@ -12,6 +12,7 @@ use std::time::SystemTime;
 
 use super::contract::{self, ContractError, Project, Session, SessionLog};
 use super::identity::{self, Guard, IdentityError};
+use super::pinned::Pinned;
 use crate::control::{fsx, time};
 
 /// Only the tail of a sessions file is read.
@@ -170,11 +171,24 @@ impl Store {
         Ok(out)
     }
 
-    fn read_one(&self, id: &str) -> Result<Project> {
+    /// The project's folder, pinned (never through a symlink). `NotFound` when there is no such folder.
+    fn pin(&self, id: &str) -> Result<Pinned> {
         if !contract::valid_project_id(id) {
             return Err(StoreError::NotFound);
         }
-        let bytes = match fsx::read_nofollow_capped(&self.project_dir(id).join("project.json"), contract::MAX_RECORD_BYTES as u64) {
+        match Pinned::open(&self.project_dir(id), false) {
+            Ok(d) => Ok(d),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn read_one(&self, id: &str) -> Result<Project> {
+        self.read_pinned(&self.pin(id)?, id)
+    }
+
+    fn read_pinned(&self, dir: &Pinned, id: &str) -> Result<Project> {
+        let bytes = match dir.read("project.json", contract::MAX_RECORD_BYTES as u64) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(StoreError::NotFound),
             Err(e) => return Err(e.into()),
@@ -190,11 +204,10 @@ impl Store {
 
     fn write(&self, p: &Project) -> Result<()> {
         p.validate()?;
-        let dir = self.project_dir(&p.id);
-        fsx::private_dir(&dir)?;
+        let dir = Pinned::open(&self.project_dir(&p.id), true)?;
         let mut bytes = serde_json::to_vec_pretty(p).map_err(|e| StoreError::Io(io::Error::other(e)))?;
         bytes.push(b'\n');
-        fsx::write_atomic(&dir, "project.json", &bytes)?;
+        dir.write_atomic("project.json", &bytes)?;
         Ok(())
     }
 
@@ -260,17 +273,16 @@ impl Store {
 
     /// Append one session record to its project's `sessions.jsonl` (0600).
     pub fn append_session(&self, s: &Session) -> Result<()> {
-        use std::io::Write;
         s.validate()?;
         let _g = self.lock();
-        self.read_one(&s.project_id)?;
+        let dir = self.pin(&s.project_id)?;
+        self.read_pinned(&dir, &s.project_id)?;
         let mut line = serde_json::to_vec(s).map_err(|e| StoreError::Io(io::Error::other(e)))?;
         if line.len() >= contract::MAX_RECORD_BYTES {
             return Err(StoreError::Invalid(ContractError::TooLarge));
         }
         line.push(b'\n');
-        let mut f = fsx::open_append(&self.project_dir(&s.project_id).join("sessions.jsonl"))?;
-        f.write_all(&line)?;
+        dir.append("sessions.jsonl", &line)?;
         Ok(())
     }
 
@@ -278,9 +290,9 @@ impl Store {
     /// line is skipped but counted, and a line of another major version is flagged (`unsupported`).
     pub fn sessions(&self, project_id: &str) -> Result<SessionLog> {
         let _g = self.lock();
-        self.read_one(project_id)?;
-        let path = self.project_dir(project_id).join("sessions.jsonl");
-        let buf = match fsx::read_tail_nofollow(&path, SESSIONS_READ_CAP) {
+        let dir = self.pin(project_id)?;
+        self.read_pinned(&dir, project_id)?;
+        let buf = match dir.read_tail("sessions.jsonl", SESSIONS_READ_CAP) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionLog::default()),
             Err(e) => return Err(e.into()),

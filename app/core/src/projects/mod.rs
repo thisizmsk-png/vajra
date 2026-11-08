@@ -5,3 +5,4 @@
 pub mod contract;
 pub mod identity;
 pub mod store;
+mod pinned;
