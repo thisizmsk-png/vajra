@@ -1,0 +1,10 @@
+{
+  "id": "codex",
+  "installed": true,
+  "login_state": "cannot_tell",
+  "capabilities": {"pty_attach": true, "transcript": false, "inspect": false, "message": false, "redirect": false, "stop": "terminate", "resume": true, "vajra_workflow": false},
+  "limits": [
+    {"control": "message", "reason": "Codex cannot take a message mid-run"},
+    {"control": "vajra_workflow", "reason": "Codex does not run the Vajra workflow"}
+  ]
+}
