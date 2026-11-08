@@ -1086,9 +1086,9 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
     let roots = app.other_project_roots(&t.repo());
-    assert_eq!(roots.len(), 2, "one folder per other project: {roots:?}");
-    assert!(roots.contains(&other));
-    assert!(roots.iter().any(|r| r.starts_with(&second)));
+    for want in [&other, &second, &second.join("sub")] {
+        assert!(roots.contains(want), "every run folder of another project: {want:?} in {roots:?}");
+    }
     assert!(!roots.iter().any(|r| r == &t.0 || r.starts_with(t.repo())), "never its own project or a folder holding it: {roots:?}");
 
     app.ask_lead(RUN_ID, "hi").unwrap();
@@ -1096,4 +1096,36 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     let got = std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("settings.json")).unwrap();
     assert!(got.contains(&format!("Read(/{}/**)", other.display())), "{got}");
     assert!(!got.contains(&format!("Read(/{}/**)", t.0.display())), "the folder holding the repo is not denied");
+}
+
+/// #80 review: a project whose only runs were in a subfolder and in a worktree outside it still has its main folder
+/// (its `.env`, its source) denied, and every one of those run folders too, not only the newest.
+#[test]
+fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an_outside_worktree() {
+    let t = Tmp::new();
+    let app = t.app();
+    let main = t.0.join("harbor");
+    let (sub, wt) = (main.join("src/api"), t.0.join("harbor-wt"));
+    for d in [main.join(".git/worktrees/harbor-wt"), sub.clone(), wt.clone(), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(main.join(".git/worktrees/harbor-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/harbor-wt").display())).unwrap();
+    assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&main), "the fixture is one project");
+    // The worktree run is the newest: before the fix it was the only folder of this project denied.
+    for (run, cwd) in [("20261108-1100", sub.clone()), ("20261108-1101", wt.clone())] {
+        app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
+    }
+    let roots = app.other_project_roots(&t.repo());
+    for want in [&main, &sub, &wt] {
+        assert!(roots.contains(want), "{want:?} denied: {roots:?}");
+    }
+    assert!(!roots.iter().any(|r| t.repo().starts_with(r)), "never its own project or a folder holding it: {roots:?}");
+
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("settings.json")).unwrap();
+    for want in [&main, &wt] {
+        assert!(got.contains(&format!("Read(/{}/**)", want.display())), "{want:?}: {got}");
+    }
 }
