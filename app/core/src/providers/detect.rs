@@ -159,6 +159,9 @@ fn login_state(engine: Engine, out: Option<Out>) -> (LoginState, Option<(&'stati
     let unsure = |code, why| (LoginState::CannotTell, Some((code, why)));
     let Some(o) = out else { return unsure("check_unfinished", "The login check did not finish") };
     match engine {
+        // Asymmetric on purpose: `signed_in` needs BOTH `loggedIn: true` and exit 0 (the one state that says things are fine,
+        // so it must be earned twice), while `loggedIn: false` is signed out whatever the exit code (the CLI said so
+        // itself, and signed out only shows a hint, it never blocks a start). Anything else is `cannot_tell`.
         Engine::Claude => match serde_json::from_str::<serde_json::Value>(&o.stdout).ok().and_then(|v| v.get("loggedIn").and_then(|b| b.as_bool())) {
             Some(true) if o.code == Some(0) => (LoginState::SignedIn, None),
             Some(false) => (LoginState::SignedOut, None),
