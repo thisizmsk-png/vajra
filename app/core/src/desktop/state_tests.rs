@@ -392,7 +392,22 @@ fn project_generation_is_durable_independent_of_receipts() {
 
 // ---- FG-07: answer a waiting task from the inbox ------------------------------------------------------------------
 
+/// The run index line that says campaign `slug` was launched as run `run`.
+fn launched(t: &Tmp, slug: &str, run: &str) {
+    let e = runindex::Entry { campaign: slug.into(), session_id: SID.into(), run_id: run.into(), cwd: t.0.join("repo"), lead_session_id: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+}
+
+fn waiting_in(t: &Tmp, slug: &str, status: &str) {
+    let d = t.0.join("home/.claude/vajra/campaigns").join(slug);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": slug, "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": slug, "schema": "vajra.tasks/v1", "tasks": [{"id": "t1", "status": status, "title": "Which key?"}]}).to_string()).unwrap();
+}
+
+/// Campaign c1, launched as the run the seeded worker belongs to (`20261105-1810`), with its task waiting.
 fn waiting_task(t: &Tmp, status: &str) {
+    launched(t, "c1", "20261105-1810");
     let d = t.0.join("home/.claude/vajra/campaigns/c1");
     fs::create_dir_all(&d).unwrap();
     fs::write(d.join("campaign.json"), json!({"slug": "c1", "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
@@ -482,4 +497,53 @@ fn answering_is_human_only() {
     let r = app.act(&env("ans-0006-ffff", None), Caller::Mcp, true, "answer_question", "task:c1.t1", None, || app.control_message("t1", "x"));
     assert_eq!(r["receipt"]["reason"], "human_only");
     assert!(queued_messages(&app).is_empty());
+}
+
+fn worker_of(agent: &str, run: &str, round: u32) -> WorkerInfo {
+    let mut w = worker(round);
+    w.worker.agent_id = agent.into();
+    w.task_id = Some(format!("{run}.t1"));
+    w
+}
+
+fn message_workers(app: &App) -> Vec<String> {
+    queued_messages(app).iter().map(|r| r["worker"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+// Given two campaigns that both have a task t1 waiting and only the OTHER campaign's worker is live, When the human
+// answers the first campaign's t1, Then it is refused (no worker of that campaign) and nothing reaches the other one.
+#[test]
+fn an_answer_never_reaches_another_campaigns_worker_with_the_same_task_name() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1); // the worker of run 20261105-1810 (campaign c2 below)
+    waiting_in(&t, "c1", "question");
+    launched(&t, "c1", "20261104-0900"); // c1 ran earlier; no worker of it is live
+    waiting_in(&t, "c2", "question");
+    launched(&t, "c2", "20261105-1810");
+    let r = app.act_answer_question(&env("ans-2000-aaaa", None), "task:c1.t1", "for c1");
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("not_found")), "{r}");
+    assert!(queued_messages(&app).is_empty(), "nothing was queued to c2's worker");
+    let ok = app.act_answer_question(&env("ans-2001-bbbb", None), "task:c2.t1", "for c2");
+    assert_eq!(state_of(&ok), "done", "{ok}");
+    assert_eq!(queued_messages(&app).len(), 1);
+}
+
+// Given both campaigns have a live t1, Then each answer goes to its own campaign's worker, never ambiguous.
+#[test]
+fn two_campaigns_sharing_a_task_name_are_answered_separately() {
+    let t = Tmp::new();
+    let app = t.app();
+    {
+        let mut c = lock(&app.control);
+        c.start_session(SID, "20261105-1810").unwrap();
+        c.set_workers(SID, vec![worker_of("aaaaaaaaaaaaaaaaa", "20261105-1810", 1), worker_of("bbbbbbbbbbbbbbbbb", "20261104-0900", 1)]);
+    }
+    waiting_in(&t, "c1", "question");
+    launched(&t, "c1", "20261104-0900");
+    waiting_in(&t, "c2", "question");
+    launched(&t, "c2", "20261105-1810");
+    assert_eq!(state_of(&app.act_answer_question(&env("ans-2002-cccc", None), "task:c1.t1", "one")), "done");
+    assert_eq!(state_of(&app.act_answer_question(&env("ans-2003-dddd", None), "task:c2.t1", "two")), "done");
+    assert_eq!(message_workers(&app), ["bbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaa"]);
 }

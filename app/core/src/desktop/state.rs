@@ -274,7 +274,15 @@ impl App {
         let inbox = self.inbox_all()?;
         let item = inbox.iter().find(|i| i["id"] == id && i["kind"] == "task").ok_or_else(|| super::fail("not_found", "that item is no longer waiting"))?;
         let campaign = item["campaign"].as_str().unwrap_or_default();
-        id.strip_prefix("task:").and_then(|r| r.strip_prefix(campaign)).and_then(|r| r.strip_prefix('.')).filter(|t| !t.is_empty()).map(str::to_string).ok_or_else(|| super::invalid("id", "not a task item"))
+        let task = id.strip_prefix("task:").and_then(|r| r.strip_prefix(campaign)).and_then(|r| r.strip_prefix('.')).filter(|t| !t.is_empty()).ok_or_else(|| super::invalid("id", "not a task item"))?;
+        // Bound to THIS campaign: only a worker whose task id is `<one of its runs>.<task>` can be the target. A live `t1`
+        // of another campaign is never found (and two campaigns sharing `t1` never collide).
+        let runs: Vec<String> = super::runindex::entries(&self.data.join("runs.jsonl")).into_iter().filter(|e| e.campaign == campaign).map(|e| e.run_id).collect();
+        match lock(&self.control).task_worker(&runs, task) {
+            Ok(Some(worker)) => Ok(worker),
+            Ok(None) => Err(super::fail("not_found", "no worker of this campaign is on that task")),
+            Err(e) => Err(e.to_json()),
+        }
     }
 
     /// An inbox read happened: a project whose waiting items differ from the last read moves its revision, so
