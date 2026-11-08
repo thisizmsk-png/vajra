@@ -83,11 +83,18 @@ impl LoginEnv for UserPathEnv {
         }
     }
     fn shell(&self) -> Option<PathBuf> {
-        self.shell.clone().or_else(crate::userpath::login_shell)
+        self.shell.clone().or_else(|| pick_shell(std::env::var_os("SHELL").map(PathBuf::from), crate::userpath::login_shell()))
     }
     fn home(&self) -> Option<PathBuf> {
         self.home.clone()
     }
+}
+
+/// The terminal's shell: the user's configured `$SHELL` when it is usable (absolute, an executable file), whatever it is
+/// (fish, nu, elvish...). Only otherwise the resolved login shell. The POSIX-only list in `userpath` belongs to its PATH
+/// probe script, not to which interactive shell the human gets.
+pub fn pick_shell(configured: Option<PathBuf>, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    configured.filter(|p| usable_shell(p)).or(fallback)
 }
 
 /// A shell program the core may run: absolute, an executable regular file. Anything else falls back to `/bin/sh`.
@@ -147,6 +154,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_configured_executable_shell_outside_the_probe_list_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("fish");
+        let fish = d.join("fish");
+        std::fs::write(&fish, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fish, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let zsh = Some(PathBuf::from("/bin/zsh"));
+        assert_eq!(pick_shell(Some(fish.clone()), zsh.clone()), Some(fish.clone()));
+        // and it reaches the shell the terminal runs
+        assert_eq!(choose_shell(&UserPathEnv::with_dirs(d.clone(), vec![]).with_shell(fish.clone())), fish);
+    }
+
+    #[test]
+    fn an_unusable_configured_shell_falls_back_to_the_resolved_login_shell() {
+        let d = dir("nofish");
+        let plain = d.join("fish"); // exists but is not executable
+        std::fs::write(&plain, "x").unwrap();
+        let zsh = Some(PathBuf::from("/bin/zsh"));
+        for bad in [Some(plain), Some(d.join("missing")), Some(PathBuf::from("fish")), None] {
+            assert_eq!(pick_shell(bad, zsh.clone()), zsh);
+        }
     }
 
     #[test]
