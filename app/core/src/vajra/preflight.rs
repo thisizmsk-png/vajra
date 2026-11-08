@@ -191,10 +191,11 @@ mod tests {
     }
 
     #[test]
-    fn bridge_path_keeps_the_user_dirs_first_and_drops_relative_ones() {
+    fn bridge_path_keeps_the_system_dirs_first_and_drops_relative_ones() {
         let p = super::super::bridge::bridge_path(&[PathBuf::from("/x/nvm/bin"), PathBuf::from("."), PathBuf::from("/usr/bin")]);
         let dirs: Vec<PathBuf> = std::env::split_paths(&p).collect();
-        assert_eq!(dirs[0], PathBuf::from("/x/nvm/bin"));
+        assert_eq!(dirs[0], PathBuf::from("/usr/bin"), "a user dir never comes before the system dirs");
+        assert_eq!(dirs.last(), Some(&PathBuf::from("/x/nvm/bin")));
         assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
         assert_eq!(dirs.iter().filter(|d| *d == Path::new("/usr/bin")).count(), 1);
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")), "base dirs stay: {dirs:?}");

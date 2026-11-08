@@ -155,18 +155,26 @@ pub fn detect(shell: &Path, home: &Path, timeout: Duration) -> Option<Vec<PathBu
 }
 
 const CHUNK: usize = 4096;
+/// After a complete marker pair, how much longer to read for a later one. Our `printf` is the shell's last command,
+/// so the real pair is the last one written; a pair an rc file printed earlier must not win.
+const LAST_PAIR_GRACE: Duration = Duration::from_millis(250);
 
-/// Read `r` on this thread until the markers parse, EOF, `cap` bytes, or `deadline`, whichever comes first. Each read
+/// Read `r` on this thread until EOF, `cap` bytes, or `deadline`, and return the **last** complete marker pair (see
+/// `parse`); once a pair has parsed, the deadline shrinks to `LAST_PAIR_GRACE`, so a pipe held open after the shell's
+/// own printf costs at most that. Each read
 /// waits in `poll` for at most the time left, so a shell (or an escaped grandchild) that holds the pipe open and
 /// prints nothing cannot outlast the deadline; no reader thread or queue exists to leak or grow. `out` never holds
 /// more than `cap` bytes: each read asks only for the room left.
 fn collect<R: Read + std::os::fd::AsRawFd>(r: &mut R, deadline: Instant, cap: usize, out: &mut Vec<u8>) -> Option<Vec<PathBuf>> {
     let mut buf = [0u8; CHUNK];
+    // The newest complete pair so far, and the (shortened) time left to look for a later one.
+    let mut found: Option<Vec<PathBuf>> = None;
+    let mut deadline = deadline;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let room = cap.saturating_sub(out.len());
         if left.is_zero() || room == 0 {
-            return None;
+            return found;
         }
         let mut pfd = libc::pollfd { fd: r.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         let ms = left.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
@@ -176,22 +184,25 @@ fn collect<R: Read + std::os::fd::AsRawFd>(r: &mut R, deadline: Instant, cap: us
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return None;
+            return found;
         }
         if rc == 0 {
             continue; // the deadline check above ends the loop
         }
         // poll said readable (data, EOF or error), so this read does not block.
         match r.read(&mut buf[..CHUNK.min(room)]) {
-            Ok(0) => return None, // EOF before the markers
+            Ok(0) => return found, // EOF: the last pair written, if any
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
                 if let Some(p) = parse(out) {
-                    return Some(p);
+                    if found.is_none() {
+                        deadline = deadline.min(Instant::now() + LAST_PAIR_GRACE);
+                    }
+                    found = Some(p);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
+            Err(_) => return found,
         }
     }
 }
@@ -328,6 +339,32 @@ mod tests {
         let at = |v: &str| dirs.iter().position(|d| d.ends_with(format!("{v}/bin"))).unwrap();
         assert!(at("v22.18.0") < at("v22.9.0") && at("v22.9.0") < at("v9.11.2"), "{dirs:?}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_reader_takes_the_last_marker_pair_not_the_first() {
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        // An rc file prints a lookalike pair first; the shell's own printf comes after it.
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            theirs.write_all(format!("banner {BEGIN}/evil/bin{END}\n").as_bytes()).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            theirs.write_all(format!("{BEGIN}/usr/bin:/bin{END}").as_bytes()).unwrap();
+        });
+        let mut out = Vec::new();
+        let got = collect(&mut ours, Instant::now() + Duration::from_secs(5), OUT_CAP, &mut out);
+        writer.join().unwrap();
+        assert_eq!(got, Some(vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]));
+        // A writer that keeps the pipe open after the pair costs only the grace, not the whole deadline.
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        {
+            use std::io::Write;
+            theirs.write_all(format!("{BEGIN}/usr/bin{END}").as_bytes()).unwrap();
+        }
+        let t = Instant::now();
+        assert_eq!(collect(&mut ours, Instant::now() + Duration::from_secs(10), OUT_CAP, &mut Vec::new()), Some(vec![PathBuf::from("/usr/bin")]));
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+        drop(theirs);
     }
 
     #[test]
