@@ -42,6 +42,7 @@ pub struct Preferences {
     pub editor: Editor,
     pub shell: Shell,
     pub notifications: bool,
+    pub notifications_text: bool,
     pub agent: Agent,
     pub model: String,
     pub workers: u8,
@@ -54,7 +55,8 @@ impl Default for Preferences {
             theme: Theme::System,
             editor: Editor::System,
             shell: Shell::Login,
-            notifications: true,
+            notifications: false,
+            notifications_text: false,
             agent: Agent::Claude,
             model: String::new(),
             workers: 4,
@@ -71,6 +73,7 @@ pub struct Patch {
     pub editor: Option<Editor>,
     pub shell: Option<Shell>,
     pub notifications: Option<bool>,
+    pub notifications_text: Option<bool>,
     pub agent: Option<Agent>,
     pub model: Option<String>,
     pub workers: Option<u8>,
@@ -79,11 +82,12 @@ pub struct Patch {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inherit: Vec<String>,
 }
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 10] = [
     "theme",
     "editor",
     "shell",
     "notifications",
+    "notifications_text",
     "agent",
     "model",
     "workers",
@@ -136,7 +140,16 @@ impl Preferences {
     }
     fn apply(&mut self, p: &Patch) {
         macro_rules! set {($($f:ident),*)=>{$(if let Some(v)=&p.$f{self.$f=*v;})*};}
-        set!(theme, editor, shell, notifications, agent, workers, rounds);
+        set!(
+            theme,
+            editor,
+            shell,
+            notifications,
+            notifications_text,
+            agent,
+            workers,
+            rounds
+        );
         if let Some(v) = &p.model {
             self.model = v.clone();
         }
@@ -438,7 +451,9 @@ fn open_at(
 }
 impl View {
     pub fn json(self) -> Value {
-        json!(self)
+        let mut value = json!(self);
+        value["caps"] = json!({"active_runs":1,"workers_per_run":16,"editable":false});
+        value
     }
 }
 #[cfg(test)]

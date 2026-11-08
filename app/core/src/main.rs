@@ -39,8 +39,8 @@ fn preferences_read(app: State<'_, App>, project_id: Option<String>) -> Res {
     app.preferences_read(project_id.as_deref())
 }
 #[tauri::command(async)]
-fn preferences_update(app: State<'_, App>, project_id: Option<String>, expect_rev: u64, patch: vajra_desktop::preferences::Patch, reset: bool) -> Res {
-    app.preferences_update(project_id.as_deref(), expect_rev, patch, reset)
+fn act_preferences_update(app: State<'_, App>, envelope: Envelope, patch: vajra_desktop::preferences::Patch, reset: bool) -> Value {
+    app.act_preferences_update(&envelope, patch, reset)
 }
 
 #[tauri::command(async)]
@@ -433,7 +433,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             preferences_read,
-            preferences_update,
+            act_preferences_update,
             preflight,
             list_campaigns,
             campaign_integrity,

@@ -169,3 +169,13 @@ fn fg08_refuses_symlinked_settings_directory() {
     assert!(h.store().read(None).is_err());
     assert!(!target.join("settings.json").exists());
 }
+
+#[test]
+fn fg08_response_contract_and_notifications_are_private_by_default() {
+    let h = Home::new();
+    let actual = h.store().read(None).unwrap().json();
+    let expected: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/preferences-v1.json")).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual["caps"]["editable"], false);
+}
