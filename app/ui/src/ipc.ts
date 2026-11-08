@@ -4,6 +4,8 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ProviderList } from "./providerContract";
+import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
@@ -87,7 +89,7 @@ export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
 export type StreamWindow = { lines: Line[]; head_seq: number; first_seq: number; at_start: boolean; at_end: boolean; gap: boolean };
-export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
+export type ResumeTarget = { session_id: string; run_id: string; cwd: string; /** The adapter that ran it; absent reads as claude. */ provider?: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
 export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "checking" | "stale";
@@ -125,7 +127,10 @@ export type InboxItem = {
   /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
 };
-export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
+export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null;
+  /** The effective `agent` preference (`claude` or `codex`) read when the form opened; omitted means claude. A provider that cannot start is refused, never swapped. */
+  provider?: string | null;
+};
 
 /** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
 export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
@@ -188,7 +193,9 @@ export const api = {
   actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
   /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
   projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
-  resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
+  resumeRun: (sessionId: string, campaign: string, cwd: string, provider?: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd, ...(provider ? { provider } : {}) }),
+  /** `vajra.providers/1`: each adapter with install state, version, capabilities (and `limits` reasons) and the CLI's own login check. Parse with `parseProviderList`. */
+  providerList: () => call<ProviderList>("provider_list"),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
@@ -234,6 +241,18 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  /** Which record versions this build reads (`vajra.app_info/1`). */
+  appInfo: () => call<AppInfo>("app_info"),
+  /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
+  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
+  projectAdd: (path: string, confirmNested = false) =>
+    call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),
+  /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
+  projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
+  projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */

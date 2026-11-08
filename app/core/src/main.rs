@@ -66,8 +66,8 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
 
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
-fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
-    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
@@ -78,6 +78,36 @@ fn project_state(app: State<'_, App>, project_id: String, since_rev: Option<u64>
 #[tauri::command(async)]
 fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
     app.reject_plan(&id, &reason)
+}
+
+#[tauri::command(async)]
+fn app_info(app: State<'_, App>) -> Res {
+    app.app_info()
+}
+
+#[tauri::command(async)]
+fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
+    app.project_list(include_archived.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_add(app: State<'_, App>, path: String, confirm_nested: Option<bool>) -> Res {
+    app.project_add(&path, confirm_nested.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_rename(app: State<'_, App>, id: String, name: String, expect_rev: Option<u64>) -> Res {
+    app.project_rename(&id, &name, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_archive(app: State<'_, App>, id: String, expect_rev: Option<u64>) -> Res {
+    app.project_archive(&id, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_sessions(app: State<'_, App>, id: String) -> Res {
+    app.project_sessions(&id)
 }
 
 #[tauri::command(async)]
@@ -110,13 +140,19 @@ fn start_run(
     max_in_flight: u32,
     campaign: Option<String>,
     cwd: String,
+    provider: Option<String>,
 ) -> Res {
-    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String, provider: Option<String>) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd, provider.as_deref())
+}
+
+#[tauri::command(async)]
+fn provider_list(app: State<'_, App>) -> Res {
+    app.provider_list()
 }
 
 #[tauri::command(async)]
@@ -422,6 +458,7 @@ fn main() {
             campaign_integrity,
             start_run,
             resume_run,
+            provider_list,
             verify_campaign,
             read_report,
             resume_targets,
@@ -452,6 +489,12 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            app_info,
+            project_list,
+            project_add,
+            project_rename,
+            project_archive,
+            project_sessions,
             act_approve_plan,
             act_stop_worker,
             act_start_run,

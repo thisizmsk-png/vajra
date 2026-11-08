@@ -10,8 +10,9 @@ export const PROJECT_MAJOR = 1;
 export const SESSION_MAJOR = 1;
 
 export interface RootKey {
-  dev: number;
-  ino: number;
+  /** Decimal u64 strings: a JSON number would lose precision above 2^53. */
+  dev: string;
+  ino: string;
   git_common_dir: string | null;
 }
 
@@ -88,16 +89,19 @@ const optStr = (v: unknown): string | null => (str(v) ? v : null);
 const uint = (v: unknown, max: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
 const optUint = (v: unknown, max: number): boolean => v === undefined || v === null || uint(v, max);
 const U32 = 0xffff_ffff;
-/** 2^53 - 1: the contract's largest `dev`, `ino` or `rev` (the core refuses more), so JSON numbers stay exact. */
+/** 2^53 - 1: the contract's largest `rev` (the core refuses more), so JSON numbers stay exact. */
 const MAX_JSON_INT = Number.MAX_SAFE_INTEGER;
+const U64_MAX = 18446744073709551615n;
+/** A decimal u64 as the core writes it: plain digits, no sign, no leading zero, at most u64::MAX. */
+const decU64 = (v: unknown): v is string => typeof v === "string" && whole(/0|[1-9][0-9]{0,19}/, v) !== null && BigInt(v) <= U64_MAX;
 
 type Fail = { ok: false; reason: "unsupported_version" | "malformed" | "invalid"; detail: string };
 const bad = (reason: Fail["reason"], detail: string): Fail => ({ ok: false, reason, detail });
 
 // The same invisible and reordering characters the core refuses in a name (control::lead::invisible).
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
-const INVISIBLE =
+export const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
+export const INVISIBLE =
   /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb]|\u{1bca0}|\u{1bca1}|\u{1bca2}|\u{1bca3}|[\u{1d173}-\u{1d17a}]|[\u{e0000}-\u{e0fff}]/u;
 
 const validName = (n: string): boolean => n.trim() !== "" && [...n].length <= MAX_NAME_CHARS && !CONTROL.test(n) && !INVISIBLE.test(n);
@@ -146,7 +150,7 @@ export function parseProject(text: string): ParseResult<Project> {
   if (!str(o.id) || !str(o.name) || !str(o.root) || !str(o.created) || !uint(o.rev, Infinity) || !optStrOk(o.archived)) {
     return bad("malformed", "missing or mistyped field");
   }
-  if (!isObj(rk) || !uint(rk.dev, Infinity) || !uint(rk.ino, Infinity) || !optStrOk(rk.git_common_dir)) {
+  if (!isObj(rk) || !decU64(rk.dev) || !decU64(rk.ino) || !optStrOk(rk.git_common_dir)) {
     return bad("malformed", "missing or mistyped root_key");
   }
   if (!validId("p", o.id)) return bad("invalid", "project id");
@@ -156,7 +160,6 @@ export function parseProject(text: string): ParseResult<Project> {
   if (!validTime(o.created)) return bad("invalid", "timestamp");
   if (str(o.archived) && !validTime(o.archived)) return bad("invalid", "timestamp");
   if (o.rev === 0 || o.rev > MAX_JSON_INT) return bad("invalid", "rev");
-  if ((rk.dev as number) > MAX_JSON_INT || (rk.ino as number) > MAX_JSON_INT) return bad("invalid", "root_key");
   return {
     ok: true,
     value: {
@@ -164,7 +167,7 @@ export function parseProject(text: string): ParseResult<Project> {
       id: o.id,
       name: o.name,
       root: o.root,
-      root_key: { dev: rk.dev as number, ino: rk.ino as number, git_common_dir: optStr(rk.git_common_dir) },
+      root_key: { dev: rk.dev, ino: rk.ino, git_common_dir: optStr(rk.git_common_dir) },
       created: o.created,
       archived: optStr(o.archived),
       rev: o.rev,

@@ -12,6 +12,7 @@ pub mod control;
 pub mod crew;
 pub mod desktop;
 pub mod projects;
+pub mod providers;
 pub mod sessions;
 pub mod terminal;
 pub mod userpath;

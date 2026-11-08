@@ -16,6 +16,40 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps provider_list and passes a provider to resume only when one is given", async () => {
+    const f = fakeIpc({ provider_list: { schema: "vajra.providers/1", providers: [] }, resume_run: {} });
+    setTransport(f.transport);
+    await api.providerList();
+    await api.resumeRun("s", "c", "/w");
+    await api.resumeRun("s", "c", "/w", "codex");
+    expect(f.calls).toEqual([
+      { cmd: "provider_list", args: undefined },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w" } },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w", provider: "codex" } },
+    ]);
+  });
+
+  it("maps the project commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [], skipped: 0, unsupported: false, truncated: false } });
+    setTransport(f.transport);
+    await api.appInfo();
+    await api.projectList();
+    await api.projectAdd("/Users/me/src/a");
+    await api.projectAdd("/Users/me/src/a/b", true);
+    await api.projectRename("p_1", "New", 2);
+    await api.projectArchive("p_1");
+    await api.projectSessions("p_1");
+    expect(f.calls).toEqual([
+      { cmd: "app_info", args: undefined },
+      { cmd: "project_list", args: { includeArchived: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a", confirmNested: false } },
+      { cmd: "project_add", args: { path: "/Users/me/src/a/b", confirmNested: true } },
+      { cmd: "project_rename", args: { id: "p_1", name: "New", expectRev: 2 } },
+      { cmd: "project_archive", args: { id: "p_1", expectRev: undefined } },
+      { cmd: "project_sessions", args: { id: "p_1" } },
+    ]);
+  });
+
   it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
     const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
     setTransport(f.transport);

@@ -26,8 +26,8 @@ pub const SESSION_MAJOR: u32 = 1;
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// A project name longer than this (in characters) is refused.
 pub const MAX_NAME_CHARS: usize = 200;
-/// The largest integer a record may carry in `dev`, `ino` or `rev`: 2^53 - 1, the most a JSON reader in JavaScript holds
-/// exactly. It is part of the contract, so the core refuses what the window could not read.
+/// The largest `rev` a record may carry: 2^53 - 1, the most a JSON reader in JavaScript holds exactly. It is part of the
+/// contract, so the core refuses what the window could not read. (`dev` and `ino` are strings on the wire instead.)
 pub const MAX_JSON_INT: u64 = 9_007_199_254_740_991;
 /// The longest path accepted in a record.
 pub const MAX_PATH_BYTES: usize = 4096;
@@ -131,7 +131,11 @@ fn check_schema(tag: &str, thing: &str, supported: u32) -> Result<(), ContractEr
 /// worktree shares with its main repository).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootKey {
+    /// Device and inode are u64 here and DECIMAL STRINGS on the wire (`"18446744073709551615"`: plain digits, no sign, no
+    /// leading zero), because a JSON number loses precision above 2^53 in the window. Anything else reads as malformed.
+    #[serde(with = "decimal_u64")]
     pub dev: u64,
+    #[serde(with = "decimal_u64")]
     pub ino: u64,
     #[serde(default)]
     pub git_common_dir: Option<String>,
@@ -177,9 +181,6 @@ impl Project {
         if self.rev == 0 || self.rev > MAX_JSON_INT {
             return Err(ContractError::Invalid("rev"));
         }
-        if self.root_key.dev > MAX_JSON_INT || self.root_key.ino > MAX_JSON_INT {
-            return Err(ContractError::Invalid("root_key"));
-        }
         Ok(())
     }
 }
@@ -193,6 +194,23 @@ pub fn parse_project(bytes: &[u8]) -> Result<Project, ContractError> {
     let p: Project = serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
     p.validate()?;
     Ok(p)
+}
+
+mod decimal_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let t = String::deserialize(d)?;
+        let plain = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) && (t == "0" || !t.starts_with('0'));
+        match t.parse::<u64>() {
+            Ok(v) if plain => Ok(v),
+            _ => Err(serde::de::Error::custom("expected a decimal u64 string without sign or leading zeros")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------- session
@@ -310,17 +328,28 @@ pub struct SessionLog {
     pub skipped: usize,
     /// At least one skipped line was another major version of the session record.
     pub unsupported: bool,
+    /// Only the tail of a longer log was read, so sessions whose lines are all older than that window are NOT listed.
+    /// Set by the store (the parser sees only the lines it is given).
+    pub truncated: bool,
 }
 
 /// The newest line per session id wins (`sessions.jsonl` is append-only). A line that fails to parse is skipped, not
 /// fatal: one bad line must not hide a project's history. But it is counted, and a line of another major is flagged,
 /// never silently dropped. Order of first appearance is kept.
 pub fn latest_sessions(lines: &[&[u8]]) -> SessionLog {
+    latest_sessions_of(None, lines)
+}
+
+/// Like `latest_sessions`, but for one project's log: a line whose `project_id` is another project's is skipped and counted
+/// BEFORE the newest-per-id choice, so a line copied from project B can neither appear in A's list nor replace A's
+/// session that shares its id.
+pub fn latest_sessions_of(project_id: Option<&str>, lines: &[&[u8]]) -> SessionLog {
     let mut order: Vec<String> = Vec::new();
     let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
     let mut log = SessionLog::default();
     for l in lines {
         match parse_session(l) {
+            Ok(s) if project_id.is_some_and(|p| s.project_id != p) => log.skipped += 1,
             Ok(s) => {
                 if !by_id.contains_key(&s.id) {
                     order.push(s.id.clone());
@@ -390,12 +419,12 @@ fn valid_time(t: &str) -> Result<(), ContractError> {
     time::parse_iso(t).map(|_| ()).ok_or(ContractError::Invalid("timestamp"))
 }
 
-fn valid_provider(p: &str) -> bool {
+pub(crate) fn valid_provider(p: &str) -> bool {
     !p.is_empty() && p.len() <= 32 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// A campaign slug or task id: short, printable, no separators.
-fn valid_label(s: &str) -> bool {
+pub(crate) fn valid_label(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') && !s.starts_with('.')
 }
 

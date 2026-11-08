@@ -183,6 +183,8 @@ pub struct App {
     data: PathBuf,
     home: PathBuf,
     claude: PathBuf,
+    /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
+    provider_dirs: Option<Vec<PathBuf>>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -231,6 +233,8 @@ pub struct App {
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// ADR-15: the project records under `<data>/projects`.
+    projects: crate::projects::store::Store,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
@@ -248,9 +252,11 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let projects = crate::projects::store::Store::open(data, home)?;
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
+            projects,
             acts,
             sink: Mutex::new(None),
             data: data.to_path_buf(),
@@ -271,6 +277,7 @@ impl App {
             },
             reader: Mutex::new(None),
             claude,
+            provider_dirs: None,
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -437,7 +444,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+        self.launch_engine(Engine::Claude, session_id, run_id, campaign, cwd, argv, rotate)
+    }
+
+    /// `launch` for the chosen provider: the session is recorded with it so a later resume knows which CLI ran it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_engine(
+        &self,
+        engine: Engine,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+    ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, engine)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -452,6 +474,7 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
         workflow: bool,
+        engine: Engine,
     ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
@@ -483,7 +506,7 @@ impl App {
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
@@ -502,9 +525,32 @@ impl App {
         let targets: serde_json::Map<String, Value> = runindex::latest(&self.data.join("runs.jsonl"))
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
-            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy()})))
+            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": e.provider.as_deref().unwrap_or("claude")})))
             .collect();
         Ok(json!({"targets": targets}))
+    }
+
+    /// The provider a start or resume runs on: the id the caller passed (the effective `agent` preference), else
+    /// `claude`. A provider that is unknown or not installed is refused. There is never a fallback to another one,
+    /// and a login that cannot be checked does not block (the CLI itself says if it is signed out).
+    fn chosen_engine(&self, requested: Option<&str>) -> Result<Engine, Value> {
+        let id = requested.unwrap_or("claude");
+        let engine = Engine::from_id(id).ok_or_else(|| invalid("provider", "must be claude or codex"))?;
+        if !self.provider_probe().installed(engine) {
+            return Err(fail("provider_not_installed", format!("{id} is not installed; install it or choose another provider")));
+        }
+        Ok(engine)
+    }
+
+    fn provider_probe(&self) -> crate::providers::detect::System {
+        crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs))
+    }
+
+    /// `provider_list` (`vajra.providers/1`): every adapter with its install state, version, capabilities and the
+    /// CLI's own login check. Read-only; a missing or broken CLI is a row, not an error.
+    pub fn provider_list(&self) -> Res {
+        let l = crate::providers::detect::list(&self.provider_probe());
+        serde_json::to_value(l).map_err(|e| fail("internal", e))
     }
 
     /// The workflow takes only a commit sha, so a branch or ref is resolved
@@ -530,8 +576,13 @@ impl App {
         let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
-        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
-            argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+        let engine = self.chosen_engine(input.provider.as_deref())?;
+        let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
+            if engine == Engine::Claude {
+                argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+            } else {
+                adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
+            }
         }, false)?;
         self.note("run_started", &[]);
         Ok(r)
@@ -539,7 +590,7 @@ impl App {
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
-    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str) -> Res {
+    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
@@ -550,9 +601,13 @@ impl App {
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
-        let claude = adapter_for(Engine::Claude);
-        let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
-            claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
+        let engine = self.chosen_engine(provider)?;
+        let adapter = adapter_for(engine);
+        if !adapter.capabilities().resume {
+            return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
+        }
+        let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
+            adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
         }, true)?;
         self.note("run_resumed", &[]);
         Ok(r)
@@ -1711,6 +1766,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod inbox;
+mod projects;
 mod wfresult;
 mod decide;
 mod lead;

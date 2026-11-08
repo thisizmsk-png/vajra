@@ -7,7 +7,7 @@ use vajra_desktop::adapter::{adapter_for, Billing, Engine, StopKind};
 use vajra_desktop::sessions::argv::RunInput;
 
 fn input(ask: &str) -> RunInput {
-    RunInput { ask: ask.into(), max_rounds: 2, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 4, campaign: None }
+    RunInput { ask: ask.into(), max_rounds: 2, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 4, campaign: None, provider: None }
 }
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";

@@ -13,6 +13,7 @@ fn input() -> RunInput {
         base: SHA.into(),
         max_in_flight: 4,
         campaign: None,
+        provider: None,
     }
 }
 
