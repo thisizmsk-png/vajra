@@ -302,10 +302,12 @@ glob_pattern_check() { # canonical search root
   unset IFS
   case "$pat" in /*) ;; *) lit="${lit#/}" ;; esac
   if [ "$GLOB_N" -eq 0 ]; then shopt -u nocasematch; return 0; fi # no glob character: a plain path, judged as a path
-  [ -n "$lit" ] || lit="."
+  # A pattern that starts with a glob has no literal prefix: an absolute one is rooted at "/", a relative one at the search root.
+  [ -n "$lit" ] || case "$pat" in /*) lit="/" ;; *) lit="." ;; esac
   canon "$lit" "$root"
   if [ "$dotdot" = 1 ] && glob_dotdot_reaches "$CANON"; then shopt -u nocasematch; block "Glob pattern steps back with .. after a glob character far enough to reach a directory that holds the Vajra state directory"; fi
-  if ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi # the literal part is not at or above the state dir
+  # The literal part is not at or above the state dir ("/" is above everything; "inside" needs a non-root directory).
+  if [ "$CANON" != / ] && ! inside "$VS_C" "$CANON"; then shopt -u nocasematch; return 0; fi
   rel="${VS_C:${#CANON}}"; rel="${rel#/}"
   GLOB_S=() GLOB_K=0
   if [ -n "$rel" ]; then

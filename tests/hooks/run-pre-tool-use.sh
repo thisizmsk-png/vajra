@@ -257,6 +257,11 @@ glob_case ALLOW "Glob pattern braces in the project"          "src/{a,b}/*.ts" "
 glob_case ALLOW "Glob pattern campaigns/*/tasks.json" "$VS/campaigns/*/tasks.json"
 glob_case ALLOW "Glob pattern src/**/*.ts"          "src/**/*.ts" "$PROJ"
 glob_case ALLOW "Glob pattern **/*.md in project"   "**/*.md"
+glob_case BLOCK "Glob absolute /** then the literal log name, project cwd"   "/**/audit.log"
+glob_case BLOCK "Glob absolute /** then .h*, project cwd"                      "/**/.h*"
+glob_case BLOCK "Glob absolute /** then .h*, explicit project path"            "/**/.h*" "$PROJ"
+glob_case BLOCK "Glob absolute /*/** then the log name, explicit path"         "/*/**/audit.log" "$PROJ"
+glob_case ALLOW "Glob absolute /**/*.md"                                       "/**/*.md"
 path_case ALLOW "Glob path=HOME"            Glob "$H"
 bash_case BLOCK "grep -r on state dir"      'grep -r "" ~/.claude/vajra'
 bash_case BLOCK "grep -rn on ~/.claude"     'grep -rn . ~/.claude'
