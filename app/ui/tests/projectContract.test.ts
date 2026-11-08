@@ -12,7 +12,7 @@ describe("project contract fixtures", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value).toMatchObject({ id: "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T", name: "vajra", root: "/Users/u/src/vajra", rev: 7, archived: null });
-    expect(r.value.root_key).toEqual({ dev: 16777230, ino: 9123, git_common_dir: "/Users/u/src/vajra/.git" });
+    expect(r.value.root_key).toEqual({ dev: "16777230", ino: "9123", git_common_dir: "/Users/u/src/vajra/.git" });
   });
 
   it("ignores fields it does not know", () => {
@@ -80,6 +80,10 @@ describe("shared invalid fixtures", () => {
       const r = parseSession(patched(fx("session.v1.json"), c));
       expect({ case: c.case, ok: r.ok, reason: r.ok ? null : r.reason }).toEqual({ case: c.case, ok: false, reason: c.reason });
     }
+  });
+  it("keeps u64::MAX device and inode exact and accepts rev at 2^53-1", () => {
+    const r = parseProject(fx("project.v1.max-ids.json"));
+    expect(r.ok && [r.value.root_key.dev, r.value.root_key.ino, r.value.rev]).toEqual(["18446744073709551615", "9007199254740993", 9007199254740991]);
   });
   it("still accepts the valid fixtures the cases are built from", () => {
     expect(parseProject(fx("project.v1.json")).ok).toBe(true);

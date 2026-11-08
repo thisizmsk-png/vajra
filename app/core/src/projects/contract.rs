@@ -26,8 +26,8 @@ pub const SESSION_MAJOR: u32 = 1;
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// A project name longer than this (in characters) is refused.
 pub const MAX_NAME_CHARS: usize = 200;
-/// The largest integer a record may carry in `dev`, `ino` or `rev`: 2^53 - 1, the most a JSON reader in JavaScript holds
-/// exactly. It is part of the contract, so the core refuses what the window could not read.
+/// The largest `rev` a record may carry: 2^53 - 1, the most a JSON reader in JavaScript holds exactly. It is part of the
+/// contract, so the core refuses what the window could not read. (`dev` and `ino` are strings on the wire instead.)
 pub const MAX_JSON_INT: u64 = 9_007_199_254_740_991;
 /// The longest path accepted in a record.
 pub const MAX_PATH_BYTES: usize = 4096;
@@ -131,7 +131,11 @@ fn check_schema(tag: &str, thing: &str, supported: u32) -> Result<(), ContractEr
 /// worktree shares with its main repository).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootKey {
+    /// Device and inode are u64 here and DECIMAL STRINGS on the wire (`"18446744073709551615"`: plain digits, no sign, no
+    /// leading zero), because a JSON number loses precision above 2^53 in the window. Anything else reads as malformed.
+    #[serde(with = "decimal_u64")]
     pub dev: u64,
+    #[serde(with = "decimal_u64")]
     pub ino: u64,
     #[serde(default)]
     pub git_common_dir: Option<String>,
@@ -177,9 +181,6 @@ impl Project {
         if self.rev == 0 || self.rev > MAX_JSON_INT {
             return Err(ContractError::Invalid("rev"));
         }
-        if self.root_key.dev > MAX_JSON_INT || self.root_key.ino > MAX_JSON_INT {
-            return Err(ContractError::Invalid("root_key"));
-        }
         Ok(())
     }
 }
@@ -193,6 +194,23 @@ pub fn parse_project(bytes: &[u8]) -> Result<Project, ContractError> {
     let p: Project = serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
     p.validate()?;
     Ok(p)
+}
+
+mod decimal_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let t = String::deserialize(d)?;
+        let plain = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) && (t == "0" || !t.starts_with('0'));
+        match t.parse::<u64>() {
+            Ok(v) if plain => Ok(v),
+            _ => Err(serde::de::Error::custom("expected a decimal u64 string without sign or leading zeros")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------- session
