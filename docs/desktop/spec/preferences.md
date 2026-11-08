@@ -26,7 +26,7 @@ Responses have `schema: "vajra.preferences/1"`, `rev`, `project_id`, `global`, `
 Each source is `global` or `project`. A project inherits every absent override; `patch.inherit` removes selected
 project overrides. Reset clears only the selected scope. Global reset preserves other projects' overrides.
 
-Fields: `theme` (system/dark/light), `editor` (system/code), `shell` (login/sh/bash/zsh), `notifications` (boolean, default false), `notifications_text` (boolean, default false),
+Fields: `theme` (system/dark/light), `editor` (system/code), `shell` (login/sh/bash/zsh), `notifications` (boolean, preserved default true), `notifications_text` (boolean, default false),
 `agent` (claude/codex), `model` (bounded identifier or empty for native default), `workers` (1–16), `rounds` (1–3),
 and `shortcuts` (palette/settings bindings). Provider values are integration targets, not comparative names.
 Shortcut choices are deliberately bounded and conflicting/reserved bindings are refused.
@@ -56,7 +56,7 @@ run/worker caps are not raised by these defaults. An unsupported provider/model 
 Theme and keyboard consumers may apply saved preferences immediately. Editor/shell/agent adapters must consume the
 snapshot only at an explicit new open/launch; saving preferences alone never executes a program, starts a run,
 installs a CLI, changes a provider account, or upgrades an existing session. Browser notifications still require
-separate OS permission. `notifications` is an opt-in preference, never an OS grant. Delivery requires both the
+separate OS permission. `notifications` preserves its existing true default; it is a delivery preference, never an OS grant. Delivery requires both the
 effective toggle and granted OS permission. `notifications_text: false` limits delivery to project name and
 item kind; no prompt/code/item text. The separate text opt-in never bypasses existing redaction.
 

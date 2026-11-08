@@ -93,7 +93,7 @@ mod tests {
             "done"
         );
         let v = app.preferences_read(None).unwrap();
-        assert_eq!(v["effective"]["notifications"], false);
+        assert_eq!(v["effective"]["notifications"], true);
         assert_eq!(v["effective"]["notifications_text"], false);
         std::fs::remove_dir_all(temp).unwrap();
     }

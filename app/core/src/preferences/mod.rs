@@ -55,7 +55,7 @@ impl Default for Preferences {
             theme: Theme::System,
             editor: Editor::System,
             shell: Shell::Login,
-            notifications: false,
+            notifications: true,
             notifications_text: false,
             agent: Agent::Claude,
             model: String::new(),
