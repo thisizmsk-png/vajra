@@ -9,7 +9,7 @@ export type PreferencePatch = Partial<Preferences> & { inherit?: PreferenceKey[]
 export type PreferenceView = { schema: "vajra.preferences/1"; rev: number; project_id: string | null;
   caps: { active_runs: number; workers_per_run: number; editable: false };
   global: Preferences; overrides: Partial<Preferences>; effective: Preferences; sources: Record<PreferenceKey, "global" | "project"> };
-export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "system", shell: "login", notifications: false, notifications_text: false,
+export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "system", shell: "login", notifications: true, notifications_text: false,
   agent: "claude", model: "", workers: 4, rounds: 2, shortcuts: { palette: "Primary+K", settings: "Primary+," } };
 export const SHORTCUT_CHOICES = ["Primary+K", "Primary+,", "Primary+Shift+K", "Primary+Shift+P", "Primary+Shift+S", "F6", "F7"];
 export const shortcutKeys = (binding: string) => binding.split("+").map(k => k === "Primary" ? "⌘" : k === "Shift" ? "⇧" : k.toUpperCase());

@@ -46,7 +46,7 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
       {([ ["notifications", "OS notifications"], ["notifications_text", "Include item text"] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onChange={e => change(key, e.target.checked)} /></label>
         {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => inherit(key)}>Use global {label}</Button>}
       </div>)}
-      <p>Both defaults are off. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply.</p>
+      <p>Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply.</p>
     </>}
     {section === "keyboard" && (["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? "Search shortcut" : "Settings shortcut"}<small>{source("shortcuts")}</small></span>
       <select aria-label={key === "palette" ? "Search shortcut" : "Settings shortcut"} value={value("shortcuts")[key]} disabled={prefs.busy} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>

@@ -50,10 +50,10 @@ describe("FG-08 preferences",()=>{
   fireEvent.click(await screen.findByRole("button",{name:"Retry same action"}));await screen.findByText("Saved.");
   const writes=f.calls.filter(c=>c.cmd==="act_preferences_update");expect(writes[0].args?.envelope).toEqual(writes[1].args?.envelope);expect(screen.getByText(/Action done/)).toBeTruthy();
  });
- it("keeps OS notifications and item text off until explicitly saved",async()=>{
+ it("preserves the notification default and keeps item text off until explicitly saved",async()=>{
   const f=fakeIpc({preferences_read:view(),act_preferences_update:()=>done(view(null,1))});setTransport(f.transport);
   render(<PreferenceForm projectId={null} section="notifications"/>);
-  expect((await screen.findByLabelText(/OS notifications/ ) as HTMLInputElement).checked).toBe(false);
+  expect((await screen.findByLabelText(/OS notifications/ ) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByLabelText(/Include item text/) as HTMLInputElement).checked).toBe(false);
   fireEvent.click(screen.getByLabelText(/Include item text/));expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(0);
   fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args?.patch).toEqual({notifications_text:true});
