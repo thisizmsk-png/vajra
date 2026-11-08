@@ -169,7 +169,7 @@ PKIND=""
 CLASSIFY_FAST=""
 if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
    && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
-classify() { shopt -s nocasematch; classify_ "$1"; shopt -u nocasematch; return 0; }
+classify() { local was=0; shopt -q nocasematch && was=1; shopt -s nocasematch; classify_ "$1"; [ "$was" = 1 ] || shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
   PKIND=""
@@ -211,10 +211,11 @@ classify_() { # canonical path -> PKIND = key|core|ancestor|""
 }
 
 inside() { # path dir -> 0 if path is dir or below it (case-insensitive)
-  local rc=1
+  local rc=1 was=0
+  shopt -q nocasematch && was=1 # the caller's setting survives: a Glob walk is case-insensitive end to end
   shopt -s nocasematch
   if [[ "$1" == "$2" || "$1" == "$2"/* ]]; then rc=0; fi
-  shopt -u nocasematch
+  [ "$was" = 1 ] || shopt -u nocasematch
   return $rc
 }
 
