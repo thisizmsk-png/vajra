@@ -1,7 +1,8 @@
 //! Approve or reject a plan item (ADR-14, S5). The app never runs push, PR or deploy itself.
 //!
 //! - **Approve** starts the approved action as a new turn of the run's own Claude Code session: the fixed text
-//!   `Execute approved plan <run_id>.<index>` (an `ApprovedPlanTurn`, which holds no free text). A live session gets it
+//!   `Execute approved plan <run_id>.<index> (<action>)` (an `ApprovedPlanTurn`, which holds no free text; the action is
+//!   the approved entry's, so a session holding a different plan at that index sees the mismatch). A live session gets it
 //!   through `submit_fixed_turn` (refused while Take over is on); an ended one is resumed with that text as its prompt,
 //!   and the human answers its permission prompts through Take over. `vajra-deliver` has no paused state, so this is a
 //!   new turn, not a resume of the workflow.
@@ -82,7 +83,8 @@ impl App {
             return Err(fail("plan_invalid", format!("this plan cannot be approved: {why}")));
         }
         self.undecided(id)?;
-        let turn = ApprovedPlanTurn::new(run_id, index).ok_or_else(|| invalid("id", "not a plan id"))?;
+        // The turn names the action of the entry the human just approved (hash-checked above).
+        let turn = ApprovedPlanTurn::new(run_id, index, &plan.action).ok_or_else(|| invalid("id", "not a plan id"))?;
         let stream = format!("run-{}", e.session_id);
         let live = self.sup.is_running(&stream).unwrap_or(false);
         if live && self.sup.take_over(&stream).unwrap_or(false) {
@@ -109,7 +111,7 @@ impl App {
         }
     }
 
-    /// An ended session continues from the approval: `claude --resume <sid> "Execute approved plan <id>"` in a new PTY.
+    /// An ended session continues from the approval: `claude --resume <sid> "Execute approved plan <id> (<action>)"` in a new PTY.
     fn resume_with_turn(&self, e: &runindex::Entry, turn: &ApprovedPlanTurn) -> Result<(), Value> {
         let (_, run_id) = self.fresh_run_id(crate::ids::unix_now())?;
         self.launch_kind(&e.session_id, &run_id, &e.campaign, &e.cwd, |_| argv::build_approve_resume_argv(&e.session_id, turn).map_err(super::invalid_input), true, false).map(|_| ())

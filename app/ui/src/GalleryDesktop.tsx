@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Section, Button, Text } from "../components/ui/base";
-import { ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip } from "../components/ui/desktop";
+import { Section, Button, Icon, ICONS, Kbd, Text } from "../components/ui/base";
+import type { IconName } from "../components/ui/base";
+import { ActionBar, ActionCard, CommandPalette, CrewTree, DiffView, EvidenceRow, ResizablePanes, Table, Tabs, TerminalPane, Tooltip } from "../components/ui/desktop";
 import type { CrewNode } from "../components/ui/desktop";
 
 const E = "\u001b";
@@ -31,7 +32,7 @@ export function GalleryDesktop() {
         ]} />
       </Section>
       <Section title="Crew and panes">
-        <div style={{ height: 160 }}>
+        <div className="v-gallery__panel">
           <ResizablePanes initial={220} min={160} max={320} label="Resize crew tree"
             first={<CrewTree label="Crew" nodes={TREE} selected={sel} onSelect={setSel} defaultOpen={["lead", "be"]} />}
             second={<Text variant="body">Selected: {sel}</Text>} />
@@ -49,10 +50,27 @@ export function GalleryDesktop() {
           <EvidenceRow id="ac-2" state="fail" command="npm test" exitCode={1} />
         </tbody>
         </table>
-        <div style={{ marginTop: 8 }}><ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+        <div className="v-gallery__gap"><ActionCard kind="redirect" worker="Backend" by="Lead" text="Use the kit Button" state="delivered" time="14:22" onOpenWorker={() => setNote("worker")} onOpenAudit={() => setNote("audit")} /></div>
+        <div className="v-gallery__flex v-gallery__center v-gallery__gap">
           <Tooltip text="Open the command palette (Cmd K)"><Button onClick={() => setPalette(true)}>Commands</Button></Tooltip>
           <Text variant="body-sm" muted>{note}</Text>
+        </div>
+      </Section>
+      <Section title="Icons">
+        <ul className="v-gallery__icons">
+          {(Object.keys(ICONS) as IconName[]).map((n) => (
+            <li key={n}><Icon name={n} /><Icon name={n} size={12} /><Text variant="body-sm">{n}</Text></li>
+          ))}
+        </ul>
+      </Section>
+      <Section title="Keys and action bar">
+        <div className="v-gallery__flex v-gallery__center"><Kbd keys={["⌘", "K"]} /><Kbd keys={["⌘", "↵"]} /><Kbd keys={["M"]} /></div>
+        <div className="v-gallery__gap">
+          <ActionBar label="Actions for the selection" context={<><b>Backend</b><span>t2 Token bucket middleware</span></>} actions={[
+            { id: "approve", label: "Approve plan", keys: ["⌘", "↵"], primary: true, run: () => setNote("Approve plan") },
+            { id: "message", label: "Message", keys: ["M"], run: () => setNote("Message") },
+            { id: "stop", label: "Stop worker", keys: ["⌘", "."], run: () => setNote("Stop worker") },
+          ]} />
         </div>
       </Section>
       <CommandPalette open={palette} onClose={() => setPalette(false)} commands={[

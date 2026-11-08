@@ -526,6 +526,12 @@ const suitePasses = (v) => !v.suite_command.trim() || v.suite_passes
 
 const flatten = (w) => ({ status: w.status, summary: oneLine(w.summary, 500), branch: w.artifacts.branch, base_commit: w.artifacts.base_commit,
   commit: w.artifacts.commit, files: w.artifacts.files, protected_actions_skipped: w.artifacts.protected_actions_skipped, evidence_cmds: w.evidence_cmds })
+// D2: the human stopped this worker. A stopped worker may make exactly one call, its final report, and that call is
+// allowed only because it says "stopped by the human"; nothing stops it from also claiming status "done". Whatever status a
+// report carries, the phrase anywhere in it means the task is held back: never merged, never closed.
+const STOPPED_RE = /stopped[^a-z0-9]{1,8}by[^a-z0-9]{1,8}the[^a-z0-9]{1,8}human/i
+const stoppedReport = (v) => typeof v === 'string' ? STOPPED_RE.test(v) : Array.isArray(v) ? v.some(stoppedReport)
+  : v && typeof v === 'object' ? Object.values(v).some(stoppedReport) : false
 function checkChange(task, c, round) {
   if (c.status !== 'done' && c.status !== 'progress') return null
   if (c.branch !== branchFor(task.id, round)) return `branch must be ${branchFor(task.id, round)}`
@@ -574,7 +580,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
       S.WorkerReport, 'Execute', { isolation: 'worktree' })
     if (!r.ok) return { ok: false, id, error: r.error }   // keyed by task id, not by label
     const c = flatten(r.out)
-    if (SHA_RE.test(c.commit)) runCommits.add(c.commit)
+    if (stoppedReport(r.out)) return { ok: false, id, needsUser: true, out: { ...c, status: 'blocked', summary: 'stopped by the human; the task was not merged. ' + c.summary } }
+    if (SHA_RE.test(c.commit)) runCommits.add(c.commit)   // after the stop check: a stopped task's commit is not recorded
     const bad = checkChange(t, c, round)
     if (bad) return { ok: false, id, error: 'invalid worker report: ' + bad, out: c }
     if (c.status === 'progress') {

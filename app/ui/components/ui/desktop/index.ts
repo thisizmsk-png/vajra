@@ -16,4 +16,6 @@ export { EvidenceRow } from "./EvidenceRow";
 export { ActionCard } from "./ActionCard";
 export type { ActionState } from "./ActionCard";
 export { DiffView, parseDiff } from "./DiffView";
+export { ActionBar, chordMatches } from "./ActionBar";
+export type { Action } from "./ActionBar";
 export { sanitizeLine, sanitizeLines } from "./ansi";

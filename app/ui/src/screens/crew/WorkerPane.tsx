@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Badge, Button, Section, Text } from "../../../components/ui/base";
+import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
+import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api, errorText } from "../../ipc";
@@ -82,6 +83,7 @@ function WorktreeTab({ info }: { info: WorktreeInfo | null | undefined }) {
   );
 }
 
+const STATUS_KEYS = ["pending", "ready", "claimed", "in_progress", "done", "blocked", "question", "failed", "unknown"] as const;
 const WORKTREE_RETRY_MS = 3000;
 /** Same cadence as the Crew screen's own refresh. */
 const TASK_POLL_MS = 2000;
@@ -126,31 +128,41 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   }, [slug, taskId]);
   const taskObj = task && task !== "none" && !("err" in task) ? task : null;
 
+  const shape = (STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown";
+
   return (
     <>
-      <Section title={S.crew.details}>
-        <dl className="v-crew__facts" role="group" aria-label={S.crew.header}>
-          <dt>{S.crew.role}</dt><dd>{node.role ?? node.title}</dd>
-          {node.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{node.engine_id}</dd></>)}
-          <dt>{S.crew.status}</dt><dd><Badge>{status}</Badge></dd>
-          <dt>{S.crew.task}</dt><dd>{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</dd>
-          {info && (<>
-            <dt>{S.crew.worktreePath}</dt><dd>{info.worktree} <Copy what={S.crew.worktreePath} text={info.worktree} /></dd>
-            <dt>{S.crew.branch}</dt><dd>{info.branch ?? ""} {info.branch && <Copy what={S.crew.branch} text={info.branch} />}</dd>
-          </>)}
-        </dl>
-      </Section>
-      <Tabs
-        label={S.crew.tabsLabel}
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} /> },
-          { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
-          { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },
-          { id: "worktree", label: S.crew.tabs.worktree, panel: <WorktreeTab info={info} /> },
-        ]}
-      />
+      <section className="v-crew__pane" aria-label={S.crew.header}>
+        <div className="v-crew__panehead">
+          <Text as="h2" variant="headline-md">{node.role ?? node.title}</Text>
+          <StatusDot status={shape} label={status} />
+          <span className="v-crew__task">{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</span>
+        </div>
+        <Tabs
+          label={S.crew.tabsLabel}
+          value={tab}
+          onChange={setTab}
+          tabs={[
+            { id: "stream", label: S.crew.tabs.stream, panel: <StreamTab stream={`w-${agent}`} /> },
+            { id: "diff", label: S.crew.tabs.diff, panel: info ? <DiffTab info={info} /> : <Text variant="body-sm" muted>{info === null ? S.crew.noWorktree : S.crew.loading}</Text> },
+            { id: "task", label: S.crew.tabs.task, panel: <TaskTab t={task} /> },
+            { id: "worktree", label: S.crew.tabs.worktree, panel: <WorktreeTab info={info} /> },
+          ]}
+        />
+      </section>
+      <aside className="v-crew__aside" aria-label={S.crew.details}>
+        <Section title={S.crew.details}>
+          <dl className="v-crew__facts" role="group" aria-label={S.crew.header}>
+            <dt>{S.crew.role}</dt><dd>{node.role ?? node.title}</dd>
+            {node.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{node.engine_id}</dd></>)}
+            <dt>{S.crew.task}</dt><dd>{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</dd>
+            {info && (<>
+              <dt>{S.crew.worktreePath}</dt><dd>{info.worktree} <Copy what={S.crew.worktreePath} text={info.worktree} /></dd>
+              <dt>{S.crew.branch}</dt><dd>{info.branch ?? ""} {info.branch && <Copy what={S.crew.branch} text={info.branch} />}</dd>
+            </>)}
+          </dl>
+        </Section>
+      </aside>
     </>
   );
 }

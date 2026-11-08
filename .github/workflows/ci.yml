@@ -49,3 +49,14 @@ jobs:
           # base is not main. Pushes to main and any pull_request into main stay strict, so main is never stale.
           VAJRA_MANIFEST_FRESH: ${{ github.event_name == 'pull_request' && github.base_ref != 'main' && 'warn' || '' }}
         run: bash tests/run-all.sh
+      - name: Build the UI (tauri::generate_context! needs app/ui/dist)
+        if: runner.os == 'macOS'
+        working-directory: app/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Clippy (Rust core, warnings are errors)
+        # macOS only: the Tauri crate needs webkit2gtk system packages on Linux, which this job does not install.
+        if: runner.os == 'macOS'
+        working-directory: app/core
+        run: cargo clippy --all-targets -- -D warnings

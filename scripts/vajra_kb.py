@@ -720,7 +720,9 @@ def is_stale(r, root):
     for p in paths:
         pat = os.path.join(root, p.lstrip("/"))
         try:
-            if next(_glob.iglob(pat, recursive=True), None) is not None:
+            # Python < 3.11 yields the literal directory for "missing/**" even when it does not exist, so a hit
+            # only counts if it is really there.
+            if any(os.path.lexists(m) for m in _glob.iglob(pat, recursive=True)):
                 return False
         except (OSError, ValueError):
             return False

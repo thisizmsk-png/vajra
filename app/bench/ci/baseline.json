@@ -3,9 +3,9 @@
   "25G332|21624.5.1.11.3": {
    "flavours": {
     "Networking+WebContent": {
-     "idle_mib": 175.0,
+     "idle_mib": 181.6,
      "provisional": false,
-     "measured": "macOS 26.7.2 (25G332), WebKit 21624.5.1.11.3, image 20261102.0473.1; 2 helpers (Networking, WebContent): medians 174.5, 175.4, 174.9, 175.4 from 4 CI attempts of runs 42323420368 and 42328381675 on #26; consistent with the earlier pooled clean mean 174.8"
+     "measured": "Owner decision 2026-11-07: Graphite look approved, 4.3 MiB more idle memory (181.5 MiB) accepted as the new baseline, relayed by orchestrator vajra-1. macOS 26.7.2 (25G332), WebKit 21624.5.1.11.3, image 20261102.0473.1; 2 helpers (Networking, WebContent): median_of_medians_mib 181.6 in run 42374742561 (head 4003d2b), 181.5 in run 42375695580 (head 139dc19) and 181.6 in run 42392853588 (head 8d632a7), same UI code in the last two; median of the 3 runs is 181.6 (0.1 over the accepted 181.5). The first two runs were red only against the old 175.0 line; no launch was excluded in the third. Was 175.0 (runs 42323420368 and 42328381675 on #26)."
     },
     "GPU+Networking+WebContent": {
      "idle_mib": 201.1,

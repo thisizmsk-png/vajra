@@ -59,7 +59,10 @@ Everything must be green before you open a pull request.
 
 After changing tracked files, run `bash scripts/generate-manifest.sh` in your
 own terminal so the integrity manifest stays in sync (like `install.sh`, it is
-for you to run, not the model). `vajra-doctor.sh` flags a mismatch.
+for you to run, not the model). `vajra-doctor.sh` flags a mismatch. The manifest
+hashes are operator-only: agents never run the generator and never edit a hash
+by hand. `tests/hooks/run-manifest-fresh.sh` checks the committed manifest
+against the tree.
 Feature PRs target an integration branch and don't include `manifest.json` (a stale manifest only warns there); the operator regenerates it once, and the integration branch then merges to main, where the check is strict.
 
 ## Style
