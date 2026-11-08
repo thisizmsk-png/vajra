@@ -66,6 +66,13 @@ describe("summarize: the tab state (FG-03 'urgent items stay visible')", () => {
     expect(s.get(web.id)?.needsYou).toBe(1);
   });
 
+  it("counts a run proposal for the project whose folder it names (proposals carry a folder, not a campaign)", () => {
+    const prop = (folder: string): InboxItem => ({ id: "proposal:x", kind: "run_proposal", origin: "app", created: "", age_s: 1, title: "Start a run?", body: "", actions: ["start", "dismiss"], project: folder });
+    const s = summarize(idx, [camp("a1")], [prop("/src/web/"), prop("/elsewhere")], null);
+    expect(s.get(web.id)?.needsYou).toBe(1);
+    expect(s.get(api.id)?.needsYou).toBe(0);
+  });
+
   it("marks a project whose newest campaign stopped or failed; needs-you wins over it", () => {
     const camps = [camp("a1"), camp("b1", { status: "stopped", updated: "2026-11-07 10:00" }), camp("b0", { updated: "2026-11-01 10:00" })];
     expect(summarize(idx, camps, [], null).get(web.id)?.state).toBe("stopped");

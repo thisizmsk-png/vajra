@@ -10,7 +10,7 @@ import type { ActiveCrew, BoardCard, DayGroup, Lane, Project, ProjectId, Project
 
 export const UNSORTED_ID = "p_unsorted";
 
-const normRoot = (p: string) => {
+export const normRoot = (p: string) => {
   const t = p.trim();
   const s = t.replace(/\/+$/, "");
   return s === "" && t.startsWith("/") ? "/" : s;
@@ -72,8 +72,12 @@ const DOT: Record<SessionStatus, StatusKey> = { running: "in_progress", done: "d
 export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: InboxItem[], crew: ActiveCrew | null): Map<ProjectId, ProjectSummary> {
   const out = new Map<ProjectId, ProjectSummary>();
   for (const p of index.projects) out.set(p.id, { needsYou: 0, state: null, pips: [], live: false });
+  // A run proposal names its project's folder, not a campaign (FG-02b); match it to the project with that root.
+  const byRoot = new Map<string, ProjectId>();
+  for (const p of index.projects) if (p.root) byRoot.set(normRoot(p.root), p.id);
   for (const item of inbox) {
-    const s = item.campaign ? out.get(index.byCampaign[item.campaign]) : undefined;
+    const pid = item.campaign ? index.byCampaign[item.campaign] : typeof item.project === "string" ? byRoot.get(normRoot(item.project)) : undefined;
+    const s = pid ? out.get(pid) : undefined;
     if (s) s.needsYou += 1;
   }
   const newest = new Map<ProjectId, Campaign>();

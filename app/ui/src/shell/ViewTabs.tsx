@@ -17,7 +17,7 @@ export function ViewTabs({ route, project, review, workers, onClose, inspector, 
   inspector: boolean | null;
   onInspector: () => void;
 }) {
-  const here = (s: string) => (route.screen === s ? "page" : undefined);
+  const here = (s: string) => (route.screen === s || (s === "orch" && route.screen === "launch") ? "page" : undefined);
   const views = [
     { id: "orch", label: S.views.orch, href: toHash("orch", {}, project) },
     { id: "board", label: S.views.board, href: toHash("board", {}, project) },

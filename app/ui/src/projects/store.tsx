@@ -21,6 +21,8 @@ export type ProjectsView = {
   error: string;
   projects: Project[];
   byCampaign: Record<string, ProjectId>;
+  /** The run id of each campaign this app started (`resume_targets`), for the Director-General's commands. */
+  runIds: Record<string, string>;
   campaigns: Campaign[];
   inbox: InboxItem[];
   crew: ActiveCrew | null;
@@ -49,11 +51,11 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
 
 const EMPTY: ProjectIndex = { projects: [], byCampaign: {} };
 const Ctx = createContext<ProjectsView>({
-  state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map(), reload: () => {},
+  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map(), reload: () => {},
 });
 
 export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map() });
+  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map() });
   const seq = useRef(0);
   const last = useRef(0);
 
@@ -70,7 +72,10 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
         return;
       }
       const campaigns = Array.isArray(camps.value?.campaigns) ? camps.value.campaigns : [];
-      const index = groupProjects(campaigns, targets.value?.targets ?? {});
+      const tmap = targets.value?.targets ?? {};
+      const index = groupProjects(campaigns, tmap);
+      const runIds: Record<string, string> = {};
+      for (const [slug, t] of Object.entries(tmap)) if (t && typeof t.run_id === "string") runIds[slug] = t.run_id;
       // The inbox and the live run add urgency; if they fail the projects still show, without those marks.
       const items = inbox.status === "fulfilled" && Array.isArray(inbox.value?.items) ? inbox.value.items : [];
       const run = active.status === "fulfilled" && Array.isArray(active.value?.runs)
@@ -87,7 +92,7 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
         }
       }
       const runs = active.status === "fulfilled" && Array.isArray(active.value?.runs) ? active.value.runs.length : 0;
-      setData({ state: "ok", error: "", ...index, campaigns, inbox: items, crew, runs, summaries: summarize(index, campaigns, items, crew) });
+      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, crew, runs, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 

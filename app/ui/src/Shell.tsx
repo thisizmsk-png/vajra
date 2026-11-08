@@ -6,6 +6,7 @@ import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { ProjectsProvider, useProjects } from "./projects/store";
+import { normRoot } from "./projects/adapter";
 import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
@@ -23,9 +24,9 @@ import "./shell/frame.css";
 const OVERLAY = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && /Mac/.test(navigator.userAgent);
 const SEARCH_KEYS = ["⌘", "K"];
 /** Views that have something to say in the inspector. Review has its own panes; Settings and the legacy views have none. */
-const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "board", "worker"]);
+const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "launch", "board", "worker"]);
 /** Views that make sense in another project; anything tied to one campaign or worker becomes the Director-General. */
-const PORTABLE: ReadonlySet<Screen> = new Set(["orch", "board", "history", "settings"]);
+const PORTABLE: ReadonlySet<Screen> = new Set(["orch", "launch", "board", "history", "settings"]);
 const MAX_WORKER_TABS = 4;
 
 /** Shell B: project tabs in the title bar, the project column, the main area with its view tabs, the inspector, the status bar. */
@@ -63,8 +64,11 @@ function Frame() {
     const campaigns = project ? P.campaigns.filter((c) => P.byCampaign[c.slug] === project.id)
       .sort((a, b) => ((b.updated ?? b.created ?? "") > (a.updated ?? a.created ?? "") ? 1 : -1)) : [];
     const mine = P.crew && project && P.byCampaign[P.crew.campaign] === project.id ? P.crew : null;
-    return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null };
-  }, [project, P.campaigns, P.byCampaign, P.crew]);
+    const dgRun = mine?.runId ?? campaigns.map((c) => P.runIds[c.slug]).find(Boolean) ?? null;
+    const root = project?.root ? normRoot(project.root) : null;
+    const proposals = root ? P.inbox.filter((i) => i.kind === "run_proposal" && typeof i.project === "string" && normRoot(i.project) === root) : [];
+    return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null, dgRun, proposals };
+  }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox]);
   const crew = current.runId ? P.crew : null;
   const focusCampaign = current.campaigns.find((c) => c.slug === current.focus) ?? null;
 
