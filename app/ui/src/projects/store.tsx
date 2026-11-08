@@ -80,12 +80,13 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       if (run) {
         try {
           const root = await api.crew(run.campaign as string, run.run_id as string);
-          if (mine !== seq.current) return;
           crew = { campaign: run.campaign as string, runId: run.run_id as string, workers: root && Array.isArray(root.children) ? workersOf(root) : [] };
         } catch {
           crew = { campaign: run.campaign as string, runId: run.run_id as string, workers: [] };
         }
       }
+      // A newer load started while the crew was asked for: whatever this one learned (answer or failure) is stale.
+      if (mine !== seq.current) return;
       const runs = active.status === "fulfilled" && Array.isArray(active.value?.runs) ? active.value.runs.length : 0;
       setData({ state: "ok", error: "", ...index, campaigns, inbox: items, crew, runs, summaries: summarize(index, campaigns, items, crew) });
     })();
