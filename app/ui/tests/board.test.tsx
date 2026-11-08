@@ -1,5 +1,5 @@
 // FG-06 (ADR-15 §4.2, D6 A, D7): one campaign's board, 4 lanes plus a needs-you badge, read-only.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Board } from "../src/screens/board/Board";
@@ -83,5 +83,20 @@ describe("Board", () => {
     mount(rest);
     await waitFor(() => expect(screen.getByText("Token bucket")).toBeTruthy());
     expect(screen.queryByText("Deploy to staging")).toBeNull();
+  });
+
+  it("Given two loads of the same campaign, When the older one answers last, Then the newer board stays", async () => {
+    let calls = 0;
+    let answerOld: (v: unknown) => void = () => {};
+    const renamed = { ...overview, graph: { ...overview.graph, tasks: [task("t2", "in_progress", "Token bucket, newer")] } };
+    const f = fakeIpc({ ...ok, run_overview: () => (++calls === 1 ? new Promise((r) => { answerOld = r; }) : renamed) });
+    setTransport(f.transport);
+    render(<CurrentProject.Provider value={current}><Board /></CurrentProject.Provider>);
+    await waitFor(() => expect(calls).toBe(1));
+    act(() => { f.emit("changed", {}); }); // a second load for the same campaign, while the first is still out
+    expect(await screen.findByText("Token bucket, newer", undefined, { timeout: 1500 })).toBeTruthy();
+    await act(async () => { answerOld(overview); });
+    expect(screen.getByText("Token bucket, newer")).toBeTruthy();
+    expect(screen.queryByText("Design the limiter")).toBeNull();
   });
 });
