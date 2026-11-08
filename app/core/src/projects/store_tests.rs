@@ -336,3 +336,32 @@ fn two_adds_of_the_same_folder_at_once_make_one_project() {
     assert_eq!(outcomes.iter().filter(|o| **o == "created").count(), 1, "{outcomes:?}");
     assert_eq!(s.list(true).unwrap().projects.len(), 1);
 }
+
+#[test]
+fn a_symlink_or_a_fifo_in_place_of_sessions_jsonl_is_refused_without_hanging() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let t = Tmp::new("sessionsplanted");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let file = t.data().join("projects").join(&p.id).join("sessions.jsonl");
+    // A symlink to a file holding valid-looking session lines must not be read as this project's history.
+    let other = t.0.join("elsewhere.jsonl");
+    let sid = contract::fresh_id("s").unwrap();
+    fs::write(&other, format!("{}\n", serde_json::to_string(&session(&p.id, &sid, SessionStatus::Running)).unwrap())).unwrap();
+    symlink(&other, &file).unwrap();
+    assert!(s.sessions(&p.id).is_err(), "a symlink is not followed");
+    assert!(s.append_session(&session(&p.id, &sid, SessionStatus::Done)).is_err(), "nor appended through");
+    assert_eq!(fs::read_to_string(&other).unwrap().lines().count(), 1, "the target is untouched");
+    // A FIFO must not block the reader (and with it every other command).
+    fs::remove_file(&file).unwrap();
+    let c = CString::new(file.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let s = std::sync::Arc::new(s);
+    let s2 = s.clone();
+    let id = p.id.clone();
+    std::thread::spawn(move || tx.send(s2.sessions(&id).is_err()).ok());
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "a FIFO is refused, not waited on");
+    assert!(s.list(true).is_ok(), "the store is still usable");
+}

@@ -5,7 +5,7 @@
 //! skipped, so one file cannot impersonate another project.
 
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -280,15 +280,11 @@ impl Store {
         let _g = self.lock();
         self.read_one(project_id)?;
         let path = self.project_dir(project_id).join("sessions.jsonl");
-        let mut f = match fs::File::open(&path) {
-            Ok(f) => f,
+        let buf = match fsx::read_tail_nofollow(&path, SESSIONS_READ_CAP) {
+            Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionLog::default()),
             Err(e) => return Err(e.into()),
         };
-        let len = f.metadata()?.len();
-        let mut buf = Vec::new();
-        f.seek(SeekFrom::Start(len.saturating_sub(SESSIONS_READ_CAP)))?;
-        f.take(SESSIONS_READ_CAP).read_to_end(&mut buf)?;
         let lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
         Ok(contract::latest_sessions(&lines))
     }
