@@ -432,3 +432,24 @@ fn a_session_line_from_another_project_is_skipped_and_cannot_replace_a_local_one
     assert_eq!(log.sessions.len(), 1);
     assert_eq!((log.sessions[0].id.as_str(), log.sessions[0].project_id.as_str(), log.sessions[0].status), (local.as_str(), a.id.as_str(), SessionStatus::Running));
 }
+
+#[test]
+fn an_append_after_a_torn_tail_is_not_lost() {
+    use std::io::Write;
+    let t = Tmp::new("torn");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let first = contract::fresh_id("s").unwrap();
+    s.append_session(&session(&p.id, &first, SessionStatus::Running)).unwrap();
+    // A crash mid-append: a JSON fragment with no newline.
+    let file = t.data().join("projects").join(&p.id).join("sessions.jsonl");
+    fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(br#"{"schema":"vajra.session/1","id":"s_0"#).unwrap();
+    s.append_session(&session(&p.id, &first, SessionStatus::Done)).unwrap();
+    let second = contract::fresh_id("s").unwrap();
+    s.append_session(&session(&p.id, &second, SessionStatus::Running)).unwrap();
+    let log = s.sessions(&p.id).unwrap();
+    assert_eq!(log.skipped, 1, "only the fragment is lost");
+    let got: Vec<_> = log.sessions.iter().map(|x| (x.id.as_str(), x.status)).collect();
+    assert_eq!(got, vec![(first.as_str(), SessionStatus::Done), (second.as_str(), SessionStatus::Running)]);
+    assert!(fs::read_to_string(&file).unwrap().ends_with('\n'));
+}
