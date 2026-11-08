@@ -1,8 +1,9 @@
 // The one place that names the core's IPC commands. Screens call `api.*`, never `invoke`, so a screen can be tested
 // against `setTransport(fake)` and a command rename is a one-file change. Argument names are camelCase here; Tauri maps
 // them to the snake_case parameters of the Rust commands.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
@@ -21,10 +22,18 @@ export interface Transport {
   call(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
   /** Subscribe to a core event; returns the unsubscribe function. */
   on(event: string, cb: (payload: unknown) => void): () => void;
+  /** Like `call`, for a command that streams to a Tauri `Channel`: `onMessage` gets each channel message (raw output
+   *  bytes, or the JSON `{exit}`). A transport without it cannot open terminals. */
+  channel?(cmd: string, args: Record<string, unknown>, onMessage: (m: unknown) => void): Promise<unknown>;
 }
 
 const tauri: Transport = {
   call: (cmd, args) => invoke(cmd, args),
+  channel(cmd, args, onMessage) {
+    const ch = new Channel<unknown>();
+    ch.onmessage = onMessage;
+    return invoke(cmd, { ...args, onEvent: ch });
+  },
   on(event, cb) {
     let off: (() => void) | null = null;
     let dead = false;
@@ -42,6 +51,17 @@ export const setTransport = (t?: Transport) => void (transport = t ?? tauri);
 
 const call = <T>(cmd: string, args?: Record<string, unknown>) => transport.call(cmd, args) as Promise<T>;
 
+function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermMsg) => void): Promise<TermInfo> {
+  if (!transport.channel) return Promise.reject({ error: "no_terminal_transport", detail: "this backend cannot stream" });
+  const bytes = (m: unknown): Uint8Array | null =>
+    Object.prototype.toString.call(m) === "[object ArrayBuffer]" ? new Uint8Array(m as ArrayBuffer) : ArrayBuffer.isView(m) ? new Uint8Array(m.buffer, m.byteOffset, m.byteLength) : Array.isArray(m) ? Uint8Array.from(m as number[]) : null;
+  return transport.channel(cmd, args, (m) => {
+    const b = bytes(m);
+    if (b) onMsg({ data: b });
+    else if (typeof m === "object" && m !== null && "exit" in m) onMsg({ exit: (m as { exit: number | null }).exit });
+  }) as Promise<TermInfo>;
+}
+
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
 export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
@@ -56,6 +76,13 @@ export type Report = { slug: string; integrity: ReportIntegrity; text?: string }
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+/** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
+export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+/** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
+export type TermMsg = { data: Uint8Array } | { exit: number | null };
+/** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
+export const TERM_WRITE_CHUNK = 32 * 1024;
+
 export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
@@ -174,6 +201,14 @@ export const api = {
   evidenceList: (slug: string) => call<{ slug: string; stale: boolean; pending?: number; rows: EvidenceRow[] }>("evidence_list", { slug }),
   runOverview: (slug: string) => call<RunOverview>("run_overview", { slug }),
   evidenceDetail: (slug: string, taskId: string) => call<EvidenceDetail>("evidence_detail", { slug, taskId }),
+  // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
+  termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
+  termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  termList: () => call<{ terminals: TermInfo[] }>("term_list"),
+  termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
+  termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
+  termAck: (id: number, bytes: number) => call<Json>("term_ack", { id, bytes }),
+  termClose: (id: number) => call<Json>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
   controlMessage: (worker: string, text: string) => call<Json>("control_message", { worker, text }),
   controlRedirect: (worker: string, text: string) => call<Json>("control_redirect", { worker, text }),
@@ -197,6 +232,24 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  /** Which record versions this build reads (`vajra.app_info/1`). */
+  appInfo: () => call<AppInfo>("app_info"),
+  /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
+  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
+  projectAdd: (path: string, confirmNested = false) =>
+    call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),
+  /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
+  projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
+  projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** Suggested projects for campaigns from before projects existed. Writes nothing; `done` once confirmed. `terminal` campaigns are read-only and never adopted. */
+  projectMigrationSuggest: () =>
+    call<{ done: boolean; groups: { root: string; name: string; campaigns: string[] }[]; unsorted: string[]; terminal: string[] }>("project_migration_suggest"),
+  /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
+  projectMigrationConfirm: (roots: string[]) =>
+    call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */
