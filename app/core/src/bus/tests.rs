@@ -517,3 +517,249 @@ fn bus_read_spill_before_on_an_unknown_stream_or_nothing_before_is_empty_at_star
     let p = bus.read_spill_before("s", 1, 100).unwrap();
     assert!(p.lines.is_empty() && p.at_start);
 }
+
+// ---- window: the core serves only the rows a reader is showing (#45) ----------------------------------------------
+
+fn seqs(w: &Window) -> Vec<u64> {
+    w.lines.iter().map(|l| l.seq).collect()
+}
+
+#[test]
+fn bus_window_newest_is_the_last_lines_with_the_streams_bounds() {
+    let tmp = TmpDir::new("winnewest");
+    let bus = Bus::open(&tmp.0, cfg(1_000_000, u64::MAX, 16)).unwrap();
+    for i in 1..=500u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let w = bus.window("s", None, 50, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (451..=500).collect::<Vec<_>>());
+    assert_eq!((w.head_seq, w.first_seq), (500, 1));
+    assert!(w.at_end && !w.at_start && !w.gap);
+    // Asking for more than exists returns everything and reports the start.
+    let all = bus.window("s", None, 10_000, usize::MAX).unwrap();
+    assert_eq!(seqs(&all), (1..=500).collect::<Vec<_>>());
+    assert!(all.at_start && all.at_end);
+}
+
+#[test]
+fn bus_window_from_a_seq_is_contiguous_across_the_spill_and_the_ring() {
+    let tmp = TmpDir::new("winacross");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=5_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let ring_first = bus.tail("s", 0, usize::MAX).lines[0].seq;
+    assert!(ring_first > 3_000);
+    // Starts in the spill and runs into the ring.
+    let from = ring_first - 40;
+    let w = bus.window("s", Some(from), 60, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (from..from + 60).collect::<Vec<_>>());
+    assert_eq!(w.lines[0].text.as_ref(), format!("line {from}"));
+    assert!(!w.at_start && !w.at_end && !w.gap);
+    // Starts in the middle of the spill, wholly inside it.
+    let w = bus.window("s", Some(1_000), 200, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (1_000..1_200).collect::<Vec<_>>());
+    // The very start, and the very end.
+    let w = bus.window("s", Some(1), 10, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (1..=10).collect::<Vec<_>>());
+    assert!(w.at_start);
+    let w = bus.window("s", Some(4_990), 100, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (4_990..=5_000).collect::<Vec<_>>());
+    assert!(w.at_end && !w.at_start);
+    assert_eq!((w.head_seq, w.first_seq), (5_000, 1));
+}
+
+#[test]
+fn bus_window_never_returns_more_than_asked_and_reads_only_near_the_target() {
+    let tmp = TmpDir::new("wincost");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=60_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let start = Instant::now();
+    let w = bus.window("s", Some(30_000), 80, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (30_000..30_080).collect::<Vec<_>>());
+    assert!(start.elapsed() < Duration::from_millis(500), "{:?}", start.elapsed());
+    for max in [1usize, 2, 7] {
+        assert_eq!(bus.window("s", Some(100), max, usize::MAX).unwrap().lines.len(), max);
+        assert_eq!(bus.window("s", None, max, usize::MAX).unwrap().lines.len(), max);
+    }
+    // Zero is treated as one line: a reader always makes progress.
+    assert_eq!(bus.window("s", None, 0, usize::MAX).unwrap().lines.len(), 1);
+}
+
+#[test]
+fn bus_window_before_the_oldest_kept_line_starts_there_and_says_so() {
+    let tmp = TmpDir::new("wingap");
+    // Spill cap small enough that the oldest lines are gone.
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    for i in 0..400 {
+        bus.push("other", &format!("other line {i:04}")).unwrap();
+    }
+    let w = bus.window("old", Some(1), 20, usize::MAX).unwrap();
+    assert!(w.gap, "the requested start was evicted");
+    assert!(w.first_seq > 1 && w.lines[0].seq == w.first_seq, "{:?} first {}", seqs(&w), w.first_seq);
+    assert!(w.at_start, "nothing older is held");
+    assert!(seqs(&w).windows(2).all(|p| p[1] == p[0] + 1));
+}
+
+#[test]
+fn bus_window_keeps_the_ring_lines_when_the_spill_is_evicted_mid_read() {
+    let tmp = TmpDir::new("winevict");
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    let burst = || {
+        for i in 0..400 {
+            bus.push("other", &format!("other line {i:04}")).unwrap();
+        }
+    };
+    let w = bus.window_with("old", Some(200), 60, usize::MAX, &burst).unwrap();
+    assert!(w.gap, "the eviction is reported so the reader retries");
+    assert!(!w.lines.is_empty(), "the lines the ring held for this request are kept");
+    assert!(seqs(&w).windows(2).all(|p| p[1] == p[0] + 1));
+    // A retry succeeds from the new bounds.
+    let again = bus.window("old", Some(w.first_seq.max(1)), 10, usize::MAX).unwrap();
+    assert!(!again.lines.is_empty());
+}
+
+#[test]
+fn bus_window_obeys_the_byte_budget_on_the_side_away_from_the_anchor() {
+    let tmp = TmpDir::new("winbytes");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    let body = "x".repeat(50 * 1024);
+    for i in 1..=100u64 {
+        bus.push("s", &format!("{i} {body}")).unwrap();
+    }
+    let budget = 200 * 1024;
+    // From a seq: the lines starting at it, cut at the budget (the newest are left out).
+    let w = bus.window("s", Some(20), 100, budget).unwrap();
+    assert_eq!(w.lines[0].seq, 20);
+    assert!(w.lines.len() < 100 && w.lines.iter().map(|l| l.text.len()).sum::<usize>() <= budget + 50 * 1024 + 8);
+    assert!(!w.at_end);
+    // Newest: the lines ending at the head (the oldest are left out).
+    let w = bus.window("s", None, 100, budget).unwrap();
+    assert_eq!(w.lines.last().unwrap().seq, 100);
+    assert!(w.lines.len() < 100 && !w.at_start && w.at_end);
+    // One line is always returned, even over the budget.
+    assert_eq!(bus.window("s", Some(5), 10, 1).unwrap().lines.len(), 1);
+}
+
+#[test]
+fn bus_window_on_an_unknown_stream_or_beyond_the_head_is_empty() {
+    let tmp = TmpDir::new("winnone");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    let w = bus.window("nope", None, 10, usize::MAX).unwrap();
+    assert!(w.lines.is_empty() && w.at_start && w.at_end && w.head_seq == 0);
+    for i in 1..=10u64 {
+        bus.push("s", &format!("l{i}")).unwrap();
+    }
+    let w = bus.window("s", Some(11), 10, usize::MAX).unwrap();
+    assert!(w.lines.is_empty() && w.at_end && w.head_seq == 10, "past the head there is nothing yet");
+}
+
+#[test]
+fn bus_window_memory_is_bounded_by_the_request_not_the_stream() {
+    // A window of a very long stream holds only the asked lines: this is the property the UI relies on.
+    let tmp = TmpDir::new("winmem");
+    let bus = Bus::open(&tmp.0, cfg(100_000, u64::MAX, 16)).unwrap();
+    for i in 1..=100_000u64 {
+        bus.push("s", &format!("line {i} {}", "y".repeat(40))).unwrap();
+    }
+    let w = bus.window("s", None, 80, 64 * 1024).unwrap();
+    assert!(w.lines.len() <= 80);
+    assert!(w.lines.iter().map(|l| l.text.len()).sum::<usize>() < 64 * 1024 + 200);
+    assert_eq!(w.head_seq, 100_000);
+}
+
+// ---- review of #48: budget stop, eviction at the spill base, byte budget on the eviction fallback --------------------
+
+#[test]
+fn bus_window_stops_at_the_byte_budget_without_joining_distant_ring_rows() {
+    let tmp = TmpDir::new("winbudgetstop");
+    // Big rows reach the spill; the ring then holds only short rows, smaller than the big row the budget rejects.
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for _ in 0..30 {
+        bus.push("s", &"B".repeat(100)).unwrap();
+    }
+    for i in 0..400 {
+        bus.push("s", &format!("s{i}")).unwrap();
+    }
+    let w = bus.window("s", Some(1), 200, 150).unwrap();
+    assert_eq!(seqs(&w), vec![1], "the first row fits, the second would pass the budget: the window ends there");
+    assert!(!w.gap, "no false data-loss gap from joining far-away ring rows");
+    assert!(!w.at_end);
+}
+
+fn evicting_bus(tmp: &TmpDir) -> Bus {
+    let bus = Bus::open(&tmp.0, cfg(300, 8_000, 16)).unwrap();
+    for i in 1..=300u64 {
+        bus.push("old", &format!("old line {i:04}")).unwrap();
+    }
+    bus
+}
+
+fn burst(bus: &Bus) {
+    for i in 0..400 {
+        bus.push("other", &format!("other line {i:04}")).unwrap();
+    }
+}
+
+#[test]
+fn bus_window_reports_an_eviction_that_hits_a_request_at_the_spill_base() {
+    let tmp = TmpDir::new("winevictbase");
+    let bus = evicting_bus(&tmp);
+    let w = bus.window_with("old", Some(1), 60, usize::MAX, &|| burst(&bus)).unwrap();
+    assert!(w.gap, "the requested rows were evicted mid-read: the reader must see it");
+    assert!(seqs(&w).windows(2).all(|p| p[1] == p[0] + 1));
+    assert!(w.lines.first().is_none_or(|l| l.seq >= w.first_seq), "first_seq is not stale: {:?} first {}", seqs(&w), w.first_seq);
+}
+
+#[test]
+fn bus_window_eviction_fallback_obeys_the_byte_budget() {
+    // Explicit from: the first captured ring row only. Newest: the last captured ring row only.
+    let tmp = TmpDir::new("winevictbytes");
+    let bus = evicting_bus(&tmp);
+    let w = bus.window_with("old", Some(200), 60, 1, &|| burst(&bus)).unwrap();
+    assert!(w.gap);
+    assert_eq!(w.lines.len(), 1, "{:?}", seqs(&w));
+    let tmp2 = TmpDir::new("winevictbytes2");
+    let bus2 = evicting_bus(&tmp2);
+    let n = bus2.window_with("old", None, 300, 1, &|| burst(&bus2)).unwrap();
+    assert!(n.gap);
+    assert_eq!(n.lines.len(), 1, "{:?}", seqs(&n));
+    assert_eq!(n.lines[0].seq, n.head_seq, "the newest row is the one kept");
+}
+
+#[test]
+fn bus_window_from_inside_rows_lost_after_spilling_stopped_reports_a_gap() {
+    // Spilling worked for a prefix, then stopped (ENOSPC), so a hole sits between the spill and the ring. A request
+    // that starts inside the hole must not come back as the ring's first rows with `gap: false`.
+    let tmp = TmpDir::new("winlostprefix");
+    let bus = Bus::open(&tmp.0, cfg(2_000, u64::MAX, 16)).unwrap();
+    for i in 1..=1_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    super::lock(&bus.inner).streams.get_mut("s").unwrap().spill_disabled = true;
+    for i in 1_001..=5_000u64 {
+        bus.push("s", &format!("line {i}")).unwrap();
+    }
+    let ring_first = bus.tail("s", 0, usize::MAX).lines[0].seq;
+    let from = ring_first - 100;
+    assert!(from > 1_000, "from sits in the lost interval");
+    let w = bus.window("s", Some(from), 20, usize::MAX).unwrap();
+    assert!(w.gap, "the requested start is not among the returned rows: {:?}", seqs(&w));
+    // A start inside the retained spill prefix is still exact and clean.
+    let w = bus.window("s", Some(500), 20, usize::MAX).unwrap();
+    assert_eq!(seqs(&w), (500..520).collect::<Vec<_>>());
+    assert!(!w.gap);
+    // A start at the ring's first row is clean too, and so is one beyond the head.
+    let w = bus.window("s", Some(ring_first), 20, usize::MAX).unwrap();
+    assert_eq!(seqs(&w)[0], ring_first);
+    assert!(!w.gap);
+    assert!(!bus.window("s", Some(9_999), 20, usize::MAX).unwrap().gap);
+}

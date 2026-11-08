@@ -117,6 +117,11 @@ fn read_spill(app: State<'_, App>, stream: String, offset: u64, max_bytes: usize
 }
 
 #[tauri::command(async)]
+fn stream_window(app: State<'_, App>, stream: String, from: Option<u64>, max_lines: usize, max_bytes: usize) -> Res {
+    app.stream_window(&stream, from, max_lines, max_bytes)
+}
+
+#[tauri::command(async)]
 fn read_spill_before(app: State<'_, App>, stream: String, before_seq: u64, max_lines: usize) -> Res {
     app.read_spill_before(&stream, before_seq, max_lines)
 }
@@ -307,6 +312,7 @@ fn main() {
             tail,
             read_spill,
             read_spill_before,
+            stream_window,
             task,
             diff,
             evidence_list,
