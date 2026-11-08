@@ -31,26 +31,36 @@ export function Run() {
   const [overview, setOverview] = useState<RunOverview | null>(null);
   const [overviewErr, setOverviewErr] = useState(false);
 
-  /** The slug the latest request was made for: a response for any other slug (the route changed while it was in flight) is dropped. */
-  const current = useRef(slug);
+  // Each load takes a number and only the newest may set state, on its answer and on its failure. Checking the slug is
+  // not enough: two loads of the same campaign overlap when events arrive while one is out, and the older must not land
+  // last. A new campaign, or leaving the view, retires whatever is still out.
+  const evSeq = useRef(0);
+  const ovSeq = useRef(0);
   const load = useCallback(() => {
     if (!slug) return;
-    current.current = slug;
+    const mine = ++evSeq.current;
     api.evidenceList(slug).then(
-      (r) => { if (current.current !== slug) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
-      (e) => { if (current.current === slug) setErr(errorText(e)); },
+      (r) => { if (mine !== evSeq.current) return; setRows(r.rows); setPending(r.pending ?? 0); setErr(""); },
+      (e) => { if (mine === evSeq.current) setErr(errorText(e)); },
     );
   }, [slug]);
   // A new campaign starts empty: the previous campaign's rows, pending count, error and selection are not shown under it.
-  useEffect(() => { current.current = slug; setRows(null); setPending(0); setErr(""); setSel(null); }, [slug]);
+  useEffect(() => {
+    setRows(null); setPending(0); setErr(""); setSel(null);
+    return () => { evSeq.current++; };
+  }, [slug]);
   const loadOverview = useCallback(() => {
     if (!slug) return;
+    const mine = ++ovSeq.current;
     api.runOverview(slug).then(
-      (o) => { if (current.current === slug) { setOverview(o); setOverviewErr(false); } },
-      () => { if (current.current === slug) setOverviewErr(true); },
+      (o) => { if (mine === ovSeq.current) { setOverview(o); setOverviewErr(false); } },
+      () => { if (mine === ovSeq.current) setOverviewErr(true); },
     );
   }, [slug]);
-  useEffect(() => { setOverview(null); setOverviewErr(false); }, [slug]);
+  useEffect(() => {
+    setOverview(null); setOverviewErr(false);
+    return () => { ovSeq.current++; };
+  }, [slug]);
   useEffect(loadOverview, [loadOverview]);
   useEffect(() => (slug ? onChanged(loadOverview) : undefined), [slug, loadOverview]);
   useEffect(load, [load]);

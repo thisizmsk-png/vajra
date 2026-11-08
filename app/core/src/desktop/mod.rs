@@ -258,8 +258,8 @@ impl App {
         let projects = crate::projects::store::Store::open(data, home)?;
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
-            preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             projects,
+            preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
             sink: Mutex::new(None),
             data: data.to_path_buf(),

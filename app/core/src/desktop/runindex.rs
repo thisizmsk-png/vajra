@@ -75,21 +75,82 @@ pub fn entries(path: &Path) -> Vec<Entry> {
     }
     let text = String::from_utf8_lossy(&buf);
     // A cut at the front leaves a partial first line, which fails to parse and is skipped.
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
-        let (Some(campaign), Some(session_id), Some(run_id), Some(cwd)) = (s("campaign"), s("session_id"), s("run_id"), s("cwd")) else {
-            continue;
-        };
-        if !ids::valid_session_id(&session_id) || !Path::new(&cwd).is_absolute() {
+    out.extend(text.lines().filter_map(parse_line));
+    out
+}
+
+/// One index line as an entry: all four fields present, a canonical session id, an absolute cwd; the Lead id only when
+/// it is a canonical uuid.
+fn parse_line(line: &str) -> Option<Entry> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let (campaign, session_id, run_id, cwd) = (s("campaign")?, s("session_id")?, s("run_id")?, s("cwd")?);
+    if !ids::valid_session_id(&session_id) || !Path::new(&cwd).is_absolute() {
+        return None;
+    }
+    // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
+    let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
+    let provider = s("provider").filter(|p| crate::adapter::Engine::from_id(p).is_some());
+    Some(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id, provider })
+}
+
+/// The longest single line the full reader looks at (a launch line is a few hundred bytes).
+const LINE_CAP: usize = 64 * 1024;
+
+/// Every valid entry in the WHOLE file, oldest first, for the one-time migration, which must not miss older launches.
+/// Memory is bounded by streaming one line at a time (a line over `LINE_CAP` is skipped, not buffered) and the file is
+/// opened without following a symlink or waiting on a FIFO. A file larger than `max_bytes` is an `InvalidData` error:
+/// the caller refuses rather than act on input it could not read completely. A missing file is empty.
+pub fn entries_all(path: &Path, max_bytes: u64) -> io::Result<Vec<Entry>> {
+    use std::io::BufRead;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.len() > max_bytes {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "launch index too large to read completely"));
+    }
+    let mut out = Vec::new();
+    let mut r = io::BufReader::new(f.take(max_bytes + 1));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        // read_until would buffer an unbounded line; cap each line by reading through `take`.
+        let n = (&mut r).take(LINE_CAP as u64 + 1).read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        if line.len() > LINE_CAP && line.last() != Some(&b'\n') {
+            // Over-long line: drop the rest of it without keeping it.
+            loop {
+                let buf = r.fill_buf()?;
+                if buf.is_empty() {
+                    break;
+                }
+                match buf.iter().position(|b| *b == b'\n') {
+                    Some(i) => {
+                        r.consume(i + 1);
+                        break;
+                    }
+                    None => {
+                        let n = buf.len();
+                        r.consume(n);
+                    }
+                }
+            }
             continue;
         }
-        // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
-        let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
-        let provider = s("provider").filter(|p| crate::adapter::Engine::from_id(p).is_some());
-        out.push(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id, provider });
+        if let Some(e) = parse_line(&String::from_utf8_lossy(&line)) {
+            out.push(e);
+        }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -166,6 +227,26 @@ mod tests {
         let m = latest(&p);
         assert_eq!(m["x"].lead_session_id, None);
         assert_eq!(m["x"].run_id, "r");
+    }
+
+    #[test]
+    fn the_full_reader_sees_launches_older_than_the_tail_cap_and_skips_long_junk_lines() {
+        let p = tmp("full");
+        append(&p, &entry("old", S1, "r0")).unwrap();
+        let pad = "x".repeat(2000);
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        for _ in 0..800 {
+            writeln!(f, "{{\"junk\":\"{pad}\"}}").unwrap();
+        }
+        writeln!(f, "{}", "y".repeat(LINE_CAP * 3)).unwrap(); // one over-long line
+        drop(f);
+        append(&p, &entry("new", S2, "r1")).unwrap();
+        assert!(std::fs::metadata(&p).unwrap().len() > READ_CAP, "the index is bigger than the tail the normal reader sees");
+        assert!(!latest(&p).contains_key("old"), "the tail reader misses it");
+        let all = entries_all(&p, 64 * 1024 * 1024).unwrap();
+        assert_eq!(all.iter().map(|e| e.campaign.as_str()).collect::<Vec<_>>(), vec!["old", "new"]);
+        assert_eq!(entries_all(&p, 1024).unwrap_err().kind(), io::ErrorKind::InvalidData, "too large is refused, not truncated");
+        assert!(entries_all(&p.with_file_name("none.jsonl"), 1024).unwrap().is_empty());
     }
 
     #[test]

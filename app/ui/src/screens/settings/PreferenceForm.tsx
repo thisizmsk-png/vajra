@@ -20,13 +20,16 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
   const value = <K extends PreferenceKey>(key: K): Preferences[K] => patch.inherit?.includes(key) ? view.global[key] : (patch[key] ?? view.effective[key]) as Preferences[K];
   const change = <K extends PreferenceKey>(key: K, v: Preferences[K]) => { setMessage(""); setPatch(p => ({ ...p, [key]: v, ...(p.inherit ? { inherit: p.inherit.filter(k => k !== key) } : {}) })); };
   const inherit = (key: PreferenceKey) => { setMessage(""); setPatch(p => { const next = { ...p, inherit: [...new Set([...(p.inherit ?? []), key])] }; delete next[key]; return next; }); };
+  // While a save is in flight, uncertain or awaiting review, nothing may change the draft: a retry replays the original
+  // intent, and an edit made after it would be cleared when the retry lands (PR 100 review).
+  const locked = prefs.busy || prefs.uncertain || prefs.needsReview;
   const source = (key: PreferenceKey) => key in patch || patch.inherit?.includes(key) ? C.unsaved : view.sources[key] === "project" ? C.projectSource : C.globalSource;
   const select = <K extends PreferenceKey>(key: K, label: string, choices: readonly (readonly [string, string, boolean?])[]) => (
     <div className="v-pref__row" key={key}>
-      <label><span>{label}<small>{source(key)}</small></span><select aria-label={label} value={String(value(key))} disabled={prefs.busy} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
+      <label><span>{label}<small>{source(key)}</small></span><select aria-label={label} value={String(value(key))} disabled={locked} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
         {choices.map(([v, text, disabled]) => <option key={v} value={v} disabled={disabled}>{text}</option>)}
       </select></label>
-      {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
+      {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
     </div>
   );
   const save = async (reset = false) => { setMessage(""); if (await prefs.save(reset ? {} : patch, reset)) { setPatch({}); setMessage(C.saved); } };
@@ -51,15 +54,19 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
       <p>{C.defaultsHint}</p>
     </>}
     {section === "notifications" && <>
-      {([ ["notifications", C.notifications], ["notifications_text", C.notificationsText] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onChange={e => change(key, e.target.checked)} /></label>
-        {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
+      {([ ["notifications", C.notifications], ["notifications_text", C.notificationsText] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={locked} onChange={e => change(key, e.target.checked)} /></label>
+        {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
       </div>)}
       <p>{C.notificationsHint}</p>
     </>}
-    {section === "keyboard" && (["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? C.searchShortcut : C.settingsShortcut}<small>{source("shortcuts")}</small></span>
-      <select aria-label={key === "palette" ? C.searchShortcut : C.settingsShortcut} value={value("shortcuts")[key]} disabled={prefs.busy} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
-        {SHORTCUT_CHOICES.map(k => <option key={k} value={k}>{shortcutKeys(k).join(" ")}</option>)}
-      </select></label>{projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit("shortcuts")}>{C.inherit(key === "palette" ? C.searchShortcut : C.settingsShortcut)}</Button>}</div>)}
+    {section === "keyboard" && <>
+      {(["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? C.searchShortcut : C.settingsShortcut}<small>{source("shortcuts")}</small></span>
+        <select aria-label={key === "palette" ? C.searchShortcut : C.settingsShortcut} value={value("shortcuts")[key]} disabled={locked} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
+          {SHORTCUT_CHOICES.map(k => <option key={k} value={k}>{shortcutKeys(k).join(" ")}</option>)}
+        </select></label></div>)}
+      {/* The shortcuts are one override in the store, so inheriting is one group-wide control that says it resets both (PR 100 review). */}
+      {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit("shortcuts")}>{C.inheritShortcuts}</Button>}
+    </>}
     {prefs.error && <p role="alert">{prefs.error}</p>}
     {prefs.receipt && <p role="status">{C.receipt(prefs.receipt.state, prefs.receipt.action_id, prefs.receipt.reason)}</p>}
     {prefs.uncertain && <Button disabled={prefs.busy} onClick={() => { void prefs.retry().then(ok => { if (ok) { setPatch({}); setMessage(C.saved); } }); }}>{C.retry}</Button>}

@@ -251,6 +251,12 @@ export const api = {
   /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
   projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
   projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** Suggested projects for campaigns from before projects existed. Writes nothing; `done` once confirmed. `terminal` campaigns are read-only and never adopted. */
+  projectMigrationSuggest: () =>
+    call<{ done: boolean; groups: { root: string; name: string; campaigns: string[] }[]; unsorted: string[]; terminal: string[] }>("project_migration_suggest"),
+  /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
+  projectMigrationConfirm: (roots: string[]) =>
+    call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
   /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
   projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };

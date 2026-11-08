@@ -320,6 +320,7 @@ export const S = {
     scopeHint: "Save or discard changes before switching scope.",
     scopeDescription: (name?: string) => `${name ? `Overrides for ${name}` : "Global defaults"}. Changes apply only after Save.`,
     inherit: (label: string) => `Use global ${label}`,
+    inheritShortcuts: "Use global shortcuts (both)",
     theme: "Theme", systemTheme: "Follow system", dark: "Dark", light: "Light",
     editor: "Default editor", systemEditor: "System default", editorCli: "Editor CLI",
     shell: "Terminal shell", loginShell: "Login shell", sh: "/bin/sh", bash: "/bin/bash", zsh: "/bin/zsh",

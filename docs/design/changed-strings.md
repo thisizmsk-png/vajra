@@ -244,3 +244,9 @@ FG-09 providers in the UI (Settings > Providers, Start, Resume, Run, Crew).
 | NAME cannot take a message while it runs. / NAME cannot be redirected while it runs. / NAME has no inspect step Vajra can read. / NAME does not write a transcript Vajra can read. / NAME does not run the Vajra workflow, so there is no crew to show. / Stop ends the NAME process. There is no hand-off at the next tool call. / NAME is not installed. / This build cannot run NAME. | limit codes (providers.md stable codes) | new; the core's own sentence shows only for a code not in this list |
 | Uses your Claude Code login / Uses your Codex login | login route codes | new |
 | The login check did not finish in time, so Vajra cannot tell. / The login check answered something Vajra could not read, so it cannot tell. | login detail codes | new |
+
+Settings keyboard (PR 100 review).
+
+| String | Where | Note |
+|---|---|---|
+| Use global shortcuts (both) | Settings > Keyboard, project scope | replaces the two per-shortcut "Use global ..." buttons: shortcuts are one override, so the one control says it resets both (PR 100 review) |

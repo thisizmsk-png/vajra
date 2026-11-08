@@ -63,6 +63,27 @@ describe("FG-08 preferences",()=>{
   render(<PreferenceForm projectId={null} section="appearance"/>);fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));
   await screen.findByText(/Action unknown ·/);expect(screen.getByRole("button",{name:"Save preferences"}).getAttribute("aria-disabled")).toBe("true");fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(1);expect(screen.queryByRole("button",{name:"Retry same action"})).toBeNull();
  });
+ it("locks every draft control after a lost reply, so a retry of the first intent cannot clear a newer edit",async()=>{
+  let calls=0;const f=fakeIpc({preferences_read:view(P),act_preferences_update:(a?:Record<string,unknown>)=>{if(++calls===1)return Promise.reject(new Error("lost"));return {receipt:{state:"done",action_id:(a?.envelope as {action_id:string}).action_id},result:view(P,1,"dark")};}});setTransport(f.transport);
+  render(<PreferenceForm projectId={P} projectName="Project A" section="appearance"/>);
+  fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));
+  await screen.findByRole("button",{name:"Retry same action"});
+  expect((screen.getByLabelText("Theme") as HTMLSelectElement).disabled).toBe(true);
+  expect(screen.getByRole("button",{name:"Use global Theme"}).getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(screen.getByRole("button",{name:"Retry same action"}));await screen.findByText("Saved.");
+  const writes=f.calls.filter(c=>c.cmd==="act_preferences_update");expect(writes).toHaveLength(2);expect(writes[1].args?.patch).toEqual({theme:"dark"});
+  expect((screen.getByLabelText("Theme") as HTMLSelectElement).disabled).toBe(false);
+ });
+ it("offers one group-wide shortcut inheritance that says it resets both bindings",async()=>{
+  const both={palette:"Primary+Shift+P",settings:"Primary+Shift+S"};
+  const f=fakeIpc({preferences_read:{...view(P),overrides:{shortcuts:both},effective:{...DEFAULT_PREFERENCES,shortcuts:both},sources:{...view(P).sources,shortcuts:"project"}},act_preferences_update:()=>done(view(P,1))});setTransport(f.transport);
+  render(<PreferenceForm projectId={P} projectName="Project A" section="keyboard"/>);
+  await screen.findByLabelText("Search shortcut");
+  expect(screen.queryByRole("button",{name:/^Use global Search shortcut$|^Use global Settings shortcut$/})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Use global shortcuts (both)"}));
+  fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
+  expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args?.patch).toEqual({inherit:["shortcuts"]});
+ });
  it("supports the saved primary key but does not hijack composition or terminal keystrokes",()=>{
   expect(matchesShortcut(new KeyboardEvent("keydown",{key:"p",metaKey:true,shiftKey:true}),"Primary+Shift+P")).toBe(true);expect(matchesShortcut(new KeyboardEvent("keydown",{key:"p",metaKey:true,shiftKey:true,isComposing:true}),"Primary+Shift+P")).toBe(false);
   const terminal=document.createElement("textarea");terminal.className="xterm-helper-textarea";const e=new KeyboardEvent("keydown",{key:"k",metaKey:true,bubbles:true});let matched=true;terminal.addEventListener("keydown",x=>{matched=matchesShortcut(x,"Primary+K");});terminal.dispatchEvent(e);expect(matched).toBe(false);
