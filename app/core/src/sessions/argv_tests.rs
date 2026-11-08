@@ -275,7 +275,8 @@ fn lead_argv_is_fixed_template() {
         assert_eq!(
             after(&argv, "--tools"),
             "Read,Grep,Glob,mcp__vajra-desktop__list_workers,mcp__vajra-desktop__inspect_worker,\
-             mcp__vajra-desktop__message_worker,mcp__vajra-desktop__redirect_worker,mcp__vajra-desktop__stop_worker"
+             mcp__vajra-desktop__message_worker,mcp__vajra-desktop__redirect_worker,mcp__vajra-desktop__stop_worker,\
+             mcp__vajra-desktop__propose_run"
         );
         assert_eq!(after(&argv, "--permission-mode"), "dontAsk");
         assert_eq!(after(&argv, "--setting-sources"), "");

@@ -86,7 +86,7 @@ fn text_prop() -> Value {
     json!({"type": "string", "minLength": 1, "maxLength": 4000})
 }
 
-/// The five tools, schemas as in design.md 5.2.
+/// The six tools: the five of design.md 5.2, plus ADR-15 2.4's `propose_run` (served only to a Director-General).
 pub fn tools() -> Value {
     json!([
         {"name": "list_workers",
@@ -109,7 +109,13 @@ pub fn tools() -> Value {
         {"name": "stop_worker",
          "description": "Ask the human to stop a worker. Nothing happens until the human confirms in the app.",
          "inputSchema": {"type": "object", "additionalProperties": false, "required": ["worker"],
-            "properties": {"worker": worker_prop(), "reason": {"type": "string", "maxLength": 500}}}}
+            "properties": {"worker": worker_prop(), "reason": {"type": "string", "maxLength": 500}}}},
+        {"name": "propose_run",
+         "description": "Propose a new Vajra run for this project. Nothing runs until the human reads the exact ask and starts it in the app.",
+         "inputSchema": {"type": "object", "additionalProperties": false, "required": ["ask"],
+            "properties": {"ask": text_prop(),
+                           "base": {"type": "string", "maxLength": 255, "default": "HEAD"},
+                           "rounds": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2}}}}
     ])
 }
 

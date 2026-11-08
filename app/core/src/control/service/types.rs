@@ -179,6 +179,8 @@ pub(super) enum Kind {
     /// ADR-14: the human approved or rejected a plan item. Always actor human, via ui.
     Approve,
     Reject,
+    /// ADR-15 2.4: a Director-General proposed a run. Always actor Lead, via mcp; a human starts or dismisses it.
+    Propose,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -197,7 +199,7 @@ pub(super) enum State {
 }
 
 impl Kind {
-    pub(super) const ALL: [Kind; 9] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject];
+    pub(super) const ALL: [Kind; 10] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject, Kind::Propose];
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -209,6 +211,7 @@ impl Kind {
             Kind::Ask => "ask",
             Kind::Approve => "approve",
             Kind::Reject => "reject",
+            Kind::Propose => "propose",
         }
     }
     pub(super) fn parse(k: &str) -> Option<Kind> {

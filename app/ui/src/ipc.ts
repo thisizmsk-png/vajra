@@ -89,7 +89,7 @@ export type LeadStatus = {
 export type NewConversation = { project_id: string; generation: number; stream: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
-  id: string; kind: "task" | "plan" | "question"; campaign: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
+  id: string; kind: "task" | "plan" | "question" | "run_proposal"; campaign?: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
   title: string; body: string; context?: string[]; actions: string[];
   /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
   source?: string;
@@ -103,6 +103,10 @@ export type InboxItem = {
   invalid?: string | null;
   /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
+  /** ADR-15 2.4 `run_proposal` items: the exact run a Director-General proposed. `ask` is what starts, byte for byte. */
+  ask?: string; base?: string; rounds?: number; project_id?: string; project?: string | null; generation?: number;
+  /** What `start_proposal` must be given back: the hash of exactly what was shown. */
+  proposal_sha256?: string;
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
@@ -156,6 +160,9 @@ export const api = {
   approvePlan: (id: string, planSha256: string) => call<{ action_id: string; state: string; via: string }>("approve_plan", { id, planSha256 }),
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
+  /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
+  startProposal: (id: string, proposalSha256: string) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256 }),
+  dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
 };
 

@@ -1725,6 +1725,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod caps;
 mod orchestrator;
+mod proposals;
 mod inbox;
 mod wfresult;
 mod decide;
