@@ -35,16 +35,20 @@ pub fn find_on_path(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     })
 }
 
-/// `$PATH` split into dirs.
+/// The user's PATH dirs (login shell, process PATH, install dirs; absolute only). See `crate::userpath`.
 pub fn path_dirs() -> Vec<PathBuf> {
-    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default()
+    crate::userpath::current()
 }
+
+/// The detail for a missing claude: names where it was looked for.
+pub const CLAUDE_MISSING: &str =
+    "not found on your login-shell PATH or in ~/.local/bin, ~/.claude/local, /opt/homebrew/bin, /usr/local/bin";
 
 pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
     let mut rows = Vec::new();
 
     rows.push(match find_on_path("claude", dirs) {
-        None => row("claude", false, "not found on PATH", "Install Claude Code: https://claude.com/claude-code"),
+        None => row("claude", false, CLAUDE_MISSING, "Install Claude Code: https://claude.com/claude-code"),
         Some(p) => match run_process(&p, &["--version".to_string()], None, bridge.timeout) {
             Ok(o) if o.exit() == Some(0) => row("claude", true, o.stdout.trim(), ""),
             _ => row("claude", false, "`claude --version` failed", "Reinstall Claude Code: https://claude.com/claude-code"),
@@ -132,5 +136,44 @@ mod tests {
         assert!(!doc.ok && doc.detail.contains("cap"), "{doc:?}");
         assert!(!find("hooks registered").ok, "a cut doctor proves no hooks: {rows:?}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn claude_row(home: &Path, dirs: &[PathBuf]) -> Row {
+        std::fs::create_dir_all(home.join("scripts")).unwrap();
+        let allow = Allowlist::new(home, home).unwrap();
+        let bridge = Bridge::new(home.join("scripts"));
+        run(&allow, &bridge, dirs).into_iter().find(|r| r.name == "claude").unwrap()
+    }
+
+    /// A Finder launch: the process PATH is the minimal GUI one and claude lives in a dir only the login shell names.
+    #[test]
+    fn a_gui_launch_finds_claude_through_the_login_shell_path() {
+        let home = std::env::temp_dir().join(format!("vajra-preflight-gui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("custom/bin")).unwrap();
+        let home = home.canonicalize().unwrap();
+        exe(&home.join("custom/bin/claude"), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n");
+        let shell = home.join("zsh");
+        exe(&shell, &format!("#!/bin/sh\nprintf '%s' '__VAJRA_PATH_BEGIN__{}:/usr/bin:/bin__VAJRA_PATH_END__'\n", home.join("custom/bin").display()));
+        let minimal: Vec<PathBuf> = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from).to_vec();
+        let login = crate::userpath::detect(&shell, &home, std::time::Duration::from_secs(5));
+        let dirs = crate::userpath::effective(login, &minimal, &home);
+        let r = claude_row(&home, &dirs);
+        assert!(r.ok && r.detail == "9.9.9 (Claude Code)", "{r:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_missing_claude_says_where_it_looked_and_how_to_install() {
+        let home = std::env::temp_dir().join(format!("vajra-preflight-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("empty")).unwrap();
+        let home = home.canonicalize().unwrap();
+        let r = claude_row(&home, &[home.join("empty")]);
+        assert!(!r.ok, "{r:?}");
+        assert_eq!(r.detail, CLAUDE_MISSING);
+        assert!(r.detail.contains("login-shell PATH") && r.detail.contains("~/.local/bin"), "{r:?}");
+        assert!(r.fix.contains("https://claude.com/claude-code"), "{r:?}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
