@@ -258,6 +258,97 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
     assert!(tail.contains("DO2NE"), "the flood never finished after acks");
 }
 
+/// A shell running `sleep` in the foreground does not read its input, so a PTY write of any size would block.
+fn sleeping_terminal(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
+    let (info, out) = open_root(t, f);
+    t.write(info.id, b"sleep 60\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    (info, out)
+}
+
+#[test]
+fn a_big_paste_to_a_shell_that_is_not_reading_returns_at_once_and_other_terminals_stay_responsive() {
+    let f = Fixture::new("blocked");
+    let t = f.terminals();
+    let (a, _oa) = sleeping_terminal(&t, &f);
+    let (b, ob) = open_root(&t, &f);
+    let max = Limits::default().max_write;
+    let start = Instant::now();
+    let mut results = Vec::new();
+    for _ in 0..8 {
+        let one = Instant::now();
+        results.push(t.write(a.id, &vec![b'x'; max]));
+        assert!(one.elapsed() < Duration::from_millis(500), "a write waited on the shell: {:?}", one.elapsed());
+    }
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(results.contains(&Err(TermError::QueueFull)), "the bounded queue never said full: {results:?}");
+    // Another terminal, and the blocked one's own resize and ack, still answer.
+    t.write(b.id, b"echo MARK$((20+22))\n").unwrap();
+    assert!(ob.until("MARK42", 5).contains("MARK42"));
+    assert!(t.resize(a.id, 30, 100).is_ok() && t.ack(a.id, 0).is_ok());
+    // And closing the blocked tab does not hang.
+    let one = Instant::now();
+    t.close(a.id).unwrap();
+    assert!(one.elapsed() < Duration::from_secs(3), "close waited {:?}", one.elapsed());
+}
+
+#[test]
+fn the_input_queue_is_bounded_and_drains_in_order() {
+    let f = Fixture::new("queue");
+    let t = Terminals::with(Limits { write_queue: 4096, max_write: 4096, ..Limits::default() }, f.env());
+    let (a, _oa) = sleeping_terminal(&t, &f);
+    let mut busy = false;
+    for _ in 0..200 {
+        busy |= t.write(a.id, &[b'y'; 4096]) == Err(TermError::QueueFull);
+    }
+    assert!(busy, "200 x 4 KiB never filled a 4 KiB queue");
+    t.close(a.id).unwrap();
+    // A reading shell gets its keystrokes in the order typed.
+    let (b, ob) = open_root(&t, &f);
+    for part in [&b"echo A"[..], b"B", b"C$((1+1))\n"] {
+        t.write(b.id, part).unwrap();
+    }
+    assert!(ob.until("ABC2", 5).contains("ABC2"));
+}
+
+#[test]
+fn signalling_a_reaped_terminal_never_touches_a_session_that_reuses_its_pid() {
+    use std::os::unix::process::CommandExt;
+    // An unrelated session whose leader pid stands in for a recycled pid/session id.
+    let mut other = unsafe {
+        std::process::Command::new("/bin/sleep").arg("60").pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }).spawn().unwrap()
+    };
+    let pid = other.id();
+    assert!(alive(pid));
+    super::kill::signal_all(pid, false, libc::SIGKILL);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alive(pid), "an ended terminal signalled a session it no longer owns");
+    super::kill::signal_all(pid, true, libc::SIGKILL); // control: a live terminal's session is ended
+    assert!(other.wait().unwrap().code().is_none(), "a live terminal's signal did not end the session");
+}
+
+#[test]
+fn a_shell_that_exits_takes_its_background_jobs_with_it_and_a_later_close_is_harmless() {
+    let f = Fixture::new("ended-bg");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    t.write(info.id, b"sleep 300 & echo BG=$!\n").unwrap();
+    let mut seen = out.until("BG=", 5);
+    for _ in 0..50 {
+        if seen.split("BG=").skip(1).any(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
+            break;
+        }
+        seen.push_str(&out.until("BG=", 1));
+    }
+    let bg: u32 = seen.split("BG=").skip(1).find_map(|r| r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()).unwrap();
+    assert!(alive(bg));
+    t.write(info.id, b"exit 0\n").unwrap();
+    assert_eq!(out.exit(5), Some(Some(0)));
+    assert!(all_gone(&[bg], 3), "the session was not ended before the leader was reaped");
+    assert!(!t.list()[0].alive);
+    t.close(info.id).unwrap();
+}
+
 #[test]
 fn the_terminal_module_stays_off_the_bus_the_control_service_mcp_and_agent_sessions() {
     // The wall that keeps agents out: this directory's non-test source may not reach those modules.

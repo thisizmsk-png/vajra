@@ -46,6 +46,8 @@ pub enum TermError {
     /// The global or per-root cap of open terminals.
     TooMany,
     TooLarge,
+    /// The terminal's input queue is full (the shell is not reading); retry later.
+    QueueFull,
     NotFound,
     ShuttingDown,
     Spawn(String),
@@ -61,6 +63,7 @@ impl TermError {
             Self::InvalidSize => "invalid_size",
             Self::TooMany => "too_many_terminals",
             Self::TooLarge => "write_too_large",
+            Self::QueueFull => "input_queue_full",
             Self::NotFound => "not_found",
             Self::ShuttingDown => "shutting_down",
             Self::Spawn(_) => "spawn_failed",
@@ -77,6 +80,7 @@ impl std::fmt::Display for TermError {
             Self::InvalidSize => f.write_str("rows and cols must be non-zero"),
             Self::TooMany => f.write_str("too many open terminals; close one first"),
             Self::TooLarge => f.write_str("input is too large; send it in smaller pieces"),
+            Self::QueueFull => f.write_str("the terminal is not reading its input right now"),
             Self::NotFound => f.write_str("no such terminal"),
             Self::ShuttingDown => f.write_str("app is quitting"),
             Self::Spawn(e) => write!(f, "spawn failed: {e}"),
@@ -112,7 +116,9 @@ struct Term {
     place: Placement,
     size: Mutex<(u16, u16)>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Typed bytes wait here for the writer thread, so a shell that is not reading never blocks the caller.
+    input: Arc<(Mutex<Input>, Condvar)>,
+    writer: Mutex<Option<JoinHandle<()>>>,
     sink: Mutex<Sink>,
     /// Bytes sent to the sink and not yet acknowledged.
     credit: Mutex<usize>,
@@ -139,8 +145,37 @@ impl Term {
     }
 }
 
+/// The open terminals, and the roots of opens in progress (their slot is taken before the shell is forked, so the fork
+/// happens outside this lock and a slow spawn never stalls `list`, `ack` or `resize`).
+#[derive(Default)]
+struct Registry {
+    terms: HashMap<u32, Arc<Term>>,
+    opening: Vec<PathBuf>,
+}
+
+/// Releases an `open` slot on every path out of `open`.
+struct Slot<'a>(&'a Mutex<Registry>, PathBuf);
+
+impl Slot<'_> {
+    fn release(self, r: &mut Registry) {
+        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
+            r.opening.swap_remove(i);
+        }
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut r = lock(self.0);
+        if let Some(i) = r.opening.iter().position(|p| *p == self.1) {
+            r.opening.swap_remove(i);
+        }
+    }
+}
+
 pub struct Terminals {
-    map: Mutex<HashMap<u32, Arc<Term>>>,
+    map: Mutex<Registry>,
     next: AtomicU32,
     closing: AtomicBool,
     limits: Limits,
@@ -159,15 +194,15 @@ impl Terminals {
     }
 
     pub fn with(limits: Limits, env: Arc<dyn LoginEnv>) -> Self {
-        Self { map: Mutex::new(HashMap::new()), next: AtomicU32::new(1), closing: AtomicBool::new(false), limits, env }
+        Self { map: Mutex::new(Registry::default()), next: AtomicU32::new(1), closing: AtomicBool::new(false), limits, env }
     }
 
     pub fn count(&self) -> usize {
-        lock(&self.map).len()
+        lock(&self.map).terms.len()
     }
 
     fn get(&self, id: u32) -> Result<Arc<Term>, TermError> {
-        lock(&self.map).get(&id).cloned().ok_or(TermError::NotFound)
+        lock(&self.map).terms.get(&id).cloned().ok_or(TermError::NotFound)
     }
 
     /// Open a terminal in `cwd`, which must be one of `roots` or a worker worktree of one.
@@ -202,12 +237,17 @@ impl Terminals {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.cwd(&place.cwd);
-        // The cap is checked last and the slot taken under the same lock as the insert below, so two concurrent opens
-        // cannot both pass the check.
-        let mut map = lock(&self.map);
-        if map.len() >= self.limits.max_open || map.values().filter(|t| t.place.root == place.root).count() >= self.limits.max_per_root {
-            return Err(TermError::TooMany);
-        }
+        // The cap is checked and the slot taken under one lock, so two concurrent opens cannot both pass the check; the
+        // fork below happens outside it.
+        let slot = {
+            let mut r = lock(&self.map);
+            let under = |root: &Path| r.terms.values().filter(|t| t.place.root == root).count() + r.opening.iter().filter(|p| *p == root).count();
+            if r.terms.len() + r.opening.len() >= self.limits.max_open || under(&place.root) >= self.limits.max_per_root {
+                return Err(TermError::TooMany);
+            }
+            r.opening.push(place.root.clone());
+            Slot(&self.map, place.root.clone())
+        };
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| TermError::Spawn(e.to_string()))?;
         drop(pair.slave); // so the reader sees EOF when the shell and its group are gone
         let pid = child.process_id().unwrap_or(0);
@@ -220,12 +260,14 @@ impl Terminals {
                 return Err(TermError::Io(e.to_string()));
             }
         };
+        let input = Arc::new((Mutex::new(Input::default()), Condvar::new()));
         let term = Arc::new(Term {
             pid,
             place,
             size: Mutex::new((rows, cols)),
             master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
+            input: input.clone(),
+            writer: Mutex::new(None),
             sink: Mutex::new(sink),
             credit: Mutex::new(0),
             credit_cv: Condvar::new(),
@@ -243,26 +285,51 @@ impl Terminals {
                 .map_err(|e| TermError::Io(e.to_string()))?
         };
         *lock(&term.reader) = Some(handle);
+        let writer_thread = {
+            let input = term.input.clone();
+            std::thread::Builder::new().name(format!("term-in-{id}")).spawn(move || write_loop(writer, &input)).ok()
+        };
+        *lock(&term.writer) = writer_thread;
         let info = term.info(id);
-        map.insert(id, term);
+        let mut r = lock(&self.map);
+        if self.closing.load(Ordering::SeqCst) {
+            drop(r);
+            stop(&term);
+            return Err(TermError::ShuttingDown);
+        }
+        r.terms.insert(id, term);
+        // The terminal now counts as open; release the slot under this same lock (its Drop would take the lock again).
+        slot.release(&mut r);
         Ok(info)
     }
 
     /// Every open terminal, oldest first.
     pub fn list(&self) -> Vec<TermInfo> {
-        let mut v: Vec<TermInfo> = lock(&self.map).iter().map(|(id, t)| t.info(*id)).collect();
+        let mut v: Vec<TermInfo> = lock(&self.map).terms.iter().map(|(id, t)| t.info(*id)).collect();
         v.sort_by_key(|i| i.id);
         v
     }
 
     /// Keystrokes or a paste typed by the human. The caller is the UI's own terminal view; there is no other path in.
+    /// Never blocks: the bytes go to a bounded queue a writer thread drains into the PTY, and a full queue (the shell is
+    /// not reading) answers `QueueFull` instead of waiting.
     pub fn write(&self, id: u32, data: &[u8]) -> Result<(), TermError> {
         if data.len() > self.limits.max_write {
             return Err(TermError::TooLarge);
         }
         let t = self.get(id)?;
-        let mut w = lock(&t.writer);
-        w.write_all(data).and_then(|()| w.flush()).map_err(|e| TermError::Io(e.to_string()))
+        let (m, cv) = &*t.input;
+        let mut q = lock(m);
+        if q.closed {
+            return Err(TermError::Io("the terminal's input is closed".into()));
+        }
+        if q.bytes + data.len() > self.limits.write_queue {
+            return Err(TermError::QueueFull);
+        }
+        q.bytes += data.len();
+        q.chunks.push_back(data.to_vec());
+        cv.notify_one();
+        Ok(())
     }
 
     pub fn resize(&self, id: u32, rows: u16, cols: u16) -> Result<(), TermError> {
@@ -298,7 +365,7 @@ impl Terminals {
 
     /// Close a tab: hang up the shell's group and session, kill what ignores that, reap, and join the reader.
     pub fn close(&self, id: u32) -> Result<(), TermError> {
-        let t = lock(&self.map).remove(&id).ok_or(TermError::NotFound)?;
+        let t = lock(&self.map).terms.remove(&id).ok_or(TermError::NotFound)?;
         stop(&t);
         Ok(())
     }
@@ -306,7 +373,7 @@ impl Terminals {
     /// App quit: close every terminal. After this `open` is refused.
     pub fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
-        let all: Vec<Arc<Term>> = lock(&self.map).drain().map(|(_, t)| t).collect();
+        let all: Vec<Arc<Term>> = lock(&self.map).terms.drain().map(|(_, t)| t).collect();
         for t in &all {
             t.signal(libc::SIGHUP);
         }
@@ -317,7 +384,7 @@ impl Terminals {
 
     /// Tests: the shell's pid.
     pub fn pid(&self, id: u32) -> Option<u32> {
-        lock(&self.map).get(&id).map(|t| t.pid)
+        lock(&self.map).terms.get(&id).map(|t| t.pid)
     }
 }
 
@@ -336,14 +403,64 @@ fn stop(t: &Arc<Term>) {
     if !t.exited.load(Ordering::SeqCst) {
         t.signal(libc::SIGKILL);
     }
+    // The shell and its session are gone, so a writer stuck on a full PTY gets an error and ends; wake an idle one.
+    {
+        let (m, cv) = &*t.input;
+        let mut q = lock(m);
+        q.closed = true;
+        q.chunks.clear();
+        cv.notify_all();
+    }
     // Unblock a reader that is waiting for credit, then wait for it.
     *lock(&t.credit) = 0;
     t.credit_cv.notify_all();
     if let Some(h) = lock(&t.reader).take() {
         let _ = h.join();
     }
-    // Anything the shell left in its session (a `sleep &` in its own job group) goes with it.
-    t.signal(libc::SIGKILL);
+    // Join the writer if it ends promptly. One stuck on a PTY that something outside the session still holds open must
+    // not hang the close; it is detached and ends when that write fails.
+    if let Some(h) = lock(&t.writer).take() {
+        let until = Instant::now() + Duration::from_millis(200);
+        while !h.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if h.is_finished() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Typed bytes not yet written to the PTY.
+#[derive(Default)]
+struct Input {
+    chunks: std::collections::VecDeque<Vec<u8>>,
+    bytes: usize,
+    closed: bool,
+}
+
+/// The only thread that writes to the PTY master. A `write_all` here may block for as long as the shell does not read;
+/// callers never wait on it. It ends when the input is closed or the PTY write fails (the shell is gone).
+fn write_loop(mut w: Box<dyn Write + Send>, input: &(Mutex<Input>, Condvar)) {
+    let (m, cv) = input;
+    loop {
+        let mut q = lock(m);
+        while q.chunks.is_empty() && !q.closed {
+            q = cv.wait(q).unwrap_or_else(|e| e.into_inner());
+        }
+        if q.closed {
+            return;
+        }
+        let Some(chunk) = q.chunks.pop_front() else { continue };
+        drop(q);
+        let ok = w.write_all(&chunk).and_then(|()| w.flush()).is_ok();
+        let mut q = lock(m);
+        q.bytes = q.bytes.saturating_sub(chunk.len());
+        if !ok {
+            q.closed = true;
+            q.chunks.clear();
+            return;
+        }
+    }
 }
 
 /// Output the reader has taken from the PTY and the flusher has not sent yet.
@@ -414,11 +531,19 @@ fn read_loop(mut reader: Box<dyn Read + Send>, mut child: Box<dyn portable_pty::
     if let Some(f) = flusher {
         let _ = f.join();
     }
-    // The PTY closed. Reap under the lock `signal` takes, so a signal never reaches a recycled pid.
-    let status = child.wait();
-    t.exited.store(true, Ordering::SeqCst);
-    *lock(&t.reaped) = true;
-    let code = status.ok().map(|s| s.exit_code() as i32);
+    // The PTY closed. Under the lock `signal` takes: end what is left of the session while the leader is still
+    // unreaped (an unreaped leader, even a zombie, holds its pid and so its session id), then reap it and mark the
+    // terminal not signalable. After this nothing can send a signal for this pid, which may be recycled at once.
+    let (status, code) = {
+        let mut reaped = lock(&t.reaped);
+        kill::signal_all(t.pid, true, libc::SIGKILL);
+        let status = child.wait();
+        *reaped = true;
+        t.exited.store(true, Ordering::SeqCst);
+        let code = status.as_ref().ok().map(|s| s.exit_code() as i32);
+        (status, code)
+    };
+    drop(status);
     t.send(Event::Exit(code));
 }
 

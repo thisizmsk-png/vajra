@@ -16,11 +16,13 @@ pub struct Limits {
     pub window: usize,
     /// Largest single `write` (a paste is chunked by the caller).
     pub max_write: usize,
+    /// Typed bytes that may wait for a shell that is not reading; more is answered `QueueFull`.
+    pub write_queue: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024 }
+        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024, write_queue: 1024 * 1024 }
     }
 }
 

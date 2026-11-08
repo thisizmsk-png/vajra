@@ -197,7 +197,8 @@ fn term_value(i: &vajra_desktop::terminal::TermInfo) -> serde_json::Value {
     serde_json::to_value(i).unwrap_or_default()
 }
 
-#[tauri::command]
+/// Async (off the main thread) because it forks a shell.
+#[tauri::command(async)]
 fn term_open(
     app: State<'_, App>,
     terms: State<'_, Terminals>,
@@ -215,7 +216,8 @@ fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Chann
     terms.attach(id, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
 }
 
-#[tauri::command]
+/// Async so a slow call never sits on the main thread; `write` itself only queues and never blocks.
+#[tauri::command(async)]
 fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Res {
     terms.write(id, data.as_bytes()).map(|()| serde_json::json!({})).map_err(term_err)
 }
