@@ -168,7 +168,9 @@ function Frame() {
               </main>
               {showInspector && project && <Inspector project={project} focus={focusCampaign} crew={crew} worker={workerRow} />}
             </div>
-            {/* The terminal dock's place (FG-05/FG-16, built by the terminal track): nothing is mounted until it lands. */}
+            {/* The terminal dock's place (FG-05/FG-16, the terminal track). Nothing mounts until its PR lands; then this div
+                becomes `<TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />`
+                (src/terminal/TerminalDock.tsx, `Place = { cwd, label }`); the Unsorted bucket has no folder, so no default. */}
             <div className="v-dock" data-slot="terminal" hidden />
           </div>
           <StatusBar runs={P.runs} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
