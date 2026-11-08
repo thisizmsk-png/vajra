@@ -2,7 +2,7 @@
 // place. It reads the shell's one project view (`useProjects`, which already reloads on the store's change events with
 // the 500 ms gap), so it adds no polling and no subscription. Opening an item only moves focus to its project and
 // campaign; approving takes an explicit click on the exact plan hash shown, returns a receipt, and a stale plan fails.
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button } from "../../../components/ui/base";
 import { S } from "../../../strings";
 import { api, newActionId } from "../../ipc";
@@ -41,6 +41,14 @@ export function Inbox() {
   const [said, setSaid] = useState("");
 
   const name = (campaign: string) => P.projects.find((p) => p.id === P.byCampaign[campaign])?.name ?? S.projects.unsorted;
+  // Expiry must cause a render by itself: nothing else re-renders an idle inbox. One timer, for the earliest snooze.
+  const [ticks, tick] = useState(0);
+  useEffect(() => {
+    const next = Math.min(...Object.values(until).filter((t) => t > Date.now()));
+    if (!Number.isFinite(next)) return;
+    const h = setTimeout(() => tick((n) => n + 1), Math.max(0, next - Date.now()) + 50);
+    return () => clearTimeout(h);
+  }, [until, ticks]);
   const now = Date.now();
   const snoozed = (i: InboxItem) => (until[keyOf(i)] ?? 0) > now;
   const live = P.inbox.filter((i) => !snoozed(i));

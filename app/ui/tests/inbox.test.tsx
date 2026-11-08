@@ -242,6 +242,33 @@ describe("Snooze never hides a new blocker", () => {
     expect(await screen.findByRole("article", { name: /Which key/ })).toBeTruthy();
   });
 
+  it("brings a snoozed item back on its own when the snooze ends, with no refresh and no other event", async () => {
+    vi.useFakeTimers();
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    snooze("Which key");
+    expect(screen.queryByRole("article", { name: /Which key/ })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(14 * 60_000); });
+    expect(screen.queryByRole("article", { name: /Which key/ })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    expect(screen.getByRole("article", { name: /Which key/ })).toBeTruthy();
+    expect(n("inbox")).toBe(1);
+  });
+
+  it("wakes again for a later snooze after an earlier one ended", async () => {
+    vi.useFakeTimers();
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    snooze("Which key");
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    snooze("Deploy to staging");
+    await act(async () => { await vi.advanceTimersByTimeAsync(11 * 60_000); });
+    expect(screen.getByRole("article", { name: /Which key/ })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: /Deploy to staging/ })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    expect(screen.getByRole("article", { name: /Deploy to staging/ })).toBeTruthy();
+  });
+
   it("can be undone from the snoozed list", async () => {
     mount();
     await screen.findByText("Which key?");
