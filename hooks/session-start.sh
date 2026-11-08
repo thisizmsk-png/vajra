@@ -19,6 +19,12 @@
 
 set -uo pipefail
 
+# NFR-SEC-2: this script handles the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+OPENSSL="/usr/bin/openssl"
+
 SKILL_DIR="${HOME}/.claude/skills/vajra"
 VAJRA_DIR="${HOME}/.claude/vajra"
 MANIFEST="${SKILL_DIR}/manifest.json"
@@ -46,7 +52,7 @@ sha256_of() {
 
 # One line per problem; empty output = clean.
 integrity_problems() {
-  if ! command -v jq >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  if ! command -v jq >/dev/null 2>&1 || [ ! -x "$OPENSSL" ]; then
     echo "cannot verify: jq and openssl are required"
     return
   fi
@@ -68,7 +74,7 @@ integrity_problems() {
   else
     local want got
     want="$(tr -d '[:space:]' < "$SIG_FILE")"
-    got="$(sha256_of "$MANIFEST" | tr -d '\n' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex 2>/dev/null | awk '{print $NF}')"
+    got="$(sha256_of "$MANIFEST" | tr -d '\n' | "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex 2>/dev/null | awk '{print $NF}')"
     if [ -z "$got" ] || [ "$got" != "$want" ]; then
       echo "manifest.json signature does not match (changed after install)"
     fi

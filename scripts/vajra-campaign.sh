@@ -34,6 +34,12 @@
 set -uo pipefail
 umask 077
 
+# NFR-SEC-2: this script handles the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+OPENSSL="/usr/bin/openssl"
+
 VAJRA_DIR="${HOME}/.claude/vajra"
 ROOT="${VAJRA_DIR}/campaigns"
 KEY_FILE="${VAJRA_DIR}/.hmac-key"
@@ -46,7 +52,7 @@ usage() { echo "usage:" >&2; grep '^#   vajra-campaign.sh' "$0" | sed 's/^#   / 
 now()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
-command -v openssl >/dev/null 2>&1 || die "openssl is required"
+[ -x "$OPENSSL" ] || die "openssl is required at $OPENSSL"
 
 # ---------- helpers ----------
 
@@ -61,13 +67,13 @@ valid_feature_id() {
   printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 }
 
-sha256_file() { openssl dgst -sha256 -r < "$1" | awk '{print $1}'; }
-sha256_str()  { printf '%s' "$1" | openssl dgst -sha256 -r | awk '{print $1}'; }
+sha256_file() { "$OPENSSL" dgst -sha256 -r < "$1" | awk '{print $1}'; }
+sha256_str()  { printf '%s' "$1" | "$OPENSSL" dgst -sha256 -r | awk '{print $1}'; }
 
 load_key() {
   if [ ! -s "$KEY_FILE" ]; then
     mkdir -p "$VAJRA_DIR"
-    ( umask 077; openssl rand -hex 32 > "$KEY_FILE" ) || die "cannot create HMAC key"
+    ( umask 077; "$OPENSSL" rand -hex 32 > "$KEY_FILE" ) || die "cannot create HMAC key"
     chmod 600 "$KEY_FILE" 2>/dev/null || true
   fi
   KEY="$(tr -d ' \r\n' < "$KEY_FILE")"
@@ -75,14 +81,14 @@ load_key() {
 }
 
 # HMAC of stdin. The key is never echoed.
-hmac_stdin() { openssl dgst -sha256 -hmac "$KEY" -r | awk '{print $1}'; }
+hmac_stdin() { "$OPENSSL" dgst -sha256 -hmac "$KEY" -r | awk '{print $1}'; }
 
 state_digest() { # $1 = campaign dir
   printf '%s\n%s\n%s\n%s\n' "$SCHEMA" \
     "$(sha256_file "$1/campaign.json")" "$(sha256_file "$1/features.json")" "$(sha256_file "$1/progress.md")"
 }
 
-features_def_sha() { jq -cS '[.features[] | {id, description}]' "$1" | tr -d '\n' | openssl dgst -sha256 -r | awk '{print $1}'; }
+features_def_sha() { jq -cS '[.features[] | {id, description}]' "$1" | tr -d '\n' | "$OPENSSL" dgst -sha256 -r | awk '{print $1}'; }
 
 sign_state() { state_digest "$1" | hmac_stdin > "$1/state.sig.tmp" && mv "$1/state.sig.tmp" "$1/state.sig"; }
 
@@ -406,7 +412,7 @@ cmd_report() {
   [ -n "$slug" ] || die "--campaign is required"
   resolve "$slug"; load_key; lock "$DIR"; require_valid
   tmp="$(umask 077; mktemp "$DIR/.report.XXXXXX")" || die "cannot create a temp file"
-  printf '%s' "$b64" | openssl base64 -d -A > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
+  printf '%s' "$b64" | "$OPENSSL" base64 -d -A > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "--base64 does not decode"; }
   got="$(wc -c < "$tmp" | tr -d ' ')"
   [ "$got" = "$nb" ] || { rm -f "$tmp"; die "decoded report is $got bytes, expected $nb"; }
   mv -f "$tmp" "$DIR/report.md"

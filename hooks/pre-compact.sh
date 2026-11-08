@@ -14,6 +14,12 @@
 
 set -uo pipefail
 
+# NFR-SEC-2: this script handles the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes from the system dirs first and openssl only from
+# its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"; export PATH
+OPENSSL="/usr/bin/openssl"
+
 VAJRA_DIR="${HOME}/.claude/vajra"
 HMAC_KEY_FILE="${VAJRA_DIR}/.hmac-key"
 COMPACT_DIR="${VAJRA_DIR}/compaction"
@@ -47,7 +53,7 @@ if git -C "$CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # 2. Checkpoint event (HMAC-chained like the rest of the event stream).
-if command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+if command -v jq >/dev/null 2>&1 && [ -x "$OPENSSL" ]; then
   EV_LOG="${VAJRA_DIR}/events/${SESSION}.jsonl"
   mkdir -p "$(dirname "$EV_LOG")"
   prev="genesis"; seq=0
@@ -59,7 +65,7 @@ if command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
     '{seq:$seq, ts:$ts, tool:"__compaction__", kind:"checkpoint", outcome:"success", gitSha:$gs, gitRef:$ref, prevHmac:$prev}')"
   if [ -s "$HMAC_KEY_FILE" ]; then
     key="$(tr -d '[:space:]' < "$HMAC_KEY_FILE")"
-    h="$(printf '%s' "$entry" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${key}" -hex 2>/dev/null | awk '{print $NF}')"
+    h="$(printf '%s' "$entry" | "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:${key}" -hex 2>/dev/null | awk '{print $NF}')"
     entry="$(printf '%s' "$entry" | jq -c --arg h "$h" '. + {hmac:$h}')"
   fi
   printf '%s\n' "$entry" >> "$EV_LOG"
