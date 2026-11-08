@@ -54,15 +54,42 @@ fn a_hidden_flood_sends_nothing_and_shows_only_the_newest_tail_once_with_what_wa
 }
 
 #[test]
-fn a_hidden_pane_does_not_slow_the_program_even_with_an_output_rate_limit() {
+fn a_hidden_pane_is_not_held_to_the_visible_rate_and_a_realistic_producer_is_not_held_at_all() {
     let f = Fixture::new("hid-speed");
     let t = Terminals::with(Limits { max_rate: 1 << 20, ..Limits::default() }, f.env()); // a visible pane is held to 1 MiB/s
     let (info, out) = open_root(&t, &f);
     out.until("$", 5);
     t.set_visible(info.id, false, false).unwrap();
+    // About 4 MiB/s for a second (8 pieces of 512 KiB, 125 ms apart), far above a real build log: not held at the default
+    // 32 MiB/s, where holding it to the visible 1 MiB/s would take 4 s.
+    let t0 = Instant::now();
+    run_hidden(&t, &f, info.id, "i=0; while [ $i -lt 8 ]; do head -c 524288 /dev/zero | tr '\\0' x; sleep 0.125; i=$((i+1)); done");
+    assert!(t0.elapsed() < Duration::from_millis(2500), "a 4 MiB/s producer took {:?}", t0.elapsed());
+}
+
+#[test]
+fn a_hidden_flood_is_paced_to_32_mib_a_second_by_default() {
+    let f = Fixture::new("hid-default");
+    let t = f.terminals();
+    assert_eq!(Limits::default().hidden_rate, 32 << 20);
+    let (info, out) = open_root(&t, &f);
+    out.until("$", 5);
+    t.set_visible(info.id, false, false).unwrap();
+    let t0 = Instant::now();
+    run_hidden(&t, &f, info.id, "head -c 64000000 /dev/zero | tr '\\0' x"); // 64 MB: about 2 s at 32 MiB/s (less the free burst), well under 1 s unpaced
+    assert!(t0.elapsed() > Duration::from_millis(1300), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn a_hidden_rate_of_zero_does_not_hold_a_hidden_pane() {
+    let f = Fixture::new("hid-off");
+    let t = Terminals::with(Limits { max_rate: 1 << 20, hidden_rate: 0, ..Limits::default() }, f.env());
+    let (info, out) = open_root(&t, &f);
+    out.until("$", 5);
+    t.set_visible(info.id, false, false).unwrap();
     let t0 = Instant::now();
     run_hidden(&t, &f, info.id, "head -c 8000000 /dev/zero | tr '\\0' x");
-    assert!(t0.elapsed() < Duration::from_secs(4), "8 MB took {:?}: a background build must not wait", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_secs(4), "8 MB took {:?}", t0.elapsed());
 }
 
 #[test]

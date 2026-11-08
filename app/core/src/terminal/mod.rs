@@ -513,7 +513,7 @@ impl Terminals {
     }
 
     /// The view shows or hides this pane (the dock is hidden, or another tab is selected). While hidden the shell keeps
-    /// running at full speed: the core keeps the newest 256 KiB of its output and sends nothing, and showing the pane sends
+    /// running (not held to the visible rate): the core keeps the newest 256 KiB of its output and sends nothing, and showing the pane sends
     /// how much was left out, then that tail, once. `alt` says whether the view was on the alternate screen when it hid.
     /// An unknown id is an error and changes nothing.
     pub fn set_visible(&self, id: u32, visible: bool, alt: bool) -> Result<(), TermError> {
@@ -842,8 +842,8 @@ impl Pace {
 
 fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize, rate: usize, hidden_rate: usize) {
     let low = window / 2;
-    // A visible pane is held to `rate`; a hidden one to `hidden_rate` (0, the default: not held, so a build in a background
-    // tab runs at full speed). Each has its own clock, so switching does not carry a debt over.
+    // A visible pane is held to `rate`; a hidden one to `hidden_rate` (32 MiB/s by default, far above any real build
+    // log; 0 means not held). Each has its own clock, so switching does not carry a debt over.
     let (mut seen, mut unseen) = (Pace::new(rate), Pace::new(hidden_rate));
     let mut buf = vec![0u8; CHUNK];
     loop {
