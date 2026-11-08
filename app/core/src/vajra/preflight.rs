@@ -46,20 +46,21 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
     rows.push(match find_on_path("claude", dirs) {
         None => row("claude", false, "not found on PATH", "Install Claude Code: https://claude.com/claude-code"),
         Some(p) => match run_process(&p, &["--version".to_string()], None, bridge.timeout) {
-            Ok(o) if o.code == Some(0) => row("claude", true, o.stdout.trim(), ""),
+            Ok(o) if o.exit() == Some(0) => row("claude", true, o.stdout.trim(), ""),
             _ => row("claude", false, "`claude --version` failed", "Reinstall Claude Code: https://claude.com/claude-code"),
         },
     });
 
     let doctor = bridge.run(&Request::Doctor);
     let (doctor_ok, text) = match &doctor {
-        Ok(o) => (o.code == Some(0) && !o.timed_out, o.stdout.clone()),
+        Ok(o) => (o.exit() == Some(0), o.stdout_whole().unwrap_or_default().to_string()),
         Err(_) => (false, String::new()),
     };
     let fails: Vec<&str> = text.lines().filter(|l| l.starts_with("FAIL")).collect();
     rows.push(match &doctor {
         Ok(_) if doctor_ok => row("vajra doctor", true, "PASS", ""),
         Ok(o) if o.timed_out => row("vajra doctor", false, "timed out", "/vajra doctor"),
+        Ok(o) if o.truncated => row("vajra doctor", false, "output over the cap", "/vajra doctor"),
         Ok(_) => row("vajra doctor", false, format!("FAIL: {}", fails.join("; ")), "/vajra doctor"),
         Err(e) => row("vajra doctor", false, e.to_string(), INSTALL_CMD),
     });
@@ -99,4 +100,37 @@ pub fn run(allow: &Allowlist, bridge: &Bridge, dirs: &[PathBuf]) -> Vec<Row> {
         )
     });
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn exe(p: &Path, body: &str) {
+        std::fs::write(p, body).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A claude and a doctor that each print a passing answer, exit 0, and then flood stderr past the output cap.
+    #[test]
+    fn claude_and_doctor_output_cut_at_the_cap_are_failures_not_passes() {
+        let d = std::env::temp_dir().join(format!("vajra-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        let flood = "head -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 0\n";
+        exe(&d.join("bin/claude"), &format!("#!/bin/sh\necho '2.1.0 (Claude Code)'\n{flood}"));
+        exe(&d.join("scripts/vajra-doctor.sh"), &format!("#!/bin/sh\necho 'PASS  OS sandbox enabled'\necho 'PASS  hook registered: PreToolUse'\n{flood}"));
+        let canon = d.canonicalize().unwrap();
+        let allow = Allowlist::new(&canon, &canon).unwrap();
+        let bridge = Bridge::new(canon.join("scripts"));
+        let rows = run(&allow, &bridge, &[canon.join("bin")]);
+        let find = |n: &str| rows.iter().find(|r| r.name == n).unwrap().clone();
+        assert!(!find("claude").ok, "{rows:?}");
+        let doc = find("vajra doctor");
+        assert!(!doc.ok && doc.detail.contains("cap"), "{doc:?}");
+        assert!(!find("hooks registered").ok, "a cut doctor proves no hooks: {rows:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

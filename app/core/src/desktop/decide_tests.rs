@@ -429,6 +429,18 @@ fn reject_failed_script_keeps_item() {
 }
 
 #[test]
+fn reject_progress_cut_at_the_cap_is_a_failure_even_when_it_exits_0() {
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    let sh = t.home().join(".claude/skills/vajra/scripts/vajra-campaign.sh");
+    fs::write(&sh, "#!/bin/bash\nhead -c 2200000 /dev/zero | tr '\\0' 'x' >&2\nexit 0\n").unwrap();
+    fs::set_permissions(&sh, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code_of(&app.reject_plan(PLAN, "too risky").unwrap_err()), "reject_failed");
+    assert!(item_ids(&app).iter().any(|i| i == PLAN), "the plan is still waiting");
+}
+
+#[test]
 fn approve_reject_ledger_and_audit_lines_and_reconcile_covers_them() {
     let t = Tmp::new();
     let app = t.app();
