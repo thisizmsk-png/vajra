@@ -350,6 +350,64 @@ fn a_shell_that_exits_takes_its_background_jobs_with_it_and_a_later_close_is_har
 }
 
 #[test]
+fn many_small_writes_reach_the_shell_in_order() {
+    let f = Fixture::new("order");
+    let t = Arc::new(f.terminals());
+    let (info, out) = open_root(&t, &f);
+    let file = f.dir.join("typed.txt");
+    t.write(info.id, format!("cat > {}\n", file.display()).as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    // One caller, many tiny writes: what the UI does while typing fast or pasting in pieces.
+    for i in 0..500 {
+        t.write(info.id, format!("{i}\n").as_bytes()).unwrap();
+    }
+    t.write(info.id, b"\x04").unwrap(); // end of input for cat
+    t.write(info.id, b"echo DONE$((1+1))\n").unwrap();
+    out.until("DONE2", 10);
+    let got = std::fs::read_to_string(&file).unwrap();
+    let want: String = (0..500).map(|i| format!("{i}\n")).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_signal_death_is_reported_as_no_exit_code_and_exit_one_as_one() {
+    let f = Fixture::new("sigexit");
+    let t = f.terminals();
+    let (a, oa) = open_root(&t, &f);
+    t.write(a.id, b"kill -9 $$\n").unwrap();
+    assert_eq!(oa.exit(5), Some(None), "a shell killed by a signal has no exit code");
+    let (b, ob) = open_root(&t, &f);
+    t.write(b.id, b"exit 1\n").unwrap();
+    assert_eq!(ob.exit(5), Some(Some(1)));
+}
+
+#[test]
+fn close_returns_even_when_a_child_in_another_session_keeps_the_pty_open() {
+    let f = Fixture::new("escape");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    // The child starts its own session (so the terminal's session kill cannot reach it) and keeps the slave open.
+    t.write(info.id, b"perl -MPOSIX -e '$p=fork; if($p==0){POSIX::setsid(); sleep 60; exit} print \"ESC=$p\\n\"'\n").unwrap();
+    let mut seen = out.until("ESC=", 5);
+    for _ in 0..50 {
+        if seen.split("ESC=").skip(1).any(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
+            break;
+        }
+        seen.push_str(&out.until("ESC=", 1));
+    }
+    let esc: u32 = seen.split("ESC=").skip(1).find_map(|r| r.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()).unwrap();
+    assert!(alive(esc));
+    let shell = t.pid(info.id).unwrap();
+    let start = Instant::now();
+    t.close(info.id).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(4), "close waited {:?} for a PTY that something else held", start.elapsed());
+    assert!(all_gone(&[shell], 3), "the shell was not reaped without EOF");
+    assert_eq!(t.count(), 0);
+    // Shutdown with the same kind of holder is bounded too.
+    unsafe { libc::kill(esc as i32, libc::SIGKILL) };
+}
+
+#[test]
 fn the_terminal_module_stays_off_the_bus_the_control_service_mcp_and_agent_sessions() {
     // The wall that keeps agents out: this directory's non-test source may not reach those modules.
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terminal");
