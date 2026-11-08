@@ -1,0 +1,10 @@
+{
+  "schema": "vajra.project/1",
+  "id": "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T",
+  "name": "vajra",
+  "root": "/Users/u/src/vajra",
+  "root_key": {"dev": 16777230, "ino": 9123, "git_common_dir": "/Users/u/src/vajra/.git"},
+  "created": "2026-11-08T09:00:00Z",
+  "archived": null,
+  "rev": 7
+}

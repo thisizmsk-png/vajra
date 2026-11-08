@@ -1,0 +1,5 @@
+{"schema":"vajra.session/1","id":"s_01JC5X8Z3C1K2M4N6P7Q8R9S0T","project_id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","kind":"run","provider":"claude","run_id":"20261108-0930","generation":1,"status":"running","started":"2026-11-08T09:30:00Z"}
+this line is not json
+{"schema":"vajra.session/1","id":"s_01JC5X8Z3B0K2M4N6P7Q8R9S0T","project_id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","kind":"worker","parent":"s_01JC5X8Z3C1K2M4N6P7Q8R9S0T","provider":"claude","generation":1,"status":"running","started":"2026-11-08T09:31:00Z"}
+{"schema":"vajra.session/2","id":"s_01JC5X8Z3D2K2M4N6P7Q8R9S0T","project_id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","kind":"run","provider":"claude","generation":1,"status":"running","started":"2026-11-08T09:32:00Z"}
+{"schema":"vajra.session/1","id":"s_01JC5X8Z3C1K2M4N6P7Q8R9S0T","project_id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","kind":"run","provider":"claude","run_id":"20261108-0930","generation":1,"status":"done","started":"2026-11-08T09:30:00Z","ended":"2026-11-08T10:00:00Z"}
