@@ -5,6 +5,7 @@
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
 import type { Campaign, EvidenceRow, InboxItem, ResumeTarget, RunOverview } from "../ipc";
+import { PROJECT_SCHEMA } from "../projectContract";
 import type { ActiveCrew, BoardCard, DayGroup, Lane, Project, ProjectId, ProjectSummary, SessionRow, SessionStatus, TabState } from "./contract";
 
 export const UNSORTED_ID = "p_unsorted";
@@ -56,9 +57,9 @@ export function groupProjects(campaigns: Campaign[] | undefined, targets: Record
   }
   const projects: Project[] = [...roots.entries()]
     .sort(([, a], [, b]) => (a.first === b.first ? a.root.localeCompare(b.root) : a.first < b.first ? -1 : 1))
-    .map(([id, r]) => ({ schema: "vajra.project/1", id, name: basename(r.root), root: r.root, created: r.first === "￿" ? null : r.first, archived: null, rev: 0 }));
+    .map(([id, r]) => ({ schema: PROJECT_SCHEMA, id, name: basename(r.root), root: r.root, created: r.first === "￿" ? null : r.first, archived: null, rev: 0 }));
   if (unsorted !== null) {
-    projects.push({ schema: "vajra.project/1", id: UNSORTED_ID, name: S.projects.unsorted, root: null, created: unsorted || null, archived: null, rev: 0, bucket: "unsorted" });
+    projects.push({ schema: PROJECT_SCHEMA, id: UNSORTED_ID, name: S.projects.unsorted, root: null, created: unsorted || null, archived: null, rev: 0, bucket: "unsorted" });
   }
   return { projects, byCampaign };
 }

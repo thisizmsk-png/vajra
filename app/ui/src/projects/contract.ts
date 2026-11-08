@@ -1,26 +1,25 @@
-// The project shapes the shell reads, mirrored from ADR-15 §1.2 (`vajra.project/1`, `vajra.session/1`) and §4.2 (board).
-// The core does not serve them yet: `adapter.ts` derives them from today's campaign, crew and inbox commands. When the
-// core's contract lands (T1 PR 1a, then T2's `project_state`), its types replace these and the adapter's loaders call
-// the core instead; the shell's components do not change. Nothing here is a core contract: it is the UI's reading of one.
+// The project shapes the shell reads. The contract itself is T1's `src/projectContract.ts` (the TS mirror of the core's
+// `vajra.project/1` and `vajra.session/1`); these are the UI's views of it. Until the core serves `project_list`,
+// `adapter.ts` derives them from today's campaign, crew and inbox commands; then its loaders call the core and the
+// shell's components do not change.
 import type { StatusKey } from "../../strings";
+import type { Project as ContractProject, SessionStatus } from "../projectContract";
 
-export type ProjectId = string;
+export type { SessionStatus };
+export type ProjectId = ContractProject["id"];
 
-/** ADR-15 §1.2. `bucket: "unsorted"` is the Imported (unsorted) group of §1.5: campaigns with no recorded folder. */
-export type Project = {
-  schema: "vajra.project/1";
-  id: ProjectId;
-  name: string;
-  /** The folder runs were started in, as recorded (not canonicalised: the core does that, by realpath and dev/ino). */
+/**
+ * A contract project as the shell shows it. Until `project_list` lands the adapter has no `root_key` (the core's
+ * dev/ino identity) and records `root` as the run recorded it, not canonicalised. `bucket: "unsorted"` is ADR-15
+ * §1.5's Imported group: campaigns with no recorded folder, so `root` is null. The adapter's ids are `p_<8 hex>`
+ * placeholders, not the core's ULID-style ids; they are never sent to the core.
+ */
+export type Project = Pick<ContractProject, "schema" | "id" | "name" | "rev"> & {
   root: string | null;
   created: string | null;
-  archived: null;
-  rev: number;
+  archived: ContractProject["archived"];
   bucket?: "unsorted";
 };
-
-/** A run's state as a session (`vajra.session/1` `status`). */
-export type SessionStatus = "running" | "stopped" | "done" | "failed" | "unknown";
 
 /** One row of a project's history: a campaign run, until the core lists sessions itself. */
 export type SessionRow = { slug: string; title: string; status: SessionStatus; dot: StatusKey; time: string; sortKey: string };
