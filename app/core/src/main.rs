@@ -244,6 +244,8 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
+    vajra_desktop::userpath::init(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {

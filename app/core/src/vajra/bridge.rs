@@ -321,9 +321,33 @@ fn name(s: &str) -> Result<String, BridgeError> {
     if ok { Ok(s.to_string()) } else { Err(BridgeError::Invalid(format!("bad name: {s:?}"))) }
 }
 
-fn scrubbed_env(cmd: &mut Command, home: Option<&Path>) {
+/// The fixed PATH every bridged program runs with (NFR-SEC-2). `vajra-campaign.sh` holds the HMAC key and calls
+/// `openssl`, `jq`, `awk`, `tr` and `mktemp` by bare name, and a same-uid worker can write user dirs such as
+/// `~/.local/bin`, so a bridged program never sees a user dir ahead of these. Never the resolved login-shell PATH.
+pub const BASE_PATH: [&str; 6] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
+
+/// `BASE_PATH` as one PATH value: what every `Request` runs with.
+pub fn bridge_path() -> std::ffi::OsString {
+    BASE_PATH.join(":").into()
+}
+
+/// The claude version check's PATH: the user's resolved dirs in their own order, which is the order the PTY sessions and
+/// the Lead give `claude` (`userpath::joined`), so an npm `claude`'s `#!/usr/bin/env node` picks the same `node` here
+/// as at run time; then any system dir they lack. Relative entries are dropped (never the cwd). Keyless only: it is
+/// never used for a script that holds or is given the HMAC key.
+pub fn probe_path(user: &[PathBuf]) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for d in user.iter().cloned().chain(BASE_PATH.map(PathBuf::from)) {
+        if d.is_absolute() && !dirs.contains(&d) {
+            dirs.push(d);
+        }
+    }
+    std::env::join_paths(&dirs).unwrap_or_else(|_| bridge_path())
+}
+
+fn scrubbed_env(cmd: &mut Command, home: Option<&Path>, path: std::ffi::OsString) {
     cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
+    cmd.env("PATH", path);
     cmd.env("LC_ALL", "C.UTF-8");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
@@ -396,9 +420,37 @@ pub fn run_process_env(
     stdin: Option<&[u8]>,
     env: &[(&str, &Path)],
 ) -> Result<Output, BridgeError> {
+    // The fixed system PATH only: every `Request` (the key-holding campaign script among them) runs through here.
+    run_process_inner(program, argv, cwd, timeout, home, stdin, env, bridge_path())
+}
+
+/// As `run_process`, on `probe_path(path)`: the user's dirs in their runtime order, then the system dirs. For the
+/// claude version check only (an npm `claude` must find the same `node` it runs with); never for a script that holds
+/// or is given the HMAC key.
+pub fn run_process_on_path(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    path: &[PathBuf],
+) -> Result<Output, BridgeError> {
+    run_process_inner(program, argv, cwd, timeout, None, None, &[], probe_path(path))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_process_inner(
+    program: &Path,
+    argv: &[String],
+    cwd: Option<&Path>,
+    timeout: Duration,
+    home: Option<&Path>,
+    stdin: Option<&[u8]>,
+    env: &[(&str, &Path)],
+    path: std::ffi::OsString,
+) -> Result<Output, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(argv).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
-    scrubbed_env(&mut cmd, home);
+    scrubbed_env(&mut cmd, home, path);
     for (k, v) in env {
         cmd.env(k, v);
     }
