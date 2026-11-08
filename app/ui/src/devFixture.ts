@@ -3,6 +3,7 @@
 // Nothing here reaches a real engine: every command answers from the objects below.
 import { setTransport } from "./ipc";
 import type { CrewNodeDto, Transport } from "./ipc";
+import { terminalFixture } from "./terminal/fixtureShell";
 
 const RUN = "20261106-2140";
 const SLUG = `deliver-${RUN}`;
@@ -131,5 +132,5 @@ export function installFixture(mode = "") {
     },
     on: () => () => {},
   };
-  setTransport(t);
+  setTransport(terminalFixture(t));
 }
