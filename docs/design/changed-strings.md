@@ -241,3 +241,6 @@ FG-09 providers in the UI (Settings > Providers, Start, Resume, Run, Crew).
 | NAME is not installed, so this run cannot be resumed here. | Resume, beside the disabled button | new |
 | Model: MODEL. Choosing a model needs a supported adapter. The agent is chosen under Providers. | Models and capacity | changed from "Additional agent and model selection requires a supported adapter." |
 | The saved model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | changed: an agent other than Claude no longer blocks Start |
+| NAME cannot take a message while it runs. / NAME cannot be redirected while it runs. / NAME has no inspect step Vajra can read. / NAME does not write a transcript Vajra can read. / NAME does not run the Vajra workflow, so there is no crew to show. / Stop ends the NAME process. There is no hand-off at the next tool call. / NAME is not installed. / This build cannot run NAME. | limit codes (providers.md stable codes) | new; the core's own sentence shows only for a code not in this list |
+| Uses your Claude Code login / Uses your Codex login | login route codes | new |
+| The login check did not finish in time, so Vajra cannot tell. / The login check answered something Vajra could not read, so it cannot tell. | login detail codes | new |

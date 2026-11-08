@@ -367,6 +367,22 @@ export const S = {
     has: (names: string[]) => names.length ? `Available: ${names.join(", ")}.` : "",
     stopSentence: (how: string) => `${how}.`,
     offFallback: (name: string) => `${name} does not support this.`,
+    /** The core's stable codes (providers.md) in this app's words; the core's own text is shown only for a code not listed here. */
+    limitCode: {
+      no_message_mid_run: (n: string) => `${n} cannot take a message while it runs.`,
+      no_redirect_mid_run: (n: string) => `${n} cannot be redirected while it runs.`,
+      no_inspect: (n: string) => `${n} has no inspect step Vajra can read.`,
+      no_transcript: (n: string) => `${n} does not write a transcript Vajra can read.`,
+      no_vajra_workflow: (n: string) => `${n} does not run the Vajra workflow, so there is no crew to show.`,
+      stop_ends_process: (n: string) => `Stop ends the ${n} process. There is no hand-off at the next tool call.`,
+      not_installed: (n: string) => `${n} is not installed.`,
+      not_supported: (n: string) => `This build cannot run ${n}.`,
+    } as Record<string, (name: string) => string>,
+    routeCode: { uses_claude_login: "Uses your Claude Code login", uses_codex_login: "Uses your Codex login" } as Record<string, string>,
+    detailCode: {
+      check_unfinished: "The login check did not finish in time, so Vajra cannot tell.",
+      check_not_understood: "The login check answered something Vajra could not read, so it cannot tell.",
+    } as Record<string, string>,
     runsOn: (name: string) => `Runs on ${name}`,
     startBlocked: (name: string) => `${name} is not installed, so this run cannot start. Install it, or choose another agent in Settings, Providers.`,
     startUnknown: (id: string) => `The saved agent "${id}" is not one this build can run. Choose another in Settings, Providers.`,

@@ -55,7 +55,7 @@ describe("Settings > Providers (FG-09)", () => {
     expect(within(codex).getByText("0.9.0")).toBeTruthy();
     expect(within(codex).getByText(C.tested.untested)).toBeTruthy();
     expect(within(codex).getByText(C.loginState.cannot_tell)).toBeTruthy();
-    expect(within(codex).getByText("This CLI has no read-only login status command")).toBeTruthy();
+    expect(within(codex).getByText(C.detailCode.check_not_understood)).toBeTruthy();
     expect(within(codex).getByText("Uses your Codex login")).toBeTruthy();
     expect(within(codex).getByText(C.keyInEnv("OPENAI_API_KEY", "Codex CLI"))).toBeTruthy();
     const claude = screen.getByRole("region", { name: "Claude Code" });
@@ -69,7 +69,7 @@ describe("Settings > Providers (FG-09)", () => {
     const message = within(codex).getByRole("button", { name: C.capability.message });
     expect(message.getAttribute("aria-disabled")).toBe("true");
     const reason = document.getElementById(message.getAttribute("aria-describedby") ?? "");
-    expect(reason?.textContent).toContain("Codex cannot take a message mid-run");
+    expect(reason?.textContent).toBe(C.limitCode.no_message_mid_run("Codex CLI"));
     for (const k of ["redirect", "transcript", "inspect", "vajra_workflow"] as const) {
       expect(within(codex).getByRole("button", { name: C.capability[k] }).getAttribute("aria-disabled")).toBe("true");
     }
@@ -78,6 +78,16 @@ describe("Settings > Providers (FG-09)", () => {
     // Claude has nothing off: no disabled control in its card.
     const claude = screen.getByRole("region", { name: "Claude Code" });
     expect(within(claude).queryAllByRole("button").filter((b) => b.getAttribute("aria-disabled") === "true")).toHaveLength(0);
+  });
+
+  it("words a known code in this app's words, and shows the core's own sentence for a code it does not know", async () => {
+    const codex = LIST.providers[1];
+    const odd = { ...codex, limits: [...codex.limits.filter((l: { control: string }) => l.control !== "message"), { control: "message", code: "no_message_new_kind", reason: "A reason from a newer core" }] };
+    settings({ provider_list: { ...LIST, providers: [LIST.providers[0], odd] } });
+    const card = await screen.findByRole("region", { name: "Codex CLI" });
+    expect(within(card).getByText("A reason from a newer core")).toBeTruthy();
+    expect(within(card).getByText(C.limitCode.no_redirect_mid_run("Codex CLI"))).toBeTruthy();
+    expect(within(card).getByText(new RegExp(C.limitCode.stop_ends_process("Codex CLI").slice(0, 20)))).toBeTruthy();
   });
 
   it("chooses the agent per project through act_preferences_update; a not-installed one cannot be chosen", async () => {
@@ -209,7 +219,7 @@ describe("The run's provider in Run and Crew (FG-09 G6)", () => {
     render(<Run />);
     const strip = await screen.findByRole("region", { name: C.runsOn("Codex CLI") });
     expect(within(strip).getByRole("button", { name: C.capability.redirect }).getAttribute("aria-disabled")).toBe("true");
-    expect(within(strip).getByText(/Codex cannot be redirected mid-run/)).toBeTruthy();
+    expect(within(strip).getByText(C.limitCode.no_redirect_mid_run("Codex CLI"))).toBeTruthy();
   });
 
   it("Run says nothing extra for a claude run and does not run the provider check", async () => {
@@ -232,7 +242,7 @@ describe("The run's provider in Run and Crew (FG-09 G6)", () => {
     render(<Crew />);
     const strip = await screen.findByRole("region", { name: C.runsOn("Codex CLI") });
     expect(within(strip).getByRole("button", { name: C.capability.vajra_workflow }).getAttribute("aria-disabled")).toBe("true");
-    expect(within(strip).getByText("Codex does not run the Vajra workflow")).toBeTruthy();
+    expect(within(strip).getByText(C.limitCode.no_vajra_workflow("Codex CLI"))).toBeTruthy();
   });
 
   it("Crew drops a late provider answer for the run it has moved away from", async () => {

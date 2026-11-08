@@ -11,7 +11,7 @@ import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
 import { PreflightList } from "../PreflightList";
-import { ProviderControls, useProviders } from "../ProviderControls";
+import { ProviderControls, limitText, useProviders } from "../ProviderControls";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
 
@@ -116,7 +116,9 @@ export function Home() {
     const p = t.provider && t.provider !== "claude" ? providerOf(t.provider) : undefined;
     if (!p) return "";
     if (!p.installed) return S.providers.resumeOff(p.name);
-    return p.capabilities.resume ? "" : p.limits.find((l) => l.control === "resume")?.reason ?? S.providers.offFallback(p.name);
+    if (p.capabilities.resume) return "";
+    const l = p.limits.find((x) => x.control === "resume");
+    return l ? limitText(p, l) : S.providers.offFallback(p.name);
   };
   const resume = (c: Campaign) => {
     const t = targetOf(c);

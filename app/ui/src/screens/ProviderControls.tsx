@@ -7,7 +7,7 @@ import { S } from "../../strings";
 import { api } from "../ipc";
 import type { ResumeTarget } from "../ipc";
 import { parseProviderList } from "../providerContract";
-import type { CapabilityFlags, ProviderInfo } from "../providerContract";
+import type { CapabilityFlags, Limit, ProviderInfo } from "../providerContract";
 import { problemDetail } from "./states";
 import "./providers.css";
 
@@ -42,13 +42,22 @@ const FLAGS = ["pty_attach", "transcript", "inspect", "message", "redirect", "re
 type Row = { key: string; on: boolean; text: string };
 
 /** Each control with its state: on, or off with the provider's own reason (this build's words when it gives none). */
+/** A limit in this app's words when its code is known; the core's own sentence otherwise. */
+export function limitText(p: ProviderInfo, l: Limit): string {
+  const known = l.code ? C.limitCode[l.code] : undefined;
+  return known ? known(p.name) : l.reason;
+}
+
 export function controlRows(p: ProviderInfo): Row[] {
-  const reason = (k: string) => p.limits.find((l) => l.control === k)?.reason ?? C.offFallback(p.name);
+  const limit = (k: string) => p.limits.find((l) => l.control === k);
+  const reason = (k: string) => { const l = limit(k); return l ? limitText(p, l) : C.offFallback(p.name); };
   const caps: CapabilityFlags = p.capabilities;
   const rows: Row[] = FLAGS.map((k) => ({ key: k, on: caps[k], text: caps[k] ? C.on : reason(k) }));
-  rows.splice(5, 0, { key: "stop", on: caps.stop !== "other", text: C.stop[caps.stop] ?? C.stop.other });
+  // Stop is always there; a `stop` limit (a provider that ends the process) says how it differs.
+  const stopLimit = limit("stop");
+  rows.splice(5, 0, { key: "stop", on: caps.stop !== "other", text: stopLimit ? limitText(p, stopLimit) : C.stop[caps.stop] ?? C.stop.other });
   // A limit on a control that is not a capability flag (for example `start`) is still shown, off, with its reason.
-  for (const l of p.limits) if (!rows.some((r) => r.key === l.control)) rows.push({ key: l.control, on: false, text: l.reason });
+  for (const l of p.limits) if (!rows.some((r) => r.key === l.control)) rows.push({ key: l.control, on: false, text: limitText(p, l) });
   return rows;
 }
 
@@ -105,8 +114,8 @@ export function ProviderCard({ provider: p }: { provider: ProviderInfo }) {
           <dt>{C.login}</dt>
           <dd>
             <span>{C.loginState[p.login.state] ?? C.loginState.cannot_tell}</span>
-            <Text as="span" variant="body-sm" muted>{p.login.route}</Text>
-            {p.login.detail && <Text as="span" variant="body-sm" muted>{p.login.detail}</Text>}
+            <Text as="span" variant="body-sm" muted>{(p.login.route_code && C.routeCode[p.login.route_code]) || p.login.route}</Text>
+            {(p.login.detail || p.login.detail_code) && <Text as="span" variant="body-sm" muted>{(p.login.detail_code && C.detailCode[p.login.detail_code]) || p.login.detail}</Text>}
             {p.login.state === "signed_out" && <Text as="span" variant="body-sm" muted>{C.signedOut(p.name)}</Text>}
           </dd>
         </>}
