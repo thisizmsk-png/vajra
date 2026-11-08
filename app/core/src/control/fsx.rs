@@ -136,25 +136,6 @@ pub fn read_nofollow(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// The last `max` bytes of a regular file (never through a symlink), cut to whole lines: when the read starts
-/// mid-file the first partial line is dropped. Bounded, so a long ledger never costs a full read at startup.
-pub fn read_tail_nofollow(path: &Path, max: u64) -> io::Result<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = open_regular(path)?;
-    let len = f.metadata()?.len();
-    let start = len.saturating_sub(max);
-    f.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::new();
-    f.take(max + 1).read_to_end(&mut buf)?;
-    if start > 0 {
-        match buf.iter().position(|b| *b == b'\n') {
-            Some(i) => buf.drain(..=i),
-            None => buf.drain(..),
-        };
-    }
-    Ok(buf)
-}
-
 /// True when the file is empty or its last byte is a newline (a crash mid-append leaves neither).
 pub fn ends_with_newline(path: &Path) -> io::Result<bool> {
     use std::io::{Read, Seek, SeekFrom};

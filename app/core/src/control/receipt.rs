@@ -18,10 +18,9 @@ use super::ledger::Ledger;
 pub const SCHEMA: &str = "vajra.receipt/1";
 /// Dedupe window: an `action_id` older than this may be reused.
 pub const DEDUPE_MS: u64 = 7 * 24 * 3600 * 1000;
-/// How much of the ledger tail is read at startup to rebuild the index.
-pub const TAIL_BYTES: u64 = 4 * 1024 * 1024;
-/// In-memory index bound (oldest receipts fall out first).
-pub const MAX_INDEX: usize = 5000;
+/// Most receipts held at once. A receipt leaves the index only when it is older than `DEDUPE_MS`, never to make
+/// room: at the limit a NEW action_id is refused (`too_many_actions`), so a stored id can never run twice.
+pub const MAX_IN_WINDOW: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Caller {
@@ -101,6 +100,7 @@ pub struct Store {
     ledger: Ledger,
     by_id: HashMap<String, Receipt>,
     order: VecDeque<String>,
+    max: usize,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -111,10 +111,16 @@ impl Store {
     /// Open the ledger and rebuild the index from its bounded tail. A receipt last seen `accepted` has no outcome:
     /// the process died mid-action, so it becomes `unknown` (and is written as such).
     pub fn open(path: &Path, now_ms: u64) -> io::Result<Self> {
-        let records = Ledger::read_tail(path, TAIL_BYTES)?;
+        Self::open_with_limit(path, now_ms, MAX_IN_WINDOW)
+    }
+
+    /// `open` with a different in-window limit (tests). The whole ledger is read, as the control service already
+    /// does at startup, so every receipt inside the dedupe window is found however long the file has grown.
+    pub fn open_with_limit(path: &Path, now_ms: u64, max: usize) -> io::Result<Self> {
+        let records = Ledger::read_all(path)?;
         let mut ledger = Ledger::open(path)?;
         ledger.seal_torn_tail()?;
-        let mut s = Self { ledger, by_id: HashMap::new(), order: VecDeque::new() };
+        let mut s = Self { ledger, by_id: HashMap::new(), order: VecDeque::new(), max };
         for r in records {
             if r.get("kind").and_then(Value::as_str) != Some("receipt") {
                 continue;
@@ -143,13 +149,22 @@ impl Store {
     fn insert(&mut self, rc: Receipt) {
         if !self.by_id.contains_key(&rc.action_id) {
             self.order.push_back(rc.action_id.clone());
-            while self.order.len() > MAX_INDEX {
-                if let Some(old) = self.order.pop_front() {
-                    self.by_id.remove(&old);
-                }
-            }
         }
         self.by_id.insert(rc.action_id.clone(), rc);
+    }
+
+    /// Drop receipts that have left the dedupe window (oldest first; one still in flight is never dropped).
+    fn expire(&mut self, now_ms: u64) {
+        while let Some(front) = self.order.front() {
+            match self.by_id.get(front) {
+                Some(r) if r.state.terminal() && now_ms.saturating_sub(r.ts_ms) > DEDUPE_MS => {}
+                Some(_) => break,
+                None => {}
+            }
+            if let Some(old) = self.order.pop_front() {
+                self.by_id.remove(&old);
+            }
+        }
     }
 
     fn persist(&mut self, rc: &Receipt) -> io::Result<()> {
@@ -187,6 +202,7 @@ impl Store {
     /// action has no generation to check). Order matters: replay first (so a retry is never re-judged), then
     /// refusals, then the receipt-before-effect write.
     pub fn begin(&mut self, req: &Request<'_>, current_generation: Option<u64>, rev: u64, now_ms: u64) -> io::Result<Begin> {
+        self.expire(now_ms);
         if !valid_id(req.action_id) {
             // Not stored: there is no usable key. Fabricate nothing persistent.
             let rc = Self::make(req, State::Rejected, Some("invalid_action_id"), Some("action_id must be 8..=64 chars of A-Z a-z 0-9 - _"), Retry::Safe, rev, now_ms);
@@ -200,6 +216,11 @@ impl Store {
                 return Ok(Begin::Done(rc));
             }
             return Ok(Begin::Done(prev.clone()));
+        }
+        if self.by_id.len() >= self.max {
+            // Not stored (there is no room, and evicting would let an old id run twice). Retry later.
+            let rc = Self::make(req, State::Rejected, Some("too_many_actions"), Some("too many recent actions; try again later"), Retry::Safe, rev, now_ms);
+            return Ok(Begin::Done(rc));
         }
         if req.human_only && req.caller != Caller::Ui {
             return self.reject(req, "human_only", "this action can only be taken by a person in the app", Retry::No, None, rev, now_ms);
@@ -422,6 +443,45 @@ mod tests {
         assert!(s.get("act-0008-hhhh").is_none());
     }
 
+    // Review P2: a receipt inside the window is never evicted to make room, and a long ledger does not hide it.
+    #[test]
+    fn an_id_inside_the_window_is_never_forgotten_and_a_full_index_refuses_new_ids() {
+        let d = tempdir();
+        let p = path(&d);
+        let mut s = Store::open_with_limit(&p, T0, 3).unwrap();
+        for (i, id) in ["act-0020-aaaa", "act-0021-bbbb", "act-0022-cccc"].iter().enumerate() {
+            run(s.begin(&req(id, None), None, 1, T0 + i as u64).unwrap());
+            s.finish(id, State::Done, None, None, 2, T0 + i as u64).unwrap();
+        }
+        let full = done(s.begin(&req("act-0023-dddd", None), None, 3, T0 + 10).unwrap());
+        assert_eq!(full.reason.as_deref(), Some("too_many_actions"));
+        assert!(s.get("act-0023-dddd").is_none(), "the refusal is not stored");
+        // The oldest id still answers with its receipt: it cannot run again.
+        assert_eq!(done(s.begin(&req("act-0020-aaaa", None), None, 3, T0 + 11).unwrap()).state, State::Done);
+        // Past the window the old ones expire and room opens up.
+        let later = T0 + DEDUPE_MS + 100;
+        run(s.begin(&req("act-0023-dddd", None), None, 4, later).unwrap());
+    }
+
+    #[test]
+    fn a_receipt_far_back_in_a_long_ledger_is_still_found_after_restart() {
+        let d = tempdir();
+        let p = path(&d);
+        {
+            let mut s = Store::open(&p, T0).unwrap();
+            run(s.begin(&req("act-0024-eeee", None), None, 1, T0).unwrap());
+            s.finish("act-0024-eeee", State::Done, None, None, 2, T0).unwrap();
+        }
+        // More than any tail would cover, written after it.
+        let mut l = Ledger::open(&p).unwrap();
+        let pad = "x".repeat(1000);
+        for i in 0..6000 {
+            l.append(&json!({"v": 1, "kind": "msg", "action_id": format!("c{i}"), "pad": pad})).unwrap();
+        }
+        let s = Store::open(&p, T0 + 5).unwrap();
+        assert_eq!(s.get("act-0024-eeee").unwrap().state, State::Done);
+    }
+
     #[test]
     fn old_receipts_fall_out_of_the_dedupe_window() {
         let d = tempdir();
@@ -474,12 +534,4 @@ mod tests {
         assert_eq!(s.get("act-0011-kkkk").unwrap().state, State::Unknown, "the record after the fragment was read back");
     }
 
-    #[test]
-    fn tail_read_drops_a_partial_first_line() {
-        let d = tempdir();
-        let p = path(&d);
-        std::fs::write(&p, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n").unwrap();
-        let v = Ledger::read_tail(&p, 12).unwrap();
-        assert_eq!(v, vec![json!({"c": 3})]);
-    }
 }
