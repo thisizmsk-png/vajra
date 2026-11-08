@@ -942,7 +942,7 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
 - **Project:** Competitor M, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
   141 open issues).
 - **Storage:** SQLite in the tool's data directory under the home directory (WAL mode, sessions, observations and summaries,
-  FTS5) plus a Chroma vector store. Its settings are a JSON file in the same directory.
+  FTS5) plus a Chroma vector store. Settings are in its settings file.
 - **Capture:** six Claude Code hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
   SessionEnd) capture what the agent does, compress it with a model, and inject context into later
   sessions. A local Bun worker serves an HTTP API and a viewer, with loopback bind as its only protection
