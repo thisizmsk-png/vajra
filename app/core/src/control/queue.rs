@@ -73,6 +73,27 @@ impl SessionDir {
         find(&self.dir("expired"), |n| n.ends_with(&format!("-{action_id}.json")))
     }
 
+    /// Remove the `.<name>.<pid>.tmp` files a crash between `write_atomic`'s write and rename left in queue/. The hook
+    /// skips dot files, so none is live when a session starts. Best effort: a file that will not go is left for next time.
+    pub fn sweep_temp(&self) {
+        let Ok(d) = fsx::DirHandle::open(&self.dir("queue")) else { return };
+        for n in d.names().unwrap_or_default() {
+            if n.starts_with('.') && n.ends_with(".tmp") {
+                let _ = d.unlink(&n); // unlinkat without AT_REMOVEDIR: a directory of that name is left alone
+            }
+        }
+    }
+
+    /// The file names in queue/ and inflight/ right now, listed once so a tick settling many messages of one session
+    /// does not scan both directories per message. Taken before any ack is read, which keeps the check order
+    /// (queue, inflight, ack): a file only ever leaves queue/ and a claim only ever appears after it, so a stale
+    /// listing can only say "still queued" (retried next tick), never "gone" for a file that is not.
+    /// The two scans succeed or fail independently: a message still proves itself queued from queue/ when inflight/
+    /// is unreadable, and a stop (which never uses queue/) is not held up by an unreadable queue/.
+    pub fn listing(&self) -> Listing {
+        Listing { queue: names(&self.dir("queue")).map_err(Into::into), inflight: names(&self.dir("inflight")).map_err(Into::into) }
+    }
+
     /// The highest `<seq>` prefix in queue/ and expired/.
     pub fn max_seq(&self) -> u64 {
         ["queue", "expired"]
@@ -85,19 +106,50 @@ impl SessionDir {
     }
 }
 
+/// An io error kept so one failed scan can be reported to every message that needs it.
+#[derive(Clone, Copy)]
+pub struct ScanError(io::ErrorKind, Option<i32>);
+
+impl From<io::Error> for ScanError {
+    fn from(e: io::Error) -> Self {
+        Self(e.kind(), e.raw_os_error())
+    }
+}
+
+impl ScanError {
+    pub fn to_io(self) -> io::Error {
+        self.1.map_or_else(|| io::Error::from(self.0), io::Error::from_raw_os_error)
+    }
+}
+
+/// A one-pass listing of a session's queue/ and inflight/ (see `SessionDir::listing`).
+pub struct Listing {
+    queue: Result<Vec<String>, ScanError>,
+    inflight: Result<Vec<String>, ScanError>,
+}
+
+impl Listing {
+    pub fn queued(&self, action_id: &str) -> io::Result<bool> {
+        let suffix = format!("-{action_id}.json");
+        self.queue.as_ref().map_err(|e| e.to_io()).map(|v| v.iter().any(|n| n.ends_with(&suffix)))
+    }
+
+    pub fn inflight(&self, action_id: &str) -> io::Result<bool> {
+        let prefix = format!("{action_id}.");
+        self.inflight.as_ref().map_err(|e| e.to_io()).map(|v| v.iter().any(|n| n.starts_with(&prefix)))
+    }
+}
+
+fn names(dir: &Path) -> io::Result<Vec<String>> {
+    match fsx::DirHandle::open(dir).and_then(|d| d.names()) {
+        Ok(v) => Ok(v.into_iter().filter(|n| !n.starts_with('.')).collect()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
 /// The first entry of `dir` that `pred` accepts. A scan that fails is an error, never "not found": settling on a
 /// failed scan would call a file absent that is still there. A directory that does not exist has no entries.
 fn find(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Option<PathBuf>> {
-    let rd = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for e in rd {
-        let p = e?.path();
-        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && pred(n)) {
-            return Ok(Some(p));
-        }
-    }
-    Ok(None)
+    Ok(names(dir)?.into_iter().find(|n| pred(n)).map(|n| dir.join(n)))
 }

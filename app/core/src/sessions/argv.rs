@@ -141,6 +141,11 @@ pub fn is_sha(s: &str) -> bool {
     (7..=40).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// A full 40-hex commit id (what `git rev-parse` prints, and what an archived evidence bundle is checked against).
+pub fn is_full_sha(s: &str) -> bool {
+    s.len() == 40 && is_sha(s)
+}
+
 /// A git ref or commit: ref-safe chars, no leading `-` (would read as an
 /// option), no `..`.
 fn valid_base(s: &str) -> bool {

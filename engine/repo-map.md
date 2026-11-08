@@ -7,7 +7,7 @@ the agent `grep`/`Read` the specifics on demand (progressive disclosure).
 
 ## How it ranks (`scripts/vajra_repomap.py`)
 
-Aider's algorithm, dependency-light (pure stdlib + git, runs anywhere):
+A published repo-map algorithm, dependency-light (pure stdlib + git, runs anywhere):
 1. **Extract** per file: the symbols it *defines* (regex per language) and the
    identifiers it *references*.
 2. **Graph**: a file that references a symbol defined elsewhere → edge

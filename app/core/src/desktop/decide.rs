@@ -132,7 +132,7 @@ impl App {
         let action = self.decision_line(Decision::Reject, None, id, &e, sha, DecisionState::Requested, Some(&reason))?;
         let text = format!("rejected plan {id}: {reason}");
         match self.bridge.run(&Request::CampaignProgress { slug: e.campaign.clone(), text }) {
-            Ok(o) if o.code == Some(0) => {
+            Ok(o) if o.exit() == Some(0) => {
                 self.decision_line(Decision::Reject, Some(&action), id, &e, sha, DecisionState::Final, Some(&reason))?;
                 self.note("plan_rejected", &[]);
                 Ok(json!({"action_id": action, "state": "rejected"}))

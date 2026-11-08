@@ -309,3 +309,19 @@ fn check_evidence_runs_against_the_real_vajra_tasks() {
     assert_eq!(v["green"], false);
     assert!(v["reasons"].as_array().is_some_and(|r| !r.is_empty()));
 }
+
+/// #13 item 6: an archived bundle is checked with `--archived <slug> --head <40-hex>`; the script refuses anything else
+/// (exit 2), so the bridge refuses it before spawning instead of learning from the exit code.
+#[test]
+fn check_evidence_archived_needs_a_full_40_hex_head() {
+    let d = tmp();
+    let b = echo_bridge(&d);
+    let ev = |head: Option<&str>| Request::CheckEvidence {
+        path: "/r/c1/evidence/e1/evidence.json".into(), head: head.map(Into::into), archived: Some("c1".into()), repo: None,
+    };
+    for bad in [None, Some("abc1234"), Some("ea73cb05d639b945e21c667e17103e56404861a")] {
+        assert!(matches!(b.run(&ev(bad)), Err(BridgeError::Invalid(_))), "{bad:?}");
+    }
+    let h40 = "ea73cb05d639b945e21c667e17103e56404861a8";
+    assert!(b.run(&ev(Some(h40))).is_ok());
+}

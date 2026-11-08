@@ -20,4 +20,11 @@ while IFS= read -r f; do
   if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then P=$((P+1)); else F=$((F+1)); echo "FAIL :: manifest.json lists $f, which is not shipped"; fi
 done < <(jq -r '.files | keys[]' manifest.json)
 echo "manifest fresh: $P passed, $F failed"
+# Strict by default (local runs and pushes to main). CI sets VAJRA_MANIFEST_FRESH=warn for pull_request events only:
+# feature PRs do not carry manifest.json, the operator regenerates main after merges, so a stale entry warns there.
+if [ "$F" -gt 0 ] && [ "${VAJRA_MANIFEST_FRESH:-}" = "warn" ]; then
+  echo "WARN: manifest.json is stale in $F place(s); not blocking this pull request (the operator regenerates it on main)"
+  [ -z "${GITHUB_ACTIONS:-}" ] || echo "::warning::manifest.json is stale in $F place(s); the operator regenerates it on main after merge"
+  exit 0
+fi
 [ "$F" -eq 0 ]

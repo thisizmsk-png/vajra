@@ -543,7 +543,7 @@ impl App {
                 return Ok(());
             }
         }
-        let out = self.bridge.run(&Request::Doctor).ok().filter(|o| o.code == Some(0) && !o.timed_out);
+        let out = self.bridge.run(&Request::Doctor).ok().filter(|o| o.exit() == Some(0));
         let verdict = match out {
             None => Err("vajra doctor does not pass"),
             Some(o) if o.stdout.lines().any(|l| l.starts_with("PASS") && l.contains("denyWrite active")) => Ok(()),
