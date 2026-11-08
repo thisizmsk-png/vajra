@@ -65,6 +65,37 @@ fn the_shell_gets_the_scrubbed_env_plus_the_resolved_path() {
 }
 
 #[test]
+fn a_terminal_gets_the_users_login_path_from_the_resolved_login_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("userpath");
+    // A stand-in login shell that prints the PATH a real one would after sourcing the user's profile.
+    let fake = f.dir.join("fake-login-shell");
+    std::fs::write(&fake, "#!/bin/sh\nprintf '%s' '__VAJRA_PATH_BEGIN__/user/tools/bin:/usr/bin:/bin__VAJRA_PATH_END__'\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Resolve it the way the app does at startup (#70), with a temp HOME, then hand it to the terminal.
+    let login = crate::userpath::detect(&fake, &f.dir, Duration::from_secs(5)).expect("the stand-in shell resolves");
+    let dirs = crate::userpath::effective(Some(login), &[PathBuf::from("/usr/bin")], &f.dir);
+    let env = Arc::new(UserPathEnv::with_dirs(f.dir.clone(), dirs).with_shell("/bin/sh".into()));
+    let t = Terminals::with(Limits::default(), env);
+    let (info, out) = open_root(&t, &f);
+    t.write(info.id, b"case \":$PATH:\" in *:/user/tools/bin:*) echo USERPATH$((1+1))OK;; esac; echo HOME=$HOME\n").unwrap();
+    let home_line = format!("HOME={}", f.dir.display()); // the typed echo says HOME=$HOME, so this is the shell's answer
+    let seen = out.until(&home_line, 5);
+    assert!(seen.contains("USERPATH2OK"), "the user's login PATH did not reach the tab: {seen}");
+    assert!(seen.contains(&home_line), "{seen}");
+}
+
+#[test]
+fn the_app_environment_is_the_resolved_login_environment_and_nothing_secret_goes_with_it() {
+    let env = UserPathEnv::app(PathBuf::from("/home/someone"));
+    assert_eq!(env.path(), crate::userpath::joined());
+    assert_eq!(env.shell(), crate::userpath::login_shell());
+    assert_eq!(env.home(), Some(PathBuf::from("/home/someone")));
+    // The variables a terminal may inherit from the app are the same four as before: no token, key or nonce.
+    assert_eq!(policy::ENV_ALLOW, ["HOME", "USER", "LOGNAME", "LANG"]);
+}
+
+#[test]
 fn an_unusable_login_shell_falls_back_to_bin_sh() {
     let f = Fixture::new("badshell");
     let env = Arc::new(TestEnv { home: f.dir.clone(), path: None, shell: "relative-zsh".into() });

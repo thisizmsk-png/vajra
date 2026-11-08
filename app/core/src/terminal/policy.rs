@@ -27,8 +27,8 @@ impl Default for Limits {
 }
 
 /// Where the user's login-shell environment comes from. The login shell rebuilds most of its environment from the
-/// user's profile; this supplies the base it starts from. Swappable: #70 resolves the login-shell PATH once at startup
-/// and implements this, so GUI launches find the same tools a Terminal window does.
+/// user's profile; this supplies the base it starts from. The app's implementation is `UserPathEnv`, which reads the
+/// login environment `userpath` resolved once at startup, so a tab finds the same tools a Terminal window does.
 pub trait LoginEnv: Send + Sync {
     /// The PATH to start the shell with, if one was resolved.
     fn path(&self) -> Option<OsString>;
@@ -40,15 +40,53 @@ pub trait LoginEnv: Send + Sync {
     }
 }
 
-/// Until #70 lands: no resolved PATH, and `$SHELL` from the app's own environment.
-pub struct ProcessEnv;
+/// The login environment `crate::userpath` resolved at startup: its PATH (the user's login-shell PATH, then the process
+/// PATH, then the usual install dirs; absolute entries only) and its login shell. A terminal is interactive, so it gets
+/// the USER PATH, unlike the scripts the app runs that hold keys, which stay on the system PATH.
+pub struct UserPathEnv {
+    home: Option<PathBuf>,
+    /// Fixed dirs (tests); `None` reads `userpath::current()` live.
+    dirs: Option<Vec<PathBuf>>,
+    shell: Option<PathBuf>,
+}
 
-impl LoginEnv for ProcessEnv {
+impl UserPathEnv {
+    /// The app's: `userpath`'s resolved PATH and login shell, and this HOME.
+    pub fn app(home: PathBuf) -> Self {
+        Self { home: Some(home), dirs: None, shell: None }
+    }
+
+    /// With a fixed PATH, for tests that resolve one themselves (with a temp HOME).
+    pub fn with_dirs(home: PathBuf, dirs: Vec<PathBuf>) -> Self {
+        Self { home: Some(home), dirs: Some(dirs), shell: None }
+    }
+
+    /// Use this shell instead of the resolved login shell (tests, so they get `/bin/sh`).
+    pub fn with_shell(mut self, shell: PathBuf) -> Self {
+        self.shell = Some(shell);
+        self
+    }
+}
+
+impl Default for UserPathEnv {
+    /// The process's own HOME.
+    fn default() -> Self {
+        Self { home: None, dirs: None, shell: None }
+    }
+}
+
+impl LoginEnv for UserPathEnv {
     fn path(&self) -> Option<OsString> {
-        None
+        match &self.dirs {
+            Some(d) => std::env::join_paths(d).ok(),
+            None => crate::userpath::joined(),
+        }
     }
     fn shell(&self) -> Option<PathBuf> {
-        std::env::var_os("SHELL").map(PathBuf::from)
+        self.shell.clone().or_else(crate::userpath::login_shell)
+    }
+    fn home(&self) -> Option<PathBuf> {
+        self.home.clone()
     }
 }
 
