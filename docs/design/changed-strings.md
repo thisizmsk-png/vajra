@@ -136,3 +136,14 @@ Polish pass (stacked on PR #39).
 | Terminal | Home campaign rows | short tag; replaces the visible "Started outside this app. Continue it from your terminal.", which stays as the tooltip and for screen readers |
 | Workers; N of M done | Crew details for the Lead, a run or a task | new; per-status counts of the workers under the selection |
 | (Goal column removed) | History | the goal now leads the Campaign cell, with the slug under it |
+
+Terminal dock (standalone component, `app/ui/src/terminal/`).
+
+| String | Where | Note |
+|---|---|---|
+| Terminal, Terminals, New terminal, Hide terminal, Terminal here | dock bar and the "Terminal here" action | new |
+| The shell ended. / The shell ended with code N. / The shell was stopped. | banner over an ended terminal | new |
+| Start a new shell | button on an ended terminal | new |
+| No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
+| This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
+| The shell is not reading input right now. What you typed was dropped. | transient note | new |
