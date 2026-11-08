@@ -18,7 +18,8 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp, service, socket};
-use vajra_desktop::desktop::{App, Res, collect_changes};
+use serde_json::Value;
+use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
@@ -41,6 +42,28 @@ fn inbox(app: State<'_, App>) -> Res {
 #[tauri::command(async)]
 fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
     app.approve_plan(&id, &plan_sha256)
+}
+
+/// Receipt-wrapped actions (FG-11): the answer is always a `vajra.receipt/1`; see `desktop::state`.
+#[tauri::command(async)]
+fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sha256: String) -> Value {
+    app.act_approve_plan(&envelope, &id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
+    app.act_stop_worker(&envelope, &worker, reason.as_deref())
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+}
+
+#[tauri::command(async)]
+fn project_state(app: State<'_, App>, project_id: String, since_rev: Option<u64>) -> Res {
+    app.project_state(&project_id, since_rev)
 }
 
 #[tauri::command(async)]
@@ -372,6 +395,8 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
+    vajra_desktop::userpath::init(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {
@@ -402,14 +427,23 @@ fn main() {
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(AppLoginEnv { home: home.clone() })))
         .setup(move |a| {
             let handle = a.handle().clone();
+            // Receipts notify on their own: an action with no bus output still moves the projection.
+            let sink_handle = handle.clone();
+            handle.state::<App>().set_change_sink(Box::new(move |p| {
+                let _ = sink_handle.emit(CHANGED, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
                 loop {
-                    if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
+                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
+                    handle.state::<App>().refresh_workers();
+                    if let Some(mut payload) = changed {
+                        // The revision each known project is now at, so a subscriber refetches `project_state`.
+                        payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
                         let _ = handle.emit(CHANGED, payload);
                     }
-                    handle.state::<App>().refresh_workers();
                     // ADR-9 item 7: no App Nap while a run is active.
                     #[cfg(target_os = "macos")]
                     {
@@ -472,6 +506,10 @@ fn main() {
             project_sessions,
             project_migration_suggest,
             project_migration_confirm,
+            act_approve_plan,
+            act_stop_worker,
+            act_start_run,
+            project_state,
             term_open,
             term_attach,
             term_list,

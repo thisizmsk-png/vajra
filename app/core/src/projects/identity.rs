@@ -95,28 +95,40 @@ fn refuse(root: &Path, g: &Guard) -> Result<(), IdentityError> {
     Ok(())
 }
 
-/// The git common dir of the repository whose root is `dir`, read from `dir/.git` without running anything:
-/// a `.git` directory is its own common dir; a `.git` file (`gitdir: <path>`) names a worktree's git dir, whose
-/// `commondir` file points at the shared one. Only a directory shaped like a git dir (`HEAD` and `objects`) counts.
+/// The git common dir of the repository whose root is `dir`, read from `dir/.git` without running anything, and only
+/// when git's own bookkeeping agrees. `dir/.git` is the folder's own claim and anyone can write one, so:
+/// - a `.git` directory inside `dir` is its own common dir;
+/// - a `.git` file (`gitdir: <path>`) counts only as a linked worktree: the target must be `<common>/worktrees/<name>`,
+///   its `commondir` must lead to that `<common>`, and the `gitdir` file git keeps inside it must name this folder's
+///   `.git` file (the back-link). A `.git` file or symlink that merely points at some other repository fails this and
+///   is treated as no git repo, so it can neither move the project root nor match another project.
+///
+/// A directory only counts when it is shaped like a git dir (`HEAD` and `objects`).
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     let dotgit = dir.join(".git");
     let meta = fs::symlink_metadata(&dotgit).ok()?;
-    let gitdir = if meta.is_dir() {
+    let common = if meta.is_dir() {
         fs::canonicalize(&dotgit).ok()?
     } else if meta.is_file() {
-        let line = read_small(&dotgit)?;
-        let target = line.trim().strip_prefix("gitdir:")?.trim();
-        fs::canonicalize(dir.join(target)).ok()?
-    } else if meta.file_type().is_symlink() {
-        fs::canonicalize(&dotgit).ok().filter(|p| p.is_dir())?
+        linked_worktree_common(dir, &dotgit)?
     } else {
-        return None;
-    };
-    let common = match read_small(&gitdir.join("commondir")) {
-        Some(rel) => fs::canonicalize(gitdir.join(rel.trim())).ok()?,
-        None => gitdir,
+        return None; // a symlink or anything else is only a claim
     };
     looks_like_git_dir(&common).then_some(common)
+}
+
+/// The common dir a `.git` file really links to, or `None` unless the back-link holds.
+fn linked_worktree_common(dir: &Path, dotgit: &Path) -> Option<PathBuf> {
+    let line = read_small(dotgit)?;
+    let target = line.trim().strip_prefix("gitdir:")?.trim();
+    let gitdir = fs::canonicalize(dir.join(target)).ok()?;
+    let common = fs::canonicalize(gitdir.join(read_small(&gitdir.join("commondir"))?.trim())).ok()?;
+    let in_worktrees = gitdir.parent()?;
+    if in_worktrees.file_name()? != "worktrees" || in_worktrees.parent()? != common {
+        return None;
+    }
+    let back = fs::canonicalize(read_small(&gitdir.join("gitdir"))?.trim()).ok()?;
+    (back == fs::canonicalize(dotgit).ok()?).then_some(common)
 }
 
 fn looks_like_git_dir(p: &Path) -> bool {

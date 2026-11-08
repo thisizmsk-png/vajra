@@ -71,6 +71,7 @@ fn a_worktree_resolves_to_the_main_repo_folder_and_shares_its_common_dir() {
     fs::write(wt_git.join("commondir"), "../..\n").unwrap();
     fs::write(wt_git.join("HEAD"), "ref: refs/heads/w1\n").unwrap();
     let wt = t.dir("home/work/w1");
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
     fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
     let from_main = resolve(&main, &t.guard()).unwrap();
     let from_wt = resolve(&wt, &t.guard()).unwrap();
@@ -86,6 +87,7 @@ fn a_relative_gitdir_in_a_worktree_file_is_read_relative_to_the_worktree() {
     fs::create_dir_all(&wt_git).unwrap();
     fs::write(wt_git.join("commondir"), "../..").unwrap();
     let wt = t.dir("home/src/vajra-w2");
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
     fs::write(wt.join(".git"), "gitdir: ../vajra/.git/worktrees/w2").unwrap();
     assert_eq!(resolve(&wt, &t.guard()).unwrap().root, main);
 }
@@ -133,4 +135,55 @@ fn folders_that_must_never_be_projects_are_refused() {
         assert!(matches!(resolve(&p, &g), Err(IdentityError::Refused(_))), "{what}: {}", p.display());
     }
     assert!(resolve(&t.dir("home/src"), &g).is_ok());
+}
+
+// A `.git` entry is the folder's own claim. It moves the project root to another folder only when git's own back-link
+// agrees: the git dir is `<common>/worktrees/<name>` and its `gitdir` file names this folder's `.git` file.
+
+#[test]
+fn a_git_file_pointing_straight_at_another_repo_does_not_move_the_root() {
+    let t = Tmp::new("hijack");
+    let victim = t.repo("home/src/victim");
+    let dl = t.dir("home/downloads/thing");
+    fs::write(dl.join(".git"), format!("gitdir: {}\n", victim.join(".git").display())).unwrap();
+    let r = resolve(&dl, &t.guard()).unwrap();
+    assert_eq!(r.root, dl, "the project is the folder that was picked");
+    assert_eq!(r.key.git_common_dir, None, "an unverified common dir is not used to match other projects");
+    assert_ne!(r, resolve(&victim, &t.guard()).unwrap());
+}
+
+#[test]
+fn a_git_file_naming_a_worktree_entry_of_another_repo_needs_the_back_link() {
+    let t = Tmp::new("nolink");
+    let victim = t.repo("home/src/victim");
+    let wt_git = victim.join(".git/worktrees/w1");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    // The real worktree, which git linked back to /home/real/w1/.git:
+    let real = t.dir("home/real/w1");
+    fs::write(wt_git.join("gitdir"), format!("{}\n", real.join(".git").display())).unwrap();
+    fs::write(real.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    assert_eq!(resolve(&real, &t.guard()).unwrap().root, victim, "the genuine worktree still resolves");
+    // A different folder claiming the same entry is not it.
+    let fake = t.dir("home/downloads/fake");
+    fs::write(fake.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    let r = resolve(&fake, &t.guard()).unwrap();
+    assert_eq!((r.root, r.key.git_common_dir), (fake, None));
+    // And so does an entry with no back-link file at all.
+    let bare = victim.join(".git/worktrees/w2");
+    fs::create_dir_all(&bare).unwrap();
+    fs::write(bare.join("commondir"), "../..\n").unwrap();
+    let nolink = t.dir("home/downloads/nolink");
+    fs::write(nolink.join(".git"), format!("gitdir: {}\n", bare.display())).unwrap();
+    assert_eq!(resolve(&nolink, &t.guard()).unwrap().root, nolink);
+}
+
+#[test]
+fn a_git_symlink_to_another_repo_does_not_move_the_root() {
+    let t = Tmp::new("symgit");
+    let victim = t.repo("home/src/victim");
+    let d = t.dir("home/downloads/linked");
+    symlink(victim.join(".git"), d.join(".git")).unwrap();
+    let r = resolve(&d, &t.guard()).unwrap();
+    assert_eq!((r.root, r.key.git_common_dir), (d, None));
 }

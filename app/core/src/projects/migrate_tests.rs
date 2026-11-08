@@ -199,3 +199,27 @@ fn an_accepted_root_inside_an_existing_project_is_reported_not_forced() {
     assert_eq!((out.projects.len(), out.nested.len()), (0, 1));
     assert_eq!(s.list(true).unwrap().projects.len(), 1);
 }
+
+#[test]
+fn two_confirms_at_once_write_each_session_once() {
+    let t = Tmp::new("race");
+    let a = t.repo("src/alpha");
+    t.lead("20261101-0900", LEAD);
+    let ls = std::sync::Arc::new(vec![launch("c1", "20261101-0900", S1, &a), launch("c1", "20261102-1030", S2, &a)]);
+    let s = std::sync::Arc::new(t.store());
+    let (data, guard, root) = (t.data(), t.guard(), a.to_string_lossy().into_owned());
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let (s, ls, data, guard, root) = (s.clone(), ls.clone(), data.clone(), guard.clone(), root.clone());
+            std::thread::spawn(move || confirm(&s, &data, &guard, &ls, &["c1".to_string()], &[root]))
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "one confirm wins");
+    assert!(results.iter().filter(|r| r.is_err()).all(|r| matches!(r, Err(MigrateError::AlreadyDone))));
+    let id = s.list(true).unwrap().projects[0].id.clone();
+    let sessions = s.sessions(&id).unwrap().sessions;
+    let count = |k: SessionKind, run: &str| sessions.iter().filter(|x| x.kind == k && x.run_id.as_deref() == Some(run)).count();
+    assert_eq!((count(SessionKind::Run, "20261101-0900"), count(SessionKind::Run, "20261102-1030"), count(SessionKind::Orchestrator, "20261101-0900")), (1, 1, 1));
+    assert_eq!(sessions.len(), 3);
+}

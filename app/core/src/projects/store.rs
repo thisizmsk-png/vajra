@@ -5,7 +5,7 @@
 //! skipped, so one file cannot impersonate another project.
 
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -104,6 +104,8 @@ pub struct Store {
     guard: Guard,
     /// Serialises every read-modify-write of a record within the process.
     lock: Mutex<()>,
+    /// Held by a whole migration confirm (see `migrate::confirm`), so two confirms never interleave.
+    migrating: Mutex<()>,
     now: Clock,
 }
 
@@ -118,12 +120,17 @@ impl Store {
         fsx::private_dir(&dir)?;
         // The guard compares against canonical paths; a data dir that is a symlink is compared by its target.
         let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        Ok(Self { dir, guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), now })
+        Ok(Self { dir, guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now })
     }
 
     /// The folders that can never be a project.
     pub fn guard(&self) -> &Guard {
         &self.guard
+    }
+
+    /// Serialise one whole migration: taken before the done-check and held until the marker is written.
+    pub fn migration_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.migrating.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -285,15 +292,11 @@ impl Store {
         let _g = self.lock();
         self.read_one(project_id)?;
         let path = self.project_dir(project_id).join("sessions.jsonl");
-        let mut f = match fs::File::open(&path) {
-            Ok(f) => f,
+        let buf = match fsx::read_tail_nofollow(&path, SESSIONS_READ_CAP) {
+            Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(SessionLog::default()),
             Err(e) => return Err(e.into()),
         };
-        let len = f.metadata()?.len();
-        let mut buf = Vec::new();
-        f.seek(SeekFrom::Start(len.saturating_sub(SESSIONS_READ_CAP)))?;
-        f.take(SESSIONS_READ_CAP).read_to_end(&mut buf)?;
         let lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
         Ok(contract::latest_sessions(&lines))
     }

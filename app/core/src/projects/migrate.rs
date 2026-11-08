@@ -144,6 +144,9 @@ impl From<std::io::Error> for MigrateError {
 /// data), give each its sessions, and drop the marker. The owner confirms once: whatever was not accepted stays
 /// unsorted, and the marker stops the suggestion from coming back.
 pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], campaigns: &[String], accepted: &[String]) -> Result<Outcome, MigrateError> {
+    // One confirm at a time, from the done-check to the marker: a double click or a second window waits, then finds the
+    // marker and is refused, instead of writing every session twice.
+    let _one = store.migration_lock();
     if is_done(data) {
         return Err(MigrateError::AlreadyDone);
     }
