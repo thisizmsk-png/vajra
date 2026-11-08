@@ -211,3 +211,78 @@ fn a_worker_replaced_between_acceptance_and_effect_is_not_stopped() {
     let l = app.ledger().unwrap();
     assert!(!l["records"].as_array().unwrap().iter().any(|x| x["kind"] == "stop"), "attempt 3 was not stopped");
 }
+
+// Review P2: counters survive a restart. After a successful start (generation 1), a reopened app still reports
+// generation 1, rejects an action expecting the old 0, and never repeats a revision a cached client holds.
+#[test]
+fn generations_and_revisions_survive_a_restart() {
+    let t = Tmp::new();
+    let (old_rev, old_receipt_rev) = {
+        let app = t.app();
+        let r = app.act(&env("run-0012-llll", Some(0)), Caller::Ui, false, "start_run", "proj-a", Some(0), || Ok(json!({})));
+        assert_eq!(state_of(&r), "done");
+        let ps = app.project_state("proj-a", None).unwrap();
+        assert_eq!(ps["generations"]["project"], 1);
+        (ps["rev"].as_u64().unwrap(), r["receipt"]["rev"].as_u64().unwrap())
+    };
+    let app = t.app();
+    let ps = app.project_state("proj-a", None).unwrap();
+    assert_eq!(ps["generations"]["project"], 1, "the project generation is recovered");
+    let rev = ps["rev"].as_u64().unwrap();
+    assert!(rev > old_rev, "a revision a client cached before the restart is never reused");
+    assert!(ps["receipts"].as_array().unwrap().iter().all(|r| r["rev"].as_u64().unwrap() <= rev), "receipts never run ahead of their projection");
+    assert_eq!(app.project_state("proj-a", Some(old_rev)).unwrap()["unchanged"], false);
+    assert!(old_receipt_rev <= rev);
+    // The delayed action that still expects generation 0 is stale; the one expecting 1 goes through.
+    let bad = app.act_start_run(&env("run-0013-mmmm", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None }, "/nonexistent");
+    assert_eq!(bad["receipt"]["reason"], "stale_generation");
+    let ok = app.act(&env("run-0014-nnnn", Some(1)), Caller::Ui, false, "start_run", "proj-a", Some(1), || Ok(json!({})));
+    assert_eq!(state_of(&ok), "done");
+}
+
+// Review P2: an interrupted action changes the projection after restart, so a client holding the old revision
+// must not be told `unchanged`.
+#[test]
+fn recovered_unknown_receipts_invalidate_cached_revisions() {
+    let t = Tmp::new();
+    let cached = {
+        let app = t.app();
+        let mut h = lock(&app.acts);
+        let rev = h.rev("proj-a");
+        let q = Request { action_id: "click-0015-oooo", project_id: "proj-a", action: "start_run", target: "proj-a", expect_generation: None, caller: Caller::Ui, human_only: false };
+        assert!(matches!(h.store.begin(&q, None, rev, now_ms()).unwrap(), Begin::Run(_)));
+        rev
+    };
+    let app = t.app();
+    let ps = app.project_state("proj-a", Some(cached)).unwrap();
+    assert_eq!(ps["unchanged"], false);
+    assert_eq!(ps["receipts"][0]["state"], "unknown");
+}
+
+// Review P2: receipt transitions notify subscribers on their own, with no bus traffic, for accepted, terminal
+// and pre-effect rejections; a replay changes nothing and says nothing.
+#[test]
+fn receipt_transitions_emit_changed_without_bus_output() {
+    let t = Tmp::new();
+    let app = t.app();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let s2 = seen.clone();
+    app.set_change_sink(Box::new(move |p| s2.lock().unwrap().push(p)));
+    let revs = || -> Vec<u64> { seen.lock().unwrap().iter().flat_map(|p| p["projects"].as_array().unwrap().iter().map(|x| x["rev"].as_u64().unwrap()).collect::<Vec<_>>()).collect() };
+    // Accepted then done: two notifications, strictly increasing.
+    app.act(&env("note-0016-pppp", None), Caller::Ui, false, "start_run", "proj-a", None, || Ok(json!({})));
+    let r = revs();
+    assert_eq!(r.len(), 2);
+    assert!(r[0] < r[1]);
+    assert_eq!(seen.lock().unwrap()[0]["projects"][0]["project_id"], "proj-a");
+    // A stale-generation rejection (never reaches the effect) notifies too.
+    seed_session(&app, 3);
+    app.act_stop_worker(&env("note-0017-qqqq", Some(2)), "bhima", None);
+    assert_eq!(revs().len(), 3);
+    // Replaying either id emits nothing.
+    app.act(&env("note-0016-pppp", None), Caller::Ui, false, "start_run", "proj-a", None, || Ok(json!({})));
+    app.act_stop_worker(&env("note-0017-qqqq", Some(2)), "bhima", None);
+    assert_eq!(revs().len(), 3);
+    // And the revision the sink reported is the one project_state serves.
+    assert_eq!(app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap(), *revs().last().unwrap());
+}

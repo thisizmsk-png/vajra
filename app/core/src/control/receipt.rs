@@ -227,6 +227,13 @@ impl Store {
     /// Record the outcome of an accepted action. A receipt that is already terminal is returned unchanged
     /// (first outcome wins).
     pub fn finish(&mut self, action_id: &str, state: State, reason: Option<&str>, detail: Option<&str>, rev: u64, now_ms: u64) -> io::Result<Receipt> {
+        self.finish_with_generation(action_id, state, reason, detail, None, rev, now_ms)
+    }
+
+    /// `finish` that also records the target's generation after the effect (a start run's new project generation),
+    /// so a restart can recover it from the receipts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_with_generation(&mut self, action_id: &str, state: State, reason: Option<&str>, detail: Option<&str>, current_generation: Option<u64>, rev: u64, now_ms: u64) -> io::Result<Receipt> {
         let Some(prev) = self.by_id.get(action_id).cloned() else {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no such receipt"));
         };
@@ -243,11 +250,19 @@ impl Store {
             State::Failed => Retry::Safe,
             State::Unknown => Retry::AfterRefresh,
         };
+        if current_generation.is_some() {
+            rc.current_generation = current_generation;
+        }
         rc.rev = rev;
         rc.ts_ms = now_ms;
         self.persist(&rc)?;
         self.insert(rc.clone());
         Ok(rc)
+    }
+
+    /// Every receipt in the index (recovery of counters at startup).
+    pub fn all(&self) -> impl Iterator<Item = &Receipt> {
+        self.by_id.values()
     }
 }
 

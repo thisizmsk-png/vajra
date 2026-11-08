@@ -23,7 +23,11 @@ const FAILED_CODES: [&str; 5] = ["io_error", "send_failed", "spawn_failed", "lau
 
 pub(super) struct Hub {
     pub(super) store: Store,
-    /// project_id -> revision. Starts at 1 when first seen.
+    /// Revisions start here for every project. It is the start time in ms, or above every recovered receipt's
+    /// revision, so a revision handed out before a restart is never handed out again for different content (a
+    /// process bumps far less than once a millisecond).
+    base: u64,
+    /// project_id -> revision, from `base` when first seen.
     revs: HashMap<String, u64>,
     /// project_id -> runs started through a receipt (the project generation `start_run` is guarded by).
     run_gen: HashMap<String, u64>,
@@ -31,16 +35,29 @@ pub(super) struct Hub {
 
 impl Hub {
     pub(super) fn open(data: &Path) -> std::io::Result<Self> {
-        let store = Store::open(&data.join("control/ledger.jsonl"), now_ms())?;
-        Ok(Self { store, revs: HashMap::new(), run_gen: HashMap::new() })
+        let now = now_ms();
+        let store = Store::open(&data.join("control/ledger.jsonl"), now)?;
+        // Recovered state: the highest revision any receipt carries, and each project's run generation (a done
+        // start run records its new generation in `current_generation`).
+        let mut base = now;
+        let mut run_gen: HashMap<String, u64> = HashMap::new();
+        for r in store.all() {
+            base = base.max(r.rev.saturating_add(1));
+            if r.action == "start_run" && r.state == State::Done {
+                let g = run_gen.entry(r.project_id.clone()).or_insert(0);
+                *g = (*g).max(r.current_generation.unwrap_or(0));
+            }
+        }
+        Ok(Self { store, base, revs: HashMap::new(), run_gen })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
-        *self.revs.entry(project.to_string()).or_insert(1)
+        *self.revs.entry(project.to_string()).or_insert(self.base)
     }
 
     fn bump(&mut self, project: &str) -> u64 {
-        let r = self.revs.entry(project.to_string()).or_insert(1);
+        let base = self.base;
+        let r = self.revs.entry(project.to_string()).or_insert(base);
         *r += 1;
         *r
     }
@@ -70,21 +87,25 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn act(&self, env: &Envelope, caller: Caller, human_only: bool, action: &str, target: &str, current_generation: Option<u64>, effect: impl FnOnce() -> Res) -> Value {
         let req = Request { action_id: &env.action_id, project_id: &env.project_id, action, target, expect_generation: env.expect_generation, caller, human_only };
-        let begun = {
+        let (begun, existed) = {
             let mut h = lock(&self.acts);
             let rev = h.rev(&env.project_id);
-            h.store.begin(&req, current_generation, rev, now_ms())
+            let existed = h.store.get(&env.action_id).is_some();
+            (h.store.begin(&req, current_generation, rev, now_ms()), existed)
         };
         let (rc, outcome) = match begun {
             // The ledger would not take the receipt: nothing was done, and nothing is claimed.
             Err(e) => return json!({"receipt": null, "error": fail("io_error", e)}),
             Ok(Begin::Done(rc)) => {
-                if rc.state == State::Rejected {
-                    lock(&self.acts).bump(&env.project_id);
+                // A refusal stored just now changes the projection; a replay of an old receipt does not.
+                if !existed && lock(&self.acts).store.get(&env.action_id).is_some() {
+                    self.invalidate(&env.project_id);
                 }
                 return json!({"receipt": rc, "replayed": true});
             }
             Ok(Begin::Run(_)) => {
+                // `accepted` is now in the projection.
+                self.invalidate(&env.project_id);
                 let out = effect();
                 let (state, reason) = match &out {
                     Ok(_) => (State::Done, None),
@@ -95,15 +116,20 @@ impl App {
                 };
                 let detail = out.as_ref().err().and_then(|v| v["detail"].as_str().map(str::to_string));
                 let mut h = lock(&self.acts);
+                let mut new_gen = None;
                 if state == State::Done && action == "start_run" {
-                    *h.run_gen.entry(env.project_id.clone()).or_insert(0) += 1;
+                    let g = h.run_gen.entry(env.project_id.clone()).or_insert(0);
+                    *g += 1;
+                    new_gen = Some(*g);
                 }
                 let rev = h.bump(&env.project_id);
-                let rc = match h.store.finish(&env.action_id, state, reason.as_deref(), detail.as_deref(), rev, now_ms()) {
+                let rc = match h.store.finish_with_generation(&env.action_id, state, reason.as_deref(), detail.as_deref(), new_gen, rev, now_ms()) {
                     Ok(rc) => rc,
                     // The effect ran but its outcome could not be written: say so, never claim done.
                     Err(_) => return json!({"receipt": null, "error": fail("io_error", "outcome not recorded"), "result": out.ok()}),
                 };
+                drop(h);
+                self.emit_projects(vec![json!({"project_id": env.project_id, "rev": rev})]);
                 (rc, out)
             }
         };
@@ -111,6 +137,25 @@ impl App {
             Ok(v) => json!({"receipt": rc, "result": v}),
             Err(e) => json!({"receipt": rc, "error": e}),
         }
+    }
+
+    /// Bump a project's revision and tell subscribers, whether or not anything reached the bus.
+    fn invalidate(&self, project_id: &str) {
+        let rev = lock(&self.acts).bump(project_id);
+        self.emit_projects(vec![json!({"project_id": project_id, "rev": rev})]);
+    }
+
+    /// Send a `changed` payload naming the projects whose revision moved. The sink is installed by the shell;
+    /// without one (tests, the socket server) nothing is sent.
+    fn emit_projects(&self, projects: Vec<Value>) {
+        if let Some(sink) = lock(&self.sink).as_ref() {
+            sink(json!({"streams": [], "snapshot_needed": false, "projects": projects}));
+        }
+    }
+
+    /// The shell hands in how to emit the `changed` event (`handle.emit`), so receipts can notify on their own.
+    pub fn set_change_sink(&self, sink: super::ChangeSink) {
+        *lock(&self.sink) = Some(sink);
     }
 
     pub fn act_start_run(&self, env: &Envelope, input: RunInput, cwd: &str) -> Value {

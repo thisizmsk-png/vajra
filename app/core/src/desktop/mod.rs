@@ -30,6 +30,8 @@ use crate::vajra::state::Reader;
 
 /// Every command answers `Ok(value)` or `Err({error, detail?})`.
 pub type Res = Result<Value, Value>;
+/// Emits a `changed` payload to the UI (see `App::set_change_sink`).
+pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
@@ -230,6 +232,8 @@ pub struct App {
     sweeping: Mutex<std::collections::HashSet<String>>,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
+    /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
+    sink: Mutex<Option<ChangeSink>>,
 }
 
 impl App {
@@ -246,6 +250,7 @@ impl App {
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             acts,
+            sink: Mutex::new(None),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),

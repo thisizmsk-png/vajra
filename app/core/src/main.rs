@@ -296,6 +296,11 @@ fn main() {
         .manage(app)
         .setup(move |a| {
             let handle = a.handle().clone();
+            // Receipts notify on their own: an action with no bus output still moves the projection.
+            let sink_handle = handle.clone();
+            handle.state::<App>().set_change_sink(Box::new(move |p| {
+                let _ = sink_handle.emit(CHANGED, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
