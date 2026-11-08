@@ -20,6 +20,7 @@ pub mod policy;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -131,6 +132,9 @@ struct Term {
     pending: Arc<(Mutex<Pending>, Condvar)>,
     flusher: Mutex<Option<JoinHandle<()>>>,
     reader: Mutex<Option<JoinHandle<()>>>,
+    /// Write end of the reader's wake pipe: a byte here makes a blocked reader return (None if the fds were too large for
+    /// `select`, in which case the reader cannot be woken and `stop` falls back to detaching it).
+    wake: Option<OwnedFd>,
 }
 
 impl Term {
@@ -272,6 +276,7 @@ impl Terminals {
                 return Err(TermError::Io(e.to_string()));
             }
         };
+        let (reader, wake) = WakeReader::wrap(reader, pair.master.as_raw_fd());
         let input = Arc::new((Mutex::new(Input::default()), Condvar::new()));
         let term = Arc::new(Term {
             pid,
@@ -289,6 +294,7 @@ impl Terminals {
             pending: Arc::new((Mutex::new(Pending::default()), Condvar::new())),
             flusher: Mutex::new(None),
             reader: Mutex::new(None),
+            wake,
         });
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let window = self.limits.window;
@@ -400,7 +406,7 @@ impl Terminals {
         // In parallel, so quitting with several stuck shells takes one grace period, not one each.
         std::thread::scope(|sc| {
             for t in &all {
-                sc.spawn(|| stop(t));
+                sc.spawn(move || stop(t));
             }
         });
     }
@@ -450,12 +456,18 @@ fn stop(t: &Arc<Term>) {
         Some(h) if h.is_finished() => {
             let _ = h.join();
         }
-        Some(_) => {
-            // Something outside the session still holds the PTY, so the blocked read may never return. Reap the shell
-            // here without waiting for EOF, silence the sink, and let the reader thread end whenever that holder does.
+        Some(h) => {
+            // Something outside the session (a descendant that called `setsid`) still holds the PTY slave, so the
+            // blocked read has no EOF coming. Reap the shell here without waiting for it, silence the sink, then wake
+            // the reader through its wake pipe (no signals) so it returns, the thread ends, and the PTY descriptors are
+            // released even though the slave stays open. Bounded: without a wake pipe, or if it does not end, the
+            // thread is detached and stops at its next read (`exited` is set).
             *lock(&t.sink) = Arc::new(|_| {});
             if let Some(child) = lock(&t.child).take() {
                 reap(t, child);
+            }
+            if wake_reader(t.wake.as_ref().map(|w| w.as_raw_fd()), &h, Duration::from_secs(1)) {
+                let _ = h.join();
             }
         }
         None => {
@@ -490,6 +502,75 @@ fn stop(t: &Arc<Term>) {
             let _ = h.join();
         }
     }
+}
+
+/// A reader that can be woken without a signal: it waits in `select` on the PTY master and on a pipe, and a byte on the
+/// pipe makes `read` return 0 (end of input). `select` is used because `poll` is unreliable on macOS PTYs.
+struct WakeReader {
+    inner: Box<dyn Read + Send>,
+    watch: RawFd,
+    wake: OwnedFd,
+}
+
+impl WakeReader {
+    /// Wrap `inner` (a clone of the master's reader). Returns the wake pipe's write end, or the reader unchanged and no
+    /// wake end when a descriptor is too large for an `fd_set` or the pipe cannot be made.
+    fn wrap(inner: Box<dyn Read + Send>, watch: Option<RawFd>) -> (Box<dyn Read + Send>, Option<OwnedFd>) {
+        let Some(watch) = watch.filter(|fd| (*fd as usize) < libc::FD_SETSIZE) else { return (inner, None) };
+        let mut fds = [0 as libc::c_int; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return (inner, None);
+        }
+        // Close-on-exec, so no other shell or child inherits the wake pipe.
+        for fd in fds {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        if r.as_raw_fd() as usize >= libc::FD_SETSIZE {
+            return (inner, None);
+        }
+        (Box::new(Self { inner, watch, wake: r }), Some(w))
+    }
+}
+
+impl Read for WakeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let (a, b) = (self.watch, self.wake.as_raw_fd());
+            let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut set);
+                libc::FD_SET(a, &mut set);
+                libc::FD_SET(b, &mut set);
+            }
+            let n = unsafe { libc::select(a.max(b) + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if unsafe { libc::FD_ISSET(b, &set) } {
+                return Ok(0);
+            }
+            if unsafe { libc::FD_ISSET(a, &set) } {
+                return self.inner.read(buf);
+            }
+        }
+    }
+}
+
+/// Wake the reader through its pipe and wait for it to end, until `within` passes. Returns whether it ended.
+fn wake_reader(wake: Option<RawFd>, h: &JoinHandle<()>, within: Duration) -> bool {
+    if let Some(fd) = wake {
+        unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
+    }
+    let until = Instant::now() + within;
+    while !h.is_finished() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.is_finished()
 }
 
 /// End what is left of the session while the leader is still unreaped (an unreaped leader, even a zombie, holds its pid
