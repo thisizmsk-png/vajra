@@ -84,6 +84,15 @@ describe("FG-08 preferences",()=>{
   fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
   expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args?.patch).toEqual({inherit:["shortcuts"]});
  });
+ it("takes Primary as the platform modifier only: Command on a Mac (never Control), Control elsewhere (never Command)",()=>{
+  const k=(o:KeyboardEventInit)=>new KeyboardEvent("keydown",{key:"k",...o});
+  expect(matchesShortcut(k({metaKey:true}),"Primary+K",true)).toBe(true);
+  expect(matchesShortcut(k({ctrlKey:true}),"Primary+K",true)).toBe(false);
+  expect(matchesShortcut(new KeyboardEvent("keydown",{key:",",ctrlKey:true}),"Primary+,",true)).toBe(false);
+  expect(matchesShortcut(k({metaKey:true,ctrlKey:true}),"Primary+K",true)).toBe(false);
+  expect(matchesShortcut(k({ctrlKey:true}),"Primary+K",false)).toBe(true);
+  expect(matchesShortcut(k({metaKey:true}),"Primary+K",false)).toBe(false);
+ });
  it("supports the saved primary key but does not hijack composition or terminal keystrokes",()=>{
   expect(matchesShortcut(new KeyboardEvent("keydown",{key:"p",metaKey:true,shiftKey:true}),"Primary+Shift+P")).toBe(true);expect(matchesShortcut(new KeyboardEvent("keydown",{key:"p",metaKey:true,shiftKey:true,isComposing:true}),"Primary+Shift+P")).toBe(false);
   const terminal=document.createElement("textarea");terminal.className="xterm-helper-textarea";const e=new KeyboardEvent("keydown",{key:"k",metaKey:true,bubbles:true});let matched=true;terminal.addEventListener("keydown",x=>{matched=matchesShortcut(x,"Primary+K");});terminal.dispatchEvent(e);expect(matched).toBe(false);
