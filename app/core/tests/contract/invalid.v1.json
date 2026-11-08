@@ -36,6 +36,9 @@
     {"case": "rev negative",                "set": {"rev": -1},                           "reason": "malformed"},
     {"case": "rev fractional",              "set": {"rev": 1.5},                          "reason": "malformed"},
     {"case": "rev a string",                "set": {"rev": "7"},                          "reason": "malformed"},
+    {"case": "rev beyond 2^53-1",           "set": {"rev": 9007199254740992},         "reason": "invalid"},
+    {"case": "ino beyond 2^53-1",           "set": {"root_key": {"dev": 1, "ino": 9007199254740992}}, "reason": "invalid"},
+    {"case": "dev beyond 2^53-1",           "set": {"root_key": {"dev": 9007199254740992, "ino": 2}}, "reason": "invalid"},
     {"case": "rev missing",                 "unset": ["rev"],                             "reason": "malformed"}
   ],
   "session": [
