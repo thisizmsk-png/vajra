@@ -250,7 +250,7 @@ impl Bridge {
             return None;
         }
         let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
-        std::fs::create_dir(&dir).ok()?;
+        private_dir(&dir)?;
         let idx = dir.join("index");
         let objects = dir.join("objects");
         let repo_objects: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
@@ -280,7 +280,7 @@ impl Bridge {
             let found = git(&["rev-parse", "--git-path", "objects"], false)?.stdout.trim().to_string();
             let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { top.borrow().join(found) };
             *repo_objects.borrow_mut() = Some(found.canonicalize().ok()?);
-            std::fs::create_dir(&objects).ok()?;
+            private_dir(&objects)?;
             if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {
                 let head = head.stdout.trim().to_string();
                 git(&["read-tree", &head], true)?;
@@ -295,6 +295,13 @@ impl Bridge {
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
+}
+
+/// Create `path` readable by its owner alone (mode 0700, before any object is written into it): `git add` stores the
+/// repository's modified and untracked file contents there, and the umask alone would leave it open to other local users.
+fn private_dir(path: &Path) -> Option<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(path).ok()
 }
 
 fn rand_tag() -> u128 {
@@ -472,4 +479,24 @@ pub fn parse_kb_line(line: &str) -> Option<KbHit> {
 /// means "no results".
 pub fn parse_kb_hits(stdout: &str) -> Vec<KbHit> {
     stdout.lines().filter_map(parse_kb_line).collect()
+}
+
+#[cfg(test)]
+mod private_dir_tests {
+    use super::private_dir;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_private_dir_is_owner_only_even_under_an_open_umask() {
+        let base = std::env::temp_dir().join(format!("vajra-private-dir-{}", std::process::id()));
+        // SAFETY: umask only changes this process's creation mask; restored right after the directory exists.
+        let old = unsafe { libc::umask(0) };
+        let made = private_dir(&base);
+        unsafe { libc::umask(old) };
+        assert!(made.is_some());
+        let mode = std::fs::metadata(&base).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir(&base);
+        assert_eq!(mode, 0o700, "a directory that holds repository contents must not be readable by other users");
+        // A plain create_dir under the same umask would have left it open: that is what this guards.
+    }
 }
