@@ -39,22 +39,27 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
       <p>Model: {view.effective.model || "Native CLI default"}. Additional agent and model selection requires a supported adapter.</p>
       {select("workers", "Concurrent workers", Array.from({ length: 16 }, (_, i) => [String(i + 1), String(i + 1)] as const))}
       {select("rounds", "Fix rounds", [["1", "1"], ["2", "2"], ["3", "3"]])}
+      <p>Read-only guard caps: {view.caps?.active_runs ?? 1} active run, {view.caps?.workers_per_run ?? 16} workers per run. Preferences cannot raise these limits.</p>
       <p>Defaults apply to new tasks. System limits and native permissions still apply.</p>
     </>}
-    {section === "notifications" && <div className="v-pref__row"><label><span>Task notifications<small>{source("notifications")}</small></span><input type="checkbox" checked={value("notifications")} disabled={prefs.busy} onChange={e => change("notifications", e.target.checked)} /></label>
-      {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit("notifications")}>Use global Task notifications</Button>}
-      <p>This preference does not grant OS notification permission or include code and prompts in notifications.</p>
-    </div>}
+    {section === "notifications" && <>
+      {([ ["notifications", "OS notifications"], ["notifications_text", "Include item text"] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onChange={e => change(key, e.target.checked)} /></label>
+        {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => inherit(key)}>Use global {label}</Button>}
+      </div>)}
+      <p>Both defaults are off. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply.</p>
+    </>}
     {section === "keyboard" && (["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? "Search shortcut" : "Settings shortcut"}<small>{source("shortcuts")}</small></span>
       <select aria-label={key === "palette" ? "Search shortcut" : "Settings shortcut"} value={value("shortcuts")[key]} disabled={prefs.busy} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
         {SHORTCUT_CHOICES.map(k => <option key={k} value={k}>{shortcutKeys(k).join(" ")}</option>)}
       </select></label>{projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit("shortcuts")}>Use global {key === "palette" ? "Search shortcut" : "Settings shortcut"}</Button>}</div>)}
     {prefs.error && <p role="alert">{prefs.error}</p>}
+    {prefs.receipt && <p role="status">Action {prefs.receipt.state} · {prefs.receipt.action_id}{prefs.receipt.reason ? ` · ${prefs.receipt.reason}` : ""}</p>}
+    {prefs.uncertain && <Button disabled={prefs.busy} onClick={() => { void prefs.retry().then(ok => { if (ok) { setPatch({}); setMessage("Saved."); } }); }}>Retry same action</Button>}
     {message && <p role="status">{message}</p>}
     <div className="v-pref__actions">
-      <Button variant="primary" disabled={!dirty || prefs.busy} busy={prefs.busy} onClick={() => void save()}>Save preferences</Button>
+      <Button variant="primary" disabled={!dirty || prefs.busy || prefs.uncertain || prefs.needsReview} busy={prefs.busy} onClick={() => void save()}>Save preferences</Button>
       <Button disabled={!dirty || prefs.busy} onClick={() => { setPatch({}); setMessage(""); }}>Discard changes</Button>
-      <Button disabled={prefs.busy} onClick={() => void save(true)}>Reset this scope</Button>
+      <Button disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => void save(true)}>Reset this scope</Button>
       <Button variant="ghost" disabled={prefs.busy} onClick={() => { setPatch({}); setMessage(""); prefs.reload(); }}>Reload preferences</Button>
     </div>
   </section>;

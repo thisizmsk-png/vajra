@@ -167,9 +167,10 @@ export function installFixture(mode = "") {
   let revision = 0;
   let global = { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
+  const receipts = new Map<string, unknown>();
   const preferenceView = (id: string | null) => {
     const overrides = id ? projects.get(id) ?? {} : {};
-    return { schema: "vajra.preferences/1", rev: revision, project_id: id, global, overrides,
+    return { schema: "vajra.preferences/1", rev: revision, project_id: id, global, overrides, caps: { active_runs: 1, workers_per_run: 16, editable: false },
       effective: { ...global, ...overrides }, sources: Object.fromEntries(Object.keys(global).map(k => [k, k in overrides ? "project" : "global"])) };
   };
   const t: Transport = {
@@ -177,9 +178,11 @@ export function installFixture(mode = "") {
       // A core that does not answer: Tauri rejects with a plain string, not the core's {error, detail}.
       if (mode === "down") throw `command ${cmd} failed: the core is not running`;
       if (cmd === "preferences_read") return preferenceView(args?.projectId as string | null);
-      if (cmd === "preferences_update") {
-        if (args?.expectRev !== revision) throw { error: "revision_conflict" };
-        const id = args?.projectId as string | null;
+      if (cmd === "act_preferences_update") {
+        const envelope = args?.envelope as { action_id: string; project_id: string; expect_generation: number };
+        if (receipts.has(envelope.action_id)) return { receipt: receipts.get(envelope.action_id), replayed: true };
+        if (envelope.expect_generation !== revision) return { receipt: { action_id: envelope.action_id, state: "rejected", reason: "revision_conflict" } };
+        const id = envelope.project_id === "global" ? null : envelope.project_id;
         const { inherit = [], ...patch } = args?.patch as Record<string, unknown> & { inherit?: string[] };
         if (id) {
           const next = args?.reset ? {} : { ...projects.get(id), ...patch };
@@ -187,7 +190,9 @@ export function installFixture(mode = "") {
           projects.set(id, next);
         } else global = args?.reset ? { ...DEFAULT_PREFERENCES } : { ...global, ...patch };
         revision++;
-        return preferenceView(id);
+        const receipt = { action_id: envelope.action_id, state: "done" };
+        receipts.set(envelope.action_id, receipt);
+        return { receipt, result: preferenceView(id) };
       }
       const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };

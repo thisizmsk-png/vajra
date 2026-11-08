@@ -1,14 +1,15 @@
 // Mirror of the core's bounded preferences DTO; this contains no auth, permissions, hooks or environment values.
 export type Preferences = {
   theme: "system" | "dark" | "light"; editor: "system" | "code"; shell: "login" | "sh" | "bash" | "zsh";
-  notifications: boolean; agent: "claude" | "codex"; model: string; workers: number; rounds: number;
+  notifications: boolean; notifications_text: boolean; agent: "claude" | "codex"; model: string; workers: number; rounds: number;
   shortcuts: { palette: string; settings: string };
 };
 export type PreferenceKey = keyof Preferences;
 export type PreferencePatch = Partial<Preferences> & { inherit?: PreferenceKey[] };
 export type PreferenceView = { schema: "vajra.preferences/1"; rev: number; project_id: string | null;
+  caps: { active_runs: number; workers_per_run: number; editable: false };
   global: Preferences; overrides: Partial<Preferences>; effective: Preferences; sources: Record<PreferenceKey, "global" | "project"> };
-export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "system", shell: "login", notifications: true,
+export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "system", shell: "login", notifications: false, notifications_text: false,
   agent: "claude", model: "", workers: 4, rounds: 2, shortcuts: { palette: "Primary+K", settings: "Primary+," } };
 export const SHORTCUT_CHOICES = ["Primary+K", "Primary+,", "Primary+Shift+K", "Primary+Shift+P", "Primary+Shift+S", "F6", "F7"];
 export const shortcutKeys = (binding: string) => binding.split("+").map(k => k === "Primary" ? "⌘" : k === "Shift" ? "⇧" : k.toUpperCase());
@@ -23,7 +24,7 @@ export function isPreferenceView(input: unknown): input is PreferenceView {
   const v = input as PreferenceView;
   const valid = (p: Preferences) => p && ["system", "dark", "light"].includes(p.theme)
     && ["system", "code"].includes(p.editor) && ["login", "sh", "bash", "zsh"].includes(p.shell)
-    && typeof p.notifications === "boolean" && ["claude", "codex"].includes(p.agent)
+    && typeof p.notifications === "boolean" && typeof p.notifications_text === "boolean" && ["claude", "codex"].includes(p.agent)
     && typeof p.model === "string" && p.model.length <= 80
     && Number.isInteger(p.workers) && p.workers >= 1 && p.workers <= 16
     && Number.isInteger(p.rounds) && p.rounds >= 1 && p.rounds <= 3
@@ -34,3 +35,7 @@ export function isPreferenceView(input: unknown): input is PreferenceView {
     && valid(v.global) && valid(v.effective) && !!v.sources
     && Object.keys(DEFAULT_PREFERENCES).every(k => ["global", "project"].includes(v.sources[k as PreferenceKey]));
 }
+
+export type PreferenceEnvelope = { action_id: string; project_id: string; expect_generation: number };
+export type PreferenceReceipt = { action_id: string; state: "accepted" | "done" | "rejected" | "failed" | "unknown"; reason?: string | null };
+export type PreferenceActResult = { receipt: PreferenceReceipt | null; result?: PreferenceView; error?: { error: string }; replayed?: boolean };
