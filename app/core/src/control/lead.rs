@@ -11,7 +11,7 @@ use super::{nonce, time};
 use crate::crew::redact::Redactor;
 use crate::ids;
 
-pub use super::lead_settings::{deny_rules, settings, settings_no_hooks};
+pub use super::lead_settings::{deny_rules, deny_rules_with, settings, settings_no_hooks, settings_no_hooks_with, settings_with};
 
 /// Ask text length, in chars (ADR-13 Decision 3). Same bound as a worker message.
 pub const MAX_TEXT: usize = super::service::MAX_TEXT;

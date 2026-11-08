@@ -1064,3 +1064,36 @@ fn a_symlinked_lead_transcript_is_not_replayed() {
     assert!(app.lead_status(RUN_ID).is_ok());
     assert!(stream_text(&app).is_empty(), "{:?}", stream_text(&app));
 }
+
+/// ADR-15 D8: the Lead of one project is denied every other project's folder, taken from the app's guarded run
+/// records. Its own project (any run of it) and folders that hold it are never denied.
+#[test]
+fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    let second = t.0.join("second");
+    for d in [other.join(".git"), second.join(".git"), second.join("sub"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    for (run, cwd) in [
+        ("20261108-1100", other.clone()),
+        ("20261108-1101", second.clone()),
+        ("20261108-1102", second.join("sub")),
+        ("20261108-1103", t.0.clone()),
+        ("20261108-1104", t.repo()),
+    ] {
+        app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
+    }
+    let roots = app.other_project_roots(&t.repo());
+    assert_eq!(roots.len(), 2, "one folder per other project: {roots:?}");
+    assert!(roots.contains(&other));
+    assert!(roots.iter().any(|r| r.starts_with(&second)));
+    assert!(!roots.iter().any(|r| r == &t.0 || r.starts_with(t.repo())), "never its own project or a folder holding it: {roots:?}");
+
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("settings.json")).unwrap();
+    assert!(got.contains(&format!("Read(/{}/**)", other.display())), "{got}");
+    assert!(!got.contains(&format!("Read(/{}/**)", t.0.display())), "the folder holding the repo is not denied");
+}

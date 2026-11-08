@@ -370,6 +370,35 @@ impl App {
         String::from_utf8(body).ok()?.trim().parse::<i64>().ok().filter(|t| *t > 0)
     }
 
+    /// The folders of the app's other projects, for the Lead's deny rules (ADR-15 D8): the cwd of every run this app
+    /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
+    /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
+    /// ancestor would deny the Lead its own project). One folder per project.
+    pub(super) fn other_project_roots(&self, repo: &Path) -> Vec<PathBuf> {
+        const MAX_OTHER_ROOTS: usize = 256;
+        let own = super::caps::project_key(repo);
+        let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
+            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
+            .unwrap_or_default();
+        runs.sort_unstable_by(|a, b| b.cmp(a));
+        let (mut keys, mut out) = (Vec::new(), Vec::new());
+        for run in runs {
+            if out.len() >= MAX_OTHER_ROOTS {
+                break;
+            }
+            let Some(cwd) = self.read_run_cwd(&run) else { continue };
+            let key = super::caps::project_key(&cwd);
+            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            if key == own || own_real.starts_with(&real) || keys.contains(&key) {
+                continue;
+            }
+            keys.push(key);
+            out.push(cwd);
+        }
+        out
+    }
+
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
@@ -414,16 +443,19 @@ impl App {
         let base = self.data.join("control").join("lead");
         fsx::private_dir(&base).map_err(io)?;
         let dir = base.join(&t.run_id);
-        let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id)?;
+        // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
+        // recheck below all use the same rules. A project that first appears during the ask is in the next one.
+        let others = self.other_project_roots(&t.cwd);
+        let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id, &others)?;
         // A run this app life launched is authoritative in memory: remember its directory under the guarded dir, so
         // that after a restart the (worker-writable) index cannot supply a different one.
         if !t.from_disk {
             fsx::write_atomic(&dir, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
         }
-        self.ensure_selftest(bin, &env, &dir, &t.cwd, &settings, &t.run_id, handle)?;
+        self.ensure_selftest(bin, &env, &dir, &t.cwd, &others, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
-        if self.write_lead_files(&dir, &t.cwd, &t.run_id)? != settings {
+        if self.write_lead_files(&dir, &t.cwd, &t.run_id, &others)? != settings {
             return Err(LeadError::GuardMissing("the Lead settings changed during the self-test".into()));
         }
 
@@ -556,12 +588,12 @@ impl App {
     /// Write `<data>/lead/<run_id>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
-    fn write_lead_files(&self, dir: &Path, repo: &Path, run_id: &str) -> Result<String, LeadError> {
+    fn write_lead_files(&self, dir: &Path, repo: &Path, run_id: &str, others: &[PathBuf]) -> Result<String, LeadError> {
         if !self.data.is_absolute() {
             return Err(LeadError::GuardMissing("the data dir must be an absolute path".into()));
         }
         fsx::private_dir(dir).map_err(io)?;
-        let want = lead_settings::settings(&self.home, repo, &self.data)?;
+        let want = lead_settings::settings_with(&self.home, repo, &self.data, others)?;
         let mcp = json!({"mcpServers": {"vajra-desktop": {
             "command": self.lead.exe.to_string_lossy(),
             "args": ["--mcp"],
@@ -584,7 +616,7 @@ impl App {
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, others: &[PathBuf], settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
         let version = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -598,7 +630,7 @@ impl App {
         let file = fsx::write_atomic(&canary_dir, "c.txt", secret.as_bytes()).map_err(io)?;
         let result = (|| {
             // The deny layer alone: the same generated rules, no hooks.
-            let bare = lead_settings::settings_no_hooks(&self.home, repo, &self.data)?;
+            let bare = lead_settings::settings_no_hooks_with(&self.home, repo, &self.data, others)?;
             let bare_path = fsx::write_atomic(dir, "selftest-settings.json", bare.as_bytes()).map_err(io)?;
             verify_settings_file(&bare_path, &bare)?;
             // Two tries: the model may answer without touching the file, which proves nothing.
