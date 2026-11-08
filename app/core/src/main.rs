@@ -48,6 +48,36 @@ fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn app_info(app: State<'_, App>) -> Res {
+    app.app_info()
+}
+
+#[tauri::command(async)]
+fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
+    app.project_list(include_archived.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_add(app: State<'_, App>, path: String, confirm_nested: Option<bool>) -> Res {
+    app.project_add(&path, confirm_nested.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_rename(app: State<'_, App>, id: String, name: String, expect_rev: Option<u64>) -> Res {
+    app.project_rename(&id, &name, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_archive(app: State<'_, App>, id: String, expect_rev: Option<u64>) -> Res {
+    app.project_archive(&id, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_sessions(app: State<'_, App>, id: String) -> Res {
+    app.project_sessions(&id)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -335,6 +365,12 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            app_info,
+            project_list,
+            project_add,
+            project_rename,
+            project_archive,
+            project_sessions,
         ])
         .build(tauri::generate_context!());
     let tauri_app = match built {
