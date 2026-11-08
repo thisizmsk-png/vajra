@@ -143,16 +143,9 @@ pub fn detect(shell: &Path, home: &Path, timeout: Duration) -> Option<Vec<PathBu
     let mut child = cmd.spawn().ok()?;
     let pid = child.id() as libc::pid_t;
     let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
     // Detached: a grandchild that keeps the pipe open can only block this thread, never startup.
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = stdout.read(&mut buf) {
-            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
+    std::thread::spawn(move || pump(&mut stdout, &tx, OUT_CAP));
     let deadline = Instant::now() + timeout;
     let mut out: Vec<u8> = Vec::new();
     let mut found = None;
@@ -182,6 +175,30 @@ pub fn detect(shell: &Path, home: &Path, timeout: Duration) -> Option<Vec<PathBu
     }
     let _ = child.wait();
     found
+}
+
+/// Chunks the reader may queue ahead of the parser; with `CHUNK`-byte chunks the queue holds at most 64 KiB.
+const QUEUE: usize = 16;
+const CHUNK: usize = 4096;
+
+/// Copy at most `cap` bytes from `r` to `tx` in chunks of at most `CHUNK`, then stop reading: the reader never pulls,
+/// allocates or queues more than `cap` bytes however much the shell prints. Returns the bytes pulled from `r`.
+fn pump(r: &mut impl Read, tx: &mpsc::SyncSender<Vec<u8>>, cap: usize) -> usize {
+    let mut buf = [0u8; CHUNK];
+    let mut pulled = 0;
+    while pulled < cap {
+        let want = CHUNK.min(cap - pulled);
+        match r.read(&mut buf[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                pulled += n;
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    pulled
 }
 
 /// The dirs between the last BEGIN marker and the END after it. Rc files may print anything before it.
@@ -315,6 +332,50 @@ mod tests {
         let dirs = effective(None, &[], &home);
         let at = |v: &str| dirs.iter().position(|d| d.ends_with(format!("{v}/bin"))).unwrap();
         assert!(at("v22.18.0") < at("v22.9.0") && at("v22.9.0") < at("v9.11.2"), "{dirs:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A source that counts every byte anyone pulls from it.
+    struct Flood {
+        pulled: usize,
+    }
+    impl Read for Flood {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            buf.fill(b'x');
+            self.pulled += buf.len();
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn the_reader_never_pulls_or_queues_more_than_the_cap() {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
+        // Drained slowly from another thread, as a busy startup thread would.
+        let drain = std::thread::spawn(move || {
+            let mut got = 0;
+            while let Ok(c) = rx.recv() {
+                assert!(c.len() <= CHUNK);
+                got += c.len();
+                std::thread::sleep(Duration::from_micros(50));
+            }
+            got
+        });
+        let mut src = Flood { pulled: 0 };
+        let n = pump(&mut src, &tx, OUT_CAP);
+        drop(tx);
+        assert_eq!(n, OUT_CAP);
+        assert_eq!(src.pulled, OUT_CAP, "the source is never read past the cap");
+        assert_eq!(drain.join().unwrap(), OUT_CAP, "nothing past the cap is ever queued");
+    }
+
+    #[test]
+    fn a_flooding_rc_file_gives_up_at_the_cap_not_the_deadline() {
+        let home = tmp("flood");
+        let sh = home.join("zsh");
+        exe(&sh, &format!("#!/bin/sh\nhead -c 20000000 /dev/zero | tr '\\0' 'x'\nprintf '%s' '{BEGIN}/usr/bin{END}'\n"));
+        let t = Instant::now();
+        assert_eq!(detect(&sh, &home, Duration::from_secs(20)), None, "markers past the cap are not trusted");
+        assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());
         let _ = std::fs::remove_dir_all(&home);
     }
 
