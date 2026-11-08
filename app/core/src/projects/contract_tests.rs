@@ -125,7 +125,7 @@ fn a_project_record_over_the_size_cap_is_refused_unread() {
 
 #[test]
 fn unknown_fields_are_ignored_and_a_missing_optional_field_reads_as_none() {
-    let json = br#"{"schema":"vajra.project/1","id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","name":"n","root":"/r","root_key":{"dev":1,"ino":2,"volume":"x"},"created":"2026-11-08T09:00:00Z","rev":3,"later":{"a":1}}"#;
+    let json = br#"{"schema":"vajra.project/1","id":"p_01JC5X8Z3A9K2M4N6P7Q8R9S0T","name":"n","root":"/r","root_key":{"dev":"1","ino":"2","volume":"x"},"created":"2026-11-08T09:00:00Z","rev":3,"later":{"a":1}}"#;
     let p = parse_project(json).unwrap();
     assert_eq!((p.rev, p.archived, p.root_key.git_common_dir), (3, None, None));
 }

@@ -28,7 +28,7 @@ use crate::crew::redact::Redactor;
 use crate::ids;
 use crate::lock;
 use crate::sessions::argv::{LeadArgv, build_lead_argv};
-use crate::sessions::scrubbed_env;
+use crate::sessions::user_env;
 use crate::vajra::bridge::Request;
 use crate::vajra::preflight::find_on_path;
 
@@ -57,6 +57,9 @@ const GUARD_SCRIPT: &str = ".claude/skills/vajra/hooks/pre-tool-use.sh";
 /// Test seam: runs right after the settings file is written, before it is verified.
 #[cfg(test)]
 pub(super) type AfterWrite = Box<dyn Fn(&Path) + Send>;
+/// Test only: runs in `ask_lead` after the orchestrator was first looked up and before the ask lock is taken.
+#[cfg(test)]
+pub(super) type BeforeAskLock = Box<dyn Fn() + Send>;
 
 pub(super) struct Active {
     ask_id: String,
@@ -82,6 +85,8 @@ pub(super) struct LeadState {
     exe: PathBuf,
     #[cfg(test)]
     pub(super) after_write: Mutex<Option<AfterWrite>>,
+    #[cfg(test)]
+    pub(super) before_ask_lock: Mutex<Option<BeforeAskLock>>,
 }
 
 impl LeadState {
@@ -89,7 +94,7 @@ impl LeadState {
         let path_dirs = crate::vajra::preflight::path_dirs();
         Self {
             bin: Mutex::new(resolve_claude(home, &path_dirs)),
-            env: Mutex::new(scrubbed_env(|k| std::env::var_os(k))),
+            env: Mutex::new(user_env()),
             active: Arc::new(Mutex::new(HashMap::new())),
             proven: Mutex::new(HashSet::new()),
             closing: AtomicBool::new(false),
@@ -98,6 +103,8 @@ impl LeadState {
             exe: std::env::current_exe().unwrap_or_default(),
             #[cfg(test)]
             after_write: Mutex::new(None),
+            #[cfg(test)]
+            before_ask_lock: Mutex::new(None),
         }
     }
 
@@ -129,12 +136,8 @@ pub fn resolve_claude(home: &Path, path_dirs: &[PathBuf]) -> Option<PathBuf> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ];
-    // nvm: newest node version last.
-    let mut nvm: Vec<PathBuf> = std::fs::read_dir(home.join(".nvm/versions/node"))
-        .map(|r| r.filter_map(|e| e.ok()).map(|e| e.path().join("bin")).collect())
-        .unwrap_or_default();
-    nvm.sort();
-    dirs.extend(nvm.into_iter().rev());
+    // nvm: newest node version first (numeric, so v22.18.0 beats v9.11.2).
+    dirs.extend(crate::userpath::nvm_bins(home));
     find_on_path("claude", &dirs)
 }
 
@@ -290,6 +293,10 @@ impl App {
         let mut red = target.nonces.clone();
         red.absorb(&lock(&self.control).redactor());
         let framed = frame(&ask_id, run_id, text, &red)?;
+        #[cfg(test)]
+        if let Some(f) = lock(&self.lead.before_ask_lock).as_ref() {
+            f();
+        }
 
         // One ask in flight per Director-General: two `--resume` writers would fork its transcript. And at most
         // `MAX_TURNS` turns across the app.
@@ -307,6 +314,16 @@ impl App {
             }
             active.insert(orch.id.clone(), Active { ask_id: ask_id.clone(), handle: handle.clone() });
         }
+        // #82 review: the generation and session are read again now that this ask holds the project's entry.
+        // `new_conversation` bumps them only while no entry is held, so this copy is the current conversation; the one
+        // read before the lock may predate a "New conversation" and must never be resumed or re-published.
+        let orch = match self.orchestrator(&orch.id, &orch.root) {
+            Ok(o) => o,
+            Err(e) => {
+                lock(&self.lead.active).remove(&orch.id);
+                return Err(e);
+            }
+        };
         let started = self.start_ask(&target, &orch, &bin, &ask_id, &framed, &handle, red);
         if started.is_err() {
             lock(&self.lead.active).remove(&orch.id);

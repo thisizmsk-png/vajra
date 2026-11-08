@@ -187,12 +187,12 @@ fn a_stale_or_unknown_generation_gets_nothing() {
     let (mut s, dir) = two();
     s.set_project(A, PA).unwrap();
     // No generation was set for the project: nothing the app started can be calling.
-    assert!(matches!(s.call_tool_for_project(PA, 1, "list_workers", &json!({})), Err(ControlError::StaleGeneration)));
+    assert!(matches!(s.call_tool_for_project(PA, 1, "list_workers", &json!({})), Err(ControlError::StaleLeadGeneration)));
     s.set_generation(PA, 1).unwrap();
     s.set_generation(PA, 2).unwrap();
     // A process of the replaced conversation can neither read nor steer.
     for (tool, args) in [("list_workers", json!({})), ("message_worker", json!({"worker": "t1", "text": "x"}))] {
-        assert!(matches!(s.call_tool_for_project(PA, 1, tool, &args), Err(ControlError::StaleGeneration)), "{tool}");
+        assert!(matches!(s.call_tool_for_project(PA, 1, tool, &args), Err(ControlError::StaleLeadGeneration)), "{tool}");
     }
     assert_eq!(count(&dir, A, "queue"), 0);
     s.call_tool_for_project(PA, 2, "list_workers", &json!({})).unwrap();

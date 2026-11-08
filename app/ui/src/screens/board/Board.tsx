@@ -23,16 +23,18 @@ export function Board() {
   const [run, setRun] = useState<RunOverview | null>(null);
   const [err, setErr] = useState("");
   const [onlyYou, setOnlyYou] = useState(false);
-  const asked = useRef<string | null>(null);
+  // Every load takes a number; only the newest may set state. A slug check is not enough: two loads of the same
+  // campaign overlap when events arrive while one is out, and the older answer must not land last.
+  const seq = useRef(0);
   const last = useRef(0);
 
   const load = useCallback(() => {
     if (!focus) return;
-    asked.current = focus;
+    const mine = ++seq.current;
     last.current = Date.now();
     const slug = focus;
     void Promise.allSettled([api.runOverview(slug), api.evidenceList(slug), api.inbox()]).then(([o, e, i]) => {
-      if (asked.current !== slug) return;
+      if (mine !== seq.current) return;
       if (o.status === "rejected") { setErr(problemDetail(o.reason)); return; }
       const rows = e.status === "fulfilled" && Array.isArray(e.value?.rows) ? e.value.rows : [];
       const items = i.status === "fulfilled" && Array.isArray(i.value?.items) ? i.value.items : [];
@@ -42,7 +44,8 @@ export function Board() {
     });
   }, [focus]);
 
-  useEffect(() => { setCards(null); setRun(null); setErr(""); }, [focus]);
+  // A new campaign, or leaving the board, retires whatever is still out.
+  useEffect(() => { setCards(null); setRun(null); setErr(""); return () => { seq.current++; }; }, [focus]);
   useEffect(load, [load]);
   useEffect(() => {
     if (!focus) return;
