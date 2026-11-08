@@ -217,3 +217,9 @@ Terminal dock (standalone component, `app/ui/src/terminal/`).
 | No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
 | This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
 | The shell is not reading input right now. What you typed was dropped. | transient note | new |
+
+Settings keyboard (PR 100 review).
+
+| String | Where | Note |
+|---|---|---|
+| Use global shortcuts (both) | Settings > Keyboard, project scope | replaces the two per-shortcut "Use global ..." buttons: shortcuts are one override, so the one control says it resets both (PR 100 review) |
