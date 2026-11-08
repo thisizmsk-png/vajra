@@ -201,7 +201,15 @@ export const S = {
     state: { active: "Active", done: "Done", stopped: "Stopped", failed: "Failed", abandoned: "Abandoned" } as Record<string, string>,
     of: (n: number, m: number) => `${n} of ${m}`,
   },
-  settings: {
+  projects: {
+    unsorted: "Unsorted",
+    unsortedHint: "Runs started outside the app, or before it recorded their folder. Nothing is moved until you sort them.",
+    today: "Today",
+    yesterday: "Yesterday",
+    earlier: "Earlier",
+    dayCount: (n: number, s: "running" | "done" | "stopped" | "failed" | "unknown") =>
+      `${n} ${{ running: "running", done: "done", stopped: "stopped", failed: "failed", unknown: "not known" }[s]}`,
+  },  settings: {
     title: "Settings",
     checks: "Checks",
     recheck: "Check again",
