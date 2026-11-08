@@ -22,6 +22,7 @@ use vajra_desktop::desktop::{App, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
+use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
 use vajra_desktop::terminal::{Event as TermEvent, LoginEnv, Sink as TermSink, Terminals};
 
 /// The one event the UI listens to.
@@ -202,12 +203,18 @@ fn term_value(i: &vajra_desktop::terminal::TermInfo) -> serde_json::Value {
 fn term_open(
     app: State<'_, App>,
     terms: State<'_, Terminals>,
+    own: State<'_, Ownership>,
     cwd: String,
     rows: u16,
     cols: u16,
     on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Res {
-    terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
+    let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
+    // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
+        let _ = own.ledger.record(Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+    }
+    Ok(term_value(&i))
 }
 
 /// Re-bind a terminal that outlived its view (the webview reloaded, or a hidden dock came back).
@@ -235,7 +242,10 @@ fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
 }
 
 #[tauri::command(async)]
-fn term_close(terms: State<'_, Terminals>, id: u32) -> Res {
+fn term_close(terms: State<'_, Terminals>, own: State<'_, Ownership>, id: u32) -> Res {
+    if let Some(i) = terms.list().into_iter().find(|i| i.id == id) {
+        let _ = own.ledger.forget_pid(i.pid);
+    }
     terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
@@ -244,10 +254,53 @@ fn term_list(terms: State<'_, Terminals>) -> Res {
     Ok(serde_json::json!({"terminals": terms.list().iter().map(term_value).collect::<Vec<_>>()}))
 }
 
-/// What keeps running after the window closes, after a quit and after an archive. On demand: nothing polls it.
+/// Shells recorded by an earlier session of the app, reconciled once at launch, and what the human did about them.
+struct Ownership {
+    ledger: Ledger,
+    found: std::sync::Mutex<Vec<Found>>,
+    home: String,
+}
+
+fn found_lock(own: &Ownership) -> std::sync::MutexGuard<'_, Vec<Found>> {
+    own.found.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What keeps running after the window closes, after a quit and after an archive, and what the last crash left behind.
+/// On demand: nothing polls it.
 #[tauri::command]
-fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>) -> Res {
-    serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), app.active_run_count())).map_err(|e| serde_json::json!({"error": "internal", "detail": e.to_string()}))
+fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
+    let mut v = serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags())).map_err(internal)?;
+    v["found"] = serde_json::to_value(&*found_lock(&own)).map_err(internal)?;
+    Ok(v)
+}
+
+fn internal(e: serde_json::Error) -> serde_json::Value {
+    serde_json::json!({"error": "internal", "detail": e.to_string()})
+}
+
+/// End leftover shells the human picked. Only records that reconciled as owned are eligible, and each is proven again
+/// (pid and start stamp) right before it is signalled; anything else is reported and left alone.
+#[tauri::command(async)]
+fn recover_orphans(own: State<'_, Ownership>, pids: Vec<u32>) -> Res {
+    let picked: Vec<Found> = found_lock(&own).iter().filter(|f| pids.contains(&f.owner.pid) && matches!(f.verdict, Verdict::Owned { .. })).cloned().collect();
+    let mut out = Vec::new();
+    for f in &picked {
+        let r = vajra_desktop::owned::recover(&f.owner);
+        let _ = own.ledger.forget(f.owner.pid, f.owner.stamp);
+        out.push(serde_json::json!({"pid": f.owner.pid, "result": r}));
+    }
+    found_lock(&own).retain(|f| !picked.iter().any(|p| p.owner == f.owner));
+    for pid in pids.iter().filter(|p| !picked.iter().any(|f| f.owner.pid == **p)) {
+        out.push(serde_json::json!({"pid": pid, "result": "not_owned"}));
+    }
+    Ok(serde_json::json!({"results": out}))
+}
+
+/// The redacted, bounded text the human may read and copy. Nothing is sent anywhere.
+#[tauri::command]
+fn diagnostics_preview(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
+    let report = vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags());
+    Ok(serde_json::json!({"text": vajra_desktop::diagnostics::preview(&report, &found_lock(&own), &own.home)}))
 }
 
 #[tauri::command(async)]
@@ -363,8 +416,12 @@ fn main() {
     }
     let sub = app.bus.subscribe();
 
+    // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
+    // start stamp, never a name). Nothing is signalled until the human asks.
+    let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
     let built = tauri::Builder::default()
         .manage(app)
+        .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(AppLoginEnv { home: home.clone() })))
         .setup(move |a| {
             let handle = a.handle().clone();
@@ -434,6 +491,8 @@ fn main() {
             term_attach,
             term_list,
             lifecycle,
+            recover_orphans,
+            diagnostics_preview,
             term_write,
             term_resize,
             term_ack,
@@ -461,6 +520,7 @@ fn main() {
             app.shutdown_lead();
             app.sup.shutdown();
             handle.state::<Terminals>().shutdown();
+            handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
         }
         _ => {}
     });

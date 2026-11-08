@@ -128,6 +128,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
 
   // Ask the core what a close, a quit or an archive would do: once when the dock is shown and again when a shell starts,
   // ends or goes. Never while hidden, never on a timer.
+  const [tick, setTick] = useState(0);
+  const refreshLife = useCallback(() => setTick((n) => n + 1), []);
   const shape = tabs.map((t) => `${t.key}:${t.state.status}`).join(",");
   useEffect(() => {
     if (!open) return;
@@ -137,7 +139,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       () => !stale && setLife(null),
     );
     return () => void (stale = true);
-  }, [open, shape]);
+  }, [open, shape, tick]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -213,7 +215,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
-      <Lifecycle life={life} />
+      <LifeLine life={life} refresh={refreshLife} />
       <div className="v-term__body">
         {!tabs.length && (
           <div className="v-term__state">
@@ -248,27 +250,58 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
 
 const nameOf = (p: string) => base(p);
 
-/** One honest line from the core's own report, and a list of the shells behind it. Nothing renders when nothing would be affected. */
-function Lifecycle({ life }: { life: Lifecycle | null }) {
+/** One honest line from the core's own report, what the last crash left behind, and the shells behind it. Nothing renders when nothing is affected. */
+function LifeLine({ life, refresh }: { life: Lifecycle | null; refresh: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   if (!life) return null;
   const { terminals: t, runs: r } = life.close_keeps;
   const keeps = [t && S.terminal.lifecycle.terminals(t), r && S.terminal.lifecycle.runs(r)].filter(Boolean).join(" and ");
   const leaves = life.terminals.filter((x) => life.archive_leaves.includes(x.id)).map((x) => nameOf(x.cwd)).join(", ");
-  if (!keeps && !leaves) return null;
+  const owned = life.found.filter((f) => f.verdict === "owned");
+  const reused = life.found.filter((f) => f.verdict === "reused");
+  if (!keeps && !leaves && !owned.length && !reused.length) return null;
+  const L = S.terminal.lifecycle;
+  const ask = () => {
+    setFailed(false);
+    api.diagnosticsPreview().then((d) => setText(d.text), () => (setText(null), setFailed(true)));
+  };
   return (
     <div className="v-term__life" data-testid="v-term-lifecycle">
       <p>
-        {keeps && S.terminal.lifecycle.keeps(keeps, t + r > 1 || (t > 0 && r > 0))} {leaves && S.terminal.lifecycle.archive(leaves)}
+        {keeps && L.keeps(keeps, t + r > 1 || (t > 0 && r > 0))} {leaves && L.archive(leaves)}
       </p>
+      {(owned.length > 0 || reused.length > 0) && (
+        <div data-testid="v-term-found">
+          <p>{L.foundTitle}</p>
+          <ul>
+            {owned.map((f) => <li key={`${f.pid}-${f.stamp}`}>{L.foundOwned(f.pid, f.cwd, f.members ?? 1)}</li>)}
+            {reused.map((f) => <li key={`${f.pid}-${f.stamp}`}>{L.foundReused(f.pid)}</li>)}
+          </ul>
+          {owned.length > 0 && (
+            <button className="v-term__btn" onClick={() => void api.recoverOrphans(owned.map((f) => f.pid)).finally(refresh)}>{L.endLeft(owned.length)}</button>
+          )}
+        </div>
+      )}
       <details>
-        <summary>{S.terminal.lifecycle.details}</summary>
+        <summary>{L.details}</summary>
         <ul>
           {life.terminals.map((x) => (
             <li key={x.id}>
-              {x.cwd} · {S.terminal.lifecycle.pid(x.pid)} · {x.alive ? S.terminal.lifecycle.running : S.terminal.lifecycle.endedState}
+              {x.cwd} · {L.pid(x.pid)} · {x.alive ? L.running : L.endedState}
             </li>
           ))}
+          {life.runs.map((x) => <li key={x.stream}>{L.runGroup(x.pid)}</li>)}
         </ul>
+        <button className="v-term__btn" onClick={ask}>{L.preview}</button>
+        {failed && <p role="alert">{L.previewFailed}</p>}
+        {text !== null && (
+          <>
+            <pre data-testid="v-term-diag" tabIndex={0}>{text}</pre>
+            <p className="v-term__muted">{L.previewNote}</p>
+            <button className="v-term__btn" onClick={() => void navigator.clipboard?.writeText(text)}>{L.copy}</button>
+          </>
+        )}
       </details>
     </div>
   );

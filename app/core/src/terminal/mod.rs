@@ -14,7 +14,7 @@
 //! * A terminal keeps running while its tab is hidden (ADR-15 D9): nothing here depends on a UI. If the UI goes away,
 //!   `attach` binds a new sink; until then the reader simply waits at the window and the shell blocks on its output.
 
-mod kill;
+pub(crate) mod kill;
 pub mod policy;
 
 use std::collections::HashMap;

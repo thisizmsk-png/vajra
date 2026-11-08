@@ -28,3 +28,4 @@
 .v-term__life p { margin: 0; }
 .v-term__life summary { cursor: pointer; }
 .v-term__life ul { margin: 4px 0 0; padding-left: 16px; font-family: var(--font-mono, monospace); }
+.v-term__life pre { margin: 4px 0; max-height: 160px; overflow: auto; white-space: pre-wrap; font-family: var(--font-mono, monospace); }
