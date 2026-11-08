@@ -155,6 +155,7 @@ export const S = {
     campaigns: "Campaigns",
     campaignsEmpty: "No campaigns yet. Start a run and it appears here.",
     campaignsFailed: "Could not read the campaigns.",
+    targetsFailed: "Could not read which folder each run used, so this project's runs cannot be listed.",
     resume: "Resume",
     resuming: "Resuming",
     resumeElsewhere: "Started outside this app. Continue it from your terminal.",

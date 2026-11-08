@@ -166,6 +166,7 @@ Shell B frame (T4, wave 1).
 | VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
 | Project column / Inspector | status-bar and view-tab toggles (accessible name) | one constant name; aria-pressed carries the state. "Show/Hide …" stays in the tooltip and the palette commands (#86 review) |
 | (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
+| Could not read which folder each run used, so this project's runs cannot be listed. | Home inside a project, campaign list | new; shown with Try again when resume targets fail, instead of an empty project (#86 review) |
 
 "Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps
 its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become

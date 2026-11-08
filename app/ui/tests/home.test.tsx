@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
+import { CurrentProject } from "../src/projects/current";
 import { validate } from "../src/screens/home/validate";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -147,3 +148,32 @@ describe("Home", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(S.home.preflightFailed);
   });
 });
+
+describe("Home inside a project (FG-03)", () => {
+  const project = { schema: "vajra.project/1", id: "p_1", name: "api", root: "/src/api", created: null, archived: null, rev: 0 };
+  const inProject = (replies: Record<string, unknown>) => {
+    const f = fakeIpc({ preflight: rows(true), list_campaigns: { campaigns: [camp({ slug: "a1", goal: "api work" }), camp({ slug: "w1", goal: "web work" })] }, ...replies });
+    setTransport(f.transport);
+    render(<CurrentProject.Provider value={{ project, campaigns: [], focus: null, runId: null }}><Home /></CurrentProject.Provider>);
+    return f;
+  };
+  const list = () => screen.getByRole("region", { name: S.home.campaigns });
+
+  it("Given the folders are still loading, Then the project's list shows loading, not 'no campaigns'", async () => {
+    inProject({ resume_targets: () => new Promise(() => {}) });
+    await waitFor(() => expect(list().querySelector("[aria-busy=true], [role=status]")).toBeTruthy());
+    expect(screen.queryByText(S.home.campaignsEmpty)).toBeNull();
+  });
+
+  it("Given the folders cannot be read, Then it says so next to the list and can try again, instead of an empty project", async () => {
+    let n = 0;
+    const f = inProject({ resume_targets: () => (++n === 1 ? Promise.reject({ error: "io", detail: "runs.jsonl unreadable" }) : { targets: { a1: { session_id: "s", run_id: "r", cwd: "/src/api/" } } }) });
+    expect(await screen.findByText(S.home.targetsFailed)).toBeTruthy();
+    expect(screen.queryByText(S.home.campaignsEmpty)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.states.retry }));
+    expect(await screen.findByText("api work")).toBeTruthy();
+    expect(screen.queryByText("web work")).toBeNull();
+    expect(f.calls.filter((c) => c.cmd === "resume_targets").length).toBe(2);
+  });
+});
+
