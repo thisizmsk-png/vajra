@@ -67,6 +67,11 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
 pub struct DirHandle(File);
 
 impl DirHandle {
+    /// Wrap a descriptor that was opened as a directory without following a symlink.
+    pub fn from_file(f: File) -> Self {
+        Self(f)
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(path).map(Self).map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {

@@ -201,7 +201,7 @@ export const api = {
   /** Which record versions this build reads (`vajra.app_info/1`). */
   appInfo: () => call<AppInfo>("app_info"),
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
-  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number }>("project_list", { includeArchived }),
+  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
   /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
   projectAdd: (path: string, confirmNested = false) =>
     call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),

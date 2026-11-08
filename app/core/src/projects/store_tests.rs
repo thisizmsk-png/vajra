@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -452,4 +453,54 @@ fn an_append_after_a_torn_tail_is_not_lost() {
     let got: Vec<_> = log.sessions.iter().map(|x| (x.id.as_str(), x.status)).collect();
     assert_eq!(got, vec![(first.as_str(), SessionStatus::Done), (second.as_str(), SessionStatus::Running)]);
     assert!(fs::read_to_string(&file).unwrap().ends_with('\n'));
+}
+
+#[test]
+fn a_scan_that_hit_its_limit_is_reported_and_add_refuses_instead_of_duplicating() {
+    let t = Tmp::new("limit");
+    let s = t.store().with_limits(3, 100);
+    let repos: Vec<_> = (0..4).map(|i| t.repo(&format!("src/r{i}"))).collect();
+    for r in &repos[..3] {
+        s.add(r, false).unwrap();
+    }
+    // At capacity: a fourth is refused and writes nothing; the three existing ones still resolve as existing.
+    assert!(matches!(s.add(&repos[3], false), Err(StoreError::Full)));
+    assert_eq!(s.add(&repos[0], false).unwrap().outcome(), "existing");
+    let l = s.list(true).unwrap();
+    assert_eq!((l.projects.len(), l.truncated), (3, false));
+    // More valid records than a (smaller) cap: the listing says it is partial, and add refuses everything that needs
+    // the whole inventory, including a re-add of a project the scan did not reach.
+    let small = t.store().with_limits(2, 100);
+    let l = small.list(true).unwrap();
+    assert_eq!((l.projects.len(), l.truncated), (2, true));
+    assert!(matches!(small.add(&repos[0], false), Err(StoreError::Full)));
+    assert!(matches!(small.add(&repos[2], false), Err(StoreError::Full)));
+    assert_eq!(t.store().list(true).unwrap().projects.len(), 3, "nothing was written");
+    // Stray entries use up the scan budget too, and are reported the same way.
+    let tight = t.store().with_limits(500, 2);
+    assert!(tight.list(true).unwrap().truncated);
+    assert!(matches!(tight.add(&repos[3], false), Err(StoreError::Full)));
+}
+
+#[test]
+fn the_projects_folder_swapped_for_a_symlink_after_open_redirects_nothing() {
+    let t = Tmp::new("swapparent");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    // An outside folder with a valid record under the same id, and the projects folder replaced by a symlink to it.
+    let outside = t.0.join("outside-projects");
+    fs::create_dir_all(outside.join(&p.id)).unwrap();
+    let planted = serde_json::to_vec(&p).unwrap();
+    fs::write(outside.join(&p.id).join("project.json"), &planted).unwrap();
+    let projects = t.data().join("projects");
+    fs::rename(&projects, t.0.join("moved-projects")).unwrap();
+    symlink(&outside, &projects).unwrap();
+    // The open store keeps working on the folder it opened, and never touches the outside one.
+    s.rename(&p.id, "renamed", None).unwrap();
+    s.append_session(&session(&p.id, &contract::fresh_id("s").unwrap(), SessionStatus::Running)).unwrap();
+    assert_eq!(fs::read(outside.join(&p.id).join("project.json")).unwrap(), planted);
+    assert!(!outside.join(&p.id).join("sessions.jsonl").exists());
+    assert!(t.0.join("moved-projects").join(&p.id).join("sessions.jsonl").exists());
+    // A store opened afterwards refuses the symlinked folder.
+    assert!(Store::open(&t.data(), &t.home()).is_err());
 }
