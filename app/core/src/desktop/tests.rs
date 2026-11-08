@@ -2854,3 +2854,37 @@ fn a_run_starts_only_in_an_active_project_and_is_recorded_under_its_orchestrator
 
 #[path = "board_tests.rs"]
 mod board_cards;
+
+/// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
+/// session of runs that start and finish keeps the map bounded by the runs still going.
+#[test]
+fn reaping_forgets_finished_runs_worker_counts() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    for i in 0..6u32 {
+        let sid = format!("1b4e28ba-2fa1-41d2-883f-0016d3cca4{i:02}");
+        app.launch(&sid, &format!("20261105-12{i:02}"), "c", &cwd, |_| Ok(vec!["true".into()]), false).unwrap();
+        app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+        app.reap_runs();
+        assert!(lock(&app.run_workers).is_empty(), "after run {i}: {:?}", lock(&app.run_workers));
+    }
+}
+
+/// #80 optional: a bad maxInFlight is `invalid_args` even next to a running run (never `workers_full`), from
+/// `start_run` and at the caps door itself.
+#[test]
+fn a_bad_max_in_flight_is_invalid_args_before_any_cap() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca499";
+    app.launch_kind(sid, "20261105-1259", "c", &cwd, |_| Ok(vec!["sleep".into(), "5".into()]), false, true, 16).unwrap();
+    for bad in [0u32, 17, 99] {
+        let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: bad, campaign: None };
+        assert_eq!(code(&app.start_run(input, cwd.to_str().unwrap()).unwrap_err()), "invalid_args", "{bad}");
+        let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca498";
+        assert_eq!(code(&app.launch_kind(other, "20261105-1258", "c", &cwd, |_| Ok(vec!["true".into()]), false, true, bad).unwrap_err()), "invalid_args", "caps door: {bad}");
+    }
+    let _ = app.sup.kill(&format!("run-{sid}"));
+}

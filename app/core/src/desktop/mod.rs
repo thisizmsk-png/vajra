@@ -402,6 +402,10 @@ impl App {
     /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
     /// concurrent run safe; the caps bound what runs at once.
     fn within_caps(&self, cwd: &Path, workers: u32) -> Result<(), Value> {
+        // A worker count no start may ask for is a bad request, never a full ceiling (#80 review).
+        if !(1..=16).contains(&workers) {
+            return Err(invalid("maxInFlight", "must be 1 to 16"));
+        }
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
@@ -411,11 +415,6 @@ impl App {
                 .map(|(s, r)| caps::Active { project: caps::project_key(&r.cwd), workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) })
                 .collect()
         };
-        // Forget the worker counts of runs that ended.
-        {
-            let runs = lock(&self.runs);
-            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
-        }
         let limits = *lock(&self.limits);
         caps::check(limits, &active, &caps::project_key(cwd), workers).map_err(|h| h.to_json())
     }
@@ -463,6 +462,11 @@ impl App {
                 svc.end_session(&id);
             }
         }
+        drop(svc);
+        // Forget the worker counts of runs that ended, here and not only on the next start (#80 review), so the map is
+        // bounded by the runs still going. The run itself stays in `runs` for its crew view.
+        let runs = lock(&self.runs);
+        lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
     }
 
     /// Take the control session, build the argv with its nonce, spawn. A
