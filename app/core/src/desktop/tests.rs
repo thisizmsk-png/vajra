@@ -2704,3 +2704,18 @@ fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
     app.refresh_workers(); // every live run is refreshed; must not panic or touch the ended one
     app.sup.kill(&format!("run-{b}")).unwrap();
 }
+
+#[test]
+fn terminal_roots_are_the_run_dirs_of_runs_this_app_started_not_the_worker_writable_index() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert!(app.terminal_roots().is_empty());
+    let (a, b) = (t.home().join("repo-a"), t.home().join("repo-b"));
+    for (k, cwd) in [("s1", &a), ("s2", &a), ("s3", &b)] {
+        lock(&app.runs).insert(k.into(), Run { session_id: k.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
+    }
+    assert_eq!(app.terminal_roots(), vec![a.clone(), b]);
+    // A line a worker appends to runs.jsonl names a dir; it grants nothing.
+    fs::write(t.0.join("data/runs.jsonl"), format!("{{\"campaign\":\"c\",\"session_id\":\"x\",\"run_id\":\"20261105-1231\",\"cwd\":\"{}\"}}\n", t.home().join("elsewhere").display())).unwrap();
+    assert!(!app.terminal_roots().iter().any(|r| r.ends_with("elsewhere")));
+}

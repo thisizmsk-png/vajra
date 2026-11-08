@@ -126,6 +126,13 @@ pub struct ExitInfo {
     pub signal: Option<String>,
 }
 
+/// `scrubbed_env` of this process with `PATH` replaced by the user's resolved PATH (`crate::userpath`), so a GUI
+/// launch spawns `claude` from where the user's terminal would find it. Absolute dirs only: never the cwd.
+pub fn user_env() -> Vec<(&'static str, OsString)> {
+    let path = crate::userpath::joined();
+    scrubbed_env(|k| if k == "PATH" { path.clone() } else { std::env::var_os(k) })
+}
+
 /// The allowed variables present in `get`, in `ENV_ALLOW` order, with TERM
 /// defaulted.
 pub fn scrubbed_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str, OsString)> {
@@ -262,7 +269,7 @@ impl Supervisor {
         // would start a shell, and we never call it.
         let mut cmd = CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect());
         cmd.env_clear();
-        for (k, v) in scrubbed_env(|k| std::env::var_os(k)) {
+        for (k, v) in user_env() {
             cmd.env(k, v);
         }
         cmd.cwd(&spec.cwd);
