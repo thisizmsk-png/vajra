@@ -40,7 +40,7 @@ pub(super) fn clean(text: &str, cap: usize) -> String {
 }
 
 /// A graph id the engine could have written: letters, digits, `.`, `_`, `-`, at most 64.
-fn valid_task_id(id: &str) -> bool {
+pub(super) fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
