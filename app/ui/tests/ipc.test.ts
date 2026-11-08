@@ -16,16 +16,18 @@ describe("typed ipc", () => {
     ]);
   });
 
-  it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
-    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
+  it("maps the Director-General commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false, name: "Director-General" }, new_conversation: { project_id: "k_0", generation: 2, stream: "orchestrator-k_0-g2" } });
     setTransport(f.transport);
     await api.askLead("20261106-0911", "what is bhima doing?");
     await api.cancelAsk("01ARZ3NDEKTSV4RRFFQ69G5FAV");
     await api.leadStatus("20261106-0911");
+    expect((await api.newConversation("20261106-0911")).generation).toBe(2);
     expect(f.calls).toEqual([
       { cmd: "ask_lead", args: { runId: "20261106-0911", text: "what is bhima doing?" } },
       { cmd: "cancel_ask", args: { askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
       { cmd: "lead_status", args: { runId: "20261106-0911" } },
+      { cmd: "new_conversation", args: { runId: "20261106-0911" } },
     ]);
   });
 
@@ -40,6 +42,17 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the proposal commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ start_proposal: { action_id: "a1", state: "started", run: {} }, dismiss_proposal: { action_id: "a2", state: "dismissed" } });
+    setTransport(f.transport);
+    await api.startProposal("proposal:a1", "ab".repeat(32));
+    await api.dismissProposal("proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "start_proposal", args: { id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "dismiss_proposal", args: { id: "proposal:a2" } },
+    ]);
+  });
+
   it("maps inbox to the inbox command", async () => {
     const f = fakeIpc({ inbox: { count: 0, items: [] } });
     setTransport(f.transport);
@@ -48,8 +61,10 @@ describe("typed ipc", () => {
   });
 
   it("shows the sandbox message as one friendly line", () => {
-    const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+    const msg = "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
     expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);
+    const full = "Two Director-General turns are running, the most the app runs at once. Ask again when one finishes.";
+    expect(errorText({ error: "turns_full", detail: full })).toBe(full);
     expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
   });
 

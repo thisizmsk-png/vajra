@@ -73,9 +73,9 @@ fn pages_are_capped_at_64_kib() {
 }
 
 #[test]
-fn one_active_run_at_a_time() {
-    // The control service steers one session; a second concurrent run would
-    // get the first run's messages and stops (review #4).
+fn one_active_run_per_project() {
+    // ADR-15 D5: a second run in the same project is held (two workflows would fight over its branches and
+    // worktrees), with a reason; it is never queued.
     let t = Tmp::new();
     let app = t.app();
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -86,13 +86,15 @@ fn one_active_run_at_a_time() {
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let cwd = t.0.to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None };
-    assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "run_active");
+    let held = app.start_run(input, &cwd).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
+    assert!(held["detail"].as_str().is_some_and(|d| !d.is_empty()));
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    assert_eq!(code(&app.resume_run(other, "c2", &cwd).unwrap_err()), "run_active");
+    assert_eq!(app.resume_run(other, "c2", &cwd).unwrap_err()["reason"], "project_busy");
     // A past run's crew view never retargets the control service.
-    let before = lock(&app.control).nonce().map(str::to_string);
+    let before = lock(&app.control).nonce(sid).map(str::to_string);
     let _ = app.crew("c-old", "20261101-0000");
-    assert_eq!(lock(&app.control).nonce().map(str::to_string), before);
+    assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), before);
     app.sup.kill(&stream).unwrap();
 }
 
@@ -303,7 +305,7 @@ fn a_spawn_failure_rolls_the_control_session_back() {
     let argv = vec!["/nonexistent/vajra-no-such-binary".to_string()];
     let e = app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(argv.clone()), false).unwrap_err();
     assert_eq!(code(&e), "spawn_failed");
-    assert!(lock(&app.control).nonce().is_none(), "the control session ended with the failed spawn");
+    assert!(lock(&app.control).nonce(sid).is_none(), "the control session ended with the failed spawn");
     assert_eq!(app.active_run_count(), 0);
 }
 
@@ -315,10 +317,10 @@ fn an_exited_run_ends_its_control_session() {
     let cwd = t.0.to_string_lossy().into_owned();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
-    assert!(lock(&app.control).nonce().is_some());
+    assert!(lock(&app.control).nonce(sid).is_some());
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
     app.reap_runs();
-    assert!(lock(&app.control).nonce().is_none(), "end_session ran for the exited run");
+    assert!(lock(&app.control).nonce(sid).is_none(), "end_session ran for the exited run");
     assert_eq!(app.active_run_count(), 0);
     assert_eq!(app.active_runs().unwrap()["count"], 0);
     // The finished run is still known, so its crew view keeps its workers.
@@ -346,8 +348,8 @@ fn worker_transcripts_redact_the_rotated_nonce() {
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     app.crew("c", "20261105-1230").unwrap();
-    lock(&app.control).resume_session().unwrap();
-    let rotated = lock(&app.control).nonce().unwrap().to_string();
+    lock(&app.control).resume_session(sid).unwrap();
+    let rotated = lock(&app.control).nonce(sid).unwrap().to_string();
     // The worker now echoes the rotated nonce.
     let echo = first_line.replace("Run these Bash commands", &format!("steer {rotated} then run these Bash commands"));
     assert_ne!(echo, first_line);
@@ -390,10 +392,10 @@ fn transcripts_stay_redacted_after_the_run_exits() {
     fs::create_dir_all(&cwd).unwrap();
     let (path, first) = seed_worker(&t, &cwd, sid);
     app.launch(sid, "20261105-1230", "c", &cwd, |_| Ok(vec!["true".into()]), false).unwrap();
-    let nonce = lock(&app.control).nonce().unwrap().to_string();
+    let nonce = lock(&app.control).nonce(sid).unwrap().to_string();
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
     app.reap_runs();
-    assert!(lock(&app.control).nonce().is_none());
+    assert!(lock(&app.control).nonce(sid).is_none());
     append_echo(&path, &first, &nonce);
     app.crew("c", "20261105-1230").unwrap();
     let w = app.bus.tail("w-aa870dd40540481f0", 0, MAX_PAGE);
@@ -415,7 +417,7 @@ fn a_reap_during_a_resume_keeps_the_new_session() {
         app.reap_runs();
         Ok(vec!["sleep".into(), "5".into()])
     }, true).unwrap();
-    assert!(lock(&app.control).nonce().is_some(), "the resumed run is still steerable");
+    assert!(lock(&app.control).nonce(sid).is_some(), "the resumed run is still steerable");
     app.sup.kill(&format!("run-{sid}")).unwrap();
 }
 
@@ -427,7 +429,7 @@ fn a_resumed_pty_redacts_the_launch_nonce_too() {
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     let cwd = t.0.to_string_lossy().into_owned();
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
-    let old = lock(&app.control).nonce().unwrap().to_string();
+    let old = lock(&app.control).nonce(sid).unwrap().to_string();
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
     let echo = format!("printf 'replay {old}\\n'");
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["/bin/sh".into(), "-c".into(), echo.clone()]), true).unwrap();
@@ -2678,4 +2680,123 @@ fn a_cut_verify_run_never_resumes_and_a_cut_diff_stays_viewable() {
 
 fn code_of_err(v: &Value) -> &str {
     v["error"].as_str().unwrap_or("")
+}
+
+/// ADR-15 2.6 step 1: with two runs live, each keeps its own control session, and the end of one ends only its own.
+#[test]
+fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.clone();
+    let (a, b) = ("1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e");
+    for (sid, run, argv) in [(a, "20261108-0900", vec!["true".to_string()]), (b, "20261108-0901", vec!["sleep".into(), "5".into()])] {
+        let stream = format!("run-{sid}");
+        app.sup.spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+        lock(&app.runs).insert(stream, Run { session_id: sid.into(), run_id: run.into(), campaign: format!("c-{run}"), cwd: cwd.clone(), nonces: Redactor::default() });
+        lock(&app.control).start_session(sid, run).unwrap();
+    }
+    let nb = lock(&app.control).nonce(b).unwrap().to_string();
+    assert_ne!(lock(&app.control).nonce(a).unwrap(), nb);
+    app.sup.wait(&format!("run-{a}"), Duration::from_secs(5)).unwrap();
+    app.reap_runs();
+    let svc = lock(&app.control);
+    assert!(!svc.has_session(a), "the exited run's session ended");
+    assert_eq!(svc.nonce(b), Some(nb.as_str()), "the live run's session is untouched");
+    drop(svc);
+    app.refresh_workers(); // every live run is refreshed; must not panic or touch the ended one
+    app.sup.kill(&format!("run-{b}")).unwrap();
+}
+
+/// Two folders, each its own project (a `.git` dir), under the test's temp dir.
+fn repos(t: &Tmp, names: &[&str]) -> Vec<PathBuf> {
+    names.iter().map(|n| {
+        let d = t.0.join(n);
+        fs::create_dir_all(d.join(".git")).unwrap();
+        d
+    }).collect()
+}
+
+const SIDS: [&str; 3] = ["1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e", "7c9e6679-7425-40de-944b-e07fc1f90ae7"];
+const RUNS: [&str; 3] = ["20261108-1000", "20261108-1001", "20261108-1002"];
+
+fn sleeper(_: &str) -> Result<Vec<String>, Value> {
+    Ok(vec!["sleep".into(), "5".into()])
+}
+
+/// ADR-15 D5: runs in two projects go at once (2 by default); a third is held until the setting allows it.
+#[test]
+fn two_projects_run_at_once_and_the_app_cap_holds_a_third() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two", "three"]);
+    // Two workers each, so the worker ceiling (8) is not what holds the third run.
+    let go = |i: usize, repo: &Path| app.launch_kind(SIDS[i], RUNS[i], &format!("c{i}"), repo, sleeper, false, true, 2);
+    go(0, &r[0]).unwrap();
+    go(1, &r[1]).unwrap();
+    assert_eq!(app.active_run_count(), 2);
+    {
+        let svc = lock(&app.control);
+        assert!(svc.has_session(SIDS[0]) && svc.has_session(SIDS[1]));
+        assert_ne!(svc.nonce(SIDS[0]), svc.nonce(SIDS[1]));
+        assert!(caps::project_key(&r[0]) != caps::project_key(&r[1]));
+    }
+    let held = go(2, &r[2]).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("app_runs_full")), "{held}");
+    assert!(!lock(&app.control).has_session(SIDS[2]), "a held start takes no control session");
+    assert_eq!(app.active_run_count(), 2, "nothing running was stopped");
+    assert_eq!(code(&app.set_run_limits(5).unwrap_err()), "invalid_input");
+    assert_eq!(app.set_run_limits(3).unwrap()["max_runs"], 3);
+    go(2, &r[2]).unwrap();
+    assert_eq!(app.active_run_count(), 3);
+    // A lower cap never stops running work; it only holds new starts.
+    app.set_run_limits(1).unwrap();
+    assert_eq!(app.active_run_count(), 3);
+    for s in SIDS {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
+
+/// ADR-15 D5: the worker ceiling (8) counts every concurrent run's maxInFlight; a lone run is never held by it.
+#[test]
+fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, 6).unwrap();
+    let held = app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 4).unwrap_err();
+    assert_eq!(held["reason"], "workers_full", "{held}");
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 2).unwrap();
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+    // With both ended, a lone run may use more than the ceiling (today's 1 to 16 range).
+    app.sup.wait(&format!("run-{}", SIDS[0]), Duration::from_secs(5)).unwrap();
+    app.sup.wait(&format!("run-{}", SIDS[1]), Duration::from_secs(5)).unwrap();
+    app.launch_kind(SIDS[2], RUNS[2], "c2", &r[0], sleeper, false, true, 16).unwrap();
+    app.sup.kill(&format!("run-{}", SIDS[2])).unwrap();
+}
+
+#[test]
+fn a_launched_run_belongs_to_its_projects_director_general() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["alpha", "beta"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, 2).unwrap();
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, 2).unwrap();
+    let (pa, pb) = (orchestrator::project_ref(&r[0]).0, orchestrator::project_ref(&r[1]).0);
+    assert_ne!(pa, pb);
+    assert_eq!(std::fs::read_to_string(t.0.join("data/control/lead").join(RUNS[0]).join("project")).unwrap(), pa, "pinned in the guarded record");
+    {
+        let mut svc = lock(&app.control);
+        svc.set_generation(&pa, 1).unwrap();
+        svc.set_generation("k_00000000000000000000000000000000", 1).unwrap();
+        // Alpha's Director-General has a live session in scope (an unknown worker is "not found"); a project with no
+        // live run has none at all (control is off for it), so nothing falls back to every session.
+        let msg = json!({"worker": "nobody", "text": "x"});
+        assert!(matches!(svc.call_tool_for_project(&pa, 1, "message_worker", &msg), Err(crate::control::service::ControlError::WorkerNotFound)));
+        assert!(matches!(svc.call_tool_for_project("k_00000000000000000000000000000000", 1, "message_worker", &msg), Err(crate::control::service::ControlError::ControlDisabled)));
+    }
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
 }

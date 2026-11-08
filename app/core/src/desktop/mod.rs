@@ -202,9 +202,13 @@ pub struct App {
     runs: Mutex<HashMap<String, Run>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
-    /// Held from the one-active-run check until the run is recorded, so two
-    /// Start clicks cannot both pass the check.
+    /// Held from the caps check until the run is recorded, so two Start clicks
+    /// (or two projects at once) cannot both pass the check on the same count.
     launching: Mutex<()>,
+    /// The run caps (ADR-15 D5); in memory until the settings store (FG-08) persists them.
+    limits: Mutex<caps::RunLimits>,
+    /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
+    run_workers: Mutex<HashMap<String, u32>>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -272,6 +276,8 @@ impl App {
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            limits: Mutex::new(caps::RunLimits::default()),
+            run_workers: Mutex::new(HashMap::new()),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -373,13 +379,39 @@ impl App {
         Ok(json!({"campaigns": list}))
     }
 
-    /// The control service steers one session, so one run is active at a time.
-    fn no_active_run(&self) -> Result<(), Value> {
+    /// ADR-15 D5: may a run in `cwd` with `workers` start now? One run per project, `max_runs` in the app, and the
+    /// worker ceiling across concurrent runs. Over a cap the start is held with a reason (`run_held`), never queued.
+    /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
+    /// concurrent run safe; the caps bound what runs at once.
+    fn within_caps(&self, cwd: &Path, workers: u32) -> Result<(), Value> {
         self.reap_locked();
-        if self.active_run_count() > 0 {
-            return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
+        let active: Vec<caps::Active> = {
+            let runs = lock(&self.runs);
+            let per = lock(&self.run_workers);
+            runs.iter()
+                .filter(|(s, _)| self.sup.is_running(s).unwrap_or(false))
+                .map(|(s, r)| caps::Active { project: caps::project_key(&r.cwd), workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) })
+                .collect()
+        };
+        // Forget the worker counts of runs that ended.
+        {
+            let runs = lock(&self.runs);
+            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
-        Ok(())
+        let limits = *lock(&self.limits);
+        caps::check(limits, &active, &caps::project_key(cwd), workers).map_err(|h| h.to_json())
+    }
+
+    /// The run caps and their bounds.
+    pub fn run_limits(&self) -> Res {
+        Ok(lock(&self.limits).to_json())
+    }
+
+    /// Set the app-wide run cap (1 to 4). Running work is never stopped: a lower cap only holds new starts.
+    pub fn set_run_limits(&self, max_runs: u32) -> Res {
+        let l = caps::RunLimits::with_max_runs(max_runs)?;
+        *lock(&self.limits) = l;
+        Ok(l.to_json())
     }
 
     /// Runs whose PTY is still open.
@@ -408,8 +440,10 @@ impl App {
             .map(|(_, r)| r.session_id.clone())
             .collect();
         let mut svc = lock(&self.control);
-        if svc.session_id().is_some_and(|id| ended.iter().any(|e| e == id)) {
-            svc.end_session();
+        for id in ended {
+            if svc.has_session(&id) {
+                svc.end_session(&id);
+            }
         }
     }
 
@@ -424,7 +458,7 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, caps::DEFAULT_RUN_WORKERS)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -439,17 +473,23 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
         workflow: bool,
+        workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
-        self.no_active_run()?;
+        self.within_caps(cwd, workers)?;
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
-            let n = if rotate { ctl(svc.resume_session()) } else { Ok(svc.nonce().unwrap_or_default()) };
+            // The run's project's Director-General sees and steers it (ADR-15 2.3).
+            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref(cwd).0) {
+                svc.end_session(session_id);
+                return Err(e.to_json());
+            }
+            let n = if rotate { ctl(svc.resume_session(session_id)) } else { Ok(svc.nonce(session_id).unwrap_or_default()) };
             match n {
                 Ok(n) => n.to_string(),
                 Err(e) => {
-                    svc.end_session();
+                    svc.end_session(session_id);
                     return Err(e);
                 }
             }
@@ -462,9 +502,10 @@ impl App {
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
-            lock(&self.control).end_session();
+            lock(&self.control).end_session(session_id);
             return Err(e);
         }
+        lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
@@ -517,9 +558,10 @@ impl App {
         let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
-        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
+        let workers = input.max_in_flight;
+        let r = self.launch_kind(&session_id, &run_id, &campaign, &cwd, |n| {
             argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
-        }, false)?;
+        }, false, true, workers)?;
         self.note("run_started", &[]);
         Ok(r)
     }
@@ -574,18 +616,21 @@ impl App {
         };
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
-        if running {
-            self.publish_workers(run_id, &workers, &ctx);
+        if let (true, Some((_, r))) = (running, &run) {
+            self.publish_workers(&r.session_id, run_id, &workers, &ctx);
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
         // Overlays come from the live control session only; a past run shows none.
-        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
+        let signals = match (&run, running) {
+            (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
+            _ => Signals::default(),
+        };
         let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
         Ok(node_json(&node))
     }
 
-    fn publish_workers(&self, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+    fn publish_workers(&self, session_id: &str, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
         let infos = workers
             .iter()
             .map(|w| {
@@ -603,15 +648,20 @@ impl App {
                 }
             })
             .collect();
-        lock(&self.control).set_workers(infos);
+        lock(&self.control).set_workers(session_id, infos);
     }
 
-    /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
+    /// Keep the control service's workers and the transcript tails current for every live run, without any UI view
     /// asking: steering and MCP inspect must work while the crew view is closed. Called by the core's own poll loop.
     pub fn refresh_workers(&self) {
-        let live = lock(&self.runs).iter().find(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone());
-        let Some(run) = live else { return };
-        let Ok(workers) = self.discover_workers(&run) else { return };
+        let live: Vec<Run> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone()).collect();
+        for run in live {
+            self.refresh_run_workers(&run);
+        }
+    }
+
+    fn refresh_run_workers(&self, run: &Run) {
+        let Ok(workers) = self.discover_workers(run) else { return };
         let ctx: HashMap<String, (Option<String>, Vec<String>)> = {
             let tr = lock(&self.transcripts);
             workers
@@ -623,7 +673,7 @@ impl App {
                 })
                 .collect()
         };
-        self.publish_workers(&run.run_id, &workers, &ctx);
+        self.publish_workers(&run.session_id, &run.run_id, &workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {
@@ -653,10 +703,7 @@ impl App {
         }
         let mut red = run.nonces.clone();
         {
-            let svc = lock(&self.control);
-            if svc.session_id() == Some(run.session_id.as_str()) {
-                red.add(svc.nonce());
-            }
+            red.add(lock(&self.control).nonce(&run.session_id));
         }
         let mut out = Vec::new();
         for d in dirs {
@@ -1676,6 +1723,9 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod caps;
+mod orchestrator;
+mod proposals;
 mod inbox;
 mod wfresult;
 mod decide;

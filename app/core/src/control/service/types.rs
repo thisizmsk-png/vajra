@@ -57,6 +57,9 @@ pub enum ControlError {
     NotStopped,
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
+    /// A Director-General's tool call carried an older conversation generation than the project's current one: the
+    /// process belongs to a conversation that was replaced, so it may not see or steer anything.
+    StaleGeneration,
     ActionNotFound,
     UnknownTool,
     InvalidArgs(String),
@@ -73,6 +76,7 @@ impl ControlError {
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
+            Self::StaleGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
@@ -175,6 +179,8 @@ pub(super) enum Kind {
     /// ADR-14: the human approved or rejected a plan item. Always actor human, via ui.
     Approve,
     Reject,
+    /// ADR-15 2.4: a Director-General proposed a run. Always actor Lead, via mcp; a human starts or dismisses it.
+    Propose,
 }
 
 /// Where an action is. `as_str` is the ledger and JSON name.
@@ -193,7 +199,7 @@ pub(super) enum State {
 }
 
 impl Kind {
-    pub(super) const ALL: [Kind; 9] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject];
+    pub(super) const ALL: [Kind; 10] = [Kind::List, Kind::Inspect, Kind::Message, Kind::Redirect, Kind::Stop, Kind::Resume, Kind::Ask, Kind::Approve, Kind::Reject, Kind::Propose];
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Kind::List => "list",
@@ -205,6 +211,7 @@ impl Kind {
             Kind::Ask => "ask",
             Kind::Approve => "approve",
             Kind::Reject => "reject",
+            Kind::Propose => "propose",
         }
     }
     pub(super) fn parse(k: &str) -> Option<Kind> {

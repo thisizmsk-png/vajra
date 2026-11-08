@@ -216,9 +216,38 @@ fn lead_status(app: State<'_, App>, run_id: String) -> Res {
     app.lead_status(&run_id)
 }
 
+/// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
+#[tauri::command(async)]
+fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String) -> Res {
+    app.start_proposal(&id, &proposal_sha256)
+}
+
+/// ADR-15 2.4: dismiss a proposed run; nothing runs.
+#[tauri::command(async)]
+fn dismiss_proposal(app: State<'_, App>, id: String) -> Res {
+    app.dismiss_proposal(&id)
+}
+
+/// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
+#[tauri::command(async)]
+fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
+    app.new_conversation(&run_id)
+}
+
 #[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
+}
+
+/// ADR-15 D5: the run caps (1 per project, `max_runs` in the app, the worker ceiling).
+#[tauri::command(async)]
+fn run_limits(app: State<'_, App>) -> Res {
+    app.run_limits()
+}
+
+#[tauri::command(async)]
+fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
+    app.set_run_limits(max_runs)
 }
 
 // -------------------------------------------------------------------- main
@@ -329,9 +358,14 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            run_limits,
+            set_run_limits,
             ask_lead,
             cancel_ask,
             lead_status,
+            new_conversation,
+            start_proposal,
+            dismiss_proposal,
             inbox,
             approve_plan,
             reject_plan,

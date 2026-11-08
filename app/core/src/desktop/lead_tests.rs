@@ -192,14 +192,39 @@ impl Drop for Tmp {
     }
 }
 
-/// The Lead session id of RUN_ID as the app stores it: in the guarded control dir.
+/// The project id (stand-in) of the test repo.
+fn pid(t: &Tmp) -> String {
+    super::orchestrator::project_ref(&t.repo()).0
+}
+
+/// The Director-General's guarded dir for the project of `repo`.
+fn orch_dir_of(t: &Tmp, repo: &Path) -> PathBuf {
+    t.data().join("control/projects").join(super::orchestrator::project_ref(repo).0).join("orchestrator")
+}
+
+fn orch_dir(t: &Tmp) -> PathBuf {
+    orch_dir_of(t, &t.repo())
+}
+
+/// The bus stream of the test project's first conversation.
+fn stream_name(t: &Tmp) -> String {
+    super::orchestrator::stream(&pid(t), 1)
+}
+
+/// RUN_ID's guarded record (its directory), and the Director-General's session id of its project, as the app stores
+/// them: in the guarded control dir.
 fn remember_lead(t: &Tmp, sid: &str) {
+    let fsx = |d: &Path| crate::control::fsx::private_dir(d).unwrap();
     let dir = t.data().join("control/lead").join(RUN_ID);
-    crate::control::fsx::private_dir(&t.data().join("control")).unwrap();
-    crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
-    crate::control::fsx::private_dir(&dir).unwrap();
-    crate::control::fsx::write_atomic(&dir, "lead_session", sid.as_bytes()).unwrap();
+    for d in [t.data().join("control"), t.data().join("control/lead"), dir.clone()] {
+        fsx(&d);
+    }
     crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
+    let od = orch_dir(t);
+    for d in [t.data().join("control/projects"), od.parent().unwrap().to_path_buf(), od.clone()] {
+        fsx(&d);
+    }
+    crate::control::fsx::write_atomic(&od, "session", sid.as_bytes()).unwrap();
 }
 
 fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -218,8 +243,8 @@ fn idle(app: &App) -> bool {
     lock(&app.lead.active).is_empty()
 }
 
-fn stream_text(app: &App) -> Vec<String> {
-    app.bus.tail(&format!("lead-{RUN_ID}"), 0, 1 << 20).lines.iter().map(|l| l.text.to_string()).collect()
+fn stream_text(t: &Tmp, app: &App) -> Vec<String> {
+    app.bus.tail(&stream_name(t), 0, 1 << 20).lines.iter().map(|l| l.text.to_string()).collect()
 }
 
 // ------------------------------------------------------------ the happy path
@@ -230,14 +255,15 @@ fn ask_round_trip_streams_records_and_resumes() {
     let app = t.app();
     let r = app.ask_lead(RUN_ID, &format!("what is bhima doing? {NONCE}")).unwrap();
     assert_eq!(r["state"], "queued");
-    assert_eq!(r["stream"], format!("lead-{RUN_ID}"));
+    assert_eq!(r["stream"], stream_name(&t));
+    assert_eq!((r["project_id"].as_str(), r["generation"].as_u64(), r["name"].as_str()), (Some(pid(&t).as_str()), Some(1), Some("Director-General")));
     let sid = r["lead_session_id"].as_str().unwrap().to_string();
     assert!(ids::valid_session_id(&sid));
     wait_until("the ask to finish", || idle(&app) && t.ask_states().len() == 3);
     assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
 
     // The reply is on the bus, tagged, with the question first.
-    let lines = stream_text(&app);
+    let lines = stream_text(&t, &app);
     assert_eq!(lines[0], "you\twhat is bhima doing? [redacted]");
     assert!(lines.contains(&"lead\thello from the lead".to_string()), "{lines:?}");
 
@@ -256,7 +282,8 @@ fn ask_round_trip_streams_records_and_resumes() {
     let q = &t.ledger().into_iter().find(|r| r["kind"] == "ask" && r["state"] == "queued").unwrap();
     assert_eq!(q["text"], "what is bhima doing? [redacted]");
     assert_eq!(q["actor"], "human");
-    assert_eq!(std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("lead_session")).unwrap(), sid);
+    assert_eq!(std::fs::read_to_string(orch_dir(&t).join("session")).unwrap(), sid);
+    assert!(!t.data().join("control/lead").join(RUN_ID).join("lead_session").exists(), "no per-run Lead any more");
     assert!(!std::fs::read_to_string(t.data().join("runs.jsonl")).unwrap_or_default().contains(&sid), "the worker-writable index holds no Lead id");
 
     // The second ask resumes the same Lead session. The self-test ran once, not twice.
@@ -299,7 +326,7 @@ fn reply_card_lookalike_stays_text() {
     t.set("mode", "card");
     app.ask_lead(RUN_ID, "stop bhima").unwrap();
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
-    assert!(stream_text(&app).contains(&"lead\t{\"card\":\"stop\",\"worker\":\"bhima\"}".to_string()));
+    assert!(stream_text(&t, &app).contains(&"lead\t{\"card\":\"stop\",\"worker\":\"bhima\"}".to_string()));
     // Action cards come from the ledger only, and the ledger holds nothing but the ask.
     assert!(t.ledger().iter().all(|r| r["kind"] == "ask"));
 }
@@ -374,7 +401,7 @@ fn ask_timeout_marks_failed() {
     app.ask_lead(RUN_ID, "too slow").unwrap();
     wait_until("the timeout", || idle(&app));
     assert_eq!(t.ask_states().last().unwrap(), "failed:lead_timeout");
-    assert!(stream_text(&app).contains(&"error\tlead_timeout".to_string()));
+    assert!(stream_text(&t, &app).contains(&"error\tlead_timeout".to_string()));
 }
 
 // ------------------------------------------------------------ the init check, at the app level
@@ -387,7 +414,7 @@ fn a_lead_with_the_wrong_tools_is_killed_and_not_remembered() {
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the failure", || idle(&app));
     assert_eq!(t.ask_states(), ["queued:", "failed:lead_tools_mismatch"]);
-    assert!(stream_text(&app).contains(&"error\tlead_tools_mismatch".to_string()));
+    assert!(stream_text(&t, &app).contains(&"error\tlead_tools_mismatch".to_string()));
     // No Lead id was written: the next ask starts a fresh session instead of resuming one that never passed.
     assert!(!t.data().join("runs.jsonl").exists());
 }
@@ -469,7 +496,7 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let dir = t.data().join("control").join("lead").join(RUN_ID);
+    let dir = orch_dir(&t);
     let got = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     assert_eq!(got, lead_settings::settings(&t.home(), &t.repo(), &t.data()).unwrap());
     for f in ["settings.json", "mcp.json"] {
@@ -479,8 +506,11 @@ fn lead_settings_are_written_private_atomic_and_constant() {
     assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left");
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"]["vajra-desktop"]["args"], json!(["--mcp"]));
-    // The Lead's MCP server is bound to this run: it is refused if another run is current.
-    assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_RUN"], RUN_ID);
+    // The MCP server is bound to this project and conversation: another project's runs and an older conversation get
+    // nothing (`Service::call_tool_for_project`).
+    let env = &mcp["mcpServers"]["vajra-desktop"]["env"];
+    assert_eq!((env["VAJRA_LEAD_PROJECT"].as_str(), env["VAJRA_LEAD_GEN"].as_str()), (Some(pid(&t).as_str()), Some("1")));
+    assert!(env.get("VAJRA_LEAD_RUN").is_none());
     // The argv names exactly those files.
     let argv = std::fs::read_to_string(t.files("argv.").pop().unwrap()).unwrap();
     assert!(argv.contains(&format!("--settings\n{}\n", dir.join("settings.json").display())), "{argv}");
@@ -497,7 +527,7 @@ fn lead_startup_selftest_failclosed() {
     assert_eq!(t.count("selftest.count"), 1);
     assert_eq!(t.count("ask.count"), 0, "the real ask never ran");
     assert!(t.ledger().is_empty() && idle(&app));
-    assert!(!t.data().join("control").join("lead").join(RUN_ID).join("canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
+    assert!(!orch_dir(&t).join("canary").read_dir().unwrap().any(|_| true), "the canary file is removed");
     // A failure is not cached: it is tried again, and is still refused.
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
     assert_eq!(t.count("selftest.count"), 2);
@@ -538,7 +568,7 @@ fn the_selftest_runs_with_the_hooks_removed_and_the_canary_covered_by_a_rule() {
     let app = t.app();
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
-    let bare = std::fs::read_to_string(t.data().join("control").join("lead").join(RUN_ID).join("selftest-settings.json")).unwrap();
+    let bare = std::fs::read_to_string(orch_dir(&t).join("selftest-settings.json")).unwrap();
     assert_eq!(bare, lead_settings::settings_no_hooks(&t.home(), &t.repo(), &t.data()).unwrap());
     let v: Value = serde_json::from_str(&bare).unwrap();
     assert!(v.get("hooks").is_none());
@@ -573,16 +603,16 @@ fn lead_stream_rebuilt_from_transcript_after_restart() {
     std::fs::write(proj.join(format!("{lead_sid}.jsonl")), body).unwrap();
     // A fresh app (a restart): its bus is empty.
     let app = App::open(&t.data(), &t.home()).unwrap();
-    assert!(app.bus.tail(&format!("lead-{RUN_ID}"), 0, 1 << 20).lines.is_empty());
+    assert!(app.bus.tail(&stream_name(&t), 0, 1 << 20).lines.is_empty());
     let s = app.lead_status(RUN_ID);
     // (claude may not be installed on the test machine; the history is rebuilt either way)
     assert!(s.is_ok());
-    let lines = stream_text(&app);
+    let lines = stream_text(&t, &app);
     assert_eq!(lines, vec!["you\twhat is bhima doing?", "lead\tbhima is on task t1", "tool\tmcp__vajra-desktop__list_workers: {}", "lead\tdone"], "{lines:?}");
     assert!(lines.iter().all(|l| !l.contains("SECRET")), "tool results are not replayed");
     // Asking again does not duplicate it.
     app.lead_status(RUN_ID).unwrap();
-    assert_eq!(stream_text(&app).len(), 4);
+    assert_eq!(stream_text(&t, &app).len(), 4);
 }
 
 #[test]
@@ -608,7 +638,7 @@ fn claude_is_resolved_to_an_absolute_path_once() {
 }
 
 #[test]
-fn two_runs_asking_at_once_each_get_their_own_settings() {
+fn two_projects_asking_at_once_each_get_their_own_settings() {
     let t = Tmp::new();
     let app = t.app();
     let (sid_b, run_b) = ("2b8fad5b-d9cb-469f-a165-70867728950e", "20261106-0912");
@@ -627,24 +657,26 @@ fn two_runs_asking_at_once_each_get_their_own_settings() {
     a.unwrap();
     b.unwrap();
     wait_until("both Leads running", || t.files("settings-seen.").len() >= 4);
-    // Every real Lead (not the self-test turns) was pointed at a file under its own run dir, holding its own repo's rules.
+    // Every turn (self-tests too) was pointed at a file under its own project's dir, holding its own repo's rules.
     let mut checked = 0;
     for argv in t.files("argv.") {
         let text = std::fs::read_to_string(&argv).unwrap();
         let Some(path) = text.lines().skip_while(|l| *l != "--settings").nth(1).map(PathBuf::from) else { continue };
         let seen = std::fs::read_to_string(t.bin(&format!("settings-seen.{}", argv.file_name().unwrap().to_string_lossy().trim_start_matches("argv.")))).unwrap();
-        let (mine, other) = if path.to_string_lossy().contains(&format!("/lead/{RUN_ID}/")) { (t.repo(), repo_b.clone()) } else { (repo_b.clone(), t.repo()) };
-        assert!(path.to_string_lossy().contains("/lead/2026110"), "{path:?}");
+        let (mine, other) = if path.starts_with(orch_dir(&t)) { (t.repo(), repo_b.clone()) } else { (repo_b.clone(), t.repo()) };
+        assert!(path.starts_with(orch_dir_of(&t, &mine)), "{path:?}");
         let rule = |r: &Path| format!("Read(//{}/**/.env)", r.to_str().unwrap().trim_start_matches('/'));
         assert!(seen.contains(&rule(&mine)), "{path:?} lacks its own repo rules");
         assert!(!seen.contains(&rule(&other)), "{path:?} holds the other repo's rules");
         checked += 1;
     }
     assert!(checked >= 4, "two self-tests and two asks: {checked}");
-    for id in [RUN_ID, run_b] {
-        assert!(t.data().join("control").join("lead").join(id).join("settings.json").is_file());
-        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(t.data().join("control").join("lead").join(id).join("mcp.json")).unwrap()).unwrap();
-        assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_RUN"], id, "each Lead is bound to its own run");
+    for repo in [t.repo(), repo_b.clone()] {
+        let dir = orch_dir_of(&t, &repo);
+        assert!(dir.join("settings.json").is_file());
+        let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
+        let want = super::orchestrator::project_ref(&repo).0;
+        assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_PROJECT"], want.as_str(), "each Director-General is bound to its own project");
     }
     for h in lock(&app.lead.active).values() {
         h.handle.cancel();
@@ -769,7 +801,7 @@ fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
     let stdin = t.files("stdin.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect::<String>();
     assert!(stdin.contains("is [redacted] still valid?") && !stdin.contains(&disk), "stdin: {stdin}");
     assert!(!serde_json::to_string(&t.ledger()).unwrap().contains(&disk), "ledger");
-    let lines = stream_text(&app);
+    let lines = stream_text(&t, &app);
     assert!(lines.iter().any(|l| l.contains("[redacted]")) && lines.iter().all(|l| !l.contains(&disk)), "bus: {lines:?}");
 }
 
@@ -791,7 +823,7 @@ fn lead_files_tampered_during_the_selftest_never_reach_the_real_ask() {
     let t = Tmp::new();
     let app = t.app();
     t.set("selftest", "wait");
-    let dir = t.data().join("control").join("lead").join(RUN_ID);
+    let dir = orch_dir(&t);
     std::thread::scope(|s| {
         let h = s.spawn(|| app.ask_lead(RUN_ID, "hi"));
         wait_until("the self-test to be running", || t.count("selftest.count") == 1);
@@ -846,7 +878,7 @@ fn a_forged_lead_session_id_in_the_worker_writable_index_is_ignored() {
     let argvs: Vec<String> = t.files("argv.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
     assert!(argvs.iter().all(|a| !a.contains("--resume")), "nothing was resumed: {argvs:?}");
     // Nor is it replayed into the Lead stream.
-    assert!(stream_text(&app).iter().all(|l| !l.contains("forged")));
+    assert!(stream_text(&t, &app).iter().all(|l| !l.contains("forged")));
 }
 
 #[test]
@@ -914,7 +946,7 @@ fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
     let rec = t.data().join("control/lead").join(RUN_ID).join("cwd");
     assert_eq!(std::fs::read_to_string(&rec).unwrap(), t.repo().to_string_lossy());
-    let settings = t.data().join("control/lead").join(RUN_ID).join("settings.json");
+    let settings = orch_dir(&t).join("settings.json");
     let real_rules = std::fs::read_to_string(&settings).unwrap();
     let asks = t.count("ask.count");
     drop(app);
@@ -1051,7 +1083,7 @@ fn a_fifo_in_place_of_the_lead_transcript_does_not_hang_lead_status() {
         let _ = tx.send(a.lead_status(RUN_ID).is_ok());
     });
     assert_eq!(rx.recv_timeout(Duration::from_secs(3)), Ok(true), "lead_status must not block on a FIFO");
-    assert!(stream_text(&app).is_empty());
+    assert!(stream_text(&t, &app).is_empty());
 }
 
 #[test]
@@ -1062,5 +1094,184 @@ fn a_symlinked_lead_transcript_is_not_replayed() {
     std::fs::write(&other, line).unwrap();
     let app = restarted_with_transcript(&t, |p| std::os::unix::fs::symlink(&other, p).unwrap());
     assert!(app.lead_status(RUN_ID).is_ok());
-    assert!(stream_text(&app).is_empty(), "{:?}", stream_text(&app));
+    assert!(stream_text(&t, &app).is_empty(), "{:?}", stream_text(&t, &app));
+}
+
+/// ADR-15 D8: the Lead of one project is denied every other project's folder, taken from the app's guarded run
+/// records. Its own project (any run of it) and folders that hold it are never denied.
+#[test]
+fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    let second = t.0.join("second");
+    for d in [other.join(".git"), second.join(".git"), second.join("sub"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    for (run, cwd) in [
+        ("20261108-1100", other.clone()),
+        ("20261108-1101", second.clone()),
+        ("20261108-1102", second.join("sub")),
+        ("20261108-1103", t.0.clone()),
+        ("20261108-1104", t.repo()),
+    ] {
+        app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
+    }
+    let roots = app.other_project_roots(&t.repo());
+    assert_eq!(roots.len(), 2, "one folder per other project: {roots:?}");
+    assert!(roots.contains(&other));
+    assert!(roots.iter().any(|r| r.starts_with(&second)));
+    assert!(!roots.iter().any(|r| r == &t.0 || r.starts_with(t.repo())), "never its own project or a folder holding it: {roots:?}");
+
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    assert!(got.contains(&format!("Read(/{}/**)", other.display())), "{got}");
+    assert!(!got.contains(&format!("Read(/{}/**)", t.0.display())), "the folder holding the repo is not denied");
+}
+
+// ------------------------------------------------------------ ADR-15 2: one Director-General per project
+
+/// A second run of the test project, live in this app.
+fn second_run(t: &Tmp, app: &App) -> &'static str {
+    let (sid_b, run_b) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261106-0913");
+    lock(&app.runs).insert(
+        format!("run-{sid_b}"),
+        Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-z".into(), cwd: t.repo(), nonces: Redactor::default() },
+    );
+    run_b
+}
+
+fn argvs(t: &Tmp) -> Vec<String> {
+    t.files("argv.").iter().map(|p| std::fs::read_to_string(p).unwrap()).collect()
+}
+
+#[test]
+fn two_runs_of_one_project_share_one_director_general_that_remembers() {
+    let t = Tmp::new();
+    let app = t.app();
+    let run_b = second_run(&t, &app);
+    let first = app.ask_lead(RUN_ID, "plan the next step").unwrap();
+    let sid = first["lead_session_id"].as_str().unwrap().to_string();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    // Asked from the other run, the same conversation continues: same session, same stream, same project.
+    let again = app.ask_lead(run_b, "and from this run?").unwrap();
+    assert_eq!((again["lead_session_id"].as_str(), again["stream"].as_str()), (Some(sid.as_str()), first["stream"].as_str()));
+    assert_eq!(again["project_id"], first["project_id"]);
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+    assert!(argvs(&t).iter().any(|a| a.starts_with("-p\n--resume\n") && a.contains(&sid)), "the second ask resumed the first");
+    let lines = stream_text(&t, &app);
+    assert!(lines.contains(&"you\tplan the next step".to_string()) && lines.contains(&"you\tand from this run?".to_string()), "{lines:?}");
+    // The turn runs in the project folder, not a run's.
+    assert_eq!(t.count("selftest.count"), 1, "one project, one set of rules");
+    // One turn in flight per Director-General, whichever run it is asked from.
+    t.set("mode", "slow");
+    app.ask_lead(RUN_ID, "long one").unwrap();
+    assert_eq!(code(&app.ask_lead(run_b, "me too").unwrap_err()), "lead_busy");
+    for a in lock(&app.lead.active).values() {
+        a.handle.cancel();
+    }
+    wait_until("idle", || idle(&app));
+}
+
+#[test]
+fn the_app_runs_at_most_two_director_general_turns() {
+    let t = Tmp::new();
+    let app = t.app();
+    let mut runs = vec![RUN_ID.to_string()];
+    for (i, sid) in ["4d8fad5b-d9cb-469f-a165-70867728950e", "5e8fad5b-d9cb-469f-a165-70867728950e"].iter().enumerate() {
+        let repo = t.0.join(format!("repo-{i}"));
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = format!("20261106-092{i}");
+        lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: (*sid).into(), run_id: run.clone(), campaign: format!("c{i}"), cwd: repo, nonces: Redactor::default() });
+        runs.push(run);
+    }
+    t.set("mode", "slow");
+    app.ask_lead(&runs[0], "one").unwrap();
+    app.ask_lead(&runs[1], "two").unwrap();
+    let e = app.ask_lead(&runs[2], "three").unwrap_err();
+    assert_eq!(code(&e), "turns_full", "{e}");
+    assert!(e["detail"].as_str().unwrap().contains("Director-General"), "{e}");
+    wait_until("two turns running", || t.count("ask.count") == 2);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(t.count("ask.count"), 2, "the third turn never started");
+    for a in lock(&app.lead.active).values() {
+        a.handle.cancel();
+    }
+    wait_until("idle", || idle(&app));
+    t.set("mode", "ok");
+    app.ask_lead(&runs[2], "three").unwrap();
+    wait_until("the third ask", || idle(&app));
+}
+
+#[test]
+fn a_new_conversation_starts_the_next_generation_on_an_empty_stream() {
+    let t = Tmp::new();
+    let app = t.app();
+    let old = app.ask_lead(RUN_ID, "remember this").unwrap()["lead_session_id"].as_str().unwrap().to_string();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    let nc = app.new_conversation(RUN_ID).unwrap();
+    assert_eq!((nc["generation"].as_u64(), nc["project_id"].as_str()), (Some(2), Some(pid(&t).as_str())));
+    assert_eq!(nc["stream"], super::orchestrator::stream(&pid(&t), 2));
+    assert!(!orch_dir(&t).join("session").exists(), "the old conversation is not resumed");
+    // A process of the old conversation can no longer see or steer anything.
+    assert!(matches!(lock(&app.control).call_tool_for_project(&pid(&t), 1, "list_workers", &json!({})), Err(crate::control::service::ControlError::StaleGeneration)));
+    let r = app.ask_lead(RUN_ID, "fresh start").unwrap();
+    assert_ne!(r["lead_session_id"], old.as_str());
+    assert_eq!((r["generation"].as_u64(), r["stream"].as_str()), (Some(2), nc["stream"].as_str()));
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 6);
+    assert!(argvs(&t).iter().all(|a| !(a.contains("--resume") && a.contains(&old))), "the old session was never resumed");
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(orch_dir(&t).join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_GEN"], "2");
+    let g2: Vec<String> = app.bus.tail(&super::orchestrator::stream(&pid(&t), 2), 0, 1 << 20).lines.iter().map(|l| l.text.to_string()).collect();
+    assert_eq!(g2.first().map(String::as_str), Some("you\tfresh start"), "the new stream holds only the new conversation: {g2:?}");
+    assert_eq!(t.count("selftest.count"), 1, "the rules did not change, so no new self-test");
+    // Not while a turn is in flight.
+    t.set("mode", "slow");
+    app.ask_lead(RUN_ID, "long").unwrap();
+    assert_eq!(code(&app.new_conversation(RUN_ID).unwrap_err()), "lead_busy");
+    for a in lock(&app.lead.active).values() {
+        a.handle.cancel();
+    }
+    wait_until("idle", || idle(&app));
+    assert_eq!(code(&app.new_conversation("../x").unwrap_err()), "invalid_args");
+}
+
+#[test]
+fn lead_status_names_the_director_general_and_its_state() {
+    let t = Tmp::new();
+    let app = t.app();
+    let s = app.lead_status(RUN_ID).unwrap();
+    assert_eq!((s["name"].as_str(), s["state"].as_str(), s["generation"].as_u64()), (Some("Director-General"), Some("running"), Some(1)));
+    assert_eq!((s["project_id"].as_str(), s["stream"].as_str()), (Some(pid(&t).as_str()), Some(stream_name(&t).as_str())));
+    assert!(s["reason"].as_str().is_some_and(|r| !r.is_empty()));
+    t.set("mode", "slow");
+    let a = app.ask_lead(RUN_ID, "x").unwrap();
+    let s = app.lead_status(RUN_ID).unwrap();
+    assert_eq!((s["state"].as_str(), s["ask_id"].as_str()), (Some("thinking"), a["ask_id"].as_str()));
+    for a in lock(&app.lead.active).values() {
+        a.handle.cancel();
+    }
+    wait_until("idle", || idle(&app));
+    lock(&app.runs).clear();
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["name"], "Director-General", "named even when unavailable");
+}
+
+#[test]
+fn a_runs_project_is_pinned_at_launch_and_a_bad_record_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    let rec = t.data().join("control/lead").join(RUN_ID).join("project");
+    assert_eq!(std::fs::read_to_string(&rec).unwrap(), pid(&t));
+    // The folder later looks like another project (a `.git` appears): the run stays with the project it was pinned to.
+    let pinned = pid(&t);
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    assert_ne!(pid(&t), pinned);
+    let r = app.ask_lead(RUN_ID, "hi").unwrap();
+    assert_eq!(r["project_id"], pinned.as_str());
+    wait_until("the ask", || idle(&app));
+    // A record that is not a project id is refused, not guessed around.
+    crate::control::fsx::write_atomic(rec.parent().unwrap(), "project", b"../../elsewhere").unwrap();
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
 }

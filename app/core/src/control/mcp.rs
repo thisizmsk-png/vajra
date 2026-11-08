@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::socket::{self, MAX_REQUEST};
+use super::socket::{self, Binding, MAX_REQUEST};
 
 pub const SERVER_NAME: &str = "vajra-desktop";
 pub const DEFAULT_PROTOCOL: &str = "2025-06-18";
@@ -25,27 +25,50 @@ pub trait Forward {
 /// does not break the Lead session.
 pub struct SocketClient {
     path: PathBuf,
-    /// The run this Lead was started for; sent with every call (see `Service::call_tool_for_run`).
-    run: Option<String>,
+    /// What this Lead was started for; sent with every call (see `Service::call_tool_for_run` / `_for_project`).
+    binding: Binding,
 }
 
-/// The environment variable the app's per-run `mcp.json` sets for the Lead's MCP server.
+/// The environment variable an ADR-13 per-run `mcp.json` sets for the Lead's MCP server.
 pub const RUN_ENV: &str = "VAJRA_LEAD_RUN";
+/// The environment variables a Director-General's `mcp.json` sets (ADR-15 2.3): its project and conversation generation.
+pub const PROJECT_ENV: &str = "VAJRA_LEAD_PROJECT";
+pub const GEN_ENV: &str = "VAJRA_LEAD_GEN";
 
 impl SocketClient {
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), run: None }
+        Self { path: path.to_path_buf(), binding: Binding::None }
     }
 
     /// A client whose calls are served only while `run` is the app's current run.
     pub fn bound(path: &Path, run: &str) -> Self {
-        Self { path: path.to_path_buf(), run: Some(run.to_string()) }
+        Self { path: path.to_path_buf(), binding: Binding::Run(run.to_string()) }
+    }
+
+    /// A client whose calls see only `project`'s runs, and only while `generation` is its current conversation.
+    pub fn for_project(path: &Path, project: &str, generation: u32) -> Self {
+        Self { path: path.to_path_buf(), binding: Binding::Project(project.to_string(), generation) }
+    }
+
+    /// The client the environment asks for. A malformed or partial binding is a refusal to start, never "unbound".
+    pub fn from_env(path: &Path, get: impl Fn(&str) -> Option<std::ffi::OsString>) -> io::Result<Self> {
+        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{what} is not valid"));
+        let text = |k: &str| get(k).map(|v| v.into_string().map_err(|_| bad(k))).transpose();
+        match (text(RUN_ENV)?, text(PROJECT_ENV)?, text(GEN_ENV)?) {
+            (None, None, None) => Ok(Self::new(path)),
+            (Some(r), None, None) if crate::ids::valid_run_id(&r) => Ok(Self::bound(path, &r)),
+            (None, Some(p), Some(g)) if crate::ids::valid_project_ref(&p) => {
+                let g = g.parse::<u32>().map_err(|_| bad(GEN_ENV))?;
+                Ok(Self::for_project(path, &p, g))
+            }
+            _ => Err(bad("the Lead binding")),
+        }
     }
 }
 
 impl Forward for SocketClient {
     fn call(&mut self, tool: &str, args: &Value) -> Result<Value, Value> {
-        match socket::request_for(&self.path, self.run.as_deref(), tool, args) {
+        match socket::request_bound(&self.path, &self.binding, tool, args) {
             Ok(mut v) => match v.get_mut("ok") {
                 Some(ok) => Ok(ok.take()),
                 None => Err(v),
@@ -63,7 +86,7 @@ fn text_prop() -> Value {
     json!({"type": "string", "minLength": 1, "maxLength": 4000})
 }
 
-/// The five tools, schemas as in design.md 5.2.
+/// The six tools: the five of design.md 5.2, plus ADR-15 2.4's `propose_run` (served only to a Director-General).
 pub fn tools() -> Value {
     json!([
         {"name": "list_workers",
@@ -86,7 +109,13 @@ pub fn tools() -> Value {
         {"name": "stop_worker",
          "description": "Ask the human to stop a worker. Nothing happens until the human confirms in the app.",
          "inputSchema": {"type": "object", "additionalProperties": false, "required": ["worker"],
-            "properties": {"worker": worker_prop(), "reason": {"type": "string", "maxLength": 500}}}}
+            "properties": {"worker": worker_prop(), "reason": {"type": "string", "maxLength": 500}}}},
+        {"name": "propose_run",
+         "description": "Propose a new Vajra run for this project. Nothing runs until the human reads the exact ask and starts it in the app.",
+         "inputSchema": {"type": "object", "additionalProperties": false, "required": ["ask"],
+            "properties": {"ask": text_prop(),
+                           "base": {"type": "string", "maxLength": 255, "default": "HEAD"},
+                           "rounds": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2}}}}
     ])
 }
 
@@ -195,13 +224,8 @@ pub fn serve(mut input: impl BufRead, mut out: impl Write, fwd: &mut impl Forwar
 /// The `--mcp` entry point: stdin/stdout, forwarding to `socket_path`.
 pub fn run_stdio(socket_path: &Path) -> io::Result<()> {
     let stdin = io::stdin();
-    // A Lead the app started carries its run in the environment; a bad value is a refusal to start, not "unbound".
-    let mut client = match std::env::var_os(RUN_ENV) {
-        None => SocketClient::new(socket_path),
-        Some(r) => match r.to_str().filter(|r| crate::ids::valid_run_id(r)) {
-            Some(r) => SocketClient::bound(socket_path, r),
-            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{RUN_ENV} is not a run id"))),
-        },
-    };
+    // A Lead the app started carries its run, or its project and generation, in the environment; a bad value is a
+    // refusal to start, not "unbound".
+    let mut client = SocketClient::from_env(socket_path, |k| std::env::var_os(k))?;
     serve(stdin.lock(), io::stdout().lock(), &mut client)
 }

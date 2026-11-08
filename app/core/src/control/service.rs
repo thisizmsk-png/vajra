@@ -17,10 +17,12 @@
 // module's private items. This file keeps the `Service` struct, `open`, `rebuild` and the shared helpers.
 mod actions; // list, inspect, message, redirect, stop, confirm, cancel, resume
 mod asks; // the Lead-ask and plan-decision records
+mod proposals; // ADR-15 2.4: run proposals from a Director-General, started or dismissed by a human
 mod session; // start, resume and end a session; the nonce, redactor and worker list
 mod tools; // the Lead's tool surface (socket calls and their dispatch)
 mod types; // actors, errors, the action model, the ask and decision records, the limits
 mod watcher; // the ack watcher and the thread that ticks it
+pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
 pub use types::*;
 pub use watcher::{Watcher, spawn_watcher};
 
@@ -43,11 +45,16 @@ use crate::crew::redact::Redactor;
 use crate::crew::tree::{Status, Worker};
 use crate::logging::Logger;
 
+/// One run session the service steers. Several can be live at once (ADR-15 2.6): each keeps its own nonce, its own
+/// queue and stop dirs and its own workers, so nothing addressed to one session can reach another.
 struct Session {
     id: String,
     run_id: String,
     dir: SessionDir,
     nonce: String,
+    workers: Vec<WorkerInfo>,
+    /// The project the run belongs to (ADR-15 2.3), set by the app at launch. Its Director-General sees this session.
+    project: Option<String>,
 }
 
 pub struct Service {
@@ -55,8 +62,15 @@ pub struct Service {
     audit_log: PathBuf,
     ledger: Ledger,
     logger: Option<Logger>,
-    session: Option<Session>,
-    workers: Vec<WorkerInfo>,
+    /// Live run sessions by session id.
+    sessions: HashMap<String, Session>,
+    /// While a Lead tool call runs: the sessions it is bound to (one run, or every run of one project). `None` for human
+    /// calls, which see every session.
+    scope: Option<Vec<String>>,
+    /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
+    generations: HashMap<String, u32>,
+    /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
+    bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
@@ -83,8 +97,10 @@ impl Service {
             audit_log,
             ledger,
             logger,
-            session: None,
-            workers: Vec::new(),
+            sessions: HashMap::new(),
+            scope: None,
+            generations: HashMap::new(),
+            bound_project: None,
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
@@ -157,21 +173,29 @@ impl Service {
         self.redactor().clean(text)
     }
 
-    fn session(&self) -> Result<&Session> {
-        self.session.as_ref().ok_or(ControlError::ControlDisabled)
+    fn session(&self, sid: &str) -> Result<&Session> {
+        self.sessions.get(sid).ok_or(ControlError::ControlDisabled)
     }
 
-    fn resolve(&self, arg: &str) -> Result<&WorkerInfo> {
+    /// The sessions the current call may see: the bound session for a Lead call, every session for a human one.
+    fn in_scope(&self) -> impl Iterator<Item = &Session> {
+        self.sessions.values().filter(|s| self.scope.as_ref().is_none_or(|b| b.contains(&s.id)))
+    }
+
+    /// The one worker `arg` names among the sessions in scope, with its session id. A name that matches live workers
+    /// in two sessions (each run has a `t1`) is ambiguous: the caller must use the agent id.
+    fn resolve(&self, arg: &str) -> Result<(String, WorkerInfo)> {
         if arg.is_empty() || arg.chars().count() > MAX_WORKER {
             return Err(ControlError::InvalidArgs("worker".into()));
         }
         let key = arg.strip_prefix("agent:").unwrap_or(arg);
-        let exact: Vec<&WorkerInfo> = self.workers.iter().filter(|w| !key.is_empty() && w.key() == key).collect();
+        let all: Vec<(&str, &WorkerInfo)> = self.in_scope().flat_map(|s| s.workers.iter().map(move |w| (s.id.as_str(), w))).collect();
+        let exact: Vec<(&str, &WorkerInfo)> = all.iter().copied().filter(|(_, w)| !key.is_empty() && w.key() == key).collect();
         let found = if exact.is_empty() {
             let suffix = format!(".{arg}");
-            self.workers
-                .iter()
-                .filter(|w| {
+            all.iter()
+                .copied()
+                .filter(|(_, w)| {
                     w.task_id.as_deref().is_some_and(|t| t == arg || t.ends_with(&suffix))
                         || w.worker.engine_id == arg
                         || ui_name(&w.worker.engine_id).eq_ignore_ascii_case(arg)
@@ -180,21 +204,36 @@ impl Service {
         } else {
             exact
         };
-        match found.as_slice() {
-            [] => Err(ControlError::WorkerNotFound),
-            [w] => Ok(w),
+        let one = match found.as_slice() {
+            [] => return Err(ControlError::WorkerNotFound),
+            [w] => *w,
             many => {
-                let live: Vec<&&WorkerInfo> = many.iter().filter(|w| !w.finished()).collect();
+                let live: Vec<&(&str, &WorkerInfo)> = many.iter().filter(|(_, w)| !w.finished()).collect();
                 match live.as_slice() {
-                    [w] => Ok(w),
-                    _ => Err(ControlError::WorkerAmbiguous),
+                    [w] => **w,
+                    _ => return Err(ControlError::WorkerAmbiguous),
                 }
             }
+        };
+        Ok((one.0.to_string(), one.1.clone()))
+    }
+
+    /// The session an action without a worker is about: the bound one, or the only one.
+    fn default_session(&self) -> Option<&Session> {
+        let mut it = self.in_scope();
+        match (it.next(), it.next()) {
+            (Some(s), None) => Some(s),
+            _ => None,
         }
     }
 
-    fn new_action(&self, kind: Kind, actor: Actor, w: Option<&WorkerInfo>, now: SystemTime) -> Result<Action> {
-        let (sid, rid) = self.session.as_ref().map_or((String::new(), String::new()), |s| (s.id.clone(), s.run_id.clone()));
+    fn new_action(&self, kind: Kind, actor: Actor, w: Option<(&str, &WorkerInfo)>, now: SystemTime) -> Result<Action> {
+        let s = match w {
+            Some((sid, _)) => self.sessions.get(sid),
+            None => self.default_session(),
+        };
+        let (sid, rid) = s.map_or((String::new(), String::new()), |s| (s.id.clone(), s.run_id.clone()));
+        let w = w.map(|(_, w)| w);
         Ok(Action {
             id: new_action_id(now)?,
             kind,
@@ -263,3 +302,7 @@ impl Service {
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_sessions_tests.rs"]
+mod sessions_tests;

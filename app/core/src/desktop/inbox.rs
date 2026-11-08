@@ -186,6 +186,8 @@ impl App {
                 items.push((first, id, v));
             }
         }
+        // ADR-15 2.4: runs a Director-General proposed. Their time is the guarded ledger line's own.
+        items.extend(self.proposal_items(now));
         seen.retain(|k, _| waiting.contains(k));
         if seen != before {
             let saved = crate::control::fsx::private_dir(&self.data).and_then(|()| crate::control::fsx::write_atomic(&self.data, SEEN_FILE, &serde_json::to_vec(&seen).unwrap_or_default()));
