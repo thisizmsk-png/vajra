@@ -278,30 +278,53 @@ describe("Stream tab: a window served by the core (#45)", () => {
     expect(screen.getByText(S.crew.windowGap)).toBeTruthy();
   });
 
-  // Review on #68: the poll (1 s) used to re-ask for the held start, which cleared the gap, and reconcile then asked for the
-  // lost prefix again: one lost request per poll for ever, the notice flickering off and on.
-  it("keeps the lost prefix settled across polls: no new lost asks and the gap notice stays", async () => {
-    const f = await openBackend({
-      stream_window: (a?: Record<string, unknown>) => {
-        const from = a?.from as number | null;
-        const start = from === null || from < 4970 ? 4970 : from;
-        const lost = from !== null && from < 4970;
-        return { lines: lines(start, 5000), head_seq: 5000, first_seq: 1, at_start: false, at_end: true, gap: lost };
-      },
-    });
+  // Review on #68. The core keeps a spill prefix and a later ring with a permanent hole between: a request below 4970 is
+  // answered with 4970..5000 and `gap`; a request for the tail or from 4970 or later is a plain answer without `gap`.
+  const lostCore = (a?: Record<string, unknown>) => {
+    const from = a?.from as number | null;
+    const start = from === null || from < 4970 ? 4970 : from;
+    return { lines: lines(start, 5000), head_seq: 5000, first_seq: 1, at_start: false, at_end: true, gap: from !== null && from < 4970 };
+  };
+  const lostAsks = (f: ReturnType<typeof fakeIpc>) => wins(f).filter((c) => typeof c.args?.from === "number" && c.args.from < 4970).length;
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
+  it("asks for a lost prefix exactly once and keeps the notice steady across many polls", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const f = await openBackend({ stream_window: lostCore });
     const log = await screen.findByRole("log");
     await waitFor(() => expect(log.textContent).toContain("out 5000"));
     scrollTo(2000);
     await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
-    const lostAsks = () => wins(f).filter((c) => typeof c.args?.from === "number" && c.args.from < 4970).length;
-    const polls = () => wins(f).length;
-    const n = lostAsks(), p0 = polls();
-    // Sample the notice through at least two poll intervals: it must never drop out.
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 300));
-      expect(screen.queryByText(S.crew.windowGap), `notice gone at ${i * 300} ms`).toBeTruthy();
+    expect(lostAsks(f)).toBe(1);
+    const polls0 = wins(f).length;
+    for (let i = 0; i < 6; i++) {
+      await advance(1000); // one POLL_MS
+      expect(screen.queryByText(S.crew.windowGap), `notice gone after poll ${i + 1}`).toBeTruthy();
     }
-    expect(polls() - p0, "the poll kept running").toBeGreaterThanOrEqual(2);
-    expect(lostAsks() - n, "no new asks for the lost prefix after it settled").toBe(0);
-  }, 15000);
+    expect(wins(f).length - polls0, "the poll kept running").toBeGreaterThanOrEqual(5);
+    expect(lostAsks(f), "no further request for the lost prefix").toBe(1);
+  }, 20000);
+
+  // Review on #68: a tail answer used to leave `answered` alone, so scrolling back to the same `from` asked nothing and
+  // showed a window without the gap notice.
+  it("asks again when the view returns to a lost prefix after a tail answer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const f = await openBackend({ stream_window: lostCore });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(0); // the top: from = first_seq, below the lost hole
+    await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
+    const first = lostAsks(f);
+    expect(first).toBe(1);
+    scrollTo(100000); // back to the bottom: following, the poll reads the tail
+    await advance(1500);
+    await waitFor(() => expect(screen.queryByText(S.crew.windowGap)).toBeNull());
+    scrollTo(0); // the top again
+    // At once, not a poll later: the answer to the first visit must not satisfy this one.
+    expect(lostAsks(f), "the second visit asked again, right away").toBe(2);
+    await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
+    await advance(3000);
+    expect(lostAsks(f), "and then settled").toBe(2);
+    expect(screen.getByText(S.crew.windowGap)).toBeTruthy();
+  }, 20000);
 });

@@ -60,7 +60,12 @@ export function StreamTab({ stream }: { stream: string }) {
       if (from !== null && first !== undefined && !rereadOfLost) {
         answered.current = { from, held0: first };
         lostHeld0.current = w.gap && from < first ? first : null;
-      } else if (from === null) lostHeld0.current = null;
+      } else if (from === null || first === undefined) {
+        // The tail (or an empty answer) replaced the held window: an earlier numeric answer no longer describes it, so a
+        // later return to the same `from` must be asked again.
+        answered.current = null;
+        lostHeld0.current = null;
+      }
       setWin(w);
       // The view may still lie outside what came back (a short, byte-capped window): look again with the new window.
       setTimeout(() => reconcileRef.current(), 0);
@@ -131,6 +136,7 @@ export function StreamTab({ stream }: { stream: string }) {
     queued.current = false;
     nav.current = null;
     answered.current = null;
+    lostHeld0.current = null;
     followRef.current = true;
     winRef.current = null;
     setFollowing(true);
