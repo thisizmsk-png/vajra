@@ -33,6 +33,8 @@ export function StreamTab({ stream }: { stream: string }) {
   const queued = useRef(false);
   /** The `from` of a scroll request that has not been answered yet: a background refresh re-asks for it, never for the old window's start. */
   const nav = useRef<number | null>(null);
+  /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
+  const reconcileRef = useRef<() => void>(() => {});
   const last = useRef(0);
 
   const fetchWin = useCallback(async (from: number | null) => {
@@ -48,6 +50,8 @@ export function StreamTab({ stream }: { stream: string }) {
       winRef.current = w;
       if (nav.current === from) nav.current = null;
       setWin(w);
+      // The view may still lie outside what came back (a short, byte-capped window): look again with the new window.
+      setTimeout(() => reconcileRef.current(), 0);
     } catch (e) {
       if (g === gen.current) setErr(errorText(e));
     } finally {
@@ -78,21 +82,33 @@ export function StreamTab({ stream }: { stream: string }) {
     return () => { clearInterval(poll); clearTimeout(later); off(); };
   }, [stream, refresh]);
 
-  const onRange = useCallback((start: number, end: number, atBottom: boolean) => {
-    view.current = { start, end };
-    followRef.current = atBottom;
-    setFollowing(atBottom);
+  /**
+   * Ask for the rows around the view when it nears an edge of the held window that has more beyond it. Row i is seq `first_seq + i`.
+   * The core may answer with fewer than `WINDOW_ROWS` (a window is also capped by bytes), so the rows kept before the view shrink
+   * to what the last answer could hold on each side: a short window must still reach the visible rows.
+   */
+  const reconcile = useCallback(() => {
     const w = winRef.current;
-    if (atBottom || !w || w.lines.length === 0) return;
-    // Row i is seq `first_seq + i`. Fetch when the view nears a window edge that has more beyond it.
+    const { start, end } = view.current;
+    if (followRef.current || !w || w.lines.length === 0) return;
     const held0 = w.lines[0].seq, held1 = w.lines[w.lines.length - 1].seq;
     const s0 = w.first_seq + start, s1 = w.first_seq + end - 1;
     const needLeft = !w.at_start && s0 - EDGE < held0;
     const needRight = !w.at_end && s1 + EDGE > held1;
     if (!needLeft && !needRight) return;
-    const from = Math.max(w.first_seq, s0 - MARGIN);
+    const short = !w.at_end && w.lines.length < WINDOW_ROWS;
+    const margin = short ? Math.min(MARGIN, Math.max(0, Math.floor((w.lines.length - VISIBLE) / 2))) : MARGIN;
+    const from = Math.max(w.first_seq, s0 - margin);
     if (from !== held0) { nav.current = from; void fetchWin(from); }
   }, [fetchWin]);
+  reconcileRef.current = reconcile;
+
+  const onRange = useCallback((start: number, end: number, atBottom: boolean) => {
+    view.current = { start, end };
+    followRef.current = atBottom;
+    setFollowing(atBottom);
+    reconcile();
+  }, [reconcile]);
 
   /** Back to the live tail: forget the held window and read the newest rows. */
   const jumpLatest = () => {

@@ -231,4 +231,27 @@ describe("Stream tab: a window served by the core (#45)", () => {
     const after = wins(f).slice(wins(f).findIndex((c) => c.args?.from === asked));
     expect(after.some((c) => c.args?.from === 4781 || c.args?.from === null)).toBe(false);
   });
+
+  it("reaches the visible rows when the core's byte cap returns far fewer rows than asked for", async () => {
+    const LINE = 16 * 1024; // 64 lines fit the 1 MiB cap, not the 220 asked for
+    const head = 5000;
+    const f = await openBackend({
+      stream_window: (a?: Record<string, unknown>) => {
+        const from = a?.from as number | null, maxLines = a?.maxLines as number, maxBytes = a?.maxBytes as number;
+        const n = Math.min(maxLines, Math.floor(maxBytes / LINE));
+        const start = from === null ? Math.max(1, head - n + 1) : Math.max(1, from);
+        const end = Math.min(head, start + n - 1);
+        return { lines: lines(start, end), head_seq: head, first_seq: 1, at_start: start <= 1, at_end: end >= head, gap: false };
+      },
+    });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(2000); // visible seq 2001..2020; a naive 100-row margin would answer 1901..1964 and leave the view blank
+    await waitFor(() => expect(screen.getByRole("log").textContent).toContain("out 2001"), { timeout: 3000 });
+    expect(screen.getByRole("log").textContent).toContain("out 2020");
+    // It settles: no request storm once the visible rows are held.
+    const n = wins(f).length;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(wins(f).length - n).toBeLessThanOrEqual(1);
+  });
 });
