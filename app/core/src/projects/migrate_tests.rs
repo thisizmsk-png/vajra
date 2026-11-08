@@ -149,9 +149,9 @@ fn it_runs_once_and_a_second_confirm_changes_nothing() {
     let ls = [launch("c1", "20261101-0900", S1, &a)];
     let cs = vec!["c1".to_string()];
     let s = t.store();
-    assert!(!is_done(&t.data()));
+    assert!(!is_done(&s));
     confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]).unwrap();
-    assert!(is_done(&t.data()));
+    assert!(is_done(&s));
     let again = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]);
     assert!(matches!(again, Err(MigrateError::AlreadyDone)));
     let id = s.list(true).unwrap().projects[0].id.clone();

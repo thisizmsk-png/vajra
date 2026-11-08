@@ -53,8 +53,8 @@ pub fn marker(data: &Path) -> PathBuf {
     data.join("projects").join(".migrated-v1")
 }
 
-pub fn is_done(data: &Path) -> bool {
-    fs::symlink_metadata(marker(data)).is_ok()
+pub fn is_done(store: &Store) -> bool {
+    store.migration_done()
 }
 
 /// Group the campaigns by the live git root of the folder their newest launch used.
@@ -147,7 +147,7 @@ pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], c
     // One confirm at a time, from the done-check to the marker: a double click or a second window waits, then finds the
     // marker and is refused, instead of writing every session twice.
     let _one = store.migration_lock();
-    if is_done(data) {
+    if is_done(store) {
         return Err(MigrateError::AlreadyDone);
     }
     let plan = plan(launches, campaigns, guard);
@@ -194,7 +194,7 @@ pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], c
         }
         out.projects.push(Created { id: project.id, name: project.name, outcome: added.outcome(), sessions: written });
     }
-    fsx::write_atomic(&data.join("projects"), ".migrated-v1", b"1\n")?;
+    store.mark_migrated()?;
     Ok(out)
 }
 

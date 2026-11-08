@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -17,8 +17,10 @@ use crate::control::{fsx, time};
 
 /// Only the tail of a sessions file is read.
 const SESSIONS_READ_CAP: u64 = 1024 * 1024;
-/// No more projects than this are listed (a store with more is not one a person made).
+/// No more projects than this are kept (a store with more is not one a person made).
 const MAX_PROJECTS: usize = 500;
+/// No more directory entries than this are examined in one scan.
+const MAX_ENTRIES: usize = 2000;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -27,6 +29,8 @@ pub enum StoreError {
     Conflict { current_rev: u64 },
     /// The folder overlaps another project's folder; pass `confirm_nested` to add it anyway.
     Nested { with_id: String, with_name: String },
+    /// The store has too many entries to scan completely, or no room for another project; nothing was written.
+    Full,
     Identity(IdentityError),
     Invalid(ContractError),
     Io(io::Error),
@@ -38,6 +42,7 @@ impl std::fmt::Display for StoreError {
             Self::NotFound => write!(f, "project not found"),
             Self::Conflict { current_rev } => write!(f, "the project changed (now at revision {current_rev}); reload and try again"),
             Self::Nested { with_name, .. } => write!(f, "this folder overlaps the project {with_name}"),
+            Self::Full => write!(f, "there are too many projects (or stray entries) to add another"),
             Self::Identity(e) => write!(f, "{e}"),
             Self::Invalid(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
@@ -96,12 +101,17 @@ pub struct Listing {
     pub projects: Vec<Project>,
     /// Entries that were not a valid project record (damaged, foreign, or from another major version).
     pub skipped: usize,
+    /// The scan stopped at a limit: this listing is NOT the whole store.
+    pub truncated: bool,
 }
 
 type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
 
 pub struct Store {
-    dir: PathBuf,
+    /// The projects folder, opened once; every project folder is opened relative to it, so replacing `<data>/projects`
+    /// afterwards (a rename plus a symlink) cannot redirect anything.
+    root: Pinned,
+    limits: (usize, usize),
     guard: Guard,
     /// Serialises every read-modify-write of a record within the process.
     lock: Mutex<()>,
@@ -116,12 +126,20 @@ impl Store {
         Self::with_clock(data, home, Box::new(SystemTime::now))
     }
 
+    /// Smaller limits, for tests: (projects kept, entries examined).
+    #[cfg(test)]
+    fn with_limits(mut self, projects: usize, entries: usize) -> Self {
+        self.limits = (projects, entries);
+        self
+    }
+
     pub fn with_clock(data: &Path, home: &Path, now: Clock) -> io::Result<Self> {
         let dir = data.join("projects");
         fsx::private_dir(&dir)?;
+        let root = Pinned::open(&dir, false)?;
         // The guard compares against canonical paths; a data dir that is a symlink is compared by its target.
         let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        Ok(Self { dir, guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now })
+        Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now })
     }
 
     /// The folders that can never be a project.
@@ -134,16 +152,25 @@ impl Store {
         self.migrating.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Has the owner confirmed the migration? The marker is read through the pinned projects folder; anything but a
+    /// clean "not there" counts as done, so a surprise never lets a second migration run.
+    pub fn migration_done(&self) -> bool {
+        match self.root.read(".migrated-v1", 16) {
+            Ok(_) => true,
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
+        }
+    }
+
+    pub fn mark_migrated(&self) -> io::Result<()> {
+        self.root.write_atomic(".migrated-v1", b"1\n")
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
         self.lock.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn stamp(&self) -> String {
         time::iso_secs((self.now)())
-    }
-
-    fn project_dir(&self, id: &str) -> PathBuf {
-        self.dir.join(id)
     }
 
     // ------------------------------------------------------------------------------------------------- reads
@@ -164,17 +191,20 @@ impl Store {
     }
 
     fn read_all(&self) -> Result<Listing> {
+        let (max_projects, max_entries) = self.limits;
         let mut out = Listing::default();
-        let names = fsx::DirHandle::open(&self.dir)?.names()?;
-        for name in names.into_iter().filter(|n| !n.starts_with('.')) {
-            if out.projects.len() + out.skipped >= MAX_PROJECTS {
-                break;
-            }
+        let names: Vec<String> = self.root.names()?.into_iter().filter(|n| !n.starts_with('.')).collect();
+        out.truncated = names.len() > max_entries;
+        for name in names.into_iter().take(max_entries) {
             if !contract::valid_project_id(&name) {
                 out.skipped += 1;
                 continue;
             }
             match self.read_one(&name) {
+                Ok(_) if out.projects.len() >= max_projects => {
+                    out.truncated = true;
+                    break;
+                }
                 Ok(p) => out.projects.push(p),
                 Err(_) => out.skipped += 1,
             }
@@ -188,7 +218,7 @@ impl Store {
         if !contract::valid_project_id(id) {
             return Err(StoreError::NotFound);
         }
-        match Pinned::open(&self.project_dir(id), false) {
+        match self.root.child(id, false) {
             Ok(d) => Ok(d),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound),
             Err(e) => Err(e.into()),
@@ -216,7 +246,7 @@ impl Store {
 
     fn write(&self, p: &Project) -> Result<()> {
         p.validate()?;
-        let dir = Pinned::open(&self.project_dir(&p.id), true)?;
+        let dir = self.root.child(&p.id, true)?;
         let mut bytes = serde_json::to_vec_pretty(p).map_err(|e| StoreError::Io(io::Error::other(e)))?;
         bytes.push(b'\n');
         dir.write_atomic("project.json", &bytes)?;
@@ -229,7 +259,13 @@ impl Store {
     pub fn add(&self, picked: &Path, confirm_nested: bool) -> Result<Added> {
         let r = identity::resolve(picked, &self.guard)?;
         let _g = self.lock();
-        let all = self.read_all()?.projects;
+        // Matching an existing project and the nesting check need the WHOLE inventory; a partial scan could create a
+        // second project for a folder it did not list, or miss an overlap. Refuse instead.
+        let listing = self.read_all()?;
+        if listing.truncated {
+            return Err(StoreError::Full);
+        }
+        let all = listing.projects;
         let same = |p: &&Project| (p.root_key.dev, p.root_key.ino) == (r.key.dev, r.key.ino) || (r.key.git_common_dir.is_some() && p.root_key.git_common_dir == r.key.git_common_dir);
         if let Some(found) = all.iter().find(same) {
             if found.archived.is_some() {
@@ -240,6 +276,9 @@ impl Store {
                 return Ok(Added::Restored(p));
             }
             return Ok(Added::Existing(found.clone()));
+        }
+        if all.len() >= self.limits.0 {
+            return Err(StoreError::Full);
         }
         if !confirm_nested {
             let root = r.root.as_path();

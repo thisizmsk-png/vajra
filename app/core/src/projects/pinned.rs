@@ -45,6 +45,35 @@ impl Pinned {
         Ok(me)
     }
 
+    /// A subfolder of this one, opened (and with `create`, made at 0700) relative to the held descriptor: this folder
+    /// being renamed away or replaced by a symlink afterwards does not redirect it.
+    pub fn child(&self, name: &str, create: bool) -> io::Result<Self> {
+        let n = cstr(name)?;
+        if create {
+            // SAFETY: valid descriptor and NUL-terminated name.
+            if unsafe { libc::mkdirat(self.0.as_raw_fd(), n.as_ptr(), 0o700) } < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+        }
+        // SAFETY: as above; the result is owned immediately.
+        let fd = cvt(unsafe { libc::openat(self.0.as_raw_fd(), n.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) })?;
+        // SAFETY: `fd` is a fresh descriptor that nothing else owns.
+        let me = Self(unsafe { OwnedFd::from_raw_fd(fd) });
+        if create {
+            // SAFETY: the descriptor is open.
+            cvt(unsafe { libc::fchmod(me.0.as_raw_fd(), 0o700) })?;
+        }
+        Ok(me)
+    }
+
+    /// Entry names (UTF-8, no `.` or `..`), read from the held descriptor.
+    pub fn names(&self) -> io::Result<Vec<String>> {
+        crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).names()
+    }
+
     fn openat(&self, name: &str, flags: libc::c_int, mode: libc::mode_t) -> io::Result<File> {
         let n = cstr(name)?;
         // SAFETY: the directory descriptor and name are valid; the result is owned immediately.

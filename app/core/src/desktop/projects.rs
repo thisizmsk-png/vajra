@@ -23,6 +23,7 @@ fn project_json(p: &Project) -> Value {
 fn refusal(e: StoreError) -> Value {
     match e {
         StoreError::NotFound => fail("not_found", "project not found"),
+        StoreError::Full => fail("store_full", "there are too many projects (or stray entries) to add another"),
         StoreError::Conflict { current_rev } => {
             json!({"error": "conflict", "detail": "the project changed; reload and try again", "current_rev": current_rev})
         }
@@ -48,7 +49,7 @@ impl App {
 
     pub fn project_list(&self, include_archived: bool) -> Res {
         let l = self.projects.list(include_archived).map_err(refusal)?;
-        Ok(json!({"projects": l.projects.iter().map(project_json).collect::<Vec<_>>(), "skipped": l.skipped}))
+        Ok(json!({"projects": l.projects.iter().map(project_json).collect::<Vec<_>>(), "skipped": l.skipped, "truncated": l.truncated}))
     }
 
     pub fn project_add(&self, path: &str, confirm_nested: bool) -> Res {
@@ -71,7 +72,7 @@ impl App {
     /// What the owner is asked to confirm once: suggested projects for campaigns started before projects existed.
     /// Nothing is written. `done` is true once the owner has confirmed.
     pub fn project_migration_suggest(&self) -> Res {
-        if migrate::is_done(&self.data) {
+        if migrate::is_done(&self.projects) {
             return Ok(json!({"done": true, "groups": [], "unsorted": [], "terminal": []}));
         }
         let (launches, campaigns) = self.migration_inputs()?;
