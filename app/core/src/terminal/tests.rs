@@ -407,6 +407,57 @@ fn close_returns_even_when_a_child_in_another_session_keeps_the_pty_open() {
     unsafe { libc::kill(esc as i32, libc::SIGKILL) };
 }
 
+/// A holder outside the session that never stops printing, as the reader sees it: an endless stream of bytes.
+struct Endless(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Read for Endless {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Fail after a bound so a regression ends the test (with a count that shows it) instead of hanging it.
+        if self.0.fetch_add(1, Ordering::SeqCst) >= 5000 {
+            return Err(std::io::Error::other("test bound"));
+        }
+        buf[..1000].fill(b'x');
+        Ok(1000)
+    }
+}
+
+#[test]
+fn a_reader_still_blocked_after_close_reaped_the_shell_stops_at_its_next_read_and_buffers_nothing() {
+    let f = Fixture::new("detached");
+    let t = f.terminals();
+    let (info, _out) = open_root(&t, &f);
+    let term = t.get(info.id).unwrap();
+    // What `stop` leaves behind when the real reader is still blocked: the shell reaped, so `exited` is set.
+    term.exited.store(true, Ordering::SeqCst);
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window);
+    assert!(reads.load(Ordering::SeqCst) <= 1, "the reader kept consuming after the shell was reaped: {} reads", reads.load(Ordering::SeqCst));
+    assert!(lock(&term.pending.0).buf.len() <= 1000, "output was buffered with no flusher to drain it");
+    t.close(info.id).unwrap();
+}
+
+#[test]
+fn writing_to_an_ended_shell_is_an_error_and_shutdown_of_many_is_one_grace_period() {
+    let f = Fixture::new("ended-write");
+    let t = f.terminals();
+    let (a, oa) = open_root(&t, &f);
+    t.write(a.id, b"exit 0\n").unwrap();
+    assert_eq!(oa.exit(5), Some(Some(0)));
+    assert!(matches!(t.write(a.id, b"x"), Err(TermError::Io(_))));
+    // Four shells that ignore hangup: quitting takes about one grace period, not four.
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let (i, o) = open_root(&t, &f);
+        t.write(i.id, b"trap '' HUP TERM; echo READY$((1+1))\n").unwrap();
+        o.until("READY2", 5);
+        ids.push(i.id);
+    }
+    let start = Instant::now();
+    t.shutdown();
+    assert!(start.elapsed() < Duration::from_millis(1800), "shutdown took {:?}", start.elapsed());
+    assert_eq!(t.count(), 0);
+}
+
 #[test]
 fn the_terminal_module_stays_off_the_bus_the_control_service_mcp_and_agent_sessions() {
     // The wall that keeps agents out: this directory's non-test source may not reach those modules.

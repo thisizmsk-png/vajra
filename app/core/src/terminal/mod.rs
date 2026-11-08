@@ -335,6 +335,9 @@ impl Terminals {
             return Err(TermError::TooLarge);
         }
         let t = self.get(id)?;
+        if t.exited.load(Ordering::SeqCst) {
+            return Err(TermError::Io("the shell has ended".into()));
+        }
         let (m, cv) = &*t.input;
         let mut q = lock(m);
         if q.closed {
@@ -394,9 +397,12 @@ impl Terminals {
         for t in &all {
             t.signal(libc::SIGHUP);
         }
-        for t in &all {
-            stop(t);
-        }
+        // In parallel, so quitting with several stuck shells takes one grace period, not one each.
+        std::thread::scope(|sc| {
+            for t in &all {
+                sc.spawn(|| stop(t));
+            }
+        });
     }
 
     /// Tests: the shell's pid.
@@ -579,6 +585,7 @@ fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize) {
         }
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
+            Ok(_) if t.exited.load(Ordering::SeqCst) => break, // `stop` reaped the shell while this read was blocked (defensive: the tty is normally hung up when the leader exits, but a holder that keeps the PTY open must not make a closed terminal buffer output)
             Ok(n) => {
                 *lock(&t.credit) += n;
                 let (m, cv) = &*t.pending;
