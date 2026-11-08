@@ -55,6 +55,21 @@ describe("Inbox lists what needs you, from every project", () => {
     expect(within(card("Which key")).getByText(S.inbox.kinds.question)).toBeTruthy();
   });
 
+  it("never hides an item whose campaign the project list does not know (a run that just started)", async () => {
+    items = [plan(), question({ id: "q9", campaign: "brand-new-run", title: "Fresh blocker" })];
+    mount();
+    expect(await screen.findByText("Fresh blocker")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: S.projects.unsorted })).toBeTruthy();
+    expect(screen.getByText("Deploy to staging")).toBeTruthy();
+  });
+
+  it("says so, with a retry, when the projects cannot be read: never an empty inbox on a failure", async () => {
+    mount({ list_campaigns: new Error("down") });
+    expect(await screen.findByText(S.inbox.failed)).toBeTruthy();
+    expect(screen.queryByText(S.inbox.empty)).toBeNull();
+    expect(screen.getByRole("button", { name: S.states.retry })).toBeTruthy();
+  });
+
   it("says so when nothing needs you", async () => {
     items = [];
     mount();

@@ -103,6 +103,7 @@ export const S = {
   inbox: {
     title: "Inbox",
     empty: "Nothing needs you",
+    failed: "Could not read your inbox.",
     emptyHint: "Questions, plans to approve and failures from every project appear here.",
     open: "Open",
     approve: "Approve",

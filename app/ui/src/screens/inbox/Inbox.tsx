@@ -11,7 +11,7 @@ import { attentionText } from "../../projects/attention";
 import type { AttentionKind } from "../../projects/attention";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
-import { Empty } from "../states";
+import { Empty, Problem } from "../states";
 
 const SNOOZE_MS = 15 * 60_000;
 /** One blocker as the human saw it: a changed plan, or a different item, is a different key and cannot stay snoozed. */
@@ -88,6 +88,11 @@ export function Inbox() {
   };
 
   const groups = P.projects.map((p) => ({ p, items: live.filter((i) => P.byCampaign[i.campaign] === p.id) })).filter((g) => g.items.length > 0);
+  // An item whose campaign no project owns yet (a run that just started, or a list that lagged the inbox) still shows:
+  // under Unsorted, never dropped. Nothing waiting on you can be hidden by a missing project.
+  const placed = new Set(groups.flatMap((g) => g.items));
+  const loose = live.filter((i) => !placed.has(i));
+  const unsortedGroup = groups.find((g) => g.p.bucket === "unsorted");
 
   const card = (i: InboxItem, isSnoozed: boolean) => {
     const k = keyOf(i);
@@ -143,12 +148,20 @@ export function Inbox() {
       </div>
       <p role="status" className="v-sr">{said}</p>
       {P.state === "ok" && live.length === 0 && later.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
+      {P.state === "error" && <div className="v-board__state"><Problem title={S.inbox.failed} detail={P.error} retry={P.reload} /></div>}
       {groups.map(({ p, items }) => (
         <section key={p.id} className="v-inbox__group" aria-label={p.name}>
           <h2 className="v-inbox__h">{p.name}</h2>
           {items.map((i) => card(i, false))}
+          {p === unsortedGroup?.p && loose.map((i) => card(i, false))}
         </section>
       ))}
+      {loose.length > 0 && !unsortedGroup && (
+        <section className="v-inbox__group" aria-label={S.projects.unsorted}>
+          <h2 className="v-inbox__h">{S.projects.unsorted}</h2>
+          {loose.map((i) => card(i, false))}
+        </section>
+      )}
       {later.length > 0 && (
         <section className="v-inbox__group">
           <button type="button" className="v-inbox__more" aria-expanded={showSnoozed} onClick={() => setShowSnoozed((x) => !x)}>{S.inbox.snoozed(later.length)}</button>
