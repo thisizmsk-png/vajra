@@ -96,7 +96,9 @@ impl Allowlist {
     }
 
     /// Open through `opener` after every check passed. Tests inject an opener
-    /// to record what would have been opened.
+    /// to record what would have been opened. Public only because the integration test (`tests/vajra_state.rs`) is a
+    /// separate crate and cannot see `cfg(test)` items; nothing else calls it.
+    #[doc(hidden)]
     pub fn open_with<T>(
         &self,
         path: &Path,
