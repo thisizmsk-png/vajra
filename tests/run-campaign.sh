@@ -304,6 +304,44 @@ for vd_case in "0:$VSIG" "3:$(printf '%064d' 0)" "2:"; do
 done
 [ ! -s "$WORK/vd-err-0" ]; check "verify-digest: a valid check writes nothing to stderr (no unbound variable from the trap)" $?
 
+# --- the active pointer is per repo: two concurrent runs in different repos never see each other's campaign ---
+if command -v git >/dev/null 2>&1; then
+  RA="$WORK/repo-a"; RB="$WORK/repo-b"; NR="$WORK/no-repo"
+  for r in "$RA" "$RB"; do
+    mkdir -p "$r"; git -C "$r" init -q; git -C "$r" config user.email t@t; git -C "$r" config user.name t
+    git -C "$r" commit -q --allow-empty -m init
+  done
+  mkdir -p "$NR"
+  in_a() { ( cd "$RA" && C "$@" ); }; in_b() { ( cd "$RB" && C "$@" ); }; in_nr() { ( cd "$NR" && C "$@" ); }
+  in_a create run-a --feature "x|in repo a" >/dev/null 2>&1; check "repo A: create" $?
+  in_a active --brief | grep -q "^run-a: "; check "repo A: its banner names run-a" $?
+  [ -z "$(in_b active --brief)" ]; check "repo B: no banner before it has a campaign" $?
+  in_b pass x >/dev/null 2>&1; [ $? -ne 0 ]; check "repo B: a slug-less command does not reach repo A's campaign" $?
+  [ "$(jq -r '.features[0].passes' "$CD/run-a/features.json")" = false ]; check "repo A's campaign untouched by repo B" $?
+  in_b create run-b --feature "y|in repo b" >/dev/null 2>&1; check "repo B: create" $?
+  in_a active --brief | grep -q "^run-a: "; check "repo A: still run-a after repo B created run-b" $?
+  in_b active --brief | grep -q "^run-b: "; check "repo B: banner names run-b" $?
+  in_b pass y >/dev/null 2>&1; check "repo B: slug-less pass goes to run-b" $?
+  [ "$(jq -r '.features[0].passes' "$CD/run-b/features.json")" = true ] && [ "$(jq -r '.features[0].passes' "$CD/run-a/features.json")" = false ]
+  check "repo B: pass changed run-b only" $?
+  [ "$(in_a active)" = run-a ] && [ "$(in_b active)" = run-b ]; check "active names each repo's own campaign" $?
+  # A linked worktree is the same repo: it shares the pointer.
+  git -C "$RA" worktree add -q "$WORK/repo-a-wt" 2>/dev/null
+  ( cd "$WORK/repo-a-wt" && C active --brief ) | grep -q "^run-a: "; check "a worktree of repo A sees run-a" $?
+  [ -z "$(in_nr active --brief)" ]; check "outside any repo: no banner from either repo" $?
+  in_a close >/dev/null 2>&1; check "repo A: slug-less close closes run-a" $?
+  [ -z "$(in_a active --brief)" ] && in_b active --brief | grep -q "^run-b: "; check "closing repo A's campaign leaves repo B's banner" $?
+  in_b resume run-a >/dev/null 2>&1; [ $? -ne 0 ]; check "a closed campaign cannot be resumed" $?
+  # The key is the knowledge ledger's project id: sha256 of the absolute git common dir, first 16 hex.
+  cd_b="$(git -C "$RB" rev-parse --path-format=absolute --git-common-dir)"
+  kb="$(printf '%s' "$cd_b" | openssl dgst -sha256 -r | cut -c1-16)"
+  [ "$(tr -d ' \r\n' < "$CD/.active-$kb")" = run-b ]; check "repo B's pointer is .active-<project id>" $?
+  # A pre-upgrade global pointer is never read: it could name another repo's campaign.
+  printf 'run-b\n' > "$CD/.active"
+  [ -z "$(in_a active --brief)" ] && [ -z "$(in_nr active --brief)" ]; check "the old global .active is ignored" $?
+  rm -f "$CD/.active"
+fi
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

@@ -38,7 +38,6 @@ VAJRA_DIR="${HOME}/.claude/vajra"
 ROOT="${VAJRA_DIR}/campaigns"
 KEY_FILE="${VAJRA_DIR}/.hmac-key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ACTIVE_FILE="${ROOT}/.active"
 SCHEMA="vajra.campaign/v1"
 
 die()   { echo "vajra-campaign: $*" >&2; exit 1; }
@@ -63,6 +62,22 @@ valid_feature_id() {
 
 sha256_file() { openssl dgst -sha256 -r < "$1" | awk '{print $1}'; }
 sha256_str()  { printf '%s' "$1" | openssl dgst -sha256 -r | awk '{print $1}'; }
+
+# The active-campaign pointer is per repo, so two runs in different repos never see each other's campaign
+# (the SessionStart banner, `/vajra continue`, any command run without a slug). The repo is the git common dir
+# of the cwd, so every worktree of one repo shares a pointer; the key is its sha256 (first 16 hex), the same
+# project id the knowledge ledger uses. Outside a repo the key is "global". The pre-repo `.active` file is
+# never read.
+repo_key() {
+  local d
+  d="$(git -c core.fsmonitor= rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || d=""
+  if [ -z "$d" ]; then # git before 2.31: a relative common dir
+    d="$(git -c core.fsmonitor= rev-parse --git-common-dir 2>/dev/null)" || d=""
+    [ -n "$d" ] && { d="$(cd "$d" 2>/dev/null && pwd)" || d=""; }
+  fi
+  if [ -n "$d" ]; then sha256_str "$d" | cut -c1-16; else echo global; fi
+}
+ACTIVE_FILE="${ROOT}/.active-$(repo_key)"
 
 load_key() {
   if [ ! -s "$KEY_FILE" ]; then
