@@ -14,7 +14,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// How long the login shell gets before it is killed and the fallback is used.
@@ -143,62 +142,58 @@ pub fn detect(shell: &Path, home: &Path, timeout: Duration) -> Option<Vec<PathBu
     let mut child = cmd.spawn().ok()?;
     let pid = child.id() as libc::pid_t;
     let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
-    // Detached: a grandchild that keeps the pipe open can only block this thread, never startup.
-    std::thread::spawn(move || pump(&mut stdout, &tx, OUT_CAP));
-    let deadline = Instant::now() + timeout;
-    let mut out: Vec<u8> = Vec::new();
-    let mut found = None;
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match rx.recv_timeout(left) {
-            Ok(chunk) => {
-                let room = OUT_CAP.saturating_sub(out.len());
-                out.extend_from_slice(&chunk[..chunk.len().min(room)]);
-                if let Some(p) = parse(&out) {
-                    found = Some(p);
-                    break;
-                }
-                if out.len() >= OUT_CAP {
-                    break;
-                }
-            }
-            Err(_) => break, // EOF (the shell exited) or the deadline
-        }
-    }
-    // SAFETY: killpg on the group we created for this child; a group that already exited just returns ESRCH.
+    let mut out = Vec::new();
+    let found = collect(&mut stdout, Instant::now() + timeout, OUT_CAP, &mut out);
+    // SAFETY: killpg on the group we created for this child; a group that already exited just returns ESRCH. The
+    // leader is not yet reaped, so its pid (the group id) cannot have been reused.
     unsafe {
         libc::killpg(pid, libc::SIGKILL);
     }
+    drop(stdout); // closes our end, so anything still writing gets EPIPE rather than blocking
     let _ = child.wait();
     found
 }
 
-/// Chunks the reader may queue ahead of the parser; with `CHUNK`-byte chunks the queue holds at most 64 KiB.
-const QUEUE: usize = 16;
 const CHUNK: usize = 4096;
 
-/// Copy at most `cap` bytes from `r` to `tx` in chunks of at most `CHUNK`, then stop reading: the reader never pulls,
-/// allocates or queues more than `cap` bytes however much the shell prints. Returns the bytes pulled from `r`.
-fn pump(r: &mut impl Read, tx: &mpsc::SyncSender<Vec<u8>>, cap: usize) -> usize {
+/// Read `r` on this thread until the markers parse, EOF, `cap` bytes, or `deadline`, whichever comes first. Each read
+/// waits in `poll` for at most the time left, so a shell (or an escaped grandchild) that holds the pipe open and
+/// prints nothing cannot outlast the deadline; no reader thread or queue exists to leak or grow. `out` never holds
+/// more than `cap` bytes: each read asks only for the room left.
+fn collect<R: Read + std::os::fd::AsRawFd>(r: &mut R, deadline: Instant, cap: usize, out: &mut Vec<u8>) -> Option<Vec<PathBuf>> {
     let mut buf = [0u8; CHUNK];
-    let mut pulled = 0;
-    while pulled < cap {
-        let want = CHUNK.min(cap - pulled);
-        match r.read(&mut buf[..want]) {
-            Ok(0) | Err(_) => break,
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let room = cap.saturating_sub(out.len());
+        if left.is_zero() || room == 0 {
+            return None;
+        }
+        let mut pfd = libc::pollfd { fd: r.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let ms = left.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+        // SAFETY: one valid pollfd for an fd `r` owns for the whole call.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if rc == 0 {
+            continue; // the deadline check above ends the loop
+        }
+        // poll said readable (data, EOF or error), so this read does not block.
+        match r.read(&mut buf[..CHUNK.min(room)]) {
+            Ok(0) => return None, // EOF before the markers
             Ok(n) => {
-                pulled += n;
-                if tx.send(buf[..n].to_vec()).is_err() {
-                    break;
+                out.extend_from_slice(&buf[..n]);
+                if let Some(p) = parse(out) {
+                    return Some(p);
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
     }
-    pulled
 }
 
 /// The dirs between the last BEGIN marker and the END after it. Rc files may print anything before it.
@@ -335,37 +330,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A source that counts every byte anyone pulls from it.
-    struct Flood {
-        pulled: usize,
-    }
-    impl Read for Flood {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            buf.fill(b'x');
-            self.pulled += buf.len();
-            Ok(buf.len())
-        }
+    #[test]
+    fn the_reader_never_holds_more_than_the_cap_under_a_flood() {
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        // 8 MiB of noise and then the markers; the writer is cut off with EPIPE once the reader is done.
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let noise = vec![b'x'; 64 * 1024];
+            for _ in 0..128 {
+                if theirs.write_all(&noise).is_err() {
+                    return;
+                }
+            }
+            let _ = theirs.write_all(format!("{BEGIN}/usr/bin{END}").as_bytes());
+        });
+        let mut out = Vec::new();
+        let t = Instant::now();
+        assert_eq!(collect(&mut ours, Instant::now() + Duration::from_secs(10), OUT_CAP, &mut out), None);
+        assert_eq!(out.len(), OUT_CAP, "exactly the cap is kept, never more");
+        assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+        drop(ours);
+        writer.join().unwrap();
     }
 
     #[test]
-    fn the_reader_never_pulls_or_queues_more_than_the_cap() {
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
-        // Drained slowly from another thread, as a busy startup thread would.
-        let drain = std::thread::spawn(move || {
-            let mut got = 0;
-            while let Ok(c) = rx.recv() {
-                assert!(c.len() <= CHUNK);
-                got += c.len();
-                std::thread::sleep(Duration::from_micros(50));
-            }
-            got
-        });
-        let mut src = Flood { pulled: 0 };
-        let n = pump(&mut src, &tx, OUT_CAP);
-        drop(tx);
-        assert_eq!(n, OUT_CAP);
-        assert_eq!(src.pulled, OUT_CAP, "the source is never read past the cap");
-        assert_eq!(drain.join().unwrap(), OUT_CAP, "nothing past the cap is ever queued");
+    fn an_escaped_grandchild_holding_the_pipe_cannot_outlast_the_deadline() {
+        let home = tmp("escape");
+        let sh = home.join("zsh");
+        // perl leaves the shell's process group (so killpg misses it) and keeps stdout open; the shell exits at once.
+        exe(&sh, "#!/bin/sh\n/usr/bin/perl -e 'setpgrp(0, 0); sleep 3' &\nexit 0\n");
+        let t = Instant::now();
+        assert_eq!(detect(&sh, &home, Duration::from_millis(400)), None);
+        assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
