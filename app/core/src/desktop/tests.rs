@@ -1162,6 +1162,7 @@ fn fake_tasks_script(t: &Tmp) {
         if 'slow' in p:\n    import time; time.sleep(30)\n\
         if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
         if 'swap' in p:\n    open(p, 'w').write('{\"a\":\"BBB\"}')\n\
+        import os\nif os.path.exists(p + '.swap-to'):\n    open(p, 'w').write(open(p + '.swap-to').read())\n\
         green = 'green' in p\n\
         try:\n    green = green and 'RED' not in open(p).read()\nexcept OSError:\n    pass\n\
         print(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
@@ -1538,6 +1539,41 @@ fn the_tree_id_leaves_out_the_walkthrough_directory_the_evidence_was_written_und
     fs::create_dir_all(&outside).unwrap();
     let outside_s = outside.to_string_lossy().into_owned();
     assert_eq!(tree(&[&outside_s]), tree(&[]));
+}
+
+#[test]
+fn a_tree_recorded_by_evidence_swapped_in_after_the_green_check_is_never_trusted() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    let rec = |tree: &str| serde_json::to_vec(&json!({"git": {"worktreeTree": tree}})).unwrap();
+    // Evidence that honestly records the tree it was verified on: current.
+    let a = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree A");
+    fs::write(&ev, rec(&a)).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    // A tracked edit makes tree B; the green check ran on evidence for A, and during that check the file is replaced with
+    // unsigned JSON that records B. The verdict is about the bytes read before the check, so B must not be taken from the path.
+    fs::write(repo.join("f.txt"), b"edited").unwrap();
+    let b = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree B");
+    assert_ne!(a, b);
+    fs::write(format!("{}.swap-to", ev.display()), rec(&b)).unwrap();
+    app.evidence_cache.lock().unwrap().clear();
+    let got = status_of(&app, &slug);
+    assert_ne!(got, "pass", "a tree read from a file swapped in after the check must not make the evidence current");
+    assert_eq!(got, "unverified");
+}
+
+#[test]
+fn large_evidence_is_bound_by_a_second_read_and_still_reads_current() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    let a = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree A");
+    // Over the 16 KiB cache-key limit: no key, so the bytes are bound by reading the file again after the check.
+    fs::write(&ev, serde_json::to_vec(&json!({"git": {"worktreeTree": a}, "pad": "x".repeat(40_000)})).unwrap()).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    fs::write(repo.join("f.txt"), b"edited").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
 }
 
 /// A "git" that never answers, to stand in for a slow repo.

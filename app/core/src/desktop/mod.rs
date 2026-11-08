@@ -181,15 +181,18 @@ enum RecordedTree {
 /// `check-evidence` itself reads at most this much of an evidence file (vajra_tasks.py / vajra_kb.py: 5,000,000 bytes).
 const EVIDENCE_READ_MAX: u64 = 5_000_000;
 
-fn evidence_tree(path: &Path) -> RecordedTree {
+/// The evidence file's bytes (a regular file, at most `EVIDENCE_READ_MAX`), or `None` when it cannot be read within that bound.
+fn evidence_snapshot(path: &Path) -> Option<Vec<u8>> {
+    std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path).ok()?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
+    (bytes.len() as u64 <= EVIDENCE_READ_MAX).then_some(bytes)
+}
+
+/// The tree an evidence file's bytes record. Parsed from bytes the caller has already bound to a check's verdict, never from the path.
+fn evidence_tree(bytes: Option<&[u8]>) -> RecordedTree {
     let read = || -> Option<RecordedTree> {
-        std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::Read::take(std::fs::File::open(path).ok()?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
-        if bytes.len() as u64 > EVIDENCE_READ_MAX {
-            return None;
-        }
-        let doc: Value = serde_json::from_slice(&bytes).ok()?;
+        let doc: Value = serde_json::from_slice(bytes?).ok()?;
         Some(match doc.get("git").and_then(|g| g.get("worktreeTree")).and_then(Value::as_str).filter(|t| !t.is_empty()) {
             Some(t) => RecordedTree::Id(t.to_string()),
             None => RecordedTree::None,
@@ -823,6 +826,10 @@ impl App {
         let mut why: HashMap<usize, Value> = HashMap::new();
         let mut repo_of: HashMap<usize, PathBuf> = HashMap::new();
         let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
+        // The evidence bytes each green verdict is bound to: read once per task before its check, and used for the recorded
+        // tree only if the file is shown unchanged around the check (the verdict is about those bytes, not about the path).
+        let mut snaps: HashMap<usize, Vec<u8>> = HashMap::new();
+        let mut bound: HashMap<usize, bool> = HashMap::new();
         {
             let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
             let cached_why = self.evidence_why.lock().unwrap_or_else(|e| e.into_inner());
@@ -839,9 +846,14 @@ impl App {
                     repo_of.insert(i, r.clone());
                 }
                 let k = key(&req);
+                if let Request::CheckEvidence { path, .. } = &req {
+                    if let Some(s) = evidence_snapshot(path) { snaps.insert(i, s); }
+                }
                 let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
                 match hit {
                     Some((v, _)) => {
+                        // A cached verdict belongs to the key's bytes: the tree may be read only from a snapshot equal to them.
+                        bound.insert(i, k.as_ref().is_some_and(|k| snaps.get(&i).is_some_and(|s| *s == k.1)));
                         verdict.insert(i, *v);
                         if !*v {
                             if let Some(w) = k.as_ref().and_then(|k| cached_why.get(k)) {
@@ -917,6 +929,16 @@ impl App {
                 if let Some(w) = w.clone() {
                     why.insert(i, w);
                 }
+                // The script opened the file after the snapshot: the verdict covers the snapshot's bytes only if the file is
+                // the same now (a small file by its key, a large one by a second read).
+                if let Some((_, req, k)) = jobs.iter().find(|j| j.0 == i) {
+                    let same = match (k, snaps.get(&i)) {
+                        (Some(k), Some(s)) => key(req).as_ref() == Some(k) && *s == k.1,
+                        (None, Some(s)) => matches!(req, Request::CheckEvidence { path, .. } if evidence_snapshot(path).as_ref() == Some(s)),
+                        _ => false,
+                    };
+                    bound.insert(i, same);
+                }
                 // Remember it only if the file still holds the bytes the key was made from: the script opened it after the
                 // key was read, so a swapped file would otherwise store this verdict under the wrong content.
                 let Some(k) = jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone()) else { continue };
@@ -970,7 +992,10 @@ impl App {
                         // read the check's verdict stands.
                         let ev = t.get("evidence");
                         let want_head = ev.and_then(|e| e.get("head")).and_then(Value::as_str);
-                        let recorded = ev.and_then(|e| e.get("path")).and_then(Value::as_str).map(|p| evidence_tree(Path::new(p))).unwrap_or(RecordedTree::None);
+                        // Read from the bytes the verdict is bound to, never from the path again: a file swapped after the check cannot supply the tree.
+                        let recorded = if ev.and_then(|e| e.get("path")).is_none() { RecordedTree::None }
+                            else if bound.get(&i) == Some(&true) { evidence_tree(snaps.get(&i).map(Vec::as_slice)) }
+                            else { RecordedTree::Unreadable };
                         let unreadable = matches!(recorded, RecordedTree::Unreadable);
                         let want_tree = match recorded { RecordedTree::Id(t) => Some(t), _ => None };
                         let state = repo_of.get(&i).and_then(|r| repos.get(&(r.clone(), base_of(i)))).and_then(Option::as_ref);
