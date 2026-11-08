@@ -1,0 +1,20 @@
+/* FG-09: one provider per block inside the panel; facts as a quiet two-column list; controls that are off read as disabled with the reason beside them. */
+.v-prov__list { display: flex; flex-direction: column; gap: 0; }
+.v-prov { display: flex; flex-direction: column; gap: var(--space-sm); padding: var(--space-md) 0; border-bottom: 1px solid var(--c-border); }
+.v-prov:first-child { padding-top: 0; }
+.v-prov:last-child { padding-bottom: 0; border-bottom: 0; }
+.v-prov__title { margin: 0; font: 600 13px/20px var(--font-ui); color: var(--c-text); }
+.v-prov__facts { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 6px var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
+.v-prov__facts dt { color: var(--c-text-muted); }
+.v-prov__facts dd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-sm); margin: 0; min-width: 0; color: var(--c-text-secondary); overflow-wrap: anywhere; }
+.v-prov__tested { color: var(--c-text); }
+.v-prov__path { font: 400 12px/17px var(--font-mono); color: var(--c-text-secondary); }
+.v-prov__key { margin: 0; }
+.v-prov__controls { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 2px var(--space-md); margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 17px; }
+.v-prov__controls li { display: contents; }
+.v-prov__controls .v-button { justify-content: flex-start; }
+.v-prov__caps { display: flex; flex-direction: column; gap: var(--space-xs); }
+.v-prov__has { margin: 0; font-size: 12px; line-height: 17px; color: var(--c-text-secondary); }
+.v-prov__run { display: flex; flex-direction: column; gap: var(--space-xs); margin: var(--space-sm) 0; padding: var(--space-sm) var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); }
+.v-crew > .v-prov__run { margin: var(--space-sm) var(--space-lg) 0; }
+.v-home__off { display: block; max-width: 28ch; text-align: right; }
