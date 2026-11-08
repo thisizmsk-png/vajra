@@ -154,3 +154,60 @@ fn resuming_one_session_rotates_only_its_nonce() {
     assert!(matches!(s.resume_session("00000000-0000-4000-8000-000000000000"), Err(ControlError::ControlDisabled)));
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ------------------------------------------------------------ ADR-15 2.3: a Director-General is bound to its project
+
+const PA: &str = "k_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PB: &str = "k_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn a_director_general_sees_and_steers_only_its_own_projects_runs() {
+    let (mut s, dir) = two();
+    s.set_project(A, PA).unwrap();
+    s.set_project(B, PB).unwrap();
+    s.set_generation(PA, 1).unwrap();
+    let list = s.call_tool_for_project(PA, 1, "list_workers", &json!({})).unwrap();
+    let names: Vec<&str> = list["workers"].as_array().unwrap().iter().map(|w| w["worker"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["aaaa0000aaaa0000a"]);
+    for (tool, args) in [
+        ("inspect_worker", json!({"worker": "bbbb0000bbbb0000b"})),
+        ("message_worker", json!({"worker": "bbbb0000bbbb0000b", "text": "x"})),
+        ("stop_worker", json!({"worker": "bbbb0000bbbb0000b"})),
+    ] {
+        assert!(matches!(s.call_tool_for_project(PA, 1, tool, &args), Err(ControlError::WorkerNotFound)), "{tool}");
+    }
+    // `t1` names only its own project's worker.
+    s.call_tool_for_project(PA, 1, "message_worker", &json!({"worker": "t1", "text": "x"})).unwrap();
+    assert_eq!((count(&dir, A, "queue"), count(&dir, B, "queue")), (1, 0));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stale_or_unknown_generation_gets_nothing() {
+    let (mut s, dir) = two();
+    s.set_project(A, PA).unwrap();
+    // No generation was set for the project: nothing the app started can be calling.
+    assert!(matches!(s.call_tool_for_project(PA, 1, "list_workers", &json!({})), Err(ControlError::StaleGeneration)));
+    s.set_generation(PA, 1).unwrap();
+    s.set_generation(PA, 2).unwrap();
+    // A process of the replaced conversation can neither read nor steer.
+    for (tool, args) in [("list_workers", json!({})), ("message_worker", json!({"worker": "t1", "text": "x"}))] {
+        assert!(matches!(s.call_tool_for_project(PA, 1, tool, &args), Err(ControlError::StaleGeneration)), "{tool}");
+    }
+    assert_eq!(count(&dir, A, "queue"), 0);
+    s.call_tool_for_project(PA, 2, "list_workers", &json!({})).unwrap();
+    assert!(matches!(s.call_tool_for_project("k_../x", 2, "list_workers", &json!({})), Err(ControlError::InvalidArgs(_))));
+    assert!(s.set_project(A, "p_not-a-ref").is_err() && s.set_generation("../x", 1).is_err());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_director_general_with_no_live_run_sees_no_workers_and_never_falls_back_to_all() {
+    let (mut s, dir) = two();
+    // Neither session belongs to PA: the scope is empty, not "every session".
+    s.set_generation(PA, 1).unwrap();
+    assert!(s.call_tool_for_project(PA, 1, "list_workers", &json!({})).unwrap()["workers"].as_array().unwrap().is_empty());
+    assert!(matches!(s.call_tool_for_project(PA, 1, "message_worker", &json!({"worker": "aaaa0000aaaa0000a", "text": "x"})), Err(ControlError::ControlDisabled)));
+    assert_eq!(count(&dir, A, "queue") + count(&dir, B, "queue"), 0);
+    let _ = fs::remove_dir_all(&dir);
+}

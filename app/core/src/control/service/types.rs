@@ -57,6 +57,9 @@ pub enum ControlError {
     NotStopped,
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
+    /// A Director-General's tool call carried an older conversation generation than the project's current one: the
+    /// process belongs to a conversation that was replaced, so it may not see or steer anything.
+    StaleGeneration,
     ActionNotFound,
     UnknownTool,
     InvalidArgs(String),
@@ -73,6 +76,7 @@ impl ControlError {
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
+            Self::StaleGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",

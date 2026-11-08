@@ -27,11 +27,30 @@ impl Service {
                     return Err(ControlError::InvalidArgs("run".into()));
                 }
                 let s = self.sessions.values().find(|s| s.run_id == r).ok_or(ControlError::RunNotCurrent)?;
-                Some(s.id.clone())
+                Some(vec![s.id.clone()])
             }
             None if self.sessions.len() > 1 => return Err(ControlError::RunNotCurrent),
             None => None,
         };
+        self.call_scoped(bound, tool, args)
+    }
+
+    /// `call_tool` for a project's Director-General (ADR-15 2.3): `VAJRA_LEAD_PROJECT` and `VAJRA_LEAD_GEN` in its MCP
+    /// config, sent with every request. The call is refused unless `generation` is the project's current one (a process
+    /// from a replaced conversation, or one the app never started, gets nothing), and it then sees and steers **only
+    /// this project's** live run sessions. With none live it sees no workers; it never falls back to "every session".
+    pub fn call_tool_for_project(&mut self, project: &str, generation: u32, tool: &str, args: &Value) -> Result<Value> {
+        if !crate::ids::valid_project_ref(project) {
+            return Err(ControlError::InvalidArgs("project".into()));
+        }
+        if self.generations.get(project) != Some(&generation) {
+            return Err(ControlError::StaleGeneration);
+        }
+        let bound: Vec<String> = self.sessions.values().filter(|s| s.project.as_deref() == Some(project)).map(|s| s.id.clone()).collect();
+        self.call_scoped(Some(bound), tool, args)
+    }
+
+    fn call_scoped(&mut self, bound: Option<Vec<String>>, tool: &str, args: &Value) -> Result<Value> {
         self.last_recorded = None;
         let prev = std::mem::replace(&mut self.scope, bound);
         let out = self.dispatch_tool(tool, args);
