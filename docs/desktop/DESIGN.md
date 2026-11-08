@@ -134,8 +134,8 @@ lights (green, amber, red, teal). Everything else is structure.
 **Signature.** The **action bar**, 40 px, at the foot of every screen. Left: the selection, in words
 ("Backend, t2 Token bucket middleware"). Right: its actions, each with its keys, the primary first
 ("Approve plan ⌘↵"). People learn the shortcuts by reading the bar. It replaces the 24 px status bar
-in UX.md section 2; the run health that sat there (guard, engine, memory) moves to the sidebar foot
-(not built yet). UX.md sections 2 and 3 record the change. The bar lists only actions the screen can
+in UX.md section 2 as the per-screen action row; the frame keeps a quiet 24 px status bar beneath it
+for what is app-wide (runs active, phone, Settings; usage once the core reports it). UX.md sections 2 and 3 record the change. The bar lists only actions the screen can
 run today: Check again on Home, none yet on Crew until Message, Redirect and Stop are wired.
 
 **The primary action is ink.** The one primary button on a view is filled with the text colour
@@ -153,9 +153,8 @@ quiet 34 px band in `surface`; rows are 52 px with two lines where there is a na
 over slug). Times in lists read relative ("2 days ago") with the exact time as the tooltip. Status
 badges are pills: a 10% tint and a 35% edge of the status colour behind status-coloured text.
 
-**Window.** On macOS the title bar is an overlay: the traffic lights sit in the sidebar's top row,
-beside the brand, and that row and every screen head drag the window. Settings sits at the foot of
-the sidebar.
+**Window.** On macOS the title bar is an overlay; the 40 px project tab row is the title bar and
+drags the window. Settings opens from the status bar (⌘,).
 
 **Defaults rejected.**
 - Identical stacked cards for workers → one row per worker, grouped by what it needs from you
@@ -164,7 +163,7 @@ the sidebar.
 - Unicode glyphs as icons (✓, ▲) → one SVG set on a 16 px grid, 1.5 px stroke, `currentColor`.
 - A hero metric block for "X of Y" → the run's own sentence ("3 of 7 criteria pass").
 - A form with a submit button for the ask → a launcher: one field, settings as inline tokens
-  (Base, Rounds, Workers, Guard), Start run at the right; its ⌘↵ hint shows while focus is in the form, where the key works. The sidebar's ⌘1 to ⌘7 hints are out of layout until hover or focus. Neither is drawn in the idle window, and Home sets the check-fix hint in the UI face, so idle loads one typeface (idle memory gate).
+  (Base, Rounds, Workers, Guard), Start run at the right; its ⌘↵ hint shows while focus is in the form, where the key works. The ⌘K hint in the title bar search is out of layout until hover or focus. Neither is drawn in the idle window, and Home sets the check-fix hint in the UI face, so idle loads one typeface (idle memory gate).
 - Separate search and command fields → one ⌘K field for actions, runs and files.
 - An empty state with sample data → the real Vajra crews and the one command that starts each.
 
@@ -305,9 +304,29 @@ paragraph into. Hierarchy is size and weight first, then text-secondary and text
 ## Layout
 
 4 px base: 4, 8, 12, 16, 24, 32. Controls are 24 (small), 28 (rows, buttons, inputs) and 32 px
-(search, palette field, toolbar tabs); hit targets never under 24x24 px. Sidebar 240 px; it holds
-navigation, the runs in the current repository (live run first, with a spinner and a count of what
-needs you) and the health line at its foot. Action bar 40 px. Chat dock 320 px (min 280). Panes are
+(search, palette field, toolbar tabs); hit targets never under 24x24 px.
+
+**The frame (shell B, T4).** A project is the unit; there is no static navigation list.
+- Title bar, 40 px: one tab per project (its initial, a pip per live worker, then the urgent state:
+  "N needs you" as a warning pill, or Stopped / Failed in the status colour), Add project, and the ⌘K
+  field at the right. ⌘1 to ⌘9 switch projects. Campaigns started in a terminal with no folder go to
+  an "Unsorted" tab, last.
+- Project column, 272 px: the folder, the **Director-General** card (the project's orchestrator:
+  which run it leads, the goal, a criteria meter), the workers as two-line rows (name and status,
+  then the task), and the sessions grouped by day with a search field once there are more than four.
+  ⌘B hides it; it starts hidden below 1100 px.
+- Main area: a view tab row (Director-General, Board, Review, then up to four worker tabs that
+  close), the view, a terminal dock slot (empty until the terminal lands), then the 24 px status bar.
+- Inspector, 300 px (360 from 1600 px): the selection's details (a worker's task and worktree, or the
+  campaign's status, criteria and worker counts). ⌘I toggles it; it starts closed below 1440 px and
+  only mounts while open.
+- Board: Backlog, Running, Review, Done, read-only (cards move when work and checks do); a card that
+  needs you carries a "Needs you" pill and an inset warning edge, and "Only what needs you" filters.
+- Routes are `#/p/<project id>/<view>`; the old `#/<view>` links still work.
+- Projects come from one adapter (`src/projects/`) shaped like the core's project contract, so the
+  core's project list replaces it without touching a screen.
+
+Action bar 40 px. Chat dock 320 px (min 280). Panes are
 resizable with a 4 px drag handle (8 px hit area, keyboard resizable with arrow keys when focused);
 min widths: crew list 240, worker pane 480, review pane 280, inbox list 320, detail 400. Minimum
 window 960x600; at that size the dock becomes an overlay sheet (UX.md section 4). The launcher and
@@ -365,8 +384,8 @@ actions with label and keys, primary first; chords bind on the window while it i
 chord without a modifier never fires while typing in a field). The ⌘K command palette is wired into
 the shell: it lists the other screens with their keys, and each screen adds what it can really run
 (`useCommands` in `src/palette.tsx`): Crew adds "Go to worker" for each worker with its status, Home
-adds Check again. Runs, tasks, criteria and files join as their screens land. The sidebar's
-"Search or run ⌘K" button opens the same palette for the mouse.
+adds Check again. Runs, tasks, criteria and files join as their screens land. The title bar's
+"Search or jump" field opens the same palette for the mouse.
 
 `Icon` (`components/ui/base/Icon.tsx`) is the authored set: 16 px grid, 1.5 px stroke, round caps and
 joins, `currentColor`, always `aria-hidden` (the text beside it or the control's label names the

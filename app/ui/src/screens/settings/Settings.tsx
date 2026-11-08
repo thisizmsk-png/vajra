@@ -1,15 +1,32 @@
+// Settings (shell B): a section list inside the page, and the section beside it. Providers holds the checks a run
+// needs (real); Keyboard lists the real shortcuts; Appearance states what the app really does. The other sections say
+// what they will hold and show no controls until they work (FG-08, FG-09, FG-21).
 import { useCallback, useEffect, useState } from "react";
-import { Text } from "../../../components/ui/base";
+import { Kbd, Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
 import { api } from "../../ipc";
-import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import type { Preflight } from "../../ipc";
 import { useCommands } from "../../palette";
+import { toHash, useRoute } from "../../router";
+import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import { PreflightList } from "../PreflightList";
 
-/** The app has no preferences yet; Settings shows the environment checks and where each failing one is fixed. */
-export function Settings() {
+export const SECTIONS = ["providers", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
+type Section = (typeof SECTIONS)[number];
+const isSection = (s: string | undefined): s is Section => !!s && (SECTIONS as readonly string[]).includes(s);
+
+/** The shortcuts the shell really handles (Shell.tsx). One list, so Settings and the keys cannot drift apart silently. */
+export const SHORTCUTS: ReadonlyArray<{ label: string; keys: string[] }> = [
+  { label: S.settings.keys.palette, keys: ["⌘", "K"] },
+  { label: S.settings.keys.project, keys: ["⌘", "1"] },
+  { label: S.settings.keys.column, keys: ["⌘", "B"] },
+  { label: S.settings.keys.inspector, keys: ["⌘", "I"] },
+  { label: S.settings.keys.settings, keys: ["⌘", ","] },
+  { label: S.settings.keys.start, keys: ["⌘", "↵"] },
+];
+
+function useChecks(on: boolean) {
   const [pre, setPre] = useState<Preflight | null>(null);
   const [err, setErr] = useState("");
   const [at, setAt] = useState<Date | null>(null);
@@ -17,28 +34,57 @@ export function Settings() {
     setAt(null);
     api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e))).finally(() => setAt(new Date()));
   }, []);
-  useEffect(run, [run]);
-  useCommands([{ id: "recheck", label: S.settings.recheck, run }]);
+  useEffect(() => { if (on) run(); }, [on, run]);
+  useCommands(on ? [{ id: "recheck", label: S.settings.recheck, run }] : []);
+  return { pre, err, at, run };
+}
+
+export function Settings() {
+  const [route] = useRoute();
+  const section: Section = isSection(route.params.section) ? route.params.section : "providers";
+  const meta = S.settings.sections[section];
+  const checks = useChecks(section === "providers");
   return (
     <div className="v-screen v-settings">
-      <div className="v-screen__body">
-        <div className="v-home__col">
-          <Text as="h1" variant="headline-lg">{S.settings.title}</Text>
-          <Text variant="body" muted className="v-home__lede">{S.settings.lede}</Text>
-          <section aria-labelledby="v-settings-checks" className="v-panel v-settings__checks">
-            <div className="v-panel__bar">
-              <h2 id="v-settings-checks" className="v-panel__title">{S.settings.checks}</h2>
-              <span className="v-panel__end"><CheckedAt at={at} /></span>
-            </div>
-            <div className="v-panel__body">
-              {err && <Problem title={S.settings.failed} detail={err} retry={run} />}
-              {!pre && !err && <LoadingRows rows={4} label={S.states.loading} />}
-              {pre && <PreflightList rows={pre.rows} />}
-            </div>
-          </section>
+      <div className="v-settings__grid">
+        <nav className="v-settings__nav" aria-label={S.settings.sectionsLabel}>
+          {SECTIONS.map((s) => (
+            <a key={s} href={toHash("settings", s === "providers" ? {} : { section: s }, route.project)} className="v-settings__link" aria-current={s === section ? "page" : undefined}>
+              {S.settings.sections[s].title}
+            </a>
+          ))}
+        </nav>
+        <div className="v-screen__body">
+          <div className="v-settings__col">
+            <Text as="h1" variant="headline-lg">{meta.title}</Text>
+            <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
+            {section === "providers" && (
+              <section aria-labelledby="v-settings-checks" className="v-panel v-settings__checks">
+                <div className="v-panel__bar">
+                  <h2 id="v-settings-checks" className="v-panel__title">{S.settings.checks}</h2>
+                  <span className="v-panel__end"><CheckedAt at={checks.at} /></span>
+                </div>
+                <div className="v-panel__body">
+                  {checks.err && <Problem title={S.settings.failed} detail={checks.err} retry={checks.run} />}
+                  {!checks.pre && !checks.err && <LoadingRows rows={4} label={S.states.loading} />}
+                  {checks.pre && <PreflightList rows={checks.pre.rows} />}
+                </div>
+              </section>
+            )}
+            {section === "keyboard" && (
+              <section className="v-panel" aria-label={meta.title}>
+                <ul className="v-settings__keys">
+                  {SHORTCUTS.map((k) => <li key={k.label}><span>{k.label}</span><Kbd keys={k.keys} /></li>)}
+                </ul>
+              </section>
+            )}
+            {section !== "providers" && section !== "keyboard" && section !== "appearance" && (
+              <p className="v-settings__later">{S.settings.later}</p>
+            )}
+          </div>
         </div>
       </div>
-      <ActionBar label={S.settings.barLabel} actions={[{ id: "recheck", label: S.settings.recheck, run }]} />
+      {section === "providers" && <ActionBar label={S.settings.barLabel} actions={[{ id: "recheck", label: S.settings.recheck, run: checks.run }]} />}
     </div>
   );
 }

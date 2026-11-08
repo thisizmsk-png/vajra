@@ -183,6 +183,9 @@ cat > "$SK/scripts/vajra-campaign.sh" <<'S'
 S
 c="$(ctx "/vajra keep going on the auth rewrite")"
 [ "$(echo "$c" | grep -o 'Vajra campaign' | wc -l | tr -d ' ')" = "1" ]; check "already-prefixed campaign line not double-prefixed" $?
+# The pointer is per repo, so the brief runs in the prompt's cwd (the payload's /tmp), not the hook's.
+printf '#!/usr/bin/env bash\n[ "$1 $2" = "active --brief" ] && echo "camp-in-$(pwd -P): 1/2 features passing"\n' > "$SK/scripts/vajra-campaign.sh"
+ctx "/vajra keep going on the auth rewrite" | grep -qF "camp-in-$(cd /tmp && pwd -P): 1/2"; check "campaign brief runs in the payload cwd" $?
 printf '#!/usr/bin/env bash\nexit 1\n' > "$SK/scripts/vajra-campaign.sh"
 ctx "/vajra keep going" | grep -q 'vajra-deliver'; check "failing campaign script tolerated" $?
 rm -f "$SK/scripts/vajra-campaign.sh"
