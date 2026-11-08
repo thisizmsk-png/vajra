@@ -33,6 +33,8 @@ export function StreamTab({ stream }: { stream: string }) {
   const queued = useRef(false);
   /** The `from` of a scroll request that has not been answered yet: a background refresh re-asks for it, never for the old window's start. */
   const nav = useRef<number | null>(null);
+  /** The last numeric request that was answered, and the first row held after it. Asking again for the same `from` while the held window has not moved is a loop (a lost prefix is answered with later rows and `gap`). */
+  const answered = useRef<{ from: number; held0: number } | null>(null);
   /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
   const reconcileRef = useRef<() => void>(() => {});
   const last = useRef(0);
@@ -49,6 +51,7 @@ export function StreamTab({ stream }: { stream: string }) {
       setErr("");
       winRef.current = w;
       if (nav.current === from) nav.current = null;
+      if (from !== null && w.lines.length) answered.current = { from, held0: w.lines[0].seq };
       setWin(w);
       // The view may still lie outside what came back (a short, byte-capped window): look again with the new window.
       setTimeout(() => reconcileRef.current(), 0);
@@ -99,6 +102,8 @@ export function StreamTab({ stream }: { stream: string }) {
     const short = !w.at_end && w.lines.length < WINDOW_ROWS;
     const margin = short ? Math.min(MARGIN, Math.max(0, Math.floor((w.lines.length - VISIBLE) / 2))) : MARGIN;
     const from = Math.max(w.first_seq, s0 - margin);
+    // An answered request that left the held window where it was made no progress: its rows are gone for good (the gap notice says so).
+    if (answered.current?.from === from && answered.current.held0 === held0) return;
     if (from !== held0) { nav.current = from; void fetchWin(from); }
   }, [fetchWin]);
   reconcileRef.current = reconcile;
@@ -116,6 +121,7 @@ export function StreamTab({ stream }: { stream: string }) {
     busy.current = false;
     queued.current = false;
     nav.current = null;
+    answered.current = null;
     followRef.current = true;
     winRef.current = null;
     setFollowing(true);

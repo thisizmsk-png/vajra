@@ -254,4 +254,27 @@ describe("Stream tab: a window served by the core (#45)", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(wins(f).length - n).toBeLessThanOrEqual(1);
   });
+
+  it("stops re-asking for a requested prefix the core has lost for good, and keeps the gap notice", async () => {
+    // The core kept a spill prefix and a later ring with a permanent hole between: a request below 4970 is answered with 4970..5000 and `gap`.
+    const f = await openBackend({
+      stream_window: (a?: Record<string, unknown>) => {
+        const from = a?.from as number | null;
+        const start = from === null || from < 4970 ? 4970 : from;
+        const lost = from !== null && from < 4970;
+        return { lines: lines(start, 5000), head_seq: 5000, first_seq: 1, at_start: false, at_end: true, gap: lost };
+      },
+    });
+    const log = await screen.findByRole("log");
+    await waitFor(() => expect(log.textContent).toContain("out 5000"));
+    scrollTo(2000);
+    await waitFor(() => expect(screen.getByText(S.crew.windowGap)).toBeTruthy());
+    const lostAsks = () => wins(f).filter((c) => typeof c.args?.from === "number" && c.args.from < 4970).length;
+    await new Promise((r) => setTimeout(r, 400));
+    const n = lostAsks();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(lostAsks()).toBe(n);
+    expect(n).toBeLessThanOrEqual(2);
+    expect(screen.getByText(S.crew.windowGap)).toBeTruthy();
+  });
 });
