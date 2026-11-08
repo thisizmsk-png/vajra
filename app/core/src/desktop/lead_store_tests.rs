@@ -46,10 +46,14 @@ fn a_run_is_pinned_to_its_store_project_and_its_subfolders_share_it() {
     std::os::unix::fs::symlink(t.repo(), &link).unwrap();
     live_run(&app, "3c8fad5b-d9cb-469f-a165-70867728950e", "20261106-0930", t.repo().join("src"));
     live_run(&app, "4c8fad5b-d9cb-469f-a165-70867728950e", "20261106-0931", link.join("src"));
+    app.projects.rename(&pinned, "Harbor", None).unwrap();
     for run in [RUN_ID, "20261106-0930", "20261106-0931"] {
         let s = app.lead_status(run).unwrap();
-        assert_eq!((s["available"].as_bool(), s["project_id"].as_str()), (Some(true), Some(pinned.as_str())), "{run}: {s}");
+        assert_eq!((s["available"].as_bool(), s["project_id"].as_str(), s["project_name"].as_str()), (Some(true), Some(pinned.as_str()), Some("Harbor")), "{run}: {s}");
     }
+    let r = app.ask_lead(RUN_ID, "hi").unwrap();
+    assert_eq!((r["project_id"].as_str(), r["project_name"].as_str()), (Some(pinned.as_str()), Some("Harbor")));
+    wait_until("the ask", || idle(&app));
 }
 
 /// 3.1 test 3 (decision Q1): a run in a folder that is not a project gets `not_a_project` with the add action and the
@@ -64,7 +68,8 @@ fn a_run_in_a_folder_that_is_not_a_project_is_refused_and_nothing_runs() {
     let e = app.ask_lead("20261106-0930", "hi").unwrap_err();
     assert_eq!((code(&e), e["action"].as_str(), e["path"].as_str()), ("not_a_project", Some("add_project"), loose.to_str()), "{e}");
     assert!(!e["detail"].as_str().unwrap().contains(loose.to_str().unwrap()), "the folder is not in the detail text");
-    assert_eq!(app.lead_status("20261106-0930").unwrap()["available"], false);
+    let s = app.lead_status("20261106-0930").unwrap();
+    assert_eq!((s["available"].as_bool(), s["error"].as_str(), s["action"].as_str(), s["path"].as_str()), (Some(false), Some("not_a_project"), Some("add_project"), loose.to_str()), "{s}");
     assert!(t.count("ask.count") == 0 && t.ask_states().is_empty(), "nothing was spawned or recorded");
 }
 
@@ -222,4 +227,22 @@ fn another_projects_director_general_cannot_name_this_projects_worker() {
     let e = svc.call_tool_for_project(&other, 1, "stop_worker", &json!({"worker": "bhima", "reason": "x"})).unwrap_err();
     assert!(matches!(e, ControlError::ControlDisabled | ControlError::WorkerNotFound), "{e:?}");
     svc.end_session(SID);
+}
+
+/// Plan item 7: every ask line in the ledger (queued, delivered, done, and a new conversation's) names the project and
+/// the conversation it went to.
+#[test]
+fn every_ask_line_names_the_project_and_its_conversation() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    app.ask_lead(RUN_ID, "one").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    app.new_conversation(RUN_ID).unwrap();
+    app.ask_lead(RUN_ID, "two").unwrap();
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+    let asks: Vec<Value> = t.ledger().into_iter().filter(|r| r["kind"] == "ask").collect();
+    assert!(asks.iter().all(|r| r["project_id"] == p.as_str()), "{asks:?}");
+    let gens: Vec<u64> = asks.iter().map(|r| r["generation"].as_u64().unwrap()).collect();
+    assert_eq!(gens, [1, 1, 1, 2, 2, 2]);
 }

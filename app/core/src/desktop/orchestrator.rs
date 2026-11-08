@@ -297,6 +297,14 @@ impl App {
         Ok(Orchestrator { id: pid.to_string(), root, dir, generation, session })
     }
 
+    /// The store project a stand-in orchestrator's conversation was carried over to (`mapped-to`), if any.
+    pub(super) fn standin_mapped_to(&self, k: &str) -> Option<String> {
+        if !ids::valid_standin_ref(k) {
+            return None;
+        }
+        read_text(&self.orchestrator_dir(k).join(MAPPED_TO)).filter(|p| pc::valid_project_id(p))
+    }
+
     /// The project folder recorded for `pid`'s Director-General, if it has one.
     pub(super) fn orchestrator_root(&self, pid: &str) -> Option<PathBuf> {
         if !ids::valid_project_ref(pid) {

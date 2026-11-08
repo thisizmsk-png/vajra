@@ -287,6 +287,8 @@ pub struct AskRecord<'a> {
     pub state: AskState,
     pub text: Option<&'a str>,
     pub reason: Option<&'a str>,
+    /// The Director-General's project and conversation the ask went to (FG-02c); `None` only in the service's tests.
+    pub project: Option<(&'a str, u32)>,
 }
 
 /// A human decision on a plan item (ADR-14).

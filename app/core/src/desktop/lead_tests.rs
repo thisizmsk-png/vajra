@@ -555,10 +555,8 @@ fn lead_startup_selftest_failclosed() {
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
     assert_eq!(t.count("selftest.count"), 7);
-    // So is a different repo (the generated rules change with it).
-    let other = t.0.join("other-repo");
-    std::fs::create_dir_all(&other).unwrap();
-    lock(&app.runs).values_mut().for_each(|r| r.cwd = other.clone());
+    // So are new rules: another project added to the store is denied, which changes the settings (FG-02c D8).
+    super::super::test_project(&t.data(), &t.home(), &t.0.join("other-repo"));
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
     assert_eq!(t.count("selftest.count"), 8);
@@ -1100,37 +1098,45 @@ fn a_symlinked_lead_transcript_is_not_replayed() {
     assert!(stream_text(&t, &app).is_empty(), "{:?}", stream_text(&t, &app));
 }
 
-/// ADR-15 D8: the Lead of one project is denied every other project's folder, taken from the app's guarded run
-/// records. Its own project (any run of it) and folders that hold it are never denied.
+/// ADR-15 D8 from the store (FG-02c, 3.3 tests 13-14): a Director-General is denied every other project's root, an
+/// archived one too, never its own root or a project root that holds it; a project added later is denied on the next
+/// ask, and the byte-for-byte settings check holds on the new bytes.
 #[test]
 fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     let t = Tmp::new();
     let app = t.app();
-    let other = t.0.join("other");
-    let second = t.0.join("second");
-    for d in [other.join(".git"), second.join(".git"), second.join("sub"), t.repo().join(".git")] {
-        std::fs::create_dir_all(d).unwrap();
+    let (other, archived, inner) = (t.0.join("other"), t.0.join("archived"), t.repo().join("vendor/lib"));
+    let add = |d: &Path| super::super::test_project(&t.data(), &t.home(), d);
+    add(&other);
+    let gone = add(&archived);
+    app.projects.archive(&gone, None).unwrap();
+    add(&inner); // a project inside this one: its folder is another project's
+    let roots = app.other_project_roots(&t.repo()).unwrap();
+    for want in [&other, &archived, &inner] {
+        assert!(roots.contains(want), "{want:?} denied: {roots:?}");
     }
-    for (run, cwd) in [
-        ("20261108-1100", other.clone()),
-        ("20261108-1101", second.clone()),
-        ("20261108-1102", second.join("sub")),
-        ("20261108-1103", t.0.clone()),
-        ("20261108-1104", t.repo()),
-    ] {
-        app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
-    }
-    let roots = app.other_project_roots(&t.repo());
-    assert_eq!(roots.len(), 2, "one folder per other project: {roots:?}");
-    assert!(roots.contains(&other));
-    assert!(roots.iter().any(|r| r.starts_with(&second)));
-    assert!(!roots.iter().any(|r| r == &t.0 || r.starts_with(t.repo())), "never its own project or a folder holding it: {roots:?}");
+    assert!(!roots.contains(&t.repo()), "never its own root: {roots:?}");
+    // A project root that holds this one is not denied (that would deny the repo itself); a sibling of it is.
+    let outer = t.0.join("outer");
+    let held = outer.join("repo2");
+    add(&outer);
+    assert!(!app.other_project_roots(&held).unwrap().contains(&outer));
+    assert!(app.other_project_roots(&t.repo()).unwrap().contains(&outer));
 
     app.ask_lead(RUN_ID, "hi").unwrap();
-    wait_until("the ask", || idle(&app));
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    let rule = |r: &Path| format!("Read(/{}/**)", r.display());
     let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
-    assert!(got.contains(&format!("Read(/{}/**)", other.display())), "{got}");
-    assert!(!got.contains(&format!("Read(/{}/**)", t.0.display())), "the folder holding the repo is not denied");
+    assert!(got.contains(&rule(&other)) && got.contains(&rule(&archived)), "{got}");
+    assert!(!got.contains(&rule(&t.repo())) && !got.contains(&rule(&t.0)), "own root and its parents are not denied");
+    // Added while idle: denied on the next ask.
+    let late = t.0.join("late");
+    add(&late);
+    app.ask_lead(RUN_ID, "again").unwrap();
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    assert!(got.contains(&rule(&late)), "{got}");
+    assert_eq!(t.ask_states().last().map(String::as_str), Some("done:"), "the settings check passed on the new bytes");
 }
 
 // ------------------------------------------------------------ ADR-15 2: one Director-General per project

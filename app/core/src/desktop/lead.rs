@@ -211,7 +211,19 @@ impl App {
         };
         let orch = match self.orchestrator_for_run(&t.run_id, &t.cwd) {
             Ok(o) => o,
-            Err(e) => return off(e.detail().unwrap_or_else(|| e.code().to_string())),
+            Err(e) => {
+                // A store refusal says which, so the window can offer "Add this folder as a project" (decision Q1).
+                let mut v = off(e.detail().unwrap_or_else(|| e.code().to_string()))?;
+                if let LeadError::NotAProject(_) | LeadError::ProjectArchived | LeadError::ProjectMissing = e {
+                    let j = e.to_json();
+                    for k in ["error", "action", "path"] {
+                        if let Some(x) = j.get(k) {
+                            v[k] = x.clone();
+                        }
+                    }
+                }
+                return Ok(v);
+            }
         };
         let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
         // After a restart the bus is empty; bring the history back from the Director-General's own transcript.
@@ -232,7 +244,7 @@ impl App {
         };
         let mut out = json!({
             "available": true, "busy": busy.is_some(), "name": orchestrator::NAME, "state": state, "reason": reason,
-            "project_id": orch.id, "generation": orch.generation, "stream": orch.stream(),
+            "project_id": orch.id, "project_name": self.projects.get(&orch.id).ok().map(|p| p.name), "generation": orch.generation, "stream": orch.stream(),
         });
         if let Some(id) = busy {
             out["ask_id"] = json!(id);
@@ -415,33 +427,27 @@ impl App {
         String::from_utf8(body).ok()?.trim().parse::<i64>().ok().filter(|t| *t > 0)
     }
 
-    /// The folders of the app's other projects, for the Lead's deny rules (ADR-15 D8): the cwd of every run this app
-    /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
-    /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
-    /// ancestor would deny the Lead its own project). One folder per project.
-    pub(super) fn other_project_roots(&self, repo: &Path) -> Vec<PathBuf> {
-        const MAX_OTHER_ROOTS: usize = 256;
-        let own = super::caps::project_key(repo);
-        let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
-            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
-            .unwrap_or_default();
-        runs.sort_unstable_by(|a, b| b.cmp(a));
-        let (mut keys, mut out) = (Vec::new(), Vec::new());
-        for run in runs {
-            if out.len() >= MAX_OTHER_ROOTS {
-                break;
-            }
-            let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            let key = super::caps::project_key(&cwd);
-            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            if key == own || own_real.starts_with(&real) || keys.contains(&key) {
+    /// The folders of the app's other projects, for the Director-General's deny rules (ADR-15 D8, FG-02c): the recorded
+    /// root of every other project in the store, archived ones too (archiving hides a project, it does not make its
+    /// folder readable to others). Never `repo`'s own root, and never a project root that holds `repo` (denying an
+    /// ancestor would deny the Director-General its own project). A store that cannot be listed in full refuses the ask:
+    /// a partial list would leave some project readable.
+    pub(super) fn other_project_roots(&self, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let listing = self.projects.list(true).map_err(|_| LeadError::GuardMissing("the project list could not be read for the deny rules".into()))?;
+        if listing.truncated {
+            return Err(LeadError::GuardMissing("the project list is too large to build the deny rules".into()));
+        }
+        let own = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let mut out: Vec<PathBuf> = Vec::new();
+        for p in listing.projects {
+            let root = PathBuf::from(&p.root);
+            let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            if real == own || own.starts_with(&real) || out.contains(&root) {
                 continue;
             }
-            keys.push(key);
-            out.push(cwd);
+            out.push(root);
         }
-        out
+        Ok(out)
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
@@ -495,7 +501,7 @@ impl App {
         let dir = &orch.dir;
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let others = self.other_project_roots(&orch.root);
+        let others = self.other_project_roots(&orch.root)?;
         let settings = self.write_lead_files(dir, &orch.root, &orch.id, orch.generation, &others)?;
         self.ensure_selftest(bin, &env, dir, &orch.root, &others, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
@@ -525,9 +531,10 @@ impl App {
         let svc = self.control.clone();
         let ledger = {
             let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
+            let (project, generation) = (orch.id.clone(), orch.generation);
             move |state: AskState, text: Option<&str>, reason: Option<&str>| {
                 lock(&svc)
-                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason })
+                    .record_ask(&AskRecord { ask_id: &ask_id, run_id: &run_id, session_id: &session_id, lead_session_id: &lead_sid, state, text, reason, project: Some((&project, generation)) })
                     .map_err(|e| LeadError::Io(e.code().to_string()))
             }
         };
@@ -593,7 +600,7 @@ impl App {
         });
         Ok(json!({
             "ask_id": ask_id, "state": "queued", "stream": orch.stream(), "lead_session_id": lead_sid,
-            "project_id": orch.id, "generation": orch.generation, "name": orchestrator::NAME,
+            "project_id": orch.id, "project_name": self.projects.get(&orch.id).ok().map(|p| p.name), "generation": orch.generation, "name": orchestrator::NAME,
         }))
     }
 

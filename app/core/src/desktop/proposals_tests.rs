@@ -217,3 +217,47 @@ fn a_proposal_names_its_project_by_the_full_recorded_root() {
     assert_eq!(it["project_id"].as_str(), Some(pid.as_str()));
     assert_ne!(super::super::orchestrator::project_ref(&t.0.join("other/harbor-api")).0, pid, "same name, different project");
 }
+
+/// A `propose` line as FG-02b wrote it, for project `project` (a stand-in id from before the store, here).
+fn old_proposal(t: &Tmp, project: &str, n: char) -> String {
+    let item = format!("proposal:a{}", n.to_string().repeat(28));
+    let sha = crate::control::service::proposal_sha(project, "tidy the README", SHA, 1);
+    let line = json!({"v": 1, "ts": "2026-11-08T12:00:00.000Z", "action_id": &item[9..], "kind": "propose", "state": "awaiting_human_confirm", "actor": "lead", "via": "mcp", "source": "lead",
+        "item": item, "project": project, "generation": 1, "ask": "tidy the README", "base": SHA, "rounds": 1, "proposal_sha256": sha});
+    Ledger::open(&t.0.join("data/control/ledger.jsonl")).unwrap().append(&line).unwrap();
+    item
+}
+
+/// FG-02c 3.5 tests 22-24: a proposal names its store project (id, root and the store's name); an archived project's
+/// proposal starts nothing and stays open; one from before the store is dismiss-only and can never start, and is
+/// listed under the project its stand-in's conversation went to.
+#[test]
+fn proposals_belong_to_store_projects_and_old_ones_can_only_be_dismissed() {
+    let t = Tmp::new();
+    let (app, pid) = proposed(&t, &["ours"]);
+    app.projects.rename(&pid, "Harbor", None).unwrap();
+    let it = proposals(&app).into_iter().next().unwrap();
+    assert_eq!((it["project_id"].as_str(), it["project_name"].as_str(), it["actions"].clone()), (Some(pid.as_str()), Some("Harbor"), json!(["start", "dismiss"])), "{it}");
+    // Archived: nothing starts, nothing is recorded, and the proposal is still open.
+    app.projects.archive(&pid, None).unwrap();
+    let e = app.start_proposal_with(it["id"].as_str().unwrap(), it["proposal_sha256"].as_str().unwrap(), |_, _| panic!("must not start")).unwrap_err();
+    assert_eq!(code(&e), "project_archived", "{e}");
+    assert_eq!(states(&t, "approve"), Vec::<String>::new());
+    assert_eq!(proposals(&app).len(), 1, "still open");
+    app.projects.add(&t.repo(), true).unwrap();
+    // From before the store, not carried over: dismiss only, never started.
+    let k = "k_0123456789abcdef0123456789abcdef";
+    let item = old_proposal(&t, k, '1');
+    let old = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap();
+    assert_eq!((old["actions"].clone(), old["pre_store"].as_bool(), old["project_id"].as_str()), (json!(["dismiss"]), Some(true), Some(k)), "{old}");
+    let e = app.start_proposal_with(&item, old["proposal_sha256"].as_str().unwrap(), |_, _| panic!("must not start")).unwrap_err();
+    assert_eq!(code(&e), "proposal_changed");
+    assert_eq!(app.dismiss_proposal(&item).unwrap()["state"], "dismissed");
+    // Carried over (the stand-in's conversation went to this project): listed under it, still dismiss-only.
+    let kdir = t.0.join("data/control/projects").join(k).join("orchestrator");
+    fs::create_dir_all(&kdir).unwrap();
+    fs::write(kdir.join("mapped-to"), &pid).unwrap();
+    let item = old_proposal(&t, k, '2');
+    let old = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap();
+    assert_eq!((old["project_id"].as_str(), old["project_name"].as_str(), old["actions"].clone()), (Some(pid.as_str()), Some("Harbor"), json!(["dismiss"])), "{old}");
+}
