@@ -19,7 +19,7 @@ const HERE = "vajra:terminal-here";
 export const openTerminalHere = (place: Place) => window.dispatchEvent(new CustomEvent<Place>(HERE, { detail: place }));
 
 /** `live` is false for a tab restored from the saved layout: it has no view and no shell until it is first shown. */
-type Tab = { key: number; cwd: string; label: string; kind: Kind; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" } };
+type Tab = { key: number; cwd: string; label: string; kind: Kind; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
 let seq = 0;
 
 // ---- durable layout --------------------------------------------------------------------------------------------------
@@ -196,6 +196,15 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     patch(key, (t) => ({ ...t, state: s }));
     if (s.status === "ended") setNote(S.terminal.announceEnded(tabsRef.current.find((t) => t.key === key)?.label ?? S.terminal.region));
   };
+  // Output in a pane nobody is looking at marks its tab until the tab is shown. (Only the mark: the output itself is
+  // kept by the core, newest 256 KiB, and arrives when the pane is shown.)
+  const onActivity = (key: number) => () => {
+    if (openRef.current && curRef.current === key) return;
+    patch(key, (t) => (t.unread ? t : { ...t, unread: true }));
+  };
+  useEffect(() => {
+    if (open && cur !== null && tabs.find((t) => t.key === cur)?.unread) setTabs((all) => all.map((t) => (t.key === cur ? { ...t, unread: false } : t)));
+  }, [open, cur, tabs]);
   const restart = (key: number) => patch(key, (t) => ({ ...t, attachId: undefined, gen: t.gen + 1, state: { status: "starting" } }));
 
   const onTabKey = (e: React.KeyboardEvent) => {
@@ -220,7 +229,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
             const name = t.state.status === "ended" ? S.terminal.endedTab(who) : who;
             return (
               <span key={t.key} className="v-term__tab" data-active={t.key === cur}>
-                <button role="tab" id={`v-term-tab-${t.key}`} aria-selected={t.key === cur} tabIndex={t.key === cur ? 0 : -1} title={t.cwd} onClick={() => { setCur(t.key); setFocusToken((n) => n + 1); }}>{name}</button>
+                <button role="tab" id={`v-term-tab-${t.key}`} aria-selected={t.key === cur} aria-label={t.unread ? S.terminal.unreadTab(name) : undefined} tabIndex={t.key === cur ? 0 : -1} title={t.cwd} onClick={() => { setCur(t.key); setFocusToken((n) => n + 1); }}>{name}{t.unread && <i className="v-term__dot" aria-hidden="true" />}</button>
                 <button className="v-term__x" aria-label={S.terminal.closeTab(t.label)} onClick={() => close(t.key)}>×</button>
               </span>
             );
@@ -240,7 +249,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         )}
         <Suspense fallback={<span className="v-term__muted">{S.states.loading}</span>}>
           {tabs.filter((t) => t.live).map((t) => (
-            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} />
+            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} onActivity={onActivity(t.key)} />
           ))}
         </Suspense>
         {active?.state.status === "starting" && <p className="v-term__badge v-term__muted">{S.terminal.starting}</p>}

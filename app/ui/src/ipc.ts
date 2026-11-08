@@ -58,6 +58,11 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
     const b = bytes(m);
     if (b) onMsg({ data: b });
     else if (typeof m === "object" && m !== null && "exit" in m) onMsg({ exit: (m as { exit: number | null }).exit });
+    else if (typeof m === "object" && m !== null && "skipped" in m) {
+      const r = m as { skipped: unknown; alt?: unknown };
+      onMsg({ skipped: Number(r.skipped) || 0, alt: typeof r.alt === "boolean" ? r.alt : null });
+    }
+    else if (typeof m === "object" && m !== null && "activity" in m) onMsg({ activity: true });
   }) as Promise<TermInfo>;
 }
 
@@ -84,7 +89,13 @@ export type RunDiag = { stream: string; pid: number };
 export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
 export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
-export type TermMsg = { data: Uint8Array } | { exit: number | null };
+export type TermMsg =
+  | { data: Uint8Array }
+  | { exit: number | null }
+  /** A hidden pane was shown: `skipped` bytes of its output are not coming; `alt` says it entered (true) or left (false) the alternate screen meanwhile. */
+  | { skipped: number; alt: boolean | null }
+  /** New output arrived in a pane that is hidden (the core sends it at most twice a second). */
+  | { activity: true };
 /** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
 export const TERM_WRITE_CHUNK = 32 * 1024;
 
@@ -166,6 +177,8 @@ export const api = {
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),
   termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
   termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
+  /** The pane is shown or hidden; `alt` says it was on the alternate screen when it hid. */
+  termVisible: (id: number, visible: boolean, alt = false) => call<Json>("term_visible", { id, visible, alt }),
   termAck: (id: number, bytes: number) => call<Json>("term_ack", { id, bytes }),
   termClose: (id: number) => call<Json>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),

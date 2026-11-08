@@ -74,6 +74,7 @@ export const S = {
     skipped: (kb: number) => `[skipped ${kb} KB of output]`,
     ended: (code: number | null) => (code === null ? "The shell was stopped." : code === 0 ? "The shell ended." : `The shell ended with code ${code}.`),
     endedTab: (name: string) => `${name} (ended)`,
+    unreadTab: (name: string) => `${name}, new output`,
     restart: "Start a new shell",
     empty: "No terminals are open.",
     emptyHint: "A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it.",

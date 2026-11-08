@@ -12,6 +12,7 @@
 .v-term__bar button:disabled { opacity: 0.5; cursor: default; }
 .v-term__bar button:focus-visible, .v-term__btn:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 .v-term__btn { border: 1px solid var(--c-border-strong); color: var(--c-text); }
+.v-term__dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--c-primary); vertical-align: middle; }
 .v-term__hide { margin-left: auto; }
 .v-term__body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; }
 .v-term__host { height: 100%; }
