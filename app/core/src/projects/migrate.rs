@@ -9,7 +9,7 @@
 //! (started from a terminal) are listed read-only and never adopted. A campaign that cannot be placed stays in
 //! "Imported (unsorted)"; it is never assigned silently.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -172,27 +172,26 @@ pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], c
             Err(e) => return Err(e.into()),
         };
         let project = added.project().clone();
-        let mut have: HashSet<(String, &'static str)> = store
-            .sessions(&project.id)?
-            .sessions
-            .iter()
-            .filter_map(|s| Some((s.run_id.clone()?, kind_name(&s.kind))))
-            .collect();
+        // What an earlier, interrupted confirm already wrote: orchestrator ids by run (so a retry reuses them as the
+        // run's parent) and the runs that already have a run session.
+        let existing = store.sessions(&project.id)?.sessions;
+        let mut orchestrators: HashMap<String, String> =
+            existing.iter().filter(|s| s.kind == SessionKind::Orchestrator).filter_map(|s| Some((s.run_id.clone()?, s.id.clone()))).collect();
+        let mut runs: HashSet<String> = existing.iter().filter(|s| s.kind == SessionKind::Run).filter_map(|s| s.run_id.clone()).collect();
         let mut written = 0;
         for l in launches.iter().filter(|l| g.campaigns.contains(&l.campaign)) {
-            let started = run_started(&l.run_id);
-            let Some(started) = started else { continue };
-            let mut parent = None;
+            let Some(started) = run_started(&l.run_id) else { continue };
             if let Some(lead) = lead_session(data, &l.run_id) {
-                if have.insert((l.run_id.clone(), "orchestrator")) {
+                if !orchestrators.contains_key(&l.run_id) {
                     let id = contract::fresh_id(contract::SESSION_PREFIX).map_err(StoreError::from)?;
                     store.append_session(&session(&project.id, &id, SessionKind::Orchestrator, None, Some(lead), l, &started))?;
-                    parent = Some(id);
+                    orchestrators.insert(l.run_id.clone(), id);
                     written += 1;
                 }
             }
-            if have.insert((l.run_id.clone(), "run")) {
+            if runs.insert(l.run_id.clone()) {
                 let id = contract::fresh_id(contract::SESSION_PREFIX).map_err(StoreError::from)?;
+                let parent = orchestrators.get(&l.run_id).cloned();
                 store.append_session(&session(&project.id, &id, SessionKind::Run, parent, Some(l.session_id.clone()), l, &started))?;
                 written += 1;
             }
@@ -201,14 +200,6 @@ pub fn confirm(store: &Store, data: &Path, guard: &Guard, launches: &[Launch], c
     }
     store.mark_migrated()?;
     Ok(out)
-}
-
-fn kind_name(k: &SessionKind) -> &'static str {
-    match k {
-        SessionKind::Orchestrator => "orchestrator",
-        SessionKind::Run => "run",
-        _ => "other",
-    }
 }
 
 fn session(project: &str, id: &str, kind: SessionKind, parent: Option<String>, native: Option<String>, l: &Launch, started: &str) -> Session {

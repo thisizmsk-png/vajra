@@ -243,3 +243,25 @@ fn confirming_a_repo_and_one_of_its_subfolders_makes_one_project_and_no_nested_r
     let p = plan(&[launch("n", "20261101-0900", S1, &plain)], &["n".to_string()], &t.guard());
     assert_eq!(p.groups[0].root, fs::canonicalize(&plain).unwrap().to_string_lossy());
 }
+
+#[test]
+fn a_retry_after_an_interrupted_confirm_gives_the_missing_run_its_existing_orchestrator() {
+    let t = Tmp::new("recover");
+    let a = t.repo("src/alpha");
+    t.lead("20261101-0900", LEAD);
+    let ls = [launch("c1", "20261101-0900", S1, &a)];
+    let cs = vec!["c1".to_string()];
+    let s = t.store();
+    // The first attempt wrote the orchestrator and then stopped (no run session, no marker).
+    let project = s.add(&a, false).unwrap().project().clone();
+    let orch = contract::fresh_id("s").unwrap();
+    s.append_session(&session(&project.id, &orch, SessionKind::Orchestrator, None, Some(LEAD.into()), &ls[0], "2026-11-01T09:00:00Z")).unwrap();
+    assert!(!is_done(&s));
+    let out = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]).unwrap();
+    assert_eq!((out.projects[0].outcome, out.projects[0].sessions), ("existing", 1));
+    let sessions = s.sessions(&project.id).unwrap().sessions;
+    assert_eq!(sessions.iter().filter(|x| x.kind == SessionKind::Orchestrator).count(), 1, "the orchestrator is reused, not duplicated");
+    let run = sessions.iter().find(|x| x.kind == SessionKind::Run).unwrap();
+    assert_eq!(run.parent.as_deref(), Some(orch.as_str()), "and it is the run's parent");
+    assert!(is_done(&s));
+}

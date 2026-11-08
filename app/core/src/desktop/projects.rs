@@ -11,6 +11,9 @@ use crate::projects::contract::{self, ContractError, Project};
 use crate::projects::identity::IdentityError;
 use crate::projects::store::{Added, StoreError};
 
+/// The largest launch index the migration will read (it streams, so this bounds time, not memory).
+const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
+
 /// `app_info` (`vajra.app_info/1`): which record versions this build reads and writes.
 fn info() -> Value {
     serde_json::to_value(contract::app_info()).unwrap_or_else(|_| json!({}))
@@ -94,7 +97,10 @@ impl App {
     }
 
     fn migration_inputs(&self) -> Result<(Vec<Launch>, Vec<String>), Value> {
-        let launches = runindex::entries(&self.data.join("runs.jsonl"))
+        // The WHOLE index, not its recent tail: the migration is once-only, so it must not see a partial history. An
+        // index that cannot be read completely is refused, and nothing is marked done.
+        let launches = runindex::entries_all(&self.data.join("runs.jsonl"), MAX_INDEX_BYTES)
+            .map_err(|e| fail("launch_index_unreadable", e))?
             .into_iter()
             .map(|e| Launch { campaign: e.campaign, run_id: e.run_id, session_id: e.session_id, cwd: e.cwd })
             .collect();
