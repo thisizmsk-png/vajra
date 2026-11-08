@@ -9,6 +9,9 @@ import { REGISTRY } from "./screens/registry";
 import { S } from "../strings";
 import "./shell.css";
 
+/** In the macOS app the title bar is an overlay (tauri.conf.json): the traffic lights sit over the sidebar's top row. */
+const OVERLAY = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && /Mac/.test(navigator.userAgent);
+
 /** ⌘1 to ⌘7 open the screens in nav order; each link shows its chord. */
 const chord = (i: number) => ["⌘", String(i + 1)];
 const ICON: Record<Screen, IconName> = { home: "home", run: "run", crew: "crew", chat: "chat", inbox: "inbox", history: "history", settings: "settings" };
@@ -43,10 +46,10 @@ export function Shell() {
   const commands = SCREENS.flatMap((s, i) => (s === route.screen ? [] : [{ id: s, label: S.palette.goScreen(S.nav[s]), keys: chord(i), run: () => go(s) }]));
   return (
     <PaletteHost commands={commands}>
-      <div className="v-shell">
+      <div className={OVERLAY ? "v-shell v-shell--overlay" : "v-shell"}>
         <a className="v-skip" href="#v-main" onClick={(e) => { e.preventDefault(); skip(); }}>{S.shell.skip}</a>
         <nav className="v-shell__nav" aria-label={S.shell.navLabel}>
-          <div className="v-shell__brand">{S.shell.brand}</div>
+          <div className="v-shell__brand" data-tauri-drag-region><span className="v-shell__mark" aria-hidden="true" />{S.shell.brand}</div>
           <PaletteButton label={S.shell.search} />
           {SCREENS.map((s, i) => (
             <a key={s} href={toHash(s)} className="v-shell__link" title={S.nav[s]} aria-current={route.screen === s ? "page" : undefined} aria-keyshortcuts={ariaShortcut(chord(i))}>
