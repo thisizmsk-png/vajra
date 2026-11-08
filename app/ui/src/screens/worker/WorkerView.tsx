@@ -1,6 +1,6 @@
 // One worker as its own tab (shell B): its stream, task, changes and controls, from the Crew screen's WorkerPane.
 // The crew tree is read here only to find the worker's node and task; the project column already lists the crew.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/base";
 import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
@@ -29,11 +29,27 @@ export function WorkerView() {
   const { slug = "", id = "", worker = "" } = route.params;
   const [root, setRoot] = useState<CrewNodeDto | null>(null);
   const [err, setErr] = useState("");
+  // Only the newest load for the route's run may set state, on its answer and on its failure (as in Crew): polls and
+  // events for one run can answer out of order, and a load for the run this tab showed before can answer after it
+  // moved. A route change, or leaving the tab, retires whatever is still out.
+  const seq = useRef(0);
+  const routeKey = `${slug}\n${id}`;
+  const shown = useRef(routeKey);
+  shown.current = routeKey;
   const load = useCallback(() => {
     if (!slug || !id) return;
-    api.crew(slug, id).then((n) => { setRoot(n); setErr(""); }, (e) => setErr(problemDetail(e)));
+    const mine = ++seq.current;
+    const asked = `${slug}\n${id}`;
+    const current = () => mine === seq.current && shown.current === asked;
+    api.crew(slug, id).then(
+      (n) => { if (current()) { setRoot(n); setErr(""); } },
+      (e) => { if (current()) setErr(problemDetail(e)); },
+    );
   }, [slug, id]);
-  useEffect(() => { setRoot(null); setErr(""); }, [slug, id]);
+  useEffect(() => {
+    setRoot(null); setErr("");
+    return () => { seq.current++; };
+  }, [slug, id]);
   useEffect(load, [load]);
   useEffect(() => {
     if (!slug || !id) return;

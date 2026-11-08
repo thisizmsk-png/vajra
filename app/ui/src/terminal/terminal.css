@@ -1,0 +1,25 @@
+/* The terminal dock. Colors come from the theme tokens only. */
+.v-term { position: fixed; left: var(--sidebar-w); right: 0; bottom: 0; height: 280px; display: flex; flex-direction: column; background: var(--c-background); border-top: 1px solid var(--c-border); z-index: 20; }
+.v-term[hidden] { display: none; }
+.v-term__sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.v-term__bar { display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 6px; background: var(--c-surface); border-bottom: 1px solid var(--c-border); }
+.v-term__tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; }
+.v-term__tab { display: inline-flex; align-items: center; border-radius: var(--radius-md); flex: none; }
+.v-term__tab[data-active="true"] { background: var(--c-background); }
+.v-term__bar button, .v-term__btn { font: 500 12px/16px var(--font-ui); color: var(--c-text-secondary); background: none; border: 0; border-radius: var(--radius-md); padding: 4px 8px; cursor: pointer; }
+.v-term__tab[data-active="true"] > button:first-child { color: var(--c-text); }
+.v-term__bar button:hover:not(:disabled), .v-term__btn:hover { background: var(--c-accent); }
+.v-term__bar button:disabled { opacity: 0.5; cursor: default; }
+.v-term__bar button:focus-visible, .v-term__btn:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
+.v-term__btn { border: 1px solid var(--c-border-strong); color: var(--c-text); }
+.v-term__hide { margin-left: auto; }
+.v-term__body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; }
+.v-term__host { height: 100%; }
+.v-term__host[hidden] { display: none; }
+.v-term__muted { color: var(--c-text-muted); font: 12px/16px var(--font-ui); }
+.v-term__badge { position: absolute; top: 8px; right: 12px; margin: 0; }
+.v-term__state { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); padding: var(--space-md); font: 13px/18px var(--font-ui); color: var(--c-text); }
+.v-term__state p { margin: 0; }
+.v-term__ended { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: var(--space-md); padding: 6px var(--space-md); background: var(--c-surface-elevated); border-top: 1px solid var(--c-border); font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
+/* An error replaces the view inside the body (the host is full height, so a normal-flow box would fall below the dock). */
+.v-term__state--over { position: absolute; inset: 0; background: var(--c-background); z-index: 1; }

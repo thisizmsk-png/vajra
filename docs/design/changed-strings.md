@@ -166,8 +166,20 @@ Shell B frame (T4, wave 1).
 | VIEW, PROJECT - Vajra | window title | was "SCREEN - Vajra" |
 | Project column / Inspector | status-bar and view-tab toggles (accessible name) | one constant name; aria-pressed carries the state. "Show/Hide …" stays in the tooltip and the palette commands (#86 review) |
 | (removed) "This screen is not built yet.", "Main" nav label, "Vajra" brand | old sidebar | the static nav sidebar is gone |
+| Could not read which folder each run used, so this project's runs cannot be listed. | Home inside a project, campaign list | new; shown with Try again when resume targets fail, instead of an empty project (#86 review) |
 
 "Lead" stays for now (orchestrator, 2026-11-08): the run-scoped "Lead" in the Crew tree, Review and the palette keeps
 its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become
 "Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
 "Director-General"; code and the contract keep `orchestrator`.
+
+Terminal dock (standalone component, `app/ui/src/terminal/`).
+
+| String | Where | Note |
+|---|---|---|
+| Terminal, Terminals, New terminal, Hide terminal, Terminal here | dock bar and the "Terminal here" action | new |
+| The shell ended. / The shell ended with code N. / The shell was stopped. | banner over an ended terminal | new |
+| Start a new shell | button on an ended terminal | new |
+| No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
+| This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
+| The shell is not reading input right now. What you typed was dropped. | transient note | new |
