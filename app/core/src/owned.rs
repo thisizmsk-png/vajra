@@ -147,30 +147,55 @@ pub fn reconcile(entries: &[Owner]) -> Vec<Found> {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Recovery {
-    /// Signalled, and gone within the grace period or ended with SIGKILL.
+    /// Every process of the shell's session is gone (the leader and each job it had).
     Ended,
+    /// Some processes of the session are still running after SIGKILL; `remaining` counts them.
+    Survived { remaining: usize },
     /// Not provably ours (gone, or the pid was reused): nothing was signalled.
     NotOwned,
 }
 
-/// End a recorded shell's session, but only if the record still proves it is ours. SIGHUP first, SIGKILL after `GRACE`,
-/// and each step re-checks the start stamp so a pid that dies and is reused in between is never signalled.
+/// Is this exact process (pid and start stamp) still running? A zombie is not.
+fn running(pid: u32, stamp: u64) -> bool {
+    same_process(pid, stamp) && !crate::procid::is_zombie(pid)
+}
+
+/// End a recorded shell's session, but only if the record still proves it is ours.
+///
+/// Before the first signal the session's members are snapshotted, each with its own start stamp: once a leader that died
+/// on SIGHUP is reaped its pid (and with it the session id) can be reused, so members that ignored SIGHUP (`nohup`,
+/// `trap '' HUP`) could no longer be found. The steps: SIGHUP the session; wait up to `GRACE`; SIGKILL the session while
+/// the leader still holds it; then SIGKILL every snapshotted member that still matches its stamp, whether or not the
+/// leader is gone. `Ended` means none of them is still running; otherwise `Survived` says how many.
 pub fn recover(o: &Owner) -> Recovery {
-    if !same_process(o.pid, o.stamp) {
+    if !running(o.pid, o.stamp) {
         return Recovery::NotOwned;
+    }
+    let mut members: Vec<(u32, u64)> = crate::terminal::kill::session_members(o.pid).into_iter().filter_map(|p| Some((p as u32, start_stamp(p as u32)?))).collect();
+    if !members.contains(&(o.pid, o.stamp)) {
+        members.push((o.pid, o.stamp));
     }
     crate::terminal::kill::signal_all(o.pid, true, libc::SIGHUP);
     let t0 = Instant::now();
-    while t0.elapsed() < GRACE {
-        if !same_process(o.pid, o.stamp) {
-            return Recovery::Ended;
-        }
+    while t0.elapsed() < GRACE && members.iter().any(|&(p, s)| running(p, s)) {
         std::thread::sleep(Duration::from_millis(25));
     }
-    if same_process(o.pid, o.stamp) {
-        crate::terminal::kill::signal_all(o.pid, true, libc::SIGKILL);
+    if running(o.pid, o.stamp) {
+        crate::terminal::kill::signal_all(o.pid, true, libc::SIGKILL); // also reaches members that started after the snapshot
     }
-    Recovery::Ended
+    for &(p, s) in &members {
+        if running(p, s) {
+            unsafe { libc::kill(p as i32, libc::SIGKILL) }; // proven by its stamp just now; never by name or a bare pid
+        }
+    }
+    let t1 = Instant::now();
+    while t1.elapsed() < Duration::from_secs(1) && members.iter().any(|&(p, s)| running(p, s)) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    match members.iter().filter(|&&(p, s)| running(p, s)).count() {
+        0 => Recovery::Ended,
+        remaining => Recovery::Survived { remaining },
+    }
 }
 
 pub fn ledger_path(data: &Path) -> PathBuf {
@@ -262,6 +287,51 @@ mod tests {
             }
             assert!(!alive(p as u32), "member {p} must have ended");
         }
+    }
+
+    /// A leader that dies on SIGHUP with a background job that ignores it (`nohup`, `trap '' HUP`): the leader's pid is
+    /// then free to be reused, and the job is only findable by the snapshot taken before the hangup.
+    fn hup_ignoring_job() -> (Child, Owner) {
+        let mut c = Command::new("sh");
+        c.args(["-c", "(trap '' HUP; exec sleep 300) & wait"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let ch = c.spawn().unwrap();
+        let t0 = Instant::now();
+        while crate::terminal::kill::session_members(ch.id()).len() < 2 && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(150)); // the subshell has exec'd sleep with HUP ignored
+        let o = Owner { pid: ch.id(), stamp: start_stamp(ch.id()).unwrap(), cwd: "/tmp".into() };
+        (ch, o)
+    }
+
+    #[test]
+    fn given_a_job_that_ignores_hangup_when_the_leader_exits_then_the_job_is_killed_and_ended_is_honest() {
+        let (c, o) = hup_ignoring_job();
+        let job: Vec<i32> = crate::terminal::kill::session_members(o.pid).into_iter().filter(|&p| p as u32 != o.pid).collect();
+        assert!(!job.is_empty(), "the background job exists");
+        // After a crash the leader is not our child: something else reaps it at once.
+        let reaper = std::thread::spawn(move || {
+            let mut c = c;
+            c.wait().ok();
+        });
+        assert_eq!(recover(&o), Recovery::Ended);
+        reaper.join().unwrap();
+        for p in job {
+            assert!(!alive(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
+        }
+    }
+
+    #[test]
+    fn a_member_that_survives_is_reported_as_survived_not_ended() {
+        let v = serde_json::to_value(Recovery::Survived { remaining: 2 }).unwrap();
+        assert_eq!(v, serde_json::json!({"survived": {"remaining": 2}}));
+        assert_eq!(serde_json::to_value(Recovery::Ended).unwrap(), serde_json::json!("ended"));
     }
 
     #[test]

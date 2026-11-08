@@ -160,7 +160,7 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
-  recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string }[] }>("recover_orphans", { pids }),
+  recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),

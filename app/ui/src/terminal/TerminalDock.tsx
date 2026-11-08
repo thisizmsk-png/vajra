@@ -262,14 +262,23 @@ const nameOf = (p: string) => base(p);
 function LifeLine({ life, refresh }: { life: Lifecycle | null; refresh: () => void }) {
   const [text, setText] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [recovery, setRecovery] = useState("");
   if (!life) return null;
   const { terminals: t, runs: r } = life.close_keeps;
   const keeps = [t && S.terminal.lifecycle.terminals(t), r && S.terminal.lifecycle.runs(r)].filter(Boolean).join(" and ");
   const leaves = life.terminals.filter((x) => life.archive_leaves.includes(x.id)).map((x) => nameOf(x.cwd)).join(", ");
   const owned = life.found.filter((f) => f.verdict === "owned");
   const reused = life.found.filter((f) => f.verdict === "reused");
-  if (!keeps && !leaves && !owned.length && !reused.length) return null;
+  if (!keeps && !leaves && !owned.length && !reused.length && !recovery) return null;
   const L = S.terminal.lifecycle;
+  // Say what happened: only a result that is exactly "ended" counts as ended.
+  const end = () => {
+    setRecovery("");
+    api.recoverOrphans(owned.map((f) => f.pid)).then(
+      (r) => setRecovery(r.results.every((x) => x.result === "ended") ? "" : typeof r.results.find((x) => typeof x.result === "object") !== "undefined" ? L.stillRunning : L.endFailed),
+      () => setRecovery(L.endFailed),
+    ).finally(refresh);
+  };
   const ask = () => {
     setFailed(false);
     api.diagnosticsPreview().then((d) => setText(d.text), () => (setText(null), setFailed(true)));
@@ -279,6 +288,7 @@ function LifeLine({ life, refresh }: { life: Lifecycle | null; refresh: () => vo
       <p>
         {keeps && L.keeps(keeps, t + r > 1 || (t > 0 && r > 0))} {leaves && L.archive(leaves)}
       </p>
+      {recovery && <p role="alert">{recovery}</p>}
       {(owned.length > 0 || reused.length > 0) && (
         <div data-testid="v-term-found">
           <p>{L.foundTitle}</p>
@@ -287,7 +297,7 @@ function LifeLine({ life, refresh }: { life: Lifecycle | null; refresh: () => vo
             {reused.map((f) => <li key={`${f.pid}-${f.stamp}`}>{L.foundReused(f.pid)}</li>)}
           </ul>
           {owned.length > 0 && (
-            <button className="v-term__btn" onClick={() => void api.recoverOrphans(owned.map((f) => f.pid)).finally(refresh)}>{L.endLeft(owned.length)}</button>
+            <button className="v-term__btn" onClick={end}>{L.endLeft(owned.length)}</button>
           )}
         </div>
       )}

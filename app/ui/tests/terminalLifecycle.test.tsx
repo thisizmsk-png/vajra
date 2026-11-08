@@ -33,8 +33,8 @@ afterEach(() => {
   setTransport();
 });
 
-async function shown(r: unknown) {
-  const f = fakeTerm({ lifecycle: r });
+async function shown(r: unknown, over: Parameters<typeof fakeTerm>[0] = {}) {
+  const f = fakeTerm({ lifecycle: r, ...over });
   setTransport(f.transport);
   render(<TerminalDock defaultPlace={PLACE} />);
   act(() => openTerminalHere(PLACE));
@@ -142,12 +142,45 @@ describe("after a crash", () => {
   });
 
   it("GIVEN owned and reused records WHEN I end them THEN only the owned pid is sent, and the report is asked again", async () => {
-    const f = await shown(report({ found: [owned(4242), reused(777)] }));
+    const f = await shown(report({ found: [owned(4242), reused(777)] }), { recover_orphans: { results: [{ pid: 4242, result: "ended" }] } });
     const before = f.named("lifecycle").length;
     fireEvent.click(await screen.findByRole("button", { name: /end/i }));
     await waitFor(() => expect(f.named("recover_orphans").length).toBe(1));
     expect(f.named("recover_orphans")[0].args).toEqual({ pids: [4242] });
     await waitFor(() => expect(f.named("lifecycle").length).toBeGreaterThan(before));
+  });
+});
+
+describe("recovering leftovers honestly", () => {
+  it("GIVEN a leftover shell WHEN some of its processes survive the kill THEN the dock says so and does not claim it ended", async () => {
+    await shown(report({ found: [owned(4242)] }), { recover_orphans: { results: [{ pid: 4242, result: { survived: { remaining: 1 } } }] } });
+    fireEvent.click(await screen.findByRole("button", { name: /end/i }));
+    expect(await screen.findByText(/still running/i)).toBeTruthy();
+  });
+
+  it("GIVEN survivors WHEN the refreshed report no longer lists the shell THEN the warning stays", async () => {
+    let recovered = false;
+    await shown(report(), {
+      lifecycle: () => report({ found: recovered ? [] : [owned(4242)] }),
+      recover_orphans: () => ((recovered = true), { results: [{ pid: 4242, result: { survived: { remaining: 1 } } }] }),
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /end/i }));
+    await waitFor(() => expect(screen.queryByTestId("v-term-found")).toBeNull());
+    expect(screen.getByText(/still running/i)).toBeTruthy();
+  });
+
+  it("GIVEN a leftover shell WHEN recovery is not possible THEN the dock says so and nothing throws", async () => {
+    await shown(report({ found: [owned(4242)] }), { recover_orphans: new Error("boom") });
+    fireEvent.click(await screen.findByRole("button", { name: /end/i }));
+    expect(await screen.findByText(/could not be ended/i)).toBeTruthy();
+  });
+
+  it("GIVEN a clean recovery WHEN it finishes THEN no warning is shown", async () => {
+    const f = await shown(report({ found: [owned(4242)] }), { recover_orphans: { results: [{ pid: 4242, result: "ended" }] } });
+    fireEvent.click(await screen.findByRole("button", { name: /end/i }));
+    await waitFor(() => expect(f.named("recover_orphans").length).toBe(1));
+    await act(async () => {});
+    expect(screen.queryByText(/still running|could not be ended/i)).toBeNull();
   });
 });
 

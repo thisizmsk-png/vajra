@@ -58,6 +58,8 @@ export const S = {
       foundOwned: (pid: number, cwd: string, members: number) => `pid ${pid} in ${cwd}: Vajra started it and can prove it, ${members === 1 ? "1 process" : `${members} processes`}`,
       foundReused: (pid: number) => `pid ${pid} now belongs to another program, so it is left alone`,
       endLeft: (n: number) => (n === 1 ? "End the leftover shell" : `End ${n} leftover shells`),
+      stillRunning: "Some processes of that shell are still running. They could not be stopped.",
+      endFailed: "The leftover shell could not be ended.",
       preview: "Preview diagnostics",
       previewNote: "Redacted: no tokens, prompts or full home paths. It stays on this computer; nothing is uploaded.",
       copy: "Copy",

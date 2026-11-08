@@ -26,6 +26,29 @@ pub fn start_stamp(pid: u32) -> Option<u64> {
     }
 }
 
+/// Has `pid` ended but not yet been reaped (a zombie)? It holds nothing and can run nothing, so liveness checks that ask
+/// "is it still running" count it as gone. False when the process does not exist or cannot be read.
+pub fn is_zombie(pid: u32) -> bool {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+        got == size && info.pbi_status == 5 // SZOMB
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rsplit_once(')').map(|(_, r)| r.trim_start().starts_with('Z'))).unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
 /// Is `pid` still the very process that started at `stamp`? False for a dead pid, a reused pid, or an unreadable one.
 pub fn same_process(pid: u32, stamp: u64) -> bool {
     start_stamp(pid) == Some(stamp)
