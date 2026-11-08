@@ -82,16 +82,24 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
-/// `Execute approved plan <run_id>.<index>`: the only text `submit_fixed_turn` can type. It can be built only from a
-/// run id that matches `YYYYMMDD-HHMM` and a small index, so it holds no free text.
+/// `S.Action` of `workflows/vajra-deliver.js`: the only words a plan's `action` (and so an approval turn) can hold.
+pub const PLAN_ACTIONS: [&str; 9] = ["push", "pull_request", "deploy", "migration", "data_deletion", "secrets", "spend", "external_message", "other"];
+
+/// `Execute approved plan <run_id>.<index> (<action>)`: the only text `submit_fixed_turn` can type. It can be built only
+/// from a run id that matches `YYYYMMDD-HHMM`, a small index and one of the fixed `PLAN_ACTIONS`, so it holds no free text.
+///
+/// The action is the one in the entry the human approved. The session executes the plan it holds at that index, which
+/// may differ from what the inbox showed (the result file is worker-writable); naming the action makes such a mismatch
+/// visible to the session and in its terminal instead of silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovedPlanTurn(String);
 
 impl ApprovedPlanTurn {
     pub const MAX_INDEX: usize = 99;
 
-    pub fn new(run_id: &str, index: usize) -> Option<Self> {
-        (crate::ids::valid_run_id(run_id) && index <= Self::MAX_INDEX).then(|| Self(format!("Execute approved plan {run_id}.{index}")))
+    pub fn new(run_id: &str, index: usize, action: &str) -> Option<Self> {
+        (crate::ids::valid_run_id(run_id) && index <= Self::MAX_INDEX && PLAN_ACTIONS.contains(&action))
+            .then(|| Self(format!("Execute approved plan {run_id}.{index} ({action})")))
     }
 
     pub fn text(&self) -> &str {

@@ -32,9 +32,9 @@ claim.
 
 | Rank | Reason | Evidence and copy difficulty | Requirements |
 |---|---|---|---|
-| 1 | **Proof per acceptance criterion.** Criteria written before the code by a different agent, an independent Verifier, evidence bound to the exact tree (HEAD, whole-tree id, HMAC), a gate computed in code, fix rounds per failing criterion | Review can't keep up (P18, P12; indirect, since no pain point says "false done"). An engine contract, not a widget: a shallow copy takes about a week; that a faithful one takes months is our inference, not measured. octomux is one step away (one verify command per task), so this is the centre of the product, not a tab | POS-1.1 to POS-1.7 |
+| 1 | **Proof per acceptance criterion.** Criteria written before the code by a different agent, an independent Verifier, evidence bound to the exact tree (HEAD, whole-tree id, HMAC), a gate computed in code, fix rounds per failing criterion | Review can't keep up (P18, P12; indirect, since no pain point says "false done"). An engine contract, not a widget: a shallow copy takes about a week; that a faithful one takes months is our inference, not measured. Competitor D is one step away (one verify command per task), so this is the centre of the product, not a tab | POS-1.1 to POS-1.7 |
 | 2 (weak) | **Earned project knowledge.** Every record has provenance and a trust tier; "verified" needs signed evidence; learned records wait for approval; secrets and injection are refused | P15 (agents forget decisions). Moderate to copy. Drops to a supporting point if POS-3.3 shows no effect | POS-3.1 to POS-3.4 |
-| Killed (revivable) | Memory that stays bounded | P1 is the top pain, but the prototype failed the soak (+31.1 MiB in an hour against 20) and Orca already attributes memory (parity). Comes back only if POS-4.2, 4.4 and 4.6 pass on the real build, and is never a comparison with Runner | POS-4.1 to POS-4.7 (build budgets either way) |
+| Killed (revivable) | Memory that stays bounded | P1 is the top pain, but the prototype failed the soak (+31.1 MiB in an hour against 20) and Competitor F already attributes memory (parity). Comes back only if POS-4.2, 4.4 and 4.6 pass on the real build, and is never a comparison with Competitor A | POS-4.1 to POS-4.7 (build budgets either way) |
 
 **Table stakes.** These were killed as reasons, but missing any of them is a reason to leave, so they are
 required:
@@ -57,9 +57,9 @@ required:
 to 8 sessions in parallel, on an Apple Silicon Mac, in a TypeScript or Python repo with a real test suite
 (evidence is only as good as the checks). Existing Vajra CLI users are the first cohort.
 
-**Banned claims at launch** (no measurement unlocks them without an owner decision): "lighter than Runner",
+**Banned claims at launch** (no measurement unlocks them without an owner decision): "lighter than Competitor A",
 "lightest", "lowest memory", any total-RAM number, "faster startup". The only load comparison (Tauri
-prototype 805.3 MiB against Runner 1,138 MiB at 10 workers, both 5-minute figures) is unequal load and
+prototype 805.3 MiB against Competitor A 1,138 MiB at 10 workers, both 5-minute figures) is unequal load and
 supports no claim.
 
 **Claims we may not make until measured.** Any memory wording (POS-4.4 and POS-4.6 on the real build).
@@ -87,7 +87,7 @@ report (`docs/commands/deliver.md`). Today all of that is one terminal:
   reading `progress.md` files by hand.
 
 The desktop orchestrators that exist (section 7) are mostly fleet dashboards: many independent agents,
-a kanban board, a PR at the end. None we found shows evidence per acceptance criterion (octomux and Agent Orchestrator do loop verify
+a kanban board, a PR at the end. None we found shows evidence per acceptance criterion (Competitor D and Competitor B do loop verify
 or CI fixes, per task), and the two installed on this Mac are Electron apps (bundle inspection), one using about 1.6 GB summed RSS
 across 13 processes while running sessions (one `ps` snapshot; summed RSS over-counts shared pages).
 
@@ -112,7 +112,7 @@ campaigns, a task graph, a verified knowledge ledger) to put a product over it.
 | J4 Run view | Follow the phase timeline (route, recall, understand, plan, execute, verify, fix, deliver), the task graph with owners, and every acceptance criterion with pass/fail evidence | US-4.1 to US-4.3 |
 | J5 Approvals inbox | See every plan waiting for them (push, PR, deploy) and questions from the run; approve or reject | US-5.1 to US-5.3 |
 | J6 History and knowledge | Browse past campaigns and delivery reports; search the knowledge ledger | US-6.1, US-6.2 |
-| J7 Project memory | See what the system proposes to learn (rules, lessons, routes) with the evidence behind it; approve it with Touch ID, edit or reject it; see which rules apply where (which rules primed which session is post-MVP, E10); search everything locally. Built on the ledger and Atman, no second store (ADR-12). claude-mem: a one-shot import later (ADR-13) | US-7.1 to US-7.4 |
+| J7 Project memory | See what the system proposes to learn (rules, lessons, routes) with the evidence behind it; approve it with Touch ID, edit or reject it; see which rules apply where (which rules primed which session is post-MVP, E10); search everything locally. Built on the ledger and Atman, no second store (ADR-12). Competitor M: a one-shot import later (ADR-13) | US-7.1 to US-7.4 |
 
 Names: the app shows generic role names (Lead, Architect, Backend, Frontend, Verifier, Security, ...),
 not the engine's agent ids. The engine id is visible only in a worker's inspector. Mapping table:
@@ -170,21 +170,21 @@ confirmed from a primary source; "?" means not found.
 
 | Tool | Model | Platforms | Agents | Worktree per task | Approval inbox | Diff review | Mobile / push | Stack | License | Status (2026-11-05) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Runner (yicheng47/runner) | Crew in split terminal panes; the `lead` flag is now "a retained storage field ignored by current code", so peers in practice | macOS arm64, Windows x64, Linux beta; no Intel Mac | Claude Code, Codex, Copilot CLI, pi (README) | None found in README or architecture doc | Human-question cards (`runner ask`) | No diff viewer; a reviewer agent | Desktop notifications; remote control in private beta | Native Rust: Zed's GPUI + `alacritty_terminal`, a `runnerd` daemon, Sparkle updater | MIT | 460 stars, active, alpha |
-| Agent Orchestrator (OrchestratorInc/agent-orchestrator) | Fleet dashboard plus a per-project main agent that plans and spawns workers | Desktop (macOS, Windows, Linux), iPhone, Android | "35+" (claimed, unverified) | Yes, one per worker | Yes, in chat ("approve the request") | Files view; PR and CI loop | iPhone and Android apps | **Electron** desktop (bundle: Electron Framework, Squirrel), Go core, bundled daemon | Apache-2.0 | 14.1k stars, v0.14.10-nightly installed |
-| Vibe Kanban (BloopAI/vibe-kanban) | Kanban issues, then workspaces with a branch, terminal and dev server | Local web UI via `npx`, self-host via Docker | Claude Code, Codex, Gemini CLI, Copilot, Amp, Cursor, OpenCode, Droid, CCR, Qwen Code | Yes | ? | Yes, inline comments sent to the agent | ? | Rust backend + TypeScript web UI | Apache-2.0 | 28.6k stars; README: "Vibe Kanban is sunsetting" |
-| octomux (ShreyPaharia/octomux) | Kanban of the fleet; orchestrator tree view; a verify command looped until exit 0 | macOS, Linux; needs Node 18+ and tmux | Claude Code (others unverified) | Yes | One inbox for permission prompts | In-app diff review | ? | **Electron** + React + xterm (package manifest) | MIT | 25 stars, last push 2026-09-18 |
-| Pragma (pragma-sh/pragma) | Agent board from prompt to review to PR; one prompt fanned out to several attempts | macOS (arm64, Intel), Windows, Linux; companion iOS, Android, web | Claude Code, Codex, OpenCode, Cursor and more | Yes | ? | Yes, plus staging, commit, push, PRs | Companion apps over your own tunnel | **Tauri v2 + Rust** host, OS webview | AGPL-3.0 | 25 stars, early |
-| Orca (stablyai/orca) | Worktree-per-agent IDE; fan one prompt across agents and merge the winner | macOS, Windows, Linux; iOS and Android companion | Codex, Claude Code, OpenCode, Pi and more | Yes | ? | Yes, annotate diff lines and send back | Mobile companion | **Electron** (bundle: Electron Framework, Squirrel), TypeScript; embedded browser and computer use | MIT | 116k stars, v1.4.249 installed |
-| Vicoa (vicoa-ai/vicoa) | Team of agents driven from desktop, web or phone | Electron desktop, web, Android | claude, codex, hermes, pi and more | Yes, parallel worktrees (README list) | Reply and approve remotely (unverified) | ? | Mobile apps, push notifications | Electron + Python daemon, PostgreSQL | AGPL-3.0 | 531 stars |
-| wmux (openwong2kim/wmux) | Terminal multiplexer with a fleet list (needs you, ready to review, running, idle) | Windows, macOS, Linux | Claude Code, Codex, Gemini and more | Worktree fan-out | Spawn requests wait for approval | Git page with diff and CI logs | ? | Electron + xterm.js, TypeScript | MIT | 448 stars |
-| Ghostex (maddada/Ghostex) | Terminal workspace for agents | macOS (others unverified) | Many (unverified) | ? | ? | Annotations sent back to the agent | Mobile apps | Native Rust (GPUI, Ghostty terminals) but embeds CEF and code-server | MIT | 1.6k stars |
-| Traycer (traycerai/traycer) | Parallel sessions, agent-to-agent loops, shareable boards | macOS (arm64, Intel), Windows, Linux | Bring your own agent | ? | ? | ? | Cross-device sync (unverified) | TypeScript (+ Swift); framework unverified | MIT | 1.65k stars |
-| ai-maestro (23blocks-OS/ai-maestro) | Multi-machine dashboard, signed agent-to-agent messaging, memory search | macOS, Linux, Windows (WSL2) | "Any agent" | ? | ? | ? | Push via its messaging protocol (unverified) | TypeScript web dashboard at `localhost:23000`, CozoDB | MIT | 845 stars |
+| Competitor A | Crew in split terminal panes; the `lead` flag is now "a retained storage field ignored by current code", so peers in practice | macOS arm64, Windows x64, Linux beta; no Intel Mac | Claude Code, Codex, Copilot CLI, pi (README) | None found in README or architecture doc | Human-question cards (an ask command) | No diff viewer; a reviewer agent | Desktop notifications; remote control in private beta | Native Rust: Zed's GPUI + `alacritty_terminal`, its own daemon, Sparkle updater | MIT | 460 stars, active, alpha |
+| Competitor B | Fleet dashboard plus a per-project main agent that plans and spawns workers | Desktop (macOS, Windows, Linux), iPhone, Android | "35+" (claimed, unverified) | Yes, one per worker | Yes, in chat ("approve the request") | Files view; PR and CI loop | iPhone and Android apps | **Electron** desktop (bundle: Electron Framework, Squirrel), Go core, bundled daemon | Apache-2.0 | 14.1k stars, v0.14.10-nightly installed |
+| Competitor C | Kanban issues, then workspaces with a branch, terminal and dev server | Local web UI via `npx`, self-host via Docker | Claude Code, Codex, Gemini CLI, Copilot, OpenCode, CCR, Qwen Code | Yes | ? | Yes, inline comments sent to the agent | ? | Rust backend + TypeScript web UI | Apache-2.0 | 28.6k stars; README: "Competitor C is sunsetting" |
+| Competitor D | Kanban of the fleet; orchestrator tree view; a verify command looped until exit 0 | macOS, Linux; needs Node 18+ and tmux | Claude Code (others unverified) | Yes | One inbox for permission prompts | In-app diff review | ? | **Electron** + React + xterm (package manifest) | MIT | 25 stars, last push 2026-09-18 |
+| Competitor E | Agent board from prompt to review to PR; one prompt fanned out to several attempts | macOS (arm64, Intel), Windows, Linux; companion iOS, Android, web | Claude Code, Codex, OpenCode and more | Yes | ? | Yes, plus staging, commit, push, PRs | Companion apps over your own tunnel | **Tauri v2 + Rust** host, OS webview | AGPL-3.0 | 25 stars, early |
+| Competitor F | Worktree-per-agent IDE; fan one prompt across agents and merge the winner | macOS, Windows, Linux; iOS and Android companion | Codex, Claude Code, OpenCode, Pi and more | Yes | ? | Yes, annotate diff lines and send back | Mobile companion | **Electron** (bundle: Electron Framework, Squirrel), TypeScript; embedded browser and computer use | MIT | 116k stars, v1.4.249 installed |
+| Competitor G | Team of agents driven from desktop, web or phone | Electron desktop, web, Android | claude, codex, hermes, pi and more | Yes, parallel worktrees (README list) | Reply and approve remotely (unverified) | ? | Mobile apps, push notifications | Electron + Python daemon, PostgreSQL | AGPL-3.0 | 531 stars |
+| Competitor H | Terminal multiplexer with a fleet list (needs you, ready to review, running, idle) | Windows, macOS, Linux | Claude Code, Codex, Gemini and more | Worktree fan-out | Spawn requests wait for approval | Git page with diff and CI logs | ? | Electron + xterm.js, TypeScript | MIT | 448 stars |
+| Competitor I | Terminal workspace for agents | macOS (others unverified) | Many (unverified) | ? | ? | Annotations sent back to the agent | Mobile apps | Native Rust (GPUI, Ghostty terminals) but embeds CEF and code-server | MIT | 1.6k stars |
+| Competitor J | Parallel sessions, agent-to-agent loops, shareable boards | macOS (arm64, Intel), Windows, Linux | Bring your own agent | ? | ? | ? | Cross-device sync (unverified) | TypeScript (+ Swift); framework unverified | MIT | 1.65k stars |
+| Competitor K | Multi-machine dashboard, signed agent-to-agent messaging, memory search | macOS, Linux, Windows (WSL2) | "Any agent" | ? | ? | ? | Push via its messaging protocol (unverified) | TypeScript web dashboard at `localhost:23000`, CozoDB | MIT | 845 stars |
 
-### Runner, studied closest
+### Competitor A, studied closest
 
-Runner is the nearest to our model (a crew of CLI agents, each in a real terminal) and the strongest native
+Competitor A is the nearest to our model (a crew of CLI agents, each in a real terminal) and the strongest native
 competitor. From its README and `docs/arch/arch.md`:
 
 - **Coordination is a file bus.** One append-only NDJSON event log per mission, appended with `flock` from
@@ -197,29 +197,29 @@ competitor. From its README and `docs/arch/arch.md`:
 - **No worktree isolation** found in its docs, so agents share a checkout; Vajra gives every writer its own
   worktree and merges one integration branch.
 - **Memory:** the only claim is a design target (a handful of missions, about 10 live sessions, "tens of MB
-  each only when scrollback is full"); no published measurement. GPUI renders without a webview. Runner is
+  each only when scrollback is full"); no published measurement. GPUI renders without a webview. Competitor A is
   measured by POS-4.2 for our own budgets; we don't compare ourselves with it in marketing.
 
-### Agent Orchestrator: complement, don't duplicate
+### Competitor B: complement, don't duplicate
 
-The owner already uses Agent Orchestrator for fleets of independent tasks across projects, with a main
+The owner already uses Competitor B for fleets of independent tasks across projects, with a main
 agent per project, phone apps and the task to PR to CI to merge lifecycle. Vajra Desktop does none of that.
-It goes deep on one thing AO treats as a black box: what happens inside a single Vajra delivery (criteria,
+It goes deep on one thing Competitor B treats as a black box: what happens inside a single Vajra delivery (criteria,
 task graph, verify and fix rounds, evidence, campaign checkpoints, the knowledge ledger). The two fit
-together: an AO worker can run `/vajra <ask>`, and Vajra Desktop is where you watch and steer that run and
-approve its plan; AO then carries the approved branch through PR and CI.
+together: a Competitor B worker can run `/vajra <ask>`, and Vajra Desktop is where you watch and steer that run and
+approve its plan; Competitor B then carries the approved branch through PR and CI.
 
 ### Where Vajra Desktop differs
 
 | | Vajra Desktop | Others |
 |---|---|---|
-| Evidence per acceptance criterion | Each criterion shows the command, exit code, signed evidence file and commit; no evidence means "no evidence", never a pass | None found. octomux loops one `--verify` command until exit 0; Runner uses a reviewer agent; AO, Orca and Pragma gate on CI and PRs |
-| Verify and fix rounds | Up to 3 rounds, per failing criterion: only that criterion's task reruns, and the report names what is still failing | Parity on the loop itself: octomux loops one verify command until exit 0; AO sends failed CI back to the owning worker. Only the per-criterion part is ours |
+| Evidence per acceptance criterion | Each criterion shows the command, exit code, signed evidence file and commit; no evidence means "no evidence", never a pass | None found. Competitor D loops one `--verify` command until exit 0; Competitor A uses a reviewer agent; Competitor B, Competitor F and Competitor E gate on CI and PRs |
+| Verify and fix rounds | Up to 3 rounds, per failing criterion: only that criterion's task reruns, and the report names what is still failing | Parity on the loop itself: Competitor D loops one verify command until exit 0; Competitor B sends failed CI back to the owning worker. Only the per-criterion part is ours |
 | The guard | Every tool call passes Vajra's fail-closed guard; protected actions come back as plans; the app adds no bypass | Permission prompts are passed through or answered in-app |
-| A crew you can talk to | Ask the Lead about any worker; it messages, redirects or stops workers through a documented, audited channel, never by typing into a terminal | AO has a main agent you chat with (mechanism not confirmed); Runner injects into PTYs without audit; Traycer and ai-maestro have agent-to-agent messaging |
-| Memory | Bounded and attributed: the app and each run's agents shown separately (AC-2.1.4, POS-4.7); budgets in NFR-PERF; no comparative claim | Parity on attribution: Orca has a Resource Manager. Measured RSS: Runner 201.3 MiB and Orca 1,061.5 MiB idle (single busy-machine runs) |
+| A crew you can talk to | Ask the Lead about any worker; it messages, redirects or stops workers through a documented, audited channel, never by typing into a terminal | Competitor B has a main agent you chat with (mechanism not confirmed); Competitor A injects into PTYs without audit; Competitor J and Competitor K have agent-to-agent messaging |
+| Memory | Bounded and attributed: the app and each run's agents shown separately (AC-2.1.4, POS-4.7); budgets in NFR-PERF; no comparative claim | Parity on attribution: Competitor F has a Resource Manager. Measured RSS: Competitor A 201.3 MiB and Competitor F 1,061.5 MiB idle (single busy-machine runs) |
 
-Memory is a budget, not a positioning claim. Pragma shares our stack (Tauri v2 + Rust) and Runner is native
+Memory is a budget, not a positioning claim. Competitor E shares our stack (Tauri v2 + Rust) and Competitor A is native
 GPUI, so a low footprint can't rest on the stack choice alone. It has to come from the design: no embedded browser, no database server, workers
 read from transcripts instead of one PTY each, bounded buffers, and virtualized views. And it has to be
 measured, not claimed.
@@ -230,7 +230,7 @@ A fleet kanban, issue-tracker intake, PR, CI and merge automation, mobile apps a
 mesh, cloud sync and shared boards, an embedded browser or IDE, fan-out of one prompt to competing
 attempts, agent breadth beyond Claude Code and Codex CLI (Gemini CLI and OpenCode come post-MVP, through the same
 adapter interface), and account or usage switching. Each belongs to a tool above,
-mostly to Agent Orchestrator, which the owner already runs.
+mostly to Competitor B, which the owner already runs.
 
 No competitor's name, branding, UI, copy or assets are used in Vajra Desktop.
 
@@ -279,7 +279,7 @@ need the owner's own Claude Code login; row 15's choice is the owner's.
 ## 8. Non-goals (deliberately not built)
 
 - **A fleet kanban or issue-tracker intake.** Vajra plans its own task graph from one ask.
-- **PR, CI and merge lifecycle.** Agent Orchestrator does this well and the owner already uses it. Vajra
+- **PR, CI and merge lifecycle.** Competitor B does this well and the owner already uses it. Vajra
   Desktop stops at "approved plan handed to Claude Code".
 - **Mobile apps, push to phone, multi-machine, cloud sync, team sharing.**
 - **Agents beyond Claude Code and Codex CLI in the MVP.** One small agent-adapter interface in the core
@@ -314,9 +314,9 @@ The canonical table (targets, prototype measurements and what is still unmeasure
 - **Idle fails:** 220.2 MiB against a 200 MiB ceiling.
 - **Hourly growth fails:** 31.1 MiB against 20 MiB.
 - **Unmeasured:** marginal cost per worker, render time, cold boot and physical footprint.
-- **Like-for-like load:** at 10 workers the Tauri prototype measured 805.3 MiB and Runner 1,138 MiB, both
-  5-minute figures. That comparison isn't matched (Runner renders 10 terminals), so it supports no claim.
-- **Agent Orchestrator** was uncontrolled (it hosted the measurement).
+- **Like-for-like load:** at 10 workers the Tauri prototype measured 805.3 MiB and Competitor A 1,138 MiB, both
+  5-minute figures. That comparison isn't matched (Competitor A renders 10 terminals), so it supports no claim.
+- **Competitor B** was uncontrolled (it hosted the measurement).
 
 The owner authorized provisional Tauri work. Performance approval is withheld by both models.
 
@@ -387,13 +387,13 @@ Threat model and tests: [spec/design.md](spec/design.md#8-security-consideration
 | 2026-11-05 | Q13 approved: engine change E7 (archive each delivery's evidence bundle and executed setup list before cleanup), additive, under vidura review, every existing test passing | owner, via orchestrator | tasks E7 (vajra-6 engine work); unblocks slice 1 |
 | 2026-11-05 | Q11 approved: E5 (steer nonce and one sentence in task briefs only), the wider E2, E4 and E6, all additive, each under bhishma or vidura review, with every existing guard test passing | owner, via orchestrator | tasks M1 |
 | 2026-11-05 | H0 rule: if memory is over budget at the end of M3, the owner chooses between a written budget change, a stack change or a delay | owner, via orchestrator | tasks H0 |
-| 2026-11-05 | Agent-adapter interface with Codex CLI; read-only Conductor import; billing hard rules | owner | ADR-10, ADR-11, section 11 |
+| 2026-11-05 | Agent-adapter interface with Codex CLI; read-only import of existing worktrees; billing hard rules | owner | ADR-10, ADR-11, section 11 |
 | 2026-11-05 | Q14 approved: E9, Touch ID approval in the app (LocalAuthentication plus a single-use approval file in the protected data dir, checked by the engine), under the conditions in AC-7.1.8; bhishma reviews, the stage D red team attacks it | owner, via orchestrator | ADR-12, E9, AC-7.1.4, AC-7.1.8 |
-| 2026-11-05 | New feature: project memory that learns with human approval (J7), built on the ledger and Atman; MVP is inbox, approve, rules view and search; claude-mem import later | owner, via orchestrator | US-7.1 to US-7.4, ADR-12, ADR-13 |
+| 2026-11-05 | New feature: project memory that learns with human approval (J7), built on the ledger and Atman; MVP is inbox, approve, rules view and search; Competitor M import later | owner, via orchestrator | US-7.1 to US-7.4, ADR-12, ADR-13 |
 | 2026-11-05 | Model routing: main components on Opus 5.5 (bhima, nakula, arjuna, bhishma); lighter items on Sonnet 5.5 (sepoys, abhimanyu); search and audit on Haiku; GPT 6.1 Sol reviews every PR | owner | tasks.md owners |
 
-Conductor import is backed by the clearest live demand in the research: P6 (tool shutdown or rug-pull, 13
-sources) includes displaced Conductor users asking in public for an alternative (`vajra-4/pain-points.md`).
+Import of existing worktrees is backed by the clearest live demand in the research: P6 (tool shutdown or rug-pull, 13
+sources) includes displaced users of a shut-down tool asking in public for an alternative (`vajra-4/pain-points.md`).
 
 ### Open questions
 

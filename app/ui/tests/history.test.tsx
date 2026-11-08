@@ -118,6 +118,16 @@ describe("History report and integrity (S6)", () => {
     expect(await screen.findByText(S.history.integrityFailed)).toBeTruthy();
   });
 
+  it("opens the report in a pane beside the table, and closes it again", async () => {
+    await open({ read_report: { slug: "a-camp", integrity: "ok", text: "body" } });
+    const pane = await screen.findByRole("complementary", { name: S.history.panel });
+    expect(await screen.findByRole("region", { name: S.history.reportTitle("a-camp") })).toBeTruthy();
+    expect(pane.textContent).toContain("a-camp");
+    fireEvent.click(screen.getByRole("button", { name: S.history.closeReport }));
+    expect(screen.queryByRole("complementary", { name: S.history.panel })).toBeNull();
+    expect(screen.getByRole("table")).toBeTruthy();
+  });
+
   it("renders the stored report as text with control characters escaped", async () => {
     const f = await open({ read_report: { slug: "a-camp", integrity: "ok", text: "Branch b\u0000\u001b[31mred\nline 2\ttab" } });
     const pre = await screen.findByRole("region", { name: S.history.reportTitle("a-camp") });
@@ -162,6 +172,28 @@ describe("History report and integrity (S6)", () => {
     await waitFor(() => expect(within(rowOf("a-camp")).getByText(S.history.integrityFailed)).toBeTruthy());
     expect(screen.getByRole("region", { name: S.history.reportTitle("b-camp") }).textContent).toContain("b body");
     expect(screen.queryByText(S.history.reportFailed)).toBeNull();
+  });
+
+  it.each([
+    ["report", S.history.report("a-camp"), "read_report", { slug: "a-camp", integrity: "ok", text: "late body" }],
+    ["verify", S.history.verify("a-camp"), "verify_campaign", { slug: "a-camp", ok: true, restore: null }],
+  ])("keeps the pane closed when a pending %s reply arrives after the user closed it", async (_k, button, cmd, reply) => {
+    let release!: () => void;
+    const slow = new Promise<void>((r) => { release = r; });
+    const f = fakeIpc({ list_campaigns: camps, [cmd]: () => slow.then(() => reply) });
+    setTransport(f.transport);
+    render(<History />);
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    expect(await screen.findByRole("complementary", { name: S.history.panel })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: S.history.closeReport }));
+    expect(screen.queryByRole("complementary", { name: S.history.panel })).toBeNull();
+    const lists = () => f.calls.filter((c) => c.cmd === "list_campaigns").length;
+    expect(lists()).toBe(1);
+    release();
+    await waitFor(() => expect(lists()).toBe(2)); // the shared integrity verdict still refreshes the table
+    expect(screen.queryByRole("complementary", { name: S.history.panel })).toBeNull();
+    expect(screen.queryByText(/late body/)).toBeNull();
   });
 
   it("verifies now and offers the restore command when the signature fails", async () => {

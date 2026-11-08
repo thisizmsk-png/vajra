@@ -1,15 +1,70 @@
-.v-shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
-.v-shell__nav { display: flex; flex-direction: column; gap: var(--space-xs); padding: var(--space-md) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); }
-.v-shell__link { display: flex; align-items: center; min-height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); }
+/* Graphite shell (DESIGN.md "Layout"): 240 px sidebar on the surface, the screen on the background. */
+.v-shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; position: relative; }
+.v-shell__nav { display: flex; flex-direction: column; gap: 2px; padding: 10px var(--space-sm) var(--space-sm); border-right: 1px solid var(--c-border); background: var(--c-surface); min-height: 0; }
+.v-shell__brand { display: flex; align-items: center; height: var(--ctl-lg); padding: 0 var(--space-sm); margin-bottom: var(--space-sm); font: 600 13px/16px var(--font-ui); color: var(--c-text); }
+.v-shell__link { display: flex; align-items: center; gap: 10px; height: var(--row-h); padding: 0 var(--space-sm); border-radius: var(--radius-md); color: var(--c-text-secondary); text-decoration: none; font: 500 13px/16px var(--font-ui); transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
+.v-shell__label { flex: 1; min-width: 0; text-align: left; }
+/* Skip link: the first Tab stop, out of sight until it has focus. */
+.v-skip { position: absolute; left: var(--space-sm); top: var(--space-sm); z-index: 10; padding: var(--space-xs) var(--space-sm); border-radius: var(--radius-md); background: var(--c-primary); color: var(--c-text-on-primary); font: 500 13px/16px var(--font-ui); text-decoration: none; transform: translateY(-200%); }
+.v-skip:focus-visible { transform: none; outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+.v-shell__link .v-icon { color: var(--c-text-muted); transition: color var(--t-fast) var(--ease-out); }
+.v-shell__link:hover .v-icon, .v-shell__link[aria-current="page"] .v-icon { color: var(--c-text); }
+/* The palette for the mouse: reads as a field, so it is inset like one. */
+.v-shell__search { display: flex; align-items: center; gap: 10px; height: var(--row-h); margin-bottom: var(--space-md); padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); cursor: default; transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
+.v-shell__search:hover { border-color: var(--c-border-strong); color: var(--c-text-secondary); }
+.v-shell__search:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
+/* Key hints are out of layout until asked for (hover, or focus in the nav), so the idle window draws no hint glyphs (idle memory). */
+.v-shell__link .v-kbd-group { display: none; }
+.v-shell__search .v-kbd-group { display: none; }
+.v-shell__search:hover .v-kbd-group, .v-shell__search:focus-visible .v-kbd-group { display: inline-flex; }
+.v-shell__link:hover .v-kbd-group, .v-shell__link:focus-visible .v-kbd-group, .v-shell__nav:focus-within .v-kbd-group { display: inline-flex; }
 .v-shell__link:hover { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-shell__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-.v-shell__main { padding: var(--space-lg); overflow: auto; }
+.v-shell__main:focus { outline: none; }
+.v-shell__main { min-width: 0; min-height: 0; padding: var(--space-xl); overflow: auto; background: var(--c-background); }
+/* A screen that owns its layout (header, panes, action bar) fills the main area edge to edge. */
+.v-shell__main:has(> .v-screen) { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 .v-shell__error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); }
-.v-home { display: flex; flex-direction: column; gap: var(--space-lg); max-width: 720px; }
-.v-home__checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-xs); }
+
+/* A full-bleed screen: a scrolling body and the action bar at its foot. */
+.v-screen { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.v-screen__body { flex: 1; min-height: 0; overflow: auto; }
+/* Home: a launcher, then the checks line, then the campaigns (DESIGN.md "Hierarchy per screen"). */
+.v-home__col { max-width: 800px; margin: 0 auto; padding: 48px var(--space-xl) var(--space-xl); display: flex; flex-direction: column; }
+.v-home__lede { margin: var(--space-xs) 0 18px; }
+.v-launch { border: 1px solid var(--c-border-strong); border-radius: var(--radius-lg); background: var(--c-surface); }
+.v-launch__ask { padding: var(--space-lg) var(--space-lg) 0; }
+.v-launch__ask .v-field__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.v-launch__ask textarea.v-input { min-height: 72px; padding: 0; border: 0; background: transparent; font-size: 16px; line-height: 25px; resize: none; }
+.v-launch__ask textarea.v-input:focus-visible { outline: none; }
+/* The ask has no edge of its own, so while it has focus the launcher draws a 2 px ring (WCAG 2.4.7); the other fields ring themselves. */
+.v-launch:has(.v-launch__ask textarea:focus) { border-color: var(--c-focus-ring); box-shadow: 0 0 0 1px var(--c-focus-ring); }
+.v-launch__row { display: flex; align-items: flex-start; gap: var(--space-md); padding: var(--space-md) var(--space-lg) 0; border-top: 1px solid var(--c-border); margin-top: var(--space-md); }
+.v-launch__row .v-field__label { font-size: 12px; line-height: 16px; color: var(--c-text-muted); }
+.v-launch__rounds { display: flex; flex-direction: column; gap: var(--space-xs); }
+.v-launch__cap { font: 500 12px/16px var(--font-ui); color: var(--c-text-muted); }
+.v-launch__repo { flex: 2; min-width: 0; }
+.v-launch__base { flex: 1; min-width: 0; }
+.v-launch__foot { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-md); padding: var(--space-md) var(--space-lg) var(--space-md); }
+.v-launch__adv summary { height: var(--row-h); display: flex; align-items: center; color: var(--c-text-secondary); font: 500 12px/16px var(--font-ui); cursor: default; }
+.v-launch__adv .v-field { margin-top: var(--space-xs); max-width: 240px; }
+.v-launch__fail { padding: 0 var(--space-lg) var(--space-md); color: var(--c-danger); }
+
+.v-home__checks { margin: 10px 2px 0; }
+.v-checked { display: block; min-height: 16px; margin-top: var(--space-xs); color: var(--c-text-muted); font: 400 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; }
+.v-home__checksum { display: flex; align-items: center; gap: 10px; min-height: var(--ctl-sm); list-style: none; cursor: default; }
+.v-home__checksum::-webkit-details-marker { display: none; }
+.v-home__checksum .v-status-dot { font-size: 12px; }
+.v-home__checksall { color: var(--c-text-muted); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--c-border-strong); }
+.v-home__checks ul { list-style: none; margin: var(--space-xs) 0 0; padding: 0; display: flex; flex-direction: column; }
 .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
-.v-home__fix { font: 12px/16px var(--font-mono); color: var(--c-text-secondary); }
+/* The fix hint uses the UI face on Home so the idle window loads no second typeface (idle memory); Settings keeps mono. */
+.v-home__fix { font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
+.v-settings .v-home__fix { font-family: var(--font-mono); }
+/* Start run shows its key while you are in the form, which is where the key works. */
+.v-launch .v-button--primary .v-kbd-group { display: none; }
+.v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
@@ -20,10 +75,117 @@
 .v-home__list li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); border-bottom: 1px solid var(--c-border); }
 .v-home__list li > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.v-crew { display: flex; flex-direction: column; gap: var(--space-md); }
-.v-crew__body { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: var(--space-lg); align-items: start; }
-.v-crew__facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-xs) var(--space-md); margin: 0; }
-.v-crew__facts dt { color: var(--c-text-secondary); }
-.v-crew__facts dd { margin: 0; }
+.v-home__runs { margin-top: 40px; display: flex; flex-direction: column; gap: 6px; }
+.v-home__campaigns { list-style: none; margin: 0 calc(-1 * var(--space-sm)); padding: 0; display: flex; flex-direction: column; }
+.v-home__campaigns li { display: grid; grid-template-columns: 18px 1fr auto; gap: 2px 10px; align-items: center; padding: var(--space-sm); border-radius: var(--radius-md); }
+.v-home__campaigns li:hover { background: var(--c-surface); }
+.v-home__dot { grid-row: 1 / span 2; }
+.v-home__dot > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.v-home__goal { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-home__slug { grid-column: 2; font: 12px/16px var(--font-mono); color: var(--c-text-muted); }
+.v-home__side { grid-column: 3; grid-row: 1 / span 2; display: flex; align-items: center; gap: var(--space-md); }
+.v-home__side .v-text--body-sm { white-space: nowrap; }
+
+/* Crew: run header, tree | worker pane | details, and the action bar (DESIGN.md "Hierarchy per screen"). */
+.v-crew--empty { display: flex; flex-direction: column; gap: var(--space-sm); }
+.v-crew__head { display: flex; align-items: center; gap: 10px; height: 48px; flex: none; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); white-space: nowrap; }
+.v-crew__title { color: var(--c-text-muted); font-weight: 400; }
+.v-crew__title::after { content: "/"; margin-left: 10px; color: var(--c-text-muted); }
+.v-crew__run { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.v-crew__id { margin-left: auto; font: 12px/16px var(--font-mono); color: var(--c-text-muted); }
+.v-crew__err { padding: var(--space-sm) var(--space-lg); border-bottom: 1px solid var(--c-border); }
+.v-crew__body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px minmax(0, 1fr) 280px; }
+.v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 320px minmax(0, 1fr); }
+.v-crew__tree { min-height: 0; overflow: auto; padding: 6px var(--space-sm); border-right: 1px solid var(--c-border); }
+.v-crew__pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; }
+.v-crew__pane--facts { padding: var(--space-lg); }
+.v-crew__panehead { display: flex; align-items: center; gap: 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
+.v-crew__task { min-width: 0; color: var(--c-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v-crew__pane .v-tablist { padding: 6px var(--space-md) 0; }
+.v-crew__pane .v-tabpanel { padding: var(--space-md) var(--space-lg); }
+.v-crew__aside { min-height: 0; overflow: auto; padding: var(--space-md) 14px; border-left: 1px solid var(--c-border); background: var(--c-background); }
+.v-crew__aside .v-section__head { margin-bottom: var(--space-sm); }
+.v-crew__facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
+.v-crew__facts dt { color: var(--c-text-muted); }
+.v-crew__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--c-text-secondary); }
 .v-crew__side { display: flex; flex-direction: column; gap: var(--space-md); min-width: 0; }
 .v-crew__actions { display: flex; gap: var(--space-sm); }
+
+/* Shared screen frame: a 48 px head (title, then quiet meta), a scrolling body, the action bar at the foot. */
+.v-screen__head { display: flex; align-items: center; gap: 10px; height: 48px; flex: none; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); white-space: nowrap; }
+.v-screen__meta { color: var(--c-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* History: the campaigns and the search in one scrolling column; a report opens in a pane on the right. */
+.v-history__body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.v-history__body--open { grid-template-columns: minmax(0, 1fr) 400px; }
+/* Fixed columns; the goal takes what is left and truncates (the full goal is its tooltip). */
+.v-history .v-table { table-layout: fixed; }
+.v-history .v-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v-history .v-table th:nth-child(1) { width: 190px; }
+.v-history .v-table th:nth-child(3) { width: 80px; }
+.v-history .v-table th:nth-child(4) { width: 76px; }
+.v-history .v-table th:nth-child(5) { width: 136px; }
+.v-history .v-table th:nth-child(6) { width: 164px; }
+.v-history .v-table th:nth-child(7) { width: 128px; }
+.v-history__goal { display: block; overflow: hidden; text-overflow: ellipsis; }
+/* With the report open, Status and Updated give their room to the goal (the report names its status). */
+.v-history__body--open .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
+.v-history__main { padding: var(--space-lg) var(--space-lg) var(--space-xl); }
+.v-history__h { margin: 0 0 var(--space-sm); }
+.v-history__slug { font: 12px/16px var(--font-mono); color: var(--c-text-secondary); margin-left: calc(-1 * var(--space-sm)); }
+.v-history__muted { color: var(--c-text-secondary); }
+.v-history__acts { display: inline-flex; gap: 2px; margin-left: calc(-1 * var(--space-sm)); }
+.v-history .v-table td { height: 36px; }
+.v-history__search { margin-top: 40px; max-width: 960px; }
+.v-history__form { display: flex; align-items: flex-start; gap: var(--space-md); }
+.v-history__q { flex: 3; min-width: 0; }
+.v-history__repo { flex: 2; min-width: 0; }
+.v-history__q .v-field, .v-history__repo .v-field { width: 100%; }
+.v-history__go { margin-top: 20px; }
+.v-history__search .v-home__list { margin-top: var(--space-md); }
+.v-history__pane { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--c-border); background: var(--c-surface); }
+.v-history__panehead { display: flex; align-items: center; gap: 10px; height: 40px; flex: none; padding: 0 var(--space-sm) 0 var(--space-lg); border-bottom: 1px solid var(--c-border); }
+.v-history__paneslug { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 12px/16px var(--font-mono); color: var(--c-text-muted); }
+.v-history__panebody { flex: 1; min-height: 0; overflow: auto; padding: var(--space-md) var(--space-lg); display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-md); }
+.v-history__panebody > section { align-self: stretch; }
+.v-history__panebody .v-home__report { border: 0; padding: 0; max-height: none; color: var(--c-text); font-size: 12px; line-height: 18px; background: transparent; }
+
+/* Settings: one column, the checks with their fixes. */
+.v-settings__checks { margin-top: var(--space-md); display: flex; flex-direction: column; gap: var(--space-xs); }
+.v-settings__checks .v-home__checks { margin: 0; padding: 0; list-style: none; }
+.v-settings__checks .v-home__checks li { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--row-h); }
+
+/* States: a problem (alert, plain title, the detail small, Try again), an empty place with its next step, loading rows. */
+.v-problem { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); padding: var(--space-md); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); max-width: 560px; }
+.v-problem__detail { overflow-wrap: anywhere; }
+.v-problem .v-button { margin-top: var(--space-xs); }
+.v-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); max-width: 480px; }
+.v-empty__act { display: flex; gap: var(--space-sm); margin-top: var(--space-sm); }
+.v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
+.v-loading .v-skeleton { height: 12px; max-width: 420px; }
+.v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+.v-crew__state { padding: 48px var(--space-xl); }
+.v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
+
+/* Under 1200 px (UX.md section 3): the sidebar folds to 56 px icons, each keeping its name for screen readers and
+   as a tooltip; Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
+@media (max-width: 1199px) {
+  .v-shell { grid-template-columns: 56px 1fr; }
+  .v-shell__nav { padding: 10px var(--space-sm); align-items: stretch; }
+  .v-shell__brand { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .v-shell__nav .v-shell__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .v-shell .v-shell__nav :is(.v-shell__link, .v-shell__search) .v-kbd-group { display: none; }
+  .v-shell__link, .v-shell__search { justify-content: center; padding: 0; gap: 0; }
+  .v-shell__search { margin-top: var(--space-xs); border-color: transparent; background: transparent; }
+  .v-shell__search:hover { background: var(--c-accent); }
+  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  .v-crew__head { padding: 0 var(--space-md); }
+  .v-history .v-table :is(th, td):is(:nth-child(3), :nth-child(5)) { display: none; }
+  .v-history .v-table th:nth-child(1) { width: 180px; }
+  .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
+  .v-history__body--open .v-history__main { display: none; }
+  .v-history__pane { border-left: 0; }
+  .v-history__form { flex-wrap: wrap; }
+  .v-history__q { flex: 1 1 100%; }
+}

@@ -281,7 +281,7 @@ fn approve_live_session_types_the_fixed_turn_and_writes_ledger_before_delivery()
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(got, "Execute approved plan 20261106-0911.0\n", "exactly the fixed turn and Enter, no plan text");
+    assert_eq!(got, "Execute approved plan 20261106-0911.0 (push)\n", "exactly the fixed turn (with the approved action) and Enter, no plan text");
     assert_eq!(states(&t, "approve"), ["requested", "delivered"], "requested is written before delivery");
     let id = r["action_id"].as_str().unwrap();
     assert!(t.audit().contains(&format!("ALLOW desktop-control reason=\"approve id={id} item={PLAN}\"")), "{}", t.audit());
@@ -336,7 +336,7 @@ fn approve_refused_during_take_over() {
     assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "take_over_on");
     assert!(t.ledger().is_empty() && fs::read_to_string(&typed).unwrap_or_default().is_empty(), "nothing recorded, nothing typed");
     // The session-level door refuses too, so a race with the toggle cannot type.
-    let turn = ApprovedPlanTurn::new(RUN, 0).unwrap();
+    let turn = ApprovedPlanTurn::new(RUN, 0, "push").unwrap();
     assert_eq!(app.sup.submit_fixed_turn(&format!("run-{SID}"), &turn), Err(SessionError::TakeOverActive));
     // With Take over off again it goes through.
     app.sup.set_take_over(&format!("run-{SID}"), false).unwrap();
@@ -346,16 +346,51 @@ fn approve_refused_during_take_over() {
 
 #[test]
 fn approve_turn_is_fixed_bytes() {
-    assert_eq!(ApprovedPlanTurn::new(RUN, 3).unwrap().text(), "Execute approved plan 20261106-0911.3");
+    assert_eq!(ApprovedPlanTurn::new(RUN, 3, "pull_request").unwrap().text(), "Execute approved plan 20261106-0911.3 (pull_request)");
     for (run, i) in [("2026-11-06", 0), ("20261106-0911\nrm -rf /", 0), ("../x", 0), (RUN, 100), ("", 0)] {
-        assert!(ApprovedPlanTurn::new(run, i).is_none(), "{run:?} {i}");
+        assert!(ApprovedPlanTurn::new(run, i, "push").is_none(), "{run:?} {i}");
+    }
+    // The action is one of the workflow's fixed `S.Action` words, never free text.
+    for a in ["", "Push", "push ", "push\n", "push) (deploy", "rm -rf /", "pr", "deploy\r"] {
+        assert!(ApprovedPlanTurn::new(RUN, 0, a).is_none(), "{a:?}");
+    }
+    for a in crate::sessions::PLAN_ACTIONS {
+        assert!(ApprovedPlanTurn::new(RUN, 0, a).unwrap().text().ends_with(&format!(" ({a})")));
     }
 }
 
 #[test]
+fn a_planted_plan_with_another_action_shows_in_the_turn_the_session_gets() {
+    // R1: the session's own workflow result holds a deploy at index 0; a worker plants a newer finished result whose
+    // index 0 is a harmless-looking push. The human approves what the inbox shows (the push), and the turn names that
+    // action, so the session and its terminal see "plan 0 (push)" against the deploy they know: the mismatch is visible
+    // instead of the session silently executing its own plan 0.
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    t.result_at("wf_real.json", &done(CAMP, json!([{"action": "deploy", "why": "go live", "plan": deploy_plan()}])), RUN, 60);
+    t.result_at("wf_planted.json", &done(CAMP, json!([{"action": "push", "why": "just a push"}])), RUN, 120);
+    let shown = item(&app.inbox().unwrap(), PLAN).clone();
+    assert_eq!(shown["action"], "push", "the inbox shows the planted entry");
+    let typed = t.live(&app);
+    app.approve_plan(PLAN, shown["plan_sha256"].as_str().unwrap()).unwrap();
+    let mut got = String::new();
+    for _ in 0..100 {
+        got = fs::read_to_string(&typed).unwrap_or_default();
+        if !got.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(got, "Execute approved plan 20261106-0911.0 (push)\n", "the turn names the action the human approved");
+    assert!(!got.contains("deploy"));
+    app.sup.kill(&format!("run-{SID}")).unwrap();
+}
+
+#[test]
 fn approve_ended_session_argv() {
-    let turn = ApprovedPlanTurn::new(RUN, 2).unwrap();
-    assert_eq!(argv::build_approve_resume_argv(SID, &turn).unwrap(), ["claude", "--resume", SID, "Execute approved plan 20261106-0911.2"]);
+    let turn = ApprovedPlanTurn::new(RUN, 2, "deploy").unwrap();
+    assert_eq!(argv::build_approve_resume_argv(SID, &turn).unwrap(), ["claude", "--resume", SID, "Execute approved plan 20261106-0911.2 (deploy)"]);
     assert!(argv::build_approve_resume_argv("--last", &turn).is_err());
 }
 
@@ -517,7 +552,7 @@ fn source_indices_survive_unsupported_entries_and_pull_request_is_recognised() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(got, "Execute approved plan 20261106-0911.2\n");
+    assert_eq!(got, "Execute approved plan 20261106-0911.2 (deploy)\n");
     let bad = item(&inbox, "plan:20261106-0911.1")["plan_sha256"].as_str().unwrap().to_string();
     assert_eq!(code_of(&app.approve_plan("plan:20261106-0911.1", &bad).unwrap_err()), "plan_invalid");
     app.sup.kill(&format!("run-{SID}")).unwrap();

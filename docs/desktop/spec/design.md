@@ -107,9 +107,9 @@ Evidence required, on this Mac, with the same method for every candidate (NFR-PE
 - frame time p95 and p99 with 10 agents at 200 lines/s each (NFR-PERF-3)
 - 1 h soak RSS growth (NFR-PERF-6)
 
-Comparison targets: at least two competitors installed locally, Agent Orchestrator desktop and Orca. Both
+Comparison targets: at least two competitors installed locally, Competitor B desktop and Competitor F. Both
 are Electron (bundle inspection: `Electron Framework.framework` and Squirrel in `Contents/Frameworks`). One
-snapshot from the brief: Agent Orchestrator 0.14.10-nightly with sessions, 13 processes, about 1608 MB `ps`
+snapshot from the brief: Competitor B 0.14.10-nightly with sessions, 13 processes, about 1608 MB `ps`
 RSS sum (over-counts shared pages; the spike should also report `footprint`/phys_footprint).
 
 The spike also settles every "to verify in spike" item in this document (list in 5.9), plus: how long a run started in a plain terminal takes to show up and how events reach the UI (NFR-PERF-9, POS-2.2).
@@ -217,7 +217,7 @@ sequenceDiagram
   Note over H,AUD: Approve a plan (US-5.2)
   H->>UI: open plan, read full text, Approve
   UI->>UI: require run status terminal (done/need_input)
-  UI->>SUP: write one visible human turn "Execute approved plan <id>" to Run PTY
+  UI->>SUP: write one visible human turn "Execute approved plan <run>.<idx> (<action>)" to Run PTY
   RUN-->>H: Claude Code permission prompt for push/PR/deploy (human answers in terminal)
   UI->>CS: ledger "approved" (plan id, who, time)
 ```
@@ -655,7 +655,7 @@ Reconciliation (AC-3.4.3):
 
 - **Approve** (US-5.2). Enabled only when the full plan text is shown (AC-5.2.1) and the run's workflow has
   ended (status terminal), so the turn cannot be relayed into running workflow agents. The app writes the
-  visible turn `Execute approved plan <id>` followed by the plan id reference to the run session PTY. The
+  visible turn `Execute approved plan <run>.<idx> (<action>)` to the run session PTY: the plan id plus the approved entry's fixed-vocabulary action, so a planted or mismatched result is visible to the session. The
   plan body is already in that session's context from the result. Claude Code's permission prompt fires for
   each protected command. The app runs no push, PR or deploy. The ledger records `approve`. The audit line
   comes from the guard on the resulting Bash calls.
@@ -694,7 +694,7 @@ agent, read tools plus control tools, no Agent/Workflow tool), never with the ru
 
 **ADR-2 Control by hook + queue, not PTY injection.** Status: accepted 2026-11-05. Decision: control reaches workers only through E1
 reading the app-owned queue.
-- Options: (a) do nothing (no steering); (b) PTY injection, as Runner's router writes into agent stdin; (c)
+- Options: (a) do nothing (no steering); (b) PTY injection, as Competitor A's router writes into agent stdin; (c)
   hook + queue (chosen); (d) restart the worker with a new brief.
 - Evidence against: delivery waits for the worker's next tool call (a long model turn delays it), and
   several key behaviors are to verify in spike (5.9 items 6-8).
@@ -814,8 +814,8 @@ check.
   - (e) Claude Code's own background sessions, if they cover workflow runs.
 - Evidence for (b):
   - P2 and P3 in `pain-points.md` (vajra-4) are mostly daemon-lifecycle failures in apps that have one:
-    old daemon generations left running after an update (orca#9138), every session swept to `exited` after
-    a daemon restart (AO#6639), and duplicate sessions after an upgrade (wmux#537, ai-maestro#75). (c)
+    old daemon generations left running after an update (a public issue in Competitor F's tracker), every session swept to `exited` after
+    a daemon restart (a public issue in Competitor B's tracker), and duplicate sessions after an upgrade (public issues in Competitor H's and Competitor K's trackers). (c)
     takes on exactly that failure class plus a versioned protocol, in exchange for surviving crashes.
   - The spike measured the app core at about 110 MiB RSS (Rust main, flat over an hour). A daemon would
     split that across two processes and add its own baseline against an idle budget we already miss
@@ -827,7 +827,7 @@ check.
     run-namespaced tasks and no "already done" shortcut. So work since the last commit is lost and the
     current wave is redone. That is a real cost on a long delivery.
   - Shutdown and logout can't be blocked.
-  - Runner and Herdr survive reboots of their UI, and users praise it (pain-points.md, praise table).
+  - Competitor A and Competitor N survive reboots of their UI, and users praise it (pain-points.md, praise table).
 - Consequences:
   - POS-2.1 is narrowed. In the MVP the requirement is that runs survive the window closing and the app
     sleeping. Surviving SIGKILL and Quit moves to v1.1.
@@ -856,15 +856,14 @@ agents through one trait: `spawn`, `stream`, `attach_pty`, `inspect`, `message`,
   later and the interface stays.
 - Gemini CLI and OpenCode come post-MVP through the same trait.
 
-**ADR-11 Conductor import is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
+**ADR-11 Import existing worktrees is read-only discovery** Status: accepted 2026-11-05. (owner decision, 2026-11-05). Decision: discover repos,
 worktrees (`git worktree list`) and Claude Code sessions (transcript `cwd`), let the user confirm each, and
-record only app-owned entries. Nothing is deleted, moved or rewritten. Conductor's own layout is read only
-where G4 has confirmed it; otherwise the import says "not recognised" (AC-1.4.4).
-- Options: (a) no import; (b) full import that moves worktrees and converts Conductor state; (c) read-only
+record only app-owned entries. Nothing is deleted, moved or rewritten. Each other tool's on-disk layout is read by its own adapter (one adapter per layout), and only once G4 has confirmed that layout; otherwise the import says "not recognised" (AC-1.4.4).
+- Options: (a) no import; (b) full import that moves worktrees and converts other tools' state; (c) read-only
   discovery with per-item confirm (chosen).
-- Evidence: P6 (13 sources) includes displaced Conductor users asking for an alternative. (b) risks
+- Evidence: P6 (13 sources) includes displaced users of a shut-down tool asking for an alternative. (b) risks
   losing someone's work in a tool we don't control.
-- Consequences: users keep their worktrees where they are; anything Conductor-only (its own chat history)
+- Consequences: users keep their worktrees where they are; anything held only by the other tool (its own chat history)
   isn't carried over.
 - Would change our mind: G4 finds no stable on-disk layout; then the import is git- and transcript-only.
 
@@ -938,19 +937,19 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
 - **"Applied" stays data:** approved records are primed as `<untrusted-data>` exactly as today. The app adds
   no instruction channel.
 
-**ADR-13 claude-mem: no integration in the MVP; a one-shot read-only import later** (owner request,
-2026-11-05). Evidence (GitHub API and docs.claude-mem.ai, 2026-11-05; not installed on the owner's machine):
-- **Project:** `thedotmack/claude-mem`, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
+**ADR-13 Competitor M: no integration in the MVP; a one-shot read-only import later** (owner request,
+2026-11-05). Evidence (GitHub API and Competitor M's docs, 2026-11-05; not installed on the owner's machine):
+- **Project:** Competitor M, Apache-2.0, about 113k stars, very active (v15.9.0 on 2026-11-02;
   141 open issues).
-- **Storage:** SQLite at `~/.claude-mem/claude-mem.db` (WAL mode, sessions, observations and summaries,
-  FTS5) plus a Chroma vector store. Settings are in `~/.claude-mem/settings.json`.
+- **Storage:** SQLite in the tool's data directory under the home directory (WAL mode, sessions, observations and summaries,
+  FTS5) plus a Chroma vector store. Settings are in its settings file.
 - **Capture:** six Claude Code hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
   SessionEnd) capture what the agent does, compress it with a model, and inject context into later
   sessions. A local Bun worker serves an HTTP API and a viewer, with loopback bind as its only protection
   (its docs say so).
 - **Billing and privacy:** compression defaults to provider `claude` with
-  `CLAUDE_MEM_CLAUDE_AUTH_METHOD=subscription`, which conflicts with our billing rules (no SDK use of plan
-  credentials). The installer offers a hosted account (CMEM Pro, cloud sync) unless opted out. `<private>`
+  its auth-method setting set to `subscription`, which conflicts with our billing rules (no SDK use of plan
+  credentials). The installer offers a hosted account (a paid plan with cloud sync) unless opted out. `<private>`
   tags exclude content.
 - **Options:**
   - (a) Integrate as a live read-only source. Rejected: it would tie us to an unauthenticated local HTTP
@@ -959,9 +958,9 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
     reads the SQLite file directly (never the worker API), checks the schema version, and each imported
     observation still passes the write gate and the human approval (US-7.1).
   - (c) Ignore it.
-- **Coexistence:** if `vajra-doctor` finds claude-mem's hooks next to Vajra's, preflight warns that two
+- **Coexistence:** if `vajra-doctor` finds Competitor M's hooks next to Vajra's, preflight warns that two
   memories inject context (P15 context-cost risk). The app never edits either one's settings.
-- **Would change our mind:** claude-mem documents a stable export format; then (b) uses that instead.
+- **Would change our mind:** Competitor M documents a stable export format; then (b) uses that instead.
 
 ## 7. Error handling
 

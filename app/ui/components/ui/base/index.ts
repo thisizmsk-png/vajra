@@ -19,3 +19,6 @@ export type { ToastItem } from "./Toast";
 export { Skeleton } from "./Skeleton";
 export { Separator } from "./Separator";
 export { StatusDot } from "./StatusDot";
+export { Kbd, ariaShortcut, keyName } from "./Kbd";
+export { Icon, ICONS } from "./Icon";
+export type { IconName } from "./Icon";
