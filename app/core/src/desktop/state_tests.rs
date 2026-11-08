@@ -564,3 +564,23 @@ fn an_answer_is_checked_against_the_attempt_at_publication() {
     let ok = app.act_answer_question(&env("ans-4001-bbbb", Some(2)), "task:c1.t1", "new answer");
     assert_eq!(state_of(&ok), "done", "{ok}");
 }
+
+// The workflow writes tasks.json ids already namespaced (`<run>.t1`), so a real inbox item is `task:<slug>.<run>.t1`.
+// Given such an item, Then the answer reaches the worker whose task id is that same `<run>.t1`.
+#[test]
+fn an_answer_to_a_workflow_namespaced_task_reaches_its_worker() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1); // worker task id 20261105-1810.t1
+    launched(&t, "c1", "20261105-1810");
+    let d = t.0.join("home/.claude/vajra/campaigns/c1");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": "c1", "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": "c1", "schema": "vajra.tasks/v1", "tasks": [{"id": "20261105-1810.t1", "status": "question", "title": "Which key?"}]}).to_string()).unwrap();
+    let r = app.act_answer_question(&env("ans-5000-aaaa", None), "task:c1.20261105-1810.t1", "use the key id");
+    assert_eq!(state_of(&r), "done", "{r}");
+    assert_eq!(queued_messages(&app).len(), 1);
+    // Another campaign's run never matches, namespaced or not.
+    let other = app.act_answer_question(&env("ans-5001-bbbb", None), "task:c2.20261105-1810.t1", "x");
+    assert_eq!(other["receipt"]["reason"], "not_found");
+}

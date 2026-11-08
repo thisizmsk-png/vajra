@@ -184,7 +184,13 @@ impl Service {
         let hit: Vec<&WorkerInfo> = self
             .in_scope()
             .flat_map(|s| s.workers.iter())
-            .filter(|w| w.task_id.as_deref().is_some_and(|t| runs.iter().any(|r| t.strip_prefix(r.as_str()).and_then(|x| x.strip_prefix('.')) == Some(task))))
+            .filter(|w| {
+                w.task_id.as_deref().is_some_and(|t| {
+                    // The workflow writes tasks.json ids already namespaced (`<run>.t1`), and so are worker task ids: an
+                    // exact match whose run is one of the campaign's. A bare id (`t1`) matches the remainder after `<run>.`.
+                    runs.iter().any(|r| t.strip_prefix(r.as_str()).and_then(|x| x.strip_prefix('.')).is_some_and(|rest| t == task || rest == task))
+                })
+            })
             .collect();
         let live: Vec<&&WorkerInfo> = hit.iter().filter(|w| !w.finished()).collect();
         match (hit.as_slice(), live.as_slice()) {
