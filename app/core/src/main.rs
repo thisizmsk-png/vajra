@@ -102,6 +102,16 @@ fn project_sessions(app: State<'_, App>, id: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn project_migration_suggest(app: State<'_, App>) -> Res {
+    app.project_migration_suggest()
+}
+
+#[tauri::command(async)]
+fn project_migration_confirm(app: State<'_, App>, roots: Vec<String>) -> Res {
+    app.project_migration_confirm(&roots)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -477,6 +487,8 @@ fn main() {
             project_rename,
             project_archive,
             project_sessions,
+            project_migration_suggest,
+            project_migration_confirm,
             act_approve_plan,
             act_stop_worker,
             act_start_run,
