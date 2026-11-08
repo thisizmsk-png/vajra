@@ -97,7 +97,12 @@ fn place(cwd: &Path, guard: &Guard) -> Option<identity::Resolved> {
     if !cwd.is_absolute() {
         return None;
     }
-    identity::resolve(cwd, guard).ok()
+    // A run can start in a subfolder of its repository: climb to the folder that holds the repository (a verified
+    // `.git`, see `identity::git_common_dir`), then resolve that exactly as a folder the owner picked. With no
+    // repository above, the folder itself is the group.
+    let canon = fs::canonicalize(cwd).ok()?;
+    let top = canon.ancestors().take_while(|a| *a != guard.home).find(|a| identity::git_common_dir(a).is_some()).unwrap_or(&canon);
+    identity::resolve(top, guard).ok()
 }
 
 fn contract_label(s: &str) -> bool {

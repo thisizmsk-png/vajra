@@ -66,11 +66,12 @@ fn campaigns_are_grouped_by_their_git_root_and_a_subfolder_or_alias_joins_it() {
         launch("c1", "20261101-0900", S1, &a),
         launch("c2", "20261102-0900", S1, &alias),
         launch("c3", "20261103-0900", S2, &b),
+        launch("c4", "20261104-0900", S2, &a.join("pkg")),
     ];
-    let cs: Vec<String> = ["c1", "c2", "c3"].map(String::from).to_vec();
+    let cs: Vec<String> = ["c1", "c2", "c3", "c4"].map(String::from).to_vec();
     let p = plan(&ls, &cs, &t.guard());
-    assert_eq!(p.groups.len(), 2);
-    assert_eq!((p.groups[0].name.as_str(), names(&p.groups[0].campaigns)), ("alpha", vec!["c1", "c2"]));
+    assert_eq!(p.groups.len(), 2, "a launch from a subfolder belongs to the repository that holds it");
+    assert_eq!((p.groups[0].name.as_str(), names(&p.groups[0].campaigns)), ("alpha", vec!["c1", "c2", "c4"]));
     assert_eq!((p.groups[1].name.as_str(), names(&p.groups[1].campaigns)), ("beta", vec!["c3"]));
     assert!(p.unsorted.is_empty() && p.terminal.is_empty());
 }
@@ -222,4 +223,23 @@ fn two_confirms_at_once_write_each_session_once() {
     let count = |k: SessionKind, run: &str| sessions.iter().filter(|x| x.kind == k && x.run_id.as_deref() == Some(run)).count();
     assert_eq!((count(SessionKind::Run, "20261101-0900"), count(SessionKind::Run, "20261102-1030"), count(SessionKind::Orchestrator, "20261101-0900")), (1, 1, 1));
     assert_eq!(sessions.len(), 3);
+}
+
+#[test]
+fn confirming_a_repo_and_one_of_its_subfolders_makes_one_project_and_no_nested_refusal() {
+    let t = Tmp::new("subfolder");
+    let a = t.repo("src/alpha");
+    fs::create_dir_all(a.join("pkg/deep")).unwrap();
+    let ls = [launch("c1", "20261101-0900", S1, &a), launch("c2", "20261102-0900", S1, &a.join("pkg/deep"))];
+    let cs: Vec<String> = ["c1", "c2"].map(String::from).to_vec();
+    let s = t.store();
+    let p = plan(&ls, &cs, &t.guard());
+    assert_eq!((p.groups.len(), names(&p.groups[0].campaigns)), (1, vec!["c1", "c2"]));
+    let out = confirm(&s, &t.data(), &t.guard(), &ls, &cs, &[a.to_string_lossy().into_owned()]).unwrap();
+    assert_eq!((out.projects.len(), out.projects[0].sessions, out.nested.len()), (1, 2, 0));
+    // A folder with no repository above it stays its own group.
+    let plain = t.home().join("notes/deep");
+    fs::create_dir_all(&plain).unwrap();
+    let p = plan(&[launch("n", "20261101-0900", S1, &plain)], &["n".to_string()], &t.guard());
+    assert_eq!(p.groups[0].root, fs::canonicalize(&plain).unwrap().to_string_lossy());
 }
