@@ -253,16 +253,20 @@ glob_chain() { # index into GLOB_R, index into GLOB_S -> 0 if the pattern can li
   if [ "$si" -ge "$GLOB_K" ]; then
     [ "$ri" -lt "$GLOB_N" ] || return 1
     c="${GLOB_R[$ri]}"
-    case "$c" in
-      *\*\**) [ $((ri + 1)) -lt "$GLOB_N" ] || return 0; glob_chain $((ri + 1)) "$si"; return $? ;;
-    esac
+    if glob_star "$c"; then
+      [ $((ri + 1)) -lt "$GLOB_N" ] || return 0
+      glob_chain $((ri + 1)) "$si" && return 0
+      case "$c" in *{*) ;; *) return 1 ;; esac # a plain globstar is only that; a brace may also take a non-globstar value
+    fi
     glob_leaf "$c"; return $?
   fi
   [ "$ri" -lt "$GLOB_N" ] || return 1
   c="${GLOB_R[$ri]}"
-  case "$c" in
-    *\*\**) glob_chain $((ri + 1)) "$si" && return 0; glob_chain "$ri" $((si + 1)); return $? ;;
-  esac
+  if glob_star "$c"; then
+    glob_chain $((ri + 1)) "$si" && return 0
+    glob_chain "$ri" $((si + 1)) && return 0
+    case "$c" in *{*) ;; *) return 1 ;; esac
+  fi
   glob_comp_match "$c" "${GLOB_S[$si]}" || return 1
   glob_chain $((ri + 1)) $((si + 1))
 }
@@ -318,6 +322,13 @@ glob_stays() { # pattern-component -> 0 if it can expand to "." or to nothing ({
   for v in "${BX[@]}"; do { [ -z "$v" ] || [ "$v" = . ]; } && return 0; done
   return 1
 }
+glob_star() { # pattern-component -> 0 if it is, or can expand to, a value containing "**" (a globstar, however the braces split it)
+  local v
+  glob_values "$1"
+  [ "$BX_OVER" = 1 ] && return 0
+  for v in "${BX[@]}"; do case "$v" in *\*\**) return 0 ;; esac; done
+  return 1
+}
 glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob part can climb to a directory at or above the
   # deepest one the prefix shares with the state dir (so the rest of the pattern could name the state dir from there).
   # Each other component descends one level, "**" none (it may match zero directories).
@@ -326,7 +337,7 @@ glob_dotdot_reaches() { # canonical literal prefix -> 0 if a ".." in the glob pa
   while [ "$common" -lt "${#a[@]}" ] && [ "$common" -lt "${#b[@]}" ] && [ "${a[$common]}" = "${b[$common]}" ]; do common=$((common + 1)); done
   depth=${#a[@]}; min=$depth
   for c in ${GLOB_R[@]+"${GLOB_R[@]}"}; do
-    if glob_climbs "$c"; then depth=$((depth - 1)); elif glob_stays "$c"; then :; else case "$c" in *\*\**) ;; *) depth=$((depth + 1)) ;; esac; fi
+    if glob_climbs "$c"; then depth=$((depth - 1)); elif glob_stays "$c" || glob_star "$c"; then :; else depth=$((depth + 1)); fi
     [ "$depth" -lt "$min" ] && min=$depth
   done
   [ "$min" -le "$common" ]
