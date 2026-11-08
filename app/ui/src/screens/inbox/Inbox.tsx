@@ -147,8 +147,8 @@ export function Inbox() {
         <Button size="sm" variant="ghost" onClick={P.reload}>{S.inbox.refresh}</Button>
       </div>
       <p role="status" className="v-sr">{said}</p>
-      {P.state === "ok" && live.length === 0 && later.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
-      {P.state === "error" && <div className="v-board__state"><Problem title={S.inbox.failed} detail={P.error} retry={P.reload} /></div>}
+      {P.state === "ok" && !P.inboxFailed && live.length === 0 && later.length === 0 && <div className="v-board__state"><Empty title={S.inbox.empty}>{S.inbox.emptyHint}</Empty></div>}
+      {(P.state === "error" || P.inboxFailed) && <div className="v-board__state"><Problem title={S.inbox.failed} detail={P.error} retry={P.reload} /></div>}
       {groups.map(({ p, items }) => (
         <section key={p.id} className="v-inbox__group" aria-label={p.name}>
           <h2 className="v-inbox__h">{p.name}</h2>

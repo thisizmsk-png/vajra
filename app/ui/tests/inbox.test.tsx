@@ -70,6 +70,13 @@ describe("Inbox lists what needs you, from every project", () => {
     expect(screen.getByRole("button", { name: S.states.retry })).toBeTruthy();
   });
 
+  it("says so, with a retry, when only the inbox read fails: never nothing-needs-you on a failure", async () => {
+    mount({ inbox: new Error("down") });
+    expect(await screen.findByText(S.inbox.failed)).toBeTruthy();
+    expect(screen.queryByText(S.inbox.empty)).toBeNull();
+    expect(screen.getByRole("button", { name: S.states.retry })).toBeTruthy();
+  });
+
   it("says so when nothing needs you", async () => {
     items = [];
     mount();

@@ -23,6 +23,8 @@ export type ProjectsView = {
   byCampaign: Record<string, ProjectId>;
   campaigns: Campaign[];
   inbox: InboxItem[];
+  /** The inbox read failed this time: `inbox` is empty because it is unknown, not because nothing waits. */
+  inboxFailed: boolean;
   crew: ActiveCrew | null;
   /** How many runs the core says are live (today at most one; ADR-15 D5 raises it). */
   runs: number;
@@ -49,11 +51,11 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
 
 const EMPTY: ProjectIndex = { projects: [], byCampaign: {} };
 const Ctx = createContext<ProjectsView>({
-  state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map(), reload: () => {},
+  state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], inboxFailed: false, crew: null, runs: 0, summaries: new Map(), reload: () => {},
 });
 
 export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], crew: null, runs: 0, summaries: new Map() });
+  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, campaigns: [], inbox: [], inboxFailed: false, crew: null, runs: 0, summaries: new Map() });
   const seq = useRef(0);
   const last = useRef(0);
 
@@ -88,7 +90,7 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       // A newer load started while the crew was asked for: whatever this one learned (answer or failure) is stale.
       if (mine !== seq.current) return;
       const runs = active.status === "fulfilled" && Array.isArray(active.value?.runs) ? active.value.runs.length : 0;
-      setData({ state: "ok", error: "", ...index, campaigns, inbox: items, crew, runs, summaries: summarize(index, campaigns, items, crew) });
+      setData({ state: "ok", error: "", ...index, campaigns, inbox: items, inboxFailed: inbox.status === "rejected", crew, runs, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 
