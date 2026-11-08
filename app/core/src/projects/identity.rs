@@ -76,7 +76,9 @@ pub fn resolve(picked: &Path, guard: &Guard) -> Result<Resolved, IdentityError> 
 }
 
 fn refuse(root: &Path, g: &Guard) -> Result<(), IdentityError> {
+    // The config folder may be a symlink: the root was canonicalised, so compare against where it really lives too.
     let claude = g.home.join(".claude");
+    let claude_real = fs::canonicalize(&claude).unwrap_or_else(|_| claude.clone());
     if root.parent().is_none() {
         return Err(IdentityError::Refused("the filesystem root cannot be a project"));
     }
@@ -86,7 +88,7 @@ fn refuse(root: &Path, g: &Guard) -> Result<(), IdentityError> {
     if g.home.starts_with(root) {
         return Err(IdentityError::Refused("a folder that contains your home folder cannot be a project"));
     }
-    if root.starts_with(&claude) || claude.starts_with(root) {
+    if [&claude, &claude_real].iter().any(|c| root.starts_with(c) || c.starts_with(root)) {
         return Err(IdentityError::Refused("the Claude config folder cannot be a project"));
     }
     if root.starts_with(&g.data) || g.data.starts_with(root) {

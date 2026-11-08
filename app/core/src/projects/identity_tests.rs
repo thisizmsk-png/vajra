@@ -187,3 +187,19 @@ fn a_git_symlink_to_another_repo_does_not_move_the_root() {
     let r = resolve(&d, &t.guard()).unwrap();
     assert_eq!((r.root, r.key.git_common_dir), (d, None));
 }
+
+#[test]
+fn a_symlinked_config_folder_is_refused_by_where_it_really_lives() {
+    let t = Tmp::new("cfglink");
+    let g = t.guard();
+    let real = t.dir("home/elsewhere/config-real");
+    fs::create_dir_all(real.join("skills/x")).unwrap();
+    let cfg = g.home.join(".claude");
+    symlink(&real, &cfg).unwrap();
+    for picked in [cfg.clone(), cfg.join("skills"), cfg.join("skills/x"), real.clone(), real.join("skills")] {
+        assert!(matches!(resolve(&picked, &g), Err(IdentityError::Refused(_))), "{}", picked.display());
+    }
+    // A folder that merely sits beside it is fine.
+    let ok = t.dir("home/elsewhere/other");
+    assert!(resolve(&ok, &g).is_ok());
+}

@@ -334,11 +334,19 @@ pub struct SessionLog {
 /// fatal: one bad line must not hide a project's history. But it is counted, and a line of another major is flagged,
 /// never silently dropped. Order of first appearance is kept.
 pub fn latest_sessions(lines: &[&[u8]]) -> SessionLog {
+    latest_sessions_of(None, lines)
+}
+
+/// Like `latest_sessions`, but for one project's log: a line whose `project_id` is another project's is skipped and counted
+/// BEFORE the newest-per-id choice, so a line copied from project B can neither appear in A's list nor replace A's
+/// session that shares its id.
+pub fn latest_sessions_of(project_id: Option<&str>, lines: &[&[u8]]) -> SessionLog {
     let mut order: Vec<String> = Vec::new();
     let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
     let mut log = SessionLog::default();
     for l in lines {
         match parse_session(l) {
+            Ok(s) if project_id.is_some_and(|p| s.project_id != p) => log.skipped += 1,
             Ok(s) => {
                 if !by_id.contains_key(&s.id) {
                     order.push(s.id.clone());
