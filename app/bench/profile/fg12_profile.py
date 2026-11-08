@@ -127,15 +127,39 @@ def sample(app_pid, run_roots, before):
             "load_1m": round(os.getloadavg()[0], 1), "front": frontmost()}
 
 
+def lstart(pid):
+    """The process's start time as `ps` prints it (1 s resolution): with the command name, its identity for the cleanup."""
+    out = subprocess.run(["ps", "-o", "lstart=,comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return out or None
+
+
+def snapshot_tree(pid):
+    """Every descendant of `pid` with its identity, taken while the tree still hangs together (once the parent dies they
+    are reparented to launchd and can no longer be told from anyone else's)."""
+    rows = ps()
+    return {p: lstart(p) for p in tree(rows, pid) - {pid}} if pid in rows else {}
+
+
 def stop(p):
-    """Kill only the launch's own process group."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    """End the launch: SIGTERM to the harness itself so it runs its own cleanup (shuts its terminals down), SIGKILL of its
+    group if it does not exit, then SIGKILL of any snapshotted descendant that is still the same process. Terminal shells
+    are their own sessions, which a group kill never reaches. Only processes this launch started are touched."""
+    snap = snapshot_tree(p.pid)
+    for sig, wait in ((signal.SIGTERM, 12), (signal.SIGKILL, 8)):
         try:
-            os.killpg(p.pid, sig)
-            p.wait(timeout=8)
-            return
+            os.kill(p.pid, sig) if sig == signal.SIGTERM else os.killpg(p.pid, sig)
+            p.wait(timeout=wait)
+            break
+        except ProcessLookupError:
+            break
         except Exception:
             pass
+    for pid, ident in snap.items():
+        if ident is not None and lstart(pid) == ident:  # same pid, same start time, same command: ours
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def launch_hidden(binary, env_extra):

@@ -15,7 +15,7 @@
 //! Output (stdout): `PID n`, then `RUNS [pid..]` once the runs exist, then at the end `STATS {json}`. The harness ends by
 //! itself after SECONDS (a hard upper bound), so nothing keeps running if the sampler is cancelled.
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,19 @@ use vajra_desktop::terminal::{Event, Limits, Terminals, UserPathEnv};
 
 const SIDS: [&str; 1] = ["1b4e28ba-2fa1-41d2-883f-0016d3cca427"];
 
+/// Set by SIGTERM or SIGINT: the loop ends and the harness shuts its terminals and runs down itself, so a cancelled
+/// profile leaves no shell behind (they are sessions of their own, which a process-group kill never reaches).
+static STOP: AtomicBool = AtomicBool::new(false);
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
 fn main() {
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_stop as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_stop as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 7 {
         eprintln!("usage: profile_run HOME DATA SCENARIO FAKE_AGENT_PY FIXTURE_DIR SECONDS");
@@ -89,7 +101,7 @@ fn main() {
 
     let t0 = Instant::now();
     // The same loop main.rs runs: coalesce bus events for 1 s, refresh the crew's workers.
-    while t0.elapsed() < Duration::from_secs(secs) {
+    while t0.elapsed() < Duration::from_secs(secs) && !STOP.load(Ordering::SeqCst) {
         let _ = collect_changes(&sub, Duration::from_secs(1));
         app.refresh_workers();
         app.reap_runs();

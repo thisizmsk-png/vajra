@@ -102,6 +102,28 @@ class Bounds(unittest.TestCase):
         self.assertGreater(len(data["samples"]), 0)
         self.assertEqual(subprocess.run(["pgrep", "-f", fake], capture_output=True).returncode, 1, "the harness stand-in must be gone")
 
+    def test_cancel_also_ends_session_leaders_the_harness_started(self):
+        """Terminal shells are their own sessions, so killing the harness's process group misses them: a harness that dies
+        on SIGTERM without cleanup must not leave its descendants behind."""
+        import tempfile
+        out = os.path.join(tempfile.mkdtemp(), "o.json")
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fg12_profile.py")
+        marker = "301"  # a unique sleep length to find the orphan by
+        fake = os.path.join(tempfile.mkdtemp(), "harness")
+        with open(fake, "w") as f:
+            # like the real harness: a child in its own session, still our child when we are told to stop; then keep running
+            f.write("#!/usr/bin/env python3\nimport os, subprocess\nprint('PID', os.getpid(), flush=True)\nprint('RUNS []', flush=True)\n"
+                    f"subprocess.Popen(['sleep', '{marker}'], start_new_session=True)\nos.execvp('sleep', ['sleep', '300'])\n")
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, FG12_FIXTURE="/nonexistent")
+        runner = subprocess.Popen([sys.executable, "-c", f"import sys; sys.path.insert(0, {os.path.dirname(script)!r}); import fg12_profile as P; P.SETTLE_S=0; P.STEP_S=0.2; sys.argv=['x','core',{fake!r},'idle',{out!r},'60']; P.main()"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2.5)
+        self.assertEqual(subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True).returncode, 0, "the session leader exists before the cancel")
+        runner.send_signal(signal.SIGTERM)
+        runner.wait(timeout=30)
+        time.sleep(0.5)
+        self.assertEqual(subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True).returncode, 1, "the harness's own session leader must be gone after cancel")
+
 
 if __name__ == "__main__":
     unittest.main()

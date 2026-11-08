@@ -30,8 +30,10 @@ Raw samples for the numbers below are in `results/`.
 
 ## Safety
 - **Bounded:** seconds clamp to 600, samples to 300; the harness ends itself after its own deadline.
-- **Cancellable:** SIGINT/SIGTERM stop sampling, quit only the launch's own process (by pid, never by name) and still
-  write what was sampled (`cancelled: true`). A unit test covers it.
+- **Cancellable:** SIGINT/SIGTERM stop sampling and still write what was sampled (`cancelled: true`). The core harness
+  handles SIGTERM itself and shuts its terminals and runs down; the sampler then SIGKILLs only descendants it had
+  snapshotted (same pid, start time and command) that are still alive, because terminal shells are sessions of their
+  own and a process-group kill misses them. The shipping app is quit by pid, never by name. Unit tests cover both.
 - **Never in front of the human:** the shipping app is started with `open -g -j` (not activated, window hidden) and
   quit by pid when the run ends. Every launch uses a temp HOME and data dir; the real ones, the installer and the
   manifest generator are not touched.
