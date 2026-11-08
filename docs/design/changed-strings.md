@@ -172,3 +172,37 @@ Shell B frame (T4, wave 1).
 its name until FG-02 replaces the run Lead with the per-project orchestrator. Those surfaces then become
 "Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
 "Director-General"; code and the contract keep `orchestrator`.
+
+FG-08 settings (owner review).
+
+All new settings copy lives in `S.preferences` in `app/ui/strings.ts`; section titles and ledes live in
+`S.settings.sections`. Provider labels name integration targets only. The unavailable adapter label uses
+parentheses, not an em dash. Notification delivery retains its existing true preference default; item text
+starts off and OS permission remains separate.
+
+| String | Where | Note |
+|---|---|---|
+| General / Default editor and shell for supported new opens. Active sessions keep their settings. | Settings section | new section |
+| Choose global defaults or override them for this project. | Settings lede | saved preferences replace placeholder copy |
+| Graphite, in dark or light. Follow the system or choose an appearance. | Appearance lede | system or explicit choice |
+| Default agent and task capacity. Project overrides apply to new work; native capabilities and system limits still apply. | Models and capacity lede | new-launch scope |
+| Preference scope / Global defaults / Saved preferences / Overrides for NAME. Changes apply only after Save. | scope and landmark | project name is dynamic |
+| Global default / Project override / Unsaved change / Use global FIELD | fields | shows value source and inherit action |
+| Save or discard changes before switching scope. | scope | scope selector disabled while dirty |
+| Reading preferences… / Reload preferences / Save preferences / Discard changes / Reset this scope / Saved. | lifecycle/actions | reset touches selected scope only |
+| Theme / Follow system / Dark / Light | Appearance | saved choices |
+| Default editor / System default / Editor CLI / Terminal shell / Login shell / /bin/sh / /bin/bash / /bin/zsh | General | bounded choices; adapter consumption follows |
+| Launch preferences are saved for supported new opens. Running sessions keep their launch settings. | General hint | no action on save |
+| Default agent / Claude Code / Codex CLI (availability check required) | provisional provider selector | integration targets; replaced by provider track |
+| Model: MODEL. Additional agent and model selection requires a supported adapter. / Native CLI default | Models | honest unavailable controls |
+| Concurrent workers / Fix rounds / Read-only guard caps: N active run, M workers per run. Preferences cannot raise these limits. | Models and capacity | counts from read-only caps |
+| Defaults apply to new tasks. System limits and native permissions still apply. | capacity hint | active runs retain settings |
+| OS notifications / Include item text | Notifications | independent delivery/text preferences |
+| Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply. | Notifications hint | no implied OS grant |
+| Search shortcut / Settings shortcut | Keyboard | bounded remapping; remaining shortcuts unchanged |
+| Action STATE · ID · REASON / Retry same action | receipts | reason suffix only when present; retry retains ID |
+| The core returned unsupported preferences. Update the desktop and reload. / Preferences could not be read. The saved file was preserved. | read errors | no automatic destructive reset |
+| The action outcome is not confirmed. Retry the same action or reload to review. / Save outcome is unconfirmed. Retry the same action or reload to review. | uncertain action | no fresh action ID |
+| Preferences changed in another window. Reload and review before saving again. | conflict | no silent retry |
+| Action STATE. Reload and review the saved values before another action. / Unsupported preferences response. Reload before another action. | receipt/recovery errors | no new write before review |
+| The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | prevents unsupported adapter fallback |

@@ -117,7 +117,7 @@ export function Home() {
           <Text variant="body" muted className="v-home__lede">{S.home.lede}</Text>
 
           {prefs.error && <p role="alert">{prefs.error}</p>}
-          {unsupported && <p role="alert">The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting.</p>}
+          {unsupported && <p role="alert">{S.preferences.unsupportedLaunch}</p>}
           <form className="v-launch" aria-label={S.home.start} noValidate
             onSubmit={(e) => { e.preventDefault(); start(); }}
             onKeyDown={(e) => { if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) start(); } }}>

@@ -3,7 +3,9 @@ import { Button } from "../../../components/ui/base";
 import { usePreferenceScope } from "../../preferences";
 import { SHORTCUT_CHOICES, shortcutKeys } from "../../preferenceContract";
 import type { PreferenceKey, PreferencePatch, Preferences } from "../../preferenceContract";
+import { S } from "../../../strings";
 import "./preferences.css";
+const C = S.preferences;
 
 export function PreferenceForm({ projectId, projectName, section, onDirty }: { projectId: string | null; projectName?: string; section: string; onDirty?: (dirty: boolean) => void }) {
   const prefs = usePreferenceScope(projectId, false);
@@ -11,56 +13,56 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
   const dirty = Object.keys(patch).length > 0;
   useEffect(() => { setPatch({}); setMessage(""); }, [projectId, prefs.view?.rev]);
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
-  if (!prefs.view) return <div className="v-pref">{prefs.error ? <><p role="alert">{prefs.error}</p><Button onClick={prefs.reload}>Reload preferences</Button></> : <p role="status">Reading preferences…</p>}</div>;
+  if (!prefs.view) return <div className="v-pref">{prefs.error ? <><p role="alert">{prefs.error}</p><Button onClick={prefs.reload}>{C.reload}</Button></> : <p role="status">{C.reading}</p>}</div>;
   const view = prefs.view;
   const value = <K extends PreferenceKey>(key: K): Preferences[K] => patch.inherit?.includes(key) ? view.global[key] : (patch[key] ?? view.effective[key]) as Preferences[K];
   const change = <K extends PreferenceKey>(key: K, v: Preferences[K]) => { setMessage(""); setPatch(p => ({ ...p, [key]: v, ...(p.inherit ? { inherit: p.inherit.filter(k => k !== key) } : {}) })); };
   const inherit = (key: PreferenceKey) => { setMessage(""); setPatch(p => { const next = { ...p, inherit: [...new Set([...(p.inherit ?? []), key])] }; delete next[key]; return next; }); };
-  const source = (key: PreferenceKey) => key in patch || patch.inherit?.includes(key) ? "Unsaved change" : view.sources[key] === "project" ? "Project override" : "Global default";
+  const source = (key: PreferenceKey) => key in patch || patch.inherit?.includes(key) ? C.unsaved : view.sources[key] === "project" ? C.projectSource : C.globalSource;
   const select = <K extends PreferenceKey>(key: K, label: string, choices: readonly (readonly [string, string, boolean?])[]) => (
     <div className="v-pref__row" key={key}>
       <label><span>{label}<small>{source(key)}</small></span><select aria-label={label} value={String(value(key))} disabled={prefs.busy} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
         {choices.map(([v, text, disabled]) => <option key={v} value={v} disabled={disabled}>{text}</option>)}
       </select></label>
-      {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit(key)}>Use global {label}</Button>}
+      {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
     </div>
   );
-  const save = async (reset = false) => { setMessage(""); if (await prefs.save(reset ? {} : patch, reset)) { setPatch({}); setMessage("Saved."); } };
-  return <section className="v-pref" aria-label="Saved preferences">
-    <p>{projectId ? `Overrides for ${projectName ?? projectId}` : "Global defaults"}. Changes apply only after Save.</p>
-    {section === "appearance" && select("theme", "Theme", [["system", "Follow system"], ["dark", "Dark"], ["light", "Light"]])}
+  const save = async (reset = false) => { setMessage(""); if (await prefs.save(reset ? {} : patch, reset)) { setPatch({}); setMessage(C.saved); } };
+  return <section className="v-pref" aria-label={C.region}>
+    <p>{C.scopeDescription(projectId ? projectName ?? projectId : undefined)}</p>
+    {section === "appearance" && select("theme", C.theme, [["system", C.systemTheme], ["dark", C.dark], ["light", C.light]])}
     {section === "general" && <>
-      {select("editor", "Default editor", [["system", "System default"], ["code", "Editor CLI"]])}
-      {select("shell", "Terminal shell", [["login", "Login shell"], ["sh", "/bin/sh"], ["bash", "/bin/bash"], ["zsh", "/bin/zsh"]])}
-      <p>Launch preferences are saved for supported new opens. Running sessions keep their launch settings.</p>
+      {select("editor", C.editor, [["system", C.systemEditor], ["code", C.editorCli]])}
+      {select("shell", C.shell, [["login", C.loginShell], ["sh", C.sh], ["bash", C.bash], ["zsh", C.zsh]])}
+      <p>{C.launchHint}</p>
     </>}
     {section === "models" && <>
-      {select("agent", "Default agent", [["claude", "Claude Code"], ["codex", "Codex CLI — availability check required", true]])}
-      <p>Model: {view.effective.model || "Native CLI default"}. Additional agent and model selection requires a supported adapter.</p>
-      {select("workers", "Concurrent workers", Array.from({ length: 16 }, (_, i) => [String(i + 1), String(i + 1)] as const))}
-      {select("rounds", "Fix rounds", [["1", "1"], ["2", "2"], ["3", "3"]])}
-      <p>Read-only guard caps: {view.caps?.active_runs ?? 1} active run, {view.caps?.workers_per_run ?? 16} workers per run. Preferences cannot raise these limits.</p>
-      <p>Defaults apply to new tasks. System limits and native permissions still apply.</p>
+      {select("agent", C.agent, [["claude", C.claude], ["codex", C.codexUnavailable, true]])}
+      <p>{C.modelHint(view.effective.model || C.nativeModel)}</p>
+      {select("workers", C.workers, Array.from({ length: 16 }, (_, i) => [String(i + 1), String(i + 1)] as const))}
+      {select("rounds", C.rounds, [["1", "1"], ["2", "2"], ["3", "3"]])}
+      <p>{C.caps(view.caps?.active_runs ?? 1, view.caps?.workers_per_run ?? 16)}</p>
+      <p>{C.defaultsHint}</p>
     </>}
     {section === "notifications" && <>
-      {([ ["notifications", "OS notifications"], ["notifications_text", "Include item text"] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onChange={e => change(key, e.target.checked)} /></label>
-        {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => inherit(key)}>Use global {label}</Button>}
+      {([ ["notifications", C.notifications], ["notifications_text", C.notificationsText] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onChange={e => change(key, e.target.checked)} /></label>
+        {projectId && <Button size="sm" variant="ghost" disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
       </div>)}
-      <p>Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply.</p>
+      <p>{C.notificationsHint}</p>
     </>}
-    {section === "keyboard" && (["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? "Search shortcut" : "Settings shortcut"}<small>{source("shortcuts")}</small></span>
-      <select aria-label={key === "palette" ? "Search shortcut" : "Settings shortcut"} value={value("shortcuts")[key]} disabled={prefs.busy} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
+    {section === "keyboard" && (["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? C.searchShortcut : C.settingsShortcut}<small>{source("shortcuts")}</small></span>
+      <select aria-label={key === "palette" ? C.searchShortcut : C.settingsShortcut} value={value("shortcuts")[key]} disabled={prefs.busy} onChange={e => change("shortcuts", { ...value("shortcuts"), [key]: e.target.value })}>
         {SHORTCUT_CHOICES.map(k => <option key={k} value={k}>{shortcutKeys(k).join(" ")}</option>)}
-      </select></label>{projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit("shortcuts")}>Use global {key === "palette" ? "Search shortcut" : "Settings shortcut"}</Button>}</div>)}
+      </select></label>{projectId && <Button size="sm" variant="ghost" disabled={prefs.busy} onClick={() => inherit("shortcuts")}>{C.inherit(key === "palette" ? C.searchShortcut : C.settingsShortcut)}</Button>}</div>)}
     {prefs.error && <p role="alert">{prefs.error}</p>}
-    {prefs.receipt && <p role="status">Action {prefs.receipt.state} · {prefs.receipt.action_id}{prefs.receipt.reason ? ` · ${prefs.receipt.reason}` : ""}</p>}
-    {prefs.uncertain && <Button disabled={prefs.busy} onClick={() => { void prefs.retry().then(ok => { if (ok) { setPatch({}); setMessage("Saved."); } }); }}>Retry same action</Button>}
+    {prefs.receipt && <p role="status">{C.receipt(prefs.receipt.state, prefs.receipt.action_id, prefs.receipt.reason)}</p>}
+    {prefs.uncertain && <Button disabled={prefs.busy} onClick={() => { void prefs.retry().then(ok => { if (ok) { setPatch({}); setMessage(C.saved); } }); }}>{C.retry}</Button>}
     {message && <p role="status">{message}</p>}
     <div className="v-pref__actions">
-      <Button variant="primary" disabled={!dirty || prefs.busy || prefs.uncertain || prefs.needsReview} busy={prefs.busy} onClick={() => void save()}>Save preferences</Button>
-      <Button disabled={!dirty || prefs.busy} onClick={() => { setPatch({}); setMessage(""); }}>Discard changes</Button>
-      <Button disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => void save(true)}>Reset this scope</Button>
-      <Button variant="ghost" disabled={prefs.busy} onClick={() => { setPatch({}); setMessage(""); prefs.reload(); }}>Reload preferences</Button>
+      <Button variant="primary" disabled={!dirty || prefs.busy || prefs.uncertain || prefs.needsReview} busy={prefs.busy} onClick={() => void save()}>{C.save}</Button>
+      <Button disabled={!dirty || prefs.busy} onClick={() => { setPatch({}); setMessage(""); }}>{C.discard}</Button>
+      <Button disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => void save(true)}>{C.reset}</Button>
+      <Button variant="ghost" disabled={prefs.busy} onClick={() => { setPatch({}); setMessage(""); prefs.reload(); }}>{C.reload}</Button>
     </div>
   </section>;
 }

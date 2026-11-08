@@ -4,6 +4,8 @@ import { api } from "./ipc";
 import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceReceipt } from "./preferenceContract";
 import { isPreferenceView } from "./preferenceContract";
 import { followSystemTheme } from "./theme";
+import { S } from "../strings";
+const C = S.preferences;
 export const SAVED = "vajra-preferences-saved";
 export function usePreferenceScope(projectId: string | null, listenForSaves = true) {
   const scope = projectId ?? ""; const current = useRef(scope); current.current = scope;
@@ -17,8 +19,8 @@ export function usePreferenceScope(projectId: string | null, listenForSaves = tr
     pending.current = null; setUncertain(false); setReceipt(null);
     const ticket = ++epoch.current;
     setState(s => ({ scope, view: s.scope === scope ? s.view : null, error: "", busy: false }));
-    api.preferencesRead(projectId).then(view => { if (ticket === epoch.current && current.current === scope) setState(isPreferenceView(view) && view.project_id === projectId ? { scope, view, error: "", busy: false } : { scope, view: null, error: "The core returned unsupported preferences. Update the desktop and reload.", busy: false }); }, () => {
-      if (ticket === epoch.current && current.current === scope) setState({ scope, view: null, error: "Preferences could not be read. The saved file was preserved.", busy: false });
+    api.preferencesRead(projectId).then(view => { if (ticket === epoch.current && current.current === scope) setState(isPreferenceView(view) && view.project_id === projectId ? { scope, view, error: "", busy: false } : { scope, view: null, error: C.unsupported, busy: false }); }, () => {
+      if (ticket === epoch.current && current.current === scope) setState({ scope, view: null, error: C.readFailed, busy: false });
     });
   }, [projectId, scope]);
   useEffect(() => { load(); if (listenForSaves) window.addEventListener(SAVED, load); return () => { ++epoch.current; window.removeEventListener(SAVED, load); }; }, [load, listenForSaves]);
@@ -35,26 +37,26 @@ export function usePreferenceScope(projectId: string | null, listenForSaves = tr
       setReceipt(out.receipt);
       if (!out.receipt || out.receipt.state === "accepted") {
         setUncertain(true);
-        throw new Error("The action outcome is not confirmed. Retry the same action or reload to review.");
+        throw new Error(C.unconfirmed);
       }
       pending.current = null;
       if (out.receipt.state !== "done") {
         const code = out.receipt.reason ?? out.error?.error;
         throw new Error(code === "revision_conflict"
-          ? "Preferences changed in another window. Reload and review before saving again."
-          : `Action ${out.receipt.state}. Reload and review the saved values before another action.`);
+          ? C.conflict
+          : C.rejected(out.receipt.state));
       }
       // Replayed receipts deliberately carry no effect result. Recover it with a read, never a second write.
       const next = out.result ?? await api.preferencesRead(projectId);
       if (ticket !== epoch.current || current.current !== scope) return false;
-      if (!isPreferenceView(next) || next.project_id !== projectId) throw new Error("Unsupported preferences response. Reload before another action.");
+      if (!isPreferenceView(next) || next.project_id !== projectId) throw new Error(C.unsupportedSave);
       setState({ scope, view: next, error: "", busy: false });
       window.dispatchEvent(new CustomEvent(SAVED));
       return true;
     } catch (e) {
       if (ticket === epoch.current && current.current === scope) {
         if (pending.current) setUncertain(true);
-        setState(s => ({ ...s, busy: false, error: e instanceof Error ? e.message : "Save outcome is unconfirmed. Retry the same action or reload to review." }));
+        setState(s => ({ ...s, busy: false, error: e instanceof Error ? e.message : C.saveFailed }));
       }
       return false;
     } finally { flight.current = false; }

@@ -98,8 +98,8 @@ export function Settings() {
 function ScopedPreferences({ section }: { section: string }) {
   const { project } = useCurrentProject(); const available = project && !project.bucket ? project : null;
   const [global, setGlobal] = useState(!available); const [dirty, setDirty] = useState(false);
-  return <><div className="v-pref-scope"><label>Preference scope<select aria-label="Preference scope" disabled={dirty} value={global ? "global" : "project"} onChange={e => setGlobal(e.target.value === "global")}>
-    <option value="global">Global defaults</option>{available && <option value="project">{available.name}</option>}
-  </select></label>{dirty && <p>Save or discard changes before switching scope.</p>}</div>
+  return <><div className="v-pref-scope"><label>{S.preferences.scope}<select aria-label={S.preferences.scope} disabled={dirty} value={global ? "global" : "project"} onChange={e => setGlobal(e.target.value === "global")}>
+    <option value="global">{S.preferences.global}</option>{available && <option value="project">{available.name}</option>}
+  </select></label>{dirty && <p>{S.preferences.scopeHint}</p>}</div>
   <PreferenceForm projectId={global ? null : available?.id ?? null} projectName={available?.name} section={section} onDirty={setDirty} /></>;
 }
