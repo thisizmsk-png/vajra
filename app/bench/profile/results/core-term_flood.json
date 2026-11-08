@@ -1,0 +1,820 @@
+{
+ "summary": {
+  "samples": 29,
+  "clean_samples": 10,
+  "helpers_min": 0,
+  "rss_mib": {
+   "app": 7.9,
+   "webkit": {},
+   "runs": [
+    14.6
+   ],
+   "terminals": [
+    4.3
+   ],
+   "total": 26.8
+  },
+  "total_min_max": [
+   26.7,
+   26.8
+  ],
+  "cpu_percent_of_one_core": {
+   "app": 90.36,
+   "all": 137.95
+  },
+  "load_1m_max": 7.6,
+  "front_app_seen": [
+   "Orchestrator"
+  ],
+  "mode": "core",
+  "scenario": "term_flood",
+  "seconds": 60,
+  "settle_s": 25,
+  "cancelled": false
+ },
+ "samples": [
+  {
+   "t": 1794160600.901925,
+   "comp": {
+    "app": [
+     7.546875,
+     23.95
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      12.53
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 36.559999999999995,
+   "load_1m": 7.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160602.970041,
+   "comp": {
+    "app": [
+     7.546875,
+     26.02
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      13.68
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 39.78,
+   "load_1m": 7.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160605.0406048,
+   "comp": {
+    "app": [
+     7.546875,
+     28.1
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      14.85
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 43.03,
+   "load_1m": 7.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160607.106785,
+   "comp": {
+    "app": [
+     7.546875,
+     30.18
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      16.020000000000003
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 46.28,
+   "load_1m": 7.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160609.169861,
+   "comp": {
+    "app": [
+     7.546875,
+     32.25
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      17.14
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 49.47,
+   "load_1m": 7.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160611.235214,
+   "comp": {
+    "app": [
+     7.546875,
+     34.29
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      18.19
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 52.56,
+   "load_1m": 7.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160613.308797,
+   "comp": {
+    "app": [
+     7.546875,
+     36.37
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.08
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      19.28
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.4,
+   "helpers": 0,
+   "cpu_all": 55.73,
+   "load_1m": 7.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160615.374007,
+   "comp": {
+    "app": [
+     7.84375,
+     38.36
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      20.330000000000002
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 58.78,
+   "load_1m": 7.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160617.44657,
+   "comp": {
+    "app": [
+     7.84375,
+     40.45
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      21.41
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 61.95,
+   "load_1m": 7.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160619.524062,
+   "comp": {
+    "app": [
+     7.84375,
+     42.53
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      22.51
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 65.13000000000001,
+   "load_1m": 6.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160621.600816,
+   "comp": {
+    "app": [
+     7.84375,
+     44.6
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      23.6
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 68.29,
+   "load_1m": 6.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160623.670569,
+   "comp": {
+    "app": [
+     7.84375,
+     46.66
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      24.69
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 71.44,
+   "load_1m": 6.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160625.742301,
+   "comp": {
+    "app": [
+     7.84375,
+     48.72
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      25.78
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 74.59,
+   "load_1m": 6.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160627.8193548,
+   "comp": {
+    "app": [
+     7.84375,
+     50.8
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      26.87
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 77.76,
+   "load_1m": 6.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160629.89073,
+   "comp": {
+    "app": [
+     7.84375,
+     52.87
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      27.96
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 80.92,
+   "load_1m": 6.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160631.963661,
+   "comp": {
+    "app": [
+     7.84375,
+     54.94
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      29.05
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 84.08,
+   "load_1m": 6.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160634.037411,
+   "comp": {
+    "app": [
+     7.84375,
+     57.02
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      30.14
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 87.25,
+   "load_1m": 6.3,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160636.110653,
+   "comp": {
+    "app": [
+     7.84375,
+     59.09
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      31.23
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 90.41000000000001,
+   "load_1m": 6.3,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160638.184247,
+   "comp": {
+    "app": [
+     7.84375,
+     61.16
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      32.32
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 93.57,
+   "load_1m": 6.3,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160640.260267,
+   "comp": {
+    "app": [
+     7.84375,
+     63.22
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      33.4
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 96.71000000000001,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160642.326729,
+   "comp": {
+    "app": [
+     7.84375,
+     65.29
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      34.489999999999995
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 99.87,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160644.394691,
+   "comp": {
+    "app": [
+     7.84375,
+     67.36
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      35.58
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 103.03,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160646.474228,
+   "comp": {
+    "app": [
+     7.859375,
+     68.89
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      36.379999999999995
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.7,
+   "helpers": 0,
+   "cpu_all": 105.36,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160648.545599,
+   "comp": {
+    "app": [
+     7.890625,
+     69.75
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      36.87
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 106.71000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160650.621402,
+   "comp": {
+    "app": [
+     7.890625,
+     71.82
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      37.96
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 109.87,
+   "load_1m": 5.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160652.695144,
+   "comp": {
+    "app": [
+     7.890625,
+     73.85
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      39.01
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 112.94999999999999,
+   "load_1m": 5.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160654.758603,
+   "comp": {
+    "app": [
+     7.890625,
+     75.88
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      40.07
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 116.03999999999999,
+   "load_1m": 5.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160656.828609,
+   "comp": {
+    "app": [
+     7.890625,
+     77.95
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      41.16
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 119.2,
+   "load_1m": 5.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160658.897609,
+   "comp": {
+    "app": [
+     7.890625,
+     80.06
+    ],
+    "runs": [
+     [
+      14.5625,
+      0.09
+     ]
+    ],
+    "terminals": [
+     [
+      4.296875,
+      42.269999999999996
+     ]
+    ],
+    "webkit": {}
+   },
+   "total_mib": 26.8,
+   "helpers": 0,
+   "cpu_all": 122.42,
+   "load_1m": 5.4,
+   "front": "Orchestrator"
+  }
+ ]
+}
