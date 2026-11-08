@@ -84,7 +84,10 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
       }
     };
     const onMsg = (m: TermMsg) => {
-      if ("data" in m) t.write(m.data, () => ack(m.data.length));
+      // A disposed view (StrictMode's first setup, a closed tab) may still get messages on its old channel, such as the
+      // Exit the core sends when it closes that shell. They belong to a terminal this view no longer represents.
+      if (dead) return;
+      if ("data" in m) t.write(m.data, () => !dead && ack(m.data.length));
       else onStateRef.current({ status: "ended", code: m.exit });
     };
     const started = attachId !== undefined ? api.termAttach(attachId, onMsg) : api.termOpen(cwd, t.rows || 24, t.cols || 80, onMsg);

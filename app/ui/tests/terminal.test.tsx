@@ -242,6 +242,33 @@ describe("TerminalDock", () => {
     expect(f.named("term_open").length).toBe(0);
   });
 
+  it("a disposed view's late stream messages (data, exit) do not touch the replacement terminal", async () => {
+    const f = fakeTerm();
+    setTransport(f.transport);
+    render(
+      <StrictMode>
+        <TerminalDock defaultPlace={PLACE} />
+      </StrictMode>,
+    );
+    act(() => void ctrlTick());
+    await waitFor(() => expect(f.named("term_open").length).toBeGreaterThanOrEqual(2)); // the disposed setup and the live one
+    await act(async () => {});
+    expect(f.streams.length).toBeGreaterThanOrEqual(2);
+    const [first, second] = [f.streams[0], f.streams[f.streams.length - 1]];
+    const [dead, live] = [FakeXterm.all[0], FakeXterm.all[FakeXterm.all.length - 1]];
+    expect(dead.disposed).toBe(true);
+    // The first shell's output and its exit arrive after the second open has resolved.
+    act(() => first.send(f.bytes("late output").slice().buffer as ArrayBuffer));
+    act(() => first.send({ exit: 0 }));
+    expect(dead.text()).toBe("");
+    expect(screen.queryByText(S.terminal.ended(0))).toBeNull();
+    expect(screen.getByRole("tab", { name: "app" })).toBeTruthy(); // not "(ended)"
+    // The live stream still works, and acknowledgements are not sent for the disposed one.
+    act(() => second.send(new Uint8Array(64 * 1024).buffer));
+    expect(live.written.length).toBe(1);
+    expect(f.named("term_ack")).toEqual([{ cmd: "term_ack", args: { id: second.id, bytes: 64 * 1024 } }]);
+  });
+
   it("attaching under StrictMode (setup, cleanup, setup) does not close the terminal the second setup attached", async () => {
     const f = fakeTerm({ term_list: { terminals: [{ id: 7, cwd: "/work/app", root: "/work/app", rows: 24, cols: 80, alive: true }] } });
     setTransport(f.transport);
