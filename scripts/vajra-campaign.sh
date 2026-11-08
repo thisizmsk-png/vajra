@@ -71,7 +71,12 @@ sha256_str()  { printf '%s' "$1" | openssl dgst -sha256 -r | awk '{print $1}'; }
 repo_key() {
   local d
   d="$(git -c core.fsmonitor= rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || d=""
-  if [ -z "$d" ]; then # git before 2.31: a relative common dir
+  # Only one absolute path counts. Git before 2.31 does not know --path-format: it echoes the option as a line of
+  # its own and still exits 0, which would give every repo root the same key (#84 review).
+  case "$d" in /*) ;; *) d="" ;; esac
+  case "$d" in *"
+"*) d="" ;; esac
+  if [ -z "$d" ]; then # git before 2.31: a relative common dir, made absolute here
     d="$(git -c core.fsmonitor= rev-parse --git-common-dir 2>/dev/null)" || d=""
     [ -n "$d" ] && { d="$(cd "$d" 2>/dev/null && pwd)" || d=""; }
   fi

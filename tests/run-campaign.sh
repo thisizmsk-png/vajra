@@ -340,6 +340,36 @@ if command -v git >/dev/null 2>&1; then
   printf 'run-b\n' > "$CD/.active"
   [ -z "$(in_a active --brief)" ] && [ -z "$(in_nr active --brief)" ]; check "the old global .active is ignored" $?
   rm -f "$CD/.active"
+
+  # #84 review: Git before 2.31 does not know --path-format; it echoes the option as its own line and still exits 0.
+  # A fake old git (it prints the option, then runs the real git without it) and a copy of the script that calls it:
+  # two repo roots must still get two pointers. (A copy, not a PATH entry: the key holder may pin its own PATH.)
+  REAL_GIT="$(command -v git)"; OLDGIT="$WORK/old-git"
+  cat > "$OLDGIT" <<OG
+#!/bin/sh
+for a in "\$@"; do [ "\$a" = "--path-format=absolute" ] && echo "--path-format=absolute"; done
+n=\$#; i=0
+while [ \$i -lt \$n ]; do a="\$1"; shift; i=\$((i+1)); [ "\$a" = "--path-format=absolute" ] || set -- "\$@" "\$a"; done
+exec "$REAL_GIT" "\$@"
+OG
+  chmod 755 "$OLDGIT"
+  og_out="$(cd "$RA" && "$OLDGIT" rev-parse --path-format=absolute --git-common-dir)"; og_rc=$?
+  [ "$og_rc" -eq 0 ] && [ "${og_out%%
+*}" = "--path-format=absolute" ]
+  check "fake old git echoes --path-format and exits 0, like git before 2.31" $?
+  OLD_SCRIPT="$WORK/old-git-campaign.sh"
+  sed "s#git -c core.fsmonitor= rev-parse#\"$OLDGIT\" -c core.fsmonitor= rev-parse#g" "$SCRIPT" > "$OLD_SCRIPT"
+  [ "$(grep -c "$OLDGIT" "$OLD_SCRIPT")" = 2 ]; check "the copy calls the fake old git for both lookups" $?
+  RC="$WORK/repo-c"; RD="$WORK/repo-d"
+  for r in "$RC" "$RD"; do mkdir -p "$r"; git -C "$r" init -q; done
+  OC() { "$BASH_BIN" "$OLD_SCRIPT" "$@"; }
+  ( cd "$RC" && OC create run-c --feature "c|in repo c" ) >/dev/null 2>&1; check "old git: create in repo C" $?
+  [ -z "$(cd "$RD" && OC active --brief)" ]; check "old git: repo D (at its root) does not see repo C's campaign" $?
+  ( cd "$RD" && OC pass c ) >/dev/null 2>&1; [ $? -ne 0 ]; check "old git: a slug-less pass in repo D cannot reach repo C" $?
+  ( cd "$RC" && OC active --brief ) | grep -q "^run-c: "; check "old git: repo C still sees run-c" $?
+  ( cd "$RC/" && mkdir -p sub && cd sub && OC active --brief ) | grep -q "^run-c: "; check "old git: a subfolder of repo C shares its pointer" $?
+  [ ! -e "$CD/.active-global" ] || [ "$(tr -d ' \r\n' < "$CD/.active-global")" != run-c ]; check "old git: repo C's pointer is not the global one" $?
+  ( cd "$RC" && OC close ) >/dev/null 2>&1
 fi
 
 echo "----------------------------------------"
