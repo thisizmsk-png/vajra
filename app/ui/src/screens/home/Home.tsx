@@ -136,11 +136,15 @@ export function Home() {
             <CheckedAt at={checkedAt} />
           </section>
 
-          <section className="v-home__runs" aria-labelledby="v-home-camps">
-            <h2 id="v-home-camps" className="v-text v-text--label">{S.home.campaigns}</h2>
-            {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
-            {camps.state === "error" && <Problem title={S.home.campaignsFailed} detail={camps.text} retry={reloadCamps} />}
-            {camps.state === "ok" && camps.data.length === 0 && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
+          <section className="v-panel v-home__runs" aria-labelledby="v-home-camps">
+            <div className="v-panel__bar"><h2 id="v-home-camps" className="v-panel__title">{S.home.campaigns}</h2></div>
+            {camps.state !== "ok" || camps.data.length === 0 ? (
+              <div className="v-panel__body">
+                {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
+                {camps.state === "error" && <Problem title={S.home.campaignsFailed} detail={camps.text} retry={reloadCamps} />}
+                {camps.state === "ok" && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
+              </div>
+            ) : null}
             {camps.state === "ok" && camps.data.length > 0 && (
               <ul className="v-home__campaigns" aria-label={S.home.campaigns}>
                 {camps.data.map((c) => (
@@ -157,7 +161,8 @@ export function Home() {
                               {busy === c.slug ? S.home.resuming : S.home.resume}
                             </Button>
                           ) : (
-                            <Text variant="body-sm" muted>{S.home.resumeElsewhere}</Text>
+                            // A quiet tag on the row; the sentence says what it means to a screen reader and on hover.
+                            <span className="v-home__elsewhere" title={S.home.resumeElsewhere}><span aria-hidden="true">{S.home.resumeElsewhereShort}</span><span className="v-sr">{S.home.resumeElsewhere}</span></span>
                           )}
                         </>
                       )}
