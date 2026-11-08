@@ -354,7 +354,7 @@ glob_walk() { # directory first-component-index -> 0 if the pattern, taken from 
 glob_symlinks() { # literal directory, 1 if the pattern has a ".." after a glob character -> blocks if the first glob component can match a symlink that leads to the state dir or above
   local base="$1" dotdot="${2:-0}" first="${GLOB_R[0]}" ent name start
   [ -d "$base" ] || return 0
-  for ent in "$base"/* "$base"/.[!.]*; do
+  for ent in "$base"/* "$base"/.[!.]* "$base"/..?*; do # plain, dot-led, and "..x"-led names (a symlink can be called ..x)
     [ -L "$ent" ] || continue
     name="${ent##*/}"
     glob_star "$first" || glob_comp_match "$first" "$name" || continue
