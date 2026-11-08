@@ -44,14 +44,19 @@ export function Home() {
   const { project } = useCurrentProject();
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
-  const [targets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
-  const inProject = (c: Campaign) => {
-    if (!project) return true;
-    const cwd = targets.state === "ok" ? targets.data[c.slug]?.cwd : undefined;
-    const root = cwd?.trim().replace(/\/+$/, "");
-    return project.bucket ? !root : root === project.root;
+  const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
+  // Inside a project the folders decide which campaigns are its own. Until they are read the list is loading, and if
+  // they cannot be read it says so: filtering without them would empty every project and put everything in Unsorted.
+  const inProject = (t: Record<string, ResumeTarget>) => (c: Campaign) => {
+    const root = t[c.slug]?.cwd?.trim().replace(/\/+$/, "");
+    return project?.bucket ? !root : root === project?.root;
   };
-  const camps: Load<Campaign[]> = allCamps.state === "ok" ? { state: "ok", data: allCamps.data.filter(inProject) } : allCamps;
+  const camps: Load<Campaign[]> = allCamps.state !== "ok" ? allCamps
+    : !project ? allCamps
+    : targets.state === "ok" ? { state: "ok", data: allCamps.data.filter(inProject(targets.data)) }
+    : targets;
+  const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
+  const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
   const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
@@ -151,7 +156,7 @@ export function Home() {
             {camps.state !== "ok" || camps.data.length === 0 ? (
               <div className="v-panel__body">
                 {camps.state === "loading" && <LoadingRows label={S.states.loading} />}
-                {camps.state === "error" && <Problem title={S.home.campaignsFailed} detail={camps.text} retry={reloadCamps} />}
+                {camps.state === "error" && <Problem title={campsFailed} detail={camps.text} retry={retryCamps} />}
                 {camps.state === "ok" && <Text variant="body-sm" muted>{S.home.campaignsEmpty}</Text>}
               </div>
             ) : null}

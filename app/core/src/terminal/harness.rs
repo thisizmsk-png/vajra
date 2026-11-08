@@ -79,6 +79,11 @@ pub fn sink() -> (Sink, Collect) {
 impl Collect {
     /// Read until `needle` appears in the output (or `secs` pass); returns everything seen.
     pub fn until(&self, needle: &str, secs: u64) -> String {
+        String::from_utf8_lossy(&self.until_raw(needle, secs)).into_owned()
+    }
+
+    /// Like `until`, but the bytes exactly as received (so a caller can acknowledge exactly what it consumed).
+    pub fn until_raw(&self, needle: &str, secs: u64) -> Vec<u8> {
         let mut all = Vec::new();
         let end = Instant::now() + Duration::from_secs(secs);
         while Instant::now() < end {
@@ -89,7 +94,7 @@ impl Collect {
                 }
             }
         }
-        String::from_utf8_lossy(&all).into_owned()
+        all
     }
 
     pub fn exit(&self, secs: u64) -> Option<Option<i32>> {
@@ -103,10 +108,32 @@ impl Collect {
     }
 }
 
-/// Open a terminal in the fixture's root.
-pub fn open_root(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
+/// Wait until the shell is actually reading its input. A login shell may discard what is typed before it has finished
+/// starting (it resets the tty), so typing "pwd" straight after `open` is lost when the machine is busy. Probe until an
+/// answer comes back, and acknowledge exactly the bytes consumed so flow-control tests start from a clean window.
+pub fn ready(t: &Terminals, id: u32, out: &Collect) {
+    for _ in 0..40 {
+        let _ = t.write(id, b"echo R$((40+2))\n");
+        let raw = out.until_raw("R42", 1);
+        let _ = t.ack(id, raw.len());
+        if String::from_utf8_lossy(&raw).contains("R42") {
+            return;
+        }
+    }
+    panic!("the shell never became ready");
+}
+
+/// Open a terminal at `cwd` and wait until its shell is reading input.
+pub fn open_at(t: &Terminals, f: &Fixture, cwd: &Path) -> (TermInfo, Collect) {
     let (s, out) = sink();
-    (t.open(&f.root, &f.roots(), 24, 80, s).unwrap(), out)
+    let info = t.open(cwd, &f.roots(), 24, 80, s).unwrap();
+    ready(t, info.id, &out);
+    (info, out)
+}
+
+/// Open a terminal in the fixture's root, ready for input.
+pub fn open_root(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
+    open_at(t, f, &f.root)
 }
 
 pub fn alive(pid: u32) -> bool {
