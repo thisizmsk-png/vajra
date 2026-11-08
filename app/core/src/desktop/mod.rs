@@ -408,8 +408,10 @@ impl App {
             .map(|(_, r)| r.session_id.clone())
             .collect();
         let mut svc = lock(&self.control);
-        if svc.session_id().is_some_and(|id| ended.iter().any(|e| e == id)) {
-            svc.end_session();
+        for id in ended {
+            if svc.has_session(&id) {
+                svc.end_session(&id);
+            }
         }
     }
 
@@ -445,11 +447,11 @@ impl App {
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
-            let n = if rotate { ctl(svc.resume_session()) } else { Ok(svc.nonce().unwrap_or_default()) };
+            let n = if rotate { ctl(svc.resume_session(session_id)) } else { Ok(svc.nonce(session_id).unwrap_or_default()) };
             match n {
                 Ok(n) => n.to_string(),
                 Err(e) => {
-                    svc.end_session();
+                    svc.end_session(session_id);
                     return Err(e);
                 }
             }
@@ -462,7 +464,7 @@ impl App {
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
-            lock(&self.control).end_session();
+            lock(&self.control).end_session(session_id);
             return Err(e);
         }
         lock(&self.runs).insert(
@@ -574,18 +576,21 @@ impl App {
         };
         // Only the live run's workers are steering targets; viewing a past run
         // never retargets the control service.
-        if running {
-            self.publish_workers(run_id, &workers, &ctx);
+        if let (true, Some((_, r))) = (running, &run) {
+            self.publish_workers(&r.session_id, run_id, &workers, &ctx);
         }
         let run_status = if running { Status::InProgress } else { Status::Unknown };
         let lead = run.as_ref().map(|_| run_status);
         // Overlays come from the live control session only; a past run shows none.
-        let signals = if running { lock(&self.control).signals() } else { Signals::default() };
+        let signals = match (&run, running) {
+            (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
+            _ => Signals::default(),
+        };
         let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
         Ok(node_json(&node))
     }
 
-    fn publish_workers(&self, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
+    fn publish_workers(&self, session_id: &str, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
         let infos = workers
             .iter()
             .map(|w| {
@@ -603,15 +608,20 @@ impl App {
                 }
             })
             .collect();
-        lock(&self.control).set_workers(infos);
+        lock(&self.control).set_workers(session_id, infos);
     }
 
-    /// Keep the control service's workers and the transcript tails current for the live run, without any UI view
+    /// Keep the control service's workers and the transcript tails current for every live run, without any UI view
     /// asking: steering and MCP inspect must work while the crew view is closed. Called by the core's own poll loop.
     pub fn refresh_workers(&self) {
-        let live = lock(&self.runs).iter().find(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone());
-        let Some(run) = live else { return };
-        let Ok(workers) = self.discover_workers(&run) else { return };
+        let live: Vec<Run> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.clone()).collect();
+        for run in live {
+            self.refresh_run_workers(&run);
+        }
+    }
+
+    fn refresh_run_workers(&self, run: &Run) {
+        let Ok(workers) = self.discover_workers(run) else { return };
         let ctx: HashMap<String, (Option<String>, Vec<String>)> = {
             let tr = lock(&self.transcripts);
             workers
@@ -623,7 +633,7 @@ impl App {
                 })
                 .collect()
         };
-        self.publish_workers(&run.run_id, &workers, &ctx);
+        self.publish_workers(&run.session_id, &run.run_id, &workers, &ctx);
     }
 
     fn discover_workers(&self, run: &Run) -> Result<Vec<Worker>, Value> {
@@ -653,10 +663,7 @@ impl App {
         }
         let mut red = run.nonces.clone();
         {
-            let svc = lock(&self.control);
-            if svc.session_id() == Some(run.session_id.as_str()) {
-                red.add(svc.nonce());
-            }
+            red.add(lock(&self.control).nonce(&run.session_id));
         }
         let mut out = Vec::new();
         for d in dirs {
