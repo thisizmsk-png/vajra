@@ -1,7 +1,7 @@
 // Perf-CI fixture. Compiled in ONLY when the build sets VITE_PERF_FIXTURE (the CI post-load measurement build); the
 // normal bundle contains none of this (CI greps the shipped bundle for it). It replaces the core with a scripted one:
-// a Crew view with one worker whose stream starts LOAD_START_S after launch and delivers TOTAL lines at RATE per second,
-// the way a long run would, so the app's post-load idle can be measured. Mirrors LOAD_START_S/LOAD_END_S in
+// a Crew view with one worker whose stream (served as `stream_window`, the one command the Stream tab reads) starts
+// LOAD_START_S after launch and delivers TOTAL lines at RATE per second, the way a long run would, so the app's post-load idle can be measured. Mirrors LOAD_START_S/LOAD_END_S in
 // app/bench/ci/measure.py.
 import { setTransport } from "../ipc";
 import type { Transport } from "../ipc";
@@ -10,9 +10,8 @@ export const LOAD_START_S = 20;
 export const RATE = 170;
 export const TOTAL = 10_000;
 export const LOAD_END_S = LOAD_START_S + Math.ceil(TOTAL / RATE);
-/** What the real core keeps in memory for a stream; older lines are in its spill file. */
-const CORE_RING = 2900;
-const PAGE = 700;
+/** The most rows one `stream_window` answers (the core clamps a request to this). */
+const WINDOW_MAX_LINES = 500;
 
 const pad = "the quick brown fox jumps over the lazy dog while the crew builds the thing ";
 const line = (n: number) => `\x1b[32m${String(n).padStart(6, "0")}\x1b[0m Edit src/api/reports.py +${n % 40} -${n % 7} ${pad.slice(0, 20 + (n % 40))}`;
@@ -32,21 +31,14 @@ export function fixtureTransport(elapsedS: () => number): { transport: Transport
       if (cmd === "crew") return node("lead", "lead", "Lead", [node("run", "run", "Run r1", [node("agent:a1", "worker", "Backend")])]);
       if (cmd === "active_runs") return { count: 0, runs: [] };
       if (cmd === "worktree_info") return { worker: "a1", worktree: "/fixture/.claude/worktrees/w1", branch: "worker-1", base: null };
-      if (cmd === "tail") {
-        const after = args.afterSeq ?? 0;
-        const spilled = Math.max(0, c - CORE_RING);
-        const gap = c - after > CORE_RING;
-        const from = gap ? c - PAGE + 1 : after + 1;
-        return {
-          lines: lines(from, Math.min(c, from + PAGE - 1)), gap, head_seq: c,
-          ...(spilled > 0 ? { spill_start: 0, spill_end: spilled * 100 } : { spill_start: null, spill_end: null }),
-        };
-      }
-      if (cmd === "read_spill") {
-        const spilled = Math.max(0, c - CORE_RING);
-        const from = Math.floor((args.offset ?? 0) / 100) + 1;
-        const to = Math.min(spilled, from + PAGE - 1);
-        return { lines: lines(from, to), next_offset: to * 100, gap: false, end: to >= spilled };
+      if (cmd === "stream_window") {
+        // The real StreamWindow: up to `maxLines` rows from seq `from` (the newest rows when `from` is null), clamped to
+        // the oldest line kept. An empty stream answers head 0 with both edges reached, as the core does.
+        if (c === 0) return { lines: [], head_seq: 0, first_seq: 0, at_start: true, at_end: true, gap: false };
+        const max = Math.min(WINDOW_MAX_LINES, Math.max(1, Number(args.maxLines ?? 220)));
+        const start = args.from === null || args.from === undefined ? Math.max(1, c - max + 1) : Math.max(1, Number(args.from));
+        const end = Math.min(c, start + max - 1);
+        return { lines: lines(start, end), head_seq: c, first_seq: 1, at_start: start <= 1, at_end: end >= c, gap: false };
       }
       return {};
     },
