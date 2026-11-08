@@ -155,7 +155,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         </Suspense>
         {active?.state.status === "starting" && <p className="v-term__badge v-term__muted">{S.terminal.starting}</p>}
         {active?.state.status === "error" && (
-          <div className="v-term__state" role="alert">
+          <div className="v-term__state v-term__state--over" role="alert">
             <p>{S.terminal.errors[active.state.code] ?? active.state.detail}</p>
             <button className="v-term__btn" onClick={() => restart(active.key)}>{S.terminal.retry}</button>
           </div>

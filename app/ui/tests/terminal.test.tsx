@@ -1,4 +1,6 @@
 import { StrictMode } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport, TERM_WRITE_CHUNK } from "../src/ipc";
@@ -180,6 +182,11 @@ describe("TerminalDock", () => {
     act(() => void ctrlTick());
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(S.terminal.errors.cwd_not_allowed);
+    // jsdom has no layout: the host is full height, so a normal-flow error box would fall below the dock. It must be
+    // the overlay variant, and the stylesheet must position that variant over the body (checked in a real layout too).
+    expect(alert.classList.contains("v-term__state--over")).toBe(true);
+    const css = readFileSync(join(process.cwd(), "src/terminal/terminal.css"), "utf8");
+    expect(css).toMatch(/\.v-term__state--over\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0/);
     fail = false;
     fireEvent.click(screen.getByRole("button", { name: S.terminal.retry }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());

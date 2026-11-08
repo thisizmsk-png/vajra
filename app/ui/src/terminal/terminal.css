@@ -21,3 +21,5 @@
 .v-term__state { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-sm); padding: var(--space-md); font: 13px/18px var(--font-ui); color: var(--c-text); }
 .v-term__state p { margin: 0; }
 .v-term__ended { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: var(--space-md); padding: 6px var(--space-md); background: var(--c-surface-elevated); border-top: 1px solid var(--c-border); font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
+/* An error replaces the view inside the body (the host is full height, so a normal-flow box would fall below the dock). */
+.v-term__state--over { position: absolute; inset: 0; background: var(--c-background); z-index: 1; }
