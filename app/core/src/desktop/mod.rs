@@ -230,6 +230,8 @@ pub struct App {
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
+    /// ADR-15: the project records under `<data>/projects`.
+    projects: crate::projects::store::Store,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
@@ -247,8 +249,10 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let projects = crate::projects::store::Store::open(data, home)?;
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            projects,
             acts,
             sink: Mutex::new(None),
             data: data.to_path_buf(),
@@ -1709,6 +1713,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod inbox;
+mod projects;
 mod wfresult;
 mod decide;
 mod lead;
