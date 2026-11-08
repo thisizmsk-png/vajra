@@ -59,15 +59,37 @@ fn a_planted_openssl_or_jq_in_a_user_dir_is_never_run_by_the_bridge() {
     }
     assert!(!caught.exists(), "a planted tool ran: {}", fs::read_to_string(&caught).unwrap_or_default());
 
-    // The claude version check may see user dirs (an npm claude needs its node), but only after the system dirs, and it
-    // is never given the key.
+    // The claude version check is keyless (it runs only `claude --version`), and it gets the runtime's order: the user
+    // dirs as resolved, then the system dirs. Nothing here touches the key.
     let probe = scripts.join("probe.sh");
-    exe(&probe, "echo \"PATH=$PATH\"; echo \"openssl=$(command -v openssl)\"; openssl version >/dev/null 2>&1; exit 0");
-    let out = run_process_on_path(&probe, &[], None, Duration::from_secs(10), std::slice::from_ref(&planted)).unwrap();
+    exe(&probe, "echo \"PATH=$PATH\"");
+    let user = vajra_desktop::userpath::current();
+    let out = run_process_on_path(&probe, &[], None, Duration::from_secs(10), &user).unwrap();
     let path = out.stdout.lines().find_map(|l| l.strip_prefix("PATH=")).unwrap().to_string();
     let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    assert_eq!(dirs[0], PathBuf::from("/usr/bin"), "system dirs first: {dirs:?}");
-    assert_eq!(dirs.last(), Some(&planted), "user dirs only after them: {dirs:?}");
-    assert!(!caught.exists(), "a planted tool ran from the claude check: {}", fs::read_to_string(&caught).unwrap_or_default());
+    assert_eq!(&dirs[..user.len()], &user[..], "the probe keeps the runtime order: {dirs:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// #70 review: an npm `claude` is `#!/usr/bin/env node`. The probe must pick the same `node` the run would: the first
+/// one on the user's PATH (here the selected nvm node), not a later, older one.
+#[test]
+fn the_claude_probe_runs_the_node_the_user_path_selects() {
+    let root = std::env::temp_dir().join(format!("vajra-probe-node-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let (nvm, older) = (root.join("nvm/v22/bin"), root.join("brew/bin"));
+    fs::create_dir_all(&nvm).unwrap();
+    fs::create_dir_all(&older).unwrap();
+    let (nvm, older) = (nvm.canonicalize().unwrap(), older.canonicalize().unwrap());
+    exe(&nvm.join("node"), "echo '2.1.0 (Claude Code)'");
+    exe(&older.join("node"), "echo 'unsupported node' >&2; exit 1");
+    fs::write(nvm.join("claude"), "#!/usr/bin/env node\n").unwrap();
+    fs::set_permissions(nvm.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    for order in [[nvm.clone(), older.clone()], [older.clone(), nvm.clone()]] {
+        let out = run_process_on_path(&nvm.join("claude"), &["--version".into()], None, Duration::from_secs(10), &order).unwrap();
+        let first_is_nvm = order[0] == nvm;
+        assert_eq!(out.exit() == Some(0), first_is_nvm, "{order:?}: {out:?}");
+        assert_eq!(out.stdout.trim() == "2.1.0 (Claude Code)", first_is_nvm, "{order:?}: {out:?}");
+    }
     let _ = fs::remove_dir_all(&root);
 }

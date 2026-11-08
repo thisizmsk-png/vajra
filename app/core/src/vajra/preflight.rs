@@ -172,7 +172,8 @@ mod tests {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
         let home = home.canonicalize().unwrap();
-        let node = "vajra-fake-node";
+        // A real `node` name, so it competes with any node in the system or Homebrew dirs.
+        let node = "node";
         exe(&home.join("nvm/bin").join(node), "#!/bin/sh\necho '9.9.9 (Claude Code)'\n");
         exe(&home.join("nvm/bin/claude"), &format!("#!/usr/bin/env {node}\n"));
         let shell = home.join("zsh");
@@ -183,22 +184,24 @@ mod tests {
         let r = claude_row(&home, &dirs);
         assert!(r.ok && r.detail == "9.9.9 (Claude Code)", "{r:?}");
 
-        // Control: the same claude run without its node dir on PATH fails the version check.
-        exe(&home.join("other/claude"), &format!("#!/usr/bin/env {node}\n"));
+        // Control: a claude whose interpreter is on no dir of the PATH fails the version check. (Not `node`: a
+        // system or Homebrew node would answer.)
+        exe(&home.join("other/claude"), "#!/usr/bin/env vajra-missing-node\n");
         let r = claude_row(&home, &[home.join("other")]);
         assert!(!r.ok && r.detail.contains("--version"), "{r:?}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn bridge_path_keeps_the_system_dirs_first_and_drops_relative_ones() {
-        let p = super::super::bridge::bridge_path(&[PathBuf::from("/x/nvm/bin"), PathBuf::from("."), PathBuf::from("/usr/bin")]);
-        let dirs: Vec<PathBuf> = std::env::split_paths(&p).collect();
-        assert_eq!(dirs[0], PathBuf::from("/usr/bin"), "a user dir never comes before the system dirs");
-        assert_eq!(dirs.last(), Some(&PathBuf::from("/x/nvm/bin")));
+    fn requests_get_the_fixed_system_path_and_the_probe_gets_the_user_order() {
+        use super::super::bridge::{BASE_PATH, bridge_path, probe_path};
+        assert_eq!(bridge_path(), std::ffi::OsString::from(BASE_PATH.join(":")));
+        let user = [PathBuf::from("/x/nvm/bin"), PathBuf::from("."), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/bin")];
+        let dirs: Vec<PathBuf> = std::env::split_paths(&probe_path(&user)).collect();
+        assert_eq!(&dirs[..3], &[PathBuf::from("/x/nvm/bin"), PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/bin")], "the user order is kept: {dirs:?}");
         assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
         assert_eq!(dirs.iter().filter(|d| *d == Path::new("/usr/bin")).count(), 1);
-        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")), "base dirs stay: {dirs:?}");
+        assert!(BASE_PATH.iter().all(|b| dirs.contains(&PathBuf::from(b))), "missing system dirs are appended: {dirs:?}");
     }
 
     #[test]
