@@ -8,6 +8,7 @@ import { S } from "../../strings";
 import { api, errorText, isIpcError } from "../ipc";
 import type { TermMsg } from "../ipc";
 import { createInput } from "./input";
+import { createOutputQueue, frameScheduler } from "./outputQueue";
 
 /** Output is acknowledged to the core in steps like this, once xterm has parsed it: a flood is paced by the view. */
 export const ACK_EVERY = 64 * 1024;
@@ -41,6 +42,9 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
+  const queueRef = useRef<ReturnType<typeof createOutputQueue> | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const onStateRef = useRef(onState);
   onStateRef.current = onState;
 
@@ -83,11 +87,21 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
         void api.termAck(id, k).catch(() => undefined);
       }
     };
+    // Output goes through the frame budget: one write per frame, drop-to-tail when far behind, nothing rendered while the
+    // pane is hidden (see outputQueue.ts). `ack` still waits for xterm to parse, so the core's credit window paces the shell.
+    const queue = createOutputQueue({
+      write: (d, done) => t.write(d, done),
+      ack,
+      schedule: frameScheduler,
+      marker: (n) => new TextEncoder().encode(`\x1b[0m\r\n${S.terminal.skipped(Math.max(1, Math.round(n / 1024)))}\r\n`),
+    });
+    queue.setVisible(activeRef.current);
+    queueRef.current = queue;
     const onMsg = (m: TermMsg) => {
       // A disposed view (StrictMode's first setup, a closed tab) may still get messages on its old channel, such as the
       // Exit the core sends when it closes that shell. They belong to a terminal this view no longer represents.
       if (dead) return;
-      if ("data" in m) t.write(m.data, () => !dead && ack(m.data.length));
+      if ("data" in m) queue.push(m.data);
       else onStateRef.current({ status: "ended", code: m.exit });
     };
     const started = attachId !== undefined ? api.termAttach(attachId, onMsg) : api.termOpen(cwd, t.rows || 24, t.cols || 80, onMsg);
@@ -135,6 +149,8 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
     themeWatch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => {
       dead = true;
+      queue.dispose();
+      queueRef.current = null;
       ro.disconnect();
       themeWatch.disconnect();
       if (id !== null) void api.termClose(id).catch(() => undefined); // closing a tab ends the shell and its session
@@ -145,6 +161,7 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
   }, [cwd, attachId]);
 
   useEffect(() => {
+    queueRef.current?.setVisible(active);
     if (!active) return;
     const el = host.current;
     if (el && el.offsetWidth > 0) fit.current?.fit();

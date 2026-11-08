@@ -265,6 +265,29 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
     assert!(tail.contains("DO2NE"), "the flood never finished after acks");
 }
 
+#[test]
+fn a_flood_that_is_watched_and_acked_at_once_is_still_paced_to_the_output_rate() {
+    let f = Fixture::new("pace");
+    let rate = 1024 * 1024; // 1 MiB/s keeps the test short; the default is 8 MiB/s
+    let t = Terminals::with(Limits { max_rate: rate, ..Limits::default() }, f.env());
+    let (info, out) = open_root(&t, &f);
+    t.write(info.id, b"yes | head -c 60000000\n").unwrap();
+    // A view that acknowledges everything immediately: nothing but the rate holds the flood back.
+    let started = Instant::now();
+    let mut got = 0usize;
+    while started.elapsed() < Duration::from_millis(2500) {
+        if let Ok(Event::Data(d)) = out.0.recv_timeout(Duration::from_millis(20)) {
+            got += d.len();
+            t.ack(info.id, d.len()).unwrap();
+        }
+    }
+    let secs = started.elapsed().as_secs_f64();
+    let burst = 256 * 1024;
+    let ceiling = burst + (rate as f64 * secs * 1.25) as usize + 2 * CHUNK;
+    assert!(got <= ceiling, "read {got} bytes in {secs:.1}s, over the pace ceiling {ceiling}");
+    assert!(got as f64 >= rate as f64 * secs * 0.3, "the flood must still flow: only {got} bytes in {secs:.1}s");
+}
+
 /// A shell running `sleep` in the foreground does not read its input, so a PTY write of any size would block.
 fn sleeping_terminal(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
     let (info, out) = open_root(t, f);
@@ -437,7 +460,7 @@ fn a_reader_still_blocked_after_close_reaped_the_shell_stops_at_its_next_read_an
     // What `stop` leaves behind when the real reader is still blocked: the shell reaped, so `exited` is set.
     term.exited.store(true, Ordering::SeqCst);
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window);
+    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window, Limits::default().max_rate);
     assert!(reads.load(Ordering::SeqCst) <= 1, "the reader kept consuming after the shell was reaped: {} reads", reads.load(Ordering::SeqCst));
     assert!(lock(&term.pending.0).buf.len() <= 1000, "output was buffered with no flusher to drain it");
     t.close(info.id).unwrap();
@@ -459,7 +482,7 @@ fn a_reader_blocked_with_the_slave_held_open_is_woken_without_a_signal_and_ends(
     let wake = wake.expect("a wake pipe");
     let th = {
         let term = term.clone();
-        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window))
+        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window, Limits::default().max_rate))
     };
     std::thread::sleep(Duration::from_millis(200)); // let it block in select
     assert!(!th.is_finished(), "the reader should be blocked");
