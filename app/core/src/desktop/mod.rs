@@ -202,8 +202,8 @@ pub struct App {
     runs: Mutex<HashMap<String, Run>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
-    /// Held from the one-active-run check until the run is recorded, so two
-    /// Start clicks cannot both pass the check.
+    /// Held from the caps check until the run is recorded, so two Start clicks
+    /// (or two projects at once) cannot both pass the check on the same count.
     launching: Mutex<()>,
     /// The run caps (ADR-15 D5); in memory until the settings store (FG-08) persists them.
     limits: Mutex<caps::RunLimits>,
