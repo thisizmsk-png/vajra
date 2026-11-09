@@ -77,7 +77,7 @@ describe("History states", () => {
 describe("Check again", () => {
   it("says when the check finished, so a re-check that finds nothing new is not a dead click", async () => {
     let calls = 0;
-    setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; } }).transport);
+    setTransport(fakeIpc({ preflight: () => { calls++; return { start_enabled: true, rows: [] }; }, provider_list: { schema: "vajra.providers/1", providers: [] } }).transport);
     render(<Settings />);
     await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/^Checked at /));
     fireEvent.click(screen.getAllByRole("button", { name: S.settings.recheck })[0]);

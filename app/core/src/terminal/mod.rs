@@ -14,7 +14,7 @@
 //! * A terminal keeps running while its tab is hidden (ADR-15 D9): nothing here depends on a UI. If the UI goes away,
 //!   `attach` binds a new sink; until then the reader simply waits at the window and the shell blocks on its output.
 
-mod kill;
+pub(crate) mod kill;
 pub mod policy;
 
 use std::collections::HashMap;
@@ -104,6 +104,8 @@ pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TermInfo {
     pub id: u32,
+    /// The shell's process id, for diagnostics.
+    pub pid: u32,
     pub cwd: PathBuf,
     pub root: PathBuf,
     pub rows: u16,
@@ -150,7 +152,7 @@ impl Term {
 
     fn info(&self, id: u32) -> TermInfo {
         let (rows, cols) = *lock(&self.size);
-        TermInfo { id, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst) }
+        TermInfo { id, pid: self.pid, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst) }
     }
 }
 
