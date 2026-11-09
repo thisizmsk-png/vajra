@@ -454,6 +454,17 @@ impl App {
         lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
     }
 
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
+        let mut v: Vec<_> = lock(&self.runs)
+            .keys()
+            .filter(|s| self.sup.is_running(s).unwrap_or(false))
+            .filter_map(|s| Some(crate::lifecycle_report::RunDiag { stream: s.clone(), pid: self.sup.pid(s).ok()? }))
+            .collect();
+        v.sort_by(|a, b| a.stream.cmp(&b.stream));
+        v
+    }
+
     /// End the control session once its run's PTY exited, so the Lead cannot
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.

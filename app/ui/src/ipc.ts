@@ -80,6 +80,12 @@ export type RunHandle = { stream: string; session_id: string; run_id: string; ca
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+/** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
+export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
+export type RunDiag = { stream: string; pid: number };
+/** A shell an earlier session recorded, checked at launch by pid and start time. Only `owned` can be ended. */
+export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
+export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
 export type TermMsg = { data: Uint8Array } | { exit: number | null };
 /** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
@@ -238,6 +244,9 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
+  diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
+  lifecycle: () => call<Lifecycle>("lifecycle"),
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),
   termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
   termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),

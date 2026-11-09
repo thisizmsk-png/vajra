@@ -2,12 +2,16 @@
 
 pub mod adapter;
 pub mod ids;
+pub mod lifecycle_report;
 pub mod logging;
 pub mod nap;
+pub mod owned;
 pub mod paths;
 pub mod preferences;
+pub mod procid;
 
 pub mod bus;
+pub mod diagnostics;
 pub mod control;
 pub mod crew;
 pub mod desktop;
