@@ -3004,3 +3004,80 @@ fn recorded_runs_of_one_folder_that_disagree_on_its_project_refuse_the_launch() 
     let e = app.launch_key(&a).unwrap_err();
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
+
+/// #80 codex P1a: a start in a SUBFOLDER of a pinned folder takes the folder's pinned project, not whatever a worker
+/// rewrote `.git` to. The cap and the other project's deny rules both follow the pin.
+#[test]
+fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(a.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let pinned = caps::project_key(&a);
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    // A worker of A's run points A at B.
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    fs::write(a.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    assert_eq!(caps::project_key(&a.join("src")), caps::project_key(&b), "the rewrite took, seen from the subfolder");
+    let key = app.launch_key(&a.join("src")).unwrap();
+    assert_eq!(key, pinned, "a start in a subfolder keeps A");
+    let busy = app.within_caps(&key, 1).unwrap_err();
+    assert_eq!(busy["reason"], "project_busy", "A is still busy: {busy}");
+    // The subfolder's run is recorded under A, so B's Lead still has A's folders denied.
+    app.record_run_as("20261105-1231", &a.join("src"), &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "e", true, 1).unwrap();
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a.join("src")) && denied.contains(&a), "{denied:?}");
+    app.sup.kill(&stream).unwrap();
+}
+
+fn without_key(app: &App, run: &str) {
+    fs::remove_file(app.data.join("control/lead").join(run).join("project_key")).unwrap();
+}
+
+/// #80 codex P1b: a record written before project keys existed (cwd, session and campaign, no key) is migrated once from
+/// its guarded cwd, so a fresh start in a previously used folder works after the upgrade.
+#[test]
+fn an_old_record_without_a_project_key_is_migrated_once_and_a_fresh_start_works() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("a");
+    fs::create_dir_all(a.join(".git")).unwrap();
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    without_key(&app, "20261105-1230");
+    assert_eq!(app.read_run_key("20261105-1230"), None, "this is the base format");
+    let key = app.launch_key(&a).expect("the old record is recognised, not refused");
+    assert_eq!(key, caps::project_key(&a));
+    assert_eq!(app.read_run_key("20261105-1230"), Some(key.clone()), "written back under the guard");
+    assert_eq!(app.launch_key(&a).unwrap(), key, "and stable on the next call");
+}
+
+#[test]
+fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("a");
+    fs::create_dir_all(a.join(".git")).unwrap();
+    // Conflict: an old record, and a keyed record of the same folder under another project.
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    without_key(&app, "20261105-1230");
+    app.record_run_as("20261105-1231", &a, &t.0.join("other/.git"), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap();
+    let e = app.launch_key(&a).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    // Malformed: a cwd record with no session and no key is not the base format.
+    let t2 = Tmp::new();
+    let app2 = t2.app();
+    let a2 = t2.0.join("a");
+    fs::create_dir_all(a2.join(".git")).unwrap();
+    app2.record_run("20261105-1230", &a2, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    without_key(&app2, "20261105-1230");
+    fs::remove_file(app2.data.join("control/lead/20261105-1230/session")).unwrap();
+    let e = app2.launch_key(&a2).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+}
