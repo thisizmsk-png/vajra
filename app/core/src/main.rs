@@ -57,8 +57,8 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
 
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
-fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
-    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
@@ -102,6 +102,16 @@ fn project_sessions(app: State<'_, App>, id: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn project_migration_suggest(app: State<'_, App>) -> Res {
+    app.project_migration_suggest()
+}
+
+#[tauri::command(async)]
+fn project_migration_confirm(app: State<'_, App>, roots: Vec<String>) -> Res {
+    app.project_migration_confirm(&roots)
+}
+
+#[tauri::command(async)]
 fn preflight(app: State<'_, App>) -> Res {
     app.preflight()
 }
@@ -131,13 +141,19 @@ fn start_run(
     max_in_flight: u32,
     campaign: Option<String>,
     cwd: String,
+    provider: Option<String>,
 ) -> Res {
-    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String, provider: Option<String>) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd, provider.as_deref())
+}
+
+#[tauri::command(async)]
+fn provider_list(app: State<'_, App>) -> Res {
+    app.provider_list()
 }
 
 #[tauri::command(async)]
@@ -470,6 +486,7 @@ fn main() {
             campaign_integrity,
             start_run,
             resume_run,
+            provider_list,
             verify_campaign,
             read_report,
             resume_targets,
@@ -511,6 +528,8 @@ fn main() {
             project_rename,
             project_archive,
             project_sessions,
+            project_migration_suggest,
+            project_migration_confirm,
             act_approve_plan,
             act_stop_worker,
             act_start_run,

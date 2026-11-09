@@ -10,25 +10,68 @@ import "./terminal.css";
 
 const TerminalView = lazy(() => import("./TerminalView"));
 
-export type Place = { cwd: string; label: string };
+export type Kind = "shell" | "agent";
+/** `kind` defaults to a plain user shell; an agent terminal is its own tab even in the same folder as a shell. */
+export type Place = { cwd: string; label: string; kind?: Kind };
 
 const HERE = "vajra:terminal-here";
 /** "Terminal here": open (or focus) a terminal in this project folder or worktree. */
 export const openTerminalHere = (place: Place) => window.dispatchEvent(new CustomEvent<Place>(HERE, { detail: place }));
 
-type Tab = { key: number; cwd: string; label: string; attachId?: number; gen: number; state: ViewState | { status: "starting" } };
+/** `live` is false for a tab restored from the saved layout: it has no view and no shell until it is first shown. */
+type Tab = { key: number; cwd: string; label: string; kind: Kind; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" } };
 let seq = 0;
+
+// ---- durable layout --------------------------------------------------------------------------------------------------
+// Only the arrangement is kept (folder, label, kind, order, active tab): never output, ids or the shell itself, which
+// die with the app (ADR-9). The core still checks every folder against its allowlist when a restored tab starts.
+export const LAYOUT_KEY = "vajra:terminal-layout";
+const MAX_TABS = 16;
+type Saved = { cwd: string; label: string; kind: Kind };
+const absolute = (p: unknown): p is string => typeof p === "string" && p.length <= 4096 && /^(\/|[A-Za-z]:[\\/])/.test(p);
+
+export function readLayout(): { tabs: Saved[]; cur: number } {
+  try {
+    const v = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null");
+    if (!v || v.v !== 1 || !Array.isArray(v.tabs)) return { tabs: [], cur: 0 };
+    const tabs: Saved[] = [];
+    for (const t of v.tabs.slice(0, MAX_TABS)) {
+      if (!t || !absolute(t.cwd) || typeof t.label !== "string" || (t.kind !== "shell" && t.kind !== "agent")) return { tabs: [], cur: 0 };
+      tabs.push({ cwd: t.cwd, label: t.label.slice(0, 200), kind: t.kind });
+    }
+    const cur = Number.isInteger(v.cur) ? Math.min(Math.max(v.cur, 0), tabs.length - 1) : 0;
+    return { tabs, cur: Math.max(cur, 0) };
+  } catch {
+    return { tabs: [], cur: 0 };
+  }
+}
+function writeLayout(tabs: Tab[], cur: number | null) {
+  try {
+    const i = tabs.findIndex((t) => t.key === cur);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: Math.max(i, 0), tabs: tabs.map((t) => ({ cwd: t.cwd, label: t.label, kind: t.kind })) }));
+  } catch {
+    // storage full or blocked: the dock works, it just forgets the layout
+  }
+}
+const restore = (): { tabs: Tab[]; cur: number | null } => {
+  const l = readLayout();
+  const tabs = l.tabs.map((t): Tab => ({ key: ++seq, ...t, live: false, gen: 0, state: { status: "starting" } }));
+  return { tabs, cur: tabs[l.cur]?.key ?? null };
+};
 
 const base = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 const labelOf = (i: TermInfo) => (i.cwd === i.root ? base(i.root) : `${base(i.root)}/${base(i.cwd)}`);
 
 export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const [open, setOpen] = useState(false);
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [cur, setCur] = useState<number | null>(null);
+  const [init] = useState(restore);
+  const [tabs, setTabs] = useState<Tab[]>(init.tabs);
+  const [cur, setCur] = useState<number | null>(init.cur);
   const [focusToken, setFocusToken] = useState(0);
   const [note, setNote] = useState("");
   const back = useRef<Element | null>(null);
+  const curRef = useRef(cur);
+  curRef.current = cur;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const openRef = useRef(open);
@@ -47,9 +90,16 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     back.current = null;
     if (el instanceof HTMLElement && el.isConnected) el.focus();
   }, []);
-  const add = useCallback((p: Place, attachId?: number) => {
+  /** Open a tab and select it, or at the cap say so and change nothing (no selection of a tab that does not exist). */
+  const add = useCallback((p: Place, attachId?: number): number | null => {
+    if (tabsRef.current.length >= MAX_TABS) {
+      setNote(S.terminal.errors.too_many_terminals);
+      return null;
+    }
     const key = ++seq;
-    setTabs((t) => [...t, { key, cwd: p.cwd, label: p.label, attachId, gen: 0, state: { status: "starting" } }]);
+    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", live: true, attachId, gen: 0, state: { status: "starting" } };
+    tabsRef.current = [...tabsRef.current, tab]; // so a second add in the same tick sees the cap too
+    setTabs((t) => [...t, tab]);
     setCur(key);
     return key;
   }, []);
@@ -60,13 +110,34 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     api.termList().then(
       (r) => {
         if (dead || !r.terminals.length) return;
-        const keys = r.terminals.map((i) => add({ cwd: i.cwd, label: labelOf(i) }, i.id));
-        setCur(keys[0]);
+        // Bind each live shell to the restored tab for its folder (keeping that tab's kind). A live shell is never left
+        // without a tab, or nothing could show or close it: it gets one even past the cap, and dormant tabs (no shell,
+        // nothing lost) make room for it, never the selected one.
+        const next = tabsRef.current.map((t) => ({ ...t }));
+        let first: number | null = null;
+        for (const i of r.terminals) {
+          // The core does not know kinds: prefer the plain shell tab, so a returning shell never lands on an agent tab.
+          const t = next.find((n) => !n.live && n.cwd === i.cwd && n.kind === "shell") ?? next.find((n) => !n.live && n.cwd === i.cwd);
+          if (t) Object.assign(t, { live: true, attachId: i.id });
+          else next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
+          first ??= (t ?? next[next.length - 1]).key;
+        }
+        for (let k = next.length - 1; k >= 0 && next.length > MAX_TABS; k--) {
+          if (!next[k].live && next[k].key !== curRef.current) next.splice(k, 1);
+        }
+        setTabs(next);
+        if (!tabsRef.current.length && first !== null) setCur(first);
       },
       () => undefined,
     );
     return () => void (dead = true);
   }, [add]);
+
+  // A restored tab starts its shell only when it is first shown, and keeps it after that.
+  useEffect(() => {
+    if (open && cur !== null) setTabs((all) => (all.some((t) => t.key === cur && !t.live) ? all.map((t) => (t.key === cur ? { ...t, live: true } : t)) : all));
+  }, [open, cur]);
+  useEffect(() => writeLayout(tabs, cur), [tabs, cur]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,7 +153,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     };
     const onHere = (e: Event) => {
       const p = (e as CustomEvent<Place>).detail;
-      const have = tabsRef.current.find((t) => t.cwd === p.cwd && t.state.status !== "ended");
+      const kind = p.kind ?? "shell";
+      const have = tabsRef.current.find((t) => t.cwd === p.cwd && t.kind === kind && t.state.status !== "ended");
       if (have) setCur(have.key);
       else add(p);
       show();
@@ -128,7 +200,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       <div className="v-term__bar">
         <div role="tablist" aria-label={S.terminal.tabs} className="v-term__tabs" onKeyDown={onTabKey}>
           {tabs.map((t) => {
-            const name = t.state.status === "ended" ? S.terminal.endedTab(t.label) : t.label;
+            const who = t.kind === "agent" ? S.terminal.agentTab(t.label) : t.label;
+            const name = t.state.status === "ended" ? S.terminal.endedTab(who) : who;
             return (
               <span key={t.key} className="v-term__tab" data-active={t.key === cur}>
                 <button role="tab" id={`v-term-tab-${t.key}`} aria-selected={t.key === cur} tabIndex={t.key === cur ? 0 : -1} title={t.cwd} onClick={() => { setCur(t.key); setFocusToken((n) => n + 1); }}>{name}</button>
@@ -137,7 +210,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
             );
           })}
         </div>
-        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: active.label } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
+        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
       <div className="v-term__body">
@@ -149,7 +222,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
           </div>
         )}
         <Suspense fallback={<span className="v-term__muted">{S.states.loading}</span>}>
-          {tabs.map((t) => (
+          {tabs.filter((t) => t.live).map((t) => (
             <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} />
           ))}
         </Suspense>
