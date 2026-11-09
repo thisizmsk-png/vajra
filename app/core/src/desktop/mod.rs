@@ -603,7 +603,7 @@ impl App {
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
-        self.note_run(&project, run_id, campaign);
+        self.note_run(&project, run_id, campaign, engine);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
