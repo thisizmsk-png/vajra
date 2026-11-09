@@ -3362,3 +3362,57 @@ fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
     assert_eq!(root_of("20261105-1230"), loc.to_string_lossy());
     assert_eq!(root_of("20261105-1231"), loc.to_string_lossy());
 }
+
+/// #80 round 6: a pinned common dir that was replaced by a symlink is no longer the project it was pinned as; it cannot admit a
+/// new location, so a planted `gitdir:` into another project's common dir is refused.
+#[test]
+fn a_redirected_pinned_common_dir_cannot_admit_a_new_location() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let (app, a, b, _) = pinned_a_and_b(&t);
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    symlink(b.join(".git"), a.join(".git")).unwrap();
+    fs::write(a.join("sub/.git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a), "B's deny roots still cover A: {denied:?}");
+}
+
+/// #80 round 6 (P2): a legitimate linked worktree nested under an already-pinned repo (`.claude/worktrees/w`, whose git dir has
+/// the normal `commondir` of `../..`) is admitted and pinned to the enclosing project, through the real launch path.
+#[test]
+fn a_linked_worktree_nested_under_its_pinned_repo_is_admitted_with_the_repos_key() {
+    let t = Tmp::new();
+    let (app, a, _, pinned) = pinned_a_and_b(&t);
+    let wt = a.join(".claude/worktrees/w");
+    linked_worktree(&a, &wt, "w");
+    let (loc, key) = app.launch_identity(&wt).expect("a worktree of the enclosing project");
+    assert_eq!(key, pinned, "it is the enclosing project");
+    assert_eq!(loc, fs::canonicalize(&wt).unwrap());
+    // A worktree whose commondir redirects to another project is still refused.
+    let b = t.0.join("b");
+    let bad = a.join(".claude/worktrees/bad");
+    linked_worktree(&a, &bad, "bad");
+    fs::write(a.join(".git/worktrees/bad/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    let e = app.launch_key(&bad).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+}
+
+/// #80 round 6 (P1): another project's Lead denies the other run's pinned location too, so a submodule launched from a subfolder
+/// has its checkout root denied, not only the subfolder.
+#[test]
+fn another_leads_deny_roots_include_a_submodules_pinned_location_not_just_the_run_subfolder() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sup, sub, b) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("b"));
+    fs::create_dir_all(sup.join(".git/modules/sub")).unwrap();
+    fs::create_dir_all(sub.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let key = fs::canonicalize(sup.join(".git/modules/sub")).unwrap();
+    let loc = fs::canonicalize(&sub).unwrap();
+    app.record_run_pinned("20261105-1230", &sub.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&loc), "the submodule's checkout root is denied to B's Lead: {denied:?}");
+}
