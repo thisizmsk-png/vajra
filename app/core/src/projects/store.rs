@@ -116,6 +116,8 @@ pub struct Store {
     guard: Guard,
     /// Serialises every read-modify-write of a record within the process.
     lock: Mutex<()>,
+    /// Held by a whole migration confirm (see `migrate::confirm`), so two confirms never interleave.
+    migrating: Mutex<()>,
     now: Clock,
     /// Project folders opened (tests: an update opens its folder once).
     #[cfg(test)]
@@ -141,7 +143,30 @@ impl Store {
         let root = Pinned::open(&dir, false)?;
         // The guard compares against canonical paths; a data dir that is a symlink is compared by its target.
         let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), now, #[cfg(test)] opens: Default::default() })
+        Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now, #[cfg(test)] opens: Default::default() })
+    }
+
+    /// The folders that can never be a project.
+    pub fn guard(&self) -> &Guard {
+        &self.guard
+    }
+
+    /// Serialise one whole migration: taken before the done-check and held until the marker is written.
+    pub fn migration_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.migrating.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Has the owner confirmed the migration? The marker is read through the pinned projects folder; anything but a
+    /// clean "not there" counts as done, so a surprise never lets a second migration run.
+    pub fn migration_done(&self) -> bool {
+        match self.root.read(".migrated-v1", 16) {
+            Ok(_) => true,
+            Err(e) => e.kind() != io::ErrorKind::NotFound,
+        }
+    }
+
+    pub fn mark_migrated(&self) -> io::Result<()> {
+        self.root.write_atomic(".migrated-v1", b"1\n")
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {

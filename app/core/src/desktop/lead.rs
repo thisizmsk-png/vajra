@@ -43,6 +43,8 @@ const CWD_FILE: &str = "cwd";
 /// Most other-project run folders the Director-General's deny rules hold; more refuses the ask (#80 review: never
 /// drop one).
 pub(super) const MAX_OTHER_ROOTS: usize = 256;
+/// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
+const PROVIDER_FILE: &str = "provider";
 const SESSION_FILE: &str = "session";
 const CAMPAIGN_FILE: &str = "campaign";
 /// Present for a run that started no new workflow (the approval-only resume).
@@ -501,6 +503,24 @@ impl App {
             }
         }
         super::caps::DEFAULT_RUN_WORKERS
+    }
+
+    /// Record, before the run starts, which adapter it runs on. A run launched by this build always has this record, so a
+    /// resume trusts it and never the worker-writable index. A failure here refuses the launch.
+    pub(super) fn record_run_provider(&self, run_id: &str, engine: crate::adapter::Engine) -> std::io::Result<()> {
+        let control = self.data.join("control");
+        fsx::private_dir(&control)?;
+        fsx::private_dir(&control.join("lead"))?;
+        let dir = self.lead_sid_dir(run_id);
+        fsx::private_dir(&dir)?;
+        fsx::write_atomic(&dir, PROVIDER_FILE, engine.id().as_bytes()).map(|_| ())
+    }
+
+    /// The guarded provider of a run: `Some` for a run this build launched, `None` for one from before providers
+    /// existed (all of which ran on claude) or whose record is unreadable.
+    pub(super) fn read_run_provider(&self, run_id: &str) -> Option<crate::adapter::Engine> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(PROVIDER_FILE)).ok()?;
+        crate::adapter::Engine::from_id(String::from_utf8(body).ok()?.trim())
     }
 
     /// The guarded (cwd, session id, campaign) of a run, or `None` if any part is missing (a run from before this
