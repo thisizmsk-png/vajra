@@ -43,14 +43,22 @@ export function DirectorGeneral() {
   const field = useRef<HTMLTextAreaElement>(null);
   const end = useRef<HTMLDivElement>(null);
 
-  // Which stream the transcript belongs to, and a number per read: an answer applies only while its stream is still
-  // the one shown and no later read has applied, so an old conversation never refills a new one and overlapping
-  // poll/event reads never go backwards. `follow` switches streams at once and voids every read still in flight.
+  // What the view is showing, so nothing that was asked earlier can bring an older state back:
+  // - `active` is the stream the transcript belongs to;
+  // - `epoch` changes on every switch (project or run, New conversation, an ask that moved streams), and an action's
+  //   answer applies only if no switch happened while it was in flight;
+  // - each window and status read is numbered, and applies only if no later one has, so overlapping poll, event and
+  //   Cancel reads never go backwards.
+  // `follow` is the one way to switch: it moves `active` at once and voids every read still in flight.
   const active = useRef<string | null>(null);
+  const epoch = useRef(0);
   const reads = useRef({ asked: 0, applied: 0 });
+  const statusReads = useRef({ asked: 0, applied: 0 });
   const follow = useCallback((s: string | null) => {
     active.current = s;
+    epoch.current += 1;
     reads.current.applied = reads.current.asked;
+    statusReads.current.applied = statusReads.current.asked;
     setStream(s);
   }, []);
 
@@ -66,10 +74,20 @@ export function DirectorGeneral() {
     }
   }, []);
 
+  // The run (so the project) the view is on now. `still(run, at)` holds while the view is on that run and nothing
+  // has switched since `at` (an epoch).
+  const onRun = useRef(dgRun);
+  onRun.current = dgRun;
+  const still = (run: string | null | undefined, at: number) => onRun.current === run && epoch.current === at;
   const readStatus = useCallback(async () => {
     if (!dgRun) return;
+    const n = ++statusReads.current.asked;
+    const at = epoch.current;
+    const current = () => onRun.current === dgRun && epoch.current === at && n > statusReads.current.applied;
     try {
       const s = await dg.status({ projectId: null, runId: dgRun });
+      if (!current()) return;
+      statusReads.current.applied = n;
       setSt(s);
       setLoadErr("");
       if (!s.busy) setAskId(null);
@@ -77,7 +95,7 @@ export function DirectorGeneral() {
       if (typeof s.generation === "number") setGeneration(s.generation);
       if (s.stream && active.current === null) follow(s.stream);
     } catch (e) {
-      setLoadErr(errorText(e));
+      if (current()) setLoadErr(errorText(e));
     }
   }, [dgRun, follow]);
 
@@ -111,10 +129,12 @@ export function DirectorGeneral() {
   const send = async () => {
     const text = draft.trim();
     if (!dgRun || !text || !canAsk) return;
+    const run = dgRun, at = epoch.current;
     setSending(true);
     setAskErr("");
     const r = await dg.ask(target, envelope(target, actionId(), generation), text);
     setSending(false);
+    if (!still(run, at)) return;
     if (!r.ok) { setAskErr(r.outcome.text); return; }
     setAskId(r.value.ask_id);
     setEcho(text);
@@ -124,13 +144,17 @@ export function DirectorGeneral() {
   };
   const cancel = async () => {
     if (!askId) return;
+    const run = dgRun, at = epoch.current;
     const r = await dg.cancel(target, envelope(target, actionId(), null), askId);
+    if (!still(run, at)) return;
     if (!r.ok) setAskErr(r.outcome.text);
     void readStatus();
   };
   const fresh = async () => {
     if (!dgRun || busy) return;
+    const run = dgRun, at = epoch.current;
     const r = await dg.newConversation(target, envelope(target, actionId(), generation));
+    if (!still(run, at)) return;
     if (!r.ok) { setAskErr(r.outcome.text); return; }
     setGeneration(r.value.generation);
     follow(r.value.stream);

@@ -131,6 +131,148 @@ describe("Director-General conversation", () => {
     expect(screen.getByText("Newer answer.")).toBeTruthy();
   });
 
+  it("switching project loads the new project's conversation and follows its stream", async () => {
+    const B = "orchestrator-p_Y-g1";
+    const f = fakeIpc({
+      lead_status: (a: { runId: string }) => a.runId === "run-b" ? status({ project_id: "p_Y", generation: 1, stream: B }) : status(),
+      stream_window: (a: { stream: string }) => win(a.stream === B ? ["you\tProject B question?"] : ["you\tProject A question?"]),
+    });
+    setTransport(f.transport);
+    const r = render(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
+    expect(await screen.findByText("Project A question?")).toBeTruthy();
+    r.rerender(<CurrentProject.Provider value={cur({ dgRun: "run-b" })}><DirectorGeneral /></CurrentProject.Provider>);
+    expect(await screen.findByText("Project B question?")).toBeTruthy();
+    expect(screen.queryByText("Project A question?")).toBeNull();
+  });
+
+  it("a status read of the previous project that lands after the switch never takes the view back", async () => {
+    const B = "orchestrator-p_Y-g1";
+    let oldStatus!: (v: unknown) => void;
+    const f = fakeIpc({
+      lead_status: (a: { runId: string }) => a.runId === "run-b"
+        ? status({ project_id: "p_Y", generation: 1, stream: B })
+        : new Promise((res) => { oldStatus = res; }),
+      stream_window: (a: { stream: string }) => win(a.stream === B ? ["you\tProject B question?"] : ["you\tProject A question?"]),
+    });
+    setTransport(f.transport);
+    const r = render(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
+    await waitFor(() => expect(oldStatus).toBeTruthy());
+    r.rerender(<CurrentProject.Provider value={cur({ dgRun: "run-b" })}><DirectorGeneral /></CurrentProject.Provider>);
+    expect(await screen.findByText("Project B question?")).toBeTruthy();
+    await act(async () => oldStatus(status()));
+    expect(screen.queryByText("Project A question?")).toBeNull();
+    expect(screen.getByText("Project B question?")).toBeTruthy();
+    expect(screen.getByText(S.dg.generation(1))).toBeTruthy();
+  });
+
+  // Every way the view's conversation can change under a request still in flight: none may bring the old one back.
+  const B = "orchestrator-p_Y-g1";
+  const statusB = () => status({ project_id: "p_Y", generation: 1, stream: B });
+  const onB = (c: Current = cur()) => <CurrentProject.Provider value={{ ...c, dgRun: "run-b" }}><DirectorGeneral /></CurrentProject.Provider>;
+  const onA = () => <CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>;
+  const windows = (f: ReturnType<typeof fakeIpc>) => f.calls.filter((c) => c.cmd === "stream_window").map((c) => (c.args as { stream: string }).stream);
+
+  it("switching project mid-read: the old project's window, landing late, never renders", async () => {
+    let oldRead!: (v: unknown) => void;
+    const f = fakeIpc({
+      lead_status: (a: { runId: string }) => (a.runId === "run-b" ? statusB() : status()),
+      stream_window: (a: { stream: string }) => a.stream === B ? win(["you\tProject B question?"]) : new Promise((r) => { oldRead = r; }),
+    });
+    setTransport(f.transport);
+    const r = render(onA());
+    await waitFor(() => expect(oldRead).toBeTruthy());
+    r.rerender(onB());
+    expect(await screen.findByText("Project B question?")).toBeTruthy();
+    await act(async () => oldRead(win(["you\tProject A question?"])));
+    expect(screen.queryByText("Project A question?")).toBeNull();
+  });
+
+  it("an ask still in flight when the project switches never moves the new project's view", async () => {
+    let askAnswer!: (v: unknown) => void;
+    const f = fakeIpc({
+      lead_status: (a: { runId: string }) => (a.runId === "run-b" ? statusB() : status()),
+      stream_window: (a: { stream: string }) => win([a.stream === B ? "you\tProject B question?" : "you\tProject A question?"]),
+      ask_lead: () => new Promise((r) => { askAnswer = r; }),
+    });
+    setTransport(f.transport);
+    const r = render(onA());
+    await screen.findByText("Project A question?");
+    fireEvent.change(composer(), { target: { value: "Anything left?" } });
+    fireEvent.click(screen.getByRole("button", { name: S.dg.send }));
+    await waitFor(() => expect(askAnswer).toBeTruthy());
+    r.rerender(onB());
+    expect(await screen.findByText("Project B question?")).toBeTruthy();
+    await act(async () => askAnswer({ ask_id: "k1", state: "running", stream: "orchestrator-p_X-g9", lead_session_id: "s", project_id: "p_X", generation: 9, name: "Director-General" }));
+    expect(windows(f)).not.toContain("orchestrator-p_X-g9");
+    expect(screen.getByText(S.dg.generation(1))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: S.dg.cancel })).toBeNull();
+    expect(within(screen.getByRole("log", { name: S.dg.transcript })).queryByText("Anything left?")).toBeNull();
+  });
+
+  it("New conversation still in flight when the project switches never moves the new project's view", async () => {
+    let freshAnswer!: (v: unknown) => void;
+    const f = fakeIpc({
+      lead_status: (a: { runId: string }) => (a.runId === "run-b" ? statusB() : status()),
+      stream_window: (a: { stream: string }) => win([a.stream === B ? "you\tProject B question?" : "you\tProject A question?"]),
+      new_conversation: () => new Promise((r) => { freshAnswer = r; }),
+    });
+    setTransport(f.transport);
+    const r = render(onA());
+    await screen.findByText("Project A question?");
+    fireEvent.click(screen.getByRole("button", { name: S.dg.newConversation }));
+    await waitFor(() => expect(freshAnswer).toBeTruthy());
+    r.rerender(onB());
+    expect(await screen.findByText("Project B question?")).toBeTruthy();
+    await act(async () => freshAnswer({ project_id: "p_X", generation: 4, stream: "orchestrator-p_X-g4" }));
+    expect(windows(f)).not.toContain("orchestrator-p_X-g4");
+    expect(screen.getByText(S.dg.generation(1))).toBeTruthy();
+    expect(screen.getByText("Project B question?")).toBeTruthy();
+  });
+
+  it("a status read asked before New conversation, landing after it, never brings back the old generation or a finished turn", async () => {
+    const later: ((v: unknown) => void)[] = [];
+    let first = true;
+    const f = fakeIpc({
+      lead_status: () => {
+        if (first) { first = false; return status({ busy: true, state: "thinking", reason: "answering a question", ask_id: "k9" }); }
+        return new Promise((r) => { later.push(r); });
+      },
+      cancel_ask: {},
+      new_conversation: { project_id: "p_X", generation: 4, stream: "orchestrator-p_X-g4" },
+    });
+    setTransport(f.transport);
+    render(onA());
+    const cancelBtn = await screen.findByRole("button", { name: S.dg.cancel });
+    fireEvent.click(cancelBtn);
+    await waitFor(() => expect(later).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: S.dg.cancel }));
+    await waitFor(() => expect(later).toHaveLength(2));
+    // The newer read says the turn ended; then New conversation; then the older read lands, still saying "thinking".
+    await act(async () => later[1](status()));
+    await waitFor(() => expect(screen.getByRole("button", { name: S.dg.newConversation }).getAttribute("aria-disabled")).not.toBe("true"));
+    fireEvent.click(screen.getByRole("button", { name: S.dg.newConversation }));
+    expect(await screen.findByText(S.dg.generation(4))).toBeTruthy();
+    await act(async () => later[0](status({ busy: true, state: "thinking", reason: "answering a question", ask_id: "k9" })));
+    expect(screen.getByText(S.dg.generation(4))).toBeTruthy();
+    expect(screen.queryByText(S.dg.generation(3))).toBeNull();
+    expect(screen.queryByRole("button", { name: S.dg.cancel })).toBeNull();
+    expect(f.calls.filter((c) => c.cmd === "new_conversation")).toHaveLength(1);
+  });
+
+  it("closing the view mid-read and opening it again shows the conversation, and the late answer changes nothing", async () => {
+    let oldRead!: (v: unknown) => void;
+    let n = 0;
+    const f = fakeIpc({ lead_status: status(), stream_window: () => (++n === 1 ? new Promise((r) => { oldRead = r; }) : win(["you\tWhat is left?", "lead\tStill two tasks."])) });
+    setTransport(f.transport);
+    const first = render(onA());
+    await waitFor(() => expect(oldRead).toBeTruthy());
+    first.unmount();
+    render(onA());
+    expect(await screen.findByText("Still two tasks.")).toBeTruthy();
+    await act(async () => oldRead(win(["you\tWhat is left?", "lead\tAn old answer."])));
+    expect(screen.queryByText("An old answer.")).toBeNull();
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();
