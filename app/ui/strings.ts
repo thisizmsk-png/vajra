@@ -195,6 +195,7 @@ export const S = {
     agentTab: (name: string) => `${name} (agent)`,
     here: "Terminal here",
     starting: "Starting",
+    skipped: (kb: number) => `[skipped ${kb} KB of output]`,
     ended: (code: number | null) => (code === null ? "The shell was stopped." : code === 0 ? "The shell ended." : `The shell ended with code ${code}.`),
     endedTab: (name: string) => `${name} (ended)`,
     restart: "Start a new shell",
