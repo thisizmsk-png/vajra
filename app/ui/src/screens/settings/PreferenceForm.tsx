@@ -43,11 +43,8 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
   return <section className="v-pref" aria-label={C.region}>
     <p>{C.scopeDescription(projectId ? projectName ?? projectId : undefined)}</p>
     {section === "appearance" && select("theme", C.theme, [["system", C.systemTheme], ["dark", C.dark], ["light", C.light]])}
-    {section === "general" && <>
-      {select("editor", C.editor, [["system", C.systemEditor], ["code", C.editorCli]])}
-      {select("shell", C.shell, [["login", C.loginShell], ["sh", C.sh], ["bash", C.bash], ["zsh", C.zsh]])}
-      <p>{C.launchHint}</p>
-    </>}
+    {/* General (editor, shell) has no form yet: nothing opens an editor or a terminal from those values, so a saved
+        choice would change nothing (PR 100 review). The stored keys stay in the contract until a new-open path reads them. */}
     {section === "models" && <>
       {select("agent", C.agent, [["claude", C.claude], ["codex", C.codexUnavailable, true]])}
       <p>{C.modelHint(view.effective.model || C.nativeModel)}</p>

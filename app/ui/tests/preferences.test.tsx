@@ -5,6 +5,7 @@ import { fakeIpc } from "./fakeIpc";
 import { PreferenceForm } from "../src/screens/settings/PreferenceForm";
 import { PreferencesProvider, capturePreferences } from "../src/preferences";
 import { Home } from "../src/screens/home/Home";
+import { Settings } from "../src/screens/settings/Settings";
 import { CurrentProject } from "../src/projects/current";
 import { DEFAULT_PREFERENCES, matchesShortcut } from "../src/preferenceContract";
 const done=(result:unknown)=>({receipt:{state:"done",action_id:"prefs-save-test",project_id:"global"},result});
@@ -48,6 +49,18 @@ describe("FG-08 preferences",()=>{
   r.rerender(tree(Q));await waitFor(()=>expect(field().value).toBe("3"));
   fireEvent.change(field(),{target:{value:"9"}});await act(async()=>window.dispatchEvent(new CustomEvent("vajra-preferences-saved")));
   await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="preferences_read"&&c.args?.projectId===Q).length).toBeGreaterThan(1));expect(field().value).toBe("9");
+ });
+ it("shows no editor or shell choice until something opens with them, and a save elsewhere keeps their stored values",async()=>{
+  const stored={...view(),overrides:{editor:"code",shell:"zsh"},effective:{...DEFAULT_PREFERENCES,editor:"code",shell:"zsh"}};
+  const f=fakeIpc({preferences_read:stored,provider_list:{schema:"vajra.providers/1",providers:[]},preflight:{rows:[],start_enabled:true},act_preferences_update:(a?:Record<string,unknown>)=>done({...stored,rev:1,effective:{...stored.effective,...(a?.patch as object)}})});setTransport(f.transport);
+  window.location.hash="#/settings?section=general";
+  const r=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
+  expect(await screen.findByText("Not built yet")).toBeTruthy();
+  expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
+  r.unmount();render(<PreferenceForm projectId={null} section="appearance"/>);
+  fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
+  const write=f.calls.find(c=>c.cmd==="act_preferences_update");expect(write?.args?.patch).toEqual({theme:"dark"});
+  window.location.hash="";
  });
  it("handles an unsupported core reply without crashing the settings screen",async()=>{
   setTransport(fakeIpc({preferences_read:{}}).transport);
