@@ -1366,6 +1366,67 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     }
 }
 
+/// #82 review [P1]: a run in a worktree OUTSIDE the main checkout is still the Lead's own project, so no deny rule for
+/// its folder is generated as "another project's" - and its secret files (`.env`, `id_rsa*`) must stay denied.
+#[test]
+fn an_external_worktree_of_the_leads_own_project_keeps_its_secret_file_rules() {
+    let t = Tmp::new();
+    let app = t.app();
+    let wt = t.0.join("repo-wt");
+    for d in [t.repo().join(".git/worktrees/repo-wt"), wt.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(t.repo().join(".git/worktrees/repo-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", t.repo().join(".git/worktrees/repo-wt").display())).unwrap();
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &wt, SID, "deliver-x", true, 1).unwrap();
+    assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&t.repo()), "the fixture is one project");
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    for base in [&t.repo(), &wt] {
+        for secret in ["**/.env", "**/.env.*", "**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*"] {
+            assert!(got.contains(&format!("Read(/{}/{secret})", base.display())), "{secret} under {base:?}: {got}");
+        }
+    }
+    assert!(!got.contains(&format!("Read(/{}/**)", wt.display())), "its own worktree is never denied wholesale: {got}");
+}
+
+/// #82 review [P2]: the Director-General's conversation is shared by all of a project's runs. After a restart the history
+/// replayed for run B must not show run A's persisted nonce, even though B is the first run queried.
+#[test]
+fn after_a_restart_another_runs_nonce_in_the_shared_history_is_redacted_when_b_is_queried_first() {
+    let t = Tmp::new();
+    let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    let (run_b, sid_b) = ("20261108-1100", "2b8fad5b-d9cb-469f-a165-70867728950f");
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    std::fs::create_dir_all(t.data()).unwrap();
+    for (run, sid) in [(RUN_ID, SID), (run_b, sid_b)] {
+        let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: sid.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None, provider: None };
+        runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
+    }
+    let first = App::open(&t.data(), &t.home()).unwrap();
+    first.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    first.record_run(run_b, &t.repo(), sid_b, "deliver-x", true, 2).unwrap();
+    remember_lead(&t, lead_sid);
+    // Each run's control nonce, as the earlier app life left it.
+    let nonce_a = nonce::create(&t.data().join("control").join(SID)).unwrap();
+    let nonce_b = nonce::create(&t.data().join("control").join(sid_b)).unwrap();
+    let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
+    std::fs::create_dir_all(&proj).unwrap();
+    let line = |text: String| json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}).to_string();
+    std::fs::write(proj.join(format!("{lead_sid}.jsonl")), format!("{}\n{}\n", line(format!("run A used {nonce_a}")), line(format!("run B used {nonce_b}")))).unwrap();
+    // A fresh app: nothing in memory. Run B is the first one asked about.
+    let app = App::open(&t.data(), &t.home()).unwrap();
+    app.lead.set_bin(Some(t.bin("claude")));
+    app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
+    let st = app.lead_status(run_b).unwrap();
+    assert_eq!(st["available"], true, "{st}");
+    let lines = stream_text(&t, &app);
+    assert!(lines.iter().any(|l| l.contains("run A used")), "the history came back: {lines:?}");
+    assert!(lines.iter().all(|l| !l.contains(&nonce_a) && !l.contains(&nonce_b)), "no run's nonce reaches the bus: {lines:?}");
+}
+
 #[path = "lead_store_tests.rs"]
 mod store;
 

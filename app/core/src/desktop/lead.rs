@@ -221,7 +221,7 @@ impl App {
         };
         let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
         // After a restart the bus is empty; bring the history back from the Director-General's own transcript.
-        self.rebuild_lead_stream(&orch, &t.nonces);
+        self.rebuild_lead_stream(&orch, &self.project_redactor(&t, &orch));
         if lock(&self.lead.bin).is_none() {
             return off("claude not found".into());
         }
@@ -302,8 +302,7 @@ impl App {
         let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
         // The nonce of every session of this run, plus every live one, is redacted from the text.
-        let mut red = target.nonces.clone();
-        red.absorb(&lock(&self.control).redactor());
+        let red = self.project_redactor(&target, &orch);
         let framed = frame(&ask_id, run_id, text, &red)?;
         #[cfg(test)]
         if let Some(f) = lock(&self.lead.before_ask_lock).as_ref() {
@@ -485,6 +484,26 @@ impl App {
         Ok(out)
     }
 
+    /// The folders of the asking run's OWN project that need the secret-file rules: the project's main checkout
+    /// (`root`) plus the folder of every recorded run of the same pinned project (a worktree outside the main checkout,
+    /// a subfolder), from the guarded records and never the worker-writable index or `.git`. A folder inside another
+    /// already listed is covered by its `**` rules and left out. More than `MAX_OTHER_ROOTS` refuses the ask.
+    pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
+        let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
+        for run in self.recorded_runs() {
+            let Some(cwd) = self.read_run_cwd(&run) else { continue };
+            if self.read_run_key(&run).as_ref() != Some(&own) || out.iter().any(|d| cwd.starts_with(d)) {
+                continue;
+            }
+            if out.len() >= MAX_OTHER_ROOTS {
+                return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+            }
+            out.push(cwd);
+        }
+        Ok(out)
+    }
+
     /// Every run with a record under the guarded control dir, newest first.
     fn recorded_runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
@@ -516,6 +535,41 @@ impl App {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)
+    }
+
+    /// Every nonce that could appear in the project's shared Director-General conversation: the persisted nonce of the
+    /// session of EVERY recorded run of this project (read from the guarded records), the in-memory nonce history of
+    /// each live run of it, and every live control session's. The conversation is shared by all of the project's runs,
+    /// so history replayed after a restart for run B must not show run A's nonce.
+    fn project_redactor(&self, t: &Target, orch: &Orchestrator) -> Redactor {
+        let mut red = t.nonces.clone();
+        for run in self.recorded_runs() {
+            if !self.run_in_project(&run, &orch.id) {
+                continue;
+            }
+            let sid = fsx::read_nofollow(&self.lead_sid_dir(&run).join(SESSION_FILE)).ok().and_then(|b| String::from_utf8(b).ok());
+            if let Some(sid) = sid {
+                self.add_disk_nonce(&mut red, sid.trim());
+            }
+        }
+        for r in lock(&self.runs).values() {
+            if self.run_in_project(&r.run_id, &orch.id) {
+                red.absorb(&r.nonces);
+                self.add_disk_nonce(&mut red, &r.session_id);
+            }
+        }
+        red.absorb(&lock(&self.control).redactor());
+        red
+    }
+
+    /// Whether a recorded run is one of project `pid`'s, for redaction: its pinned store id decides; a run with no store
+    /// id pinned yet (recorded before its folder was a project, or a stand-in pin from before the store) counts when its
+    /// guarded folder is that project's, as `run_project` would resolve it. Widening only ever redacts more.
+    fn run_in_project(&self, run_id: &str, pid: &str) -> bool {
+        match self.pinned_project(run_id) {
+            Some(p) if crate::projects::contract::valid_project_id(&p) => p == pid,
+            _ => self.read_run_cwd(run_id).and_then(|cwd| self.projects.find_by_path(&cwd).ok().flatten()).is_some_and(|p| p.id == pid),
+        }
     }
 
     /// Add the session's persisted control nonce (read under the hook's rules), if there is a valid one.
@@ -564,11 +618,14 @@ impl App {
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
         let others = self.other_project_roots(&t.run_id, &orch.root)?;
-        let settings = self.write_lead_files(dir, &orch.root, &orch.id, orch.generation, &others)?;
-        self.ensure_selftest(bin, &env, dir, &orch.root, &others, &settings, &t.run_id, handle)?;
+        // The project's own folders (main checkout plus every recorded run or worktree folder) all get the secret-file
+        // rules; the self-test and the recheck below use this same set.
+        let repos = self.own_project_folders(&t.run_id, &orch.root)?;
+        let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &others)?;
+        self.ensure_selftest(bin, &env, dir, &repos, &others, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
-        if self.write_lead_files(dir, &orch.root, &orch.id, orch.generation, &others)? != settings {
+        if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &others)? != settings {
             return Err(LeadError::GuardMissing("the Director-General's settings changed during the self-test".into()));
         }
         // Only this generation's MCP calls are served from now on.
@@ -589,7 +646,7 @@ impl App {
 
         let stream = orch.stream();
         // The history of earlier asks is back on the stream before this one is added to it.
-        self.rebuild_lead_stream(orch, &t.nonces);
+        self.rebuild_lead_stream(orch, &red);
         let svc = self.control.clone();
         let ledger = {
             let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
@@ -724,12 +781,12 @@ impl App {
     /// Write `<orchestrator dir>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
-    fn write_lead_files(&self, dir: &Path, repo: &Path, project: &str, generation: u32, others: &[PathBuf]) -> Result<String, LeadError> {
+    fn write_lead_files(&self, dir: &Path, repos: &[PathBuf], project: &str, generation: u32, others: &[PathBuf]) -> Result<String, LeadError> {
         if !self.data.is_absolute() {
             return Err(LeadError::GuardMissing("the data dir must be an absolute path".into()));
         }
         fsx::private_dir(dir).map_err(io)?;
-        let want = lead_settings::settings_with(&self.home, repo, &self.data, others)?;
+        let want = lead_settings::settings_for(&self.home, repos, &self.data, others)?;
         let mcp = json!({"mcpServers": {"vajra-desktop": {
             "command": self.lead.exe.to_string_lossy(),
             "args": ["--mcp"],
@@ -756,7 +813,7 @@ impl App {
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, others: &[PathBuf], settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], others: &[PathBuf], settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
         let version = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -770,7 +827,7 @@ impl App {
         let file = fsx::write_atomic(&canary_dir, "c.txt", secret.as_bytes()).map_err(io)?;
         let result = (|| {
             // The deny layer alone: the same generated rules, no hooks.
-            let bare = lead_settings::settings_no_hooks_with(&self.home, repo, &self.data, others)?;
+            let bare = lead_settings::settings_no_hooks_for(&self.home, repos, &self.data, others)?;
             let bare_path = fsx::write_atomic(dir, "selftest-settings.json", bare.as_bytes()).map_err(io)?;
             verify_settings_file(&bare_path, &bare)?;
             // Two tries: the model may answer without touching the file, which proves nothing.
