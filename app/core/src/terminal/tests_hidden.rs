@@ -400,7 +400,20 @@ fn hiding_during_a_flood_never_sends_data_while_hidden_and_the_tail_continues_in
         std::thread::sleep(Duration::from_millis(150));
         t.set_visible(info.id, true, false).unwrap();
         seen.extend(out.for_ms(400));
-        let n = numbers(&data_of(&seen));
+        // A `Skipped` notice marks a gap: the bytes before it may end mid-line, so check each side of it on its own.
+        let mut n: Vec<u64> = Vec::new();
+        let mut part: Vec<Event> = Vec::new();
+        for e in seen {
+            if matches!(e, Event::Skipped { .. }) {
+                let mut v = numbers(&data_of(&part));
+                v.pop(); // possibly a partial line
+                n.extend(v);
+                part.clear();
+            } else {
+                part.push(e);
+            }
+        }
+        n.extend(numbers(&data_of(&part)));
         assert!(n.windows(2).all(|w| w[0] < w[1]), "round {round}: out of order around {:?}", n.windows(2).find(|w| w[0] >= w[1]));
         assert_eq!(n.last(), Some(&400_000), "round {round}: the tail ends at the last line");
     }
