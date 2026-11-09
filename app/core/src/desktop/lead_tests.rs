@@ -1406,6 +1406,37 @@ fn an_external_worktree_of_the_leads_own_project_keeps_its_secret_file_rules() {
     assert!(!got.contains(&format!("Read(/{}/**)", wt.display())), "its own worktree is never denied wholesale: {got}");
 }
 
+/// #103 review: the same with the worktree run from before the store, pinned to a stand-in. Once that pin validates (the
+/// worktree still gives the stand-in and resolves to the store project) it is the project's run, so the worktree keeps
+/// its secret-file rules and is never denied wholesale.
+#[test]
+fn an_external_worktree_stand_in_run_of_the_leads_own_project_keeps_its_secret_file_rules() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (main, wt) = (t.0.join("main"), t.0.join("main-wt"));
+    let gd = main.join(".git/worktrees/main-wt");
+    for d in [gd.clone(), main.join(".git/objects"), wt.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(gd.join("commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+    std::fs::write(gd.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    let pm = super::super::test_project(&t.data(), &t.home(), &main);
+    let (sid, run) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1500");
+    lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: sid.into(), run_id: run.into(), campaign: "deliver-m".into(), cwd: main.clone(), nonces: Redactor::default() });
+    app.record_run(run, &main, sid, "deliver-m", true, 1).unwrap();
+    assert_eq!(app.pinned_project(run).as_deref(), Some(pm.as_str()));
+    app.record_run("20261109-1501", &wt, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-w", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&wt).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1501"), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.store_identity("20261109-1501"), Ok(Some(pm.clone())), "the stand-in validates to the project");
+    let folders = app.own_project_folders(run, &main).unwrap();
+    assert!(folders.contains(&wt), "the worktree is the project's own folder: {folders:?}");
+    let iso = app.isolation(run, &main).unwrap();
+    assert!(!iso.deny.contains(&wt), "its own worktree is never denied wholesale: {:?}", iso.deny);
+}
+
 /// #82 sweep: a guarded record of the Lead's own project that exists but cannot be read (its cwd, or the directory of runs) refuses
 /// the ask. Skipping it would leave that folder's secret files without deny rules.
 #[test]
