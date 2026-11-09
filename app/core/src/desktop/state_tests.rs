@@ -394,7 +394,7 @@ fn project_generation_is_durable_independent_of_receipts() {
 
 /// The run index line that says campaign `slug` was launched as run `run`.
 fn launched(t: &Tmp, slug: &str, run: &str) {
-    let e = runindex::Entry { campaign: slug.into(), session_id: SID.into(), run_id: run.into(), cwd: t.0.join("repo"), lead_session_id: None };
+    let e = runindex::Entry { campaign: slug.into(), session_id: SID.into(), run_id: run.into(), cwd: t.0.join("repo"), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
 }
 

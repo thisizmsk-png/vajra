@@ -1141,7 +1141,7 @@ fn a_projects_inbox_is_counted_before_the_global_cut() {
         t.campaign(&format!("fill-{i:03}"), "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "filler"}]));
     }
     // Sorts after every filler item (same first-seen time, larger id) and belongs to the real project.
-    let e = runindex::Entry { campaign: "zzz-mine".into(), session_id: SID.into(), run_id: "20261106-0912".into(), cwd: t.cwd(), lead_session_id: None };
+    let e = runindex::Entry { campaign: "zzz-mine".into(), session_id: SID.into(), run_id: "20261106-0912".into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     t.campaign("zzz-mine", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "mine"}]));
     let all = app.inbox().unwrap();
@@ -1230,7 +1230,7 @@ fn a_waiting_task_belongs_to_the_project_of_its_own_run() {
     let p2 = app.projects.add(&repo2, false).unwrap().project().id.clone();
     assert_ne!(p1, p2);
     let run = |id: &str, cwd: &std::path::Path| {
-        let e = runindex::Entry { campaign: "multi".into(), session_id: SID.into(), run_id: id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+        let e = runindex::Entry { campaign: "multi".into(), session_id: SID.into(), run_id: id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: None };
         runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     };
     run("20261106-0911", &t.cwd()); // run A, project P1
@@ -1258,7 +1258,7 @@ fn a_bare_task_id_follows_a_campaign_whose_runs_share_a_project() {
     let app = t.app();
     let p1 = my_project(&app, &t);
     for r in ["20261106-0911", "20261107-0900"] {
-        let e = runindex::Entry { campaign: "one".into(), session_id: SID.into(), run_id: r.into(), cwd: t.cwd(), lead_session_id: None };
+        let e = runindex::Entry { campaign: "one".into(), session_id: SID.into(), run_id: r.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
         runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     }
     t.campaign("one", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "bare"}]));
