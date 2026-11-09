@@ -151,6 +151,15 @@ impl Ledger {
         }
     }
 
+    /// Close terminal `id` with `close`, and only then forget its record, whatever `close` returned. The record is what lets
+    /// the next launch find a shell that survived a crash during the close, so it must outlive the stop; once the shell is
+    /// stopped (or was never there) a stale record would only reconcile as gone.
+    pub fn close_then_forget<T, E>(&self, id: u32, close: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+        let r = close();
+        let _ = self.forget_for(id);
+        r
+    }
+
     /// A clean quit ended every shell: nothing is left to recover.
     pub fn clear(&self) {
         let _g = lock(&self.guard);
@@ -704,5 +713,20 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::copy(&real, &path).unwrap();
         assert_eq!(Ledger::new(path).load().len(), 1);
+    }
+
+    #[test]
+    fn given_a_close_in_progress_when_it_succeeds_or_fails_then_the_record_is_there_during_it_and_gone_after() {
+        for outcome in [Ok(()), Err("not_found")] {
+            let l = Ledger::new(tmp(&format!("close-{}", outcome.is_ok())));
+            let me = std::process::id();
+            l.record_for(7, Owner { pid: me, stamp: start_stamp(me).unwrap(), cwd: "/tmp".into() }).unwrap();
+            let r = l.close_then_forget(7, || {
+                assert_eq!(l.load().len(), 1, "the record is still recoverable while the shell is being stopped");
+                outcome
+            });
+            assert_eq!(r, outcome, "the close result is returned as it was");
+            assert!(l.load().is_empty(), "forgotten once the close is over, whatever it returned");
+        }
     }
 }

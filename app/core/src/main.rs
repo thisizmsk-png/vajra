@@ -314,8 +314,9 @@ fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
 
 #[tauri::command(async)]
 fn term_close(terms: State<'_, Terminals>, own: State<'_, Ownership>, id: u32) -> Res {
-    let _ = own.ledger.forget_for(id); // exactly the record this terminal made, not whatever shares its pid now
-    terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
+    // The record goes after the shell is stopped (exactly the record this terminal made, not whatever shares its pid now):
+    // until then a crash must still leave the shell recoverable.
+    own.ledger.close_then_forget(id, || terms.close(id)).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
 #[tauri::command]
