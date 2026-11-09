@@ -490,11 +490,13 @@ impl App {
     ) -> Res {
         let _one = lock(&self.launching);
         self.within_caps(cwd, workers)?;
+        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review).
+        let key = self.launch_key(cwd);
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
             // The run's project's Director-General sees and steers it (ADR-15 2.3).
-            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref(cwd).0) {
+            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref_of(&key, cwd).0) {
                 svc.end_session(session_id);
                 return Err(e.to_json());
             }
@@ -530,7 +532,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+        if self.record_run_as(run_id, cwd, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))

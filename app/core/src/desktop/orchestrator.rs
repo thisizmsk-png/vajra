@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::{App, Res, caps};
+use super::{App, Res};
 use crate::control::lead::LeadError;
 use crate::control::{fsx, sha256};
 use crate::ids;
@@ -31,6 +31,8 @@ pub(super) const NAME: &str = "Director-General";
 pub(super) const MAX_TURNS: usize = 2;
 /// The project id file in a run's guarded record (`<data>/control/lead/<run_id>/`).
 pub(super) const PROJECT_FILE: &str = "project";
+/// The project folder file in a run's guarded record, pinned with the id (#82 review).
+pub(super) const PROJECT_ROOT_FILE: &str = "project_root";
 const ROOT_FILE: &str = "root";
 const GEN_FILE: &str = "generation";
 pub(super) const SESSION_FILE: &str = "session";
@@ -60,8 +62,13 @@ pub(super) fn stream(project: &str, generation: u32) -> String {
 
 /// The project a run folder belongs to: its stand-in id and the folder the Director-General's turns run in (the repo
 /// root for a folder inside a repo or one of its worktrees, else the folder itself).
+#[cfg(test)]
 pub(super) fn project_ref(cwd: &Path) -> (String, PathBuf) {
-    let key = caps::project_key(cwd);
+    project_ref_of(&super::caps::project_key(cwd), cwd)
+}
+
+/// `project_ref` for a project key already found (the one a launch pinned before it spawned anything).
+pub(super) fn project_ref_of(key: &Path, cwd: &Path) -> (String, PathBuf) {
     let digest = sha256::hex_digest(key.as_os_str().as_encoded_bytes());
     let root = match (key.file_name().and_then(|n| n.to_str()), key.parent()) {
         (Some(".git"), Some(p)) if p.is_dir() => p.to_path_buf(),
@@ -85,22 +92,21 @@ impl App {
         self.data.join("control").join("projects").join(pid).join("orchestrator")
     }
 
-    /// The project of a run the app recorded: the id pinned in its guarded record at launch. A record from before
-    /// projects existed gets one now, computed from its (guarded) directory, and pinned the same way.
-    pub(super) fn run_project(&self, run_id: &str, cwd: &Path) -> Result<(String, PathBuf), LeadError> {
+    /// The project id a run's guarded record pinned at launch, if any.
+    pub(super) fn pinned_project(&self, run_id: &str) -> Option<String> {
+        read_text(&self.data.join("control").join("lead").join(run_id).join(PROJECT_FILE))
+    }
+
+    /// The project of a run the app recorded and its folder: both pinned in the guarded record at launch, from one
+    /// look at the repo before any worker ran. The repo's `.git` is never re-read for them (#82 review: a worker could
+    /// point it at another project), so a record without them is refused, not filled in now.
+    pub(super) fn run_project(&self, run_id: &str, _cwd: &Path) -> Result<(String, PathBuf), LeadError> {
         let dir = self.data.join("control").join("lead").join(run_id);
-        let (pid, root) = match read_text(&dir.join(PROJECT_FILE)) {
-            Some(p) if ids::valid_project_ref(&p) => (p, project_ref(cwd).1),
-            Some(_) => return Err(LeadError::GuardMissing("the run's project record is not valid".into())),
-            None => {
-                let (p, root) = project_ref(cwd);
-                if dir.is_dir() {
-                    fsx::write_atomic(&dir, PROJECT_FILE, p.as_bytes()).map_err(io)?;
-                }
-                (p, root)
-            }
-        };
-        Ok((pid, root))
+        match (read_text(&dir.join(PROJECT_FILE)), read_text(&dir.join(PROJECT_ROOT_FILE))) {
+            (Some(p), Some(r)) if ids::valid_project_ref(&p) && Path::new(&r).is_absolute() => Ok((p, PathBuf::from(r))),
+            (None, None) => Err(LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into())),
+            _ => Err(LeadError::GuardMissing("the run's project record is not valid".into())),
+        }
     }
 
     /// The project's orchestrator, created on first use with generation 1 and no session yet (ADR-15 2.5). Its root is
