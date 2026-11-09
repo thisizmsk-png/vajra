@@ -138,6 +138,7 @@ fn a_held_start_leaves_the_proposal_open() {
     let stream = "run-1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     app.sup.spawn(stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
     lock(&app.runs).insert(stream.into(), Run { session_id: "1b4e28ba-2fa1-41d2-883f-0016d3cca427".into(), run_id: "20261108-1100".into(), campaign: "c".into(), cwd: t.repo(), nonces: Redactor::default() });
+    app.record_run("20261108-1100", &t.repo(), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let it = proposals(&app).remove(0);
     let (id, sha) = (it["id"].as_str().unwrap(), it["proposal_sha256"].as_str().unwrap());
     let held = app.start_proposal(id, sha).unwrap_err();
