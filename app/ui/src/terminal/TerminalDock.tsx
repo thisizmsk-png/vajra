@@ -3,8 +3,8 @@
 // `openTerminalHere(place)`. The xterm view is a lazy chunk, so a window that never opens a terminal pays nothing.
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { S } from "../../strings";
-import { api } from "../ipc";
-import type { TermInfo } from "../ipc";
+import { api, onChanged } from "../ipc";
+import type { Lifecycle, TermInfo } from "../ipc";
 import type { ViewState } from "./TerminalView";
 import "./terminal.css";
 
@@ -69,6 +69,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const [cur, setCur] = useState<number | null>(init.cur);
   const [focusToken, setFocusToken] = useState(0);
   const [note, setNote] = useState("");
+  const [life, setLife] = useState<Lifecycle | null>(null);
   const back = useRef<Element | null>(null);
   const curRef = useRef(cur);
   curRef.current = cur;
@@ -138,6 +139,37 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     if (open && cur !== null) setTabs((all) => (all.some((t) => t.key === cur && !t.live) ? all.map((t) => (t.key === cur ? { ...t, live: true } : t)) : all));
   }, [open, cur]);
   useEffect(() => writeLayout(tabs, cur), [tabs, cur]);
+
+  // Ask the core what a close, a quit or an archive would do: once when the dock is shown and again when a shell starts,
+  // ends or goes. Never while hidden, never on a timer.
+  const [tick, setTick] = useState(0);
+  const refreshLife = useCallback(() => setTick((n) => n + 1), []);
+  const shape = tabs.map((t) => `${t.key}:${t.state.status}`).join(",");
+  useEffect(() => {
+    if (!open) return;
+    let stale = false;
+    api.lifecycle().then(
+      (r) => !stale && setLife(r),
+      () => !stale && setLife(null),
+    );
+    return () => void (stale = true);
+  }, [open, shape, tick]);
+
+  // A run starting or ending changes what a close or a quit would do even when no terminal changed: ask again when the app
+  // says its runs changed (the same notice the rest of the app listens to), only while the dock is shown, and at most once
+  // per burst of notices.
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = onChanged(() => {
+      clearTimeout(timer);
+      timer = setTimeout(refreshLife, 250);
+    });
+    return () => {
+      off();
+      clearTimeout(timer);
+    };
+  }, [open, refreshLife]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -213,6 +245,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
+      <LifeLine life={life} refresh={refreshLife} />
       <div className="v-term__body">
         {!tabs.length && (
           <div className="v-term__state">
@@ -242,5 +275,74 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       </div>
       <p role="status" className="v-term__sr">{note}</p>
     </section>
+  );
+}
+
+const nameOf = (p: string) => base(p);
+
+/** One honest line from the core's own report, what the last crash left behind, and the shells behind it. Nothing renders when nothing is affected. */
+function LifeLine({ life, refresh }: { life: Lifecycle | null; refresh: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [recovery, setRecovery] = useState("");
+  if (!life) return null;
+  const { terminals: t, runs: r } = life.close_keeps;
+  const keeps = [t && S.terminal.lifecycle.terminals(t), r && S.terminal.lifecycle.runs(r)].filter(Boolean).join(" and ");
+  const leaves = life.terminals.filter((x) => life.archive_leaves.includes(x.id)).map((x) => nameOf(x.cwd)).join(", ");
+  const owned = life.found.filter((f) => f.verdict === "owned");
+  const reused = life.found.filter((f) => f.verdict === "reused");
+  if (!keeps && !leaves && !owned.length && !reused.length && !recovery) return null;
+  const L = S.terminal.lifecycle;
+  // Say what happened: only a result that is exactly "ended" counts as ended.
+  const end = () => {
+    setRecovery("");
+    api.recoverOrphans(owned.map((f) => f.pid)).then(
+      (r) => setRecovery(r.results.every((x) => x.result === "ended") ? "" : typeof r.results.find((x) => typeof x.result === "object") !== "undefined" ? L.stillRunning : L.endFailed),
+      () => setRecovery(L.endFailed),
+    ).finally(refresh);
+  };
+  const ask = () => {
+    setFailed(false);
+    api.diagnosticsPreview().then((d) => setText(d.text), () => (setText(null), setFailed(true)));
+  };
+  return (
+    <div className="v-term__life" data-testid="v-term-lifecycle">
+      <p>
+        {keeps && L.keeps(keeps, t + r > 1 || (t > 0 && r > 0))} {leaves && L.archive(leaves)}
+      </p>
+      {recovery && <p role="alert">{recovery}</p>}
+      {(owned.length > 0 || reused.length > 0) && (
+        <div data-testid="v-term-found">
+          <p>{L.foundTitle}</p>
+          <ul>
+            {owned.map((f) => <li key={`${f.pid}-${f.stamp}`}>{L.foundOwned(f.pid, f.cwd, f.members ?? 1)}</li>)}
+            {reused.map((f) => <li key={`${f.pid}-${f.stamp}`}>{L.foundReused(f.pid)}</li>)}
+          </ul>
+          {owned.length > 0 && (
+            <button className="v-term__btn" onClick={end}>{L.endLeft(owned.length)}</button>
+          )}
+        </div>
+      )}
+      <details>
+        <summary>{L.details}</summary>
+        <ul>
+          {life.terminals.map((x) => (
+            <li key={x.id}>
+              {x.cwd} · {L.pid(x.pid)} · {x.alive ? L.running : L.endedState}
+            </li>
+          ))}
+          {life.runs.map((x) => <li key={x.stream}>{L.runGroup(x.pid)}</li>)}
+        </ul>
+        <button className="v-term__btn" onClick={ask}>{L.preview}</button>
+        {failed && <p role="alert">{L.previewFailed}</p>}
+        {text !== null && (
+          <>
+            <pre data-testid="v-term-diag" tabIndex={0}>{text}</pre>
+            <p className="v-term__muted">{L.previewNote}</p>
+            <button className="v-term__btn" onClick={() => void navigator.clipboard?.writeText(text)}>{L.copy}</button>
+          </>
+        )}
+      </details>
+    </div>
   );
 }

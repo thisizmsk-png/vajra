@@ -14,6 +14,7 @@ import { ViewTabs } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
+import { TerminalDock } from "./terminal/TerminalDock";
 import { lastProject, rememberProject, useCompact, useInspector } from "./shell/layout";
 import { S } from "../strings";
 import { PreferencesProvider, preferenceScope, usePreferences } from "./preferences";
@@ -175,10 +176,11 @@ function Frame() {
               </main>
               {showInspector && project && <Inspector project={project} focus={focusCampaign} crew={crew} worker={workerRow} />}
             </div>
-            {/* The terminal dock's place (FG-05/FG-16, the terminal track). Nothing mounts until its PR lands; then this div
-                becomes `<TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />`
-                (src/terminal/TerminalDock.tsx, `Place = { cwd, label }`); the Unsorted bucket has no folder, so no default. */}
-            <div className="v-dock" data-slot="terminal" hidden />
+            {/* The terminal dock (FG-05/FG-16/FG-24). It shows nothing until a terminal is opened (⌃`, or "open here"); the
+                Unsorted bucket has no folder, so no default place. */}
+            <div className="v-dock" data-slot="terminal">
+              <TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />
+            </div>
           </div>
           <StatusBar runs={P.runs} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
             onPhone={() => openSettings({ section: "mobile" })} onSettings={() => openSettings()} />
