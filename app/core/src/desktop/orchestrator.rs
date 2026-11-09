@@ -85,7 +85,7 @@ pub(super) fn project_ref(cwd: &Path) -> (String, PathBuf) {
     // One look at the `.git` entry at the folder's launch-time location, as a launch takes it (#80 review): no second walk.
     let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let loc = super::lead::git_location(cwd);
-    let key = super::caps::key_of_entry(&loc, &real).unwrap_or(real);
+    let key = super::caps::try_key_of_entry(&loc, &real).ok().flatten().unwrap_or(real);
     project_ref_of(&key, &loc)
 }
 

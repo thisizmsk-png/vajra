@@ -176,7 +176,8 @@ impl Tmp {
             format!("run-{SID}"),
             Run { session_id: SID.into(), run_id: RUN_ID.into(), campaign: "deliver-x".into(), cwd: self.repo(), nonces },
         );
-        // Launched: its guarded record, with the project pinned.
+        // Launched: its guarded record, with the project pinned (a launch only ever starts in a store project's folder).
+        super::super::test_project(&self.data(), &self.home(), &self.repo());
         app.record_run(RUN_ID, &self.repo(), SID, "deliver-x", true, 1).unwrap();
         app
     }
@@ -232,12 +233,14 @@ fn remember_lead(t: &Tmp, sid: &str) {
     crate::control::fsx::write_atomic(&od, "session", sid.as_bytes()).unwrap();
 }
 
-/// The project pins a launch writes into a run's guarded record (key, folder, id), for a run in the test repo.
+/// The project pins a launch writes into a run's guarded record (store id, location, canonical folder, main checkout), for a
+/// run in the test repo.
 fn pin_record(t: &Tmp, dir: &Path) {
-    let (pid, root) = super::orchestrator::project_ref(&t.repo());
+    let pid = super::super::test_project(&t.data(), &t.home(), &t.repo());
     let w = |f: &str, v: &str| crate::control::fsx::write_atomic(dir, f, v.as_bytes()).unwrap();
-    w("project_key", &super::super::caps::project_key(&t.repo()).to_string_lossy());
-    w("project_root", &root.to_string_lossy());
+    w("project_loc", &super::super::lead::git_location(&t.repo()).to_string_lossy());
+    w("cwd_real", &std::fs::canonicalize(t.repo()).unwrap().to_string_lossy());
+    w("project_main", &std::fs::canonicalize(t.repo()).unwrap().to_string_lossy());
     w("project", &pid);
 }
 
@@ -1126,17 +1129,21 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     let gone = add(&archived);
     app.projects.archive(&gone, None).unwrap();
     add(&inner); // a project inside this one: its folder is another project's
-    let roots = app.other_project_roots(&pid(&t), &t.repo()).unwrap();
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&other, &archived, &inner] {
         assert!(roots.contains(want), "{want:?} denied: {roots:?}");
     }
     assert!(!roots.contains(&t.repo()), "never its own root: {roots:?}");
-    // A project root that holds this one is not denied (that would deny the repo itself); a sibling of it is.
+    // A project root that holds this one is not denied wholesale (that would deny the repo itself): it gets only the secret-file
+    // rules. A sibling of it is denied.
     let outer = t.0.join("outer");
     let held = outer.join("repo2");
+    let ph = add(&held);
     add(&outer);
-    assert!(!app.other_project_roots("p_held", &held).unwrap().contains(&outer));
-    assert!(app.other_project_roots(&pid(&t), &t.repo()).unwrap().contains(&outer));
+    app.record_run_as("20261108-1105", &held, Some(&ph), SID, "h", true, 1).unwrap();
+    let iso = app.isolation("20261108-1105", &held).unwrap();
+    assert!(!iso.deny.contains(&outer) && iso.secrets.contains(&outer), "{iso:?}");
+    assert!(app.other_project_roots(RUN_ID, &t.repo()).unwrap().contains(&outer));
 
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
@@ -1356,7 +1363,7 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     for (run, cwd) in [("20261108-1100", sub.clone()), ("20261108-1101", wt.clone())] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
-    let roots = app.other_project_roots(&pid(&t), &t.repo()).unwrap();
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&main, &sub, &wt] {
         assert!(roots.contains(want), "{want:?} denied: {roots:?}");
     }
@@ -1399,6 +1406,38 @@ fn an_external_worktree_of_the_leads_own_project_keeps_its_secret_file_rules() {
     assert!(!got.contains(&format!("Read(/{}/**)", wt.display())), "its own worktree is never denied wholesale: {got}");
 }
 
+/// #82 sweep: a guarded record of the Lead's own project that exists but cannot be read (its cwd, or the directory of runs) refuses
+/// the ask. Skipping it would leave that folder's secret files without deny rules.
+#[test]
+fn an_unreadable_record_of_the_leads_own_project_refuses_instead_of_dropping_its_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    for what in ["cwd", "LIST"] {
+        let t = Tmp::new();
+        let app = t.app();
+        let wt = t.0.join("repo-wt");
+        for d in [t.repo().join(".git/worktrees/repo-wt"), wt.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(t.repo().join(".git/worktrees/repo-wt/commondir"), "../..\n").unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", t.repo().join(".git/worktrees/repo-wt").display())).unwrap();
+        app.record_run_as(RUN_ID, &t.repo(), Some(&pid(&t)), SID, "deliver-x", true, 1).unwrap();
+        app.record_run_as("20261108-1100", &wt, Some(&pid(&t)), SID, "deliver-x", true, 1).unwrap();
+        let healthy = app.own_project_folders(RUN_ID, &t.repo()).unwrap();
+        assert!(healthy.contains(&wt), "{what}: the fixture lists the worktree: {healthy:?}");
+        let lead = app.data.join("control/lead");
+        if what == "LIST" {
+            std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o300)).unwrap();
+        } else {
+            let f = lead.join("20261108-1100").join("cwd");
+            std::fs::remove_file(&f).unwrap();
+            std::fs::create_dir(&f).unwrap();
+        }
+        let r = app.own_project_folders(RUN_ID, &t.repo());
+        let _ = std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o700));
+        assert!(r.is_err(), "{what}: refused, not silently without the worktree: {r:?}");
+    }
+}
+
 /// #82 review [P2]: the Director-General's conversation is shared by all of a project's runs. After a restart the history
 /// replayed for run B must not show run A's persisted nonce, even though B is the first run queried.
 #[test]
@@ -1432,6 +1471,236 @@ fn after_a_restart_another_runs_nonce_in_the_shared_history_is_redacted_when_b_i
     let lines = stream_text(&t, &app);
     assert!(lines.iter().any(|l| l.contains("run A used")), "the history came back: {lines:?}");
     assert!(lines.iter().all(|l| !l.contains(&nonce_a) && !l.contains(&nonce_b)), "no run's nonce reaches the bus: {lines:?}");
+}
+
+/// #80 review [P2]: an outside-worktree launch whose main checkout could not be resolved refuses other projects' Leads; a later
+/// launch from the project's main folder (the suggested recovery) repairs that, and every run folder stays denied.
+#[test]
+fn a_main_folder_launch_repairs_an_unresolved_checkout_and_every_folder_stays_denied() {
+    let t = Tmp::new();
+    let app = t.app();
+    let main = t.0.join("harbor");
+    let wt = t.0.join("harbor-wt");
+    for d in [main.join(".git/worktrees/harbor-wt"), wt.clone(), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(main.join(".git/worktrees/harbor-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/harbor-wt").display())).unwrap();
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    let ph = super::super::test_project(&t.data(), &t.home(), &main);
+    app.record_run_as("20261108-1100", &wt, Some(&ph), SID, "c", true, 1).unwrap();
+    // That launch could not resolve the main checkout.
+    std::fs::write(app.data.join("control/lead/20261108-1100/project_main"), "-").unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo()).unwrap_err();
+    assert!(format!("{e:?}").contains("main folder"), "the refusal names the fix: {e:?}");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    // The user starts the project from its main folder: the same pinned project, with the checkout resolved.
+    app.record_run_as("20261108-1200", &main, Some(&ph), SID, "c", true, 1).unwrap();
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
+    for want in [&main, &wt] {
+        assert!(roots.contains(want), "{want:?} denied: {roots:?}");
+    }
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    for want in [&main, &wt] {
+        assert!(got.contains(&format!("Read(/{}/**)", want.display())), "{want:?}: {got}");
+    }
+}
+
+/// #80 review: an unresolved (`-`) main checkout on a run with no readable pinned key is still refused, never read as "nothing
+/// recorded" (the key that could have repaired it is the very thing that is missing).
+#[test]
+fn an_unresolved_main_on_a_run_with_no_key_still_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    for d in [other.join(".git"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    let po = super::super::test_project(&t.data(), &t.home(), &other);
+    app.record_run_as("20261108-1100", &other, Some(&po), SID, "c", true, 1).unwrap();
+    let dir = app.data.join("control/lead/20261108-1100");
+    std::fs::write(dir.join("project_main"), "-").unwrap();
+    std::fs::remove_file(dir.join("project")).unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo()).unwrap_err();
+    assert!(format!("{e:?}").contains("main checkout"), "{e:?}");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+}
+
+/// #80 review: a guarded record that exists but cannot be read is never "nothing recorded": the ask is refused. Covers the
+/// main, cwd and location files of another run, and a record directory that cannot be listed.
+#[test]
+fn a_guarded_record_that_exists_but_cannot_be_read_refuses_the_ask() {
+    use std::os::unix::fs::PermissionsExt;
+    for file in ["project_main", "cwd", "project_loc", "LIST"] {
+        let t = Tmp::new();
+        let app = t.app();
+        let other = t.0.join("other");
+        for d in [other.join(".git"), t.repo().join(".git")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+        app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+        assert!(app.other_project_roots(RUN_ID, &t.repo()).is_ok(), "{file}: the fixture is healthy");
+        let lead = app.data.join("control/lead");
+        if file == "LIST" {
+            // Traversable but not listable: the own record still reads, the directory of runs does not.
+            std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o300)).unwrap();
+        } else {
+            // A directory where the file should be: present, not a readable regular file.
+            let f = lead.join("20261108-1100").join(file);
+            let _ = std::fs::remove_file(&f);
+            std::fs::create_dir(&f).unwrap();
+        }
+        let r = app.other_project_roots(RUN_ID, &t.repo());
+        std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(r.is_err(), "{file}: an unreadable record refuses instead of allowing: {r:?}");
+    }
+}
+
+/// #80 review [P1]: the asking run's folder is checked against the location pinned at launch before any ancestor is exempted.
+/// A subfolder renamed away and replaced by a link into another recorded project must fail closed, not drop that project's roots.
+#[test]
+fn a_run_folder_redirected_into_another_project_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&other), "the healthy run denies the other project");
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src);
+    assert!(e.is_err(), "a redirected run folder refuses the ask: {e:?}");
+}
+
+/// #80 identity model (TZKb): a run recorded by an older build (no `project_loc` / `cwd_real`) is refused on an ask, never migrated or
+/// written back, so a folder redirected before the upgrade cannot be laundered into a trusted location.
+#[test]
+fn a_legacy_own_record_is_refused_on_an_ask_and_nothing_is_written() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    let dir = app.data.join("control/lead").join(RUN_ID);
+    for f in ["project_loc", "cwd_real"] {
+        std::fs::remove_file(dir.join(f)).unwrap();
+    }
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src).unwrap_err();
+    assert!(format!("{e:?}").contains("start a new run"), "{e:?}");
+    assert!(!dir.join("project_loc").exists() && !dir.join("cwd_real").exists(), "nothing was derived and persisted");
+}
+
+/// #80 review [P1]: containment in the asking project's root does not prove ownership when repositories nest. An outer project's
+/// recorded subfolder replaced by a link into a recorded nested project belongs, by deepest guarded membership, to the nested one.
+#[test]
+fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (inner, src) = (t.repo().join("inner"), t.repo().join("src"));
+    for d in [t.repo().join(".git"), inner.join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run_as(RUN_ID, &src, Some(&pid(&t)), SID, "deliver-x", true, 1).unwrap();
+    let pi = super::super::test_project(&t.data(), &t.home(), &inner);
+    app.record_run_as("20261108-1100", &inner, Some(&pi), SID, "c", true, 1).unwrap();
+    assert_ne!(super::super::caps::project_key(&inner), super::super::caps::project_key(&src), "the fixture nests two projects");
+    assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&inner), "healthy: the nested project is denied");
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&inner, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src);
+    assert!(e.is_err(), "a redirect into the nested project is refused: {e:?}");
+}
+
+/// #80 identity model (Option A): a project nested inside another one. The Lead of the nested project is denied the outer project's
+/// secret files but not its whole folder (that would deny the Lead itself), and the nested project itself is denied to the outer Lead.
+#[test]
+fn a_nested_projects_lead_gets_secrets_only_denies_for_the_outer_folder() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    for d in [outer.join(".git"), inner.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (run_outer, run_inner) = ("20261108-1100", "20261108-1101");
+    let (po, pi) = (super::super::test_project(&t.data(), &t.home(), &outer), super::super::test_project(&t.data(), &t.home(), &inner));
+    app.record_run_as(run_outer, &outer, Some(&po), SID, "b", true, 1).unwrap();
+    app.record_run_as(run_inner, &inner, Some(&pi), SID, "a", true, 1).unwrap();
+    let iso = app.isolation(run_inner, &inner).unwrap();
+    assert!(iso.secrets.contains(&outer) && !iso.deny.contains(&outer), "the enclosing folder is secrets-only: {iso:?}");
+    let rules = crate::control::lead::deny_rules_iso(&t.home(), &inner, &t.data(), &iso.deny, &iso.secrets).unwrap();
+    let outer_s = outer.to_str().unwrap().trim_start_matches('/');
+    assert!(rules.contains(&format!("Read(//{outer_s}/**/.env)")), "the outer project's secrets stay denied: {rules:?}");
+    assert!(!rules.contains(&format!("Read(//{outer_s}/**)")), "the outer folder is not denied whole: {rules:?}");
+    // The other way round, the outer Lead is denied the nested project whole.
+    let up = app.isolation(run_outer, &outer).unwrap();
+    assert!(up.deny.contains(&inner), "the nested project is denied to the outer Lead: {up:?}");
+}
+
+/// #80 identity model: another project's recorded folder swapped for a link to the Lead's own folder is ambiguous and refuses.
+#[test]
+fn another_projects_folder_redirected_onto_the_leads_own_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    for d in [other.join(".git"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &t.repo(), SID, "x", true, 1).unwrap();
+    // The fixture's own run was pinned before the repo had a `.git`; pin it as the repo is now.
+    crate::control::fsx::write_atomic(&app.data.join("control/lead").join(RUN_ID), "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_ok(), "healthy");
+    std::fs::rename(&other, t.0.join("other-moved")).unwrap();
+    std::os::unix::fs::symlink(t.repo(), &other).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "another project's folder now resolves to the Lead's own");
+}
+
+/// #80 identity model: the asking folder must EQUAL a recorded folder of its project. A recorded subfolder replaced by a link to an
+/// UNRECORDED folder of the same project is refused too (containment in the project's root would have allowed it).
+#[test]
+fn a_run_folder_replaced_by_a_link_to_an_unrecorded_folder_of_its_own_project_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let proj = t.0.join("proj");
+    let (src, elsewhere) = (proj.join("src"), proj.join("elsewhere"));
+    for d in [proj.join(".git"), src.clone(), elsewhere.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let pp = super::super::test_project(&t.data(), &t.home(), &proj);
+    app.record_run_as("20261108-1100", &src, Some(&pp), SID, "x", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
+    std::fs::rename(&src, proj.join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &src).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_err(), "equal to a recorded folder, not merely inside the project");
+}
+
+/// #80 identity model: one recorded location claimed by two keys via DIFFERENT runs (so no single folder collides) is ambiguous and refuses.
+#[test]
+fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let proj = t.0.join("proj");
+    let (src, lib) = (proj.join("src"), proj.join("lib"));
+    for d in [proj.join(".git"), src.clone(), lib.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (pp, po) = (super::super::test_project(&t.data(), &t.home(), &proj), super::super::test_project(&t.data(), &t.home(), &t.0.join("some/other")));
+    app.record_run_as("20261108-1100", &src, Some(&pp), SID, "x", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
+    app.record_run_as("20261108-1101", &lib, Some(&po), SID, "y", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_err(), "the location is recorded under two projects");
 }
 
 #[path = "lead_store_tests.rs"]
@@ -1515,8 +1784,9 @@ fn a_worktree_redirected_after_launch_keeps_its_projects_root() {
     app.record_run(run_w, &wt, sid_w, "deliver-w", true, 1).unwrap();
     lock(&app.runs).insert(format!("run-{sid_w}"), Run { session_id: sid_w.into(), run_id: run_w.into(), campaign: "deliver-w".into(), cwd: wt.clone(), nonces: Redactor::default() });
     app.record_run("20261106-0941", &other, sid_w, "deliver-o", true, 1).unwrap();
-    let own_dir = orch_dir_of(&t, &t.repo());
-    let other_dir = orch_dir_of(&t, &other);
+    // The fixture's own run was pinned before the repo had a `.git`; pin it as the repo is now, so one location has one key.
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(RUN_ID), "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    let (own_dir, other_dir) = (orch_dir_of(&t, &t.repo()), orch_dir_of(&t, &other));
     // A worker points the worktree at the other project before anything asked about it.
     std::fs::write(wt.join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
     assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&other), "the rewrite took");
@@ -1530,4 +1800,66 @@ fn a_worktree_redirected_after_launch_keeps_its_projects_root() {
     let got = std::fs::read_to_string(own_dir.join("settings.json")).unwrap();
     assert!(got.contains(&format!("Read(/{}/**)", other.display())), "the other project stays denied: {got}");
     assert!(argvs(&t).iter().all(|a| !a.contains(&other.to_string_lossy().to_string()) || a.contains("Read(")), "no turn ran in the other folder");
+}
+
+/// #80 review [P1]: a legacy record's location is validated against its pinned key on the LAUNCH path too, before it is persisted, even
+/// when the launch then fails: a redirected folder must not leave a trusted-looking location behind for a later ask.
+#[test]
+fn a_launch_never_persists_a_location_for_a_record_that_has_none() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run_as(RUN_ID, &src, Some(&pid(&t)), SID, "deliver-x", true, 1).unwrap();
+    let po = super::super::test_project(&t.data(), &t.home(), &other);
+    app.record_run_as("20261108-1100", &other, Some(&po), SID, "c", true, 1).unwrap();
+    let loc = app.data.join("control/lead").join(RUN_ID).join("project_loc");
+    std::fs::remove_file(&loc).unwrap();
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    // The record has no location (the shipped build's format): it pins nothing, so a fresh start in the other project is not blocked by
+    // it, and it is never written to.
+    assert!(app.launch_project(&other).is_ok(), "a record that pins nothing does not block a fresh start");
+    assert!(!loc.exists(), "no location was derived and persisted for the redirected legacy record");
+    assert!(app.other_project_roots(RUN_ID, &src).is_err(), "and a later ask for the redirected run stays refused");
+}
+
+/// #80 review [P1]: a recorded folder keeps its guarded membership when the nested Git boundary it was pinned under disappears.
+#[test]
+fn removing_a_nested_git_keeps_the_folders_pinned_project() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    for d in [outer.join(".git"), inner.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (po, pi) = (super::super::test_project(&t.data(), &t.home(), &outer), super::super::test_project(&t.data(), &t.home(), &inner));
+    app.record_run_as("20261108-1100", &outer, Some(&po), SID, "b", true, 1).unwrap();
+    app.record_run_as("20261108-1101", &inner, Some(&pi), SID, "a", true, 1).unwrap();
+    let key_a = app.pinned_project("20261108-1101").expect("the inner run is pinned");
+    let key_b = app.pinned_project("20261108-1100").expect("the outer run is pinned");
+    assert_ne!(key_a, key_b, "the fixture nests two projects");
+    assert_eq!(app.launch_project(&inner).unwrap().1.id, key_a, "healthy");
+    std::fs::rename(inner.join(".git"), inner.join(".git.saved")).unwrap();
+    let before = app.recorded_runs().len();
+    match app.launch_project(&inner) {
+        Ok((_, p)) => assert_eq!(p.id, key_a, "the original pin, never the outer project's"),
+        Err(e) => assert_eq!(code(&e), "project_membership_inconsistent", "{e}"),
+    }
+    assert_eq!(app.recorded_runs().len(), before, "nothing was recorded");
+}
+
+/// #80 review: one location recorded under two different keys is ambiguous and refuses the ask (no tie is allowed).
+#[test]
+fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    // The fixture's own run is pinned to the repo's project; this one records the same location under another project.
+    let other = super::super::test_project(&t.data(), &t.home(), &t.0.join("elsewhere"));
+    app.record_run_as("20261108-1100", &t.repo(), Some(&other), SID, "c", true, 1).unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo());
+    assert!(e.is_err(), "two projects at one location refuse: {e:?}");
 }
