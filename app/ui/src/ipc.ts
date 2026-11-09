@@ -187,8 +187,8 @@ export const api = {
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
-  /** Reject plan `id` through a receipt. Pass the first 16 hex chars of the plan hash you read as `expect_generation` to refuse a changed plan. */
-  actRejectPlan: (envelope: Envelope, id: string, reason: string) => call<ActResult>("act_reject_plan", { envelope, id, reason }),
+  /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
+  actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256?: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256: planSha256 ?? null }),
   /** Answer a waiting task: the text goes to its worker as a message (never a shell). Run-level questions are refused (`not_answerable`). */
   actAnswerQuestion: (envelope: Envelope, id: string, text: string) => call<ActResult>("act_answer_question", { envelope, id, text }),
   actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),

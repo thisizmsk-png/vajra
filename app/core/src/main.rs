@@ -51,8 +51,8 @@ fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sh
 }
 
 #[tauri::command(async)]
-fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String) -> Value {
-    app.act_reject_plan(&envelope, &id, &reason)
+fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String, plan_sha256: Option<String>) -> Value {
+    app.act_reject_plan(&envelope, &id, &reason, plan_sha256.as_deref())
 }
 
 #[tauri::command(async)]

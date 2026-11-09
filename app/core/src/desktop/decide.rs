@@ -124,9 +124,9 @@ impl App {
     }
 
     /// `reject_plan` that also refuses (`stale_generation`) when the plan in the result file NOW is not the one the
-    /// caller read: `expect` is the first 16 hex chars of its hash as a number. Compared with the entry read inside the
+    /// caller read: `expect` is the full `plan_sha256` the caller read. Compared with the entry read inside the
     /// decision guard, before any ledger line or progress call, never with the cached hash the last inbox read left.
-    pub(super) fn reject_plan_expecting(&self, id: &str, reason: &str, expect: Option<u64>) -> Res {
+    pub(super) fn reject_plan_expecting(&self, id: &str, reason: &str, expect: Option<&str>) -> Res {
         let (run_id, index) = parse_plan_id(id).ok_or_else(|| invalid("id", "not a plan id"))?;
         // One line: the progress log is line-oriented, so every whitespace run (newlines included) becomes one space.
         let reason = sanitise(reason, &Redactor::default()).split_whitespace().collect::<Vec<_>>().join(" ");
@@ -136,11 +136,9 @@ impl App {
         let _one = self.begin_decision(id)?;
         let e = self.plan_run(run_id)?;
         let sha = self.waiting(&e).and_then(|w| w.plans.iter().find(|p| p.index == index).map(|p| plan_sha(&p.raw))).ok_or_else(|| fail("not_found", "no such plan"))?;
-        if let Some(want) = expect {
+        if expect.is_some_and(|want| want != sha) {
             let have = u64::from_str_radix(sha.get(..16).unwrap_or(""), 16).ok();
-            if have != Some(want) {
-                return Err(json!({"error": "stale_generation", "detail": "the plan changed since you read it", "current_generation": have}));
-            }
+            return Err(json!({"error": "stale_generation", "detail": "the plan changed since you read it", "current_generation": have}));
         }
         self.undecided(id)?;
         let sha = Some(sha.as_str());

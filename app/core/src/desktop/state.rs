@@ -246,11 +246,14 @@ impl App {
         self.act(env, Caller::Ui, true, "stop_worker", worker, cur, || self.control_stop_expecting(worker, reason, env.expect_generation))
     }
 
-    /// Reject plan `id` with a reason, through a receipt. The plan's generation is the hash the inbox last showed; a UI
-    /// that holds the hash it read passes its first 16 hex chars as `expect_generation` and a changed plan is refused.
-    pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str) -> Value {
+    /// Reject plan `id` with a reason, through a receipt. Pass the `plan_sha256` the human read (as `act_approve_plan` does,
+    /// as a string so no precision is lost crossing JSON): a plan that is not that exact one now is refused as stale, before
+    /// any ledger line or progress call. The generation the receipt guards on is derived from the hash here, as an exact u64.
+    pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str, plan_sha256: Option<&str>) -> Value {
         let shown = lock(&self.shown).get(id).and_then(|s| sha_generation(s));
-        self.act(env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan_expecting(id, reason, env.expect_generation))
+        let mut env = env.clone();
+        env.expect_generation = env.expect_generation.or_else(|| plan_sha256.and_then(sha_generation));
+        self.act(&env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan_expecting(id, reason, plan_sha256))
     }
 
     /// Answer a waiting task (a question or a block) from the inbox: the text goes to that task's worker as a control
