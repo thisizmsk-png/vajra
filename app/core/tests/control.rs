@@ -1064,7 +1064,21 @@ fn director_general_mcp_calls_are_bound_to_project_and_generation() {
         assert!(got.is_err(), "{bad:?}");
     }
     // A raw request that names both a run and a project, or a project without a generation, is refused.
-    for req in [json!({"tool": "list_workers", "run": RUN, "project": PROJ, "generation": 3}), json!({"tool": "list_workers", "project": PROJ})] {
+    // An explicit null is a value, not an omitted key (#81 review): with one live session, a null-only binding would
+    // otherwise be served as unbound.
+    for req in [
+        json!({"tool": "list_workers", "run": RUN, "project": PROJ, "generation": 3}),
+        json!({"tool": "list_workers", "project": PROJ}),
+        json!({"tool": "list_workers", "project": null, "generation": null}),
+        json!({"tool": "list_workers", "project": null}),
+        json!({"tool": "list_workers", "generation": null}),
+        json!({"tool": "list_workers", "run": null}),
+        json!({"tool": "list_workers", "project": PROJ, "generation": null}),
+        json!({"tool": "list_workers", "project": null, "generation": 3}),
+        json!({"tool": "list_workers", "run": RUN, "project": null, "generation": null}),
+        json!({"tool": "list_workers", "run": null, "project": PROJ, "generation": 3}),
+        json!({"tool": "message_worker", "args": {"worker": AID, "text": "hi"}, "project": null, "generation": null}),
+    ] {
         let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
         writeln!(s, "{req}").unwrap();
         let mut line = String::new();

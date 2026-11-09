@@ -29,7 +29,7 @@ use std::time::SystemTime;
 
 use serde_json::{Value, json};
 
-use super::{App, Res, caps};
+use super::{App, Res};
 use crate::control::lead::LeadError;
 use crate::control::service::ControlError;
 use crate::control::{fsx, sha256, time};
@@ -82,7 +82,11 @@ pub(super) fn stream(project: &str, generation: u32) -> String {
 /// inside a repo or one of its worktrees, else the folder itself). Only used now to find a stand-in conversation to
 /// carry over, and to check an old run's stand-in pin against its folder.
 pub(super) fn project_ref(cwd: &Path) -> (String, PathBuf) {
-    let key = caps::project_key(cwd);
+    project_ref_of(&super::caps::project_key(cwd), cwd)
+}
+
+/// `project_ref` for a project key already found (the one a launch pinned before it spawned anything).
+pub(super) fn project_ref_of(key: &Path, cwd: &Path) -> (String, PathBuf) {
     let digest = sha256::hex_digest(key.as_os_str().as_encoded_bytes());
     let root = match (key.file_name().and_then(|n| n.to_str()), key.parent()) {
         (Some(".git"), Some(p)) if p.is_dir() => p.to_path_buf(),

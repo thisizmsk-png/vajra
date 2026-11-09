@@ -541,7 +541,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+        if self.record_run_as(run_id, cwd, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         // A resume of this campaign counts at the same maxInFlight (#80 review); without the record it counts at the default.
