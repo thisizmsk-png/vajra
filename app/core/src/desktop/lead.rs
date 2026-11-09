@@ -43,6 +43,9 @@ const CWD_FILE: &str = "cwd";
 /// Where the run's project sits: the folder holding the nearest `.git` entry (`git_location`), as found at launch. The pin
 /// is keyed by this LOCATION, never by what `.git` later contains.
 const LOC_FILE: &str = "project_loc";
+/// The project's main checkout as resolved at launch (the pinned store project's recorded root), or `-` when it could not
+/// be. Guarded like the others, and denied to other projects' Directors-General even if the project later leaves the store.
+const MAIN_FILE: &str = "project_main";
 /// Most other-project run folders the Director-General's deny rules hold; more refuses the ask (#80 review: never
 /// drop one).
 pub(super) const MAX_OTHER_ROOTS: usize = 256;
@@ -493,6 +496,13 @@ impl App {
             fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, p.as_bytes())?;
         }
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
+        // The main checkout, resolved once at launch (#80 review): the pinned store project's root; a folder that is no
+        // project is its own checkout. A pin the store cannot read now is recorded as unresolved (`-`).
+        let main: Option<PathBuf> = match project {
+            Some(p) => self.projects.get(p).ok().map(|p| PathBuf::from(p.root)),
+            None => Some(loc.to_path_buf()),
+        };
+        fsx::write_atomic(&dir, MAIN_FILE, main.as_ref().map_or("-".into(), |m| m.to_string_lossy()).as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -587,7 +597,16 @@ impl App {
             }
             // The run folder and the checkout root the launch pinned (`project_loc`, #80 review): a submodule's or a
             // separate-git-dir repo's root is not the run folder, and may not be in the store.
-            for dir in std::iter::once(cwd).chain(self.read_run_loc(&run)) {
+            // And the main checkout resolved at launch (`project_main`): `-` means it could not be resolved, so it cannot be
+            // protected and the ask is refused rather than left open (#80 review).
+            let pinned_main = match fsx::read_nofollow(&self.lead_sid_dir(&run).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok()) {
+                Some(m) if m.trim() == "-" => {
+                    return Err(LeadError::GuardMissing("another project's main checkout could not be resolved, so the Director-General cannot deny it; start that project from its main folder".into()));
+                }
+                Some(m) => Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()),
+                None => None,
+            };
+            for dir in std::iter::once(cwd).chain(self.read_run_loc(&run)).chain(pinned_main) {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 // Inside its own root is its own project (an inner project's root is denied above, from the store).
                 if own.starts_with(&real) || real.starts_with(&own) || out.contains(&dir) {
