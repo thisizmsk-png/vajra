@@ -100,6 +100,37 @@ describe("Director-General conversation", () => {
     expect(screen.getByRole("button", { name: S.dg.newConversation }).getAttribute("aria-disabled")).toBe("true");
   });
 
+  it("a read of the old conversation that lands after New conversation never refills the new one", async () => {
+    let oldRead!: (v: unknown) => void;
+    const { f } = mount({
+      new_conversation: { project_id: "p_X", generation: 4, stream: "orchestrator-p_X-g4" },
+      stream_window: (a: { stream: string }) => a.stream === STREAM
+        ? new Promise((r) => { oldRead = r; })
+        : win(["you\tA fresh start?"]),
+    });
+    await waitFor(() => expect(oldRead).toBeTruthy());
+    await screen.findByText(S.dg.generation(3));
+    fireEvent.click(screen.getByRole("button", { name: S.dg.newConversation }));
+    expect(await screen.findByText("A fresh start?")).toBeTruthy();
+    await act(async () => oldRead(win(["you\tWhat is left?", "lead\tTwo tasks: the limiter and the docs."])));
+    expect(screen.queryByText(/Two tasks/)).toBeNull();
+    expect(screen.getByText("A fresh start?")).toBeTruthy();
+    expect(f.calls.filter((c) => c.cmd === "stream_window").map((c) => (c.args as { stream: string }).stream)).toEqual([STREAM, "orchestrator-p_X-g4"]);
+  });
+
+  it("overlapping reads of its stream apply in the order they were asked, so an older answer never replaces a newer one", async () => {
+    const pending: ((v: unknown) => void)[] = [];
+    const { f } = mount({ stream_window: () => new Promise((r) => { pending.push(r); }) });
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => { f.emit("changed", { streams: [STREAM] }); });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => pending[1](win(["you\tWhat is left?", "lead\tNewer answer."])));
+    expect(await screen.findByText("Newer answer.")).toBeTruthy();
+    await act(async () => pending[0](win(["you\tWhat is left?", "lead\tOlder answer."])));
+    expect(screen.queryByText("Older answer.")).toBeNull();
+    expect(screen.getByText("Newer answer.")).toBeTruthy();
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();

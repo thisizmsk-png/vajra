@@ -43,9 +43,23 @@ export function DirectorGeneral() {
   const field = useRef<HTMLTextAreaElement>(null);
   const end = useRef<HTMLDivElement>(null);
 
+  // Which stream the transcript belongs to, and a number per read: an answer applies only while its stream is still
+  // the one shown and no later read has applied, so an old conversation never refills a new one and overlapping
+  // poll/event reads never go backwards. `follow` switches streams at once and voids every read still in flight.
+  const active = useRef<string | null>(null);
+  const reads = useRef({ asked: 0, applied: 0 });
+  const follow = useCallback((s: string | null) => {
+    active.current = s;
+    reads.current.applied = reads.current.asked;
+    setStream(s);
+  }, []);
+
   const readStream = useCallback(async (s: string) => {
+    const n = ++reads.current.asked;
     try {
       const w = await dg.window(s, WINDOW_ROWS);
+      if (s !== active.current || n <= reads.current.applied) return;
+      reads.current.applied = n;
       setLines(Array.isArray(w?.lines) ? w.lines.map((l) => l.text) : []);
     } catch {
       /* the status line already says whether it can be reached; an unreadable window leaves the last one */
@@ -61,16 +75,16 @@ export function DirectorGeneral() {
       if (!s.busy) setAskId(null);
       else if (s.ask_id) setAskId(s.ask_id);
       if (typeof s.generation === "number") setGeneration(s.generation);
-      if (s.stream) setStream((cur) => cur ?? s.stream ?? null);
+      if (s.stream && active.current === null) follow(s.stream);
     } catch (e) {
       setLoadErr(errorText(e));
     }
-  }, [dgRun]);
+  }, [dgRun, follow]);
 
   useEffect(() => {
-    setSt(null); setStream(null); setGeneration(null); setLines([]); setEcho(null); setAskId(null); setAskErr("");
+    setSt(null); follow(null); setGeneration(null); setLines([]); setEcho(null); setAskId(null); setAskErr("");
     void readStatus();
-  }, [readStatus]);
+  }, [readStatus, follow]);
   useEffect(() => { if (stream) void readStream(stream); }, [stream, readStream]);
 
   // Follow its own stream only; anything else moving is not this view's business.
@@ -106,7 +120,7 @@ export function DirectorGeneral() {
     setEcho(text);
     setDraft("");
     if (typeof r.value.generation === "number") setGeneration(r.value.generation);
-    if (r.value.stream && r.value.stream !== stream) setStream(r.value.stream);
+    if (r.value.stream && r.value.stream !== active.current) follow(r.value.stream);
   };
   const cancel = async () => {
     if (!askId) return;
@@ -119,9 +133,9 @@ export function DirectorGeneral() {
     const r = await dg.newConversation(target, envelope(target, actionId(), generation));
     if (!r.ok) { setAskErr(r.outcome.text); return; }
     setGeneration(r.value.generation);
+    follow(r.value.stream);
     setLines([]);
     setEcho(null);
-    setStream(r.value.stream);
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); }
