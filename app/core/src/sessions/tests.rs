@@ -278,6 +278,7 @@ fn sessions_build_run_argv_spawns_as_argv() {
         base: "ea73cb05d639b945e21c667e17103e56404861a8".into(),
         max_in_flight: 2,
         campaign: None,
+        provider: None,
     };
     let mut a = argv::build_run_argv(&input, "0123456789abcdef0123456789abcdef").unwrap();
     a[0] = "echo".into();

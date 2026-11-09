@@ -5,10 +5,14 @@
 
 use serde_json::{Value, json};
 
-use super::{App, Res, fail, invalid};
+use super::{App, Res, fail, invalid, runindex};
+use crate::projects::migrate::{self, Launch, MigrateError};
 use crate::projects::contract::{self, ContractError, Project};
 use crate::projects::identity::IdentityError;
 use crate::projects::store::{Added, StoreError};
+
+/// The largest launch index the migration will read (it streams, so this bounds time, not memory).
+const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// `app_info` (`vajra.app_info/1`): which record versions this build reads and writes.
 fn info() -> Value {
@@ -66,6 +70,42 @@ impl App {
 
     pub fn project_archive(&self, id: &str, expect_rev: Option<u64>) -> Res {
         self.projects.archive(id, expect_rev).map(|p| json!({"project": project_json(&p)})).map_err(refusal)
+    }
+
+    /// What the owner is asked to confirm once: suggested projects for campaigns started before projects existed.
+    /// Nothing is written. `done` is true once the owner has confirmed.
+    pub fn project_migration_suggest(&self) -> Res {
+        if migrate::is_done(&self.projects) {
+            return Ok(json!({"done": true, "groups": [], "unsorted": [], "terminal": []}));
+        }
+        let (launches, campaigns) = self.migration_inputs()?;
+        let plan = migrate::plan(&launches, &campaigns, self.projects.guard());
+        let mut v = serde_json::to_value(plan).unwrap_or_else(|_| json!({}));
+        v["done"] = json!(false);
+        Ok(v)
+    }
+
+    /// The owner accepted these suggested roots (each must be in a fresh suggestion). Runs once.
+    pub fn project_migration_confirm(&self, roots: &[String]) -> Res {
+        let (launches, campaigns) = self.migration_inputs()?;
+        match migrate::confirm(&self.projects, &self.data, self.projects.guard(), &launches, &campaigns, roots) {
+            Ok(o) => Ok(serde_json::to_value(o).unwrap_or_else(|_| json!({}))),
+            Err(MigrateError::AlreadyDone) => Err(fail("already_migrated", "campaigns were already sorted into projects")),
+            Err(MigrateError::Store(e)) => Err(refusal(e)),
+            Err(MigrateError::Io(e)) => Err(fail("io", e)),
+        }
+    }
+
+    fn migration_inputs(&self) -> Result<(Vec<Launch>, Vec<String>), Value> {
+        // The WHOLE index, not its recent tail: the migration is once-only, so it must not see a partial history. An
+        // index that cannot be read completely is refused, and nothing is marked done.
+        let launches = runindex::entries_all(&self.data.join("runs.jsonl"), MAX_INDEX_BYTES)
+            .map_err(|e| fail("launch_index_unreadable", e))?
+            .into_iter()
+            .map(|e| Launch { campaign: e.campaign, run_id: e.run_id, session_id: e.session_id, cwd: e.cwd })
+            .collect();
+        let campaigns = self.with_reader(|r| r.campaigns().map_err(|e| fail("io_error", e)))?;
+        Ok((launches, campaigns))
     }
 
     pub fn project_sessions(&self, id: &str) -> Res {

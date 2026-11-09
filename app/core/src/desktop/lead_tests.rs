@@ -360,7 +360,7 @@ fn ask_refused_for_terminal_run() {
     assert!(t.ledger().is_empty(), "a refused ask leaves no record");
     assert!(t.files("stdin.").is_empty(), "nothing was spawned");
     // A run that only runs.jsonl remembers (a finished run of this app) can still be asked about.
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     // ...once the app's own record of the run's directory agrees (without it the index alone is not believed).
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], false);
@@ -599,7 +599,7 @@ fn lead_stream_rebuilt_from_transcript_after_restart() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(&t, lead_sid);
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
@@ -755,7 +755,7 @@ fn a_delayed_lead_init_does_not_roll_the_campaign_back_to_an_older_run() {
     let t = Tmp::new();
     let app = t.app();
     let path = t.data().join("runs.jsonl");
-    let launch = |run: &str| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None };
+    let launch = |run: &str| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&path, &launch(RUN_ID)).unwrap();
     t.set("mode", "late");
     app.ask_lead(RUN_ID, "first question").unwrap();
@@ -797,7 +797,7 @@ fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(&t, lead_sid);
     // The run's control nonce, as the earlier app life left it.
@@ -885,7 +885,7 @@ fn a_forged_lead_session_id_in_the_worker_writable_index_is_ignored() {
     let t = Tmp::new();
     let app = t.app();
     // A worker rewrites runs.jsonl and points the run's Lead session at another session (here the run's own worker).
-    let forged = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(SID.into()) };
+    let forged = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(SID.into()), provider: None };
     std::fs::create_dir_all(t.data()).unwrap();
     runindex::append(&t.data().join("runs.jsonl"), &forged).unwrap();
     let r = app.ask_lead(RUN_ID, "hi").unwrap();
@@ -922,7 +922,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t = Tmp::new();
     let sid_a = "2b8fad5b-d9cb-469f-a165-70867728950e";
     std::fs::create_dir_all(t.data()).unwrap();
-    let a = runindex::Entry { campaign: "deliver-old".into(), session_id: sid_a.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let a = runindex::Entry { campaign: "deliver-old".into(), session_id: sid_a.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
     let app = t.app(); // in memory: campaign deliver-x, session SID, the same run id
     let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
@@ -935,7 +935,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t2 = Tmp::new();
     std::fs::create_dir_all(t2.data()).unwrap();
     for (c, s) in [("deliver-a", sid_a), ("deliver-b", SID)] {
-        let e = runindex::Entry { campaign: c.into(), session_id: s.into(), run_id: RUN_ID.into(), cwd: t2.repo(), lead_session_id: None };
+        let e = runindex::Entry { campaign: c.into(), session_id: s.into(), run_id: RUN_ID.into(), cwd: t2.repo(), lead_session_id: None, provider: None };
         runindex::append(&t2.data().join("runs.jsonl"), &e).unwrap();
     }
     let app2 = App::open(&t2.data(), &t2.home()).unwrap();
@@ -945,7 +945,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t3 = Tmp::new();
     std::fs::create_dir_all(t3.data()).unwrap();
     for _ in 0..2 {
-        let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t3.repo(), lead_session_id: None };
+        let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t3.repo(), lead_session_id: None, provider: None };
         runindex::append(&t3.data().join("runs.jsonl"), &e).unwrap();
     }
     let app3 = t3.app();
@@ -970,7 +970,7 @@ fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
     let evil = t.0.join("evil-repo");
     std::fs::create_dir_all(&evil).unwrap();
     let path = t.data().join("runs.jsonl");
-    let line = |cwd: &Path| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+    let line = |cwd: &Path| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: None };
     runindex::append(&path, &line(&evil)).unwrap();
     let app2 = App::open(&t.data(), &t.home()).unwrap();
     app2.lead.set_bin(Some(t.bin("claude")));
@@ -991,7 +991,7 @@ fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
 fn a_run_loaded_from_the_index_with_no_cwd_record_is_read_only() {
     let t = Tmp::new();
     std::fs::create_dir_all(t.data()).unwrap();
-    let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
     let app = App::open(&t.data(), &t.home()).unwrap();
     app.lead.set_bin(Some(t.bin("claude")));
@@ -1018,7 +1018,7 @@ fn a_run_launched_but_never_asked_about_can_be_asked_after_a_restart() {
     wait_until("the ask", || idle(&app2) && t.ask_states().len() == 3);
     // An index line with no guarded record (a legacy or forged entry) is still refused.
     let other = ("20261106-0912", "2b8fad5b-d9cb-469f-a165-70867728950e");
-    let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None };
+    let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
     assert_eq!(code(&app2.ask_lead(other.0, "hi").unwrap_err()), "read_only");
 }
@@ -1050,11 +1050,11 @@ fn an_older_run_of_a_resumed_campaign_is_still_askable_after_a_restart() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
     drop(app);
     // A real launch also appends its line to the index (the test app keeps the run in memory only).
-    let a = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let a = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
     // The human resumes the same campaign into a later run B (a new minute, a new session): `latest` now names B.
     let sid_b = "2b8fad5b-d9cb-469f-a165-70867728950e";
-    let b = runindex::Entry { campaign: "deliver-x".into(), session_id: sid_b.into(), run_id: "20261106-1000".into(), cwd: t.repo(), lead_session_id: None };
+    let b = runindex::Entry { campaign: "deliver-x".into(), session_id: sid_b.into(), run_id: "20261106-1000".into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &b).unwrap();
     assert_eq!(runindex::latest(&t.data().join("runs.jsonl"))["deliver-x"].run_id, "20261106-1000");
     // Life 2: no run in memory. A is not the campaign's newest run, but it is a run this app launched.
@@ -1076,7 +1076,7 @@ fn an_older_run_of_a_resumed_campaign_is_still_askable_after_a_restart() {
 fn restarted_with_transcript(t: &Tmp, make: impl FnOnce(&std::path::Path)) -> App {
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(t, lead_sid);
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));

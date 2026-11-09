@@ -1,0 +1,15 @@
+{
+  "schema": "vajra.providers/1",
+  "providers": [
+    {
+      "id": "codex",
+      "name": "Codex CLI",
+      "installed": false,
+      "tested": "unknown",
+      "capabilities": {"pty_attach": true, "transcript": false, "inspect": false, "message": false, "redirect": false, "stop": "terminate", "resume": true, "vajra_workflow": false},
+      "limits": [{"control": "start", "reason": "Codex is not installed"}],
+      "login": {"route": "Uses your Codex login", "state": "not_installed", "checked_by": "none"},
+      "billing": {"source": "login"}
+    }
+  ]
+}
