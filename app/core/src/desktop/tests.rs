@@ -3546,6 +3546,103 @@ fn another_leads_deny_roots_include_a_submodules_pinned_location_not_just_the_ru
     assert!(denied.contains(&loc), "the submodule's checkout root is denied to B's Director-General: {denied:?}");
 }
 
+/// #80 round 7: resuming a session that is already running, with another project's folder, is refused before any control state
+/// changes: its nonce, control session and process stay exactly as they were.
+#[test]
+fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_control_state() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    test_project(&t.0.join("data"), &t.home(), &b);
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let nonce = lock(&app.control).nonce(sid).map(str::to_string);
+    assert!(nonce.is_some());
+    let e = app.launch_engine(Engine::Claude, sid, "20261105-1231", "c", &b, |_| Ok(vec!["sleep".into(), "30".into()]), true, caps::DEFAULT_RUN_WORKERS).unwrap_err();
+    assert_eq!(code(&e), "session_running", "{e}");
+    assert!(lock(&app.control).has_session(sid), "the control session is intact");
+    assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), nonce, "the nonce was not rotated");
+    assert!(app.sup.is_running(&stream).unwrap(), "the original process still runs");
+    app.sup.kill(&stream).unwrap();
+}
+
+/// #80 round 7 (P1): a submodule whose first app run is from an OUTSIDE linked worktree still has its main checkout pinned and
+/// denied to other Leads; when that checkout cannot be resolved the asking Lead is refused rather than left unprotected.
+#[test]
+fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_other_leads() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sup, sub, wt, b) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("sub-wt"), t.0.join("b"));
+    let git = sup.join(".git/modules/sub");
+    fs::create_dir_all(git.join("worktrees/wt")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&wt).unwrap();
+    store_git(&b);
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", git.join("worktrees/wt").display())).unwrap();
+    fs::write(git.join("worktrees/wt/commondir"), "../..\n").unwrap();
+    let ps = test_project(&t.0.join("data"), &t.home(), &sub);
+    let pb = test_project(&t.0.join("data"), &t.home(), &b);
+    let loc = fs::canonicalize(&wt).unwrap();
+    // The submodule's first run is from an outside worktree; its main checkout is pinned at launch from the store.
+    app.record_run_pinned("20261105-1230", &wt, &loc, Some(&ps), "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    // The project then leaves the store: its checkout is still denied, from the launch-time record alone.
+    let rec = t.0.join("data/projects").join(&ps);
+    if rec.is_dir() { fs::remove_dir_all(&rec).unwrap() } else { fs::remove_file(&rec).unwrap() }
+    assert!(app.projects.get(&ps).is_err(), "gone from the store");
+    let denied = app.other_project_roots(&pb, &b).unwrap();
+    let real: Vec<PathBuf> = denied.iter().map(|d| fs::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+    assert!(real.contains(&fs::canonicalize(&sub).unwrap()), "the submodule's main checkout is denied: {denied:?}");
+    // A run whose main checkout could not be resolved at launch (its pin unreadable): the asking Director-General is refused.
+    app.record_run_pinned("20261105-1232", &wt, &loc, Some(&ps), "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
+    assert!(app.other_project_roots(&pb, &b).is_err(), "an unprotectable checkout refuses the Director-General");
+}
+
+/// #80 sweep, class (a): the guarded records are written before any control state changes, so a record that cannot be written
+/// refuses the launch with the session's nonce and control session exactly as they were.
+#[test]
+fn a_record_that_cannot_be_written_refuses_a_resume_before_the_nonce_rotates() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("a");
+    fs::create_dir_all(a.join(".git")).unwrap();
+    test_project(&t.0.join("data"), &t.home(), &a);
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let nonce = lock(&app.control).nonce(sid).map(str::to_string);
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap(); // makes control/lead
+    fs::write(app.data.join("control/lead/20261105-1231"), b"in the way").unwrap(); // the next run's record dir cannot be created
+    let e = app.launch_engine(Engine::Claude, sid, "20261105-1231", "c", &a, |_| Ok(vec!["sleep".into(), "30".into()]), true, caps::DEFAULT_RUN_WORKERS).unwrap_err();
+    assert_eq!(code(&e), "io", "{e}");
+    assert!(lock(&app.control).has_session(sid), "the control session is intact");
+    assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), nonce, "the nonce was not rotated");
+}
+
+/// #80 sweep, class (b): a resume runs in the guarded record's folder. The folder the caller names comes from the worker-writable
+/// index, so a different one is refused before anything starts.
+#[test]
+fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
+    // The index (worker-writable) is made to say this session lives in b.
+    let line = runindex::Entry { campaign: "c".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: b.clone(), lead_session_id: None, provider: None };
+    runindex::append(&app.data.join("runs.jsonl"), &line).unwrap();
+    let e = app.resume_run(sid, "c", &b.to_string_lossy(), None).unwrap_err();
+    assert_eq!(code(&e), "resume_cwd_mismatch", "{e}");
+}
+
 #[path = "board_tests.rs"]
 mod board_cards;
 
