@@ -98,30 +98,39 @@ pub fn check(limits: RunLimits, active: &[Active], project: &Path, workers: u32)
 /// The project a run directory belongs to: its git common dir (canonical), so a repo and each of its worktrees map
 /// to the same key. Found by reading `.git` (a dir, or a `gitdir:` file) and a worktree's `commondir` file, walking up
 /// from `cwd`. Nothing is executed. A folder outside any repo is its own project (its canonical path).
+#[cfg(test)]
 pub fn project_key(cwd: &Path) -> PathBuf {
     let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut dir = start.as_path();
     loop {
-        let dot = dir.join(".git");
-        match std::fs::symlink_metadata(&dot) {
-            Ok(m) if m.is_dir() => return canon(&dot),
-            Ok(m) if m.is_file() => {
-                if let Some(gitdir) = read_small(&dot).and_then(|t| t.trim().strip_prefix("gitdir:").map(|g| g.trim().to_string())) {
-                    let gitdir = dir.join(gitdir);
-                    let common = match read_small(&gitdir.join("commondir")) {
-                        Some(c) => gitdir.join(c.trim()),
-                        None => gitdir,
-                    };
-                    return canon(&common);
-                }
-                return start;
-            }
-            _ => {}
+        if let Some(key) = key_of_entry(dir, &start) {
+            return key;
         }
         match dir.parent() {
             Some(p) => dir = p,
             None => return start,
         }
+    }
+}
+
+/// The project key of the `.git` entry directly in `dir` (one look, no walking up), or `None` if `dir` holds none.
+/// `fallback` is the key of a `.git` file that names no git dir.
+pub fn key_of_entry(dir: &Path, fallback: &Path) -> Option<PathBuf> {
+    let dot = dir.join(".git");
+    match std::fs::symlink_metadata(&dot) {
+        Ok(m) if m.is_dir() => Some(canon(&dot)),
+        Ok(m) if m.is_file() => {
+            if let Some(gitdir) = read_small(&dot).and_then(|t| t.trim().strip_prefix("gitdir:").map(|g| g.trim().to_string())) {
+                let gitdir = dir.join(gitdir);
+                let common = match read_small(&gitdir.join("commondir")) {
+                    Some(c) => gitdir.join(c.trim()),
+                    None => gitdir,
+                };
+                return Some(canon(&common));
+            }
+            Some(fallback.to_path_buf())
+        }
+        _ => None,
     }
 }
 

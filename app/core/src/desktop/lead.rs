@@ -350,9 +350,18 @@ impl App {
         self.record_run_as(run_id, cwd, &super::caps::project_key(cwd), session_id, campaign, workflow, started)
     }
 
-    /// `record_run` with the project `key` the launch pinned before it spawned anything (`launch_key`).
+    /// `record_run` with a project `key` chosen by the caller; the location is the folder's own now (tests only).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record_run_as(&self, run_id: &str, cwd: &Path, key: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
+        self.record_run_pinned(run_id, cwd, &git_location(cwd), key, session_id, campaign, workflow, started)
+    }
+
+    /// `record_run` with the exact (project location, key) pair the launch checked (`launch_identity`), written before
+    /// anything is spawned: neither is read from the repo again, so a `.git` the launched process creates or redirects
+    /// afterwards cannot change what was pinned (#80 review).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_run_pinned(&self, run_id: &str, cwd: &Path, loc: &Path, key: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
@@ -365,7 +374,7 @@ impl App {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
-        fsx::write_atomic(&dir, LOC_FILE, git_location(cwd).to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -467,7 +476,13 @@ impl App {
     /// Records of one location that disagree on its project refuse the launch rather than guess. A record written before
     /// locations existed (no `project_loc`) has its location derived once from its guarded cwd and written back; one with
     /// neither key nor location is the base format, migrated by `migrate_old_key`. Anything else malformed refuses.
+    #[cfg(test)]
     pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
+        self.launch_identity(cwd).map(|(_, key)| key)
+    }
+
+    /// `launch_key` with the project location it was found at: the pair a launch records, as one look.
+    pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
         let want = git_location(cwd);
         let mut keys: Vec<PathBuf> = Vec::new();
         for r in self.recorded_runs() {
@@ -480,7 +495,7 @@ impl App {
             }
             let key = match (self.read_run_key(&r), old) {
                 (Some(k), _) => k,
-                (None, true) => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+                (None, true) => self.migrate_old_key(&r, &loc).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
                 (None, false) => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
             };
             if old {
@@ -492,22 +507,23 @@ impl App {
             }
         }
         match keys.len() {
-            0 => {
-                self.admit_new_location(&want)?;
-                Ok(super::caps::project_key(cwd))
-            }
-            1 => Ok(keys.remove(0)),
+            0 => Ok((want.clone(), self.identify_new_location(&want)?)),
+            1 => Ok((want, keys.remove(0))),
             _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
         }
     }
 
-    /// A NEW project location `want` found inside the tree of an already-pinned location may become its own project only if
-    /// its `.git` is (a) a real directory (not a symlink) with no `commondir` file: a self-contained nested repository; or
-    /// (b) a `gitdir:` file whose target resolves, by canonical path, INSIDE an enclosing pinned project's own common dir:
-    /// a submodule of that project. Anything else (a pointer into another project, a symlinked `.git`, a redirecting
+    /// The key for a NEW project location `want`, derived from ONE look at its `.git` and never re-derived.
+    ///
+    /// Outside every pinned project's tree the key is whatever that `.git` names (`caps::key_of_entry`). Inside an
+    /// already-pinned tree the location may become its own project only if its `.git` is (a) a real directory (not a
+    /// symlink) with no `commondir` file: a self-contained nested repository, keyed by that directory; or (b) a `gitdir:`
+    /// file whose canonical target lies INSIDE an enclosing pinned project's common dir AND has no `commondir` file on the
+    /// resolution path (the target and every directory up to that common dir): a submodule, keyed by exactly the canonical
+    /// target that was checked. Anything else (a pointer into another project, a symlinked `.git`, a redirecting
     /// `commondir`, an unresolvable target) is refused and never pinned, so a worker cannot plant a `.git` that pulls a
-    /// subfolder into another project. A location outside every pinned tree is not constrained here.
-    fn admit_new_location(&self, want: &Path) -> Result<(), Value> {
+    /// subfolder into another project.
+    fn identify_new_location(&self, want: &Path) -> Result<PathBuf, Value> {
         let mut enclosing: Vec<PathBuf> = Vec::new();
         for r in self.recorded_runs() {
             let (Some(loc), Some(key)) = (self.read_run_loc(&r), self.read_run_key(&r)) else { continue };
@@ -516,21 +532,27 @@ impl App {
             }
         }
         if enclosing.is_empty() {
-            return Ok(());
+            return Ok(super::caps::key_of_entry(want, want).unwrap_or_else(|| want.to_path_buf()));
         }
         let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
         let git = want.join(".git");
         let md = std::fs::symlink_metadata(&git).map_err(|_| refuse("this folder's .git cannot be read"))?;
         if md.is_dir() {
-            return if std::fs::symlink_metadata(git.join("commondir")).is_err() { Ok(()) } else { Err(refuse("this folder's .git points at another project's common dir")) };
+            if std::fs::symlink_metadata(git.join("commondir")).is_ok() {
+                return Err(refuse("this folder's .git points at another project's common dir"));
+            }
+            // The key is this very directory; a swap to a link between the check and here no longer names `want/.git`.
+            let key = std::fs::canonicalize(&git).map_err(|_| refuse("this folder's .git cannot be read"))?;
+            return if key.parent() == Some(want) && key.file_name() == Some(std::ffi::OsStr::new(".git")) { Ok(key) } else { Err(refuse("this folder's .git changed while it was checked")) };
         }
         if md.is_file() {
             let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
-            let real = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok());
-            if let Some(real) = real {
-                if enclosing.iter().any(|k| std::fs::canonicalize(k).is_ok_and(|k| real.starts_with(k))) {
-                    return Ok(());
+            if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
+                for common in enclosing.iter().filter_map(|k| std::fs::canonicalize(k).ok()) {
+                    if real.starts_with(&common) && real.ancestors().take_while(|d| d.starts_with(&common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
+                        return Ok(real);
+                    }
                 }
             }
         }
@@ -547,12 +569,13 @@ impl App {
     /// The one-time migration of the base record format: a run with a guarded cwd, session and campaign but neither a key nor
     /// a location was written before they existed. Derive its key from its guarded cwd now and write it back under the guard.
     /// Anything else (a key file that exists but is unusable, a missing session or campaign) is not migrated.
-    fn migrate_old_key(&self, run_id: &str, cwd: &Path) -> Option<PathBuf> {
+    fn migrate_old_key(&self, run_id: &str, loc: &Path) -> Option<PathBuf> {
         let dir = self.lead_sid_dir(run_id);
         if std::fs::symlink_metadata(dir.join(KEY_FILE)).is_ok() || self.read_run_record(run_id).is_none() {
             return None;
         }
-        let key = super::caps::project_key(cwd);
+        // From the same location the caller matched on, never a second walk of the repo.
+        let key = super::caps::key_of_entry(loc, loc).unwrap_or_else(|| loc.to_path_buf());
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes()).ok()?;
         self.read_run_key(run_id)
     }
