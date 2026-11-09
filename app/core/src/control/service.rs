@@ -51,6 +51,8 @@ struct Session {
     dir: SessionDir,
     nonce: String,
     workers: Vec<WorkerInfo>,
+    /// The project the run belongs to (ADR-15 2.3), set by the app at launch. Its Director-General sees this session.
+    project: Option<String>,
 }
 
 pub struct Service {
@@ -60,8 +62,11 @@ pub struct Service {
     logger: Option<Logger>,
     /// Live run sessions by session id.
     sessions: HashMap<String, Session>,
-    /// While a Lead tool call runs: the one session it is bound to. `None` for human calls, which see every session.
-    scope: Option<String>,
+    /// While a Lead tool call runs: the sessions it is bound to (one run, or every run of one project). `None` for human
+    /// calls, which see every session.
+    scope: Option<Vec<String>>,
+    /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
+    generations: HashMap<String, u32>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
@@ -90,6 +95,7 @@ impl Service {
             logger,
             sessions: HashMap::new(),
             scope: None,
+            generations: HashMap::new(),
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
@@ -168,7 +174,7 @@ impl Service {
 
     /// The sessions the current call may see: the bound session for a Lead call, every session for a human one.
     fn in_scope(&self) -> impl Iterator<Item = &Session> {
-        self.sessions.values().filter(|s| self.scope.as_deref().is_none_or(|b| b == s.id))
+        self.sessions.values().filter(|s| self.scope.as_ref().is_none_or(|b| b.contains(&s.id)))
     }
 
     /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
