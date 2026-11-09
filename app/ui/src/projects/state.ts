@@ -41,7 +41,9 @@ function refresh(id: string, e: Entry) {
       const proposals = s.unchanged ? e.view.proposals : s.proposals?.ok ? s.proposals.items : null;
       publish(e, { rev: s.rev, failed: false, proposals });
     },
-    () => { if (!e.dead) publish(e, { rev: e.view.rev, failed: true, proposals: null }); },
+    // Keep what we had: an `unchanged` answer at this revision after recovery would never send the proposals again
+    // (#90 review). Start is checked by the core against the proposal's hash, so a held one is never run stale.
+    () => { if (!e.dead) publish(e, { ...e.view, failed: true }); },
   ).finally(() => {
     e.busy = false;
     if (e.again && !e.dead) { e.again = false; schedule(id, e); }
