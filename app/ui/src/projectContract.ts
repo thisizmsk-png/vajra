@@ -100,8 +100,8 @@ const bad = (reason: Fail["reason"], detail: string): Fail => ({ ok: false, reas
 
 // The same invisible and reordering characters the core refuses in a name (control::lead::invisible).
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
-const INVISIBLE =
+export const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
+export const INVISIBLE =
   /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb]|\u{1bca0}|\u{1bca1}|\u{1bca2}|\u{1bca3}|[\u{1d173}-\u{1d17a}]|[\u{e0000}-\u{e0fff}]/u;
 
 const validName = (n: string): boolean => n.trim() !== "" && [...n].length <= MAX_NAME_CHARS && !CONTROL.test(n) && !INVISIBLE.test(n);

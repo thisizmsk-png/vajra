@@ -286,3 +286,41 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(await screen.findByText(S.run.overviewFailed)).toBeTruthy();
   });
 });
+
+describe("Run view: an older answer for the same campaign never lands over a newer one", () => {
+  it("Given two evidence loads of one campaign, When the older answers last, Then the newer rows stay", async () => {
+    let n = 0;
+    let answerOld: (v: unknown) => void = () => {};
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({
+      evidence_list: () => (++n === 1 ? new Promise((r) => { answerOld = r; }) : list([row("t1", "newer", "pass")])),
+      run_overview: overview(),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(n).toBe(1));
+    act(() => { f.emit("changed", {}); });
+    expect(await screen.findByText("newer")).toBeTruthy();
+    await act(async () => { answerOld(list([row("t1", "older", "fail")])); });
+    expect(screen.getByText("newer")).toBeTruthy();
+    expect(screen.queryByText("older")).toBeNull();
+  });
+
+  it("Given two overview loads of one campaign, When the older one fails last, Then no failure replaces the newer overview", async () => {
+    let n = 0;
+    let failOld: (e: unknown) => void = () => {};
+    window.location.hash = "#/run?slug=camp";
+    const f = fakeIpc({
+      evidence_list: list([]),
+      run_overview: () => (++n === 1 ? new Promise((_, reject) => { failOld = reject; }) : overview()),
+    });
+    setTransport(f.transport);
+    render(<Run />);
+    await waitFor(() => expect(n).toBe(1));
+    act(() => { f.emit("changed", {}); });
+    await waitFor(() => expect(n).toBe(2));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { failOld({ error: "io" }); });
+    expect(screen.queryByText(S.run.overviewFailed)).toBeNull();
+  });
+});
