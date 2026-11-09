@@ -3335,6 +3335,28 @@ fn an_external_worktree_reached_through_a_symlink_keeps_its_secret_file_rules() 
     assert!(rules.iter().any(|r| r.ends_with(&want)), "the external worktree's .env stays denied: {want} in {rules:?}");
 }
 
+/// #82 review (P1): a worktree run launched in a SUBFOLDER (`/repo-wt/src`) guards the whole checkout root, so a root-level or sibling
+/// `.env` is denied too, not only the run's own subfolder.
+#[test]
+fn a_worktree_run_started_in_a_subfolder_guards_the_whole_checkout_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    fs::create_dir_all(wt.join("docs")).unwrap();
+    let key = caps::project_key(&repo);
+    let (real_repo, real_wt) = (fs::canonicalize(&repo).unwrap(), fs::canonicalize(&wt).unwrap());
+    app.record_run_pinned("20261105-1230", &repo, &real_repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &wt.join("src"), &real_wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &repo).unwrap();
+    assert!(folders.contains(&real_wt) || folders.contains(&wt), "the checkout root is guarded: {folders:?}");
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let want = format!("{}/**/.env)", real_wt.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "root-level and sibling secrets of the worktree are denied: {want} in {rules:?}");
+}
+
 /// #82 review (P2): a finished run no longer makes the Director-General "running"; the normal reaper is what ends it.
 #[test]
 fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_reaper() {
