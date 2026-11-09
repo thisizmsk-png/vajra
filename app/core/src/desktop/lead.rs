@@ -595,17 +595,24 @@ impl App {
                 }
                 continue;
             };
-            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
-            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
-            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            let covered = |d: &PathBuf| cwd.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
-            if self.read_run_key(&run).as_ref() != Some(&own) || out.iter().any(covered) {
+            if self.read_run_key(&run).as_ref() != Some(&own) {
                 continue;
             }
-            if out.len() >= MAX_OTHER_ROOTS {
-                return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+            // The run's checkout root (its guarded `project_loc`: a worktree started in a subfolder still guards its whole root) and the
+            // folder it ran in (its own spelling, which an alias of the root needs).
+            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
+            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
+            for folder in self.read_run_loc(&run).into_iter().chain(std::iter::once(cwd)) {
+                let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+                let covered = |d: &PathBuf| folder.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+                if out.iter().any(covered) {
+                    continue;
+                }
+                if out.len() >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+                }
+                out.push(folder);
             }
-            out.push(cwd);
         }
         Ok(out)
     }
