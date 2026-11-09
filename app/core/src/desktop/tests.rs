@@ -2240,6 +2240,42 @@ fn tree_id_refuses_a_repo_that_configures_a_filter_and_still_serves_one_that_doe
     assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
 }
 
+/// #113 review [P1]: the config is checked once, then `git add` must not read it again. A worker that adds a filter (and
+/// the attribute selecting it) after the check and before the add must not get it run by the desktop.
+#[test]
+fn a_filter_added_between_the_config_check_and_the_add_never_runs() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"changed, so add would clean it").unwrap();
+    let marker = t.home().join("filter-ran");
+    let (r, m) = (repo.clone(), marker.clone());
+    crate::vajra::bridge::BEFORE_ADD.with(|h| *h.borrow_mut() = Some(Box::new(move || plant_filter(&r, &m))));
+    let tree = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES);
+    crate::vajra::bridge::BEFORE_ADD.with(|h| *h.borrow_mut() = None);
+    assert!(!marker.exists(), "tree_id ran a filter added after its config check");
+    // The snapshot is of the config as checked: the late filter is not defined in it, so the add stores the raw bytes.
+    let want = {
+        git_in(&repo, &["config", "--unset", "filter.evil.clean"]);
+        app.bridge.tree_id(&repo, &VERIFY_EXCLUDES)
+    };
+    assert_eq!(tree, want, "the tree is the one of the checked config");
+}
+
+/// The private git dir keeps the repo's own `info/exclude` (copied): a file ignored there stays out of the tree, as for
+/// verify-work in the repo itself.
+#[test]
+fn the_repos_info_exclude_still_decides_what_the_tree_leaves_out() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let before = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree");
+    fs::write(repo.join("scratch.log"), b"local only").unwrap();
+    assert_ne!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree"), before, "an untracked file is in the tree");
+    let exclude = repo.join(git_in(&repo, &["rev-parse", "--git-path", "info/exclude"]));
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, b"*.log\n").unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree"), before, "ignored by info/exclude, as git add -A does");
+}
+
 #[test]
 fn big_signed_evidence_is_still_compared_by_tree() {
     if !have_jq() { eprintln!("skipped: no jq"); return; }
