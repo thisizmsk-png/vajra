@@ -47,7 +47,10 @@ impl Service {
             return Err(ControlError::StaleLeadGeneration);
         }
         let bound: Vec<String> = self.sessions.values().filter(|s| s.project.as_deref() == Some(project)).map(|s| s.id.clone()).collect();
-        self.call_scoped(Some(bound), tool, args)
+        let prev = self.bound_project.replace((project.to_string(), generation));
+        let out = self.call_scoped(Some(bound), tool, args);
+        self.bound_project = prev;
+        out
     }
 
     fn call_scoped(&mut self, bound: Option<Vec<String>>, tool: &str, args: &Value) -> Result<Value> {
@@ -77,6 +80,7 @@ impl Service {
             "inspect_worker" => &["worker", "lines"],
             "message_worker" | "redirect_worker" => &["worker", "text"],
             "stop_worker" => &["worker", "reason"],
+            "propose_run" => &["ask", "base", "rounds"],
             _ => return Err(ControlError::UnknownTool),
         };
         if let Some(k) = args.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -109,6 +113,13 @@ impl Service {
             }
             "message_worker" => self.message_worker(lead, s("worker", true)?.unwrap_or(""), s("text", true)?.unwrap_or("")),
             "redirect_worker" => self.redirect_worker(lead, s("worker", true)?.unwrap_or(""), s("text", true)?.unwrap_or("")),
+            "propose_run" => {
+                let rounds = match args.get("rounds") {
+                    None => None,
+                    Some(v) => Some(v.as_u64().ok_or_else(|| ControlError::InvalidArgs("rounds must be an integer".into()))?),
+                };
+                self.propose_run(s("ask", true)?.unwrap_or(""), s("base", false)?, rounds)
+            }
             _ => self.stop_worker(lead, s("worker", true)?.unwrap_or(""), s("reason", false)?),
         }
     }

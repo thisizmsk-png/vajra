@@ -1900,6 +1900,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 mod arrivals;
 mod caps;
 mod orchestrator;
+mod proposals;
 mod inbox;
 mod projects;
 mod wfresult;

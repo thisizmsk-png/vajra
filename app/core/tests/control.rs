@@ -839,7 +839,7 @@ fn mcp_initialize_list_and_call() {
     assert_eq!(out[0]["result"]["protocolVersion"], "2025-06-18");
     assert!(out[0]["result"]["capabilities"]["tools"].is_object());
     let names: Vec<&str> = out[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker"]);
+    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker", "propose_run"]);
     for t in out[1]["result"]["tools"].as_array().unwrap() {
         assert_eq!(t["inputSchema"]["additionalProperties"], false);
     }

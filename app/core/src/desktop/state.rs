@@ -375,7 +375,7 @@ impl App {
             Ok(v) => {
                 // Counted and picked from the whole list: the global 200-item cut belongs to `inbox`, not to a project.
                 let mine: Vec<&Value> = v.iter().filter(|i| i["project_id"] == project_id).collect();
-                json!({"ok": true, "count": mine.len(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()})
+                json!({"ok": true, "count": mine.len(), "campaign_count": mine.iter().filter(|i| i["kind"] != "run_proposal").count(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()})
             }
             // Never "nothing waiting" on a failed read.
             Err(e) => json!({"ok": false, "error": e["error"]}),

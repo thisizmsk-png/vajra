@@ -139,6 +139,14 @@ impl App {
         Ok(Orchestrator { id: pid.to_string(), root, dir, generation, session })
     }
 
+    /// The project folder recorded for `pid`'s Director-General, if it has one.
+    pub(super) fn orchestrator_root(&self, pid: &str) -> Option<PathBuf> {
+        if !ids::valid_project_ref(pid) {
+            return None;
+        }
+        read_text(&self.orchestrator_dir(pid).join(ROOT_FILE)).map(PathBuf::from).filter(|p| p.is_absolute())
+    }
+
     /// The Director-General of the project a run belongs to.
     pub(super) fn orchestrator_for_run(&self, run_id: &str, cwd: &Path) -> Result<Orchestrator, LeadError> {
         let (pid, root) = self.run_project(run_id, cwd)?;

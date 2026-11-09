@@ -423,11 +423,13 @@ fn an_ended_session_that_cannot_be_resumed_fails_closed_and_the_plan_stays() {
 
 #[test]
 fn approve_and_reject_are_not_reachable_from_the_lead() {
-    for tool in ["approve", "reject", "approve_plan", "reject_plan", "submit_fixed_turn", "inbox"] {
+    // ADR-15 2.4: the Director-General may propose a run, but never start or dismiss one.
+    for tool in ["approve", "reject", "approve_plan", "reject_plan", "submit_fixed_turn", "inbox", "start_proposal", "dismiss_proposal", "start_run"] {
         assert!(!crate::sessions::argv::LEAD_TOOLS.contains(tool), "{tool}");
     }
     let names: Vec<String> = crate::control::mcp::tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert_eq!(names.len(), 5);
+    assert_eq!(names.len(), 6);
+    assert!(names.iter().all(|n| !n.starts_with("start") && !n.contains("dismiss")), "{names:?}");
     assert!(names.iter().all(|n| !n.contains("approve") && !n.contains("reject")), "{names:?}");
 }
 

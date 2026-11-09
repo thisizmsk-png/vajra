@@ -375,6 +375,18 @@ fn lead_status(app: State<'_, App>, run_id: String) -> Res {
     app.lead_status(&run_id)
 }
 
+/// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
+#[tauri::command(async)]
+fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String) -> Res {
+    app.start_proposal(&id, &proposal_sha256)
+}
+
+/// ADR-15 2.4: dismiss a proposed run; nothing runs.
+#[tauri::command(async)]
+fn dismiss_proposal(app: State<'_, App>, id: String) -> Res {
+    app.dismiss_proposal(&id)
+}
+
 /// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
 #[tauri::command(async)]
 fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
@@ -530,6 +542,8 @@ fn main() {
             cancel_ask,
             lead_status,
             new_conversation,
+            start_proposal,
+            dismiss_proposal,
             inbox,
             approve_plan,
             reject_plan,

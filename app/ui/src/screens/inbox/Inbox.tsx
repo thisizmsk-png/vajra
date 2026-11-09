@@ -16,8 +16,11 @@ import { escapeControls } from "../history/History";
 
 const SNOOZE_MS = 15 * 60_000;
 /** One blocker as the human saw it: a changed plan, or a different item, is a different key and cannot stay snoozed. */
-const keyOf = (i: InboxItem) => `${i.id}:${i.plan_sha256 ?? ""}`;
-const kindOf = (i: InboxItem): AttentionKind => (i.kind === "task" && i.status === "failed" ? "failed" : i.kind);
+const keyOf = (i: CampaignItem) => `${i.id}:${i.plan_sha256 ?? ""}`;
+/** The FG-07 inbox lists the items of a campaign. A `run_proposal` names its project by root and has no campaign: the Director-General surface shows it, not this list. */
+type CampaignItem = InboxItem & { campaign: string; kind: Exclude<InboxItem["kind"], "run_proposal"> };
+const isCampaignItem = (i: InboxItem): i is CampaignItem => i.kind !== "run_proposal" && typeof i.campaign === "string";
+const kindOf = (i: CampaignItem): AttentionKind => (i.kind === "task" && i.status === "failed" ? "failed" : i.kind);
 
 type Outcome = { busy: boolean; text: string };
 
@@ -33,6 +36,7 @@ function receiptText(r: ActResult): string {
 
 export function Inbox() {
   const P = useProjects();
+  const inbox = useMemo(() => P.inbox.filter(isCampaignItem), [P.inbox]);
   const [, go] = useRoute();
   const [until, setUntil] = useState<Record<string, number>>({});
   const [showSnoozed, setShowSnoozed] = useState(false);
@@ -51,31 +55,31 @@ export function Inbox() {
     return () => clearTimeout(h);
   }, [until, ticks]);
   const now = Date.now();
-  const snoozed = (i: InboxItem) => (until[keyOf(i)] ?? 0) > now;
-  const live = P.inbox.filter((i) => !snoozed(i));
-  const later = P.inbox.filter(snoozed);
+  const snoozed = (i: CampaignItem) => (until[keyOf(i)] ?? 0) > now;
+  const live = inbox.filter((i) => !snoozed(i));
+  const later = inbox.filter(snoozed);
 
   // Announce what newly arrived, by kind and project only (never the title or body: untrusted, maybe secret).
-  const keys = P.inbox.map(keyOf).join("|");
+  const keys = inbox.map(keyOf).join("|");
   const announce = useMemo(() => {
     if (P.state !== "ok") return null;
     const before = seen.current;
-    seen.current = new Set(P.inbox.map(keyOf));
+    seen.current = new Set(inbox.map(keyOf));
     if (before === null) return null;
-    const fresh = P.inbox.filter((i) => !before.has(keyOf(i)));
+    const fresh = inbox.filter((i) => !before.has(keyOf(i)));
     const last = fresh[fresh.length - 1];
     return last ? attentionText(kindOf(last), name(last.campaign)) : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys, P.state]);
   if (announce && announce !== said) setSaid(announce);
 
-  const open = (i: InboxItem) => {
+  const open = (i: CampaignItem) => {
     const project = P.byCampaign[i.campaign] ?? null;
     if (i.kind !== "plan" && P.crew && P.crew.campaign === i.campaign) go("crew", { slug: i.campaign, id: P.crew.runId }, project);
     else go("review", { slug: i.campaign }, project);
   };
   const set = (k: string, o: Outcome) => setOutcome((m) => ({ ...m, [k]: o }));
-  const approve = (i: InboxItem) => {
+  const approve = (i: CampaignItem) => {
     const k = keyOf(i);
     const project = P.byCampaign[i.campaign];
     // No project owns this campaign: there is no id to send, so nothing is sent (the card says why).
@@ -87,7 +91,7 @@ export function Inbox() {
       () => { set(k, { busy: false, text: S.inbox.receipt.notDone }); },
     );
   };
-  const reject = (i: InboxItem) => {
+  const reject = (i: CampaignItem) => {
     const k = keyOf(i);
     const reason = (reasons[k] ?? "").trim();
     if (outcome[k]?.busy || reason.length < 1 || reason.length > 500) return;
@@ -105,7 +109,7 @@ export function Inbox() {
   const loose = live.filter((i) => !placed.has(i));
   const unsortedGroup = groups.find((g) => g.p.bucket === "unsorted");
 
-  const card = (i: InboxItem, isSnoozed: boolean) => {
+  const card = (i: CampaignItem, isSnoozed: boolean) => {
     const k = keyOf(i);
     const o = outcome[k];
     const reason = reasons[k] ?? "";

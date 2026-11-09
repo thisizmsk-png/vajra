@@ -87,6 +87,17 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the proposal commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ start_proposal: { action_id: "a1", state: "started", run: {} }, dismiss_proposal: { action_id: "a2", state: "dismissed" } });
+    setTransport(f.transport);
+    await api.startProposal("proposal:a1", "ab".repeat(32));
+    await api.dismissProposal("proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "start_proposal", args: { id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "dismiss_proposal", args: { id: "proposal:a2" } },
+    ]);
+  });
+
   it("maps the receipt-wrapped inbox actions and the arrival event (FG-07)", async () => {
     const f = fakeIpc({ act_reject_plan: { receipt: null }, act_answer_question: { receipt: null } });
     setTransport(f.transport);
