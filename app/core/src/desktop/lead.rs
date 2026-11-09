@@ -41,6 +41,9 @@ const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's direct
 const CWD_FILE: &str = "cwd";
 /// The run's project (its git common dir, `caps::project_key`) as the app found it at launch, before any worker ran.
 const KEY_FILE: &str = "project_key";
+/// Where the run's project sits: the folder holding the nearest `.git` entry (`git_location`), as found at launch. The pin
+/// is keyed by this LOCATION, never by what `.git` later contains.
+const LOC_FILE: &str = "project_loc";
 /// Most other-project folders the Lead's deny rules hold; more refuses the ask (#80 review: never drop one).
 pub(super) const MAX_OTHER_ROOTS: usize = 256;
 /// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
@@ -403,6 +406,7 @@ impl App {
         // anything (ADR-15 2.3; #80, #82 review).
         let (pid, root) = orchestrator::project_ref_of(key, cwd);
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, LOC_FILE, git_location(cwd).to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, pid.as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
@@ -514,60 +518,59 @@ impl App {
         p.is_absolute().then_some(p)
     }
 
-    /// The key to pin for a launch in `cwd`, read before anything is spawned: the one pinned by the folder's first
-    /// recorded launch if there is one (a resume must not take up a `.git` a worker of the earlier run rewrote), else
-    /// the folder's key now.
+    /// The key to pin for a launch in `cwd`, read before anything is spawned.
     ///
-    /// Membership comes from the guarded run records before any Git metadata is read. A record counts when its real
-    /// folder IS `cwd`'s real folder, or when it is a Git project's folder (its pinned key is a `.git`) that CONTAINS `cwd`:
-    /// a start in `/work/a/src` takes `/work/a`'s pin, so a worker that rewrote `/work/a/.git` cannot move the subfolder
-    /// into another project (#80 review). The deepest such folder decides; records of that folder that disagree refuse the
-    /// launch rather than guess. A plain (non-Git) folder's pin is never taken by a subfolder, so a run started in `$HOME`
-    /// does not absorb the repos under it.
+    /// A project is keyed by the LOCATION of the nearest `.git` entry above `cwd` (`git_location`; the folder itself when
+    /// there is none). The first guarded launch at a location pins it to a project identity (`project_key`, from the common
+    /// dir at that moment) and records both under the guard. Every later launch whose location is the same reuses that pin,
+    /// whatever `.git` now contains: the root, a subfolder and a sibling all resolve alike, and a worker that rewrites
+    /// `.git` cannot move any of them to another project. A nested repository has its own `.git` at another location, so it
+    /// is its own project. A linked worktree is its own location, mapped to its main project by its first launch's pin.
     ///
-    /// "The folder" is by its real path: `repo_dir` accepts a symlink alias of a folder, and a resume through the alias must
-    /// find the folder's existing membership, not fall back to the (worker-writable) `.git`.
-    ///
-    /// A record written before project keys existed (guarded cwd, session and campaign, no key file) is the known old
-    /// format: its key is derived once from its guarded cwd and written back (`migrate_old_key`). Any other record with no
-    /// usable key is malformed and refuses.
+    /// Records of one location that disagree on its project refuse the launch rather than guess. A record written before
+    /// locations existed (no `project_loc`) has its location derived once from its guarded cwd and written back; one with
+    /// neither key nor location is the base format, migrated by `migrate_old_key`. Anything else malformed refuses.
     pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
-        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let want = real(cwd);
-        let is_git = |k: &Path| k.file_name() == Some(std::ffi::OsStr::new(".git"));
-        // (depth of the recorded folder, key) of every record that decides membership for `cwd`.
-        let mut found: Vec<(usize, PathBuf)> = Vec::new();
+        let want = git_location(cwd);
+        let mut keys: Vec<PathBuf> = Vec::new();
         for r in self.recorded_runs() {
             let Some(c) = self.read_run_cwd(&r) else { continue };
-            let rc = real(&c);
-            if !want.starts_with(&rc) {
+            let dir = self.lead_sid_dir(&r);
+            let old = std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err();
+            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).unwrap_or_default() };
+            if loc != want {
                 continue;
             }
-            let exact = rc == want;
-            let key = match self.read_run_key(&r) {
-                Some(k) => k,
-                None => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+            let key = match (self.read_run_key(&r), old) {
+                (Some(k), _) => k,
+                (None, true) => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+                (None, false) => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
             };
-            if exact || is_git(&key) {
-                found.push((rc.components().count(), key));
+            if old {
+                // Best effort: a record that cannot be written back is derived again next time.
+                let _ = fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes());
             }
-        }
-        let Some(deepest) = found.iter().map(|(d, _)| *d).max() else { return Ok(super::caps::project_key(cwd)) };
-        let mut keys: Vec<PathBuf> = Vec::new();
-        for (d, k) in found {
-            if d == deepest && !keys.contains(&k) {
-                keys.push(k);
+            if !keys.contains(&key) {
+                keys.push(key);
             }
         }
         match keys.len() {
+            0 => Ok(super::caps::project_key(cwd)),
             1 => Ok(keys.remove(0)),
             _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
         }
     }
 
-    /// The one-time migration of the old record format: a run with a guarded cwd, session and campaign but no key file was
-    /// written before keys existed. Derive its key from its guarded cwd now and write it back under the guard. A record
-    /// that is anything else (a key file that exists but is unusable, a missing session or campaign) is not migrated.
+    /// The project location pinned when the run was launched.
+    fn read_run_loc(&self, run_id: &str) -> Option<PathBuf> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(LOC_FILE)).ok()?;
+        let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
+        p.is_absolute().then_some(p)
+    }
+
+    /// The one-time migration of the base record format: a run with a guarded cwd, session and campaign but neither a key nor
+    /// a location was written before they existed. Derive its key from its guarded cwd now and write it back under the guard.
+    /// Anything else (a key file that exists but is unusable, a missing session or campaign) is not migrated.
     fn migrate_old_key(&self, run_id: &str, cwd: &Path) -> Option<PathBuf> {
         let dir = self.lead_sid_dir(run_id);
         if std::fs::symlink_metadata(dir.join(KEY_FILE)).is_ok() || self.read_run_record(run_id).is_none() {
@@ -1022,3 +1025,10 @@ fn read_tail(path: &Path, cap: u64) -> Option<String> {
 #[cfg(test)]
 #[path = "lead_tests.rs"]
 mod tests;
+
+/// The project location of `cwd`: the real path of the nearest ancestor (or `cwd` itself) holding a `.git` file or directory,
+/// else the real folder itself. It names WHERE the project sits, never what its `.git` points at.
+pub(super) fn git_location(cwd: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    real.ancestors().find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok()).map_or_else(|| real.clone(), Path::to_path_buf)
+}
