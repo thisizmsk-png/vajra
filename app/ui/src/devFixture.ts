@@ -138,10 +138,12 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   new_conversation: () => ({ project_id: "p_01JC3H0000000000000000000A", generation: 4, stream: "orchestrator-p_01JC3H0000000000000000000A-g4" }),
   start_proposal: () => ({ action_id: "a_fixture1", state: "started", run: {} }),
   dismiss_proposal: () => ({ action_id: "a_fixture2", state: "dismissed" }),
-  inbox: () => ({ count: 2, items: [
+  act_approve_plan: () => ({ receipt: null, error: { error: "not_in_fixture", detail: "approve" } }),
+  inbox: () => ({ count: 3, items: [
     { id: "proposal:01JC3H0000000000000000PRP1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "2026-11-06T22:03:00Z", age_s: 120,
       title: "Start a run?", body: "", ask: "Retry the admin audit log: record who changed roles, API keys and billing settings, with the actor, target, old and new values and the time. Show it under Settings > Audit log with a filter by actor and a CSV export. Skip the retention policy for now.",
       base: "main", rounds: 2, project_id: "p_01JC3H0000000000000000000A", project: "~/code/harbor-api", generation: 3, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] },
+    { id: "p-deploy", kind: "plan", campaign: SLUG, origin: "app", created: "2026-11-06T22:03:00Z", age_s: 120, title: "Deploy the limiter to staging", body: "", actions: ["approve", "reject"], plan_sha256: "9f2c4e7a1b8d03c5e6f7a89b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5", action: "deploy", plan: { target: "staging", commands: ["make deploy ENV=staging"], rollback: ["make rollback ENV=staging"], health_checks: ["curl -f https://staging.example/health"], risk: "low" }, invalid: null },
     { id: "q-t4", kind: "question", campaign: SLUG, origin: "app", created: "2026-11-06T22:01:00Z", age_s: 240, title: "Should the 429 body name the limit and the reset time?", body: "", actions: ["answer"] },
   ] }),
   run_overview: () => ({
