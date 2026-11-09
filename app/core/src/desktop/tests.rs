@@ -3775,3 +3775,40 @@ fn an_unreadable_guarded_record_refuses_a_launch_instead_of_re_pinning_the_folde
         assert!(r.is_err(), "{what}: refused, not re-pinned: {r:?}");
     }
 }
+
+struct CountingUsage(std::sync::Arc<AtomicUsize>);
+impl crate::providers::usage::UsageSource for CountingUsage {
+    fn accounts(&self) -> Vec<String> {
+        vec!["openrouter".into()]
+    }
+    fn key_info(&self, _: &str) -> Option<Vec<u8>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Some(br#"{"data":{"label":"LABEL-CANARY","usage":8.4,"limit":10.0}}"#.to_vec())
+    }
+}
+
+#[test]
+fn provider_usage_calls_out_only_while_the_page_is_open_and_at_most_once_a_minute() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    // Nothing stored: every CLI login reads "Not reported" and nothing can call out.
+    let none = app.provider_usage(true).unwrap();
+    assert_eq!(none["schema"], "vajra.provider_usage/1");
+    assert!(none["usage"].as_array().unwrap().iter().all(|u| u["source"] == "none" && u["windows"].as_array().unwrap().is_empty()));
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    app.usage_source = Box::new(CountingUsage(calls.clone()));
+    // Page closed and no run: the cache is read, no call is made (this is also the project_state path).
+    let closed = app.provider_usage(false).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(closed["usage"][2]["source"], "none");
+    // Page open: one call; a second open inside the minute reuses it.
+    let open = app.provider_usage(true).unwrap();
+    app.provider_usage(true).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!((open["usage"][2]["account"].clone(), open["usage"][2]["windows"][0]["used_pct"].clone(), open["usage"][2]["windows"][0]["warn"].clone()), (json!("openrouter"), json!(84), json!(true)));
+    assert!(!open.to_string().contains("CANARY"));
+    // Page closed again: the last answer, still one call.
+    assert_eq!(app.provider_usage_cached().usage[2].source, "gateway_key");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

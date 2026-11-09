@@ -190,6 +190,9 @@ pub struct App {
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
+    usage: crate::providers::usage::Meter,
+    usage_source: Box<dyn crate::providers::usage::UsageSource>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -291,6 +294,9 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
+            usage: Default::default(),
+            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
+            usage_source: Box::new(crate::providers::usage::NoSource),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -650,6 +656,27 @@ impl App {
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
         serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
+    /// `page_open` is true while Settings > Providers is open. A key endpoint is called only when that is true or a run is
+    /// active, and at most once a minute per account; otherwise the last answer is returned and no call is made.
+    pub fn provider_usage(&self, page_open: bool) -> Res {
+        serde_json::to_value(self.usage_snapshot(page_open || self.active_run_count() > 0)).map_err(|e| fail("internal", e))
+    }
+
+    /// The last usage answers, for `project_state`. Never calls out.
+    pub(super) fn provider_usage_cached(&self) -> crate::providers::usage::UsageList {
+        self.usage_snapshot(false)
+    }
+
+    fn usage_snapshot(&self, active: bool) -> crate::providers::usage::UsageList {
+        use crate::providers::usage::{Usage, UsageList, USAGE_SCHEMA};
+        let (now, read_at) = (std::time::Instant::now(), crate::control::time::iso_secs(std::time::SystemTime::now()));
+        // The CLI logins report no windows today, so they read "Not reported".
+        let mut usage: Vec<Usage> = ["claude", "codex"].iter().map(|a| Usage::not_reported(a)).collect();
+        usage.extend(self.usage_source.accounts().iter().map(|a| self.usage.read(a, active, now, &read_at, self.usage_source.as_ref())));
+        UsageList { schema: USAGE_SCHEMA.into(), usage }
     }
 
     /// The last `provider_list` answer, or `None` before the first. Never runs a process.

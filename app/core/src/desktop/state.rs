@@ -413,6 +413,8 @@ impl App {
             "receipts": recent,
             "inbox": inbox,
             "proposals": proposals,
+            // The last usage answers (a cache read: this never calls out).
+            "usage": self.provider_usage_cached(),
         }))
     }
 }

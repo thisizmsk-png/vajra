@@ -306,3 +306,41 @@ export interface Agents {
   roles: Record<string, AgentChoice>;
   allowed: AllowedAgent[];
 }
+
+// ---- `vajra.provider_usage/1` (H5): what an account has used, as its own source reports it ------------------------------
+// `windows` is empty when nothing is reported: say "Not reported", never estimate. `warn` is set at 80% used.
+
+export const USAGE_SCHEMA = "vajra.provider_usage/1";
+
+export interface UsageWindow {
+  /** `5h`, `daily`, `weekly` or `credit` (a key's own spending limit). */
+  kind: string;
+  used_pct: number;
+  resets_at: string | null;
+  warn: boolean;
+}
+
+export interface Usage {
+  account: string;
+  read_at: string | null;
+  /** `none` or `gateway_key`. */
+  source: string;
+  windows: UsageWindow[];
+  amounts: { usage: number; usage_daily: number | null; limit: number | null; limit_remaining: number | null } | null;
+}
+
+export interface UsageList {
+  schema: string;
+  usage: Usage[];
+}
+
+/** The window the status bar chip is about: the most used one that is at or over the warning level. */
+export function usageWarning(list: UsageList | null | undefined): { account: string; window: UsageWindow } | null {
+  let worst: { account: string; window: UsageWindow } | null = null;
+  for (const u of list?.usage ?? []) {
+    for (const w of u.windows) {
+      if (w.warn && (worst === null || w.used_pct > worst.window.used_pct)) worst = { account: u.account, window: w };
+    }
+  }
+  return worst;
+}
