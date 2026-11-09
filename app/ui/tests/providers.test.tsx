@@ -247,15 +247,20 @@ describe("The run's provider in Run and Crew (FG-09 G6)", () => {
 
   it("Crew drops a late provider answer for the run it has moved away from", async () => {
     window.location.hash = "#/crew?slug=c1&id=r1";
-    let late!: (v: unknown) => void;
+    // One resolver per request, so the answer goes to c1's own request, not whichever asked last.
+    const asked: ((v: unknown) => void)[] = [];
     setTransport(fakeIpc({
       active_runs: { count: 0, runs: [] }, crew: new Error("no crew"), provider_list: LIST,
-      resume_targets: () => new Promise((r) => { late = r; }),
+      resume_targets: () => new Promise((r) => { asked.push(r); }),
     }).transport);
     render(<Crew />);
-    await waitFor(() => expect(late).toBeTruthy());
+    await waitFor(() => expect(asked).toHaveLength(1));
+    // jsdom delivers `hashchange` as a later task: wait until Crew has really moved to r2 (and asked for it) before
+    // answering, so the answer is late by construction rather than by timing.
     act(() => { window.location.hash = "#/crew?slug=c2&id=r2"; });
-    await act(async () => late({ targets: { c1: { session_id: "s", run_id: "r1", cwd: "/r", provider: "codex" } } }));
+    await screen.findByText("r2");
+    await waitFor(() => expect(asked).toHaveLength(2));
+    await act(async () => asked[0]({ targets: { c1: { session_id: "s", run_id: "r1", cwd: "/r", provider: "codex" } } }));
     expect(screen.queryByRole("region", { name: C.runsOn("Codex CLI") })).toBeNull();
   });
 });
