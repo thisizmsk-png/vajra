@@ -536,7 +536,7 @@ impl App {
         let _one = lock(&self.launching);
         // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently. The run's project: pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
         // are checked against.
-        let project = self.launch_project(cwd)?;
+        let (loc, project) = self.launch_project(cwd)?;
         self.within_caps(&project.id, workers)?;
         let nonce = {
             let mut svc = lock(&self.control);
@@ -561,6 +561,13 @@ impl App {
             lock(&self.control).end_session(session_id);
             return Err(fail("io", "could not record the run's provider"));
         }
+        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
+        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
+        // pin could never be held to its project (#80 review).
+        if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+            lock(&self.control).end_session(session_id);
+            return Err(fail("io", "could not record the run's project"));
+        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -581,11 +588,6 @@ impl App {
         let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
-        }
-        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
-        // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run_as(run_id, cwd, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
-            self.note("lead_cwd_record_failed", &[]);
         }
         self.note_run(&project, run_id, campaign);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))

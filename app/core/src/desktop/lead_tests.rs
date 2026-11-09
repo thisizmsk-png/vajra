@@ -1297,6 +1297,8 @@ fn a_new_conversation_racing_an_ask_is_never_undone() {
 fn lead_status_names_the_director_general_and_its_state() {
     let t = Tmp::new();
     let app = t.app();
+    // A run of this project that is alive: its process is up, not just its entry kept for the crew view.
+    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
     let s = app.lead_status(RUN_ID).unwrap();
     assert_eq!((s["name"].as_str(), s["state"].as_str(), s["generation"].as_u64()), (Some("Director-General"), Some("running"), Some(1)));
     assert_eq!((s["project_id"].as_str(), s["stream"].as_str()), (Some(pid(&t).as_str()), Some(stream_name(&t).as_str())));
@@ -1311,6 +1313,7 @@ fn lead_status_names_the_director_general_and_its_state() {
     wait_until("idle", || idle(&app));
     lock(&app.runs).clear();
     assert_eq!(app.lead_status(RUN_ID).unwrap()["name"], "Director-General", "named even when unavailable");
+    app.sup.kill(&format!("run-{SID}")).unwrap();
 }
 
 #[test]
@@ -1459,7 +1462,7 @@ fn a_rewritten_dot_git_cannot_make_another_project_the_leads_own() {
     std::fs::write(t.repo().join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
     assert_eq!(super::super::caps::project_key(&t.repo()), super::super::caps::project_key(&other), "the rewrite took");
     let pinned = app.pinned_project(RUN_ID).unwrap();
-    assert_eq!(app.launch_project(&t.repo()).unwrap().id, pinned, "a later launch (a resume) in the folder keeps the first pinned project");
+    assert_eq!(app.launch_project(&t.repo()).unwrap().1.id, pinned, "a later launch (a resume) in the folder keeps the first pinned project");
 
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));

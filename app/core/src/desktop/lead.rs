@@ -240,11 +240,7 @@ impl App {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
-        let live: Vec<(String, PathBuf)> = lock(&self.runs).values().map(|r| (r.run_id.clone(), r.cwd.clone())).collect();
-        let running = live.iter().any(|(run, cwd)| {
-            let pid = self.pinned_project(run).or_else(|| self.projects.find_by_path(cwd).ok().flatten().map(|p| p.id));
-            pid.as_deref() == Some(orch.id.as_str())
-        });
+        let running = self.running_in_project(&orch.id);
         let (state, reason) = match (&busy, running) {
             (Some(_), _) => ("thinking", "answering a question"),
             (None, true) => ("running", "a run of this project is going"),
@@ -258,6 +254,13 @@ impl App {
             out["ask_id"] = json!(id);
         }
         Ok(out)
+    }
+
+    /// Whether a run of project `pid` is going now: one pinned to it whose process is still alive. `runs` keeps finished runs
+    /// for their crew views, so presence there is not liveness (the supervisor's state is).
+    pub(super) fn running_in_project(&self, pid: &str) -> bool {
+        let live: Vec<String> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.run_id.clone()).collect();
+        live.iter().any(|run| self.pinned_project(run).as_deref() == Some(pid))
     }
 
     /// Cancel the question that is running: the Lead's whole process group is killed.
@@ -406,9 +409,18 @@ impl App {
         self.record_run_as(run_id, cwd, project.as_deref(), session_id, campaign, workflow, started)
     }
 
-    /// `record_run` with the store project the launch found for the folder before it spawned anything.
+    /// `record_run` with a store project chosen by the caller; the location is the folder's own now (tests only).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record_run_as(&self, run_id: &str, cwd: &Path, project: Option<&str>, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
+        self.record_run_pinned(run_id, cwd, &git_location(cwd), project, session_id, campaign, workflow, started)
+    }
+
+    /// `record_run` with the exact (location, store project) pair the launch checked (`launch_project`), written before
+    /// anything is spawned: neither is read from the repo again, so a `.git` the launched process creates or redirects
+    /// afterwards cannot change what was pinned (#80 review).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_run_pinned(&self, run_id: &str, cwd: &Path, loc: &Path, project: Option<&str>, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
@@ -425,7 +437,7 @@ impl App {
         if let Some(p) = project {
             fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, p.as_bytes())?;
         }
-        fsx::write_atomic(&dir, LOC_FILE, git_location(cwd).to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -517,7 +529,11 @@ impl App {
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
         for run in self.recorded_runs() {
             let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            if self.pinned_project(&run).as_deref() != Some(own_project) || out.iter().any(|d| cwd.starts_with(d)) {
+            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
+            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
+            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            let covered = |d: &PathBuf| cwd.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+            if self.pinned_project(&run).as_deref() != Some(own_project) || out.iter().any(covered) {
                 continue;
             }
             if out.len() >= MAX_OTHER_ROOTS {
@@ -537,22 +553,22 @@ impl App {
         runs
     }
 
-    /// The project a launch in `cwd` runs under, read before anything is spawned, from the guarded run records before any
-    /// Git metadata is read (#80 review, on the store id).
+    /// The project a launch in `cwd` runs under, and the location it was found at: the exact pair a launch records before it
+    /// spawns anything (`record_run_pinned`), read from the guarded run records before any Git metadata is read (#80
+    /// review, on the store id).
     ///
     /// A project sits at the LOCATION of the nearest `.git` entry above `cwd` (`git_location`; the folder itself when there
     /// is none). The first guarded launch at a location pins it to a store project and records both. Every later launch
     /// at the same location reuses that pin, whatever `.git` now contains: the root, a subfolder and a sibling resolve
     /// alike, and a worker that rewrites `.git` cannot move any of them to another project. A nested repository has its
-    /// own `.git` at another location, so it is its own project, but a NEW location inside a pinned tree is admitted only
-    /// as a nested repo or a submodule (`admit_new_location`). With no record at the location, the store project of the
-    /// folder now.
+    /// own `.git` at another location, so it is its own project, but a NEW location inside a pinned Git project's tree is
+    /// admitted only as a nested repo or a submodule (`project_of_new_location`).
     ///
     /// Records of one location that disagree on its project refuse rather than guess. The old record formats are migrated
-    /// once from their guarded cwd: a record with no `project_loc` gets its location written back, and one with no store
-    /// pin (or a pre-store `k_` stand-in pin) gets its store project (`migrate_old_pin`). Anything else malformed refuses.
-    /// The pinned project must still be active.
-    pub(super) fn launch_project(&self, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
+    /// once from their guarded location: a record with no `project_loc` gets its location written back, and one with no
+    /// store pin (or a pre-store `k_` stand-in pin) gets its store project (`migrate_old_pin`). Anything else malformed
+    /// refuses. The pinned project must still be active.
+    pub(super) fn launch_project(&self, cwd: &Path) -> Result<(PathBuf, crate::projects::contract::Project), Value> {
         let want = git_location(cwd);
         let mut ids: Vec<String> = Vec::new();
         for r in self.recorded_runs() {
@@ -565,7 +581,7 @@ impl App {
             }
             let pid = match self.pinned_project(&r) {
                 Some(p) if crate::projects::contract::valid_project_id(&p) => p,
-                _ => match self.migrate_old_pin(&r, &c)? {
+                _ => match self.migrate_old_pin(&r, &loc)? {
                     Some(p) => p,
                     // A well-formed old record whose folder is no project now: it names no project to keep.
                     None => continue,
@@ -579,64 +595,95 @@ impl App {
                 ids.push(pid);
             }
         }
-        match ids.len() {
-            0 => {
-                self.admit_new_location(&want)?;
-                self.project_of_folder(cwd).map_err(|e| e.to_json())
-            }
-            1 => self.active_project(&ids[0]).map_err(|e| e.to_json()),
-            _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
-        }
+        let project = match ids.len() {
+            0 => self.project_of_new_location(&want, cwd)?,
+            1 => self.active_project(&ids[0]).map_err(|e| e.to_json())?,
+            _ => return Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
+        };
+        Ok((want, project))
     }
 
-    /// A NEW project location `want` inside the tree of an already-pinned location may become its own project only if its
-    /// `.git` is (a) a real directory (not a symlink) with no `commondir` file: a self-contained nested repository; or (b) a
-    /// `gitdir:` file whose target resolves, by canonical path, INSIDE the common dir of an enclosing pinned Git project (as
-    /// the store recorded it): a submodule or linked worktree of that project. Anything else (a pointer into another
-    /// project, a symlinked `.git`, a redirecting `commondir`, an unresolvable target) is refused and never pinned, so a
-    /// worker cannot plant a `.git` that pulls a subfolder into another project.
+    /// The store project for a NEW project location `want`, from ONE look at its `.git` and never a second walk.
     ///
-    /// A folder with no `.git` at all is a new location only when no ancestor has one: under a pinned Git project that
-    /// means its `.git` was removed, which refuses. Under only plain (non-Git) projects it is an ordinary subfolder and is
-    /// looked up in the store as usual, so a run in a plain folder like `$HOME` does not refuse the folders under it. An
-    /// enclosing pin whose project the store cannot read counts as a Git project with no known common dir (fail closed).
-    fn admit_new_location(&self, want: &Path) -> Result<(), Value> {
-        // (enclosing pin is a Git project, its canonical common dir if known)
-        let mut enclosing: Vec<(bool, Option<PathBuf>)> = Vec::new();
+    /// Only a pinned GIT project's tree constrains what nests under it (a plain folder's pin, like `$HOME`'s, leaves every
+    /// location under it unconstrained). Outside every such tree it is the store project of the folder (`project_of_folder`).
+    /// Inside one, the location may become its own project only if its `.git` is (a) a real directory (not a symlink) with
+    /// no `commondir` file: a self-contained nested repository, identified by that directory; or (b) a `gitdir:` file whose
+    /// canonical target lies INSIDE an enclosing Git project's common dir (as the store recorded it) with no `commondir`
+    /// file on the resolution path (the target and every directory up to that common dir): a submodule, identified by
+    /// exactly the target checked. Its project is then the store project rooted at `want` or recorded with that identity as
+    /// its common dir; none is `not_a_project`, never the enclosing project. Anything else (a pointer into another project,
+    /// a symlinked `.git`, a redirecting `commondir`, an unresolvable target, a `.git` removed from the pinned tree) refuses
+    /// with `project_membership_inconsistent` and is never pinned. An enclosing pin whose project the store cannot read
+    /// counts as a Git project with no known common dir (fail closed).
+    fn project_of_new_location(&self, want: &Path, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
+        let mut enclosing: Vec<Option<PathBuf>> = Vec::new();
         for r in self.recorded_runs() {
             let (Some(loc), Some(pid)) = (self.read_run_loc(&r), self.pinned_project(&r)) else { continue };
             if loc == want || !want.starts_with(&loc) {
                 continue;
             }
-            let e = match self.projects.get(&pid) {
-                Ok(p) => (p.root_key.git_common_dir.is_some(), p.root_key.git_common_dir.and_then(|c| std::fs::canonicalize(c).ok())),
-                Err(_) => (true, None),
+            let common = match self.projects.get(&pid) {
+                Ok(p) => match p.root_key.git_common_dir {
+                    Some(c) => std::fs::canonicalize(&c).ok(),
+                    None => continue, // a plain project's pin
+                },
+                Err(_) => None,
             };
-            if !enclosing.contains(&e) {
-                enclosing.push(e);
+            if !enclosing.contains(&common) {
+                enclosing.push(common);
             }
         }
         if enclosing.is_empty() {
-            return Ok(());
+            return self.project_of_folder(cwd).map_err(|e| e.to_json());
         }
         let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
         let git = want.join(".git");
-        let Ok(md) = std::fs::symlink_metadata(&git) else {
-            return if enclosing.iter().all(|(is_git, _)| !is_git) { Ok(()) } else { Err(refuse("this folder's .git cannot be read")) };
-        };
-        if md.is_dir() {
-            return if std::fs::symlink_metadata(git.join("commondir")).is_err() { Ok(()) } else { Err(refuse("this folder's .git points at another project's common dir")) };
-        }
-        if md.is_file() {
+        let md = std::fs::symlink_metadata(&git).map_err(|_| refuse("this folder's .git cannot be read"))?;
+        let identity = if md.is_dir() {
+            if std::fs::symlink_metadata(git.join("commondir")).is_ok() {
+                return Err(refuse("this folder's .git points at another project's common dir"));
+            }
+            // This very directory; a swap to a link between the check and here no longer names `want/.git`.
+            let key = std::fs::canonicalize(&git).map_err(|_| refuse("this folder's .git cannot be read"))?;
+            if key.parent() != Some(want) || key.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                return Err(refuse("this folder's .git changed while it was checked"));
+            }
+            key
+        } else if md.is_file() {
             let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
-            if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
-                if enclosing.iter().any(|(_, c)| c.as_ref().is_some_and(|c| real.starts_with(c))) {
-                    return Ok(());
-                }
+            let real = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok());
+            let inside = |real: &PathBuf, common: &PathBuf| {
+                real.starts_with(common) && real.ancestors().take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err())
+            };
+            match real {
+                Some(real) if enclosing.iter().flatten().any(|c| inside(&real, c)) => real,
+                _ => return Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project")),
             }
+        } else {
+            return Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project"));
+        };
+        self.project_with_identity(want, &identity, cwd)
+    }
+
+    /// The store project rooted at `want` (by device and inode) or recorded with `identity` as its common dir, compared by
+    /// canonical path: the project an admitted nested location names, found without reading its `.git` again.
+    fn project_with_identity(&self, want: &Path, identity: &Path, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
+        use std::os::unix::fs::MetadataExt;
+        let listing = self.projects.list(true).map_err(|e| super::fail("io", e))?;
+        if listing.truncated {
+            return Err(super::fail("io", "the project store could not be read whole"));
         }
-        Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project"))
+        let at = std::fs::metadata(want).ok().map(|m| (m.dev(), m.ino()));
+        let hit = listing.projects.into_iter().find(|p| {
+            at == Some((p.root_key.dev, p.root_key.ino)) || p.root_key.git_common_dir.as_ref().and_then(|c| std::fs::canonicalize(c).ok()).as_deref() == Some(identity)
+        });
+        match hit {
+            Some(p) if p.archived.is_some() => Err(LeadError::ProjectArchived.to_json()),
+            Some(p) => Ok(p),
+            None => Err(LeadError::NotAProject(cwd.to_string_lossy().into_owned()).to_json()),
+        }
     }
 
     /// The project location pinned when the run was launched.
