@@ -43,6 +43,8 @@ const KEY_FILE: &str = "project_key";
 /// Where the run's project sits: the folder holding the nearest `.git` entry (`git_location`), as found at launch. The pin
 /// is keyed by this LOCATION, never by what `.git` later contains.
 const LOC_FILE: &str = "project_loc";
+/// The project's main checkout as resolved at launch, or `-` when it could not be (`main_checkout`). Guarded like the others.
+const MAIN_FILE: &str = "project_main";
 /// Most other-project folders the Lead's deny rules hold; more refuses the ask (#80 review: never drop one).
 pub(super) const MAX_OTHER_ROOTS: usize = 256;
 /// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
@@ -375,6 +377,8 @@ impl App {
         }
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
+        let main = main_checkout(loc, key);
+        fsx::write_atomic(&dir, MAIN_FILE, main.as_ref().map_or("-".into(), |m| m.to_string_lossy()).as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -437,7 +441,16 @@ impl App {
             // The run folder, the project's main tree (from a `.git` key), and the checkout root the launch pinned (`project_loc`):
             // a submodule's or separate-git-dir repo's root is neither the cwd nor inferable from its key.
             let pinned_loc = self.read_run_loc(&run);
-            for dir in std::iter::once(cwd).chain(main).chain(pinned_loc) {
+            // The main checkout resolved at launch (a submodule or separate-git-dir repo run from an outside worktree has a key that
+            // names no checkout). `-` means it could not be resolved: that checkout cannot be protected, so the ask is refused.
+            let pinned_main = match fsx::read_nofollow(&self.lead_sid_dir(&run).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok()) {
+                Some(m) if m.trim() == "-" => {
+                    return Err(LeadError::GuardMissing("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project from its main folder".into()));
+                }
+                Some(m) => Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()),
+                None => None,
+            };
+            for dir in std::iter::once(cwd).chain(main).chain(pinned_loc).chain(pinned_main) {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 if own_real.starts_with(&real) || out.contains(&dir) {
                     continue;
@@ -1011,4 +1024,32 @@ mod tests;
 pub(super) fn git_location(cwd: &Path) -> PathBuf {
     let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     real.ancestors().find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok()).map_or_else(|| real.clone(), Path::to_path_buf)
+}
+
+/// The main checkout of the project whose common dir is `key`, for a run at `loc`, read once at launch before anything spawns:
+/// the parent of a `.git` key; `loc` itself when its `.git` is a directory or a file naming `key`; else, for a linked worktree of
+/// a submodule or a separate-git-dir repo, the `core.worktree` of the common dir's config, accepted only if that folder's `.git`
+/// names `key`. `None` when none of these holds: the checkout cannot be resolved.
+pub(super) fn main_checkout(loc: &Path, key: &Path) -> Option<PathBuf> {
+    // A plain folder is its own project (its key is the folder itself).
+    if key == loc {
+        return Some(loc.to_path_buf());
+    }
+    if key.file_name() == Some(std::ffi::OsStr::new(".git")) {
+        if let Some(p) = key.parent().filter(|p| p.is_dir()) {
+            return Some(p.to_path_buf());
+        }
+    }
+    let names_key = |dir: &Path| -> bool {
+        let Ok(body) = fsx::read_nofollow(&dir.join(".git")) else { return false };
+        let Ok(text) = String::from_utf8(body) else { return false };
+        text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).and_then(|t| std::fs::canonicalize(dir.join(t)).ok()).is_some_and(|t| t == key)
+    };
+    if std::fs::symlink_metadata(loc.join(".git")).is_ok_and(|m| m.is_dir()) || names_key(loc) {
+        return Some(loc.to_path_buf());
+    }
+    let config = String::from_utf8(fsx::read_nofollow(&key.join("config")).ok()?).ok()?;
+    let rel = config.lines().map(str::trim).find_map(|l| l.strip_prefix("worktree").and_then(|r| r.trim_start().strip_prefix('=')).map(str::trim))?;
+    let cand = std::fs::canonicalize(key.join(rel)).ok()?;
+    names_key(&cand).then_some(cand)
 }
