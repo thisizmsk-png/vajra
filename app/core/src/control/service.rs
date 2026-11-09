@@ -188,6 +188,30 @@ impl Service {
         self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
     }
 
+    /// The one worker of a campaign's run(s) on task `task` (the bare id in `tasks.json`; the workflow namespaces worker
+    /// task ids as `<run_id>.<task>`). Matches only those exact ids, so a worker of another campaign with the same task
+    /// name is never found. `Ok(None)`: no such worker. `Err`: more than one live worker matches. Read only.
+    pub fn task_worker(&self, runs: &[String], task: &str) -> std::result::Result<Option<String>, ControlError> {
+        let hit: Vec<&WorkerInfo> = self
+            .in_scope()
+            .flat_map(|s| s.workers.iter())
+            .filter(|w| {
+                w.task_id.as_deref().is_some_and(|t| {
+                    // The workflow writes tasks.json ids already namespaced (`<run>.t1`), and so are worker task ids: an
+                    // exact match whose run is one of the campaign's. A bare id (`t1`) matches the remainder after `<run>.`.
+                    runs.iter().any(|r| t.strip_prefix(r.as_str()).and_then(|x| x.strip_prefix('.')).is_some_and(|rest| t == task || rest == task))
+                })
+            })
+            .collect();
+        let live: Vec<&&WorkerInfo> = hit.iter().filter(|w| !w.finished()).collect();
+        match (hit.as_slice(), live.as_slice()) {
+            ([], _) => Ok(None),
+            (_, [w]) => Ok(Some(w.key().to_string())),
+            (_, []) => Ok(hit.last().map(|w| w.key().to_string())),
+            _ => Err(ControlError::WorkerAmbiguous),
+        }
+    }
+
     /// The workers as `list_workers` shows them (every session in scope), without recording a list action (for
     /// `project_state`).
     pub fn workers_view(&self) -> Vec<Value> {
