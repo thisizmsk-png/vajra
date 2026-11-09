@@ -806,6 +806,19 @@ fn flush_loop(pending: &(Mutex<Pending>, Condvar), t: &Term) {
         let data: Vec<u8> = p.buf.drain(..take).collect();
         drop(p);
         let len = data.len();
+        {
+            // The reader checks `hidden` and then appends to `pending` without `order`, so a hide can land between the two
+            // and leave bytes here that are newer than the ring's. They must not reach a hidden view (they would arrive
+            // before the older tail, and the alternate-screen tracker would miss them): keep them with the rest.
+            let mut h = lock(&t.hide);
+            if h.on {
+                h.push(&data);
+                drop(h);
+                let mut c = lock(&t.credit);
+                *c = c.saturating_sub(len);
+                continue;
+            }
+        }
         if !t.send(Event::Data(data)) {
             // The view is gone (the webview reloaded or closed): what could not be sent was never read by anyone, so it is
             // not owed an acknowledgement; keep what comes next for the view that attaches.

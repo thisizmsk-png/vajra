@@ -360,3 +360,48 @@ fn a_dead_sink_costs_no_sends_after_the_first_failure() {
     assert!(calls.load(Ordering::SeqCst) <= first + 2, "{} calls after {first}", calls.load(Ordering::SeqCst));
     t.close(info.id).unwrap();
 }
+
+/// Every `n` in the `n\r\n` lines of `bytes` that is a whole number line.
+fn numbers(bytes: &[u8]) -> Vec<u64> {
+    String::from_utf8_lossy(bytes).lines().filter_map(|l| l.trim().parse().ok()).collect()
+}
+
+#[test]
+fn hiding_during_a_flood_never_sends_data_while_hidden_and_the_tail_continues_in_order() {
+    // The reader checks "hidden" and then queues bytes without the ordering lock, so a hide can land between the two. Hide at a
+    // spread of moments in a running numbered flood: nothing may reach the view while hidden, and what the view has seen
+    // (before the hide, then the tail) must be one increasing run of numbers ending at the last.
+    for round in 0..8u64 {
+        let f = Fixture::new(&format!("hid-race-{round}"));
+        let t = f.terminals();
+        let (info, out) = open_root(&t, &f);
+        out.until("$", 5);
+        t.ack(info.id, 1 << 20).unwrap();
+        out.now();
+        let done = f.dir.join("done");
+        t.write(info.id, format!("seq 1 400000; echo ENDMARK; touch {}\n", done.display()).as_bytes()).unwrap();
+        let mut seen = Vec::new();
+        let until = Instant::now() + Duration::from_millis(5 + round * 7);
+        while Instant::now() < until {
+            for e in out.now() {
+                if let Event::Data(d) = &e {
+                    t.ack(info.id, d.len()).unwrap();
+                }
+                seen.push(e);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        t.set_visible(info.id, false, false).unwrap();
+        seen.extend(out.now()); // sent before the hide took effect
+        std::thread::sleep(Duration::from_millis(60));
+        let hidden = out.now();
+        assert!(!hidden.iter().any(|e| matches!(e, Event::Data(_))), "round {round}: data reached a hidden view");
+        assert!(wait_file(&done, 20));
+        std::thread::sleep(Duration::from_millis(150));
+        t.set_visible(info.id, true, false).unwrap();
+        seen.extend(out.for_ms(400));
+        let n = numbers(&data_of(&seen));
+        assert!(n.windows(2).all(|w| w[0] < w[1]), "round {round}: out of order around {:?}", n.windows(2).find(|w| w[0] >= w[1]));
+        assert_eq!(n.last(), Some(&400_000), "round {round}: the tail ends at the last line");
+    }
+}
