@@ -7,7 +7,7 @@ process that stays running: a profile is one bounded command.
 ## What it measures
 Per component, RSS (MiB) and CPU (% of one core): the app process, each WebKit helper by type, each run's agent
 process tree, each terminal's process tree. The method is `ci/measure.py`'s (summed `ps` RSS; WebKit helpers found by
-diffing the `com.apple.WebKit.*` pids before and after launch) plus CPU and a visibility guard (load average, frontmost
+diffing the `com.apple.WebKit.*` pids before and after launch, then keeping only those macOS names this app as responsible for; new helpers that are not provably ours are counted as `unattributed`, never summed) plus CPU and a visibility guard (load average, frontmost
 app and helper count per sample; a sample with extra helpers or load above 6 is left out of the median).
 
 - `profile_run` (`app/core/examples/profile_run.rs`): the real core (App, supervisor, bus, crew tailing, the 1 s change

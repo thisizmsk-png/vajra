@@ -10,7 +10,7 @@ usage:
 Components, each as RSS (MiB) and CPU (% of one core): the app process; each WebKit helper by type (bin mode); each run's
 agent process tree (its roots come from the harness, never guessed by name); each terminal's process tree (the app's other
 direct children). The method is `ci/measure.py`'s (ps RSS; helpers found by diffing com.apple.WebKit.* pids before and
-after launch) plus CPU and a visibility guard (load average, frontmost app, helper count per sample).
+after launch, and kept only if macOS names this app as the process responsible for them) plus CPU and a visibility guard (load average, frontmost app, helper count per sample).
 
 Focus: the shipping app is started with `open -g -j` (not activated, window hidden) and quit by pid when the run ends, so
 it never covers the human's screen; the frontmost app is recorded with every sample.
@@ -64,18 +64,38 @@ def helper_type(comm):
     return m.group(1) if m else "Unknown"
 
 
-def classify(rows, app_pid, run_roots, before=frozenset()):
-    """Pure: split the process table into the components. Returns rss MiB and cpu seconds per component."""
+def responsible(pid):
+    """The pid macOS holds responsible for `pid` (an XPC helper is charged to the app it serves), or None if unknown."""
+    try:
+        import ctypes
+        f = ctypes.CDLL(None).responsibility_get_pid_responsible_for_pid
+        f.argtypes, f.restype = [ctypes.c_int], ctypes.c_int
+        r = f(pid)
+        return r if r > 0 else None
+    except (OSError, AttributeError):
+        return None
+
+
+def classify(rows, app_pid, run_roots, before=frozenset(), owner=responsible):
+    """Pure: split the process table into the components. Returns rss MiB and cpu seconds per component.
+
+    A WebKit helper is counted only if it is new since before launch AND `owner(pid)` says it belongs to this app, so a
+    helper another app starts during sampling is never added to Vajra. Helpers that are new but not provably ours are
+    reported as `comp["unattributed"]` (a count), never summed."""
     part = lambda pids: (sum(rows[p][1] for p in pids) / KB, sum(rows[p][2] for p in pids))
     runs = [tree(rows, r) for r in run_roots if r in rows]
     in_runs = set().union(*runs) if runs else set()
     kids = sorted(p for p, r in rows.items() if r[0] == app_pid and p not in in_runs)
     terminals = [tree(rows, k) for k in kids]
     helpers = {}
+    other = 0
     for pid in webkit(rows) - set(before):
-        helpers.setdefault(helper_type(rows[pid][3]), set()).add(pid)
+        if owner(pid) == app_pid:
+            helpers.setdefault(helper_type(rows[pid][3]), set()).add(pid)
+        else:
+            other += 1
     comp = {"app": part({app_pid}), "runs": [part(t) for t in runs], "terminals": [part(t) for t in terminals],
-            "webkit": {k: part(v) for k, v in sorted(helpers.items())}}
+            "webkit": {k: part(v) for k, v in sorted(helpers.items())}, "unattributed": other}
     total = comp["app"][0] + sum(r for r, _ in comp["runs"]) + sum(r for r, _ in comp["terminals"]) + sum(r for r, _ in comp["webkit"].values())
     return comp, round(total, 1), sum(len(v) for v in helpers.values())
 

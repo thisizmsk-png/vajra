@@ -19,9 +19,24 @@ ROWS = {
 }
 
 
+OURS = lambda pid: 100  # every helper belongs to app 100
+
+
 class Classify(unittest.TestCase):
+    def test_given_a_new_helper_owned_by_another_app_when_classified_then_it_is_not_added_to_vajra(self):
+        rows = {**ROWS, 203: (1, 500 * KB, 9.0, "/x/com.apple.WebKit.WebContent")}  # 203: another app's, started during sampling
+        comp, total, helpers = P.classify(rows, 100, [101], before={202}, owner=lambda p: {200: 100, 201: 100, 203: 777}.get(p))
+        self.assertEqual(helpers, 2)
+        self.assertEqual({k: round(v[0]) for k, v in comp["webkit"].items()}, {"Networking": 22, "WebContent": 60})
+        self.assertEqual(comp["unattributed"], 1)
+        self.assertEqual(total, 100 + 25 + 21 + 82)
+
+    def test_given_ownership_cannot_be_determined_when_classified_then_helpers_are_not_guessed_in(self):
+        comp, _, helpers = P.classify(ROWS, 100, [101], before={202}, owner=lambda p: None)
+        self.assertEqual((comp["webkit"], comp["unattributed"], helpers), ({}, 2, 0))
+
     def test_given_runs_and_terminals_when_classified_then_each_component_is_separate(self):
-        comp, total, helpers = P.classify(ROWS, 100, [101], before={202})
+        comp, total, helpers = P.classify(ROWS, 100, [101], before={202}, owner=OURS)
         self.assertEqual(comp["app"][0], 100)
         self.assertEqual([round(r) for r, _ in comp["runs"]], [25])  # root + child
         self.assertEqual([round(r) for r, _ in comp["terminals"]], [17, 4])  # per terminal, job included
@@ -30,11 +45,11 @@ class Classify(unittest.TestCase):
         self.assertEqual(total, 100 + 25 + 21 + 82)
 
     def test_given_a_foreign_webkit_helper_when_classified_then_it_is_not_counted(self):
-        comp, _, _ = P.classify(ROWS, 100, [101], before={202, 200, 201})
+        comp, _, _ = P.classify(ROWS, 100, [101], before={202, 200, 201}, owner=OURS)
         self.assertEqual(comp["webkit"], {})
 
     def test_given_a_run_root_that_is_gone_when_classified_then_it_is_skipped_not_guessed_by_name(self):
-        comp, _, _ = P.classify(ROWS, 100, [999], before={200, 201, 202})
+        comp, _, _ = P.classify(ROWS, 100, [999], before={200, 201, 202}, owner=OURS)
         self.assertEqual(comp["runs"], [])
         self.assertEqual(len(comp["terminals"]), 3)  # 101 is now just another child; nothing matches by process name
 
