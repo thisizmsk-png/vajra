@@ -25,40 +25,20 @@
 .v-pt__fb { display: inline-flex; width: 14px; height: 14px; }
 .v-pt__fb svg { width: 100%; height: 100%; }
 .v-pt__via { position: absolute; right: -5px; bottom: -5px; display: inline-flex; align-items: center; justify-content: center; min-width: 12px; height: 12px; padding: 0 2px; border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font: 600 7px/1 var(--font-ui); }
-.v-acct__list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.v-acct { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: var(--space-md); padding: var(--space-md) 0; border-bottom: 1px solid var(--c-border); }
-.v-acct:first-child { padding-top: 0; }
-.v-acct__main { display: flex; flex-direction: column; gap: var(--space-xs); min-width: 0; }
-.v-acct__name { margin: 0; font: 600 13px/20px var(--font-ui); color: var(--c-text); }
-.v-acct__facts { display: flex; flex-wrap: wrap; gap: 2px var(--space-md); margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 17px; color: var(--c-text-secondary); }
-.v-acct__warn { margin: 0; }
-.v-acct__warn .v-badge { height: auto; min-height: 20px; white-space: normal; }
-.v-acct__actions { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: flex-end; gap: var(--space-xs); }
-.v-acct__adv { font-size: 12px; color: var(--c-text-secondary); }
-.v-acct__adv summary { min-height: var(--target-min); cursor: pointer; }
-.v-acct__adv summary:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-.v-usages { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-sm) var(--space-lg); margin: 0; padding: 0; list-style: none; }
-.v-usage { display: block; min-width: 0; font-size: 12px; line-height: 17px; color: var(--c-text-secondary); }
-.v-usage__head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs) var(--space-sm); }
-.v-usage__bar { height: 4px; border-radius: var(--radius-pill); background: var(--c-accent); overflow: hidden; }
-.v-usage__bar i { display: block; height: 100%; background: var(--c-primary); }
-.v-usage--warn .v-usage__bar i { background: var(--c-warning); }
-.v-models { display: flex; flex-direction: column; gap: var(--space-xs); margin: var(--space-xs) 0 0; padding: 0; list-style: none; }
-.v-model { display: flex; padding-left: 2px; flex-wrap: wrap; align-items: center; gap: var(--space-sm); font-size: 12px; line-height: 17px; color: var(--c-text); }
-.v-model__line { display: flex; flex-wrap: wrap; gap: 0 var(--space-sm); min-width: 0; }
-.v-model__id { color: var(--c-text-muted); font-family: var(--font-mono); overflow-wrap: anywhere; }
-.v-agents { display: flex; flex-direction: column; gap: var(--space-sm); }
-.v-agents__h { margin: var(--space-md) 0 0; font: 600 13px/20px var(--font-ui); color: var(--c-text); }
-.v-agent { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm) var(--space-md); padding: var(--space-xs) 0; font: 400 13px/20px var(--font-ui); }
-.v-agent__label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
-.v-agent__label > span { min-width: 96px; color: var(--c-text-secondary); }
-.v-agent select, .v-allowed input { min-height: var(--row-h); max-width: 100%; }
-.v-agent select { padding: var(--space-xs) var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); color: var(--c-text); font: inherit; }
-.v-agent select:focus-visible, .v-allowed input:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
-.v-agent__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.v-allowed { display: flex; flex-direction: column; gap: var(--space-xs); margin: 0; padding: 0; list-style: none; font: 400 13px/20px var(--font-ui); }
-.v-allowed label { display: flex; align-items: center; gap: var(--space-sm); min-height: var(--target-min); }
-.v-allowed input { accent-color: var(--c-primary); }
-.v-allowed li > .v-text { margin-left: var(--space-xl); }
 /* A gateway model: its own tile, with the gateway badge in the lower corner and the letters kept clear of it. */
 .v-pt:has(> .v-pt__via) { align-items: flex-start; justify-content: flex-start; padding: 2px 0 0 2px; margin-right: var(--space-xs); }
+
+/* A worker's provider on run cards, the crew list, the Board and the Crew pane. */
+.v-wp { display: flex; flex-direction: column; gap: 2px; min-width: 0; font: 400 12px/16px var(--font-ui); color: var(--c-text-secondary); }
+.v-wp__main { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
+.v-wp__line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-wp--compact .v-pt { width: 16px; height: 16px; font-size: 8px; padding: 0; align-items: center; justify-content: center; margin-right: 0; }
+.v-wp--compact .v-pt__via { display: none; }
+.v-wp__ran { color: var(--c-warning); }
+.v-wp__err { color: var(--c-text-secondary); overflow-wrap: anywhere; }
+.v-wp__err--you { color: var(--c-warning); }
+.v-tree .v-pt { width: 16px; height: 16px; font-size: 8px; margin-right: var(--space-xs); }
+.v-tree .v-pt__via { display: none; }
+.v-sbar__warn { margin-left: var(--space-md); color: var(--c-warning); font: 500 12px/16px var(--font-ui); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* The proposal card's workers: one row each, the pick as a chip with its billing, limits and reason beside it. */

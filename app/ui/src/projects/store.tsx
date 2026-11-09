@@ -9,6 +9,7 @@ import type { StatusKey } from "../../strings";
 import { api, onChanged } from "../ipc";
 import type { Campaign, CrewNodeDto, InboxItem } from "../ipc";
 import { problemDetail } from "../screens/states";
+import { parseWorkerProvider } from "../workerProvider";
 import { groupProjects, summarize } from "./adapter";
 import type { ProjectIndex } from "./adapter";
 import type { ActiveCrew, Project, ProjectId, ProjectSummary, WorkerRow } from "./contract";
@@ -48,7 +49,7 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
   const walk = (n: CrewNodeDto, task: string) => {
     if (n.id.startsWith("agent:")) {
       const status = statusOf(n.status);
-      out.push({ id: n.id.slice("agent:".length), name: n.role ?? n.title, status, statusLabel: S.status[status], task });
+      out.push({ id: n.id.slice("agent:".length), name: n.role ?? n.title, status, statusLabel: S.status[status], task, provider: parseWorkerProvider(n.provider) });
     }
     for (const c of n.children) walk(c, n.kind === "task" ? n.title : task);
   };

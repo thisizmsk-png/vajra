@@ -5,57 +5,17 @@ import { useEffect, useId, useState } from "react";
 import { Button, Text } from "../../components/ui/base";
 import { S } from "../../strings";
 import { api } from "../ipc";
-import { allowedChoices, choiceKey, modelLine, parseAgents, ROLES } from "../accountsContract";
+import { parseAgents, ROLES } from "../accountsContract";
 import type { Account, AgentPick, Agents } from "../accountsContract";
+import { PickRow, allEntries, sameEntry } from "./AgentPickers";
+import { choiceKey, modelLine } from "../accountsContract";
 import { ProviderIcon } from "./ProviderIcon";
 import { problemDetail } from "./states";
 import "./providers.css";
+import "./accounts.css";
 
 const C = S.agents;
 const WORD = S.accounts.defaultModel;
-
-/** Every entry a project could allow: a CLI account's own default model, and each model enabled on an account. */
-export function allEntries(accounts: Account[]): Array<{ account: Account; model: string | null }> {
-  return accounts.flatMap((a) => [
-    ...(a.credential.source === "cli_login" ? [{ account: a, model: null as string | null }] : []),
-    ...a.models.map((m) => ({ account: a, model: m.id as string | null })),
-  ]);
-}
-
-const sameEntry = (a: { account: string; model: string | null }, b: { account: string; model: string | null }): boolean => a.account === b.account && a.model === b.model;
-
-function PickRow({ label, pick, agents, accounts, onChange, inherit }: { label: string; pick: AgentPick | null; agents: Agents; accounts: Account[]; onChange: (p: AgentPick | null) => void; inherit?: boolean }) {
-  const choices = allowedChoices(accounts, agents.allowed);
-  const account = pick ? accounts.find((a) => a.id === pick.account) : undefined;
-  const value = pick ? choiceKey(pick.account, pick.model) : "";
-  // A saved pick the allowed list no longer offers stays visible but cannot be chosen again; it is never offered to anyone else.
-  const stale = pick && !choices.some((c) => sameEntry({ account: c.account.id, model: c.model }, pick));
-  const set = (key: string) => {
-    if (key === "") return onChange(null);
-    const c = choices.find((x) => choiceKey(x.account.id, x.model) === key);
-    if (!c) return;
-    const effort = pick?.effort && c.account.efforts.includes(pick.effort) ? pick.effort : null;
-    onChange({ account: c.account.id, model: c.model, effort });
-  };
-  return (
-    <div className="v-agent">
-      <label className="v-agent__label"><span>{label}</span>
-        <select aria-label={C.pickLabel(label)} value={value} onChange={(e) => set(e.target.value)}>
-          {inherit && <option value="">{C.useDefault}</option>}
-          {stale && pick && <option value={value} disabled>{account ? modelLine(account, pick.model, WORD) : `${pick.model ?? WORD} · ${pick.account}`}</option>}
-          {choices.map((c) => <option key={choiceKey(c.account.id, c.model)} value={choiceKey(c.account.id, c.model)}>{modelLine(c.account, c.model, WORD)}</option>)}
-        </select>
-      </label>
-      {pick && account && (account.efforts.length > 0
-        ? <label className="v-agent__effort"><span className="v-agent__sr">{C.effortLabel(label)}</span>
-            <select aria-label={C.effortLabel(label)} value={pick.effort ?? ""} onChange={(e) => onChange({ ...pick, effort: e.target.value || null })}>
-              <option value="">{C.effortDefault}</option>
-              {account.efforts.map((e) => <option key={e} value={e}>{e}</option>)}
-            </select></label>
-        : <Text as="span" variant="body-sm" muted>{C.noEffort}</Text>)}
-    </div>
-  );
-}
 
 export function ProjectAgents({ projectId, projectName, accounts }: { projectId: string; projectName: string; accounts: Account[] }) {
   const heading = useId();

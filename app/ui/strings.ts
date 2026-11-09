@@ -488,6 +488,48 @@ export const S = {
     startUnknown: (id: string) => `The saved agent "${id}" is not one this build can run. Choose another in Settings, Providers.`,
     resumeOff: (name: string) => `${name} is not installed, so this run cannot be resumed here.`,
   },
+  /** The per-worker provider choice on the Director-General's run proposal. */
+  proposalWorkers: {
+    title: "Workers",
+    worker: "Worker", runsOn: "Runs on", why: "Why",
+    readFailed: "Could not read which agents this project allows, so the picks are shown but cannot be changed here.",
+    changed: (proposed: string) => `Changed by you (proposed: ${proposed})`,
+    billingUnknown: "Billing: can't tell",
+    limits: "Outside the Vajra guard, in Codex's sandbox. No mid-run messages.",
+    notAllowed: "Only agents this project allows are offered. Change that in Settings > Providers.",
+    billed: (parts: string[]) => `Billed to ${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0]}.`,
+    plan: (label: string, n: number) => `your ${label} plan (${n})`,
+    login: (label: string, n: number) => `your ${label} login (${n})`,
+    key: (label: string, n: number) => `your ${label} key (${n})`,
+    outside: (n: number) => (n === 1 ? "1 worker runs outside the Vajra guard." : `${n} workers run outside the Vajra guard.`),
+  },
+  /** The provider a worker ran on, on run cards, the crew list, the Board and the Crew pane. */
+  workerProvider: {
+    notReported: "Not reported",
+    ranOn: (ran: string, asked: string) => `Ran on ${ran} (asked for ${asked})`,
+    billing: { subscription: "Plan", api_key: "API key", gateway: "Gateway key", unknown: "Billing unknown" } as Record<string, string>,
+    billingLabel: (label: string) => `Billing: ${label}`,
+    error: {
+      retrying: {
+        timeout: (n: number | null, at: string | null) => `Upstream timeout. Retrying${n ? `, attempt ${n} of 2` : ""}${at ? ` at ${at}` : ""}.`,
+        upstream: (n: number | null, at: string | null) => `Upstream error. Retrying${n ? `, attempt ${n} of 2` : ""}${at ? ` at ${at}` : ""}.`,
+        rate_limit: (_n: number | null, at: string | null) => `Rate limited. Retrying${at ? ` at ${at}` : ""}.`,
+        auth: () => "Sign-in failed.", quota: () => "Out of credit.", unexplained_exit: () => "The process ended without an error.",
+      } as Record<string, (n: number | null, at: string | null) => string>,
+      needsYou: {
+        timeout: () => "Needs you: the provider keeps timing out.",
+        upstream: () => "Needs you: the provider keeps failing.",
+        rate_limit: (at: string | null) => `Needs you: rate limited${at ? `, resets ${at}` : ""}.`,
+        auth: () => "Needs you: sign in with the CLI, or replace the key.",
+        quota: () => "Needs you: out of credit.",
+        unexplained_exit: () => "Needs you: the process ended without an error.",
+      } as Record<string, (at: string | null) => string>,
+    },
+    chips: "Workers by provider",
+    usageWarn: (name: string, pct: number, window: string, at: string | null) => `${name} ${pct}% ${window}${at ? ` · resets ${at}` : ""}`,
+    usageWarnLabel: (text: string) => `Usage warning: ${text}`,
+    weekly: "weekly", fiveHour: "this window", daily: "today", credit: "of credit",
+  },
   /** Multi-provider accounts (Settings > Providers). Every model row reads "Model · provider" (H6); no secret is ever worded as shown. */
   accounts: {
     title: "Accounts",

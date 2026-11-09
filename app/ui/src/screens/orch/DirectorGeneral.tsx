@@ -6,7 +6,7 @@
 // Every read and action goes through dgApi (FG-02c's project-keyed shapes, each action with its envelope). Until FG-02c
 // lands the core addresses these by a run of the project (`runId`), so a project with no run yet cannot be asked; the
 // view says so.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, Icon, Kbd, ariaShortcut } from "../../../components/ui/base";
 import { S } from "../../../strings";
@@ -15,12 +15,16 @@ import type { InboxItem, LeadStatus } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
 import { useCommands } from "../../palette";
 import { toHash } from "../../router";
-import { Empty, Problem } from "../states";
+import { Empty, LoadingRows, Problem } from "../states";
+import type { ProposalOverride } from "../../accountsContract";
 import { Home } from "../home/Home";
 import { actionId, dg, envelope, useDgReload } from "./dgApi";
 import type { Outcome, Target } from "./dgApi";
 import { turns } from "./transcript";
 import "./dg.css";
+
+// The per-worker provider editor loads only for a proposal that carries workers (it brings the accounts and pickers with it).
+const ProposalWorkers = lazy(() => import("./ProposalWorkers"));
 
 const WINDOW_ROWS = 400;
 const BUSY_POLL_MS = 2000;
@@ -274,6 +278,9 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
   // One action id per click. After an unknown outcome the same click is retried with the same id, so the core answers
   // it once (it may already have started); any settled answer retires the id.
   const ids = useRef<{ start?: string; dismiss?: string }>({});
+  // The picks the user changed on the workers, to be carried by Start (nothing is sent before).
+  const [overrides, setOverrides] = useState<ProposalOverride[]>([]);
+  const hasWorkers = Array.isArray((item as { workers?: unknown }).workers) && ((item as { workers?: unknown[] }).workers?.length ?? 0) > 0;
   const pending = out?.kind === "pending";
   const settled = out?.kind === "done";
   const act = async (what: "start" | "dismiss") => {
@@ -284,7 +291,7 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
     // display generation); the interim core takes no envelope, so it is null until that read exists. Dismiss is
     // idempotent and expects nothing.
     const env = envelope(target, id, null);
-    const r = what === "start" ? await dg.startProposal(target, env, item) : await dg.dismissProposal(target, env, item);
+    const r = what === "start" ? await dg.startProposal(target, env, item, overrides) : await dg.dismissProposal(target, env, item);
     if (r.kind !== "unknown") ids.current[what] = undefined;
     setOut(r);
   };
@@ -301,6 +308,11 @@ function ProposalCard({ item, target }: { item: InboxItem; target: Target }) {
         {typeof item.rounds === "number" && <><dt>{S.dg.rounds}</dt><dd>{item.rounds}</dd></>}
         {typeof item.generation === "number" && <><dt>{S.views.orch}</dt><dd>{S.dg.fromGeneration(item.generation)}</dd></>}
       </dl>
+      {hasWorkers && (
+        <Suspense fallback={<LoadingRows rows={2} label={S.states.loading} />}>
+          <ProposalWorkers item={item} onOverrides={setOverrides} />
+        </Suspense>
+      )}
       <footer className="v-prop__foot">
         <p role="status" className={out ? `v-prop__out v-prop__out--${out.kind}` : "v-prop__out"}>{out?.text ?? ""}</p>
         <Button size="sm" variant="ghost" disabled={pending || settled} onClick={() => void act("dismiss")}>{S.dg.dismiss}</Button>

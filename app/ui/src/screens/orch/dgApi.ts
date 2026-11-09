@@ -18,6 +18,7 @@ import { S } from "../../../strings";
 import { api, errorText, isIpcError, onChanged } from "../../ipc";
 import type { AskStarted, InboxItem, LeadStatus, NewConversation } from "../../ipc";
 import { normRoot } from "../../projects/adapter";
+import type { ProposalOverride } from "../../accountsContract";
 
 /** Who the commands are for. `projectId` is the core's id (from its own answers); `runId` serves the interim calls. */
 export type Target = { projectId: string | null; runId: string | null };
@@ -54,9 +55,9 @@ export const dg = {
   ask: (t: Target, env: Envelope, text: string): Promise<Result<AskStarted>> => run(() => (t.runId ? api.askLead(t.runId, text) : noRun())),
   newConversation: (t: Target, env: Envelope): Promise<Result<NewConversation>> => run(() => (t.runId ? api.newConversation(t.runId) : noRun())),
   cancel: (t: Target, env: Envelope, askId: string): Promise<Result<unknown>> => run(() => api.cancelAsk(askId)),
-  startProposal: async (t: Target, env: Envelope, item: InboxItem): Promise<Outcome> => {
+  startProposal: async (t: Target, env: Envelope, item: InboxItem, overrides: ProposalOverride[] = []): Promise<Outcome> => {
     if (!item.proposal_sha256) return { kind: "refused", text: S.dg.receipt.changed };
-    const r = await run(() => api.startProposal(item.id, item.proposal_sha256!));
+    const r = await run(() => api.startProposal(item.id, item.proposal_sha256!, overrides));
     return r.ok ? { kind: "done", text: S.dg.receipt.started } : r.outcome;
   },
   dismissProposal: async (t: Target, env: Envelope, item: InboxItem): Promise<Outcome> => {

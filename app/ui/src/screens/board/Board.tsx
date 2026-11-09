@@ -14,6 +14,7 @@ import { useProjectState } from "../../projects/state";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { Empty, LoadingRows, Problem, problemDetail } from "../states";
+import { ProviderLine } from "../ProviderLine";
 
 const LANES: Lane[] = ["backlog", "running", "review", "done"];
 const EVENT_MIN_GAP_MS = 500;
@@ -152,6 +153,7 @@ export function Board() {
                             {c.criteria && <span className="v-num">{S.board.criteria(c.criteria.pass, c.criteria.total)}</span>}
                             {c.owner && <span className="v-card__owner">{c.owner}</span>}
                           </span>
+                          {c.provider && <ProviderLine p={c.provider} />}
                         </button>
                       </li>
                     ))}
