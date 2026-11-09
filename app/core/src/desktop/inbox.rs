@@ -153,7 +153,9 @@ impl App {
     fn inbox_at(&self, now: i64) -> Res {
         let all = self.inbox_all_at(now)?;
         let count = all.len();
-        Ok(json!({"count": count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
+        // The total is "needs you"; the campaign count leaves out run proposals (they live on the Director-General surface).
+        let campaign_count = all.iter().filter(|i| i["kind"] != "run_proposal").count();
+        Ok(json!({"count": count, "campaign_count": campaign_count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
     }
 
     /// Every waiting item, oldest first, with no cut: a caller that counts or picks (a project's projection, the item an
@@ -253,6 +255,8 @@ impl App {
                 items.push((first, id, v));
             }
         }
+        // ADR-15 2.4: runs a Director-General proposed. Their time is the guarded ledger line's own.
+        items.extend(self.proposal_items(now));
         seen.retain(|k, _| waiting.contains(k));
         if seen != before {
             let saved = crate::control::fsx::private_dir(&self.data).and_then(|()| crate::control::fsx::write_atomic(&self.data, SEEN_FILE, &serde_json::to_vec(&seen).unwrap_or_default()));

@@ -17,10 +17,12 @@
 // module's private items. This file keeps the `Service` struct, `open`, `rebuild` and the shared helpers.
 mod actions; // list, inspect, message, redirect, stop, confirm, cancel, resume
 mod asks; // the Lead-ask and plan-decision records
+mod proposals; // ADR-15 2.4: run proposals from a Director-General, started or dismissed by a human
 mod session; // start, resume and end a session; the nonce, redactor and worker list
 mod tools; // the Lead's tool surface (socket calls and their dispatch)
 mod types; // actors, errors, the action model, the ask and decision records, the limits
 mod watcher; // the ack watcher and the thread that ticks it
+pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
 pub use types::*;
 pub use watcher::{Watcher, spawn_watcher};
 
@@ -67,6 +69,8 @@ pub struct Service {
     scope: Option<Vec<String>>,
     /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
     generations: HashMap<String, u32>,
+    /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
+    bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
@@ -96,6 +100,7 @@ impl Service {
             sessions: HashMap::new(),
             scope: None,
             generations: HashMap::new(),
+            bound_project: None,
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,

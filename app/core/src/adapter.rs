@@ -31,6 +31,33 @@ impl Engine {
     }
 }
 
+/// How a harness is authenticated and paid for. Not an engine: Codex under its own login and Codex through a gateway are
+/// one engine on two routes with different billing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// The CLI owns its login.
+    CliLogin,
+    /// A key the user pasted, held in the Keychain.
+    ApiKey,
+    /// A non-secret base URL plus a Keychain key.
+    Gateway,
+}
+
+/// One way of running and paying for agents: an id the preferences name, the harness that runs the worker, and the route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub engine: Engine,
+    pub route: Route,
+}
+
+impl Account {
+    /// The built-in account for an engine under its own login; its id is the engine id.
+    pub fn login(engine: Engine) -> Account {
+        Account { id: engine.id().into(), engine, route: Route::CliLogin }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopKind {
     /// Sticky block through the desktop-control hook; the worker hands back.
@@ -82,8 +109,8 @@ pub fn adapter_for(engine: Engine) -> &'static dyn AgentAdapter {
 struct Claude;
 struct Codex;
 
-const CLAUDE_KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-const CODEX_KEYS: [&str; 2] = ["CODEX_API_KEY", "OPENAI_API_KEY"];
+pub(crate) const CLAUDE_KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+pub(crate) const CODEX_KEYS: [&str; 2] = ["CODEX_API_KEY", "OPENAI_API_KEY"];
 
 fn billing(keys: &[&'static str], env: &dyn Fn(&str) -> Option<OsString>) -> Billing {
     let key_in_app_env = keys.iter().copied().find(|k| env(k).is_some_and(|v| !v.is_empty()));

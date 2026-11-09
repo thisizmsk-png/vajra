@@ -2794,6 +2794,31 @@ fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
 }
 
 #[test]
+fn a_launched_run_belongs_to_its_projects_director_general() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["alpha", "beta"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, Engine::Claude, 2).unwrap();
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, Engine::Claude, 2).unwrap();
+    let (pa, pb) = (orchestrator::project_ref(&r[0]).0, orchestrator::project_ref(&r[1]).0);
+    assert_ne!(pa, pb);
+    assert_eq!(std::fs::read_to_string(t.0.join("data/control/lead").join(RUNS[0]).join("project")).unwrap(), pa, "pinned in the guarded record");
+    {
+        let mut svc = lock(&app.control);
+        svc.set_generation(&pa, 1).unwrap();
+        svc.set_generation("k_00000000000000000000000000000000", 1).unwrap();
+        // Alpha's Director-General has a live session in scope (an unknown worker is "not found"); a project with no
+        // live run has none at all (control is off for it), so nothing falls back to every session.
+        let msg = json!({"worker": "nobody", "text": "x"});
+        assert!(matches!(svc.call_tool_for_project(&pa, 1, "message_worker", &msg), Err(crate::control::service::ControlError::WorkerNotFound)));
+        assert!(matches!(svc.call_tool_for_project("k_00000000000000000000000000000000", 1, "message_worker", &msg), Err(crate::control::service::ControlError::ControlDisabled)));
+    }
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
+
+#[test]
 fn terminal_roots_are_the_run_dirs_of_runs_this_app_started_not_the_worker_writable_index() {
     let t = Tmp::new();
     let app = t.app();
@@ -3288,6 +3313,89 @@ fn a_plain_folder_pin_does_not_block_a_plain_subfolder_but_a_git_pin_still_refus
     assert!(app2.launch_key(&a.join("sub")).is_err());
 }
 
+/// #82 review (P1): an external worktree reached through a symlink inside the main checkout is a run folder whose canonical path
+/// is NOT covered by the checkout. It keeps its secret-file deny rules (supplied and canonical forms both reach the generator).
+#[test]
+fn an_external_worktree_reached_through_a_symlink_keeps_its_secret_file_rules() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    let link = repo.join("wt-link");
+    symlink(&wt, &link).unwrap();
+    let key = caps::project_key(&repo);
+    app.record_run_pinned("20261105-1230", &repo, &repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &link, &wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &repo).unwrap();
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let real_wt = fs::canonicalize(&wt).unwrap();
+    let want = format!("{}/**/.env)", real_wt.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "the external worktree's .env stays denied: {want} in {rules:?}");
+}
+
+/// #82 review (P1): a worktree run launched in a SUBFOLDER (`/repo-wt/src`) guards the whole checkout root, so a root-level or sibling
+/// `.env` is denied too, not only the run's own subfolder.
+#[test]
+fn a_worktree_run_started_in_a_subfolder_guards_the_whole_checkout_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    fs::create_dir_all(wt.join("docs")).unwrap();
+    let key = caps::project_key(&repo);
+    let (real_repo, real_wt) = (fs::canonicalize(&repo).unwrap(), fs::canonicalize(&wt).unwrap());
+    app.record_run_pinned("20261105-1230", &repo, &real_repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &wt.join("src"), &real_wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &repo).unwrap();
+    assert!(folders.contains(&real_wt) || folders.contains(&wt), "the checkout root is guarded: {folders:?}");
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let want = format!("{}/**/.env)", real_wt.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "root-level and sibling secrets of the worktree are denied: {want} in {rules:?}");
+}
+
+/// #82 review (P2): a finished run no longer makes the Director-General "running"; the normal reaper is what ends it.
+#[test]
+fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_reaper() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0, sid, "c", true, 1).unwrap();
+    assert!(app.running_in_project(&orchestrator::project_ref(&t.0).0));
+    app.sup.kill(&stream).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.sup.is_running(&stream).unwrap_or(false) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    app.reap_runs();
+    assert!(lock(&app.runs).contains_key(&stream), "the entry stays for the crew view");
+    assert!(!app.running_in_project(&orchestrator::project_ref(&t.0).0), "but the project is no longer running");
+}
+
+/// #82 review (P2): the project root is the checkout root from the launch-time location, so a submodule first launched from a
+/// subfolder and then from its root pins the same root, never the subfolder.
+#[test]
+fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (parent, child) = (t.0.join("parent"), t.0.join("parent/child"));
+    fs::create_dir_all(parent.join(".git/modules/child")).unwrap();
+    fs::create_dir_all(child.join("src")).unwrap();
+    let key = fs::canonicalize(parent.join(".git/modules/child")).unwrap();
+    let loc = fs::canonicalize(&child).unwrap();
+    let root_of = |run: &str| fs::read_to_string(app.data.join("control/lead").join(run).join(orchestrator::PROJECT_ROOT_FILE)).unwrap();
+    app.record_run_pinned("20261105-1230", &child.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &child, &loc, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert_eq!(root_of("20261105-1230"), loc.to_string_lossy());
+    assert_eq!(root_of("20261105-1231"), loc.to_string_lossy());
+}
+
 /// #80 round 6: a pinned common dir that was replaced by a symlink is no longer the project it was pinned as; it cannot admit a
 /// new location, so a planted `gitdir:` into another project's common dir is refused.
 #[test]
@@ -3431,6 +3539,56 @@ fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_ot
     assert!(app.other_project_roots("20261105-1229", &b).is_ok(), "any guarded record of the key resolves it");
     fs::write(app.data.join("control/lead/20261105-1230/project_main"), "-").unwrap();
     assert!(app.other_project_roots("20261105-1229", &b).is_err(), "an unprotectable checkout refuses the Lead");
+}
+
+/// #82 review: a run whose `project_loc` record EXISTS but cannot be read leaves its checkout root unknown, so the ask is refused rather
+/// than guarding only the run's subfolder. A record with no location at all (the shipped format) is not that case.
+#[test]
+fn an_unreadable_project_loc_of_an_own_run_refuses_instead_of_leaving_the_root_uncovered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    let key = caps::project_key(&repo);
+    let (real_repo, real_wt) = (fs::canonicalize(&repo).unwrap(), fs::canonicalize(&wt).unwrap());
+    app.record_run_pinned("20261105-1230", &repo, &real_repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &wt.join("src"), &real_wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert!(app.own_project_folders("20261105-1230", &repo).is_ok());
+    let loc = app.data.join("control/lead/20261105-1231/project_loc");
+    fs::write(&loc, "not-an-absolute-path").unwrap();
+    let e = app.own_project_folders("20261105-1230", &repo).unwrap_err();
+    assert!(format!("{e:?}").contains("GuardMissing"), "{e:?}");
+    // No location file at all: the shipped format pins nothing, and the run's own folder is still guarded.
+    fs::remove_file(&loc).unwrap();
+    assert!(app.own_project_folders("20261105-1230", &repo).is_ok());
+}
+
+/// #82 review (P1): the same fixture seen from the OWN project: the Director-General's root is the outside worktree, and the recorded
+/// main checkout (`super/sub`, which no run was launched in) gets the secret-file rules too.
+#[test]
+fn a_submodule_run_from_an_outside_worktree_guards_its_own_main_checkouts_secrets() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sup, sub, wt) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("sub-wt"));
+    let git = sup.join(".git/modules/sub");
+    fs::create_dir_all(git.join("worktrees/wt")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(git.join("config"), "[core]\n\tworktree = ../../../sub\n").unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", git.join("worktrees/wt").display())).unwrap();
+    fs::write(git.join("worktrees/wt/commondir"), "../..\n").unwrap();
+    let key = fs::canonicalize(&git).unwrap();
+    let loc = fs::canonicalize(&wt).unwrap();
+    app.record_run_pinned("20261105-1230", &wt, &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &wt).unwrap();
+    let real_sub = fs::canonicalize(&sub).unwrap();
+    assert!(folders.contains(&real_sub), "the recorded main checkout is guarded: {folders:?}");
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let want = format!("{}/**/.env)", real_sub.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "the main checkout's .env is denied: {want} in {rules:?}");
 }
 
 /// #80 sweep, class (a): the guarded records are written before any control state changes, so a record that cannot be written

@@ -232,3 +232,77 @@ export function parseProjectProvider(text: string): ParseResult<ProjectProvider>
   if (!limitsOk(lims)) return bad("invalid", "limits");
   return { ok: true, value: { id: o.id, name: o.name, installed: o.installed, tested, login_state: state, capabilities: caps, limits: lims } };
 }
+
+// ---- `vajra.provider_accounts/1` (types only; the parser arrives with the Providers screen) ----------------------------
+// One record per way of running and paying for agents. There is no field that can hold a key, token or secret, and no
+// rotation field (H7): a stored key is only the boolean `credential.saved`. Unknown states read as "cannot_tell".
+
+export const ACCOUNTS_SCHEMA = "vajra.provider_accounts/1";
+
+export type CredentialSource = "cli_login" | "api_key" | "gateway";
+export type BillingKind = "subscription" | "api_key" | "gateway" | "unknown";
+export type AccountState = "signed_in" | "signed_out" | "not_installed" | "key_saved" | "key_missing" | "cannot_tell";
+
+export interface AccountCredential {
+  source: CredentialSource;
+  /** `api_key` and `gateway` only: whether a key is stored. Never the key, a prefix or a suffix. */
+  saved?: boolean;
+}
+
+/** An API key setting that would bill instead of the subscription: the NAME of the setting and where it was found. */
+export interface OverrideWarning {
+  name: string;
+  found_in: "cli_env_block" | "cli_config" | "cli_api_key_helper";
+}
+
+export interface AccountBilling {
+  kind: BillingKind;
+  /** Only what the CLI itself prints. */
+  account_label: string | null;
+  override_warning: OverrideWarning | null;
+}
+
+export interface AccountModel {
+  /** Opaque; passed straight through to the harness. */
+  id: string;
+  /** Picks the icon. */
+  family: string;
+}
+
+export interface Account {
+  id: string;
+  provider: string;
+  /** The unmodified CLI that runs the worker. */
+  harness: string;
+  credential: AccountCredential;
+  billing: AccountBilling;
+  label: string;
+  state: AccountState;
+  models: AccountModel[];
+}
+
+export interface AccountList {
+  schema: string;
+  accounts: Account[];
+}
+
+/** An account with the model and effort to ask it for; `null` is the CLI's own default. */
+export interface AgentChoice {
+  account: string;
+  model: string | null;
+  effort: string | null;
+}
+
+/** One ceiling entry; a `model` of `null` allows every model on that account. */
+export interface AllowedAgent {
+  account: string;
+  model: string | null;
+}
+
+/** Per-project agent choice (`preferences.agents`). A role with no entry uses `default`. The old `agent` preference reads as
+ *  `{default: {account: agent}, roles: {}, allowed: [{account: agent}]}`. */
+export interface Agents {
+  default: AgentChoice;
+  roles: Record<string, AgentChoice>;
+  allowed: AllowedAgent[];
+}

@@ -454,6 +454,17 @@ impl App {
         lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
     }
 
+    /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
+        let mut v: Vec<_> = lock(&self.runs)
+            .keys()
+            .filter(|s| self.sup.is_running(s).unwrap_or(false))
+            .filter_map(|s| Some(crate::lifecycle_report::RunDiag { stream: s.clone(), pid: self.sup.pid(s).ok()? }))
+            .collect();
+        v.sort_by(|a, b| a.stream.cmp(&b.stream));
+        v
+    }
+
     /// End the control session once its run's PTY exited, so the Lead cannot
     /// queue to its workers (their messages expire). The run stays in `runs`:
     /// its crew view still reads its workers.
@@ -552,6 +563,11 @@ impl App {
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
+            // The run's project's Director-General sees and steers it (ADR-15 2.3).
+            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref_of(&key, &loc).0) {
+                svc.end_session(session_id);
+                return Err(e.to_json());
+            }
             let n = if rotate { ctl(svc.resume_session(session_id)) } else { Ok(svc.nonce(session_id).unwrap_or_default()) };
             match n {
                 Ok(n) => n.to_string(),
@@ -617,7 +633,7 @@ impl App {
     }
 
     fn provider_probe(&self) -> crate::providers::detect::System {
-        crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs))
+        crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs)).with_home(self.home.clone())
     }
 
     /// `provider_list` (`vajra.providers/1`): every adapter with its install state, version, capabilities and the
@@ -627,6 +643,13 @@ impl App {
         let v = serde_json::to_value(&l).map_err(|e| fail("internal", e))?;
         *lock(&self.provider_cache) = Some(l);
         Ok(v)
+    }
+
+    /// `provider_accounts` (`vajra.provider_accounts/1`): one record per way of running agents, each CLI under its own
+    /// login, with the billing the CLI reports and a warning when its own config holds an API key setting that would
+    /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
+    pub fn provider_accounts(&self) -> Res {
+        serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
     }
 
     /// The last `provider_list` answer, or `None` before the first. Never runs a process.
@@ -1894,6 +1917,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod orchestrator;
+mod proposals;
 mod inbox;
 mod projects;
 mod wfresult;

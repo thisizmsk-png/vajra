@@ -7,6 +7,7 @@ import { Shell } from "../src/Shell";
 import { useRoute } from "../src/router";
 import { REGISTRY } from "../src/screens/registry";
 import { projectId } from "../src/projects/adapter";
+import { inboxBadge } from "../src/shell/ViewTabs";
 import { S } from "../strings";
 import { DEFAULT_PREFERENCES } from "../src/preferenceContract";
 
@@ -234,14 +235,80 @@ describe("Shell B frame (FG-03)", () => {
   });
 });
 
+describe("The Inbox tab counts campaign items only: run proposals live on the Director-General surface", () => {
+  const item = (id: string, kind: string) => ({ id, kind, campaign: kind === "run_proposal" ? undefined : "api-1", origin: "app", created: "", age_s: 1, title: id, body: "", actions: [] }) as never;
+  const proposal = { id: "proposal:1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "", age_s: 1, title: "Start a run?", body: "", ask: "do it", base: "main", rounds: 2, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
+  const inboxTab = () => screen.getByRole("link", { name: new RegExp(`^${S.views.inbox}`) });
+
+  it("counts a full list exactly, leaving proposals out; a cut list always says '+'; a full list with nothing to count shows nothing", () => {
+    expect(inboxBadge([item("p", "plan"), item("q", "question"), item("r", "run_proposal")], 3)).toBe("2");
+    expect(inboxBadge([item("p", "plan"), item("r", "run_proposal")], 40)).toBe("1+");
+    expect(inboxBadge([item("r", "run_proposal")], 1)).toBe("");
+    // A cut list whose sent items are all proposals may still hide campaign items: it says so, never nothing.
+    expect(inboxBadge([item("r", "run_proposal")], 9)).toBe("+");
+    expect(inboxBadge([], 5)).toBe("+");
+    expect(inboxBadge([], 0)).toBe("");
+  });
+
+  it("uses the core's campaign-only count exactly when it sends one, past the cut and with proposals left out", () => {
+    expect(inboxBadge([item("p", "plan"), item("r", "run_proposal")], 120, 57)).toBe("57");
+    expect(inboxBadge([item("r", "run_proposal")], 9, 0)).toBe("");
+    expect(inboxBadge([item("p", "plan"), item("q", "question"), item("r", "run_proposal")], 3, 2)).toBe("2");
+  });
+
+  it("Given the core sends campaign_count with a cut list, Then the tab gives that exact number, not a '+'", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 120, campaign_count: 57, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 57`));
+  });
+
+  it("Given the fixture's plan, question and proposal, Then the tab reads Inbox 2, while the project still counts all three as needing you", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 3, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2`));
+    expect(tabs().getByText(S.frame.needsYou(3))).toBeTruthy();
+  });
+
+  it("Given only a run proposal waiting, Then the Inbox tab shows no count", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 1, items: [proposal] } });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "inbox")).toBe(true));
+    await waitFor(() => expect(inboxTab().textContent).toBe(S.views.inbox));
+  });
+
+  it("Given more waiting than the core sends, Then the tab gives the campaign count it has with a '+', not a wrong exact number", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 120, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2+`));
+  });
+});
+
 describe("Preferences inside a project the core has not registered (PR 100 review)", () => {
   const view = { schema: "vajra.preferences/1", rev: 0, project_id: null, caps: { active_runs: 1, workers_per_run: 16, editable: false }, global: { ...DEFAULT_PREFERENCES }, overrides: {}, effective: { ...DEFAULT_PREFERENCES }, sources: Object.fromEntries(Object.keys(DEFAULT_PREFERENCES).map((k) => [k, "global"])) };
   it("Given a folder-derived project id, Then preferences are read as global defaults and Start is not blocked", async () => {
     // The core refuses any project scope that is not a T1 id, as the real store does.
-    boot(`#/p/${API}/orch`, { preflight: { rows: [], start_enabled: true }, preferences_read: (a?: Record<string, unknown>) => a?.projectId ? Promise.reject(new Error("invalid_project")) : view });
+    boot(`#/p/${API}/launch`, { preflight: { rows: [], start_enabled: true }, preferences_read: (a?: Record<string, unknown>) => a?.projectId ? Promise.reject(new Error("invalid_project")) : view });
     await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "preferences_read")).toBe(true));
     expect(ipc.calls.filter((c) => c.cmd === "preferences_read").map((c) => c.args?.projectId ?? null)).toEqual(expect.arrayContaining([null]));
     expect(ipc.calls.some((c) => c.cmd === "preferences_read" && c.args?.projectId)).toBe(false);
     await waitFor(() => expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true"));
+  });
+});
+
+describe("Run proposals of a registered project come from its own projection (#90 review)", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const registered = { project_list: { projects: [{ schema: "vajra.project/1", id: T, name: "Harbor API", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 2 }], skipped: 0, truncated: false } };
+  const proposal = { id: "proposal:new", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "", age_s: 1, title: "Start a run?", body: "Ship the new limits", ask: "Ship the new limits", base: "main", rounds: 1, project_id: T, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
+  // The global read is full of older items and its cut left the new proposal out.
+  const full = { count: 251, campaign_count: 250, items: Array.from({ length: 200 }, (_, i) => ({ id: `task:fill-${i}.t1`, kind: "task", campaign: "api-1", project_id: T, origin: "app", created: "", age_s: 900, title: `filler ${i}`, body: "", actions: ["open"] })) };
+  const state = (proposals: unknown) => ({ schema: "vajra.project_state/1", project_id: T, rev: 7, unchanged: false, active_runs: 0, generations: { project: 1 }, workers: [], receipts: [], inbox: { ok: true, count: 251, items: [] }, proposals });
+
+  it("Given the inbox cut left a new proposal out, Then the Director-General still shows it", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, inbox: full, project_state: state({ ok: true, count: 1, more: 0, items: [proposal] }) });
+    const region = await screen.findByRole("region", { name: S.dg.proposals });
+    expect(within(region).getByText("Ship the new limits")).toBeTruthy();
+    expect(ipc.calls.some((c) => c.cmd === "project_state" && c.args?.projectId === T)).toBe(true);
+  });
+
+  it("Given the projection's proposals could not be read, Then the inbox is the fallback, never an empty list", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, inbox: { count: 1, items: [proposal] }, project_state: state({ ok: false, error: "io_error" }) });
+    const region = await screen.findByRole("region", { name: S.dg.proposals });
+    expect(within(region).getByText("Ship the new limits")).toBeTruthy();
   });
 });

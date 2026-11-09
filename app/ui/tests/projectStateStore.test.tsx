@@ -29,7 +29,7 @@ describe("useProjectState", () => {
     setTransport(f.transport);
     render(<Probe id="p_1" />);
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 10, failed: false });
+    expect(renders.at(-1)).toEqual({ rev: 10, failed: false, proposals: null });
     expect(stateCalls(f.calls)).toHaveLength(1);
   });
 
@@ -102,12 +102,35 @@ describe("useProjectState", () => {
     setTransport(f.transport);
     render(<Probe id="p_1" />);
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: null, failed: true });
+    expect(renders.at(-1)).toEqual({ rev: null, failed: true, proposals: null });
     await tick(600);
     bad = false;
     f.emit("changed", { streams: ["workers"], snapshot_needed: false });
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 20, failed: false });
+    expect(renders.at(-1)).toEqual({ rev: 20, failed: false, proposals: null });
+  });
+
+  it("keeps the proposals it has through a failed refresh, so recovery at the same revision still shows them (#90 review)", async () => {
+    const item = { id: "proposal:a", kind: "run_proposal", origin: "app", created: "", age_s: 1, title: "Start a run?", body: "go", actions: ["start", "dismiss"] };
+    let mode: "full" | "bad" | "same" = "full";
+    const f = fakeIpc({ project_state: () => {
+      if (mode === "bad") throw { error: "io_error" };
+      return mode === "same" ? same(30) : { ...full(30), proposals: { ok: true, count: 1, more: 0, items: [item] } };
+    } });
+    setTransport(f.transport);
+    render(<Probe id="p_1" />);
+    await flush();
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item] });
+    await tick(600);
+    mode = "bad";
+    f.emit("changed", { streams: ["workers"], snapshot_needed: false });
+    await flush();
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: true, proposals: [item] });
+    await tick(600);
+    mode = "same";
+    f.emit("changed", { streams: ["workers"], snapshot_needed: false });
+    await flush();
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item] });
   });
 
   it("lets go of the subscription when the last user unmounts", async () => {
@@ -125,6 +148,6 @@ describe("useProjectState", () => {
     render(<Probe id={null} />);
     await flush();
     expect(f.calls).toHaveLength(0);
-    expect(renders.at(-1)).toEqual({ rev: null, failed: false });
+    expect(renders.at(-1)).toEqual({ rev: null, failed: false, proposals: null });
   });
 });

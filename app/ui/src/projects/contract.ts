@@ -1,7 +1,7 @@
 // The project shapes the shell reads. The contract itself is T1's `src/projectContract.ts` (the TS mirror of the core's
-// `vajra.project/1` and `vajra.session/1`); these are the UI's views of it. Until the core serves `project_list`,
-// `adapter.ts` derives them from today's campaign, crew and inbox commands; then its loaders call the core and the
-// shell's components do not change.
+// `vajra.project/1` and `vajra.session/1`); these are the UI's views of it. Registered projects come from the core's
+// `project_list` (#77) with their T1 ids; `adapter.ts` adds a folder placeholder for runs whose folder is not
+// registered yet, and the Unsorted bucket for runs with no folder.
 import type { StatusKey } from "../../strings";
 import type { Project as ContractProject, SessionStatus } from "../projectContract";
 
@@ -11,14 +11,16 @@ export type ProjectId = ContractProject["id"];
 /**
  * A contract project as the shell shows it. Until `project_list` lands the adapter has no `root_key` (the core's
  * dev/ino identity) and records `root` as the run recorded it, not canonicalised. `bucket: "unsorted"` is ADR-15
- * §1.5's Imported group: campaigns with no recorded folder, so `root` is null. The adapter's ids are `p_<8 hex>`
- * placeholders, not the core's ULID-style ids; they are never sent to the core.
+ * §1.5's Imported group: campaigns with no recorded folder, so `root` is null. A placeholder's id is `p_<8 hex>`, not
+ * the core's ULID-style id, and is never sent to the core; `registered` marks a T1 id.
  */
 export type Project = Pick<ContractProject, "schema" | "id" | "name" | "rev"> & {
   root: string | null;
   created: string | null;
   archived: ContractProject["archived"];
   bucket?: "unsorted";
+  /** A project from the core's store (#77): its id is the T1 id and may be sent to the core. Placeholders lack this. */
+  registered?: true;
 };
 
 /** One row of a project's history: a campaign run, until the core lists sessions itself. */
