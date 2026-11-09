@@ -419,12 +419,12 @@ fn valid_time(t: &str) -> Result<(), ContractError> {
     time::parse_iso(t).map(|_| ()).ok_or(ContractError::Invalid("timestamp"))
 }
 
-fn valid_provider(p: &str) -> bool {
+pub(crate) fn valid_provider(p: &str) -> bool {
     !p.is_empty() && p.len() <= 32 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// A campaign slug or task id: short, printable, no separators.
-fn valid_label(s: &str) -> bool {
+pub(crate) fn valid_label(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') && !s.starts_with('.')
 }
 
