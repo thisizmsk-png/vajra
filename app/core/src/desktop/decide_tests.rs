@@ -1025,13 +1025,13 @@ fn a_folder_no_project_owns_is_unsorted_and_stays_so() {
 fn act_reject_plan_runs_once_and_replays() {
     let t = Tmp::new();
     let app = t.app();
-    ready(&t, &app);
+    let sha0 = ready(&t, &app);
     let log = t.campaign_script(0);
     let e = act_env("rej-0001-aaaa", None, &my_project(&app, &t));
-    let first = app.act_reject_plan(&e, PLAN, "too risky", None);
+    let first = app.act_reject_plan(&e, PLAN, "too risky", &sha0);
     assert_eq!(first["receipt"]["state"], "done", "{first}");
     assert_eq!(first["receipt"]["action"], "reject_plan");
-    let again = app.act_reject_plan(&e, PLAN, "too risky", None);
+    let again = app.act_reject_plan(&e, PLAN, "too risky", &sha0);
     assert_eq!((again["replayed"].clone(), again["receipt"].clone()), (json!(true), first["receipt"].clone()));
     let args = fs::read_to_string(log).unwrap();
     assert_eq!(args.matches("--end").count(), 1, "the progress script ran once: {args}");
@@ -1047,12 +1047,12 @@ fn act_reject_plan_with_a_stale_generation_is_refused_before_it_runs() {
     let sha = ready(&t, &app);
     let log = t.campaign_script(0);
     let stale = "f".repeat(64);
-    let r = app.act_reject_plan(&act_env("rej-0002-bbbb", None, &my_project(&app, &t)), PLAN, "no", Some(&stale));
+    let r = app.act_reject_plan(&act_env("rej-0002-bbbb", None, &my_project(&app, &t)), PLAN, "no", &stale);
     assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("stale_generation")), "{r}");
     assert!(!log.exists() && states(&t, "reject").is_empty(), "nothing ran");
     // The hash prefix is a 64-bit number far above 2^53 (what a JS number holds exactly): it crosses IPC as the string.
     assert!(u64::from_str_radix(&sha[..16], 16).unwrap() > 1 << 53);
-    assert_eq!(app.act_reject_plan(&act_env("rej-0003-cccc", None, &my_project(&app, &t)), PLAN, "no", Some(&sha))["receipt"]["state"], "done");
+    assert_eq!(app.act_reject_plan(&act_env("rej-0003-cccc", None, &my_project(&app, &t)), PLAN, "no", &sha)["receipt"]["state"], "done");
 }
 
 // Given a plan already decided, a new reject action is refused with the core's reason; a bad reason is invalid_args.
@@ -1060,13 +1060,13 @@ fn act_reject_plan_with_a_stale_generation_is_refused_before_it_runs() {
 fn act_reject_plan_refusals_are_receipts_with_their_codes() {
     let t = Tmp::new();
     let app = t.app();
-    ready(&t, &app);
+    let sha0 = ready(&t, &app);
     t.campaign_script(0);
     let p = my_project(&app, &t);
-    let bad = app.act_reject_plan(&act_env("rej-0004-dddd", None, &p), PLAN, "   ", None);
+    let bad = app.act_reject_plan(&act_env("rej-0004-dddd", None, &p), PLAN, "   ", &sha0);
     assert_eq!((bad["receipt"]["state"].as_str(), bad["receipt"]["reason"].as_str()), (Some("rejected"), Some("invalid_args")));
-    assert_eq!(app.act_reject_plan(&act_env("rej-0005-eeee", None, &p), PLAN, "no", None)["receipt"]["state"], "done");
-    let twice = app.act_reject_plan(&act_env("rej-0006-ffff", None, &p), PLAN, "no again", None);
+    assert_eq!(app.act_reject_plan(&act_env("rej-0005-eeee", None, &p), PLAN, "no", &sha0)["receipt"]["state"], "done");
+    let twice = app.act_reject_plan(&act_env("rej-0006-ffff", None, &p), PLAN, "no again", &sha0);
     assert_eq!(twice["receipt"]["reason"], "already_decided");
 }
 
@@ -1166,14 +1166,14 @@ fn rejecting_a_plan_that_changed_after_the_last_read_is_refused_without_effect()
     // Plan B replaces the file (a later result, same index 0, different content); nobody reads the inbox.
     let b = json!([{"action": "deploy", "why": "a different plan", "plan": deploy_plan()}, {"action": "push", "why": "ship"}]);
     t.result_at("wf_b.json", &done(CAMP, b), RUN, 120);
-    let r = app.act_reject_plan(&act_env("rej-3000-aaaa", None, &my_project(&app, &t)), PLAN, "no", Some(&sha_a));
+    let r = app.act_reject_plan(&act_env("rej-3000-aaaa", None, &my_project(&app, &t)), PLAN, "no", &sha_a);
     assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("stale_generation")), "{r}");
     assert!(r["receipt"]["current_generation"].is_number(), "the receipt names the plan's current generation");
     assert!(!log.exists() && states(&t, "reject").is_empty(), "no progress call, no decision line");
     // After a read the human sees B; rejecting with B's generation works.
     let sha_b = item(&app.inbox().unwrap(), PLAN)["plan_sha256"].as_str().unwrap().to_string();
     assert_ne!(sha_a, sha_b);
-    assert_eq!(app.act_reject_plan(&act_env("rej-3001-bbbb", None, &my_project(&app, &t)), PLAN, "no", Some(&sha_b))["receipt"]["state"], "done");
+    assert_eq!(app.act_reject_plan(&act_env("rej-3001-bbbb", None, &my_project(&app, &t)), PLAN, "no", &sha_b)["receipt"]["state"], "done");
 }
 
 // Given a successful inbox read and then a failed one, When the caller holds the last good revision, Then it is NOT told
@@ -1198,4 +1198,21 @@ fn a_failed_inbox_read_moves_the_revision_and_so_does_recovery() {
     assert!(bad_rev > rev);
     let back = app.project_state(&mine, Some(bad_rev)).unwrap();
     assert_eq!((back["unchanged"].clone(), back["inbox"]["ok"].clone()), (json!(false), json!(true)), "recovery is seen too");
+}
+
+// A reject without the hash the human read is refused up front (it would reject whichever plan is current, unseen):
+// missing, short and non-hex hashes are rejected/invalid_args with no effect.
+#[test]
+fn reject_without_the_plan_hash_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sha = ready(&t, &app);
+    let log = t.campaign_script(0);
+    let p = my_project(&app, &t);
+    for (i, bad) in ["", "abc", &"g".repeat(64), &sha[..63]].into_iter().enumerate() {
+        let r = app.act_reject_plan(&act_env(&format!("rej-6000-{i:04}"), None, &p), PLAN, "no", bad);
+        assert_eq!((r["receipt"]["state"].as_str(), r["receipt"]["reason"].as_str()), (Some("rejected"), Some("invalid_args")), "{bad:?}: {r}");
+    }
+    assert!(!log.exists() && states(&t, "reject").is_empty(), "no progress call, no decision line");
+    assert_eq!(app.act_reject_plan(&act_env("rej-6001-aaaa", None, &p), PLAN, "no", &sha)["receipt"]["state"], "done");
 }

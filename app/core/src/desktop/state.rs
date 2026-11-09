@@ -247,13 +247,19 @@ impl App {
     }
 
     /// Reject plan `id` with a reason, through a receipt. Pass the `plan_sha256` the human read (as `act_approve_plan` does,
-    /// as a string so no precision is lost crossing JSON): a plan that is not that exact one now is refused as stale, before
+    /// as a string so no precision is lost crossing JSON): required: a missing or malformed hash is refused as invalid, and a plan that is not that exact one now is refused as stale, before
     /// any ledger line or progress call. The generation the receipt guards on is derived from the hash here, as an exact u64.
-    pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str, plan_sha256: Option<&str>) -> Value {
+    pub fn act_reject_plan(&self, env: &Envelope, id: &str, reason: &str, plan_sha256: &str) -> Value {
         let shown = lock(&self.shown).get(id).and_then(|s| sha_generation(s));
         let mut env = env.clone();
-        env.expect_generation = env.expect_generation.or_else(|| plan_sha256.and_then(sha_generation));
-        self.act(&env, Caller::Ui, true, "reject_plan", id, shown, || self.reject_plan_expecting(id, reason, plan_sha256))
+        env.expect_generation = env.expect_generation.or_else(|| sha_generation(plan_sha256));
+        self.act(&env, Caller::Ui, true, "reject_plan", id, shown, || {
+            // Required: a reject without the hash the human read would reject whichever plan is current, unseen.
+            if plan_sha256.len() != 64 || !plan_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(super::invalid("plan_sha256", "the plan hash you read is required (64 hex chars)"));
+            }
+            self.reject_plan_expecting(id, reason, Some(plan_sha256))
+        })
     }
 
     /// Answer a waiting task (a question or a block) from the inbox: the text goes to that task's worker as a control
