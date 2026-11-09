@@ -190,6 +190,8 @@ pub struct App {
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
+    keys: crate::providers::keychain::Keys,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -291,6 +293,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
+            // A test build never reaches the real Keychain: its default `security` path does not exist.
+            keys: crate::providers::keychain::Keys::cli(
+                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
+                home,
+            ),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -650,6 +657,28 @@ impl App {
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
         serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
+    pub fn provider_key_saved(&self, account: &str) -> Res {
+        key_state(account, self.keys.saved(account))
+    }
+
+    /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
+    pub fn provider_key_save(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_replace`: overwrite the stored key (or store the first one).
+    pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
+    pub fn provider_key_remove(&self, account: &str) -> Res {
+        key_state(account, self.keys.remove(account).map(|()| false))
     }
 
     /// The last `provider_list` answer, or `None` before the first. Never runs a process.
@@ -1853,6 +1882,14 @@ fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
             Outcome::Verdict(false, Some(reason("refused", Some(reason_detail(first, home)), None)))
         }
         _ => Outcome::Verdict(false, Some(output_failure(o, home))),
+    }
+}
+
+/// The answer of every `provider_key_*` command: a `KeyState` or a fixed error. Never echoes input.
+fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) -> Res {
+    match r {
+        Ok(saved) => serde_json::to_value(crate::providers::contract::KeyState { account: account.into(), saved }).map_err(|e| fail("internal", e)),
+        Err(e) => Err(fail(e.code(), e.detail())),
     }
 }
 
