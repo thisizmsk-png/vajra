@@ -101,6 +101,7 @@ fn one_active_run_per_project() {
         .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let cwd = t.0.join("repo").to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let held = app.start_run(input, &cwd).unwrap_err();
@@ -2976,4 +2977,96 @@ fn the_login_check_runs_only_when_provider_list_is_called_and_is_cached_otherwis
     }
     assert_eq!(runs(), 1, "no idle work");
     assert_eq!(app.provider_cached().unwrap().providers[0].login.state, crate::providers::contract::LoginState::SignedIn);
+}
+
+
+// ---- #80 review: a run's project is the one pinned at launch, never re-read from the worker-writable `.git`
+
+/// A `.git` the project store accepts (HEAD and objects), and a linked worktree of it with its back-link, as git makes.
+fn store_git(dir: &Path) {
+    fs::create_dir_all(dir.join(".git/objects")).unwrap();
+    fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+}
+
+fn store_worktree(repo: &Path, wt: &Path, name: &str) {
+    let gd = repo.join(".git/worktrees").join(name);
+    fs::create_dir_all(&gd).unwrap();
+    fs::create_dir_all(wt).unwrap();
+    fs::write(gd.join("commondir"), "../..\n").unwrap();
+    fs::write(gd.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+}
+
+#[test]
+fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, wt) = (t.0.join("a"), t.0.join("b"), t.0.join("a-wt"));
+    store_git(&a);
+    store_git(&b);
+    store_worktree(&a, &wt, "a-wt");
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap(); // pinned to A at launch
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
+    // A worker of the active run re-links its worktree to B (a full, back-linked worktree of B).
+    store_worktree(&b, &wt, "a-wt");
+    assert_eq!(app.projects.find_by_path(&wt).unwrap().map(|p| p.id), Some(pb.clone()), "the rewrite took: the folder now looks like B's");
+    assert_eq!(app.launch_project(&wt).unwrap().id, pa, "a resume in the worktree keeps A");
+    let busy = app.within_caps(&pa, 1).unwrap_err();
+    assert_eq!(busy["reason"], "project_busy", "A is still busy: {busy}");
+    app.within_caps(&pb, 1).expect("B is still eligible");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn an_active_run_with_no_recorded_project_holds_every_start() {
+    let t = Tmp::new();
+    let app = t.app();
+    let elsewhere = test_project(&t.0.join("data"), &t.home(), &t.0.join("elsewhere"));
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
+    let e = app.within_caps(&elsewhere, 1).unwrap_err();
+    assert_eq!(code(&e), "project_not_recorded", "{e}");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn a_symlink_alias_of_a_pinned_folder_reuses_its_pinned_project_after_a_git_rewrite() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, wt, alias) = (t.0.join("a"), t.0.join("b"), t.0.join("a-wt"), t.0.join("a-wt-alias"));
+    store_git(&a);
+    store_git(&b);
+    store_worktree(&a, &wt, "a-wt");
+    symlink(&wt, &alias).unwrap();
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    app.record_run("20261105-1230", &wt, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    // A worker re-links the worktree to B.
+    store_worktree(&b, &wt, "a-wt");
+    assert_eq!(app.projects.find_by_path(&alias).unwrap().map(|p| p.id), Some(pb), "the rewrite took, seen through the alias");
+    assert_eq!(app.launch_project(&alias).unwrap().id, pa, "a resume through the alias keeps A");
+    assert_eq!(app.launch_project(&wt).unwrap().id, pa);
+}
+
+#[test]
+fn recorded_runs_of_one_folder_that_disagree_on_its_project_refuse_the_launch() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, alias) = (t.0.join("a"), t.0.join("a-alias"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    symlink(&a, &alias).unwrap();
+    test_project(&t.0.join("data"), &t.home(), &a);
+    let other = test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_as("20261105-1231", &alias, Some(&other), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap();
+    let e = app.launch_project(&a).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
