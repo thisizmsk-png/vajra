@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
+import { RunProvider } from "../ProviderControls";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
 import { api, onChanged } from "../../ipc";
@@ -162,6 +163,8 @@ export function Crew() {
       {target && <span className="v-crew__id">{target.runId}</span>}
     </header>
   );
+  // A run on another provider names it, and what it cannot do there (FG-09 G6); keyed so a new run never shows the old one's.
+  const provider = target ? <RunProvider key={target.slug} slug={target.slug} /> : null;
   // Nothing to show yet: no run, a crew that could not be read, or one on its way. Each says so in words.
   if (!root) {
     // The problem stays up while it asks again; an answer clears it, so a retry that fails the same way still shows.
@@ -169,6 +172,7 @@ export function Crew() {
     return (
       <div className="v-screen v-crew">
         {head()}
+        {provider}
         <div className="v-screen__body v-crew__state">
           {err ? <Problem title={S.crew.failed} detail={err} retry={retry} />
             : target === null ? (
@@ -186,6 +190,7 @@ export function Crew() {
   return (
     <div className="v-screen v-crew">
       {head(run?.title)}
+      {provider}
       {err && <div role="alert" className="v-crew__err"><Text variant="body-sm">{S.crew.failed} {err}</Text></div>}
       <div className="v-crew__body">
         <div className="v-crew__tree">

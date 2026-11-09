@@ -839,7 +839,7 @@ fn mcp_initialize_list_and_call() {
     assert_eq!(out[0]["result"]["protocolVersion"], "2025-06-18");
     assert!(out[0]["result"]["capabilities"]["tools"].is_object());
     let names: Vec<&str> = out[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker"]);
+    assert_eq!(names, ["list_workers", "inspect_worker", "message_worker", "redirect_worker", "stop_worker", "propose_run"]);
     for t in out[1]["result"]["tools"].as_array().unwrap() {
         assert_eq!(t["inputSchema"]["additionalProperties"], false);
     }
@@ -1019,4 +1019,70 @@ fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
     assert_eq!(call(Some(RUN), "list_workers", json!({}))["structuredContent"]["error"], "run_not_current");
     // A malformed binding is refused, not ignored.
     assert_eq!(call(Some("../x"), "list_workers", json!({}))["structuredContent"]["error"], "invalid_args");
+}
+
+#[test]
+fn director_general_mcp_calls_are_bound_to_project_and_generation() {
+    const PROJ: &str = "k_0123456789abcdef0123456789abcdef";
+    let h = Home::new();
+    let mut started = started(&h);
+    started.set_project(SID, PROJ).unwrap();
+    started.set_generation(PROJ, 3).unwrap();
+    let svc = Arc::new(Mutex::new(started));
+    let sock = short_sock();
+    let listener = socket::bind(&sock).unwrap();
+    let srv = svc.clone();
+    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    let call = |c: &mut SocketClient, tool: &str| -> Value {
+        let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}}));
+        let mut out = Vec::new();
+        mcp::serve(Cursor::new(input), &mut out, c).unwrap();
+        serde_json::from_str::<Value>(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap()["result"].clone()
+    };
+    // The environment the app writes into the Director-General's mcp.json.
+    let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| std::ffi::OsString::from(*v));
+    let mut current = SocketClient::from_env(&sock, env(&[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "3")])).unwrap();
+    let r = call(&mut current, "list_workers");
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["workers"].as_array().unwrap().len(), 2);
+    // A replaced conversation (older generation) gets nothing.
+    let mut stale = SocketClient::from_env(&sock, env(&[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "2")])).unwrap();
+    assert_eq!(call(&mut stale, "list_workers")["structuredContent"]["error"], "stale_generation");
+    // Another project, even at the right generation number, gets nothing.
+    let mut other = SocketClient::for_project(&sock, "k_ffffffffffffffffffffffffffffffff", 3);
+    assert_eq!(call(&mut other, "list_workers")["structuredContent"]["error"], "stale_generation");
+    // A partial or malformed binding is a refusal to start, never "unbound".
+    for bad in [
+        &[(mcp::PROJECT_ENV, PROJ)][..],
+        &[(mcp::GEN_ENV, "3")][..],
+        &[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "x")][..],
+        &[(mcp::PROJECT_ENV, "p_nope"), (mcp::GEN_ENV, "3")][..],
+        &[(mcp::PROJECT_ENV, PROJ), (mcp::GEN_ENV, "3"), (mcp::RUN_ENV, RUN)][..],
+    ] {
+        let pairs: Vec<(String, String)> = bad.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let got = SocketClient::from_env(&sock, |k| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.into()));
+        assert!(got.is_err(), "{bad:?}");
+    }
+    // A raw request that names both a run and a project, or a project without a generation, is refused.
+    // An explicit null is a value, not an omitted key (#81 review): with one live session, a null-only binding would
+    // otherwise be served as unbound.
+    for req in [
+        json!({"tool": "list_workers", "run": RUN, "project": PROJ, "generation": 3}),
+        json!({"tool": "list_workers", "project": PROJ}),
+        json!({"tool": "list_workers", "project": null, "generation": null}),
+        json!({"tool": "list_workers", "project": null}),
+        json!({"tool": "list_workers", "generation": null}),
+        json!({"tool": "list_workers", "run": null}),
+        json!({"tool": "list_workers", "project": PROJ, "generation": null}),
+        json!({"tool": "list_workers", "project": null, "generation": 3}),
+        json!({"tool": "list_workers", "run": RUN, "project": null, "generation": null}),
+        json!({"tool": "list_workers", "run": null, "project": PROJ, "generation": 3}),
+        json!({"tool": "message_worker", "args": {"worker": AID, "text": "hi"}, "project": null, "generation": null}),
+    ] {
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "{req}").unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(s), &mut line).unwrap();
+        assert!(line.contains("invalid_args"), "{req}: {line}");
+    }
 }

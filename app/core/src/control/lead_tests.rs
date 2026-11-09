@@ -339,3 +339,26 @@ fn deny_rules_not_injectable() {
         assert!(!std::fs::read_to_string(&f).unwrap().contains(&needle), "{} builds a Read rule outside the generator", f.display());
     }
 }
+
+/// ADR-15 D8: every other project's folder is denied as a whole, in both spellings, on top of the usual rules.
+#[test]
+fn other_project_folders_are_denied_as_a_whole() {
+    let t = tmp("others");
+    let (home, repo, data, other) = (t.join("home"), t.join("repo"), t.join("data"), t.join("other"));
+    for d in [&home, &repo, &data, &other] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let base = ls::deny_rules(&home, &repo, &data).unwrap();
+    let with = ls::deny_rules_with(&home, &repo, &data, std::slice::from_ref(&other)).unwrap();
+    assert!(base.iter().all(|r| with.contains(r)), "the usual rules stay");
+    let real = std::fs::canonicalize(&other).unwrap();
+    assert!(with.contains(&format!("Read(/{}/**)", real.display())), "{with:#?}");
+    assert!(with.contains(&format!("Read(/{}/**)", other.display())), "the given spelling too");
+    assert_eq!(ls::deny_rules_with(&home, &repo, &data, &[]).unwrap(), base);
+    let s: serde_json::Value = serde_json::from_str(&ls::settings_with(&home, &repo, &data, std::slice::from_ref(&other)).unwrap()).unwrap();
+    assert!(s["permissions"]["deny"].as_array().unwrap().iter().any(|r| r.as_str() == Some(&format!("Read(/{}/**)", real.display()))));
+    // A folder a rule cannot express fails closed instead of being skipped.
+    let odd = t.join("odd[1]");
+    std::fs::create_dir_all(&odd).unwrap();
+    assert_eq!(ls::deny_rules_with(&home, &repo, &data, &[odd]).unwrap_err().code(), "lead_guard_missing");
+}

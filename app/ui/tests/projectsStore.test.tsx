@@ -34,4 +34,35 @@ describe("ProjectsProvider", () => {
     await act(async () => { failOld(new Error("socket closed")); });
     expect(screen.getByText("ok:new:none")).toBeTruthy();
   });
+
+  it("Given a run proposal waits, When the inbox loads, Then inboxCampaignCount leaves it out and inboxCount keeps the total", async () => {
+    const f = fakeIpc({
+      list_campaigns: { campaigns: [] },
+      resume_targets: { targets: {} },
+      active_runs: { runs: [] },
+      inbox: { count: 2, campaign_count: 1, items: [
+        { id: "task:c.t1", kind: "task", campaign: "c", title: "t", detail: "", status: "blocked", since: "2026-11-01T00:00:00Z" },
+        { id: "proposal:01JC3H0000000000000000PRP1", kind: "run_proposal", title: "Start a run?", project_id: "p_unsorted" },
+      ] },
+    });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Probe /></ProjectsProvider>);
+    await screen.findByText(/^ok:/);
+    expect(view!.inboxCount).toBe(2);
+    expect(view!.inboxCampaignCount).toBe(1);
+  });
+
+  it("Given more waiting than the core sends, When the inbox loads, Then inboxCount is the core total, not the cut list", async () => {
+    const f = fakeIpc({
+      list_campaigns: { campaigns: [] },
+      resume_targets: { targets: {} },
+      active_runs: { runs: [] },
+      inbox: { count: 350, items: [{ id: "task:c.t1", kind: "task", campaign: "c", title: "t", detail: "", status: "blocked", since: "2026-11-01T00:00:00Z" }] },
+    });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Probe /></ProjectsProvider>);
+    await screen.findByText(/^ok:/);
+    expect(view!.inbox.length).toBe(1);
+    expect(view!.inboxCount).toBe(350);
+  });
 });

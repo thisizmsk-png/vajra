@@ -44,6 +44,29 @@ fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// The id of a campaign no known folder owns (a terminal-started run, or one from before the app recorded folders).
+pub(super) const UNSORTED_PROJECT: &str = "p_unsorted";
+
+/// The project id of a run's folder, from the project store. A folder no project owns (or one that is gone, or refused)
+/// is Unsorted (ADR-15): it is never guessed into a project and never creates one. One lookup per folder per read.
+fn project_of(app: &App, cache: &mut HashMap<std::path::PathBuf, String>, cwd: &std::path::Path) -> String {
+    cache
+        .entry(cwd.to_path_buf())
+        .or_insert_with(|| app.projects.find(cwd).ok().flatten().map_or_else(|| UNSORTED_PROJECT.to_string(), |p| p.id))
+        .clone()
+}
+
+/// The folder a waiting task's own run was launched in. The workflow writes task ids namespaced `<run>.<id>`, so the run is
+/// named by the id itself; it must be one the run index recorded for this campaign. A bare id names no run: it has an owner
+/// only when every run of the campaign was launched in the same folder. Otherwise the owner cannot be established.
+fn task_folder<'a>(runs: &'a [runindex::Entry], task_id: &str) -> Option<&'a std::path::Path> {
+    if let Some((run, _)) = task_id.split_once('.').filter(|(r, _)| crate::ids::valid_run_id(r)) {
+        return runs.iter().rev().find(|e| e.run_id == run).map(|e| e.cwd.as_path());
+    }
+    let first = runs.first()?;
+    runs.iter().all(|e| e.cwd == first.cwd).then_some(first.cwd.as_path())
+}
+
 /// Shown with every item that comes from the workflow result file.
 const FROM_RESULT: &str = "from the workflow result";
 
@@ -57,6 +80,31 @@ pub(super) fn parse_plan_id(id: &str) -> Option<(&str, usize)> {
 /// The bytes that are shown and hashed for one plan item.
 pub(super) fn plan_sha(shown: &Value) -> String {
     sha256::hex_digest(&serde_json::to_vec(shown).unwrap_or_default())
+}
+
+/// What `Arrivals` tracks for one item: its key (id plus the plan hash or the task status, so a changed plan or a task that
+/// left and came back is new), its project and its kind (a task's status, so a question and a block tell apart).
+fn arrival_key(v: &Value) -> (String, String, String) {
+    let s = |k: &str| v[k].as_str().unwrap_or_default();
+    let kind = if s("kind") == "task" { s("status") } else { s("kind") };
+    (format!("{}@{}", s("id"), if s("plan_sha256").is_empty() { s("status") } else { s("plan_sha256") }), s("project_id").to_string(), kind.to_string())
+}
+
+/// One fingerprint per project of the keys waiting in it, order-independent.
+fn project_fingerprints(keys: impl Iterator<Item = (String, String, String)>) -> HashMap<String, u64> {
+    use std::hash::{Hash, Hasher};
+    let mut by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (key, project, _) in keys {
+        by.entry(project).or_default().push(key);
+    }
+    by.into_iter()
+        .map(|(p, mut ks)| {
+            ks.sort();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            ks.hash(&mut h);
+            (p, h.finish() | 1)
+        })
+        .collect()
 }
 
 impl App {
@@ -103,6 +151,20 @@ impl App {
     }
 
     fn inbox_at(&self, now: i64) -> Res {
+        let all = self.inbox_all_at(now)?;
+        let count = all.len();
+        // The total is "needs you"; the campaign count leaves out run proposals (they live on the Director-General surface).
+        let campaign_count = all.iter().filter(|i| i["kind"] != "run_proposal").count();
+        Ok(json!({"count": count, "campaign_count": campaign_count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
+    }
+
+    /// Every waiting item, oldest first, with no cut: a caller that counts or picks (a project's projection, the item an
+    /// answer targets) does it here, and cuts only what it sends out.
+    pub(super) fn inbox_all(&self) -> Result<Vec<Value>, Value> {
+        self.inbox_all_at(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
+    }
+
+    fn inbox_all_at(&self, now: i64) -> Result<Vec<Value>, Value> {
         let seen_path = self.data.join(SEEN_FILE);
         let mut seen: std::collections::BTreeMap<String, i64> = crate::control::fsx::read_nofollow_capped(&seen_path, 1 << 20)
             .ok()
@@ -111,6 +173,12 @@ impl App {
         let before = seen.clone();
         let mut waiting: std::collections::BTreeSet<String> = Default::default();
         let launched = runindex::latest(&self.data.join("runs.jsonl"));
+        // Every run of every campaign: a waiting task belongs to the project of ITS run, not of the campaign's latest.
+        let mut runs: HashMap<String, Vec<runindex::Entry>> = HashMap::new();
+        for e in runindex::entries(&self.data.join("runs.jsonl")) {
+            runs.entry(e.campaign.clone()).or_default().push(e);
+        }
+        let mut folders: HashMap<std::path::PathBuf, String> = HashMap::new();
         let mut items: Vec<(i64, String, Value)> = Vec::new();
         self.with_reader(|r| {
             for slug in r.campaigns().map_err(|e| fail("io_error", e))? {
@@ -134,6 +202,7 @@ impl App {
                         item_id.clone(),
                         json!({
                             "id": item_id, "kind": "task", "campaign": slug, "origin": origin,
+                            "project_id": task_folder(runs.get(&slug).map(Vec::as_slice).unwrap_or_default(), id).map_or_else(|| UNSORTED_PROJECT.to_string(), |cwd| project_of(self, &mut folders, cwd)),
                             "status": status,
                             "since": SINCE, "created": crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(created.max(0) as u64)), "age_s": (now - created).max(0),
                             "title": clean(&text(t.get("title")), TITLE_MAX),
@@ -154,7 +223,7 @@ impl App {
                 let first = *seen.entry(key.clone()).or_insert(now);
                 waiting.insert(key);
                 let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
-                (first, json!({"id": id, "kind": kind, "campaign": slug, "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
+                (first, json!({"id": id, "kind": kind, "campaign": slug, "project_id": project_of(self, &mut folders, &e.cwd), "origin": "app", "source": FROM_RESULT, "since": SINCE, "created": created, "age_s": (now - first).max(0)}))
             };
             if let Some(q) = &w.question {
                 let id = format!("question:{}", e.run_id);
@@ -186,6 +255,8 @@ impl App {
                 items.push((first, id, v));
             }
         }
+        // ADR-15 2.4: runs a Director-General proposed. Their time is the guarded ledger line's own.
+        items.extend(self.proposal_items(now));
         seen.retain(|k, _| waiting.contains(k));
         if seen != before {
             let saved = crate::control::fsx::private_dir(&self.data).and_then(|()| crate::control::fsx::write_atomic(&self.data, SEEN_FILE, &serde_json::to_vec(&seen).unwrap_or_default()));
@@ -194,9 +265,9 @@ impl App {
             }
         }
         items.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        let count = items.len();
-        let list: Vec<Value> = items.into_iter().take(MAX_ITEMS).map(|(_, _, v)| v).collect();
-        Ok(json!({"count": count, "items": list}))
+        self.events.observe(items.iter().map(|(_, _, v)| arrival_key(v)));
+        self.inbox_read(project_fingerprints(items.iter().map(|(_, _, v)| arrival_key(v))));
+        Ok(items.into_iter().map(|(_, _, v)| v).collect())
     }
 }
 

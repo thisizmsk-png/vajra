@@ -27,11 +27,33 @@ impl Service {
                     return Err(ControlError::InvalidArgs("run".into()));
                 }
                 let s = self.sessions.values().find(|s| s.run_id == r).ok_or(ControlError::RunNotCurrent)?;
-                Some(s.id.clone())
+                Some(vec![s.id.clone()])
             }
             None if self.sessions.len() > 1 => return Err(ControlError::RunNotCurrent),
             None => None,
         };
+        self.call_scoped(bound, tool, args)
+    }
+
+    /// `call_tool` for a project's Director-General (ADR-15 2.3): `VAJRA_LEAD_PROJECT` and `VAJRA_LEAD_GEN` in its MCP
+    /// config, sent with every request. The call is refused unless `generation` is the project's current one (a process
+    /// from a replaced conversation, or one the app never started, gets nothing), and it then sees and steers **only
+    /// this project's** live run sessions. With none live it sees no workers; it never falls back to "every session".
+    pub fn call_tool_for_project(&mut self, project: &str, generation: u32, tool: &str, args: &Value) -> Result<Value> {
+        if !crate::ids::valid_project_ref(project) {
+            return Err(ControlError::InvalidArgs("project".into()));
+        }
+        if self.generations.get(project) != Some(&generation) {
+            return Err(ControlError::StaleLeadGeneration);
+        }
+        let bound: Vec<String> = self.sessions.values().filter(|s| s.project.as_deref() == Some(project)).map(|s| s.id.clone()).collect();
+        let prev = self.bound_project.replace((project.to_string(), generation));
+        let out = self.call_scoped(Some(bound), tool, args);
+        self.bound_project = prev;
+        out
+    }
+
+    fn call_scoped(&mut self, bound: Option<Vec<String>>, tool: &str, args: &Value) -> Result<Value> {
         self.last_recorded = None;
         let prev = std::mem::replace(&mut self.scope, bound);
         let out = self.dispatch_tool(tool, args);
@@ -58,6 +80,7 @@ impl Service {
             "inspect_worker" => &["worker", "lines"],
             "message_worker" | "redirect_worker" => &["worker", "text"],
             "stop_worker" => &["worker", "reason"],
+            "propose_run" => &["ask", "base", "rounds"],
             _ => return Err(ControlError::UnknownTool),
         };
         if let Some(k) = args.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -90,6 +113,13 @@ impl Service {
             }
             "message_worker" => self.message_worker(lead, s("worker", true)?.unwrap_or(""), s("text", true)?.unwrap_or("")),
             "redirect_worker" => self.redirect_worker(lead, s("worker", true)?.unwrap_or(""), s("text", true)?.unwrap_or("")),
+            "propose_run" => {
+                let rounds = match args.get("rounds") {
+                    None => None,
+                    Some(v) => Some(v.as_u64().ok_or_else(|| ControlError::InvalidArgs("rounds must be an integer".into()))?),
+                };
+                self.propose_run(s("ask", true)?.unwrap_or(""), s("base", false)?, rounds)
+            }
             _ => self.stop_worker(lead, s("worker", true)?.unwrap_or(""), s("reason", false)?),
         }
     }

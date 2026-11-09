@@ -53,8 +53,15 @@ pub struct Found {
 /// line cut by the cap fails to parse and is skipped.
 fn read_capped(path: &Path) -> Option<String> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // A link planted at the path is not followed (O_NOFOLLOW), and a FIFO with no writer cannot block the open
+    // (O_NONBLOCK); anything that is not a regular file is refused, so a hostile name costs an empty ledger, not a hang.
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut buf = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
+    f.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -81,17 +88,28 @@ impl Ledger {
         text.lines().filter(|l| l.len() <= MAX_LINE).filter_map(|l| serde_json::from_str::<Owner>(l).ok()).filter(|o| o.pid > 1).take(MAX_ENTRIES).collect()
     }
 
+    /// Replace the file with `all`: a new file created exclusively under a name nobody can have planted (`create_new` is
+    /// O_EXCL, which never follows a symlink, and O_NOFOLLOW is set as well), then renamed into place. Nothing a worker
+    /// leaves in the directory is ever opened for writing, so a planted link cannot make this truncate its target.
     fn write(&self, all: &[Owner]) -> std::io::Result<()> {
-        let tmp = self.path.with_extension("tmp");
-        {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = self.path.with_file_name(format!("{name}.{}.{}.tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let put = || -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(&tmp)?;
             for o in all {
                 writeln!(f, "{}", serde_json::to_string(o).map_err(std::io::Error::other)?)?;
             }
             f.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        };
+        let r = put();
+        if r.is_err() {
+            let _ = std::fs::remove_file(&tmp); // ours (created exclusively above), or absent
         }
-        std::fs::rename(&tmp, &self.path)
+        r
     }
 
     /// Record a shell the moment it starts. Best effort: failing to record only means a crash cannot be recovered.
@@ -131,6 +149,15 @@ impl Ledger {
             Some((pid, stamp)) => self.forget(pid, stamp),
             None => Ok(()),
         }
+    }
+
+    /// Close terminal `id` with `close`, and only then forget its record, whatever `close` returned. The record is what lets
+    /// the next launch find a shell that survived a crash during the close, so it must outlive the stop; once the shell is
+    /// stopped (or was never there) a stale record would only reconcile as gone.
+    pub fn close_then_forget<T, E>(&self, id: u32, close: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+        let r = close();
+        let _ = self.forget_for(id);
+        r
     }
 
     /// A clean quit ended every shell: nothing is left to recover.
@@ -194,33 +221,126 @@ fn running(pid: u32, stamp: u64) -> bool {
     same_process(pid, stamp) && !crate::procid::is_zombie(pid)
 }
 
+/// Reports which processes have exited, so a signal is never sent to a pid after its process is gone. A process is
+/// registered BEFORE its identity is read: if the stamp then matches, the registered pid is the right process, and its
+/// exit from then on is delivered here (an exited process that is not reaped still holds its pid). macOS only; elsewhere
+/// (or if no kqueue can be made) it reports nothing and the stamp check alone applies.
+struct ExitWatch {
+    kq: i32,
+    gone: std::collections::HashSet<u32>,
+}
+
+impl ExitWatch {
+    fn new() -> Self {
+        #[cfg(target_os = "macos")]
+        let kq = unsafe { libc::kqueue() };
+        #[cfg(not(target_os = "macos"))]
+        let kq = -1;
+        Self { kq, gone: Default::default() }
+    }
+
+    /// Watch `pid` for exit. False if it does not exist (already gone). True without a watch if there is no kqueue.
+    fn add(&mut self, pid: u32) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.kq >= 0 {
+            let ev = libc::kevent { ident: pid as usize, filter: libc::EVFILT_PROC, flags: libc::EV_ADD | libc::EV_ONESHOT, fflags: libc::NOTE_EXIT, data: 0, udata: std::ptr::null_mut() };
+            return unsafe { libc::kevent(self.kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) } >= 0;
+        }
+        let _ = pid;
+        true
+    }
+
+    /// Has `pid` exited since it was added? Reads the pending events without waiting.
+    fn exited(&mut self, pid: u32) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.kq >= 0 {
+            let none = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut out: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+            loop {
+                let n = unsafe { libc::kevent(self.kq, std::ptr::null(), 0, out.as_mut_ptr(), out.len() as i32, &none) };
+                if n <= 0 {
+                    break;
+                }
+                for e in &out[..n as usize] {
+                    if e.fflags & libc::NOTE_EXIT != 0 {
+                        self.gone.insert(e.ident as u32);
+                    }
+                }
+            }
+        }
+        self.gone.contains(&pid)
+    }
+}
+
+impl Drop for ExitWatch {
+    fn drop(&mut self) {
+        if self.kq >= 0 {
+            unsafe { libc::close(self.kq) };
+        }
+    }
+}
+
+/// Signal `pid` only if it has not exited since it was watched and is still the process with this start stamp, both read
+/// immediately before the call. Returns whether a signal was sent. Not atomic (macOS cannot signal by handle): what is
+/// left is the gap between this check and the `kill` syscall for this one pid, microseconds, and harm needs the pid to be
+/// reaped and reallocated to another process inside it, which needs the pid counter to wrap.
+fn signal_verified(w: &mut ExitWatch, pid: u32, stamp: u64, sig: libc::c_int) -> bool {
+    if w.exited(pid) || !running(pid, stamp) {
+        return false;
+    }
+    unsafe { libc::kill(pid as i32, sig) == 0 }
+}
+
+/// The leader and every other member of its session, each watched and stamped, or None if the leader is not provably
+/// ours. The leader is watched and verified first, then the session is listed, then the leader is verified again: if it
+/// held its pid across the listing, "session id equals its pid" really is its session. Each member is watched before its
+/// stamp is read and must still be in that session.
+fn snapshot(w: &mut ExitWatch, o: &Owner) -> Option<Vec<(u32, u64)>> {
+    if !w.add(o.pid) || !running(o.pid, o.stamp) {
+        return None;
+    }
+    let mut out = vec![(o.pid, o.stamp)];
+    for p in crate::terminal::kill::session_members(o.pid) {
+        let p = p as u32;
+        if p == o.pid || !w.add(p) {
+            continue;
+        }
+        let Some(stamp) = start_stamp(p) else { continue };
+        if unsafe { libc::getsid(p as i32) } == o.pid as i32 && !out.iter().any(|&(q, _)| q == p) {
+            out.push((p, stamp));
+        }
+    }
+    (running(o.pid, o.stamp) && !w.exited(o.pid)).then_some(out)
+}
+
 /// End a recorded shell's session, but only if the record still proves it is ours.
 ///
-/// Before the first signal the session's members are snapshotted, each with its own start stamp: once a leader that died
-/// on SIGHUP is reaped its pid (and with it the session id) can be reused, so members that ignored SIGHUP (`nohup`,
-/// `trap '' HUP`) could no longer be found. The steps: SIGHUP the session; wait up to `GRACE`; SIGKILL the session while
-/// the leader still holds it; then SIGKILL every snapshotted member that still matches its stamp, whether or not the
-/// leader is gone. `Ended` means none of them is still running; otherwise `Survived` says how many.
+/// The shell is watched for exit and its stamp checked, then its session is listed (`snapshot`), each member with its own
+/// stamp: once a leader that died on SIGHUP is reaped its pid (and with it the session id) can be reused, so members that
+/// ignored SIGHUP (`nohup`, `trap '' HUP`) could no longer be found. Every signal goes to one pid, and only after that
+/// pid is checked not to have exited and to still match its stamp (`signal_verified`); there is no signal to a group or
+/// to "everything in the session". The steps: SIGHUP each member; wait up to `GRACE`; list the session again while the
+/// leader still proves itself (members that started since) and SIGKILL each member that still matches. `Ended` means none
+/// of them is still running; otherwise `Survived` says how many.
 pub fn recover(o: &Owner) -> Recovery {
-    if !running(o.pid, o.stamp) {
-        return Recovery::NotOwned;
+    let mut w = ExitWatch::new();
+    let Some(mut members) = snapshot(&mut w, o) else { return Recovery::NotOwned };
+    for &(p, s) in &members {
+        signal_verified(&mut w, p, s, libc::SIGHUP);
     }
-    let mut members: Vec<(u32, u64)> = crate::terminal::kill::session_members(o.pid).into_iter().filter_map(|p| Some((p as u32, start_stamp(p as u32)?))).collect();
-    if !members.contains(&(o.pid, o.stamp)) {
-        members.push((o.pid, o.stamp));
-    }
-    crate::terminal::kill::signal_all(o.pid, true, libc::SIGHUP);
     let t0 = Instant::now();
     while t0.elapsed() < GRACE && members.iter().any(|&(p, s)| running(p, s)) {
         std::thread::sleep(Duration::from_millis(25));
     }
-    if running(o.pid, o.stamp) {
-        crate::terminal::kill::signal_all(o.pid, true, libc::SIGKILL); // also reaches members that started after the snapshot
+    if let Some(now) = snapshot(&mut w, o) {
+        for m in now {
+            if !members.contains(&m) {
+                members.push(m); // started after the first listing
+            }
+        }
     }
     for &(p, s) in &members {
-        if running(p, s) {
-            unsafe { libc::kill(p as i32, libc::SIGKILL) }; // proven by its stamp just now; never by name or a bare pid
-        }
+        signal_verified(&mut w, p, s, libc::SIGKILL);
     }
     let t1 = Instant::now();
     while t1.elapsed() < Duration::from_secs(1) && members.iter().any(|&(p, s)| running(p, s)) {
@@ -357,7 +477,8 @@ mod tests {
         assert_eq!(recover(&o), Recovery::Ended);
         reaper.join().unwrap();
         for p in job {
-            assert!(!alive(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
+            // `kill(pid, 0)` succeeds for an exited job its new parent has not reaped yet; that is not running.
+            assert!(!alive(p as u32) || crate::procid::is_zombie(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
         }
     }
 
@@ -489,6 +610,123 @@ mod tests {
         let code = src.split("#[cfg(test)]").next().unwrap();
         for bad in ["killall", "pkill", "pgrep", "\"ps\""] {
             assert!(!code.contains(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn given_a_process_that_exited_when_watched_then_it_is_reported_and_nothing_is_signalled_to_it() {
+        let mut c = Command::new("sleep").arg("300").spawn().unwrap();
+        let stamp = start_stamp(c.id()).unwrap();
+        let mut w = ExitWatch::new();
+        assert!(w.add(c.id()));
+        assert!(!w.exited(c.id()), "alive: no exit event");
+        c.kill().unwrap(); // dead but not reaped: its pid is still held, as for an orphan's zombie
+        let t0 = Instant::now();
+        while !w.exited(c.id()) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(w.exited(c.id()), "the exit is reported");
+        assert!(!signal_verified(&mut w, c.id(), stamp, libc::SIGTERM), "an exited process is not signalled");
+        c.wait().unwrap();
+    }
+
+    #[test]
+    fn given_a_live_process_with_another_stamp_when_signalled_then_it_is_skipped_and_keeps_running() {
+        let c = Command::new("sleep").arg("300").spawn().unwrap();
+        let stamp = start_stamp(c.id()).unwrap();
+        let mut w = ExitWatch::new();
+        assert!(w.add(c.id()));
+        assert!(!signal_verified(&mut w, c.id(), stamp + 3, libc::SIGKILL), "not the recorded process");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(alive(c.id()), "the bystander was not touched");
+        assert!(signal_verified(&mut w, c.id(), stamp, libc::SIGTERM), "the matching process is signalled");
+        gone(c);
+    }
+
+    #[test]
+    fn given_a_pid_that_does_not_exist_when_watched_then_it_is_refused() {
+        let c = Command::new("true").spawn().unwrap();
+        let pid = c.id();
+        let mut c = c;
+        c.wait().unwrap();
+        let mut w = ExitWatch::new();
+        assert!(!w.add(pid), "a reaped pid cannot be watched, so recovery stops at NotOwned");
+    }
+
+    #[test]
+    fn given_a_member_that_exits_during_the_loop_when_the_loop_reaches_it_then_it_is_skipped() {
+        let (c, o) = leader();
+        let mut w = ExitWatch::new();
+        let members = snapshot(&mut w, &o).unwrap();
+        assert_eq!(members.len(), 2, "the shell and its job");
+        let (job, job_stamp) = *members.iter().find(|&&(p, _)| p != o.pid).unwrap();
+        unsafe { libc::kill(job as i32, libc::SIGKILL) }; // the job dies on its own before the loop reaches it
+        let t0 = Instant::now();
+        while !w.exited(job) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!signal_verified(&mut w, job, job_stamp, libc::SIGHUP), "skipped: it exited");
+        gone(c);
+    }
+
+    #[test]
+    fn given_a_symlink_planted_at_the_old_temp_name_when_the_ledger_is_written_then_its_target_is_untouched() {
+        use std::os::unix::fs::symlink;
+        let path = tmp("symlink");
+        let dir = path.parent().unwrap().to_path_buf();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        for name in ["owned.tmp", "owned.jsonl.tmp"] {
+            let _ = std::fs::remove_file(dir.join(name));
+            symlink(&victim, dir.join(name)).unwrap();
+        }
+        let l = Ledger::new(path.clone());
+        l.record(Owner { pid: std::process::id(), stamp: start_stamp(std::process::id()).unwrap(), cwd: "/tmp".into() }).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the link's target was not truncated or written");
+        assert_eq!(l.load().len(), 1, "the ledger itself was written");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp") && n.starts_with("owned.jsonl.") && n != "owned.jsonl.tmp").collect();
+        assert!(left.is_empty(), "no temp file is left behind: {left:?}");
+    }
+
+    #[test]
+    fn given_a_fifo_or_a_symlink_at_the_ledger_path_when_read_then_it_is_empty_and_never_blocks() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = tmp("fifo");
+        let dir = path.parent().unwrap().to_path_buf();
+        // a FIFO with no writer: a plain open would block for ever
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p2 = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Ledger::new(p2).load().len());
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("reading a FIFO must not block"), 0);
+        // a symlink to a real ledger is not followed
+        let real = dir.join("real.jsonl");
+        std::fs::write(&real, format!("{}\n", serde_json::to_string(&Owner { pid: 4242, stamp: 1, cwd: "/tmp".into() }).unwrap())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert_eq!(Ledger::new(path.clone()).load().len(), 0, "the link is refused");
+        // a regular file still reads
+        std::fs::remove_file(&path).unwrap();
+        std::fs::copy(&real, &path).unwrap();
+        assert_eq!(Ledger::new(path).load().len(), 1);
+    }
+
+    #[test]
+    fn given_a_close_in_progress_when_it_succeeds_or_fails_then_the_record_is_there_during_it_and_gone_after() {
+        for outcome in [Ok(()), Err("not_found")] {
+            let l = Ledger::new(tmp(&format!("close-{}", outcome.is_ok())));
+            let me = std::process::id();
+            l.record_for(7, Owner { pid: me, stamp: start_stamp(me).unwrap(), cwd: "/tmp".into() }).unwrap();
+            let r = l.close_then_forget(7, || {
+                assert_eq!(l.load().len(), 1, "the record is still recoverable while the shell is being stopped");
+                outcome
+            });
+            assert_eq!(r, outcome, "the close result is returned as it was");
+            assert!(l.load().is_empty(), "forgotten once the close is over, whatever it returned");
         }
     }
 }

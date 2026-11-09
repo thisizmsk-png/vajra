@@ -7,6 +7,7 @@ import { Board } from "./board/Board";
 import { Crew } from "./crew/Crew";
 import { Run } from "./run/Run";
 import { History } from "./history/History";
+import { Inbox } from "./inbox/Inbox";
 import { Settings } from "./settings/Settings";
 import { WorkerView } from "./worker/WorkerView";
 
@@ -17,5 +18,6 @@ export const REGISTRY: Record<Screen, ComponentType> = {
   worker: WorkerView,
   crew: Crew,
   history: History,
+  inbox: Inbox,
   settings: Settings,
 };

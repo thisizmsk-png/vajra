@@ -73,6 +73,8 @@ export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: Inb
   const out = new Map<ProjectId, ProjectSummary>();
   for (const p of index.projects) out.set(p.id, { needsYou: 0, state: null, pips: [], live: false });
   for (const item of inbox) {
+    // A run_proposal has no campaign: it names its project by full root (`project`), which #90 matches.
+    if (item.campaign === undefined) continue;
     const s = out.get(index.byCampaign[item.campaign]);
     if (s) s.needsYou += 1;
   }

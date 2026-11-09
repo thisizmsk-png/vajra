@@ -61,6 +61,16 @@ fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sh
 }
 
 #[tauri::command(async)]
+fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String, plan_sha256: String) -> Value {
+    app.act_reject_plan(&envelope, &id, &reason, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_answer_question(app: State<'_, App>, envelope: Envelope, id: String, text: String) -> Value {
+    app.act_answer_question(&envelope, &id, &text)
+}
+
+#[tauri::command(async)]
 fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
@@ -313,8 +323,9 @@ fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
 
 #[tauri::command(async)]
 fn term_close(terms: State<'_, Terminals>, own: State<'_, Ownership>, id: u32) -> Res {
-    let _ = own.ledger.forget_for(id); // exactly the record this terminal made, not whatever shares its pid now
-    terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
+    // The record goes after the shell is stopped (exactly the record this terminal made, not whatever shares its pid now):
+    // until then a crash must still leave the shell recoverable.
+    own.ledger.close_then_forget(id, || terms.close(id)).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
 #[tauri::command]
@@ -431,9 +442,38 @@ fn lead_status(app: State<'_, App>, run_id: String) -> Res {
     app.lead_status(&run_id)
 }
 
+/// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
+#[tauri::command(async)]
+fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String) -> Res {
+    app.start_proposal(&id, &proposal_sha256)
+}
+
+/// ADR-15 2.4: dismiss a proposed run; nothing runs.
+#[tauri::command(async)]
+fn dismiss_proposal(app: State<'_, App>, id: String) -> Res {
+    app.dismiss_proposal(&id)
+}
+
+/// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
+#[tauri::command(async)]
+fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
+    app.new_conversation(&run_id)
+}
+
 #[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
+}
+
+/// ADR-15 D5: the run caps (1 per project, `max_runs` in the app, the worker ceiling).
+#[tauri::command(async)]
+fn run_limits(app: State<'_, App>) -> Res {
+    app.run_limits()
+}
+
+#[tauri::command(async)]
+fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
+    app.set_run_limits(max_runs)
 }
 
 // -------------------------------------------------------------------- main
@@ -500,6 +540,10 @@ fn main() {
             handle.state::<App>().set_change_sink(Box::new(move |p| {
                 let _ = sink_handle.emit(CHANGED, p);
             }));
+            let event_handle = handle.clone();
+            handle.state::<App>().set_event_sink(Box::new(move |name, p| {
+                let _ = event_handle.emit(name, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
@@ -563,9 +607,14 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            run_limits,
+            set_run_limits,
             ask_lead,
             cancel_ask,
             lead_status,
+            new_conversation,
+            start_proposal,
+            dismiss_proposal,
             inbox,
             approve_plan,
             reject_plan,
@@ -578,6 +627,8 @@ fn main() {
             project_migration_suggest,
             project_migration_confirm,
             act_approve_plan,
+            act_reject_plan,
+            act_answer_question,
             act_stop_worker,
             act_start_run,
             project_state,

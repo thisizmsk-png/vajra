@@ -1,5 +1,5 @@
 /* The terminal dock. Colors come from the theme tokens only. */
-.v-term { position: fixed; left: var(--sidebar-w); right: 0; bottom: 0; height: 280px; display: flex; flex-direction: column; background: var(--c-background); border-top: 1px solid var(--c-border); z-index: 20; }
+.v-term { flex: none; height: 280px; display: flex; flex-direction: column; background: var(--c-background); border-top: 1px solid var(--c-border); } /* a flex item of the shell's centre column (.v-dock): it takes that column's width and pushes the view up */
 .v-term[hidden] { display: none; }
 .v-term__sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .v-term__bar { display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 6px; background: var(--c-surface); border-bottom: 1px solid var(--c-border); }
