@@ -7,7 +7,9 @@ import { S } from "../../../strings";
 import "./preferences.css";
 const C = S.preferences;
 
-export function PreferenceForm({ projectId, projectName, section, onDirty }: { projectId: string | null; projectName?: string; section: string; onDirty?: (dirty: boolean) => void }) {
+/** `agents`: the provider choices for the `providers` section, as [id, words, disabled]; built from `provider_list` by Settings. */
+export type AgentChoice = readonly [string, string, boolean?];
+export function PreferenceForm({ projectId, projectName, section, onDirty, agents = [] }: { projectId: string | null; projectName?: string; section: string; onDirty?: (dirty: boolean) => void; agents?: readonly AgentChoice[] }) {
   const prefs = usePreferenceScope(projectId, false);
   const [patch, setPatch] = useState<PreferencePatch>({}); const [message, setMessage] = useState("");
   const dirty = Object.keys(patch).length > 0;
@@ -46,8 +48,12 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
     {/* General (editor, shell) and Notifications have no form yet: nothing opens an editor or a terminal, or delivers a
         notification, from those values, so a saved choice would change nothing (PR 100 review). The stored keys and their
         defaults stay in the contract until a consumer reads them. */}
+    {section === "providers" && <>
+      {/* A saved value this list does not offer (an older choice, or a check that has not answered) stays visible, never silently swapped. */}
+      {select("agent", S.providers.agent, agents.some(([v]) => v === value("agent")) ? agents : [...agents, [value("agent"), value("agent"), true]])}
+      <p>{S.providers.agentHint}</p>
+    </>}
     {section === "models" && <>
-      {select("agent", C.agent, [["claude", C.claude], ["codex", C.codexUnavailable, true]])}
       <p>{C.modelHint(view.effective.model || C.nativeModel)}</p>
       {select("workers", C.workers, Array.from({ length: 16 }, (_, i) => [String(i + 1), String(i + 1)] as const))}
       {select("rounds", C.rounds, [["1", "1"], ["2", "2"], ["3", "3"]])}
