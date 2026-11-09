@@ -21,7 +21,8 @@ pub const WORKER_CEILING: u32 = 8;
 /// What a resumed run counts against the ceiling: the workflow's own `maxInFlight` default.
 pub const DEFAULT_RUN_WORKERS: u32 = 4;
 /// The `.git` file and `commondir` are tiny; anything bigger is not git's.
-const GIT_FILE_CAP: u64 = 4096;
+/// The most of any Git metadata file (`.git`, `commondir`, `config`) that is ever read; a larger one is refused, not truncated.
+pub(super) const GIT_META_CAP: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunLimits {
@@ -139,11 +140,20 @@ fn canon(p: &Path) -> PathBuf {
 }
 
 fn read_small(p: &Path) -> Option<String> {
-    let m = std::fs::metadata(p).ok()?;
-    if !m.is_file() || m.len() > GIT_FILE_CAP {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NONBLOCK so a planted FIFO cannot hang the open; the type and size are checked on the descriptor, and at most cap+1 bytes are read.
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(p).ok()?;
+    let m = f.metadata().ok()?;
+    if !m.is_file() || m.len() > GIT_META_CAP {
         return None;
     }
-    std::fs::read_to_string(p).ok()
+    let mut buf = Vec::new();
+    f.take(GIT_META_CAP + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > GIT_META_CAP {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 #[cfg(test)]
