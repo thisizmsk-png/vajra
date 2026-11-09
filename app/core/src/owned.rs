@@ -81,17 +81,28 @@ impl Ledger {
         text.lines().filter(|l| l.len() <= MAX_LINE).filter_map(|l| serde_json::from_str::<Owner>(l).ok()).filter(|o| o.pid > 1).take(MAX_ENTRIES).collect()
     }
 
+    /// Replace the file with `all`: a new file created exclusively under a name nobody can have planted (`create_new` is
+    /// O_EXCL, which never follows a symlink, and O_NOFOLLOW is set as well), then renamed into place. Nothing a worker
+    /// leaves in the directory is ever opened for writing, so a planted link cannot make this truncate its target.
     fn write(&self, all: &[Owner]) -> std::io::Result<()> {
-        let tmp = self.path.with_extension("tmp");
-        {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = self.path.with_file_name(format!("{name}.{}.{}.tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let put = || -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(&tmp)?;
             for o in all {
                 writeln!(f, "{}", serde_json::to_string(o).map_err(std::io::Error::other)?)?;
             }
             f.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        };
+        let r = put();
+        if r.is_err() {
+            let _ = std::fs::remove_file(&tmp); // ours (created exclusively above), or absent
         }
-        std::fs::rename(&tmp, &self.path)
+        r
     }
 
     /// Record a shell the moment it starts. Best effort: failing to record only means a crash cannot be recovered.
@@ -640,5 +651,24 @@ mod tests {
         }
         assert!(!signal_verified(&mut w, job, job_stamp, libc::SIGHUP), "skipped: it exited");
         gone(c);
+    }
+
+    #[test]
+    fn given_a_symlink_planted_at_the_old_temp_name_when_the_ledger_is_written_then_its_target_is_untouched() {
+        use std::os::unix::fs::symlink;
+        let path = tmp("symlink");
+        let dir = path.parent().unwrap().to_path_buf();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        for name in ["owned.tmp", "owned.jsonl.tmp"] {
+            let _ = std::fs::remove_file(dir.join(name));
+            symlink(&victim, dir.join(name)).unwrap();
+        }
+        let l = Ledger::new(path.clone());
+        l.record(Owner { pid: std::process::id(), stamp: start_stamp(std::process::id()).unwrap(), cwd: "/tmp".into() }).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the link's target was not truncated or written");
+        assert_eq!(l.load().len(), 1, "the ledger itself was written");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp") && n.starts_with("owned.jsonl.") && n != "owned.jsonl.tmp").collect();
+        assert!(left.is_empty(), "no temp file is left behind: {left:?}");
     }
 }
