@@ -113,3 +113,39 @@ fn a_chosen_provider_this_build_does_not_know_is_present_and_cannot_start() {
     assert!(p.limits.iter().all(|l| l.code.as_deref() == Some("not_supported")) && p.limits.iter().any(|l| l.control == "start"));
     assert_eq!(p, crate::providers::detect::unsupported("gemini"), "the core answers exactly this");
 }
+
+// ---- accounts ----------------------------------------------------------------------------------------------------------
+
+fn acct(extra: &str) -> String {
+    format!(r#"{{"schema":"vajra.provider_accounts/1","accounts":[{{"id":"openrouter","provider":"openrouter","harness":"codex","credential":{{"source":"api_key","saved":true}},"billing":{{"kind":"gateway","account_label":"OpenRouter key"}},"label":"OpenRouter","state":"key_saved","models":[{{"id":"x-ai/grok-4","family":"grok"}}]{extra}}}]}}"#)
+}
+
+#[test]
+fn a_gateway_account_parses_and_round_trips_with_only_a_saved_flag() {
+    let l = parse_account_list(acct("").as_bytes()).unwrap();
+    let a = &l.accounts[0];
+    assert_eq!((a.credential.source, a.credential.saved, a.state, a.billing.kind), (CredentialSource::ApiKey, Some(true), AccountState::KeySaved, BillingKind::Gateway));
+    assert_eq!(parse_account_list(&serde_json::to_vec(&l).unwrap()).unwrap(), l);
+}
+
+#[test]
+fn account_unknowns_read_cautiously_and_unknown_fields_are_ignored() {
+    let raw = acct(r#","future":1"#).replace("key_saved", "expired").replace("\"gateway\"", "\"barter\"");
+    let a = &parse_account_list(raw.as_bytes()).unwrap().accounts[0];
+    assert_eq!((a.state, a.billing.kind), (AccountState::CannotTell, BillingKind::Unknown), "never signed in, never a guess");
+}
+
+#[test]
+fn another_accounts_major_is_reported_and_bad_records_are_refused() {
+    let v2 = acct("").replace("provider_accounts/1", "provider_accounts/2");
+    assert!(matches!(parse_account_list(v2.as_bytes()), Err(ContractError::UnsupportedVersion { supported: 1, .. })));
+    let cli_with_saved = acct("").replace("\"api_key\"", "\"cli_login\"");
+    assert_eq!(parse_account_list(cli_with_saved.as_bytes()), Err(ContractError::Invalid("credential")));
+    let key_without_flag = acct("").replace(",\"saved\":true", "");
+    assert_eq!(parse_account_list(key_without_flag.as_bytes()), Err(ContractError::Invalid("credential")));
+    let warn = acct("").replace("\"account_label\":\"OpenRouter key\"", "\"override_warning\":{\"name\":\"sk-abc 123\",\"found_in\":\"cli_config\"}");
+    assert_eq!(parse_account_list(warn.as_bytes()), Err(ContractError::Invalid("override_warning")), "a value-shaped name is refused");
+    let one = acct("").split_once("\"accounts\":[").unwrap().1.strip_suffix("]}").unwrap().to_string();
+    let two = format!(r#"{{"schema":"vajra.provider_accounts/1","accounts":[{one},{one}]}}"#);
+    assert_eq!(parse_account_list(two.as_bytes()), Err(ContractError::Invalid("account id")));
+}

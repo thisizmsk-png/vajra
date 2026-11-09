@@ -176,6 +176,11 @@ fn provider_list(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn provider_accounts(app: State<'_, App>) -> Res {
+    app.provider_accounts()
+}
+
+#[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
 }
@@ -494,6 +499,7 @@ fn main() {
             start_run,
             resume_run,
             provider_list,
+            provider_accounts,
             verify_campaign,
             read_report,
             resume_targets,
