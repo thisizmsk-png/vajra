@@ -1000,7 +1000,7 @@ fn a_waiting_plan_is_a_review_card_that_needs_you() {
     ready(&t, &app);
     lock(&app.shown).clear();
     let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
-    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), 1, SessionStatus::Running);
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
     app.projects.append_session(&line).unwrap();
     // The board on its own (project_state also reads the inbox, which is what shows items to the human).
     let b = app.board(&pid);
@@ -1028,7 +1028,7 @@ fn a_waiting_question_is_a_review_card_that_needs_you() {
     v["result"] = json!({"status": "need_input", "node": "plan", "question": "which branch?", "artifacts": {"campaign": CAMP}});
     t.result("wf_q.json", &v);
     let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
-    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), 1, SessionStatus::Running);
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
     app.projects.append_session(&line).unwrap();
     let b = app.project_state(&pid, None).unwrap()["board"].clone();
     let q = b["campaigns"][0]["cards"].as_array().unwrap().iter().find(|c| c["key"] == format!("inbox:question:{RUN}")).cloned().unwrap_or_else(|| panic!("{b}"));
