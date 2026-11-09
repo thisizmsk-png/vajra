@@ -38,6 +38,10 @@ pub(super) const SANDBOX_NEEDED: &str = "Ask the Lead needs the Claude Code sand
 const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
 /// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
 const CWD_FILE: &str = "cwd";
+/// The run's project (its git common dir, `caps::project_key`) as the app found it at launch, before any worker ran.
+const KEY_FILE: &str = "project_key";
+/// Most other-project folders the Lead's deny rules hold; more refuses the ask (#80 review: never drop one).
+pub(super) const MAX_OTHER_ROOTS: usize = 256;
 const SESSION_FILE: &str = "session";
 const CAMPAIGN_FILE: &str = "campaign";
 /// Present for a run that started no new workflow (the approval-only resume).
@@ -336,7 +340,14 @@ impl App {
     ///
     /// It also records the run's session id and campaign (ADR-14): `runs.jsonl` is worker-writable, so a plan approval
     /// or reject trusts only an index line whose directory, session and campaign all equal this record.
+    #[cfg(test)]
     pub(super) fn record_run(&self, run_id: &str, cwd: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
+        self.record_run_as(run_id, cwd, &super::caps::project_key(cwd), session_id, campaign, workflow, started)
+    }
+
+    /// `record_run` with the project `key` the launch pinned before it spawned anything (`launch_key`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_run_as(&self, run_id: &str, cwd: &Path, key: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
@@ -348,6 +359,7 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
+        fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -370,38 +382,64 @@ impl App {
     /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
     /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
     /// ancestor would deny the Lead its own project). Every distinct run folder, plus each project's main working tree.
-    pub(super) fn other_project_roots(&self, repo: &Path) -> Vec<PathBuf> {
-        const MAX_OTHER_ROOTS: usize = 256;
-        let own = super::caps::project_key(repo);
+    ///
+    /// Which project a run belongs to is the key pinned when the app launched it (`KEY_FILE`), for the asking run and
+    /// for every other one: the repo's `.git` and `commondir` are worker-writable, so they are never re-read here
+    /// (#80 review). A run with no pinned key counts as another project (its folder is denied); an asking run with
+    /// none is refused. More than `MAX_OTHER_ROOTS` folders refuses the ask rather than leave one undenied.
+    pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
-            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
-            .unwrap_or_default();
-        runs.sort_unstable_by(|a, b| b.cmp(a));
         let mut out: Vec<PathBuf> = Vec::new();
-        for run in runs {
-            if out.len() >= MAX_OTHER_ROOTS {
-                break;
-            }
+        for run in self.recorded_runs() {
             let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            let key = super::caps::project_key(&cwd);
-            if key == own {
+            let key = self.read_run_key(&run);
+            if key.as_ref() == Some(&own) {
                 continue;
             }
             // Every distinct run folder (a subfolder, an outside worktree) and the project's main working tree (the
-            // folder that holds its `.git` dir), so a project whose runs were all elsewhere still has its main folder
-            // denied (#80 review).
-            let main = (key.file_name() == Some(std::ffi::OsStr::new(".git")) && key.is_dir()).then(|| key.parent().map(Path::to_path_buf)).flatten();
+            // folder that holds its `.git` dir, from the pinned key), so a project whose runs were all elsewhere still
+            // has its main folder denied.
+            let main = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
             for dir in std::iter::once(cwd).chain(main) {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 if own_real.starts_with(&real) || out.contains(&dir) {
                     continue;
                 }
+                if out.len() >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} other project folders to deny; the Lead cannot be started with all of them")));
+                }
                 out.push(dir);
             }
         }
-        out.truncate(MAX_OTHER_ROOTS);
-        out
+        Ok(out)
+    }
+
+    /// Every run with a record under the guarded control dir, newest first.
+    fn recorded_runs(&self) -> Vec<String> {
+        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
+            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
+            .unwrap_or_default();
+        runs.sort_unstable_by(|a, b| b.cmp(a));
+        runs
+    }
+
+    /// The project key pinned when the run was launched.
+    pub(super) fn read_run_key(&self, run_id: &str) -> Option<PathBuf> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(KEY_FILE)).ok()?;
+        let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
+        p.is_absolute().then_some(p)
+    }
+
+    /// The key to pin for a launch in `cwd`, read before anything is spawned: the one pinned by the folder's first
+    /// recorded launch if there is one (a resume must not take up a `.git` a worker of the earlier run rewrote), else
+    /// the folder's key now.
+    pub(super) fn launch_key(&self, cwd: &Path) -> PathBuf {
+        self.recorded_runs()
+            .into_iter()
+            .rev()
+            .find_map(|r| (self.read_run_cwd(&r).as_deref() == Some(cwd)).then(|| self.read_run_key(&r)).flatten())
+            .unwrap_or_else(|| super::caps::project_key(cwd))
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
@@ -450,7 +488,7 @@ impl App {
         let dir = base.join(&t.run_id);
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let others = self.other_project_roots(&t.cwd);
+        let others = self.other_project_roots(&t.run_id, &t.cwd)?;
         let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id, &others)?;
         // A run this app life launched is authoritative in memory: remember its directory under the guarded dir, so
         // that after a restart the (worker-writable) index cannot supply a different one.
