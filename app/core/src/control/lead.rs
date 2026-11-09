@@ -24,6 +24,8 @@ pub enum LeadError {
     /// The run is not one this app launched or resumed (S3 shows the input disabled).
     ReadOnly(&'static str),
     Busy,
+    /// The app already runs `MAX_TURNS` Director-General turns (ADR-15 2.3).
+    TurnsFull,
     /// No Lead is spawned without the Vajra guard (ADR-13 2a). The text says which precondition failed.
     GuardMissing(String),
     ClaudeNotFound,
@@ -43,6 +45,7 @@ impl LeadError {
             Self::Invalid(_) => "invalid_args",
             Self::ReadOnly(_) => "read_only",
             Self::Busy => "lead_busy",
+            Self::TurnsFull => "turns_full",
             Self::GuardMissing(_) => "lead_guard_missing",
             Self::ClaudeNotFound => "claude_not_found",
             Self::NoInit => "lead_no_init",
@@ -60,6 +63,7 @@ impl LeadError {
         match self {
             Self::Invalid(d) | Self::GuardMissing(d) => Some(d.clone()),
             Self::ReadOnly(d) => Some((*d).to_string()),
+            Self::TurnsFull => Some("Two Director-General turns are running, the most the app runs at once. Ask again when one finishes.".into()),
             _ => None,
         }
     }

@@ -552,6 +552,11 @@ impl App {
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
+            // The run's project's Director-General sees and steers it (ADR-15 2.3).
+            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref_of(&key, &loc).0) {
+                svc.end_session(session_id);
+                return Err(e.to_json());
+            }
             let n = if rotate { ctl(svc.resume_session(session_id)) } else { Ok(svc.nonce(session_id).unwrap_or_default()) };
             match n {
                 Ok(n) => n.to_string(),
@@ -1894,6 +1899,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod orchestrator;
 mod inbox;
 mod projects;
 mod wfresult;

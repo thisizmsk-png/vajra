@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
+use super::orchestrator::{self, Orchestrator};
 use super::{App, Res, Run, project_slug, runindex};
 use super::caps::GIT_META_CAP;
 use crate::paths;
@@ -34,7 +35,7 @@ use crate::vajra::preflight::find_on_path;
 
 /// What the human sees when the doctor reports the OS sandbox (with its denyWrite on the app dir) as not active. One
 /// line: why, and what to do.
-pub(super) const SANDBOX_NEEDED: &str = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+pub(super) const SANDBOX_NEEDED: &str = "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
 /// `read_only` detail for a run loaded from the index whose directory the app has no record of.
 const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
 /// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
@@ -75,15 +76,16 @@ const DOCTOR_TTL: Duration = Duration::from_secs(60);
 /// Most of a Lead transcript read back after a restart.
 const REBUILD_BYTES: u64 = 4 * 1024 * 1024;
 /// Where the guard script lives under `$HOME`.
-/// File name of the Lead session id inside `<data>/control/lead/<run_id>/`.
-const LEAD_SID_FILE: &str = "lead_session";
 const GUARD_SCRIPT: &str = ".claude/skills/vajra/hooks/pre-tool-use.sh";
 
 /// Test seam: runs right after the settings file is written, before it is verified.
 #[cfg(test)]
 pub(super) type AfterWrite = Box<dyn Fn(&Path) + Send>;
+/// Test only: runs in `ask_lead` after the orchestrator was first looked up and before the ask lock is taken.
+#[cfg(test)]
+pub(super) type BeforeAskLock = Box<dyn Fn() + Send>;
 
-struct Active {
+pub(super) struct Active {
     ask_id: String,
     handle: Arc<Handle>,
 }
@@ -94,8 +96,9 @@ pub(super) struct LeadState {
     bin: Mutex<Option<PathBuf>>,
     /// The environment the Lead (and the self-test) runs with: `HOME`, `PATH`, `LANG`, `TERM`, `USER`, `SHELL`.
     env: Mutex<Vec<(&'static str, OsString)>>,
-    /// The running ask per run id. Taking the entry is the "one ask in flight" lock.
-    active: Arc<Mutex<HashMap<String, Active>>>,
+    /// The running ask per project id. Taking the entry is the "one ask in flight per Director-General" lock, and the
+    /// map's size is the app-wide turn count (`orchestrator::MAX_TURNS`).
+    pub(super) active: Arc<Mutex<HashMap<String, Active>>>,
     /// (settings sha256, claude --version) pairs that passed the startup self-test.
     proven: Mutex<HashSet<(String, String)>>,
     /// Set when the app quits: no new ask starts.
@@ -106,6 +109,8 @@ pub(super) struct LeadState {
     exe: PathBuf,
     #[cfg(test)]
     pub(super) after_write: Mutex<Option<AfterWrite>>,
+    #[cfg(test)]
+    pub(super) before_ask_lock: Mutex<Option<BeforeAskLock>>,
 }
 
 impl LeadState {
@@ -122,6 +127,8 @@ impl LeadState {
             exe: std::env::current_exe().unwrap_or_default(),
             #[cfg(test)]
             after_write: Mutex::new(None),
+            #[cfg(test)]
+            before_ask_lock: Mutex::new(None),
         }
     }
 
@@ -167,14 +174,13 @@ fn sha_hex(bytes: &[u8]) -> String {
 }
 
 /// What a run needs to be asked about.
-struct Target {
+pub(super) struct Target {
     /// Loaded from `runs.jsonl` (after a restart) rather than from a run this app life launched.
-    from_disk: bool,
-    session_id: String,
-    run_id: String,
-    cwd: PathBuf,
-    lead_session_id: Option<String>,
-    nonces: Redactor,
+    pub(super) from_disk: bool,
+    pub(super) session_id: String,
+    pub(super) run_id: String,
+    pub(super) cwd: PathBuf,
+    pub(super) nonces: Redactor,
 }
 
 /// Bus lines of one ask: `<tag>\t<cleaned text>`.
@@ -221,21 +227,43 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(super::invalid("run_id", "must be YYYYMMDD-HHMM"));
         }
-        let busy = lock(&self.lead.active).get(run_id).map(|a| a.ask_id.clone());
+        let off = |why: String| Ok(json!({"available": false, "read_only_reason": why, "busy": false, "name": orchestrator::NAME}));
         let t = match self.lead_target(run_id) {
             Ok(t) => t,
-            Err(e) => return Ok(json!({"available": false, "read_only_reason": e.detail().unwrap_or_else(|| NOT_OURS.to_string()), "busy": false})),
+            Err(e) => return off(e.detail().unwrap_or_else(|| NOT_OURS.to_string())),
         };
-        // After a restart the bus is empty; bring the history back from the Lead's own transcript.
-        self.rebuild_lead_stream(&t);
+        let orch = match self.orchestrator_for_run(&t.run_id, &t.cwd) {
+            Ok(o) => o,
+            Err(e) => return off(e.detail().unwrap_or_else(|| e.code().to_string())),
+        };
+        let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
+        // After a restart the bus is empty; bring the history back from the Director-General's own transcript.
+        self.rebuild_lead_stream(&orch, &self.project_redactor(&t, &orch));
         if lock(&self.lead.bin).is_none() {
-            return Ok(json!({"available": false, "read_only_reason": "claude not found", "busy": false}));
+            return off("claude not found".into());
         }
-        let mut out = json!({"available": true, "busy": busy.is_some()});
+        // ADR-15 2.1 states, each with its reason in words.
+        let running = self.running_in_project(&orch.id);
+        let (state, reason) = match (&busy, running) {
+            (Some(_), _) => ("thinking", "answering a question"),
+            (None, true) => ("running", "a run of this project is going"),
+            (None, false) => ("idle", "waiting for a question"),
+        };
+        let mut out = json!({
+            "available": true, "busy": busy.is_some(), "name": orchestrator::NAME, "state": state, "reason": reason,
+            "project_id": orch.id, "generation": orch.generation, "stream": orch.stream(),
+        });
         if let Some(id) = busy {
             out["ask_id"] = json!(id);
         }
         Ok(out)
+    }
+
+    /// Whether a run of project `pid` is going now: one pinned to it whose process is still alive. `runs` keeps finished runs
+    /// for their crew views, so presence there is not liveness (the supervisor's state is).
+    pub(super) fn running_in_project(&self, pid: &str) -> bool {
+        let live: Vec<String> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.run_id.clone()).collect();
+        live.iter().any(|run| self.pinned_project(run).as_deref() == Some(pid))
     }
 
     /// Cancel the question that is running: the Lead's whole process group is killed.
@@ -288,29 +316,48 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
+        self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
+        let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
         let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
         let ask_id = lead::new_ulid(SystemTime::now())?;
-        // The nonce of every session of this run, plus the live one, is redacted from the text.
-        let mut red = target.nonces.clone();
-        red.absorb(&lock(&self.control).redactor());
+        // The nonce of every session of this run, plus every live one, is redacted from the text.
+        let red = self.project_redactor(&target, &orch);
         let framed = frame(&ask_id, run_id, text, &red)?;
+        #[cfg(test)]
+        if let Some(f) = lock(&self.lead.before_ask_lock).as_ref() {
+            f();
+        }
 
-        // One ask in flight per run: two `--resume` writers would fork the Lead's transcript.
+        // One ask in flight per Director-General: two `--resume` writers would fork its transcript. And at most
+        // `MAX_TURNS` turns across the app.
         let handle = Handle::new();
         {
             let mut active = lock(&self.lead.active);
             if self.lead.closing.load(Ordering::SeqCst) {
                 return Err(LeadError::ShuttingDown);
             }
-            if active.contains_key(run_id) {
+            if active.contains_key(&orch.id) {
                 return Err(LeadError::Busy);
             }
-            active.insert(run_id.to_string(), Active { ask_id: ask_id.clone(), handle: handle.clone() });
+            if active.len() >= orchestrator::MAX_TURNS {
+                return Err(LeadError::TurnsFull);
+            }
+            active.insert(orch.id.clone(), Active { ask_id: ask_id.clone(), handle: handle.clone() });
         }
-        let started = self.start_ask(&target, &bin, &ask_id, &framed, &handle, red);
+        // #82 review: the generation and session are read again now that this ask holds the project's entry.
+        // `new_conversation` bumps them only while no entry is held, so this copy is the current conversation; the one
+        // read before the lock may predate a "New conversation" and must never be resumed or re-published.
+        let orch = match self.orchestrator(&orch.id, &orch.root) {
+            Ok(o) => o,
+            Err(e) => {
+                lock(&self.lead.active).remove(&orch.id);
+                return Err(e);
+            }
+        };
+        let started = self.start_ask(&target, &orch, &bin, &ask_id, &framed, &handle, red);
         if started.is_err() {
-            lock(&self.lead.active).remove(run_id);
+            lock(&self.lead.active).remove(&orch.id);
         }
         started
     }
@@ -320,7 +367,7 @@ impl App {
     /// The run, if this app launched or resumed it: in memory, or in `runs.jsonl`. A finished run still counts.
     /// A run id is only minute-based, so it must name exactly one (campaign, session): if the live runs and the whole
     /// index hold two different ones for it, nothing is selected and the ask is refused, never guessed.
-    fn lead_target(&self, run_id: &str) -> Result<Target, LeadError> {
+    pub(super) fn lead_target(&self, run_id: &str) -> Result<Target, LeadError> {
         let live: Vec<Run> = lock(&self.runs).values().filter(|r| r.run_id == run_id).cloned().collect();
         let indexed: Vec<runindex::Entry> = runindex::entries(&self.data.join("runs.jsonl")).into_iter().filter(|e| e.run_id == run_id).collect();
         let mut ids: HashSet<(String, String)> = live.iter().map(|r| (r.campaign.clone(), r.session_id.clone())).collect();
@@ -328,11 +375,9 @@ impl App {
         if ids.len() > 1 {
             return Err(LeadError::Invalid("run_id: more than one run has this id; it cannot be told apart".into()));
         }
-        // The Lead session id is read from the guarded control dir, never from `runs.jsonl`: a worker can write that.
-        let lead_sid = self.read_lead_sid(run_id);
         if let Some(mut r) = live.into_iter().next() {
             self.add_disk_nonce(&mut r.nonces, &r.session_id);
-            return Ok(Target { from_disk: false, lead_session_id: lead_sid, session_id: r.session_id, run_id: r.run_id, cwd: r.cwd, nonces: r.nonces });
+            return Ok(Target { from_disk: false, session_id: r.session_id, run_id: r.run_id, cwd: r.cwd, nonces: r.nonces });
         }
         // A run loaded from disk (after a restart): its control nonce is still on disk and must stay out of the
         // ask text, the ledger, the bus and the rebuilt history.
@@ -345,11 +390,11 @@ impl App {
         }
         let mut nonces = Redactor::default();
         self.add_disk_nonce(&mut nonces, &e.session_id);
-        Ok(Target { from_disk: true, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, lead_session_id: lead_sid, nonces })
+        Ok(Target { from_disk: true, session_id: e.session_id, run_id: e.run_id, cwd: e.cwd, nonces })
     }
 
-    /// `<data>/control/lead/<run_id>/lead_session`: the authoritative run to Lead-session mapping. It sits under the
-    /// directory the worker guard protects; `runs.jsonl` (worker-writable) is not trusted for it.
+    /// `<data>/control/lead/<run_id>/`: the app's guarded record of a run it launched (directory, session, campaign and
+    /// project). It sits under the directory the worker guard protects; `runs.jsonl` (worker-writable) is not trusted.
     fn lead_sid_dir(&self, run_id: &str) -> PathBuf {
         self.data.join("control").join("lead").join(run_id)
     }
@@ -388,10 +433,15 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
+        // The project, its folder and its key, all from the one look at the repo the launch took before it spawned
+        // anything (ADR-15 2.3; #80, #82 review).
+        let (pid, root) = orchestrator::project_ref_of(key, loc);
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         let main = main_checkout(loc, key);
         fsx::write_atomic(&dir, MAIN_FILE, main.as_ref().map_or("-".into(), |m| m.to_string_lossy()).as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, pid.as_bytes())?;
         let real = std::fs::canonicalize(cwd)?;
         fsx::write_atomic(&dir, CWD_REAL_FILE, real.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
@@ -527,6 +577,53 @@ impl App {
     #[cfg(test)]
     pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
         self.isolation(own_run, repo).map(|i| i.deny)
+    }
+
+    /// The folders of the asking run's OWN project that need the secret-file rules: the project's main checkout
+    /// (`root`) plus the folder of every recorded run of the same pinned project (a worktree outside the main checkout,
+    /// a subfolder, a checkout root, the recorded main checkout), from the guarded records and never the worker-writable index or `.git`. A folder inside another
+    /// already listed is covered by its `**` rules and left out. More than `MAX_OTHER_ROOTS` refuses the ask.
+    pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
+        let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
+        let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Lead cannot guard all of its folders".into());
+        for run in self.try_recorded_runs().map_err(|_| unreadable())? {
+            let Some(cwd) = self.read_run_cwd(&run) else {
+                // No cwd file is a launch that never completed; one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(self.lead_sid_dir(&run).join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
+                continue;
+            };
+            if self.read_run_key(&run).as_ref() != Some(&own) {
+                continue;
+            }
+            // The run's checkout root (its guarded `project_loc`: a worktree started in a subfolder still guards its whole root) and the
+            // folder it ran in (its own spelling, which an alias of the root needs).
+            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
+            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
+            // The project's recorded main checkout too: a submodule first launched from an outside worktree has no run in it, and
+            // `isolation` leaves it out of other projects' rules because it is this project's own. Unresolved (`-`) adds nothing.
+            let main = self.project_main_of(&run, Some(&own)).flatten();
+            // A location record that exists but cannot be read leaves the checkout root unknown: refuse, never guard only the subfolder.
+            // No location file at all is the shipped format, which pins nothing; its folder is still guarded below.
+            let loc = self.read_run_loc(&run);
+            if loc.is_none() && std::fs::symlink_metadata(self.lead_sid_dir(&run).join(LOC_FILE)).is_ok() {
+                return Err(unreadable());
+            }
+            for folder in loc.into_iter().chain(main).chain(std::iter::once(cwd)) {
+                let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+                let covered = |d: &PathBuf| folder.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+                if out.iter().any(covered) {
+                    continue;
+                }
+                if out.len() >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+                }
+                out.push(folder);
+            }
+        }
+        Ok(out)
     }
 
     /// The main checkout recorded for `run`'s project: `Some(Some(path))` when known, `Some(None)` when it was recorded
@@ -750,10 +847,29 @@ impl App {
         p.is_absolute().then_some(p)
     }
 
-    fn read_lead_sid(&self, run_id: &str) -> Option<String> {
-        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(LEAD_SID_FILE)).ok()?;
-        let sid = String::from_utf8(body).ok()?.trim().to_string();
-        ids::valid_session_id(&sid).then_some(sid)
+    /// Every nonce that could appear in the project's shared Director-General conversation: the persisted nonce of the
+    /// session of EVERY recorded run of this project (read from the guarded records), the in-memory nonce history of
+    /// each live run of it, and every live control session's. The conversation is shared by all of the project's runs,
+    /// so history replayed after a restart for run B must not show run A's nonce.
+    fn project_redactor(&self, t: &Target, orch: &Orchestrator) -> Redactor {
+        let mut red = t.nonces.clone();
+        for run in self.recorded_runs() {
+            if self.pinned_project(&run).as_deref() != Some(orch.id.as_str()) {
+                continue;
+            }
+            let sid = fsx::read_nofollow(&self.lead_sid_dir(&run).join(SESSION_FILE)).ok().and_then(|b| String::from_utf8(b).ok());
+            if let Some(sid) = sid {
+                self.add_disk_nonce(&mut red, sid.trim());
+            }
+        }
+        for r in lock(&self.runs).values() {
+            if self.pinned_project(&r.run_id).as_deref() == Some(orch.id.as_str()) {
+                red.absorb(&r.nonces);
+                self.add_disk_nonce(&mut red, &r.session_id);
+            }
+        }
+        red.absorb(&lock(&self.control).redactor());
+        red
     }
 
     /// Add the session's persisted control nonce (read under the hook's rules), if there is a valid one.
@@ -766,45 +882,52 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_ask(
         &self,
         t: &Target,
+        orch: &Orchestrator,
         bin: &Path,
         ask_id: &str,
         framed: &lead::FramedAsk,
         handle: &Arc<Handle>,
         red: Redactor,
     ) -> Result<Value, LeadError> {
-        if !t.cwd.is_dir() {
-            return Err(LeadError::Invalid("cwd: the run's directory is gone".into()));
+        if !orch.root.is_dir() {
+            return Err(LeadError::Invalid("cwd: the project's folder is gone".into()));
         }
         let env = lock(&self.lead.env).clone();
         self.guard_preconditions(&env)?;
         // Same environment for the version probe, the self-test and the ask, with the CLI's own directory on PATH.
         let env = cli_env(env, bin);
-        // Per-run files: the settings hold the run repo's deny rules, and asks for two different runs can overlap
-        // (the busy lock is per run). A shared file would let run B rewrite it before run A's CLI reads it.
-        // Under `control/`, which the worker guard already keeps workers from writing (on the default data dir).
-        let base = self.data.join("control").join("lead");
-        fsx::private_dir(&base).map_err(io)?;
-        let dir = base.join(&t.run_id);
-        // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
-        // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let iso = self.isolation(&t.run_id, &t.cwd)?;
-        let settings = self.write_lead_files(&dir, &t.cwd, &t.run_id, &iso)?;
         // A run this app life launched is authoritative in memory: remember its directory under the guarded dir, so
         // that after a restart the (worker-writable) index cannot supply a different one.
         if !t.from_disk {
-            fsx::write_atomic(&dir, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
+            fsx::private_dir(&self.data.join("control").join("lead")).map_err(io)?;
+            let rec = self.lead_sid_dir(&t.run_id);
+            fsx::private_dir(&rec).map_err(io)?;
+            fsx::write_atomic(&rec, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
         }
-        self.ensure_selftest(bin, &env, &dir, &t.cwd, &iso, &settings, &t.run_id, handle)?;
+        // Per-project files (one ask per Director-General at a time), under `control/`, which the worker guard keeps
+        // workers from writing (on the default data dir). Two projects' asks can overlap; each has its own files.
+        let dir = &orch.dir;
+        // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
+        // recheck below all use the same rules. A project that first appears during the ask is in the next one.
+        let iso = self.isolation(&t.run_id, &orch.root)?;
+        // The project's own folders (main checkout plus every recorded run or worktree folder) all get the secret-file
+        // rules; the self-test and the recheck below use this same set.
+        let repos = self.own_project_folders(&t.run_id, &orch.root)?;
+        let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)?;
+        self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
-        if self.write_lead_files(&dir, &t.cwd, &t.run_id, &iso)? != settings {
-            return Err(LeadError::GuardMissing("the Lead settings changed during the self-test".into()));
+        if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)? != settings {
+            return Err(LeadError::GuardMissing("the Director-General's settings changed during the self-test".into()));
         }
+        // Only this generation's MCP calls are served from now on.
+        lock(&self.control).set_generation(&orch.id, orch.generation).map_err(|e| LeadError::Io(e.code().to_string()))?;
 
-        let (lead_sid, resume) = match &t.lead_session_id {
+        let (lead_sid, resume) = match &orch.session {
             Some(s) => (s.clone(), true),
             None => (ids::uuid_v4()?, false),
         };
@@ -817,9 +940,9 @@ impl App {
         })
         .map_err(|e| LeadError::Invalid(e.to_string()))?;
 
-        let stream = format!("lead-{}", t.run_id);
+        let stream = orch.stream();
         // The history of earlier asks is back on the stream before this one is added to it.
-        self.rebuild_lead_stream(t);
+        self.rebuild_lead_stream(orch, &red);
         let svc = self.control.clone();
         let ledger = {
             let (svc, run_id, session_id, lead_sid, ask_id) = (svc.clone(), t.run_id.clone(), t.session_id.clone(), lead_sid.clone(), ask_id.to_string());
@@ -831,7 +954,7 @@ impl App {
         };
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None)?;
-        let child = match lead_run::spawn(&argv, &t.cwd, &env, framed, handle) {
+        let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
             Ok(c) => c,
             Err(e) => {
                 let _ = ledger(AskState::Failed, None, Some(e.code()));
@@ -841,21 +964,21 @@ impl App {
         let _ = self.bus.push(&stream, &format!("you\t{}", red.clean(framed.text())));
 
         let limits = *lock(&self.lead.limits);
-        let run_id = t.run_id.clone();
+        let project = orch.id.clone();
         let bus = self.bus.clone();
         let active = self.lead.active.clone();
         let log = self.log.clone();
         let handle = handle.clone();
         let first = !resume;
-        let sid_dir = self.lead_sid_dir(&t.run_id);
+        let sid_dir = orch.dir.clone();
         let sid_text = lead_sid.clone();
         let ledger_init = ledger.clone();
         std::thread::spawn(move || {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
-                // The Lead passed the tool and mode check: the ask is delivered. A new Lead session is remembered
-                // only now, so a Lead that never started leaves no id behind to `--resume`.
+                // The turn passed the tool and mode check: the ask is delivered. A new conversation's session is
+                // remembered only now, so a turn that never started leaves no id behind to `--resume`.
                 let _ = ledger_init(AskState::Delivered, None, None);
-                if first && fsx::write_atomic(&sid_dir, LEAD_SID_FILE, sid_text.as_bytes()).is_err() {
+                if first && fsx::write_atomic(&sid_dir, orchestrator::SESSION_FILE, sid_text.as_bytes()).is_err() {
                     if let Some(l) = &log {
                         let _ = l.log("lead_index_failed", &[]);
                     }
@@ -875,25 +998,34 @@ impl App {
                     sink.push("error", e.code());
                 }
             }
-            lock(&active).remove(&run_id);
+            lock(&active).remove(&project);
         });
-        Ok(json!({"ask_id": ask_id, "state": "queued", "stream": format!("lead-{}", t.run_id), "lead_session_id": lead_sid}))
+        Ok(json!({
+            "ask_id": ask_id, "state": "queued", "stream": orch.stream(), "lead_session_id": lead_sid,
+            "project_id": orch.id, "generation": orch.generation, "name": orchestrator::NAME,
+        }))
     }
 
     // ---------------------------------------------------------------- the guard (ADR-13 2a)
+
+    /// The Lead's generated files and the runs' guarded records live under `<data>/control/`, which the installed
+    /// worker guard protects only at its default place. Under any other data dir a worker could rewrite them, so the
+    /// Lead is not started (checked first, before any record there is believed).
+    fn data_dir_guarded(&self) -> Result<(), LeadError> {
+        let guarded = paths::resolve_data_dir(None, &self.home);
+        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+        if !same(&self.data, &guarded) {
+            return Err(LeadError::GuardMissing("Director-General unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)".into()));
+        }
+        Ok(())
+    }
 
     /// Nothing is spawned unless every one of these holds: the guard script is a regular file, the doctor passes,
     /// and the Lead's environment keeps `HOME` and a `PATH` that has `bash` and `jq` (without them the guard would
     /// fail closed and block every Lead tool).
     fn guard_preconditions(&self, env: &[(&'static str, OsString)]) -> Result<(), LeadError> {
         let miss = |why: &str| LeadError::GuardMissing(why.to_string());
-        // The Lead's generated files live under `<data>/control/`, which the installed worker guard protects only at
-        // its default place. Under any other data dir a worker could rewrite them, so the Lead is not started.
-        let guarded = paths::resolve_data_dir(None, &self.home);
-        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
-        if !same(&self.data, &guarded) {
-            return Err(miss("Lead unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)"));
-        }
+        self.data_dir_guarded()?;
         let script = self.home.join(GUARD_SCRIPT);
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
             return Err(miss("pre-tool-use.sh is missing"));
@@ -901,11 +1033,11 @@ impl App {
         self.doctor_ok().map_err(miss)?;
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
         if get("HOME").is_none_or(|h| h.is_empty()) {
-            return Err(miss("HOME is not set for the Lead"));
+            return Err(miss("HOME is not set for the Director-General"));
         }
         let dirs: Vec<PathBuf> = get("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
         if find_on_path("bash", &dirs).is_none() || find_on_path("jq", &dirs).is_none() {
-            return Err(miss("bash and jq must be on the Lead's PATH"));
+            return Err(miss("bash and jq must be on the Director-General's PATH"));
         }
         Ok(())
     }
@@ -930,19 +1062,23 @@ impl App {
         verdict
     }
 
-    /// Write `<data>/lead/<run_id>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
+    /// Write `<orchestrator dir>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
-    fn write_lead_files(&self, dir: &Path, repo: &Path, run_id: &str, iso: &Isolation) -> Result<String, LeadError> {
+    fn write_lead_files(&self, dir: &Path, repos: &[PathBuf], project: &str, generation: u32, iso: &Isolation) -> Result<String, LeadError> {
         if !self.data.is_absolute() {
             return Err(LeadError::GuardMissing("the data dir must be an absolute path".into()));
         }
         fsx::private_dir(dir).map_err(io)?;
-        let want = lead_settings::settings_iso(&self.home, repo, &self.data, &iso.deny, &iso.secrets)?;
+        let want = lead_settings::settings_for_iso(&self.home, repos, &self.data, &iso.deny, &iso.secrets)?;
         let mcp = json!({"mcpServers": {"vajra-desktop": {
             "command": self.lead.exe.to_string_lossy(),
             "args": ["--mcp"],
-            "env": {"VAJRA_DESKTOP_DATA": self.data.to_string_lossy(), crate::control::mcp::RUN_ENV: run_id},
+            "env": {
+                "VAJRA_DESKTOP_DATA": self.data.to_string_lossy(),
+                crate::control::mcp::PROJECT_ENV: project,
+                crate::control::mcp::GEN_ENV: generation.to_string(),
+            },
         }}});
         let mcp = mcp.to_string();
         let mcp_path = fsx::write_atomic(dir, "mcp.json", mcp.as_bytes()).map_err(io)?;
@@ -961,7 +1097,7 @@ impl App {
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repo: &Path, iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
         let version = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -975,7 +1111,7 @@ impl App {
         let file = fsx::write_atomic(&canary_dir, "c.txt", secret.as_bytes()).map_err(io)?;
         let result = (|| {
             // The deny layer alone: the same generated rules, no hooks.
-            let bare = lead_settings::settings_no_hooks_iso(&self.home, repo, &self.data, &iso.deny, &iso.secrets)?;
+            let bare = lead_settings::settings_no_hooks_for_iso(&self.home, repos, &self.data, &iso.deny, &iso.secrets)?;
             let bare_path = fsx::write_atomic(dir, "selftest-settings.json", bare.as_bytes()).map_err(io)?;
             verify_settings_file(&bare_path, &bare)?;
             // Two tries: the model may answer without touching the file, which proves nothing.
@@ -1018,15 +1154,15 @@ impl App {
     /// If the stream is empty but the Lead has a transcript, put its history back on the stream. The transcript is
     /// `~/.claude/projects/<slug>/<lead_sid>.jsonl`, which the allowlist already covers; the mapping is the same one
     /// the crew view uses (`crew::record`).
-    fn rebuild_lead_stream(&self, t: &Target) {
-        let Some(sid) = &t.lead_session_id else { return };
-        let stream = format!("lead-{}", t.run_id);
+    fn rebuild_lead_stream(&self, orch: &Orchestrator, nonces: &Redactor) {
+        let Some(sid) = &orch.session else { return };
+        let stream = orch.stream();
         if self.bus.tail(&stream, 0, 1).head_seq > 0 {
             return;
         }
-        let path = self.claude.join("projects").join(project_slug(&t.cwd)).join(format!("{sid}.jsonl"));
+        let path = self.claude.join("projects").join(project_slug(&orch.root)).join(format!("{sid}.jsonl"));
         let Some(body) = read_tail(&path, REBUILD_BYTES) else { return };
-        let red = t.nonces.clone();
+        let red = nonces.clone();
         for l in body.lines() {
             let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
             if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
@@ -1110,7 +1246,7 @@ fn claude_version(bin: &Path, env: &[(&'static str, OsString)]) -> Result<String
 /// The settings file on disk must be exactly what the core generated (and private). Anything else is a tamper.
 pub(super) fn verify_settings_file(path: &Path, want: &str) -> Result<(), LeadError> {
     use std::os::unix::fs::PermissionsExt;
-    let tamper = || LeadError::GuardMissing("the Lead settings file does not match what was generated".into());
+    let tamper = || LeadError::GuardMissing("the Director-General's settings file does not match what was generated".into());
     let got = fsx::read_nofollow(path).map_err(|_| tamper())?;
     let mode = std::fs::metadata(path).map_err(|_| tamper())?.permissions().mode() & 0o777;
     if sha_hex(&got) != sha_hex(want.as_bytes()) || got != want.as_bytes() || mode != 0o600 {

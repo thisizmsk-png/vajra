@@ -13,9 +13,9 @@ export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" &
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
-  // The Lead's guard preconditions already carry a one-line "why and what to do" (for example the sandbox one), so
-  // it is shown as it is, without the code in front.
-  if (isIpcError(e) && e.error === "lead_guard_missing" && e.detail) return e.detail;
+  // The Director-General's guard preconditions and its turn cap already carry a one-line "why and what to do" (for
+  // example the sandbox one), so they are shown as they are, without the code in front.
+  if (isIpcError(e) && (e.error === "lead_guard_missing" || e.error === "turns_full") && e.detail) return e.detail;
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }
@@ -108,8 +108,14 @@ export type RunOverview = {
 };
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
-export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
-export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
+/** ADR-15 2: one Director-General per project; `generation` is its conversation number (1, then +1 per "New conversation"). */
+export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; generation: number; name: string };
+export type DirectorGeneralState = "idle" | "thinking" | "running";
+export type LeadStatus = {
+  available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string; name: string;
+  state?: DirectorGeneralState; reason?: string; project_id?: string; generation?: number; stream?: string;
+};
+export type NewConversation = { project_id: string; generation: number; stream: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
   id: string; kind: "task" | "plan" | "question"; campaign: string;
@@ -239,10 +245,13 @@ export const api = {
   /** The session and directory of each campaign this app started (absent: started elsewhere). */
   resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
-  /** ADR-13: one headless Lead turn per question. The reply streams into `stream` (`lead-<run_id>`). */
+  /** ADR-15 2: one headless turn of the run's project's Director-General per question. The reply streams into
+   *  `stream` (`orchestrator-<project>-g<generation>`). */
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
+  /** The run's project's Director-General starts generation n+1, on an empty stream. Refused (`lead_busy`) mid-turn. */
+  newConversation: (runId: string) => call<NewConversation>("new_conversation", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
   /** Approve plan `id` as shown: starts the approved action as a new turn. Refused (`plan_changed`) if the plan changed since `inbox` showed it. */
   approvePlan: (id: string, planSha256: string) => call<{ action_id: string; state: string; via: string }>("approve_plan", { id, planSha256 }),
