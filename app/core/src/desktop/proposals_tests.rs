@@ -96,8 +96,8 @@ fn the_inbox_shows_the_exact_ask_and_start_runs_exactly_it_in_the_project_folder
     assert_eq!((it["ask"].as_str(), it["body"].as_str(), it["base"].as_str(), it["rounds"].as_u64()), (Some(ask), Some(ask), Some(SHA), Some(1)));
     let root = t.repo().to_string_lossy().into_owned();
     assert_eq!((it["orchestrator_id"].as_str(), it["project"].as_str(), it["project_name"].as_str()), (Some(pid.as_str()), Some(root.as_str()), Some("repo")));
-    // No project owns this folder in the store: the item sits under Unsorted, never under the k_ stand-in id.
-    assert_eq!(it["project_id"].as_str(), Some("p_unsorted"), "{it}");
+    // FG-02c: the Director-General serves a store project, so its id IS the store id the UI keys on.
+    assert_eq!(it["project_id"].as_str(), Some(pid.as_str()), "{it}");
     assert_eq!(it["source"].as_str(), Some(FROM_DIRECTOR_GENERAL));
     assert_eq!(it["actions"], json!(["start", "dismiss"]));
     let id = it["id"].as_str().unwrap().to_string();
@@ -218,19 +218,20 @@ fn a_proposal_names_its_project_by_the_full_recorded_root() {
     assert_eq!(it["project"].as_str(), Some(nested.to_string_lossy().as_ref()), "{it}");
     assert_eq!(it["project_name"].as_str(), Some("harbor-api"));
     assert_eq!(it["orchestrator_id"].as_str(), Some(pid.as_str()));
-    assert_eq!(it["project_id"].as_str(), Some("p_unsorted"));
+    assert_eq!(it["project_id"].as_str(), Some(pid.as_str()), "the store project of the nested repo");
     assert_ne!(super::super::orchestrator::project_ref(&t.0.join("other/harbor-api")).0, pid, "same name, different project");
 }
 
-/// Review on #83: `project_id` is the project store's id (what the UI, `inbox_new` and the read fingerprints key on),
-/// never the Director-General's `k_` stand-in, which travels in `orchestrator_id`.
+/// Review on #83: `project_id` is the project store's id (what the UI, `inbox_new` and the read fingerprints key on).
+/// FG-02c: the Director-General is now identified by that same store id, so `orchestrator_id` equals it (no `k_`
+/// stand-in is made for a store project).
 #[test]
 fn a_proposal_in_a_registered_project_carries_the_store_id_and_the_stand_in_separately() {
     let t = Tmp::new();
     let (app, pid) = proposed(&t, &["tidy the README"]);
     let store_id = app.projects.add(&t.repo(), false).unwrap().project().id.clone();
     assert!(store_id.starts_with("p_"), "{store_id}");
-    assert_ne!(store_id, pid, "the stand-in and the store id are different ids");
+    assert_eq!(store_id, pid, "the Director-General is the store project's");
     let items = proposals(&app);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["project_id"].as_str(), Some(store_id.as_str()), "{}", items[0]);
