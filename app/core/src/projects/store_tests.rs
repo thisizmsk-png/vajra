@@ -560,7 +560,7 @@ fn a_log_longer_than_the_read_window_says_it_was_cut() {
 /// holds finds nothing.
 #[test]
 fn find_by_path_resolves_a_run_folder_to_its_project() {
-    let t = Tmp::new("find");
+    let t = Tmp::new("find-run");
     let s = t.store();
     let main = t.repo("src/vajra");
     let p = s.add(&main, false).unwrap().project().clone();

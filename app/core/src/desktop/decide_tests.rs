@@ -19,15 +19,19 @@ struct Tmp(PathBuf);
 
 impl Tmp {
     fn new() -> Self {
+        let t = Self::bare();
+        super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+        t
+    }
+    /// The same, with the run's folder not (yet) a project.
+    fn bare() -> Self {
         let d = std::env::temp_dir().join(format!("vajra-decide-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("home/.claude/vajra/campaigns")).unwrap();
         fs::create_dir_all(d.join("home/.claude/skills/vajra/scripts")).unwrap();
         fs::create_dir_all(d.join("repo")).unwrap();
         // The allowlist and the run's directory are compared as real paths; macOS temp is a symlink.
-        let d = fs::canonicalize(&d).unwrap();
-        super::super::test_project(&d.join("data"), &d.join("home"), &d.join("repo"));
-        Self(d)
+        Self(fs::canonicalize(&d).unwrap())
     }
     fn home(&self) -> PathBuf {
         self.0.join("home")
@@ -1017,7 +1021,7 @@ fn inbox_items_carry_the_project_id_of_their_folder() {
 // Given the run's folder is not a project, Then its plan is Unsorted and the read created no project.
 #[test]
 fn a_folder_no_project_owns_is_unsorted_and_stays_so() {
-    let t = Tmp::new();
+    let t = Tmp::bare();
     let app = t.app();
     ready(&t, &app);
     let inbox = app.inbox().unwrap();
