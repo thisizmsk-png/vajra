@@ -1,5 +1,5 @@
 """Unit tests for the profile sampler's pure parts. Run: python3 -m unittest app/bench/profile/test_fg12_profile.py"""
-import os, signal, subprocess, sys, time, unittest
+import os, signal, subprocess, sys, time, types, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fg12_profile as P  # noqa: E402
@@ -158,9 +158,31 @@ class LaunchFailure(unittest.TestCase):
         P.ps = ps
         stopped = []
         P.stop_pid = stopped.append
-        with self.assertRaises(SystemExit):
-            P.launch_hidden(exe, {}, wait=0.0)
+        ours = {777: True}
+        saved = P.started_by_us
+        P.started_by_us = lambda pid, env: ours.get(pid, False)
+        try:
+            with self.assertRaises(SystemExit):
+                P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=0.0)
+        finally:
+            P.started_by_us = saved
         self.assertEqual(stopped, [777], "an instance this launch started is ended before the error goes on")
+
+    def test_given_a_new_instance_that_is_not_ours_when_the_pid_is_not_found_then_it_is_left_alone(self):
+        exe = "/x/Vajra.app/Contents/MacOS/vajra-desktop"
+        calls = {"n": 0}
+
+        def ps():
+            calls["n"] += 1
+            return {} if calls["n"] <= 2 else {888: (1, 1, 0.0, exe)}
+
+        P.subprocess.run = lambda *a, **k: types.SimpleNamespace(stdout="/x/vajra-desktop HOME=/Users/human")
+        P.ps = ps
+        stopped = []
+        P.stop_pid = stopped.append
+        with self.assertRaises(SystemExit):
+            P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=0.0)
+        self.assertEqual(stopped, [], "an app without our isolated data dir is the human's: never touched")
 
     def test_given_the_launch_fails_when_main_runs_then_the_temp_home_is_removed(self):
         import tempfile

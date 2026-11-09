@@ -162,6 +162,16 @@ def stop(p):
                 pass
 
 
+def started_by_us(pid, env_extra):
+    """True when this process was started with our isolated data dir in its environment (`ps eww` shows a process's own
+    environment), so a same-named app the human started meanwhile is never ended."""
+    mark = env_extra.get("VAJRA_DESKTOP_DATA")
+    if not mark:
+        return False
+    out = subprocess.run(["ps", "eww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return f"VAJRA_DESKTOP_DATA={mark}" in out
+
+
 def launch_hidden(binary, env_extra, wait=20):
     """Start the .app without activating it and with its window hidden (`open -g -j`), so a bench run never takes focus or
     puts a window in front of the human. Returns the app's pid; it is not our child, so `stop_pid` ends exactly that pid. If the
@@ -188,7 +198,8 @@ def launch_hidden(binary, env_extra, wait=20):
     # `open`) and must not be left running.
     new = {pid for pid, r in ps().items() if r[3] == exe} - have
     for pid in sorted(new):
-        stop_pid(pid)
+        if started_by_us(pid, env_extra):
+            stop_pid(pid)
     raise SystemExit("the app did not start")
 
 
