@@ -497,6 +497,8 @@ impl App {
         // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently.
         let project = self.project_of_folder(cwd).map_err(|e| e.to_json())?;
         self.within_caps(cwd, workers)?;
+        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review).
+        let key = self.launch_key(cwd);
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -537,7 +539,7 @@ impl App {
         }
         // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
         // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+        if self.record_run_as(run_id, cwd, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             self.note("lead_cwd_record_failed", &[]);
         }
         self.note_run(&project, run_id, campaign);
