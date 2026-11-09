@@ -1216,3 +1216,51 @@ fn reject_without_the_plan_hash_fails_closed() {
     assert!(!log.exists() && states(&t, "reject").is_empty(), "no progress call, no decision line");
     assert_eq!(app.act_reject_plan(&act_env("rej-6001-aaaa", None, &p), PLAN, "no", &sha)["receipt"]["state"], "done");
 }
+
+// Given one campaign launched twice, run A in project P1 and a later run B in project P2, with a waiting task from each,
+// Then each task belongs to the project of ITS OWN run (the run id in its namespaced task id), a task whose run cannot
+// be told (a bare id, runs in different projects) is Unsorted, and nothing is attributed to the campaign's latest run.
+#[test]
+fn a_waiting_task_belongs_to_the_project_of_its_own_run() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p1 = my_project(&app, &t);
+    let repo2 = t.0.join("repo2");
+    fs::create_dir_all(&repo2).unwrap();
+    let p2 = app.projects.add(&repo2, false).unwrap().project().id.clone();
+    assert_ne!(p1, p2);
+    let run = |id: &str, cwd: &std::path::Path| {
+        let e = runindex::Entry { campaign: "multi".into(), session_id: SID.into(), run_id: id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+        runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+    };
+    run("20261106-0911", &t.cwd()); // run A, project P1
+    run("20261107-0900", &repo2); // run B, later, project P2
+    t.campaign("multi", "2026-11-01T00:00:00Z", json!([
+        {"id": "20261106-0911.t1", "status": "blocked", "title": "from A"},
+        {"id": "20261107-0900.t1", "status": "blocked", "title": "from B"},
+        {"id": "t9", "status": "blocked", "title": "no run to tell"},
+        {"id": "20250101-0000.t1", "status": "blocked", "title": "a run the index never saw"},
+    ]));
+    let inbox = app.inbox().unwrap();
+    assert_eq!(item(&inbox, "task:multi.20261106-0911.t1")["project_id"], p1, "run A's task stays in P1");
+    assert_eq!(item(&inbox, "task:multi.20261107-0900.t1")["project_id"], p2);
+    assert_eq!(item(&inbox, "task:multi.t9")["project_id"], "p_unsorted", "runs in different projects: ownership cannot be established");
+    assert_eq!(item(&inbox, "task:multi.20250101-0000.t1")["project_id"], "p_unsorted", "an unknown run is Unsorted");
+    // And the projections agree.
+    let in1: Vec<String> = app.project_state(&p1, None).unwrap()["inbox"]["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(in1, ["task:multi.20261106-0911.t1"]);
+}
+
+// A bare task id in a campaign whose every run is in one project belongs to that project.
+#[test]
+fn a_bare_task_id_follows_a_campaign_whose_runs_share_a_project() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p1 = my_project(&app, &t);
+    for r in ["20261106-0911", "20261107-0900"] {
+        let e = runindex::Entry { campaign: "one".into(), session_id: SID.into(), run_id: r.into(), cwd: t.cwd(), lead_session_id: None };
+        runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+    }
+    t.campaign("one", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "bare"}]));
+    assert_eq!(item(&app.inbox().unwrap(), "task:one.t1")["project_id"], p1);
+}

@@ -56,6 +56,17 @@ fn project_of(app: &App, cache: &mut HashMap<std::path::PathBuf, String>, cwd: &
         .clone()
 }
 
+/// The folder a waiting task's own run was launched in. The workflow writes task ids namespaced `<run>.<id>`, so the run is
+/// named by the id itself; it must be one the run index recorded for this campaign. A bare id names no run: it has an owner
+/// only when every run of the campaign was launched in the same folder. Otherwise the owner cannot be established.
+fn task_folder<'a>(runs: &'a [runindex::Entry], task_id: &str) -> Option<&'a std::path::Path> {
+    if let Some((run, _)) = task_id.split_once('.').filter(|(r, _)| crate::ids::valid_run_id(r)) {
+        return runs.iter().rev().find(|e| e.run_id == run).map(|e| e.cwd.as_path());
+    }
+    let first = runs.first()?;
+    runs.iter().all(|e| e.cwd == first.cwd).then_some(first.cwd.as_path())
+}
+
 /// Shown with every item that comes from the workflow result file.
 const FROM_RESULT: &str = "from the workflow result";
 
@@ -160,6 +171,11 @@ impl App {
         let before = seen.clone();
         let mut waiting: std::collections::BTreeSet<String> = Default::default();
         let launched = runindex::latest(&self.data.join("runs.jsonl"));
+        // Every run of every campaign: a waiting task belongs to the project of ITS run, not of the campaign's latest.
+        let mut runs: HashMap<String, Vec<runindex::Entry>> = HashMap::new();
+        for e in runindex::entries(&self.data.join("runs.jsonl")) {
+            runs.entry(e.campaign.clone()).or_default().push(e);
+        }
         let mut folders: HashMap<std::path::PathBuf, String> = HashMap::new();
         let mut items: Vec<(i64, String, Value)> = Vec::new();
         self.with_reader(|r| {
@@ -184,7 +200,7 @@ impl App {
                         item_id.clone(),
                         json!({
                             "id": item_id, "kind": "task", "campaign": slug, "origin": origin,
-                            "project_id": launched.get(&slug).map_or_else(|| UNSORTED_PROJECT.to_string(), |e| project_of(self, &mut folders, &e.cwd)),
+                            "project_id": task_folder(runs.get(&slug).map(Vec::as_slice).unwrap_or_default(), id).map_or_else(|| UNSORTED_PROJECT.to_string(), |cwd| project_of(self, &mut folders, cwd)),
                             "status": status,
                             "since": SINCE, "created": crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(created.max(0) as u64)), "age_s": (now - created).max(0),
                             "title": clean(&text(t.get("title")), TITLE_MAX),
