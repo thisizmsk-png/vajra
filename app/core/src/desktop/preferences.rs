@@ -89,6 +89,17 @@ mod tests {
         let rejected = app.act_preferences_update(&stale, patch(), false);
         assert_eq!(rejected["receipt"]["state"], "rejected");
         assert_eq!(rejected["receipt"]["reason"], "revision_conflict");
+        // A conflict tells the caller to reload and review, on the first answer and on a replay.
+        assert_eq!(rejected["receipt"]["retry"], "after_refresh");
+        let again = app.act_preferences_update(&stale, patch(), false);
+        assert_eq!(again["replayed"], true);
+        assert_eq!(
+            (
+                again["receipt"]["state"].as_str(),
+                again["receipt"]["retry"].as_str()
+            ),
+            (Some("rejected"), Some("after_refresh"))
+        );
         let reset = Envelope {
             action_id: "prefs-reset-0001".into(),
             expect_generation: Some(1),
