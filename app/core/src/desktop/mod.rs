@@ -533,12 +533,29 @@ impl App {
         workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
+        // A session whose process is already running is never launched again: `start_session` would replace its live control
+        // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
+        // its control session. Checked under the launching lock, before anything is read or changed.
+        if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
+            return Err(fail("session_running", "this session is already running; stop it before starting it again"));
+        }
         // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently.
         let project = self.project_of_folder(cwd).map_err(|e| e.to_json())?;
         // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
         // are checked against.
         let (loc, key) = self.launch_identity(cwd)?;
         self.within_caps(&key, workers)?;
+        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
+        // refused, so a resume never has to guess the provider from the worker-writable index.
+        if self.record_run_provider(run_id, engine).is_err() {
+            return Err(fail("io", "could not record the run's provider"));
+        }
+        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
+        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
+        // pin could never be held to its project (#80 review).
+        if self.record_run_pinned(run_id, cwd, &loc, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+            return Err(fail("io", "could not record the run's project"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -556,19 +573,6 @@ impl App {
                 }
             }
         };
-        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
-        // refused, so a resume never has to guess the provider from the worker-writable index.
-        if self.record_run_provider(run_id, engine).is_err() {
-            lock(&self.control).end_session(session_id);
-            return Err(fail("io", "could not record the run's provider"));
-        }
-        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
-        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
-        // pin could never be held to its project (#80 review).
-        if self.record_run_pinned(run_id, cwd, &loc, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
-            lock(&self.control).end_session(session_id);
-            return Err(fail("io", "could not record the run's project"));
-        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -688,6 +692,16 @@ impl App {
         }
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
+        }
+        // The folder is the guarded record's: the one the caller names came from the worker-writable index, so a session recorded in
+        // one folder is never resumed into another (its project, caps and deny rules follow the folder).
+        if let Some(e) = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id) {
+            if let Some((gcwd, gsid, _, _)) = self.read_run_record(&e.run_id) {
+                let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                if gsid == session_id && real(&gcwd) != real(&cwd) {
+                    return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
+                }
+            }
         }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
