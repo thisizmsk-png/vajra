@@ -683,6 +683,28 @@ impl App {
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
+    /// The folder the guarded records say `session_id` runs in: `Ok(None)` when no record names it (a legacy session), `Err` when
+    /// records of the same session name different folders (the membership is inconsistent, so nothing resumes).
+    fn guarded_session_folder(&self, session_id: &str) -> Result<Option<PathBuf>, Value> {
+        let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let mut found: Option<PathBuf> = None;
+        for run in self.recorded_runs() {
+            let Some((cwd, sid, _, _)) = self.read_run_record(&run) else { continue };
+            if sid != session_id {
+                continue;
+            }
+            // The folder pinned at launch, as stored: re-resolving a recorded path through today's filesystem would follow a symlink
+            // planted since. A record from before `cwd_real` existed has nothing better than its own path.
+            let cwd = self.read_run_cwd_real(&run).unwrap_or_else(|| real(cwd));
+            match &found {
+                Some(f) if *f != cwd => return Err(fail("project_membership_inconsistent", "earlier runs of this session were recorded in different folders")),
+                Some(_) => {}
+                None => found = Some(cwd),
+            }
+        }
+        Ok(found)
+    }
+
     pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
@@ -691,14 +713,14 @@ impl App {
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
         }
-        // The folder is the guarded record's: the one the caller names came from the worker-writable index, so a session recorded in
-        // one folder is never resumed into another (its project, caps and deny rules follow the folder).
-        if let Some(e) = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id) {
-            if let Some((gcwd, gsid, _, _)) = self.read_run_record(&e.run_id) {
-                let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-                if gsid == session_id && real(&gcwd) != real(&cwd) {
-                    return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
-                }
+        // The folder is the guarded records': the one the caller names came from the worker-writable index, and the index's run id
+        // is as forgeable as its cwd, so membership is looked up in the guarded records by SESSION, not by the index's run id. A
+        // session recorded in a folder is never resumed into another. A session with no guarded record at all is a legacy one
+        // (launched before records existed) and is resumed where the caller says.
+        if let Some(gcwd) = self.guarded_session_folder(session_id)? {
+            // The stored launch-time folder is compared as it is; only the folder the caller names is resolved.
+            if gcwd != std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone()) {
+                return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
             }
         }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
