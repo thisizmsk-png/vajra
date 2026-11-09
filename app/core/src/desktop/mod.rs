@@ -687,7 +687,9 @@ impl App {
             if sid != session_id {
                 continue;
             }
-            let cwd = real(cwd);
+            // The folder pinned at launch, as stored: re-resolving a recorded path through today's filesystem would follow a symlink
+            // planted since. A record from before `cwd_real` existed has nothing better than its own path.
+            let cwd = self.read_run_cwd_real(&run).unwrap_or_else(|| real(cwd));
             match &found {
                 Some(f) if *f != cwd => return Err(fail("project_membership_inconsistent", "earlier runs of this session were recorded in different folders")),
                 Some(_) => {}
@@ -710,8 +712,8 @@ impl App {
         // session recorded in a folder is never resumed into another. A session with no guarded record at all is a legacy one
         // (launched before records existed) and is resumed where the caller says.
         if let Some(gcwd) = self.guarded_session_folder(session_id)? {
-            let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            if real(&gcwd) != real(&cwd) {
+            // The stored launch-time folder is compared as it is; only the folder the caller names is resolved.
+            if gcwd != std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone()) {
                 return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
             }
         }
