@@ -16,7 +16,7 @@ import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
 import { lastProject, rememberProject, useCompact, useInspector } from "./shell/layout";
 import { S } from "../strings";
-import { PreferencesProvider, usePreferences } from "./preferences";
+import { PreferencesProvider, preferenceScope, usePreferences } from "./preferences";
 import { DEFAULT_PREFERENCES, matchesShortcut, shortcutKeys } from "./preferenceContract";
 import "./shell.css";
 import "./shell/frame.css";
@@ -138,7 +138,7 @@ function Frame() {
   const workerRow = route.screen === "worker" ? P.crew?.workers.find((w) => w.id === wParam) ?? null : null;
 
   return (
-    <PreferencesProvider projectId={project && !project.bucket ? pid : null}>
+    <PreferencesProvider projectId={preferenceScope(project)}>
       <PreferenceKeys openSettings={openSettings} />
     <PaletteHost commands={commands}>
       <CurrentProject.Provider value={current}>

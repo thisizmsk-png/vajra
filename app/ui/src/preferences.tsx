@@ -4,9 +4,16 @@ import { api } from "./ipc";
 import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceReceipt } from "./preferenceContract";
 import { isPreferenceView } from "./preferenceContract";
 import { followSystemTheme } from "./theme";
+import { validId } from "./projectContract";
 import { S } from "../strings";
 const C = S.preferences;
 export const SAVED = "vajra-preferences-saved";
+/** The preference scope for a project: its id only when the core can store it (a registered T1 id). The shell's
+ * folder-derived ids (`p_<hex>`) and the Unsorted bucket read and save global defaults, so a project the core has not
+ * registered never fails `preferences_read` or blocks Start (PR 100 review). */
+export function preferenceScope(project: { id: string; bucket?: string } | null | undefined): string | null {
+  return project && !project.bucket && validId("p", project.id) ? project.id : null;
+}
 export function usePreferenceScope(projectId: string | null, listenForSaves = true) {
   const scope = projectId ?? ""; const current = useRef(scope); current.current = scope;
   const epoch = useRef(0); const flight = useRef(false);

@@ -40,7 +40,7 @@ describe("FG-08 preferences",()=>{
   await waitFor(()=>expect((screen.getByLabelText("Workers at once (1 to 16)") as HTMLInputElement).value).toBe("7"));
  });
  it("takes the next project's capacity defaults when the project changes, and keeps an edit only within its own project",async()=>{
-  const Q="p_01JC5X8Z3A9K2M4N6P7Q8R9S0U";const workers:Record<string,number>={[P]:7,[Q]:3};
+  const Q="p_01JC5X8Z3A9K2M4N6P7Q8R9S0V";const workers:Record<string,number>={[P]:7,[Q]:3};
   const f=fakeIpc({preferences_read:(a?:Record<string,unknown>)=>({...view(a?.projectId as string),effective:{...DEFAULT_PREFERENCES,workers:workers[a?.projectId as string]}}),preflight:{rows:[],start_enabled:true},list_campaigns:{campaigns:[]},resume_targets:{targets:{}}});setTransport(f.transport);
   const proj=(id:string)=>({schema:"vajra.project/1",id,name:id,root:"/src/"+id,created:null,archived:null,rev:0});
   const tree=(id:string)=><CurrentProject.Provider value={{project:proj(id),campaigns:[],focus:null,runId:null}}><PreferencesProvider projectId={id}><Home/></PreferencesProvider></CurrentProject.Provider>;

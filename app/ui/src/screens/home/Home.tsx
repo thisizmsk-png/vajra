@@ -6,7 +6,7 @@ import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
 import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
-import { usePreferences } from "../../preferences";
+import { preferenceScope, usePreferences } from "../../preferences";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
@@ -62,7 +62,7 @@ export function Home() {
   const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
   // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
   // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
-  const scope = project && !project.bucket ? project.id : null;
+  const scope = preferenceScope(project);
   const defaultsFor = useRef<string | null | undefined>(undefined);
   useEffect(() => {
     const view = prefs.view;
