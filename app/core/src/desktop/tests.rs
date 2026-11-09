@@ -3069,21 +3069,23 @@ fn without_key(app: &App, run: &str) {
     }
 }
 
-/// #80 codex P1b: a record written before project keys existed (cwd, session and campaign, no key) is migrated once from
-/// its guarded cwd, so a fresh start in a previously used folder works after the upgrade.
+/// #80 identity model: a record from an older build (no project key or location) is never migrated or written back; a launch whose
+/// folder it could hold or be held by is refused, and one elsewhere is unaffected.
 #[test]
-fn an_old_record_without_a_project_key_is_migrated_once_and_a_fresh_start_works() {
+fn an_old_record_without_a_project_key_is_refused_never_migrated() {
     let t = Tmp::new();
     let app = t.app();
-    let a = t.0.join("a");
-    fs::create_dir_all(a.join(".git")).unwrap();
+    let (a, far) = (t.0.join("a"), t.0.join("far"));
+    for d in [a.join(".git"), far.join(".git")] {
+        fs::create_dir_all(d).unwrap();
+    }
     app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
     without_key(&app, "20261105-1230");
-    assert_eq!(app.read_run_key("20261105-1230"), None, "this is the base format");
-    let key = app.launch_key(&a).expect("the old record is recognised, not refused");
-    assert_eq!(key, caps::project_key(&a));
-    assert_eq!(app.read_run_key("20261105-1230"), Some(key.clone()), "written back under the guard");
-    assert_eq!(app.launch_key(&a).unwrap(), key, "and stable on the next call");
+    let e = app.launch_key(&a).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    assert_eq!(app.read_run_key("20261105-1230"), None, "nothing was written back");
+    assert!(!app.data.join("control/lead/20261105-1230/project_loc").exists(), "no location was derived and persisted");
+    assert!(app.launch_key(&far).is_ok(), "an unrelated folder is not blocked by it");
 }
 
 #[test]
