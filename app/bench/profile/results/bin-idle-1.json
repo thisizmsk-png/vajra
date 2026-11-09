@@ -1,0 +1,907 @@
+{
+ "summary": {
+  "samples": 29,
+  "clean_samples": 20,
+  "helpers_min": 3,
+  "rss_mib": {
+   "app": 103.2,
+   "webkit": {
+    "GPU": 34.3,
+    "Networking": 15.1,
+    "WebContent": 49.0
+   },
+   "runs": [],
+   "terminals": [],
+   "total": 201.5
+  },
+  "total_min_max": [
+   201.4,
+   201.6
+  ],
+  "cpu_percent_of_one_core": {
+   "app": 0.07,
+   "all": 0.11
+  },
+  "load_1m_max": 7.7,
+  "front_app_seen": [
+   "Orchestrator"
+  ],
+  "mode": "bin",
+  "scenario": "idle",
+  "seconds": 60,
+  "settle_s": 25,
+  "cancelled": false
+ },
+ "samples": [
+  {
+   "t": 1794161128.122535,
+   "comp": {
+    "app": [
+     103.234375,
+     0.29
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.54,
+   "load_1m": 5.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161130.181352,
+   "comp": {
+    "app": [
+     103.21875,
+     0.29
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.54,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161132.239409,
+   "comp": {
+    "app": [
+     103.21875,
+     0.29
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.54,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161134.312402,
+   "comp": {
+    "app": [
+     103.28125,
+     0.3
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.55,
+   "load_1m": 6.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161136.3891258,
+   "comp": {
+    "app": [
+     103.28125,
+     0.3
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.55,
+   "load_1m": 6.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161138.454463,
+   "comp": {
+    "app": [
+     103.28125,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.1
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.56,
+   "load_1m": 6.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161140.526485,
+   "comp": {
+    "app": [
+     103.28125,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161142.588289,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 6.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161144.654021,
+   "comp": {
+    "app": [
+     103.21875,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161146.7315872,
+   "comp": {
+    "app": [
+     103.21875,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161148.802145,
+   "comp": {
+    "app": [
+     103.21875,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      14.984375,
+      0.03
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.4,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161150.872993,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.28125,
+      0.11
+     ],
+     "Networking": [
+      15.0,
+      0.03
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 5.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161152.936192,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.28125,
+      0.11
+     ],
+     "Networking": [
+      15.109375,
+      0.03
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.6,
+   "helpers": 3,
+   "cpu_all": 0.5700000000000001,
+   "load_1m": 5.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161155.001513,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.140625,
+      0.04
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.6,
+   "helpers": 3,
+   "cpu_all": 0.5800000000000001,
+   "load_1m": 5.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161157.062607,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.140625,
+      0.04
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.6,
+   "helpers": 3,
+   "cpu_all": 0.5800000000000001,
+   "load_1m": 5.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161159.121196,
+   "comp": {
+    "app": [
+     103.234375,
+     0.31
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.109375,
+      0.04
+     ],
+     "WebContent": [
+      48.96875,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.6,
+   "helpers": 3,
+   "cpu_all": 0.5800000000000001,
+   "load_1m": 5.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161161.236183,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.09375,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161163.345407,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.09375,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161165.403698,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.078125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161167.4987829,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.078125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161169.56831,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.078125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161171.671231,
+   "comp": {
+    "app": [
+     103.234375,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.078125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161173.8729,
+   "comp": {
+    "app": [
+     103.21875,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      34.265625,
+      0.11
+     ],
+     "Networking": [
+      15.078125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 201.5,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 5.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161176.0970528,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      33.890625,
+      0.11
+     ],
+     "Networking": [
+      15.046875,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 200.3,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 6.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161178.27199,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      32.5625,
+      0.11
+     ],
+     "Networking": [
+      15.03125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 199.0,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 6.9,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161180.399797,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      32.5625,
+      0.11
+     ],
+     "Networking": [
+      15.03125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 199.0,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 7.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161182.4629319,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      32.5625,
+      0.11
+     ],
+     "Networking": [
+      15.03125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 199.0,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 7.7,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161184.523926,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      32.5625,
+      0.11
+     ],
+     "Networking": [
+      15.03125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 199.0,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 7.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794161186.591241,
+   "comp": {
+    "app": [
+     102.40625,
+     0.32
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {
+     "GPU": [
+      32.5625,
+      0.11
+     ],
+     "Networking": [
+      15.03125,
+      0.04
+     ],
+     "WebContent": [
+      48.953125,
+      0.12
+     ]
+    }
+   },
+   "total_mib": 199.0,
+   "helpers": 3,
+   "cpu_all": 0.5900000000000001,
+   "load_1m": 7.1,
+   "front": "Orchestrator"
+  }
+ ]
+}

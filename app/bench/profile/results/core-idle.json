@@ -1,0 +1,543 @@
+{
+ "summary": {
+  "samples": 30,
+  "clean_samples": 30,
+  "helpers_min": 0,
+  "rss_mib": {
+   "app": 6.0,
+   "webkit": {},
+   "runs": [],
+   "terminals": [],
+   "total": 6.0
+  },
+  "total_min_max": [
+   6.0,
+   6.0
+  ],
+  "cpu_percent_of_one_core": {
+   "app": 0.0,
+   "all": 0.0
+  },
+  "load_1m_max": 5.4,
+  "front_app_seen": [
+   "Orchestrator"
+  ],
+  "mode": "core",
+  "scenario": "idle",
+  "seconds": 60,
+  "settle_s": 25,
+  "cancelled": false
+ },
+ "samples": [
+  {
+   "t": 1794160341.0676548,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160343.127092,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160345.185119,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160347.244403,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160349.306842,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160351.3666282,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160353.425662,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160355.48621,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.2,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160357.5496562,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.2,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160359.610125,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160361.6665878,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160363.74668,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.1,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160365.823597,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160367.886805,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.4,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160369.9502249,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.2,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160372.012013,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.2,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160374.077282,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160376.147529,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160378.209363,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160380.268018,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160382.3263779,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 5.0,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160384.3883898,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160386.452656,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160388.514495,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.8,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160390.577246,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160392.642433,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.5,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160394.7039502,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160396.765252,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160398.828886,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.6,
+   "front": "Orchestrator"
+  },
+  {
+   "t": 1794160400.887904,
+   "comp": {
+    "app": [
+     5.984375,
+     0.01
+    ],
+    "runs": [],
+    "terminals": [],
+    "webkit": {}
+   },
+   "total_mib": 6.0,
+   "helpers": 0,
+   "cpu_all": 0.01,
+   "load_1m": 4.5,
+   "front": "Orchestrator"
+  }
+ ]
+}
