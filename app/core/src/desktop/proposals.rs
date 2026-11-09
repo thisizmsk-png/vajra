@@ -96,13 +96,16 @@ impl App {
                 // `project_name` is only the short label. Neither is a fresh read of the repo.
                 let root = self.orchestrator_root(&p.project);
                 let name = root.as_ref().and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()));
+                // `project_id` is the project store's id for the folder (what the UI and `inbox_new` key on), `p_unsorted`
+                // when no project owns it; the Director-General's `k_` stand-in travels in `orchestrator_id` (#83 review).
+                let store_id = root.as_ref().and_then(|r| self.projects.find(r).ok().flatten()).map_or_else(|| super::inbox::UNSORTED_PROJECT.to_string(), |p| p.id);
                 let root = root.map(|r| r.to_string_lossy().into_owned());
                 let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
                 let v = json!({
                     "id": p.item, "kind": "run_proposal", "origin": "app", "source": FROM_DIRECTOR_GENERAL,
                     "created": created, "age_s": (now - first).max(0),
                     "title": "Start a run?", "body": p.ask, "ask": p.ask, "base": p.base, "rounds": p.rounds,
-                    "project_id": p.project, "project": root, "project_name": name, "generation": p.generation,
+                    "project_id": store_id, "orchestrator_id": p.project, "project": root, "project_name": name, "generation": p.generation,
                     "proposal_sha256": p.proposal_sha256, "actions": ["start", "dismiss"],
                 });
                 (first, p.item, v)
