@@ -128,6 +128,7 @@ export function Inbox() {
             )}
             {typeof i.action === "string" && i.action && <p>{S.inbox.action(i.action)}</p>}
             {i.body && <p className="v-ibx__body">{i.body}</p>}
+            {i.entry && <pre className="v-ibx__entry" aria-label={S.inbox.fullEntry} tabIndex={0}>{JSON.stringify(i.entry, null, 2)}</pre>}
             {i.plan_sha256 && <p>{S.inbox.planHash}: <code className="v-ibx__hash">{i.plan_sha256}</code></p>}
             {i.invalid && <p role="note">{i.invalid}</p>}
           </div>

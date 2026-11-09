@@ -134,6 +134,16 @@ describe("Approve and reject", () => {
     expect(n("act_approve_plan")).toBe(0);
   });
 
+  it("shows the complete entry the hash covers, so an extra field cannot be approved unseen", async () => {
+    items = [plan({ entry: { action: "deploy", why: "ship", plan: { target: "staging" }, post_hook: "run-extra-step --now" } })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    const full = within(c).getByLabelText(S.inbox.fullEntry);
+    expect(full.textContent).toContain("post_hook");
+    expect(full.textContent).toContain("run-extra-step --now");
+  });
+
   it("cannot approve a plan whose campaign no project owns: Approve is off with a reason and sends nothing", async () => {
     items = [plan({ campaign: "brand-new-run" })];
     mount();

@@ -119,6 +119,7 @@ export const S = {
     commands: "Commands",
     rollback: "Rollback",
     healthChecks: "Health checks",
+    fullEntry: "Everything the plan hash covers",
     action: (a: string) => `Action: ${a}`,
     risk: (r: string) => `Risk: ${r}`,
     kinds: { plan: "Plan to approve", question: "Question", task: "Waiting on you", failed: "Failed" },
