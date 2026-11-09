@@ -3264,3 +3264,139 @@ fn a_self_contained_nested_clone_and_a_real_submodule_are_their_own_projects() {
     let k = app.launch_key(&a.join("sub")).expect("a submodule of the enclosing project");
     assert_ne!(k, pinned, "the submodule is its own project");
 }
+
+/// #80 round 5: the submodule target passes the "inside A's common dir" check, but a `commondir` file there would redirect
+/// the key to another project. It is refused anywhere on the resolution path, and the pinned key is the validated target.
+#[test]
+fn an_internal_gitdir_whose_commondir_points_at_another_project_is_refused() {
+    let t = Tmp::new();
+    let (app, a, b, pinned) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join(".git/modules/fake")).unwrap();
+    fs::write(a.join(".git/modules/fake/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/fake\n").unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    assert_eq!(app.launch_key(&a).unwrap(), pinned, "A's pin is unchanged");
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a), "B's deny roots are intact: {denied:?}");
+    // A commondir further up the resolution path (on the modules dir itself) is refused too.
+    fs::create_dir_all(a.join(".git/modules/deep/inner")).unwrap();
+    fs::write(a.join(".git/modules/deep/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    fs::create_dir_all(a.join("sub2")).unwrap();
+    fs::write(a.join("sub2/.git"), "gitdir: ../.git/modules/deep/inner\n").unwrap();
+    let e = app.launch_key(&a.join("sub2")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "path: {e}");
+}
+
+#[test]
+fn a_submodules_pinned_key_is_the_validated_target() {
+    let t = Tmp::new();
+    let (app, a, _, _) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join(".git/modules/sub")).unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    let key = app.launch_key(&a.join("sub")).unwrap();
+    assert_eq!(key, fs::canonicalize(a.join(".git/modules/sub")).unwrap());
+}
+
+/// #80 round 5 (second finding): the location and key checked at launch are the pair that is recorded, and the record is
+/// written before the process starts, so a `.git` created later cannot change what was pinned.
+#[test]
+fn the_checked_location_is_what_is_recorded_even_if_a_git_appears_afterwards() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(a.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let (loc, key) = app.launch_identity(&a.join("src")).unwrap();
+    assert_eq!(loc, fs::canonicalize(&a).unwrap());
+    // After the identity was chosen, the launched process plants a nearer .git.
+    fs::create_dir_all(a.join("src/.git")).unwrap();
+    app.record_run_pinned("20261105-1230", &a.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    fs::write(a.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    assert_eq!(app.launch_key(&a).unwrap(), key, "a start at A still gets the key that was checked");
+}
+
+/// vajra-13: a run in a plain (non-Git) folder such as HOME must not block starts in a plain subfolder under it; the
+/// subfolder is its own plain location. A Git enclosing project still refuses an unadmitted nested location.
+#[test]
+fn a_plain_folder_pin_does_not_block_a_plain_subfolder_but_a_git_pin_still_refuses_one() {
+    let t = Tmp::new();
+    let app = t.app();
+    let home = t.0.join("home");
+    fs::create_dir_all(home.join("notes")).unwrap();
+    app.record_run("20261105-1230", &home, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let key = app.launch_key(&home.join("notes")).expect("a plain subfolder of a plain pinned folder is allowed");
+    assert_eq!(key, fs::canonicalize(home.join("notes")).unwrap(), "and it is its own plain project");
+    assert_ne!(key, app.launch_key(&home).unwrap());
+    // A Git enclosing project still refuses a nested location it does not admit.
+    let t2 = Tmp::new();
+    let (app2, a, _, _) = pinned_a_and_b(&t2);
+    fs::write(a.join("sub/.git"), "gitdir: /no/such/place\n").unwrap();
+    assert!(app2.launch_key(&a.join("sub")).is_err());
+}
+
+/// #82 review (P1): an external worktree reached through a symlink inside the main checkout is a run folder whose canonical path
+/// is NOT covered by the checkout. It keeps its secret-file deny rules (supplied and canonical forms both reach the generator).
+#[test]
+fn an_external_worktree_reached_through_a_symlink_keeps_its_secret_file_rules() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    let link = repo.join("wt-link");
+    symlink(&wt, &link).unwrap();
+    let key = caps::project_key(&repo);
+    app.record_run_pinned("20261105-1230", &repo, &repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &link, &wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &repo).unwrap();
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let real_wt = fs::canonicalize(&wt).unwrap();
+    let want = format!("{}/**/.env)", real_wt.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "the external worktree's .env stays denied: {want} in {rules:?}");
+}
+
+/// #82 review (P2): a finished run no longer makes the Director-General "running"; the normal reaper is what ends it.
+#[test]
+fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_reaper() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = test_project(&t.0.join("data"), &t.home(), &t.0.join("repo"));
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap();
+    assert!(app.running_in_project(&p));
+    app.sup.kill(&stream).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.sup.is_running(&stream).unwrap_or(false) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    app.reap_runs();
+    assert!(lock(&app.runs).contains_key(&stream), "the entry stays for the crew view");
+    assert!(!app.running_in_project(&p), "but the project is no longer running");
+}
+
+/// #82 review (P2), on the store id: a submodule first launched from a subfolder and then from its root pins the same
+/// project, whose root is the checkout root the store recorded, never the subfolder.
+#[test]
+fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (parent, child) = (t.0.join("parent"), t.0.join("parent/child"));
+    fs::create_dir_all(parent.join(".git/modules/child")).unwrap();
+    fs::create_dir_all(child.join("src")).unwrap();
+    let pc = test_project(&t.0.join("data"), &t.home(), &child);
+    let key = fs::canonicalize(parent.join(".git/modules/child")).unwrap();
+    let loc = fs::canonicalize(&child).unwrap();
+    app.record_run_pinned("20261105-1230", &child.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &child, &loc, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    for run in ["20261105-1230", "20261105-1231"] {
+        assert_eq!(app.pinned_project(run).as_deref(), Some(pc.as_str()), "{run}");
+    }
+    assert_eq!(fs::canonicalize(app.projects.get(&pc).unwrap().root).unwrap(), loc, "the root is the checkout, not the subfolder");
+}
