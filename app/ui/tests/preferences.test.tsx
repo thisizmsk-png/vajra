@@ -5,6 +5,7 @@ import { fakeIpc } from "./fakeIpc";
 import { PreferenceForm } from "../src/screens/settings/PreferenceForm";
 import { PreferencesProvider, capturePreferences } from "../src/preferences";
 import { Home } from "../src/screens/home/Home";
+import { CurrentProject } from "../src/projects/current";
 import { DEFAULT_PREFERENCES, matchesShortcut } from "../src/preferenceContract";
 const done=(result:unknown)=>({receipt:{state:"done",action_id:"prefs-save-test",project_id:"global"},result});
 const P="p_01JC5X8Z3A9K2M4N6P7Q8R9S0T";
@@ -36,6 +37,17 @@ describe("FG-08 preferences",()=>{
   setTransport(fakeIpc({preferences_read:{...view(),effective:{...DEFAULT_PREFERENCES,workers:7,rounds:1}},preflight:{rows:[],start_enabled:true},list_campaigns:{campaigns:[]},resume_targets:{targets:{}}}).transport);
   render(<PreferencesProvider projectId={null}><Home/></PreferencesProvider>);
   await waitFor(()=>expect((screen.getByLabelText("Workers at once (1 to 16)") as HTMLInputElement).value).toBe("7"));
+ });
+ it("takes the next project's capacity defaults when the project changes, and keeps an edit only within its own project",async()=>{
+  const Q="p_01JC5X8Z3A9K2M4N6P7Q8R9S0U";const workers:Record<string,number>={[P]:7,[Q]:3};
+  const f=fakeIpc({preferences_read:(a?:Record<string,unknown>)=>({...view(a?.projectId as string),effective:{...DEFAULT_PREFERENCES,workers:workers[a?.projectId as string]}}),preflight:{rows:[],start_enabled:true},list_campaigns:{campaigns:[]},resume_targets:{targets:{}}});setTransport(f.transport);
+  const proj=(id:string)=>({schema:"vajra.project/1",id,name:id,root:"/src/"+id,created:null,archived:null,rev:0});
+  const tree=(id:string)=><CurrentProject.Provider value={{project:proj(id),campaigns:[],focus:null,runId:null}}><PreferencesProvider projectId={id}><Home/></PreferencesProvider></CurrentProject.Provider>;
+  const field=()=>screen.getByLabelText("Workers at once (1 to 16)") as HTMLInputElement;
+  const r=render(tree(P));await waitFor(()=>expect(field().value).toBe("7"));
+  r.rerender(tree(Q));await waitFor(()=>expect(field().value).toBe("3"));
+  fireEvent.change(field(),{target:{value:"9"}});await act(async()=>window.dispatchEvent(new CustomEvent("vajra-preferences-saved")));
+  await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="preferences_read"&&c.args?.projectId===Q).length).toBeGreaterThan(1));expect(field().value).toBe("9");
  });
  it("handles an unsupported core reply without crashing the settings screen",async()=>{
   setTransport(fakeIpc({preferences_read:{}}).transport);
@@ -70,6 +82,9 @@ describe("FG-08 preferences",()=>{
   await screen.findByRole("button",{name:"Retry same action"});
   expect((screen.getByLabelText("Theme") as HTMLSelectElement).disabled).toBe(true);
   expect(screen.getByRole("button",{name:"Use global Theme"}).getAttribute("aria-disabled")).toBe("true");
+  // Discard would clear the draft while Retry still holds it: it stays off until the outcome is known.
+  expect(screen.getByRole("button",{name:"Discard changes"}).getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(screen.getByRole("button",{name:"Discard changes"}));expect((screen.getByLabelText("Theme") as HTMLSelectElement).value).toBe("dark");
   fireEvent.click(screen.getByRole("button",{name:"Retry same action"}));await screen.findByText("Saved.");
   const writes=f.calls.filter(c=>c.cmd==="act_preferences_update");expect(writes).toHaveLength(2);expect(writes[1].args?.patch).toEqual({theme:"dark"});
   expect((screen.getByLabelText("Theme") as HTMLSelectElement).disabled).toBe(false);
