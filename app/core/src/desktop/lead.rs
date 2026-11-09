@@ -544,8 +544,11 @@ impl App {
         // The run records below hold that root by path (`project_main` is the store's root at launch), so they never admit it:
         // only this check does.
         let mut own_root: Option<PathBuf> = None;
-        // Every folder this project claims (its root and its runs' records, unfiltered), for the ambiguity check below.
-        let mut own_claimed: Vec<PathBuf> = Vec::new();
+        // What each side OWNS (#103 review), for the ambiguity check: a project's store root and the folders its runs really ran
+        // in. A record's checkout location and main checkout are Git bookkeeping, which store projects registered inside one
+        // checkout share; they are still denied to others and still count for this run's identity, but are no ownership claim.
+        let mut own_owned: Vec<PathBuf> = Vec::new();
+        let mut other_owned: Vec<PathBuf> = Vec::new();
         for p in listing.projects {
             let root = PathBuf::from(&p.root);
             if p.id == own {
@@ -554,9 +557,10 @@ impl App {
                 if root == own_real && same_inode {
                     own_folders.push(root.clone());
                 }
-                own_claimed.push(root.clone());
+                own_owned.push(root.clone());
                 own_root = Some(root);
             } else {
+                other_owned.push(root.clone());
                 candidates.push((vec![root], false));
             }
         }
@@ -588,11 +592,14 @@ impl App {
                 Some(None) => return Err(guard("another project's main checkout could not be resolved, so the Director-General cannot deny it; start that project once from its main folder, then ask again")),
                 None => None,
             };
+            // A record with no store identity has only its recorded folders to tell its project by: all of them count as owned.
+            let owned = |all: bool| cwd_real.iter().chain(loc.iter().filter(move |_| all)).chain(main.iter().filter(move |_| all)).cloned().collect::<Vec<_>>();
             if pid.as_deref() == Some(own.as_str()) {
-                own_claimed.extend(cwd_real.iter().chain(&loc).chain(&main).cloned());
+                own_owned.extend(owned(false));
                 own_folders.extend(cwd_real.into_iter().chain(loc).chain(main).filter(|f| own_root.as_ref() != Some(f)));
                 continue;
             }
+            other_owned.extend(owned(pid.is_none()));
             let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
             let loc_missing = !present(LOC_FILE);
             other_recorded.extend(cwd_real.into_iter().chain(loc).chain(main));
@@ -604,8 +611,8 @@ impl App {
         if !own_folders.contains(&own_real) {
             return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Director-General is not started"));
         }
-        // Ambiguity: one recorded folder claimed by two projects.
-        if other_recorded.iter().any(|f| own_folders.contains(f) || own_claimed.contains(f)) {
+        // Ambiguity: a folder one project owns is recorded by another (as its folder, location or main checkout).
+        if other_recorded.iter().any(|f| own_owned.contains(f)) || own_folders.iter().any(|f| other_owned.contains(f)) {
             return Err(guard("a folder is recorded under two different projects, so the Director-General cannot tell which one owns it"));
         }
         let mut iso = Isolation::default();
