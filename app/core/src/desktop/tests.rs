@@ -2785,6 +2785,14 @@ fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     let targets = app.resume_targets().unwrap();
     assert_eq!(targets["targets"]["deliver-claude"]["provider"], "claude");
     assert!(targets["targets"].get("deliver-codex").is_none(), "the app-made id means nothing to codex resume: {targets}");
+    // A worker rewrites the Codex row to say claude: the guarded record still wins, so it is not offered on Claude.
+    let flipped = idx.replace("\"provider\":\"codex\"", "\"provider\":\"claude\"");
+    assert_ne!(flipped, idx);
+    fs::write(t.0.join("data/runs.jsonl"), flipped).unwrap();
+    let targets = app.resume_targets().unwrap();
+    assert!(targets["targets"].get("deliver-codex").is_none(), "an edited index row cannot move a Codex run onto Claude: {targets}");
+    let e = app.resume_run(other, "deliver-codex", &cwd, Some("claude")).unwrap_err();
+    assert_eq!(code(&e), "provider_mismatch", "{e}");
     // And a direct resume of it is refused, never handed to `codex resume <app uuid>`.
     let e = app.resume_run(other, "deliver-codex", &cwd, Some("codex")).unwrap_err();
     assert_eq!(code(&e), "provider_cannot_resume", "{e}");

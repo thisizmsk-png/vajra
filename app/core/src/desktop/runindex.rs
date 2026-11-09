@@ -22,7 +22,8 @@ pub struct Entry {
     /// run to Lead-session mapping in `<data>/control/lead/<run_id>/lead_session`, under the guarded control dir.
     pub lead_session_id: Option<String>,
     /// The adapter that ran it (`claude` or `codex`); absent in older lines, which were all `claude`. Like the rest of
-    /// this file it is a hint, not trusted: it only picks which of the two known CLIs a resume offers by default.
+    /// this file it is a hint and nothing decides on it: the provider a resume uses comes from the guarded per-run record
+    /// (`lead::record_run_provider`), because a worker could rewrite this line.
     pub provider: Option<String>,
 }
 

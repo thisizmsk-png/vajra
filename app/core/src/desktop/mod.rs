@@ -492,6 +492,12 @@ impl App {
                 }
             }
         };
+        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
+        // refused, so a resume never has to guess the provider from the worker-writable index.
+        if self.record_run_provider(run_id, engine).is_err() {
+            lock(&self.control).end_session(session_id);
+            return Err(fail("io", "could not record the run's provider"));
+        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -528,8 +534,13 @@ impl App {
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
             // Only a provider that can resume is offered: a Codex run's app-made id means nothing to `codex resume`.
-            .filter(|(_, e)| Engine::from_id(e.provider.as_deref().unwrap_or("claude")).is_some_and(|g| adapter_for(g).capabilities().resume))
-            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": e.provider.as_deref().unwrap_or("claude")})))
+            .map(|(k, e)| {
+                // The guarded record decides; the index line's own `provider` is a worker-writable hint and is not used.
+                let engine = self.read_run_provider(&e.run_id).unwrap_or(Engine::Claude);
+                (k, engine, e)
+            })
+            .filter(|(_, engine, _)| adapter_for(*engine).capabilities().resume)
+            .map(|(k, engine, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": engine.id()})))
             .collect();
         Ok(json!({"targets": targets}))
     }
@@ -612,7 +623,15 @@ impl App {
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
-        let engine = self.chosen_engine(provider)?;
+        // The run this session belongs to, from the index (a lookup hint) and its guarded provider record: a request for
+        // a different provider than the one that ran it is refused, never run on the other.
+        let recorded = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id).and_then(|e| self.read_run_provider(&e.run_id));
+        if let (Some(rec), Some(asked)) = (recorded, provider) {
+            if rec.id() != asked {
+                return Err(fail("provider_mismatch", format!("that run was started on {}, not {asked}", rec.id())));
+            }
+        }
+        let engine = self.chosen_engine(provider.or(recorded.map(Engine::id)))?;
         let adapter = adapter_for(engine);
         if !adapter.capabilities().resume {
             return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
