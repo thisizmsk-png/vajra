@@ -12,6 +12,8 @@ pub struct Ring {
     head: usize,
     len: usize,
     dropped: u64,
+    /// The kept bytes already start on a line boundary (a restored tail), so `take` must not trim another line.
+    aligned: bool,
 }
 
 /// What a hidden pane hands over when it is shown again.
@@ -33,6 +35,7 @@ impl Ring {
         }
         if data.len() >= RING {
             self.dropped += (self.len + data.len() - RING) as u64;
+            self.aligned = false;
             self.buf.copy_from_slice(&data[data.len() - RING..]);
             self.head = 0;
             self.len = RING;
@@ -41,6 +44,7 @@ impl Ring {
         let over = (self.len + data.len()).saturating_sub(RING);
         if over > 0 {
             self.dropped += over as u64;
+            self.aligned = false;
             self.head = (self.head + over) % RING;
             self.len -= over;
         }
@@ -55,6 +59,7 @@ impl Ring {
     pub fn restore(&mut self, tail: Tail) {
         self.push(&tail.bytes);
         self.dropped += tail.skipped;
+        self.aligned = true;
     }
 
     /// The kept bytes in order, and how many were left out; the ring is empty (and its memory freed) afterwards.
@@ -70,7 +75,7 @@ impl Ring {
             bytes.extend_from_slice(&self.buf[..self.len - first]);
         }
         let mut skipped = self.dropped;
-        if self.dropped > 0 {
+        if self.dropped > 0 && !self.aligned {
             if let Some(i) = bytes.iter().position(|b| *b == b'\n').filter(|i| i + 1 < bytes.len()) {
                 bytes.drain(..=i);
                 skipped += (i + 1) as u64;
@@ -214,14 +219,27 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_tail_comes_out_again_with_its_count() {
+    fn a_restored_tail_comes_out_again_unchanged_however_often_it_is_restored() {
         let mut r = Ring::default();
-        r.push(&vec![b'x'; RING + 5]);
-        r.push(b"\nlast\n");
+        for c in lines(60_000).chunks(1000) {
+            r.push(c);
+        }
         let first = r.take();
         let copy = Tail { bytes: first.bytes.clone(), skipped: first.skipped };
         r.restore(first);
-        assert_eq!(r.take(), copy);
+        let again = r.take();
+        r.restore(again);
+        assert_eq!(r.take(), copy, "no line is trimmed again and the count does not grow");
+    }
+
+    #[test]
+    fn output_after_a_restore_that_overflows_is_trimmed_to_a_line_again() {
+        let mut r = Ring::default();
+        r.restore(Tail { bytes: b"AAAA\nBBBB\n".to_vec(), skipped: 1 });
+        r.push(&vec![b'z'; RING - 5]); // pushes "AAAA\n" out: the front is no longer known to be on a line start
+        let t = r.take();
+        assert_eq!(t.bytes, vec![b'z'; RING - 5], "the partial first line is trimmed again");
+        assert_eq!(t.skipped, 1 + 5 + 5);
     }
 
     #[test]
