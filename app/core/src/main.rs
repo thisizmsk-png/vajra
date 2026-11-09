@@ -36,6 +36,15 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn preferences_read(app: State<'_, App>, project_id: Option<String>) -> Res {
+    app.preferences_read(project_id.as_deref())
+}
+#[tauri::command(async)]
+fn act_preferences_update(app: State<'_, App>, envelope: Envelope, patch: vajra_desktop::preferences::Patch, reset: bool) -> Value {
+    app.act_preferences_update(&envelope, patch, reset)
+}
+
+#[tauri::command(async)]
 fn inbox(app: State<'_, App>) -> Res {
     app.inbox()
 }
@@ -58,8 +67,8 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
 
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
-fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
-    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
@@ -142,13 +151,19 @@ fn start_run(
     max_in_flight: u32,
     campaign: Option<String>,
     cwd: String,
+    provider: Option<String>,
 ) -> Res {
-    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String, provider: Option<String>) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd, provider.as_deref())
+}
+
+#[tauri::command(async)]
+fn provider_list(app: State<'_, App>) -> Res {
+    app.provider_list()
 }
 
 #[tauri::command(async)]
@@ -516,11 +531,14 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            preferences_read,
+            act_preferences_update,
             preflight,
             list_campaigns,
             campaign_integrity,
             start_run,
             resume_run,
+            provider_list,
             verify_campaign,
             read_report,
             resume_targets,

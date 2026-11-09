@@ -140,7 +140,9 @@ impl App {
                     Ok(_) => (State::Done, None),
                     Err(v) => {
                         let code = v["error"].as_str().unwrap_or("failed");
-                        let state = if code == "effect_panicked" {
+                        // An effect that may have half run (a panic) or whose change landed but could not be confirmed
+                        // (`outcome_unknown`) is unknown, never a refusal: the caller must reload and review.
+                        let state = if code == "effect_panicked" || code == "outcome_unknown" {
                             State::Unknown
                         } else if FAILED_CODES.contains(&code) {
                             State::Failed

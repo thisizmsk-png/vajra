@@ -112,6 +112,18 @@ describe("Home", () => {
     expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false); // never a fresh session
   });
 
+  it("resumes on the provider that ran the campaign, never silently on another", async () => {
+    const f = await open({
+      preflight: rows(true),
+      list_campaigns: { campaigns: [camp()] },
+      resume_targets: { targets: { c1: { ...target, provider: "codex" } } },
+      resume_run: handle,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.home.resume }));
+    await waitFor(() => expect(window.location.hash).toContain("#/review?"));
+    expect(f.calls.find((c) => c.cmd === "resume_run")!.args).toEqual({ sessionId: SID, campaign: "c1", cwd: "/work/repo", provider: "codex" });
+  });
+
   it("offers no Resume for a campaign this app did not start, and says why", async () => {
     await open({ preflight: rows(true), list_campaigns: { campaigns: [camp()] }, resume_targets: { targets: {} } });
     expect(await screen.findByText(S.home.resumeElsewhere)).toBeTruthy();
