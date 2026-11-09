@@ -590,7 +590,9 @@ impl App {
         let mut enclosing: Vec<PathBuf> = Vec::new();
         for r in self.recorded_runs() {
             let (Some(loc), Some(key)) = (self.read_run_loc(&r), self.read_run_key(&r)) else { continue };
-            if loc != want && want.starts_with(&loc) && !enclosing.contains(&key) {
+            // Only a Git project (its key is a common dir, not the folder itself) constrains what may nest under it; a plain
+            // folder's pin leaves a plain subfolder its own plain location.
+            if loc != want && want.starts_with(&loc) && key != loc && !enclosing.contains(&key) {
                 enclosing.push(key);
             }
         }

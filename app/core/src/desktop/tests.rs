@@ -3282,3 +3282,22 @@ fn the_checked_location_is_what_is_recorded_even_if_a_git_appears_afterwards() {
     fs::write(a.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
     assert_eq!(app.launch_key(&a).unwrap(), key, "a start at A still gets the key that was checked");
 }
+
+/// vajra-13: a run in a plain (non-Git) folder such as HOME must not block starts in a plain subfolder under it; the
+/// subfolder is its own plain location. A Git enclosing project still refuses an unadmitted nested location.
+#[test]
+fn a_plain_folder_pin_does_not_block_a_plain_subfolder_but_a_git_pin_still_refuses_one() {
+    let t = Tmp::new();
+    let app = t.app();
+    let home = t.0.join("home");
+    fs::create_dir_all(home.join("notes")).unwrap();
+    app.record_run("20261105-1230", &home, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let key = app.launch_key(&home.join("notes")).expect("a plain subfolder of a plain pinned folder is allowed");
+    assert_eq!(key, fs::canonicalize(home.join("notes")).unwrap(), "and it is its own plain project");
+    assert_ne!(key, app.launch_key(&home).unwrap());
+    // A Git enclosing project still refuses a nested location it does not admit.
+    let t2 = Tmp::new();
+    let (app2, a, _, _) = pinned_a_and_b(&t2);
+    fs::write(a.join("sub/.git"), "gitdir: /no/such/place\n").unwrap();
+    assert!(app2.launch_key(&a.join("sub")).is_err());
+}
