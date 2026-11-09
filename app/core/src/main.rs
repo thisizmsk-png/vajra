@@ -23,6 +23,7 @@ use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
+use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
 use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
 /// The one event the UI listens to.
@@ -33,6 +34,15 @@ fn is_mcp(args: &[String]) -> bool {
 }
 
 // -------------------------------------------------------------------- commands
+
+#[tauri::command(async)]
+fn preferences_read(app: State<'_, App>, project_id: Option<String>) -> Res {
+    app.preferences_read(project_id.as_deref())
+}
+#[tauri::command(async)]
+fn act_preferences_update(app: State<'_, App>, envelope: Envelope, patch: vajra_desktop::preferences::Patch, reset: bool) -> Value {
+    app.act_preferences_update(&envelope, patch, reset)
+}
 
 #[tauri::command(async)]
 fn inbox(app: State<'_, App>) -> Res {
@@ -51,14 +61,24 @@ fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sh
 }
 
 #[tauri::command(async)]
+fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String, plan_sha256: String) -> Value {
+    app.act_reject_plan(&envelope, &id, &reason, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_answer_question(app: State<'_, App>, envelope: Envelope, id: String, text: String) -> Value {
+    app.act_answer_question(&envelope, &id, &text)
+}
+
+#[tauri::command(async)]
 fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
 
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
-fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
-    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
@@ -141,13 +161,19 @@ fn start_run(
     max_in_flight: u32,
     campaign: Option<String>,
     cwd: String,
+    provider: Option<String>,
 ) -> Res {
-    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+    app.start_run(RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
 #[tauri::command(async)]
-fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String) -> Res {
-    app.resume_run(&session_id, &campaign, &cwd)
+fn resume_run(app: State<'_, App>, session_id: String, campaign: String, cwd: String, provider: Option<String>) -> Res {
+    app.resume_run(&session_id, &campaign, &cwd, provider.as_deref())
+}
+
+#[tauri::command(async)]
+fn provider_list(app: State<'_, App>) -> Res {
+    app.provider_list()
 }
 
 #[tauri::command(async)]
@@ -248,12 +274,18 @@ fn term_value(i: &vajra_desktop::terminal::TermInfo) -> serde_json::Value {
 fn term_open(
     app: State<'_, App>,
     terms: State<'_, Terminals>,
+    own: State<'_, Ownership>,
     cwd: String,
     rows: u16,
     cols: u16,
     on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Res {
-    terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map(|i| term_value(&i)).map_err(term_err)
+    let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
+    // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
+        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+    }
+    Ok(term_value(&i))
 }
 
 /// Re-bind a terminal that outlived its view (the webview reloaded, or a hidden dock came back).
@@ -281,13 +313,64 @@ fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
 }
 
 #[tauri::command(async)]
-fn term_close(terms: State<'_, Terminals>, id: u32) -> Res {
-    terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
+fn term_close(terms: State<'_, Terminals>, own: State<'_, Ownership>, id: u32) -> Res {
+    // The record goes after the shell is stopped (exactly the record this terminal made, not whatever shares its pid now):
+    // until then a crash must still leave the shell recoverable.
+    own.ledger.close_then_forget(id, || terms.close(id)).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
 #[tauri::command]
 fn term_list(terms: State<'_, Terminals>) -> Res {
     Ok(serde_json::json!({"terminals": terms.list().iter().map(term_value).collect::<Vec<_>>()}))
+}
+
+/// Shells recorded by an earlier session of the app, reconciled once at launch, and what the human did about them.
+struct Ownership {
+    ledger: Ledger,
+    found: std::sync::Mutex<Vec<Found>>,
+    home: String,
+}
+
+fn found_lock(own: &Ownership) -> std::sync::MutexGuard<'_, Vec<Found>> {
+    own.found.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What keeps running after the window closes, after a quit and after an archive, and what the last crash left behind.
+/// On demand: nothing polls it.
+#[tauri::command]
+fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
+    let mut v = serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags())).map_err(internal)?;
+    v["found"] = serde_json::to_value(&*found_lock(&own)).map_err(internal)?;
+    Ok(v)
+}
+
+fn internal(e: serde_json::Error) -> serde_json::Value {
+    serde_json::json!({"error": "internal", "detail": e.to_string()})
+}
+
+/// End leftover shells the human picked. Only records that reconciled as owned are eligible, and each is proven again
+/// (pid and start stamp) right before it is signalled; anything else is reported and left alone.
+#[tauri::command(async)]
+fn recover_orphans(own: State<'_, Ownership>, pids: Vec<u32>) -> Res {
+    let picked: Vec<Found> = found_lock(&own).iter().filter(|f| pids.contains(&f.owner.pid) && matches!(f.verdict, Verdict::Owned { .. })).cloned().collect();
+    let mut out = Vec::new();
+    for f in &picked {
+        let r = vajra_desktop::owned::recover(&f.owner);
+        // Only an end (or a record that was not ours) settles it; members still running keep the record and the retry.
+        vajra_desktop::owned::apply_recovery(&own.ledger, &mut found_lock(&own), &f.owner, &r);
+        out.push(serde_json::json!({"pid": f.owner.pid, "result": r}));
+    }
+    for pid in pids.iter().filter(|p| !picked.iter().any(|f| f.owner.pid == **p)) {
+        out.push(serde_json::json!({"pid": pid, "result": "not_owned"}));
+    }
+    Ok(serde_json::json!({"results": out}))
+}
+
+/// The redacted, bounded text the human may read and copy. Nothing is sent anywhere.
+#[tauri::command]
+fn diagnostics_preview(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
+    let report = vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags());
+    Ok(serde_json::json!({"text": vajra_desktop::diagnostics::preview(&report, &found_lock(&own), &own.home)}))
 }
 
 #[tauri::command(async)]
@@ -350,9 +433,38 @@ fn lead_status(app: State<'_, App>, run_id: String) -> Res {
     app.lead_status(&run_id)
 }
 
+/// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
+#[tauri::command(async)]
+fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String) -> Res {
+    app.start_proposal(&id, &proposal_sha256)
+}
+
+/// ADR-15 2.4: dismiss a proposed run; nothing runs.
+#[tauri::command(async)]
+fn dismiss_proposal(app: State<'_, App>, id: String) -> Res {
+    app.dismiss_proposal(&id)
+}
+
+/// ADR-15 2.5: the Director-General of the run's project starts a new conversation (generation n+1).
+#[tauri::command(async)]
+fn new_conversation(app: State<'_, App>, run_id: String) -> Res {
+    app.new_conversation(&run_id)
+}
+
 #[tauri::command(async)]
 fn active_runs(app: State<'_, App>) -> Res {
     app.active_runs()
+}
+
+/// ADR-15 D5: the run caps (1 per project, `max_runs` in the app, the worker ceiling).
+#[tauri::command(async)]
+fn run_limits(app: State<'_, App>) -> Res {
+    app.run_limits()
+}
+
+#[tauri::command(async)]
+fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
+    app.set_run_limits(max_runs)
 }
 
 // -------------------------------------------------------------------- main
@@ -405,8 +517,12 @@ fn main() {
     }
     let sub = app.bus.subscribe();
 
+    // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and
+    // start stamp, never a name). Nothing is signalled until the human asks.
+    let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
     let built = tauri::Builder::default()
         .manage(app)
+        .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
@@ -414,6 +530,10 @@ fn main() {
             let sink_handle = handle.clone();
             handle.state::<App>().set_change_sink(Box::new(move |p| {
                 let _ = sink_handle.emit(CHANGED, p);
+            }));
+            let event_handle = handle.clone();
+            handle.state::<App>().set_event_sink(Box::new(move |name, p| {
+                let _ = event_handle.emit(name, p);
             }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
@@ -446,11 +566,14 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            preferences_read,
+            act_preferences_update,
             preflight,
             list_campaigns,
             campaign_integrity,
             start_run,
             resume_run,
+            provider_list,
             verify_campaign,
             read_report,
             resume_targets,
@@ -475,9 +598,14 @@ fn main() {
             kb_search,
             take_over,
             active_runs,
+            run_limits,
+            set_run_limits,
             ask_lead,
             cancel_ask,
             lead_status,
+            new_conversation,
+            start_proposal,
+            dismiss_proposal,
             inbox,
             approve_plan,
             reject_plan,
@@ -490,12 +618,17 @@ fn main() {
             project_migration_suggest,
             project_migration_confirm,
             act_approve_plan,
+            act_reject_plan,
+            act_answer_question,
             act_stop_worker,
             act_start_run,
             project_state,
             term_open,
             term_attach,
             term_list,
+            lifecycle,
+            recover_orphans,
+            diagnostics_preview,
             term_write,
             term_resize,
             term_ack,
@@ -523,6 +656,7 @@ fn main() {
             app.shutdown_lead();
             app.sup.shutdown();
             handle.state::<Terminals>().shutdown();
+            handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
         }
         _ => {}
     });

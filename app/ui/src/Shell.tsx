@@ -14,14 +14,16 @@ import { ViewTabs } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
+import { TerminalDock } from "./terminal/TerminalDock";
 import { lastProject, rememberProject, useCompact, useInspector } from "./shell/layout";
 import { S } from "../strings";
+import { PreferencesProvider, preferenceScope, usePreferences } from "./preferences";
+import { DEFAULT_PREFERENCES, matchesShortcut, shortcutKeys } from "./preferenceContract";
 import "./shell.css";
 import "./shell/frame.css";
 
 /** In the macOS app the title bar is an overlay (tauri.conf.json): the traffic lights sit at the left of the title row. */
 const OVERLAY = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && /Mac/.test(navigator.userAgent);
-const SEARCH_KEYS = ["⌘", "K"];
 /** Views that have something to say in the inspector. Review has its own panes; Settings and the legacy views have none. */
 const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "board", "worker"]);
 /** Views that make sense in another project; anything tied to one campaign or worker becomes the Director-General. */
@@ -109,7 +111,6 @@ function Frame() {
       if (p) { e.preventDefault(); goProject(p.id); }
     } else if (!e.shiftKey && k === "b" && project) { e.preventDefault(); setCompact((c) => !c); }
     else if (!e.shiftKey && k === "i" && inspectable) { e.preventDefault(); setInspector((x) => !x); }
-    else if (!e.shiftKey && e.key === ",") { e.preventDefault(); openSettings(); }
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => onKeyRef.current(e);
@@ -138,6 +139,8 @@ function Frame() {
   const workerRow = route.screen === "worker" ? P.crew?.workers.find((w) => w.id === wParam) ?? null : null;
 
   return (
+    <PreferencesProvider projectId={preferenceScope(project)}>
+      <PreferenceKeys openSettings={openSettings} />
     <PaletteHost commands={commands}>
       <CurrentProject.Provider value={current}>
         <div className={["v-app", OVERLAY && "v-app--overlay", showColumn ? "" : "v-app--nocol"].filter(Boolean).join(" ")}>
@@ -162,7 +165,7 @@ function Frame() {
           )}
           <div className="v-center">
             {project && route.screen !== "settings" && (
-              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} onClose={closeTab}
+              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={P.inboxCount} onClose={closeTab}
                 inspector={inspectable ? inspector : null} onInspector={() => setInspector((x) => !x)} />
             )}
             <div className="v-work">
@@ -173,27 +176,43 @@ function Frame() {
               </main>
               {showInspector && project && <Inspector project={project} focus={focusCampaign} crew={crew} worker={workerRow} />}
             </div>
-            {/* The terminal dock's place (FG-05/FG-16, the terminal track). Nothing mounts until its PR lands; then this div
-                becomes `<TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />`
-                (src/terminal/TerminalDock.tsx, `Place = { cwd, label }`); the Unsorted bucket has no folder, so no default. */}
-            <div className="v-dock" data-slot="terminal" hidden />
+            {/* The terminal dock (FG-05/FG-16/FG-24). It shows nothing until a terminal is opened (⌃`, or "open here"); the
+                Unsorted bucket has no folder, so no default place. */}
+            <div className="v-dock" data-slot="terminal">
+              <TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />
+            </div>
           </div>
           <StatusBar runs={P.runs} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
             onPhone={() => openSettings({ section: "mobile" })} onSettings={() => openSettings()} />
         </div>
       </CurrentProject.Provider>
     </PaletteHost>
+    </PreferencesProvider>
   );
 }
 
 /** The palette for the mouse, in the title bar. */
 function Search() {
   const open = usePaletteOpener();
+  const prefs = usePreferences();
+  const keys = shortcutKeys(prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette);
   return (
-    <button type="button" className="v-tb__search" onClick={open} aria-keyshortcuts={ariaShortcut(SEARCH_KEYS)}>
+    <button type="button" className="v-tb__search" onClick={open} aria-keyshortcuts={ariaShortcut(keys)}>
       <Icon name="search" size={12} />
       <span>{S.frame.search}</span>
-      <Kbd keys={SEARCH_KEYS} decorative />
+      <Kbd keys={keys} decorative />
     </button>
   );
+}
+
+function PreferenceKeys({ openSettings }: { openSettings: () => void }) {
+  const prefs = usePreferences();
+  const binding = prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings;
+  const latest = useRef(openSettings); latest.current = openSettings;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (!e.repeat && matchesShortcut(e, binding)) { e.preventDefault(); latest.current(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [binding]);
+  return null;
 }

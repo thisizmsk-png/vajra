@@ -113,7 +113,7 @@ fn inbox_age_and_order_are_per_item_and_survive_campaign_activity() {
 #[test]
 fn inbox_skips_malformed_entries_and_an_empty_inbox_is_empty() {
     let t = Tmp::new();
-    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "items": []}));
+    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "campaign_count": 0, "items": []}));
     t.campaign(
         "deliver-x",
         "2026-11-06T12:00:00Z",
@@ -140,6 +140,7 @@ fn inbox_origin_is_app_only_for_campaigns_the_app_launched() {
         run_id: "20261106-1200".into(),
         cwd: t.0.clone(),
         lead_session_id: None,
+        provider: None,
     };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     let inbox = app.inbox().unwrap();

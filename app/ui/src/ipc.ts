@@ -1,8 +1,10 @@
+import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceActResult } from "./preferenceContract";
 // The one place that names the core's IPC commands. Screens call `api.*`, never `invoke`, so a screen can be tested
 // against `setTransport(fake)` and a command rename is a one-file change. Argument names are camelCase here; Tauri maps
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ProviderList } from "./providerContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -11,9 +13,9 @@ export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" &
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
-  // The Lead's guard preconditions already carry a one-line "why and what to do" (for example the sandbox one), so
-  // it is shown as it is, without the code in front.
-  if (isIpcError(e) && e.error === "lead_guard_missing" && e.detail) return e.detail;
+  // The Director-General's guard preconditions and its turn cap already carry a one-line "why and what to do" (for
+  // example the sandbox one), so they are shown as they are, without the code in front.
+  if (isIpcError(e) && (e.error === "lead_guard_missing" || e.error === "turns_full") && e.detail) return e.detail;
   // A refused projects folder (#77 follow-up): what is wrong, then what to do (the fix names the path).
   if (isIpcError(e) && e.error === "projects_unavailable" && e.detail) {
     const fix = (e as { fix?: unknown }).fix;
@@ -83,6 +85,12 @@ export type RunHandle = { stream: string; session_id: string; run_id: string; ca
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+/** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
+export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
+export type RunDiag = { stream: string; pid: number };
+/** A shell an earlier session recorded, checked at launch by pid and start time. Only `owned` can be ended. */
+export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
+export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
 export type TermMsg = { data: Uint8Array } | { exit: number | null };
 /** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
@@ -92,7 +100,7 @@ export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
 export type StreamWindow = { lines: Line[]; head_seq: number; first_seq: number; at_start: boolean; at_end: boolean; gap: boolean };
-export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
+export type ResumeTarget = { session_id: string; run_id: string; cwd: string; /** The adapter that ran it; absent reads as claude. */ provider?: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
 export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "checking" | "stale";
@@ -111,11 +119,18 @@ export type RunOverview = {
 };
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
-export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string };
-export type LeadStatus = { available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string };
+/** ADR-15 2: one Director-General per project; `generation` is its conversation number (1, then +1 per "New conversation"). */
+export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; generation: number; name: string };
+export type DirectorGeneralState = "idle" | "thinking" | "running";
+export type LeadStatus = {
+  available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string; name: string;
+  state?: DirectorGeneralState; reason?: string; project_id?: string; generation?: number; stream?: string;
+};
+export type NewConversation = { project_id: string; generation: number; stream: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
 export type InboxItem = {
-  id: string; kind: "task" | "plan" | "question"; campaign: string; origin: "app" | "terminal"; status?: string; created: string; age_s: number;
+  id: string; kind: "task" | "plan" | "question" | "run_proposal"; campaign?: string;
+  origin: "app" | "terminal"; status?: string; created: string; age_s: number;
   title: string; body: string; context?: string[]; actions: string[];
   /** B2: plan/question items come from the workflow's own result file, which is unsigned. Show this label with them. */
   source?: string;
@@ -129,8 +144,21 @@ export type InboxItem = {
   invalid?: string | null;
   /** What `created` and `age_s` measure: when the app first saw the item waiting (tasks.json has no per-task time). */
   since?: string;
+  /** ADR-15 2.4 `run_proposal` items: the exact run a Director-General proposed. `ask` is what starts, byte for byte. */
+  ask?: string; base?: string; rounds?: number;
+  /** The project this item belongs to (ADR-15 §2.6): the store's id of the project that owns the run's folder; `p_unsorted` for a run no project owns. */
+  project_id?: string;
+  /** `run_proposal` only: the Director-General's own id for the project (`k_` plus 32 hex). Never a project-store id. */
+  orchestrator_id?: string;
+  /** The project's full recorded root: what the UI matches projects on. `project_name` is only its label. */
+  project?: string | null; project_name?: string | null; generation?: number;
+  /** What `start_proposal` must be given back: the hash of exactly what was shown. */
+  proposal_sha256?: string;
 };
-export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
+export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null;
+  /** The effective `agent` preference (`claude` or `codex`) read when the form opened; omitted means claude. A provider that cannot start is refused, never swapped. */
+  provider?: string | null;
+};
 
 /** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
 export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
@@ -166,6 +194,8 @@ export type ProjectState =
       generations: { project: number };
       workers: Json[];
       receipts: Receipt[];
+      /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
+      inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
     };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
@@ -176,6 +206,8 @@ export function newActionId(): string {
 }
 
 export const api = {
+  preferencesRead: (projectId: string | null) => call<PreferenceView>("preferences_read", { projectId }),
+  preferencesAct: (envelope: PreferenceEnvelope, patch: PreferencePatch, reset = false) => call<PreferenceActResult>("act_preferences_update", { envelope, patch, reset }),
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
   /** The signed delivery report, verified on the bytes the core read; `text` only when integrity is "ok". */
@@ -188,10 +220,16 @@ export const api = {
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
+  /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
+  actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256 }),
+  /** Answer a waiting task: the text goes to its worker as a message (never a shell). Run-level questions are refused (`not_answerable`). */
+  actAnswerQuestion: (envelope: Envelope, id: string, text: string) => call<ActResult>("act_answer_question", { envelope, id, text }),
   actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
   /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
   projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
-  resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
+  resumeRun: (sessionId: string, campaign: string, cwd: string, provider?: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd, ...(provider ? { provider } : {}) }),
+  /** `vajra.providers/1`: each adapter with install state, version, capabilities (and `limits` reasons) and the CLI's own login check. Parse with `parseProviderList`. */
+  providerList: () => call<ProviderList>("provider_list"),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
@@ -209,6 +247,9 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
+  diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
+  lifecycle: () => call<Lifecycle>("lifecycle"),
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),
   termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
   termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
@@ -227,16 +268,22 @@ export const api = {
   /** The session and directory of each campaign this app started (absent: started elsewhere). */
   resumeTargets: () => call<{ targets: Record<string, ResumeTarget> }>("resume_targets"),
   activeRuns: () => call<ActiveRuns>("active_runs"),
-  /** ADR-13: one headless Lead turn per question. The reply streams into `stream` (`lead-<run_id>`). */
+  /** ADR-15 2: one headless turn of the run's project's Director-General per question. The reply streams into
+   *  `stream` (`orchestrator-<project>-g<generation>`). */
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
+  /** The run's project's Director-General starts generation n+1, on an empty stream. Refused (`lead_busy`) mid-turn. */
+  newConversation: (runId: string) => call<NewConversation>("new_conversation", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
   /** Approve plan `id` as shown: starts the approved action as a new turn. Refused (`plan_changed`) if the plan changed since `inbox` showed it. */
   approvePlan: (id: string, planSha256: string) => call<{ action_id: string; state: string; via: string }>("approve_plan", { id, planSha256 }),
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
-  inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
+  startProposal: (id: string, proposalSha256: string) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256 }),
+  dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
+  inbox: () => call<{ count: number; campaign_count?: number; items: InboxItem[] }>("inbox"),
   /** Which record versions this build reads (`vajra.app_info/1`). */
   appInfo: () => call<AppInfo>("app_info"),
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
@@ -258,4 +305,7 @@ export const api = {
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */
+/** `inbox_new`: something new started waiting; carries ids, a kind and a count, never item text. Coalesced over 5 s in the core. */
+export type InboxNew = { project_id: string; kind: string; count: number };
+export const onInboxNew = (cb: (payload: InboxNew) => void) => transport.on("inbox_new", (p) => cb(p as InboxNew));
 export const onChanged = (cb: (payload: unknown) => void) => transport.on("changed", cb);

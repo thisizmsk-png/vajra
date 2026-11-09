@@ -173,6 +173,40 @@ its name until FG-02 replaces the run Lead with the per-project orchestrator. Th
 "Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
 "Director-General"; code and the contract keep `orchestrator`.
 
+FG-08 settings (owner review).
+
+All new settings copy lives in `S.preferences` in `app/ui/strings.ts`; section titles and ledes live in
+`S.settings.sections`. Provider labels name integration targets only. The unavailable adapter label uses
+parentheses, not an em dash. Notification delivery retains its existing true preference default; item text
+starts off and OS permission remains separate.
+
+| String | Where | Note |
+|---|---|---|
+| General / Default editor and shell for supported new opens. Active sessions keep their settings. | Settings section | new section |
+| Choose global defaults or override them for this project. | Settings lede | saved preferences replace placeholder copy |
+| Graphite, in dark or light. Follow the system or choose an appearance. | Appearance lede | system or explicit choice |
+| Default agent and task capacity. Project overrides apply to new work; native capabilities and system limits still apply. | Models and capacity lede | new-launch scope |
+| Preference scope / Global defaults / Saved preferences / Overrides for NAME. Changes apply only after Save. | scope and landmark | project name is dynamic |
+| Global default / Project override / Unsaved change / Use global FIELD | fields | shows value source and inherit action |
+| Save or discard changes before switching scope. | scope | scope selector disabled while dirty |
+| Reading preferences… / Reload preferences / Save preferences / Discard changes / Reset this scope / Saved. | lifecycle/actions | reset touches selected scope only |
+| Theme / Follow system / Dark / Light | Appearance | saved choices |
+| Default editor / System default / Editor CLI / Terminal shell / Login shell / /bin/sh / /bin/bash / /bin/zsh | General | bounded choices; adapter consumption follows |
+| Launch preferences are saved for supported new opens. Running sessions keep their launch settings. | General hint | no action on save |
+| Default agent / Claude Code / Codex CLI (availability check required) | provisional provider selector | integration targets; replaced by provider track |
+| Model: MODEL. Additional agent and model selection requires a supported adapter. / Native CLI default | Models | honest unavailable controls |
+| Concurrent workers / Fix rounds / Read-only guard caps: N active run, M workers per run. Preferences cannot raise these limits. | Models and capacity | counts from read-only caps |
+| Defaults apply to new tasks. System limits and native permissions still apply. | capacity hint | active runs retain settings |
+| OS notifications / Include item text | Notifications | independent delivery/text preferences |
+| Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply. | Notifications hint | no implied OS grant |
+| Search shortcut / Settings shortcut | Keyboard | bounded remapping; remaining shortcuts unchanged |
+| Action STATE · ID · REASON / Retry same action | receipts | reason suffix only when present; retry retains ID |
+| The core returned unsupported preferences. Update the desktop and reload. / Preferences could not be read. The saved file was preserved. | read errors | no automatic destructive reset |
+| The action outcome is not confirmed. Retry the same action or reload to review. / Save outcome is unconfirmed. Retry the same action or reload to review. | uncertain action | no fresh action ID |
+| Preferences changed in another window. Reload and review before saving again. | conflict | no silent retry |
+| Action STATE. Reload and review the saved values before another action. / Unsupported preferences response. Reload before another action. | receipt/recovery errors | no new write before review |
+| The saved agent or model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | prevents unsupported adapter fallback |
+
 Terminal dock (standalone component, `app/ui/src/terminal/`).
 
 | String | Where | Note |
@@ -183,3 +217,49 @@ Terminal dock (standalone component, `app/ui/src/terminal/`).
 | No terminals are open. A terminal runs your own shell in this project folder, as you. It is not sandboxed and agents cannot see it. | empty state | new; states plainly that it is outside the guard |
 | This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
 | The shell is not reading input right now. What you typed was dropped. | transient note | new |
+
+FG-09 providers in the UI (Settings > Providers, Start, Resume, Run, Crew).
+
+| String | Where | Note |
+|---|---|---|
+| Default agent / Claude Code / Codex CLI (availability check required) | Models and capacity | removed; the one provider choice is now "Agent for new runs" under Providers |
+| Agent for new runs | Settings > Providers | new; replaces "Default agent", scoped global or per project |
+| New runs in this scope use this agent. A run keeps the agent it started on, and Resume continues on it. | under the choice | new |
+| NAME (not installed) / NAME (not tested with this version) | agent choices | new; not installed cannot be chosen, untested stays selectable |
+| Agents on this Mac / Checking the agent CLIs / Could not check the agent CLIs. | provider panel | new |
+| This build cannot read the agent check from the core. Update the desktop app. / The agent check answered something this build cannot read. | provider panel errors | new (another schema major, or a malformed answer) |
+| Version, Path, Login, Not read, Not on your PATH, Tested, Not tested with this version, Version not compared, Tested with RANGE | provider facts | new |
+| Signed in / Signed out / Could not tell / Not installed | login state | new; the CLI's own check |
+| Sign in with NAME itself. Vajra never handles the login. | signed out | new |
+| KEY is set where Vajra was opened. Vajra does not pass it to NAME; runs use your NAME login. | billing note | new; a variable name only, never a value |
+| Available: LIST. / Stop waits for the next tool call. / Stop ends the process. | what a provider can do | new |
+| Attach terminal, Transcript, Inspect, Message, Redirect, Stop, Resume, Vajra workflow, Start | disabled controls, with the provider's own reason beside each | new |
+| NAME does not support this. | an off control with no reason from the core | new |
+| Runs on NAME | Start, Run, Crew | new; shown only for a provider other than Claude |
+| NAME is not installed, so this run cannot start. Install it, or choose another agent in Settings, Providers. | Start | new; Start is off, nothing else is tried |
+| The saved agent "ID" is not one this build can run. Choose another in Settings, Providers. | Start | new |
+| NAME is not installed, so this run cannot be resumed here. | Resume, beside the disabled button | new |
+| Model: MODEL. Choosing a model needs a supported adapter. The agent is chosen under Providers. | Models and capacity | changed from "Additional agent and model selection requires a supported adapter." |
+| The saved model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | changed: an agent other than Claude no longer blocks Start |
+| NAME cannot take a message while it runs. / NAME cannot be redirected while it runs. / NAME has no inspect step Vajra can read. / NAME does not write a transcript Vajra can read. / NAME does not run the Vajra workflow, so there is no crew to show. / Stop ends the NAME process. There is no hand-off at the next tool call. / NAME is not installed. / This build cannot run NAME. | limit codes (providers.md stable codes) | new; the core's own sentence shows only for a code not in this list |
+| Uses your Claude Code login / Uses your Codex login | login route codes | new |
+| The login check did not finish in time, so Vajra cannot tell. / The login check answered something Vajra could not read, so it cannot tell. | login detail codes | new |
+
+Settings keyboard (PR 100 review).
+
+| String | Where | Note |
+|---|---|---|
+| Use global shortcuts (both) | Settings > Keyboard, project scope | replaces the two per-shortcut "Use global ..." buttons: shortcuts are one override, so the one control says it resets both (PR 100 review) |
+
+Settings General (PR 100 review): the editor and shell choices are hidden until a new terminal or editor reads them.
+
+| String | Where | Note |
+|---|---|---|
+| Default editor and shell for new terminals and editors. | Settings > General, lede | was "Default editor and shell for supported new opens. Active sessions keep their settings."; the section now shows "Not built yet" |
+| Default editor, System default, Editor CLI, Terminal shell, Login shell, /bin/sh, /bin/bash, /bin/zsh, "Launch preferences are saved for supported new opens. Running sessions keep their launch settings." | Settings > General | removed with the rows they labelled |
+
+Settings Notifications (PR 100 review): the section's controls are hidden until notifications are delivered; it shows "Not built yet". Stored values and defaults are unchanged.
+
+| String | Where | Note |
+|---|---|---|
+| OS notifications, Include item text, "Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply." | Settings > Notifications | removed with the controls they labelled |

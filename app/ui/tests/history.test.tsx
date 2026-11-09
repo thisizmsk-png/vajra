@@ -96,7 +96,7 @@ describe("Settings", () => {
     render(<Settings />);
     expect(await screen.findByText("brew install jq")).toBeTruthy();
     cleanup();
-    setTransport(fakeIpc({ preflight: () => { throw { error: "io_error", detail: "x" }; } }).transport);
+    setTransport(fakeIpc({ preflight: () => { throw { error: "io_error", detail: "x" }; }, provider_list: { schema: "vajra.providers/1", providers: [] } }).transport);
     render(<Settings />);
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(S.settings.failed));
   });

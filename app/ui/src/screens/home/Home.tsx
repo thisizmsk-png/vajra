@@ -6,10 +6,12 @@ import { S } from "../../../strings";
 import { api, onChanged } from "../../ipc";
 import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
+import { preferenceScope, usePreferences } from "../../preferences";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { useCurrentProject } from "../../projects/current";
 import { PreflightList } from "../PreflightList";
+import { ProviderControls, limitText, useProviders } from "../ProviderControls";
 import { toInput, validate } from "./validate";
 import type { Draft } from "./validate";
 
@@ -40,6 +42,7 @@ const fetchTargets = () => api.resumeTargets().then((r) => r.targets);
 
 export function Home() {
   const [, go] = useRoute();
+  const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
@@ -58,12 +61,35 @@ export function Home() {
   const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
   const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
   const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
+  // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
+  // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
+  const scope = preferenceScope(project);
+  const defaultsFor = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const view = prefs.view;
+    if (!view || view.project_id !== scope || defaultsFor.current === scope) return;
+    defaultsFor.current = scope;
+    setD(x => ({ ...x, rounds: String(view.effective.rounds), maxInFlight: String(view.effective.workers) }));
+  }, [prefs.view, scope]);
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
-  const set = (k: keyof Draft) => (v: string) => setD((x) => ({ ...x, [k]: v }));
+  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope; setD((x) => ({ ...x, [k]: v })); };
   const errs = validate(d);
-  const ready = pre.state === "ok" && pre.data.start_enabled;
+  const unsupported = !!prefs.view && prefs.view.effective.model !== "";
+  // FG-09: the effective `agent` is the provider Start asks for. The provider check runs each CLI's status command, so it is
+  // read only when a provider other than Claude is in play (the chosen one, or one that ran a listed campaign).
+  const agent = prefs.view?.effective.agent;
+  const otherTarget = targets.state === "ok" && Object.values(targets.data).some((t) => (t.provider ?? "claude") !== "claude");
+  const providers = useProviders((!!agent && agent !== "claude") || otherTarget);
+  const providerOf = (id: string) => providers.list?.find((p) => p.id === id);
+  const chosen = agent && agent !== "claude" ? providerOf(agent) : undefined;
+  // Only "not installed" (or an id this build cannot run) blocks a start; "cannot tell" never does. A check that has not
+  // answered blocks nothing either: the core refuses a provider it cannot start, and never swaps it for another.
+  const blocked = !agent || agent === "claude" || !providers.list ? ""
+    : !chosen ? S.providers.startUnknown(agent)
+    : !chosen.installed ? S.providers.startBlocked(chosen.name) : "";
+  const ready = pre.state === "ok" && pre.data.start_enabled && (!prefs.connected || !!prefs.view) && !unsupported && !blocked;
 
   // A ref, not the busy state: a second Cmd+Return in the same tick still sees busy as null.
   const inFlight = useRef(false);
@@ -84,14 +110,23 @@ export function Home() {
 
   const start = () => {
     setShown(true);
-    if (Object.keys(errs).length === 0 && ready) void launch("start", () => api.startRun(toInput(d), d.repo.trim()));
+    if (Object.keys(errs).length === 0 && ready) void launch("start", () => api.startRun({ ...toInput(d), ...(agent ? { provider: agent } : {}) }, d.repo.trim()));
   };
   // Resume continues the session that ran the campaign (claude --resume), in the directory it ran in. Only a campaign
   // this app started has a recorded session; any other cannot be resumed from here.
   const targetOf = (c: Campaign) => (targets.state === "ok" ? targets.data[c.slug] : undefined);
+  /** Why Resume is off for this campaign: its provider is known not to be installed here, or cannot resume. */
+  const resumeOff = (t: ResumeTarget) => {
+    const p = t.provider && t.provider !== "claude" ? providerOf(t.provider) : undefined;
+    if (!p) return "";
+    if (!p.installed) return S.providers.resumeOff(p.name);
+    if (p.capabilities.resume) return "";
+    const l = p.limits.find((x) => x.control === "resume");
+    return l ? limitText(p, l) : S.providers.offFallback(p.name);
+  };
   const resume = (c: Campaign) => {
     const t = targetOf(c);
-    if (t) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd));
+    if (t && !resumeOff(t)) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd, t.provider));
   };
   const err = (k: keyof Draft) => (shown ? errs[k] : undefined);
 
@@ -107,6 +142,15 @@ export function Home() {
           <Text as="h1" variant="headline-lg">{S.home.start}</Text>
           <Text variant="body" muted className="v-home__lede">{S.home.lede}</Text>
 
+          {prefs.error && <p role="alert">{prefs.error}</p>}
+          {unsupported && <p role="alert">{S.preferences.unsupportedLaunch}</p>}
+          {blocked && <p role="alert">{blocked}</p>}
+          {chosen && !blocked && (
+            <section className="v-prov__run" aria-label={S.providers.runsOn(chosen.name)}>
+              <Text variant="label">{S.providers.runsOn(chosen.name)}</Text>
+              <ProviderControls provider={chosen} only="off" />
+            </section>
+          )}
           <form className="v-launch" aria-label={S.home.start} noValidate
             onSubmit={(e) => { e.preventDefault(); start(); }}
             onKeyDown={(e) => { if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); if (!e.repeat) start(); } }}>
@@ -171,11 +215,16 @@ export function Home() {
                       {c.error ? <Badge status="danger">{c.error}</Badge> : (
                         <>
                           {c.total != null && <Text variant="body-sm" numeric>{S.home.passing(c.passing ?? 0, c.total)}</Text>}
-                          {targetOf(c) ? (
-                            <Button size="sm" onClick={() => resume(c)} busy={busy === c.slug}>
-                              {busy === c.slug ? S.home.resuming : S.home.resume}
-                            </Button>
-                          ) : (
+                          {targetOf(c) ? (() => {
+                            const off = resumeOff(targetOf(c)!);
+                            const rid = `v-home-resume-${c.slug}`;
+                            return <>
+                              <Button size="sm" onClick={() => resume(c)} busy={busy === c.slug} disabled={!!off} aria-describedby={off ? rid : undefined}>
+                                {busy === c.slug ? S.home.resuming : S.home.resume}
+                              </Button>
+                              {off && <span id={rid} className="v-text v-text--body-sm v-text--muted v-home__off">{off}</span>}
+                            </>;
+                          })() : (
                             // A quiet tag on the row; the sentence says what it means to a screen reader and on hover.
                             <span className="v-home__elsewhere" title={S.home.resumeElsewhere}><span aria-hidden="true">{S.home.resumeElsewhereShort}</span><span className="v-sr">{S.home.resumeElsewhere}</span></span>
                           )}

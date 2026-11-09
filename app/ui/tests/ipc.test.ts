@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { api, errorText, isIpcError, onChanged, setTransport } from "../src/ipc";
+import { api, errorText, isIpcError, onChanged, onInboxNew, setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
 
 afterEach(() => setTransport());
@@ -13,6 +13,19 @@ describe("typed ipc", () => {
     expect(f.calls).toEqual([
       { cmd: "tail", args: { stream: "s1", afterSeq: 7, maxBytes: 65536 } },
       { cmd: "take_over", args: { stream: "s1", on: true } },
+    ]);
+  });
+
+  it("maps provider_list and passes a provider to resume only when one is given", async () => {
+    const f = fakeIpc({ provider_list: { schema: "vajra.providers/1", providers: [] }, resume_run: {} });
+    setTransport(f.transport);
+    await api.providerList();
+    await api.resumeRun("s", "c", "/w");
+    await api.resumeRun("s", "c", "/w", "codex");
+    expect(f.calls).toEqual([
+      { cmd: "provider_list", args: undefined },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w" } },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w", provider: "codex" } },
     ]);
   });
 
@@ -48,16 +61,18 @@ describe("typed ipc", () => {
     ]);
   });
 
-  it("maps the three Lead commands to snake_case commands with camelCase args", async () => {
-    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false } });
+  it("maps the Director-General commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ ask_lead: {}, cancel_ask: {}, lead_status: { available: true, busy: false, name: "Director-General" }, new_conversation: { project_id: "k_0", generation: 2, stream: "orchestrator-k_0-g2" } });
     setTransport(f.transport);
     await api.askLead("20261106-0911", "what is bhima doing?");
     await api.cancelAsk("01ARZ3NDEKTSV4RRFFQ69G5FAV");
     await api.leadStatus("20261106-0911");
+    expect((await api.newConversation("20261106-0911")).generation).toBe(2);
     expect(f.calls).toEqual([
       { cmd: "ask_lead", args: { runId: "20261106-0911", text: "what is bhima doing?" } },
       { cmd: "cancel_ask", args: { askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
       { cmd: "lead_status", args: { runId: "20261106-0911" } },
+      { cmd: "new_conversation", args: { runId: "20261106-0911" } },
     ]);
   });
 
@@ -70,6 +85,39 @@ describe("typed ipc", () => {
       { cmd: "approve_plan", args: { id: "plan:20261106-0911.0", planSha256: "ab".repeat(32) } },
       { cmd: "reject_plan", args: { id: "plan:20261106-0911.0", reason: "too risky" } },
     ]);
+  });
+
+  it("maps the proposal commands to snake_case commands with camelCase args", async () => {
+    const f = fakeIpc({ start_proposal: { action_id: "a1", state: "started", run: {} }, dismiss_proposal: { action_id: "a2", state: "dismissed" } });
+    setTransport(f.transport);
+    await api.startProposal("proposal:a1", "ab".repeat(32));
+    await api.dismissProposal("proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "start_proposal", args: { id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "dismiss_proposal", args: { id: "proposal:a2" } },
+    ]);
+  });
+
+  it("maps the receipt-wrapped inbox actions and the arrival event (FG-07)", async () => {
+    const f = fakeIpc({ act_reject_plan: { receipt: null }, act_answer_question: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-0001-aaaa", project_id: "p_1", expect_generation: null };
+    const sha = "123456789abcdef1" + "0".repeat(48); // the 16-hex prefix is above 2^53: it must travel as the string
+    await api.actRejectPlan(envelope, "plan:r.0", "no", sha);
+    await api.actAnswerQuestion(envelope, "task:c1.t1", "use the key id");
+    expect(f.calls).toEqual([
+      { cmd: "act_reject_plan", args: { envelope, id: "plan:r.0", reason: "no", planSha256: sha } },
+      { cmd: "act_answer_question", args: { envelope, id: "task:c1.t1", text: "use the key id" } },
+    ]);
+    // Through JSON the hash is unchanged (a number would have rounded 0x123456789abcdef1).
+    expect(JSON.parse(JSON.stringify(f.calls[0].args)).planSha256).toBe(sha);
+    expect(Number.isSafeInteger(Number.parseInt("123456789abcdef1", 16))).toBe(false); // as a number it would have been rounded
+    const got: unknown[] = [];
+    const off = onInboxNew((p) => got.push(p));
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 2 });
+    off();
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 3 });
+    expect(got).toEqual([{ project_id: "p_1", kind: "plan", count: 2 }]);
   });
 
   it("maps inbox to the inbox command", async () => {
@@ -87,8 +135,10 @@ describe("typed ipc", () => {
   });
 
   it("shows the sandbox message as one friendly line", () => {
-    const msg = "Ask the Lead needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
+    const msg = "Asking the Director-General needs the Claude Code sandbox. Run /sandbox in Claude Code, then retry.";
     expect(errorText({ error: "lead_guard_missing", detail: msg })).toBe(msg);
+    const full = "Two Director-General turns are running, the most the app runs at once. Ask again when one finishes.";
+    expect(errorText({ error: "turns_full", detail: full })).toBe(full);
     expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
   });
 
