@@ -18,11 +18,15 @@ pub struct Limits {
     pub max_write: usize,
     /// Typed bytes that may wait for a shell that is not reading; more is answered `QueueFull`.
     pub write_queue: usize,
+    /// Output the reader takes from one terminal per second, on average (a burst of `RATE_BURST` is free). Above it the
+    /// reader waits, the PTY fills and the shell blocks on its write: a flood costs a few percent of a core instead of
+    /// all of it, and nothing is dropped. No view can paint faster than this anyway; 0 turns it off.
+    pub max_rate: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024, write_queue: 1024 * 1024 }
+        Self { max_open: 8, max_per_root: 8, window: 1024 * 1024, max_write: 256 * 1024, write_queue: 1024 * 1024, max_rate: 8 * 1024 * 1024 }
     }
 }
 

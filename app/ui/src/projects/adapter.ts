@@ -5,12 +5,13 @@
 import { S } from "../../strings";
 import type { StatusKey } from "../../strings";
 import type { Campaign, EvidenceRow, InboxItem, ResumeTarget, RunOverview } from "../ipc";
-import { PROJECT_SCHEMA } from "../projectContract";
+import { PROJECT_SCHEMA, validId } from "../projectContract";
+import type { Project as StoreProject } from "../projectContract";
 import type { ActiveCrew, BoardCard, DayGroup, Lane, Project, ProjectId, ProjectSummary, SessionRow, SessionStatus, TabState } from "./contract";
 
 export const UNSORTED_ID = "p_unsorted";
 
-const normRoot = (p: string) => {
+export const normRoot = (p: string) => {
   const t = p.trim();
   const s = t.replace(/\/+$/, "");
   return s === "" && t.startsWith("/") ? "/" : s;
@@ -37,10 +38,19 @@ export type ProjectIndex = { projects: Project[]; byCampaign: Record<string, Pro
  * One project per recorded run folder; campaigns with no folder go to the Unsorted bucket, never to a guessed project
  * (FG-01). Projects are ordered by their oldest campaign so a new run never moves a tab (⌘1..n stay put).
  */
-export function groupProjects(campaigns: Campaign[] | undefined, targets: Record<string, ResumeTarget> | undefined): ProjectIndex {
+export function groupProjects(campaigns: Campaign[] | undefined, targets: Record<string, ResumeTarget> | undefined, store: StoreProject[] = []): ProjectIndex {
   const roots = new Map<string, { root: string; first: string }>();
   const byCampaign: Record<string, ProjectId> = {};
   let unsorted = null as string | null;
+  // The core's projects (#77) come first, in its order, with their T1 ids, even before they have a campaign. A folder
+  // that is not registered keeps a placeholder until the owner adds it (ADR-15 D2: nothing is assigned for them).
+  const registered: Project[] = [];
+  const byRoot = new Map<string, ProjectId>();
+  for (const p of store ?? []) {
+    if (!p || p.archived || !validId("p", p.id) || typeof p.root !== "string" || !p.root.trim() || byRoot.has(normRoot(p.root))) continue;
+    registered.push({ schema: PROJECT_SCHEMA, id: p.id, name: p.name || basename(p.root), root: normRoot(p.root), created: p.created ?? null, archived: null, rev: p.rev ?? 0, registered: true });
+    byRoot.set(normRoot(p.root), p.id);
+  }
   for (const c of campaigns ?? []) {
     const cwd = targets?.[c.slug]?.cwd;
     const root = typeof cwd === "string" && cwd.trim() ? normRoot(cwd) : null;
@@ -49,15 +59,17 @@ export function groupProjects(campaigns: Campaign[] | undefined, targets: Record
       unsorted = unsorted === null || firstSeen(c) < unsorted ? firstSeen(c) : unsorted;
       continue;
     }
+    const known = byRoot.get(root);
+    if (known) { byCampaign[c.slug] = known; continue; }
     const id = projectId(root);
     byCampaign[c.slug] = id;
     const seen = roots.get(id);
     const first = firstSeen(c) || "￿";
     if (!seen || first < seen.first) roots.set(id, { root, first });
   }
-  const projects: Project[] = [...roots.entries()]
+  const projects: Project[] = [...registered, ...[...roots.entries()]
     .sort(([, a], [, b]) => (a.first === b.first ? a.root.localeCompare(b.root) : a.first < b.first ? -1 : 1))
-    .map(([id, r]) => ({ schema: PROJECT_SCHEMA, id, name: basename(r.root), root: r.root, created: r.first === "￿" ? null : r.first, archived: null, rev: 0 }));
+    .map(([id, r]): Project => ({ schema: PROJECT_SCHEMA, id, name: basename(r.root), root: r.root, created: r.first === "￿" ? null : r.first, archived: null, rev: 0 }))];
   if (unsorted !== null) {
     projects.push({ schema: PROJECT_SCHEMA, id: UNSORTED_ID, name: S.projects.unsorted, root: null, created: unsorted || null, archived: null, rev: 0, bucket: "unsorted" });
   }
@@ -72,8 +84,15 @@ const DOT: Record<SessionStatus, StatusKey> = { running: "in_progress", done: "d
 export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: InboxItem[], crew: ActiveCrew | null): Map<ProjectId, ProjectSummary> {
   const out = new Map<ProjectId, ProjectSummary>();
   for (const p of index.projects) out.set(p.id, { needsYou: 0, state: null, pips: [], live: false });
+  // A run proposal names its project, not a campaign (FG-02b): by the core's id when it is a registered project, else
+  // by its full root.
+  const byRoot = new Map<string, ProjectId>();
+  for (const p of index.projects) if (p.root) byRoot.set(normRoot(p.root), p.id);
   for (const item of inbox) {
-    const s = out.get(index.byCampaign[item.campaign]);
+    const pid = item.campaign ? index.byCampaign[item.campaign]
+      : typeof item.project_id === "string" && out.has(item.project_id) ? item.project_id
+      : typeof item.project === "string" ? byRoot.get(normRoot(item.project)) : undefined;
+    const s = pid ? out.get(pid) : undefined;
     if (s) s.needsYou += 1;
   }
   const newest = new Map<ProjectId, Campaign>();

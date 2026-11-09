@@ -98,14 +98,14 @@ describe("Command palette in the shell", () => {
   });
 
   it("adds the screen's own commands: Home offers Check again", async () => {
-    boot();
+    boot("#/launch");
     await screen.findByRole("heading", { name: S.home.start });
     cmdK();
     expect(options().some((o) => o.textContent === S.home.preflightRetry)).toBe(true);
   });
 
   it("on Crew, goes to a worker by name and selects it in the tree; Home's commands are gone", async () => {
-    boot();
+    boot("#/launch");
     await screen.findByRole("heading", { name: S.home.start });
     act(() => { window.location.hash = "#/crew?slug=camp&id=r1"; });
     await screen.findByRole("tree", { name: S.crew.treeLabel });
@@ -121,7 +121,7 @@ describe("Command palette in the shell", () => {
 
 describe("Shell keyboard and screen-reader basics", () => {
   it("the skip link moves focus into the screen, past the sidebar", async () => {
-    boot();
+    boot("#/launch");
     await screen.findByRole("heading", { name: S.home.start });
     const skip = screen.getByRole("link", { name: S.shell.skip });
     fireEvent.click(skip);

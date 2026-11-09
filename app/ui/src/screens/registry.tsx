@@ -1,10 +1,11 @@
 // Which component renders each view. A slice replaces its entry; nothing else in the shell changes.
-// The Director-General view shows the run launcher until its conversation (FG-04) lands in this slot.
+// The Director-General view is its conversation (FG-02); the run launcher is its own view, "Start a run yourself".
 import { lazy, Suspense } from "react";
 import type { ComponentType } from "react";
 import { S } from "../../strings";
 import type { Screen } from "../router";
 import { Home } from "./home/Home";
+import { DirectorGeneral } from "./orch/DirectorGeneral";
 import { Board } from "./board/Board";
 import { Crew } from "./crew/Crew";
 import { Run } from "./run/Run";
@@ -26,7 +27,8 @@ function Settings() {
 }
 
 export const REGISTRY: Record<Screen, ComponentType> = {
-  orch: Home,
+  orch: DirectorGeneral,
+  launch: Home,
   board: Board,
   review: Run,
   worker: WorkerView,

@@ -25,7 +25,7 @@ use crate::vajra::bridge::Request;
 pub(super) const REASON_MAX: usize = 500;
 
 /// Holds a plan id in `deciding` until dropped.
-struct Deciding<'a>(&'a App, String);
+pub(super) struct Deciding<'a>(&'a App, String);
 
 impl Drop for Deciding<'_> {
     fn drop(&mut self) {
@@ -38,9 +38,9 @@ fn already(action_id: &str) -> Value {
 }
 
 impl App {
-    fn begin_decision(&self, id: &str) -> Result<Deciding<'_>, Value> {
+    pub(super) fn begin_decision(&self, id: &str) -> Result<Deciding<'_>, Value> {
         if !lock(&self.deciding).insert(id.to_string()) {
-            return Err(fail("busy", "this plan is being decided"));
+            return Err(fail("busy", "this item is being decided"));
         }
         Ok(Deciding(self, id.to_string()))
     }

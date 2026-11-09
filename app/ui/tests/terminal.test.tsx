@@ -123,12 +123,14 @@ describe("TerminalDock", () => {
   it("writes output to xterm and acknowledges it in 64 KiB steps", async () => {
     const { f, x } = await opened();
     const out = f.streams[0];
+    // Output reaches xterm on the next frame (the output budget), and is acknowledged once xterm has parsed it.
     act(() => out.send(new Uint8Array(32 * 1024).buffer));
+    await waitFor(() => expect(x.written.length).toBe(1));
     expect(f.named("term_ack").length).toBe(0);
     act(() => out.send(new Uint8Array(32 * 1024).buffer));
-    expect(f.named("term_ack")).toEqual([{ cmd: "term_ack", args: { id: 1, bytes: 64 * 1024 } }]);
+    await waitFor(() => expect(f.named("term_ack")).toEqual([{ cmd: "term_ack", args: { id: 1, bytes: 64 * 1024 } }]));
     act(() => out.send(f.bytes("hello").slice().buffer as ArrayBuffer));
-    expect(x.text().endsWith("hello")).toBe(true);
+    await waitFor(() => expect(x.text().endsWith("hello")).toBe(true));
   });
 
   it("sends typed text and chunks a big paste in order", async () => {
@@ -271,8 +273,9 @@ describe("TerminalDock", () => {
     expect(screen.getByRole("tab", { name: "app" })).toBeTruthy(); // not "(ended)"
     // The live stream still works, and acknowledgements are not sent for the disposed one.
     act(() => second.send(new Uint8Array(64 * 1024).buffer));
-    expect(live.written.length).toBe(1);
-    expect(f.named("term_ack")).toEqual([{ cmd: "term_ack", args: { id: second.id, bytes: 64 * 1024 } }]);
+    await waitFor(() => expect(live.written.length).toBe(1));
+    await waitFor(() => expect(f.named("term_ack")).toEqual([{ cmd: "term_ack", args: { id: second.id, bytes: 64 * 1024 } }]));
+    expect(dead.text()).toBe("");
   });
 
   it("attaching under StrictMode (setup, cleanup, setup) does not close the terminal the second setup attached", async () => {

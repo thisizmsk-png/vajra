@@ -12,7 +12,8 @@
     "model": null,
     "workers": null,
     "rounds": null,
-    "shortcuts": null
+    "shortcuts": null,
+    "agents": null
   },
   "effective": {
     "theme": "system",
@@ -39,7 +40,8 @@
     "model": "global",
     "workers": "global",
     "rounds": "global",
-    "shortcuts": "global"
+    "shortcuts": "global",
+    "agents": "global"
   },
   "caps": {
     "active_runs": 1,
@@ -60,5 +62,19 @@
       "palette": "Primary+K",
       "settings": "Primary+,"
     }
+  },
+  "agents": {
+    "default": {
+      "account": "claude",
+      "model": null,
+      "effort": null
+    },
+    "roles": {},
+    "allowed": [
+      {
+        "account": "claude",
+        "model": null
+      }
+    ]
   }
 }
