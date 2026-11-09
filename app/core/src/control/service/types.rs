@@ -58,6 +58,8 @@ pub enum ControlError {
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
     ActionNotFound,
+    /// A stop that named the attempt it saw (`expect_generation`) found a different one at the moment of the stop.
+    StaleGeneration(u64),
     UnknownTool,
     InvalidArgs(String),
     Io(io::Error),
@@ -74,6 +76,7 @@ impl ControlError {
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
             Self::ActionNotFound => "action_not_found",
+            Self::StaleGeneration(_) => "stale_generation",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
             Self::Io(_) => "io_error",
@@ -83,6 +86,7 @@ impl ControlError {
     pub fn to_json(&self) -> Value {
         match self {
             Self::InvalidArgs(m) => json!({"error": self.code(), "detail": m}),
+            Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
             _ => json!({"error": self.code()}),
         }
     }
