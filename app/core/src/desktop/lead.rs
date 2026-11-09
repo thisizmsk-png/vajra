@@ -512,6 +512,13 @@ impl App {
         let mut own_folders: Vec<PathBuf> = Vec::new();
         let mut other_recorded: Vec<PathBuf> = Vec::new();
         let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
+        // What each side OWNS (#103 review), for the ambiguity check: a project's validated store root and the folders its runs
+        // really ran in. A record's checkout location and main checkout are Git bookkeeping, which two store projects
+        // registered inside one checkout share; they are still denied to others and still count for this run's identity,
+        // but one alone is not a claim of ownership.
+        let root_of = |pid: &str| self.projects.get(pid).ok().map(|p| PathBuf::from(p.root));
+        let mut own_owned: Vec<PathBuf> = own_pin.as_deref().and_then(root_of).into_iter().collect();
+        let mut other_owned: Vec<PathBuf> = Vec::new();
         for run in runs {
             let present = |f: &str| std::fs::symlink_metadata(self.lead_sid_dir(&run).join(f)).is_ok();
             let Some(cwd) = self.read_run_cwd(&run) else {
@@ -522,7 +529,8 @@ impl App {
                 continue;
             };
             let key = self.read_run_key(&run);
-            let same_project = match (&own_pin, self.store_identity(&run)) {
+            let identity = self.store_identity(&run);
+            let same_project = match (&own_pin, identity.clone()) {
                 (_, Err(())) => false,
                 (Some(a), Ok(Some(b))) => *a == b,
                 (None, Ok(Some(_))) => false,
@@ -540,13 +548,22 @@ impl App {
                 Some(None) => return Err(guard("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project once from its main folder (the folder that holds its .git), then ask again")),
                 None => None,
             };
+            // A record with no store identity has only its key and recorded folders to tell its project by: all of them count.
+            let pinned = matches!(identity, Ok(Some(_)));
+            let owned = |all: bool| cwd_real.iter().chain(loc.iter().filter(move |_| all)).chain(main.iter().filter(move |_| all)).cloned().collect::<Vec<_>>();
             if same_project {
+                own_owned.extend(owned(own_pin.is_none() || !pinned));
                 own_folders.extend(cwd_real.into_iter().chain(loc).chain(main));
                 continue;
             }
+            // Its validated store root: owned by it (for the ambiguity check) and denied with its folders.
+            let store_root = identity.ok().flatten().as_deref().and_then(root_of);
+            other_owned.extend(owned(!pinned).into_iter().chain(store_root.clone()));
             // The run folder, the project's main tree (from a `.git` key), the recorded location, canonical folder and resolved main.
             let from_key = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
-            let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(from_key).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
+            // The store root too (#103 review): a run in a subfolder of a project inside a shared checkout would otherwise leave
+            // the rest of that project's root to the shared checkout's secret-file rules alone.
+            let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(from_key).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).chain(store_root).collect();
             let loc_missing = !present(LOC_FILE);
             other_recorded.extend(cwd_real.into_iter().chain(loc).chain(main));
             // A record from the shipped build (no location) is skipped for identity but its folder is still denied like any other
@@ -569,8 +586,8 @@ impl App {
         if !own_folders.contains(&own_real) {
             return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Lead is not started"));
         }
-        // Ambiguity: one recorded folder claimed by two projects.
-        if other_recorded.iter().any(|f| own_folders.contains(f)) {
+        // Ambiguity: a folder one project owns is recorded by another (as its folder, location or main checkout).
+        if other_recorded.iter().any(|f| own_owned.contains(f)) || own_folders.iter().any(|f| other_owned.contains(f)) {
             return Err(guard("a folder is recorded under two different projects, so the Lead cannot tell which one owns it"));
         }
         let mut iso = Isolation::default();
