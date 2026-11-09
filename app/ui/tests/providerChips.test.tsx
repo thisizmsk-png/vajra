@@ -143,13 +143,13 @@ describe("the proposal card's workers", () => {
   }
   const card = () => screen.getByRole("article", { name: S.dg.proposal });
   const workers = async () => within(await screen.findByRole("region", { name: P.title }));
-  const pick = async (role: string, task: string) => (await workers()).getByLabelText(A.pickLabel(`${role}: ${task}`)) as HTMLSelectElement;
+  const pick = async (role: string, task: string) => (await (await workers()).findByLabelText(A.pickLabel(`${role}: ${task}`))) as HTMLSelectElement;
 
   it("a chip per worker: Model · provider, effort, billing, the reason, the limits of a harness outside the guard, and the 80% warning", async () => {
     mount(proposal());
     const w = await workers();
     expect(((await pick("Backend", "Token bucket middleware")).selectedOptions[0]).textContent).toBe(`${S.accounts.defaultModel} · Claude Code`);
-    expect((w.getByLabelText(A.effortLabel("Backend: Token bucket middleware")) as HTMLSelectElement).value).toBe("high");
+    expect(((await w.findByLabelText(A.effortLabel("Backend: Token bucket middleware"))) as HTMLSelectElement).value).toBe("high");
     expect(((await pick("Docs", "Document the limits")).selectedOptions[0]).textContent).toBe("DeepSeek V3.2 · OpenRouter");
     expect(w.getByText("Touches auth; keeps the guard")).toBeTruthy();
     expect(w.getByText("Max plan, s…@gmail.com")).toBeTruthy();
@@ -200,7 +200,7 @@ describe("the proposal card's workers", () => {
   it("changing the effort alone is a change too", async () => {
     const f = mount(proposal());
     await workers();
-    fireEvent.change((await workers()).getByLabelText(A.effortLabel("Backend: Token bucket middleware")), { target: { value: "low" } });
+    fireEvent.change(await (await workers()).findByLabelText(A.effortLabel("Backend: Token bucket middleware")), { target: { value: "low" } });
     fireEvent.click(within(card()).getByRole("button", { name: S.dg.start }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(true));
     expect((f.calls.find((c) => c.cmd === "start_proposal")?.args as { overrides: unknown[] }).overrides).toEqual([{ slot: "w1", account: "claude", model: null, effort: "low" }]);
