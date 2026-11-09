@@ -104,10 +104,26 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     ],
   }),
   // Three folders: harbor-api (the live run), harbor-web, and one campaign started in a terminal (Unsorted).
+  provider_list: () => ({ schema: "vajra.providers/1", providers: [
+    { id: "claude", name: "Claude Code", installed: true, path: "/Users/you/.local/bin/claude", version: "2.1.0", tested: "tested", tested_range: "2.x",
+      capabilities: { pty_attach: true, transcript: true, inspect: true, message: true, redirect: true, stop: "hook_block", resume: true, vajra_workflow: true },
+      limits: [], login: { route: "Uses your Claude Code login", state: "signed_in", checked_by: "cli_status", detail: null }, billing: { source: "login", key_in_app_env: null } },
+    { id: "codex", name: "Codex CLI", installed: true, path: "/opt/homebrew/bin/codex", version: "0.170.0", tested: "untested", tested_range: "0.166",
+      capabilities: { pty_attach: true, transcript: false, inspect: false, message: false, redirect: false, stop: "terminate", resume: true, vajra_workflow: false },
+      limits: [
+        { control: "transcript", code: "no_transcript", reason: "Codex does not write a transcript Vajra can read" },
+        { control: "inspect", code: "no_inspect", reason: "Codex has no inspect hook" },
+        { control: "message", code: "no_message_mid_run", reason: "Codex cannot take a message mid-run" },
+        { control: "redirect", code: "no_redirect_mid_run", reason: "Codex cannot be redirected mid-run" },
+        { control: "vajra_workflow", code: "no_vajra_workflow", reason: "Codex does not run the Vajra workflow" },
+        { control: "stop", code: "stop_ends_process", reason: "Codex has no hand-off: Stop ends its process" },
+      ],
+      login: { route: "Uses your Codex login", route_code: "uses_codex_login", state: "signed_in", checked_by: "cli_status", detail: null }, billing: { source: "login", key_in_app_env: "OPENAI_API_KEY" } },
+  ] }),
   resume_targets: () => ({ targets: {
     [SLUG]: { session_id: "s-2140", run_id: RUN, cwd: "~/code/harbor-api" },
     "deliver-20261105-1610": { session_id: "s-1610", run_id: "20261105-1610", cwd: "~/code/harbor-api" },
-    "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api" },
+    "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api", provider: "codex" },
     "deliver-20261103-1120": { session_id: "s-1120", run_id: "20261103-1120", cwd: "~/code/harbor-api/" },
     "deliver-20261102-1505": { session_id: "s-1505", run_id: "20261102-1505", cwd: "~/code/harbor-api" },
     "deliver-20261107-1840": { session_id: "s-1840", run_id: "20261107-1840", cwd: "~/code/harbor-web" },
