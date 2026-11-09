@@ -52,7 +52,7 @@ die()   { echo "vajra-campaign: $*" >&2; exit 1; }
 usage() { echo "usage:" >&2; grep '^#   vajra-campaign.sh' "$0" | sed 's/^#   /  /' >&2; exit 2; }
 now()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v jq >/dev/null 2>&1 || die "jq is required in /usr/bin, /bin, /usr/sbin or /sbin (a jq elsewhere, such as /opt/homebrew/bin, is never used: a same-uid worker can replace it; macOS 15+ ships /usr/bin/jq). install.sh checks the same dirs."
 [ -x "$OPENSSL" ] || die "openssl is required at $OPENSSL"
 
 # ---------- helpers ----------
