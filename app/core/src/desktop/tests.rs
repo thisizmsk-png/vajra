@@ -3324,6 +3324,40 @@ fn a_linked_worktree_nested_under_its_pinned_repo_is_admitted_with_the_repos_key
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
 
+/// #80 review (P2): a linked worktree of a SUBMODULE, started outside the submodule checkout but inside the pinned superproject, is its
+/// own project keyed by the submodule's common dir. A `commondir` that leaves the enclosing common dir, lands on another module that
+/// does not hold the worktree's git dir, or names a module that itself redirects, is still refused.
+#[test]
+fn a_linked_worktree_of_a_submodule_inside_the_pinned_superproject_is_admitted_under_the_submodules_key() {
+    let t = Tmp::new();
+    let (app, a, b, pinned) = pinned_a_and_b(&t);
+    let module = a.join(".git/modules/sub");
+    fs::create_dir_all(module.join("worktrees/w")).unwrap();
+    fs::write(module.join("worktrees/w/commondir"), "../..\n").unwrap();
+    let wt = a.join("sub-wt");
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", module.join("worktrees/w").display())).unwrap();
+    let (loc, key) = app.launch_identity(&wt).expect("a worktree of a submodule of the enclosing project");
+    assert_eq!(key, fs::canonicalize(&module).unwrap(), "it is the submodule's project, not the superproject's");
+    assert_ne!(key, pinned);
+    assert_eq!(loc, fs::canonicalize(&wt).unwrap());
+    // Redirects are refused: to another project, to a sibling module that does not hold the worktree's git dir, and to a module whose own
+    // `commondir` redirects.
+    fs::create_dir_all(a.join(".git/modules/other")).unwrap();
+    fs::create_dir_all(a.join(".git/modules/hop")).unwrap();
+    fs::write(a.join(".git/modules/hop/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    for (n, redirect) in [b.join(".git"), a.join(".git/modules/other"), a.join(".git/modules/hop")].into_iter().enumerate() {
+        let gd = module.join(format!("worktrees/r{n}"));
+        fs::create_dir_all(&gd).unwrap();
+        fs::write(gd.join("commondir"), format!("{}\n", redirect.display())).unwrap();
+        let bad = a.join(format!("bad-wt{n}"));
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+        let e = app.launch_key(&bad).unwrap_err();
+        assert_eq!(code(&e), "project_membership_inconsistent", "{redirect:?}: {e}");
+    }
+}
+
 /// #80 round 6 (P1): another project's Lead denies the other run's pinned location too, so a submodule launched from a subfolder
 /// has its checkout root denied, not only the subfolder.
 #[test]
@@ -3439,6 +3473,33 @@ fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
     runindex::append(&app.data.join("runs.jsonl"), &forged).unwrap();
     let e = app.resume_run(sid, "c", &b.to_string_lossy(), None).unwrap_err();
     assert_eq!(code(&e), "resume_cwd_mismatch", "forged run id: {e}");
+    assert!(!lock(&app.control).has_session(sid), "and no control state was created");
+}
+
+/// #80 review (P1): a resume compares against the folder pinned at LAUNCH (`cwd_real`), never a re-resolution of the recorded path.
+/// A session recorded in a/src, whose folder is then renamed and replaced by a symlink to another project b, must not resume into b
+/// (by b's own path, or by the old path that now leads there); no record or control state is written.
+#[test]
+fn a_resume_after_the_recorded_folder_is_replaced_by_a_symlink_to_another_project_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(a.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    app.record_run("20261105-1230", &a.join("src"), sid, "c", true, 1).unwrap();
+    fs::rename(a.join("src"), a.join("src.old")).unwrap();
+    std::os::unix::fs::symlink(&b, a.join("src")).unwrap();
+    let line = runindex::Entry { campaign: "c".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: b.clone(), lead_session_id: None, provider: None };
+    runindex::append(&app.data.join("runs.jsonl"), &line).unwrap();
+    let records = || fs::read_dir(app.data.join("control/lead")).unwrap().count();
+    let before = records();
+    for ask in [b.clone(), a.join("src")] {
+        let e = app.resume_run(sid, "c", &ask.to_string_lossy(), None).unwrap_err();
+        assert_eq!(code(&e), "resume_cwd_mismatch", "{ask:?}: {e}");
+    }
+    assert_eq!(records(), before, "no run record was written");
     assert!(!lock(&app.control).has_session(sid), "and no control state was created");
 }
 

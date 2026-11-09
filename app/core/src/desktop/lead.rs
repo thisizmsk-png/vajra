@@ -665,7 +665,8 @@ impl App {
     /// symlink) with no `commondir` file: a self-contained nested repository, keyed by that directory; or (b) a `gitdir:`
     /// file whose canonical target lies INSIDE an enclosing pinned project's common dir AND has no `commondir` file on the
     /// resolution path (the target and every directory up to that common dir): a submodule, keyed by exactly the canonical
-    /// target that was checked. Anything else (a pointer into another project, a symlinked `.git`, a redirecting
+    /// target that was checked; or a linked worktree of such a submodule (its `commondir` names the submodule's common dir, an
+    /// ancestor of its git dir inside the pinned one). Anything else (a pointer into another project, a symlinked `.git`, a redirecting
     /// `commondir`, an unresolvable target) is refused and never pinned, so a worker cannot plant a `.git` that pulls a
     /// subfolder into another project.
     fn identify_new_location(&self, want: &Path) -> Result<PathBuf, Value> {
@@ -712,8 +713,13 @@ impl App {
                         // A linked worktree of the enclosing project: its `commondir` must resolve to this pinned common dir.
                         Ok(c) => {
                             let resolved = String::from_utf8(c).ok().and_then(|c| std::fs::canonicalize(real.join(c.trim())).ok());
-                            if resolved.as_ref() == Some(common) {
-                                return Ok(common.clone());
+                            match resolved {
+                                Some(r) if r == *common => return Ok(common.clone()),
+                                // A linked worktree of a SUBMODULE: its `commondir` names the submodule's own common dir, which must sit
+                                // inside the enclosing pinned common dir, hold this very worktree git dir, and not redirect itself. It
+                                // is its own project, keyed by that checked common dir.
+                                Some(r) if r.starts_with(common) && real.starts_with(&r) && std::fs::symlink_metadata(r.join("commondir")).is_err() => return Ok(r),
+                                _ => {}
                             }
                         }
                         Err(_) => {}
@@ -725,7 +731,7 @@ impl App {
     }
 
     /// The canonical folder pinned when the run was launched.
-    fn read_run_cwd_real(&self, run_id: &str) -> Option<PathBuf> {
+    pub(super) fn read_run_cwd_real(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_REAL_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)
