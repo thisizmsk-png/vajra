@@ -75,6 +75,37 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
 
+/// Hangs up the user terminals opened in a worker's worktree (ledger-recorded like any tab close). A close that fails
+/// stops the worker's close: nothing is marked closed while a shell still runs there.
+fn release_terminals<'a>(terms: &'a Terminals, own: &'a Ownership) -> impl Fn(&std::path::Path) -> Result<(), String> + 'a {
+    move |wt| {
+        for id in terms.ids_under(wt) {
+            match own.ledger.close_then_forget(id, || terms.close(id)) {
+                Ok(()) | Err(vajra_desktop::terminal::TermError::NotFound) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tauri::command(async)]
+fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>) -> Value {
+    // "Close anyway" sends the counts the human confirmed; both or neither.
+    let anyway = changed_files.zip(unpushed_commits);
+    app.act_close_worker(&envelope, &worker, anyway, &release_terminals(&terms, &own))
+}
+
+#[tauri::command(async)]
+fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
+    app.act_close_finished(&envelope, &release_terminals(&terms, &own))
+}
+
+#[tauri::command(async)]
+fn closeout_status(app: State<'_, App>, slug: String, run_id: String) -> Res {
+    app.closeout_status(&slug, &run_id)
+}
+
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
@@ -547,6 +578,17 @@ fn main() {
                     let changed = collect_changes(&sub, Duration::from_secs(1));
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
                     handle.state::<App>().refresh_workers();
+                    // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
+                    // asked off this loop, so a slow repo never delays worker refreshes.
+                    if handle.state::<App>().closeout_due() {
+                        let h = handle.clone();
+                        std::thread::spawn(move || {
+                            let n = h.state::<App>().closeout_auto(&release_terminals(&h.state::<Terminals>(), &h.state::<Ownership>()));
+                            if n > 0 {
+                                let _ = h.emit(CHANGED, serde_json::json!({"projects": h.state::<App>().bump_all_projects()}));
+                            }
+                        });
+                    }
                     if let Some(mut payload) = changed {
                         // The revision each known project is now at, so a subscriber refetches `project_state`.
                         payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
@@ -627,6 +669,9 @@ fn main() {
             act_reject_plan,
             act_answer_question,
             act_stop_worker,
+            act_close_worker,
+            act_close_finished,
+            closeout_status,
             act_start_run,
             project_state,
             term_open,

@@ -3775,3 +3775,138 @@ fn an_unreadable_guarded_record_refuses_a_launch_instead_of_re_pinning_the_folde
         assert!(r.is_err(), "{what}: refused, not re-pinned: {r:?}");
     }
 }
+
+// ---------------------------------------------------------------- closing finished workers (closeout)
+
+const CLOSE_W: &str = "aa870dd40540481f0";
+
+/// The fixture worker, marked finished in the run's journal (the way the crew view learns a worker is done).
+fn finish_worker(t: &Tmp) {
+    let sub = fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join("subagents");
+    fs::write(sub.join("journal.jsonl"), format!("{{\"type\":\"started\",\"agentId\":\"{CLOSE_W}\",\"label\":\"task.t1.r1\"}}\n{{\"type\":\"result\",\"agentId\":\"{CLOSE_W}\"}}\n")).unwrap();
+}
+
+/// A finished worker whose branch is pushed to a bare remote with the tree clean, then `dirty` edits on top.
+fn closeout_fixture(t: &Tmp, pushed: bool, dirty: bool) -> (App, PathBuf) {
+    let (app, _repo, wt) = crew_fixture(t, &|r| r.join(".claude/worktrees/w1"));
+    finish_worker(t);
+    if pushed {
+        let remote = t.0.join("remote.git");
+        git(&t.0, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "work"]);
+        git(&wt, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&wt, &["push", "-q", "-u", "origin", "worker-1"]);
+    } else if !dirty {
+        git(&wt, &["checkout", "-q", "--", "f.txt"]);
+    }
+    if pushed && dirty {
+        fs::write(wt.join("f.txt"), "edited again\n").unwrap();
+        fs::write(wt.join("new.txt"), "n\n").unwrap();
+    }
+    (app, wt)
+}
+
+fn released(log: &Mutex<Vec<PathBuf>>) -> impl Fn(&Path) -> Result<(), String> + '_ {
+    move |p| {
+        lock(log).push(p.to_path_buf());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_finished_clean_pushed_worker_is_closed_released_and_remembered() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, true, false);
+    let log = Mutex::new(Vec::new());
+    let r = app.close_worker(CLOSE_W, None, &released(&log)).unwrap();
+    assert_eq!(r["closed"], true, "{r}");
+    assert_eq!(*lock(&log), vec![wt.canonicalize().unwrap()], "its worktree's terminals are released");
+    assert!(app.worker_closed(CLOSE_W));
+    assert_eq!(app.close_worker(CLOSE_W, None, &released(&log)).unwrap()["already"], true);
+    assert_eq!(lock(&log).len(), 1, "closing twice releases once");
+    assert!(closeout::Store::open(&app.data).is_closed(CLOSE_W), "the closed set survives a restart");
+    assert_eq!(app.closeout_status("c", "20261105-1230").unwrap()["workers"][0]["state"], "closed");
+}
+
+#[test]
+fn a_worker_with_unsaved_work_is_kept_with_exact_counts_until_the_human_confirms_those_counts() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, true, true);
+    let log = Mutex::new(Vec::new());
+    let e = app.close_worker(CLOSE_W, None, &released(&log)).unwrap_err();
+    assert_eq!((code(&e), e["changed_files"].as_u64(), e["unpushed_commits"].as_u64(), e["no_upstream"].as_bool()), ("unsaved_work", Some(2), Some(0), Some(false)), "{e}");
+    assert!(lock(&log).is_empty() && !app.worker_closed(CLOSE_W));
+    let st = app.closeout_status("c", "20261105-1230").unwrap();
+    assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["changed_files"].as_u64()), (Some("unsaved_work"), Some(2)), "{st}");
+    // Counts that no longer match what the human saw: nothing is closed, the fresh counts come back.
+    let stale = app.close_worker(CLOSE_W, Some((9, 9)), &released(&log)).unwrap_err();
+    assert_eq!((code(&stale), stale["changed_files"].as_u64()), ("unsaved_work_changed", Some(2)));
+    assert!(!app.worker_closed(CLOSE_W));
+    app.close_worker(CLOSE_W, Some((2, 0)), &released(&log)).unwrap();
+    assert!(app.worker_closed(CLOSE_W));
+    assert!(wt.join("new.txt").exists(), "closing deletes nothing on disk");
+}
+
+#[test]
+fn no_upstream_counts_as_unpushed_and_a_commit_ahead_of_upstream_is_counted() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, false, false);
+    let e = app.close_worker(CLOSE_W, None, &|_| Ok(())).unwrap_err();
+    assert_eq!((code(&e), e["no_upstream"].as_bool(), e["changed_files"].as_u64()), ("unsaved_work", Some(true), Some(0)), "{e}");
+    let t2 = Tmp::new();
+    let (app2, wt2) = closeout_fixture(&t2, true, false);
+    fs::write(wt2.join("g.txt"), "g\n").unwrap();
+    git(&wt2, &["add", "."]);
+    git(&wt2, &["commit", "-q", "-m", "ahead"]);
+    let e2 = app2.close_worker(CLOSE_W, None, &|_| Ok(())).unwrap_err();
+    assert_eq!((e2["unpushed_commits"].as_u64(), e2["changed_files"].as_u64(), e2["no_upstream"].as_bool()), (Some(1), Some(0), Some(false)), "{e2}");
+    drop((wt, app));
+}
+
+#[test]
+fn a_worker_that_is_not_finished_is_never_closed_even_when_forced() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    fs::remove_file(fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join("subagents/journal.jsonl")).unwrap();
+    let e = app.close_worker(CLOSE_W, Some((0, 0)), &|_| Ok(())).unwrap_err();
+    assert_eq!(code(&e), "working", "{e}");
+    assert!(!app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn a_failed_release_leaves_the_worker_open() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    let e = app.close_worker(CLOSE_W, None, &|_| Err("terminal would not close".into())).unwrap_err();
+    assert_eq!(code(&e), "release_failed", "{e}");
+    assert!(!app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn close_finished_closes_what_is_safe_and_lists_what_it_kept_and_why() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, true);
+    let r = app.close_finished(&|_| Ok(())).unwrap();
+    assert_eq!(r["closed"].as_array().unwrap().len(), 0, "{r}");
+    let s = &r["skipped"][0];
+    assert_eq!((s["worker"].as_str(), s["reason"].as_str(), s["changed_files"].as_u64()), (Some(CLOSE_W), Some("unsaved_work"), Some(2)), "{r}");
+    let t2 = Tmp::new();
+    let (app2, _) = closeout_fixture(&t2, true, false);
+    let r2 = app2.close_finished(&|_| Ok(())).unwrap();
+    assert_eq!((r2["closed"].as_array().unwrap().len(), r2["skipped"].as_array().unwrap().len()), (1, 0), "{r2}");
+}
+
+#[test]
+fn a_closed_worker_is_not_tailed_any_more() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    app.close_worker(CLOSE_W, None, &|_| Ok(())).unwrap();
+    let stream = worker_stream(CLOSE_W);
+    let before = app.bus.tail(&stream, 0, MAX_PAGE).head_seq;
+    let path = fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join(format!("subagents/agent-{CLOSE_W}.jsonl"));
+    let first = fs::read_to_string(&path).unwrap().lines().next().unwrap().to_string();
+    append_echo(&path, &first, "n");
+    app.crew("c", "20261105-1230").unwrap();
+    assert_eq!(app.bus.tail(&stream, 0, MAX_PAGE).head_seq, before);
+}

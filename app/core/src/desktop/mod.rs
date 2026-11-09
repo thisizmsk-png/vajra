@@ -219,6 +219,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Workers closed once finished (see `closeout`); persisted.
+    closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -305,6 +307,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -897,6 +900,10 @@ impl App {
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
+        // A closed worker is no longer tailed: no file reads, no new stream lines. Its record stays for the history view.
+        if self.worker_closed(id) {
+            return tree::worker_from(id, meta, j, map.get(id));
+        }
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
@@ -1344,12 +1351,8 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
-    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
-    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
-    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
-    /// the run repo's HEAD.
-    pub fn worktree_info(&self, worker: &str) -> Res {
+    /// `(worktree, run repo)` of a worker, both resolved; refused for anything that is not a crew worktree.
+    pub(super) fn crew_worktree(&self, worker: &str) -> Result<(PathBuf, PathBuf), Value> {
         if !bus::valid_stream_id(&worker_stream(worker)) {
             return Err(invalid("worker", "not a worker id"));
         }
@@ -1369,6 +1372,16 @@ impl App {
         if !wt.is_dir() {
             return Err(refuse());
         }
+        Ok((wt, repo))
+    }
+
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        let (wt, repo) = self.crew_worktree(worker)?;
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
             (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
@@ -1917,6 +1930,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod closeout;
 mod orchestrator;
 mod proposals;
 mod inbox;

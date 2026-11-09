@@ -151,6 +151,8 @@ pub struct Preferences {
     pub model: String,
     pub workers: u8,
     pub rounds: u8,
+    /// Close a finished worker on its own when nothing would be lost (clean worktree, nothing unpushed).
+    pub auto_close_finished: bool,
     pub shortcuts: Shortcuts,
 }
 impl Default for Preferences {
@@ -166,6 +168,7 @@ impl Default for Preferences {
             model: String::new(),
             workers: 4,
             rounds: 2,
+            auto_close_finished: true,
             shortcuts: Shortcuts::default(),
         }
     }
@@ -184,11 +187,12 @@ pub struct Patch {
     pub model: Option<String>,
     pub workers: Option<u8>,
     pub rounds: Option<u8>,
+    pub auto_close_finished: Option<bool>,
     pub shortcuts: Option<Shortcuts>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inherit: Vec<String>,
 }
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "theme",
     "editor",
     "shell",
@@ -199,6 +203,7 @@ const FIELDS: [&str; 11] = [
     "model",
     "workers",
     "rounds",
+    "auto_close_finished",
     "shortcuts",
 ];
 #[derive(Debug, Clone, Copy)]
@@ -269,7 +274,8 @@ impl Preferences {
             notifications_text,
             agent,
             workers,
-            rounds
+            rounds,
+            auto_close_finished
         );
         // The newest write wins: an old-style `agent` write drops `agents`, which reads as the old value again.
         if p.agent.is_some() {
