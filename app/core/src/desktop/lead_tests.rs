@@ -1093,6 +1093,8 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     ] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
+    // The fixture's own run was pinned before the repo had a `.git`; pin it as the repo is now, so one location has one key.
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(RUN_ID), "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
     let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&other, &second, &second.join("sub")] {
         assert!(roots.contains(want), "every run folder of another project: {want:?} in {roots:?}");
@@ -1386,4 +1388,16 @@ fn removing_a_nested_git_keeps_the_folders_pinned_project() {
         Err(e) => assert_eq!(code(&e), "project_membership_inconsistent", "{e}"),
     }
     assert_eq!(app.recorded_runs().len(), before, "nothing was recorded");
+}
+
+/// #80 review: one location recorded under two different keys is ambiguous and refuses the ask (no tie is allowed).
+#[test]
+fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`).
+    app.record_run("20261108-1100", &t.repo(), SID, "c", true, 1).unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo());
+    assert!(e.is_err(), "two keys at one location refuse: {e:?}");
 }

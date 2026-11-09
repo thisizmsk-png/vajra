@@ -466,7 +466,7 @@ impl App {
         }
         let depth = |p: &Path| p.components().count();
         let own_depth = bases.iter().filter(|b| own_real.starts_with(b)).map(|b| depth(b)).max().unwrap_or(0);
-        if members.iter().any(|(b, k)| own_real.starts_with(b) && depth(b) > own_depth && k.as_ref() != Some(&own)) {
+        if members.iter().any(|(b, k)| own_real.starts_with(b) && depth(b) >= own_depth && k.as_ref() != Some(&own)) {
             return Err(LeadError::GuardMissing("this run's folder now resolves into another project nested with it, so the Lead is not started".into()));
         }
         let mut out: Vec<PathBuf> = Vec::new();
