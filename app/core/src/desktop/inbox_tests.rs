@@ -113,7 +113,7 @@ fn inbox_age_and_order_are_per_item_and_survive_campaign_activity() {
 #[test]
 fn inbox_skips_malformed_entries_and_an_empty_inbox_is_empty() {
     let t = Tmp::new();
-    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "items": []}));
+    assert_eq!(t.app().inbox().unwrap(), json!({"count": 0, "campaign_count": 0, "items": []}));
     t.campaign(
         "deliver-x",
         "2026-11-06T12:00:00Z",

@@ -3078,6 +3078,120 @@ fn recorded_runs_of_one_folder_that_disagree_on_its_project_refuse_the_launch() 
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
 
+/// #80 codex P1a, on the store id: a start in a SUBFOLDER of a pinned folder takes the folder's pinned project, not the
+/// one a worker re-linked its worktree `.git` to. The cap and the other project's deny rules both follow the pin.
+#[test]
+fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, wt) = (t.0.join("a"), t.0.join("b"), t.0.join("a-wt"));
+    store_git(&a);
+    store_git(&b);
+    store_worktree(&a, &wt, "a-wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
+    // A worker of A's run re-links A's worktree to B.
+    store_worktree(&b, &wt, "a-wt");
+    assert_eq!(app.projects.find_by_path(&wt.join("src")).unwrap().map(|p| p.id), Some(pb.clone()), "the rewrite took, seen from the subfolder");
+    let p = app.launch_project(&wt.join("src")).unwrap();
+    assert_eq!(p.id, pa, "a start in a subfolder keeps A");
+    let busy = app.within_caps(&p.id, 1).unwrap_err();
+    assert_eq!(busy["reason"], "project_busy", "A is still busy: {busy}");
+    // The subfolder's run is recorded under A, so B's Director-General still has A's folders denied.
+    app.record_run_as("20261105-1231", &wt.join("src"), Some(&p.id), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "e", true, 1).unwrap();
+    let denied = app.other_project_roots(&pb, &b).unwrap();
+    let real: Vec<PathBuf> = denied.iter().map(|d| fs::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+    for want in [wt.join("src"), wt.clone(), a.clone()] {
+        assert!(real.contains(&fs::canonicalize(&want).unwrap()), "{want:?} not denied: {denied:?}");
+    }
+    app.sup.kill(&stream).unwrap();
+}
+
+/// The ancestor rule takes only a Git project's pin: a run in a plain (non-Git) project folder does not absorb a repo
+/// that is its own project inside it.
+#[test]
+fn a_plain_folders_pin_is_not_taken_by_a_repo_inside_it() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (plain, inner) = (t.0.join("notes"), t.0.join("notes/tool"));
+    fs::create_dir_all(&plain).unwrap();
+    store_git(&inner);
+    let pp = test_project(&t.0.join("data"), &t.home(), &plain);
+    let pi = app.projects.add(&inner, true).unwrap().project().id.clone();
+    app.record_run("20261105-1230", &plain, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pp.as_str()));
+    assert_eq!(app.launch_project(&inner).unwrap().id, pi, "the repo is its own project");
+    // A plain subfolder with no record of its own is looked up in the store as usual (which finds the plain project).
+    fs::create_dir_all(plain.join("sub")).unwrap();
+    assert_eq!(app.launch_project(&plain.join("sub")).unwrap().id, pp);
+}
+
+fn without_pin(app: &App, run: &str) {
+    fs::remove_file(app.data.join("control/lead").join(run).join(super::orchestrator::PROJECT_FILE)).unwrap();
+}
+
+/// #80 codex P1b, on the store id: a record from before pins (cwd, session and campaign, no pin) and one with a pre-store
+/// `k_` stand-in pin are migrated once from their guarded cwd, so a fresh start in a previously used folder works.
+#[test]
+fn an_old_record_without_a_store_pin_is_migrated_once_and_a_fresh_start_works() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("a");
+    store_git(&a);
+    let pa = test_project(&t.0.join("data"), &t.home(), &a);
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    without_pin(&app, "20261105-1230");
+    assert_eq!(app.pinned_project("20261105-1230"), None, "this is the base format");
+    assert_eq!(app.launch_project(&a).expect("the old record is recognised, not refused").id, pa);
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()), "written back under the guard");
+    assert_eq!(app.launch_project(&a).unwrap().id, pa, "and stable on the next call");
+    // A pre-store stand-in pin that its folder still gives migrates the same way.
+    let k = super::orchestrator::project_ref(&a).0;
+    fs::write(app.data.join("control/lead/20261105-1230").join(super::orchestrator::PROJECT_FILE), &k).unwrap();
+    assert_eq!(app.launch_project(&a).unwrap().id, pa);
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
+}
+
+#[test]
+fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
+    let fresh = || {
+        let t = Tmp::new();
+        let app = t.app();
+        let a = t.0.join("a");
+        store_git(&a);
+        test_project(&t.0.join("data"), &t.home(), &a);
+        app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+        without_pin(&app, "20261105-1230");
+        (t, app, a)
+    };
+    let refused = |app: &App, a: &Path| code(&app.launch_project(a).unwrap_err()).to_string();
+    // Conflict: an old record, and a pinned record of the same folder under another project.
+    let (t, app, a) = fresh();
+    let other = test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
+    app.record_run_as("20261105-1231", &a, Some(&other), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap();
+    assert_eq!(refused(&app, &a), "project_membership_inconsistent");
+    // Malformed: a cwd record with no session and no pin is not the base format.
+    let (_t, app, a) = fresh();
+    fs::remove_file(app.data.join("control/lead/20261105-1230/session")).unwrap();
+    assert_eq!(refused(&app, &a), "project_membership_inconsistent");
+    // A pin file that is neither a store id nor a stand-in, and a stand-in the folder does not give.
+    let pin = |app: &App, v: &str| fs::write(app.data.join("control/lead/20261105-1230").join(super::orchestrator::PROJECT_FILE), v).unwrap();
+    let (_t, app, a) = fresh();
+    pin(&app, "garbage");
+    assert_eq!(refused(&app, &a), "project_membership_inconsistent");
+    let (_t, app, a) = fresh();
+    pin(&app, "k_0123456789abcdef0123456789abcdef");
+    assert_eq!(refused(&app, &a), "project_membership_inconsistent");
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some("k_0123456789abcdef0123456789abcdef"), "nothing was overwritten");
+}
+
 #[path = "board_tests.rs"]
 mod board_cards;
 
