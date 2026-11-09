@@ -125,5 +125,59 @@ class Bounds(unittest.TestCase):
         self.assertEqual(subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True).returncode, 1, "the harness's own session leader must be gone after cancel")
 
 
+class LaunchFailure(unittest.TestCase):
+    """If the app is started but its pid cannot be found, nothing is left behind (the review of #101)."""
+
+    def setUp(self):
+        self._saved = (P.ps, P.stop_pid, P.subprocess.run)
+
+    def tearDown(self):
+        P.ps, P.stop_pid, P.subprocess.run = self._saved
+
+    def test_given_the_app_never_shows_in_ps_when_launching_then_it_fails_within_the_wait_and_stops_nothing(self):
+        P.subprocess.run = lambda *a, **k: None  # `open` "worked"
+        P.ps = lambda: {}
+        stopped = []
+        P.stop_pid = stopped.append
+        t0 = time.time()
+        with self.assertRaises(SystemExit):
+            P.launch_hidden("/x/Vajra.app/Contents/MacOS/vajra-desktop", {}, wait=0.4)
+        self.assertLess(time.time() - t0, 5)
+        self.assertEqual(stopped, [])
+
+    def test_given_the_app_appears_only_after_the_wait_when_launching_then_that_instance_is_stopped(self):
+        exe = "/x/Vajra.app/Contents/MacOS/vajra-desktop"
+        calls = {"n": 0}
+
+        def ps():
+            calls["n"] += 1
+            # nothing during the wait, the new instance in the final look
+            return {} if calls["n"] <= 2 else {777: (1, 1, 0.0, exe)}
+
+        P.subprocess.run = lambda *a, **k: None
+        P.ps = ps
+        stopped = []
+        P.stop_pid = stopped.append
+        with self.assertRaises(SystemExit):
+            P.launch_hidden(exe, {}, wait=0.0)
+        self.assertEqual(stopped, [777], "an instance this launch started is ended before the error goes on")
+
+    def test_given_the_launch_fails_when_main_runs_then_the_temp_home_is_removed(self):
+        import tempfile
+        made = []
+        real = tempfile.mkdtemp
+        tempfile.mkdtemp = lambda *a, **k: made.append(real(*a, **k)) or made[-1]
+        old_argv = sys.argv
+        try:
+            sys.argv = ["x", "bin", "/nonexistent/NotAnApp", os.path.join(real(), "o.json"), "5"]
+            with self.assertRaises(SystemExit):
+                P.main()
+        finally:
+            tempfile.mkdtemp = real
+            sys.argv = old_argv
+        self.assertEqual(len(made), 1)
+        self.assertFalse(os.path.exists(made[0]), "no temp HOME left behind when the app could not be launched")
+
+
 if __name__ == "__main__":
     unittest.main()

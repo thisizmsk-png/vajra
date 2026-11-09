@@ -162,9 +162,10 @@ def stop(p):
                 pass
 
 
-def launch_hidden(binary, env_extra):
+def launch_hidden(binary, env_extra, wait=20):
     """Start the .app without activating it and with its window hidden (`open -g -j`), so a bench run never takes focus or
-    puts a window in front of the human. Returns the app's pid; it is not our child, so `stop_pid` ends exactly that pid."""
+    puts a window in front of the human. Returns the app's pid; it is not our child, so `stop_pid` ends exactly that pid. If the
+    pid cannot be found in `wait` seconds, an instance this launch started is ended before the error goes on."""
     app = os.path.abspath(binary)
     while app and not app.endswith(".app"):
         parent = os.path.dirname(app)
@@ -175,12 +176,19 @@ def launch_hidden(binary, env_extra):
     have = {pid for pid, r in ps().items() if r[3] == exe}
     args = ["open", "-g", "-j", "-n"] + [x for k, v in env_extra.items() for x in ("--env", f"{k}={v}")] + [app]
     subprocess.run(args, check=True, timeout=20)
-    end = time.time() + 20
-    while time.time() < end:
+    end = time.time() + wait
+    while True:
         new = {pid for pid, r in ps().items() if r[3] == exe} - have
         if new:
             return min(new)
+        if time.time() >= end:
+            break
         time.sleep(0.25)
+    # Never found in time. One more look has just been made; anything that is new now is ours (it did not exist before
+    # `open`) and must not be left running.
+    new = {pid for pid, r in ps().items() if r[3] == exe} - have
+    for pid in sorted(new):
+        stop_pid(pid)
     raise SystemExit("the app did not start")
 
 
@@ -226,14 +234,15 @@ def main():
         env["FG12_FIXTURE"] = fx
         cmd = [binary, home, os.path.join(home, "data"), scenario, agent, fx, str(min(secs, MAX_SECONDS) + SETTLE_S + 10)]
     secs = max(1, min(secs, MAX_SECONDS))
-    if mode == "bin":
-        pid = launch_hidden(binary, {"HOME": home, "VAJRA_DESKTOP_DATA": os.path.join(home, "data")})
-    else:
-        p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, text=True)
-        pid = p.pid
     runs, samples = [], []
+    pid = None
     try:
-        if mode == "core":
+        # Launching is inside the guard too: a failure here still removes the temp HOME and ends what was started.
+        if mode == "bin":
+            pid = launch_hidden(binary, {"HOME": home, "VAJRA_DESKTOP_DATA": os.path.join(home, "data")})
+        else:
+            p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, text=True)
+            pid = p.pid
             pid = int(p.stdout.readline().split()[1])
             runs = json.loads(p.stdout.readline().split(" ", 1)[1])
         nap(SETTLE_S)
@@ -247,7 +256,7 @@ def main():
     finally:
         if p is not None:
             stop(p)
-        else:
+        elif pid is not None:
             stop_pid(pid)
         shutil.rmtree(home, ignore_errors=True)
     res = summarize(samples) | {"mode": mode, "scenario": scenario, "seconds": secs, "settle_s": SETTLE_S, "cancelled": CANCEL["flag"]}
