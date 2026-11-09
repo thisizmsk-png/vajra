@@ -43,7 +43,7 @@ impl Tmp {
     }
     /// Index the run (worker-writable) and record its directory under the guarded control dir, as `launch` does.
     fn run(&self, app: &App) {
-        let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: self.cwd(), lead_session_id: None };
+        let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: self.cwd(), lead_session_id: None, provider: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
         app.record_run(RUN, &self.cwd(), SID, CAMP, true, start_of(RUN)).unwrap();
     }
@@ -62,7 +62,7 @@ impl Tmp {
     }
     /// Index and record another run of the same session.
     fn another_run(&self, app: &App, run: &str, workflow: bool) {
-        let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: run.into(), cwd: self.cwd(), lead_session_id: None };
+        let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: run.into(), cwd: self.cwd(), lead_session_id: None, provider: None };
         runindex::append(&self.0.join("data/runs.jsonl"), &e).unwrap();
         app.record_run(run, &self.cwd(), SID, CAMP, workflow, start_of(run)).unwrap();
     }
@@ -244,7 +244,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let t = Tmp::new();
     let app = t.app();
     t.result("wf_a.json", &done(CAMP, pushes()));
-    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
+    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
     app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true, start_of(RUN)).unwrap();
@@ -516,7 +516,7 @@ fn a_forged_session_id_or_campaign_on_the_same_run_is_not_trusted() {
     // The guarded record says (SID, CAMP); the index line (worker-writable) claims another session, then another campaign.
     app.record_run(RUN, &t.cwd(), SID, CAMP, true, start_of(RUN)).unwrap();
     for (sid, camp) in [(other, CAMP), (SID, "deliver-other")] {
-        let e = runindex::Entry { campaign: camp.into(), session_id: sid.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None };
+        let e = runindex::Entry { campaign: camp.into(), session_id: sid.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
         runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
         let dir = t.home().join(".claude/projects").join(project_slug(&t.cwd())).join(sid).join("workflows");
         fs::create_dir_all(&dir).unwrap();
@@ -622,7 +622,7 @@ fn plan_ids_stay_stable_after_an_approval_driven_resume() {
     app.sup.kill(&format!("run-{SID}")).unwrap();
     // The resume launches a new run (new id) in the same session; the old result file is still there.
     let r2 = "20261106-1005";
-    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
+    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     app.record_run(r2, &t.cwd(), SID, CAMP, false, start_of(r2)).unwrap();
     assert_eq!(item_ids(&app), ["plan:20261106-0911.1"], "the approved plan stays decided; its sibling keeps its id");
@@ -740,7 +740,7 @@ fn a_run_id_naming_a_future_minute_does_not_hide_a_result_written_before_it() {
     let app = t.app();
     t.run(&app);
     let (r2, launched) = ("20261106-1001", start_of("20261106-1000") + 20);
-    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None };
+    let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r2.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     app.record_run(r2, &t.cwd(), SID, CAMP, true, launched).unwrap();
     // An earlier workflow's file (before the launch) is still ignored; the new one (written 20s after launch, before the id's minute) counts.
@@ -750,7 +750,7 @@ fn a_run_id_naming_a_future_minute_does_not_hide_a_result_written_before_it() {
     assert_eq!(item_ids(&app), ["plan:20261106-1001.0", "plan:20261106-1001.1"]);
     // A run recorded without a launch time (from before this record existed) is not trusted for results.
     let r3 = "20261106-1100";
-    let e3 = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r3.into(), cwd: t.cwd(), lead_session_id: None };
+    let e3 = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: r3.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e3).unwrap();
     app.record_run(r3, &t.cwd(), SID, CAMP, true, start_of(r3)).unwrap();
     fs::remove_file(t.0.join("data/control/lead").join(r3).join("started")).unwrap();

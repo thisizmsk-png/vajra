@@ -169,7 +169,7 @@ fn start_run_generation_guards_a_second_start_that_saw_the_old_state() {
     let t = Tmp::new();
     let app = t.app();
     // A first start through a receipt (bad input: refused, so the project generation does not move).
-    let bad = RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None };
+    let bad = RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None, provider: None };
     let r = app.act_start_run(&env("run-0008-hhhh", Some(0)), bad.clone(), "/nonexistent");
     assert_eq!(state_of(&r), "rejected");
     let ps = app.project_state("proj-a", None).unwrap();
@@ -239,7 +239,7 @@ fn generations_and_revisions_survive_a_restart() {
     assert_eq!(app.project_state("proj-a", Some(old_rev)).unwrap()["unchanged"], false);
     assert!(old_receipt_rev <= rev);
     // The delayed action that still expects generation 0 is stale; the one expecting 1 goes through.
-    let bad = app.act_start_run(&env("run-0013-mmmm", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None }, "/nonexistent");
+    let bad = app.act_start_run(&env("run-0013-mmmm", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None, provider: None }, "/nonexistent");
     assert_eq!(bad["receipt"]["reason"], "stale_generation");
     let ok = app.act(&env("run-0014-nnnn", Some(1)), Caller::Ui, false, "start_run", "proj-a", Some(1), || Ok(json!({})));
     assert_eq!(state_of(&ok), "done");
@@ -386,7 +386,7 @@ fn project_generation_is_durable_independent_of_receipts() {
     let app = t.app();
     assert_eq!(app.project_state("proj-a", None).unwrap()["receipts"].as_array().unwrap().len(), 0, "the receipts aged out");
     assert_eq!(app.project_state("proj-a", None).unwrap()["generations"]["project"], 1);
-    let stale = app.act_start_run(&env("run-0023-wwww", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None }, "/nonexistent");
+    let stale = app.act_start_run(&env("run-0023-wwww", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None, provider: None }, "/nonexistent");
     assert_eq!(stale["receipt"]["reason"], "stale_generation");
 }
 
