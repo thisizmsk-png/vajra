@@ -130,7 +130,9 @@ impl AgentAdapter for Codex {
             message: false,
             redirect: false,
             stop: StopKind::Terminate,
-            resume: true,
+            // An app-started Codex run is never told the app's session id and Vajra does not read Codex's own, so there
+            // is no id to resume. Offering one would hand `codex resume` an id Codex never saw.
+            resume: false,
             vajra_workflow: false,
         }
     }

@@ -16,6 +16,19 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps provider_list and passes a provider to resume only when one is given", async () => {
+    const f = fakeIpc({ provider_list: { schema: "vajra.providers/1", providers: [] }, resume_run: {} });
+    setTransport(f.transport);
+    await api.providerList();
+    await api.resumeRun("s", "c", "/w");
+    await api.resumeRun("s", "c", "/w", "codex");
+    expect(f.calls).toEqual([
+      { cmd: "provider_list", args: undefined },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w" } },
+      { cmd: "resume_run", args: { sessionId: "s", campaign: "c", cwd: "/w", provider: "codex" } },
+    ]);
+  });
+
   it("maps the project commands to snake_case commands with camelCase args", async () => {
     const f = fakeIpc({ app_info: {}, project_list: { projects: [], skipped: 0 }, project_add: {}, project_rename: {}, project_archive: {}, project_sessions: { sessions: [], skipped: 0, unsupported: false, truncated: false } });
     setTransport(f.transport);
@@ -34,6 +47,17 @@ describe("typed ipc", () => {
       { cmd: "project_rename", args: { id: "p_1", name: "New", expectRev: 2 } },
       { cmd: "project_archive", args: { id: "p_1", expectRev: undefined } },
       { cmd: "project_sessions", args: { id: "p_1" } },
+    ]);
+  });
+
+  it("maps the migration commands", async () => {
+    const f = fakeIpc({ project_migration_suggest: { done: false, groups: [], unsorted: [], terminal: [] }, project_migration_confirm: {} });
+    setTransport(f.transport);
+    await api.projectMigrationSuggest();
+    await api.projectMigrationConfirm(["/Users/me/src/a"]);
+    expect(f.calls).toEqual([
+      { cmd: "project_migration_suggest", args: undefined },
+      { cmd: "project_migration_confirm", args: { roots: ["/Users/me/src/a"] } },
     ]);
   });
 
