@@ -3229,3 +3229,56 @@ fn a_self_contained_nested_clone_and_a_real_submodule_are_their_own_projects() {
     let k = app.launch_key(&a.join("sub")).expect("a submodule of the enclosing project");
     assert_ne!(k, pinned, "the submodule is its own project");
 }
+
+/// #80 round 5: the submodule target passes the "inside A's common dir" check, but a `commondir` file there would redirect
+/// the key to another project. It is refused anywhere on the resolution path, and the pinned key is the validated target.
+#[test]
+fn an_internal_gitdir_whose_commondir_points_at_another_project_is_refused() {
+    let t = Tmp::new();
+    let (app, a, b, pinned) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join(".git/modules/fake")).unwrap();
+    fs::write(a.join(".git/modules/fake/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/fake\n").unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    assert_eq!(app.launch_key(&a).unwrap(), pinned, "A's pin is unchanged");
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a), "B's deny roots are intact: {denied:?}");
+    // A commondir further up the resolution path (on the modules dir itself) is refused too.
+    fs::create_dir_all(a.join(".git/modules/deep/inner")).unwrap();
+    fs::write(a.join(".git/modules/deep/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    fs::create_dir_all(a.join("sub2")).unwrap();
+    fs::write(a.join("sub2/.git"), "gitdir: ../.git/modules/deep/inner\n").unwrap();
+    let e = app.launch_key(&a.join("sub2")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "path: {e}");
+}
+
+#[test]
+fn a_submodules_pinned_key_is_the_validated_target() {
+    let t = Tmp::new();
+    let (app, a, _, _) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join(".git/modules/sub")).unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    let key = app.launch_key(&a.join("sub")).unwrap();
+    assert_eq!(key, fs::canonicalize(a.join(".git/modules/sub")).unwrap());
+}
+
+/// #80 round 5 (second finding): the location and key checked at launch are the pair that is recorded, and the record is
+/// written before the process starts, so a `.git` created later cannot change what was pinned.
+#[test]
+fn the_checked_location_is_what_is_recorded_even_if_a_git_appears_afterwards() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(a.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let (loc, key) = app.launch_identity(&a.join("src")).unwrap();
+    assert_eq!(loc, fs::canonicalize(&a).unwrap());
+    // After the identity was chosen, the launched process plants a nearer .git.
+    fs::create_dir_all(a.join("src/.git")).unwrap();
+    app.record_run_pinned("20261105-1230", &a.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    fs::write(a.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    assert_eq!(app.launch_key(&a).unwrap(), key, "a start at A still gets the key that was checked");
+}
