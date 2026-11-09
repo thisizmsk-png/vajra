@@ -99,6 +99,7 @@ fn one_active_run_per_project() {
         .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0, sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let cwd = t.0.to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let held = app.start_run(input, &cwd).unwrap_err();
@@ -2916,4 +2917,83 @@ fn the_login_check_runs_only_when_provider_list_is_called_and_is_cached_otherwis
     }
     assert_eq!(runs(), 1, "no idle work");
     assert_eq!(app.provider_cached().unwrap().providers[0].login.state, crate::providers::contract::LoginState::SignedIn);
+}
+
+
+// ---- #80 review: a run's project is the one pinned at launch, never re-read from the worker-writable `.git`
+
+fn linked_worktree(repo: &Path, wt: &Path, name: &str) {
+    fs::create_dir_all(repo.join(".git/worktrees").join(name)).unwrap();
+    fs::create_dir_all(wt).unwrap();
+    fs::write(repo.join(".git/worktrees").join(name).join("commondir"), "../..\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", repo.join(".git/worktrees").join(name).display())).unwrap();
+}
+
+#[test]
+fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, wt) = (t.0.join("a"), t.0.join("b"), t.0.join("a-wt"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    linked_worktree(&a, &wt, "a-wt");
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap(); // pinned to A at launch
+    // A worker of the active run points its worktree at B.
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    assert_eq!(caps::project_key(&wt), caps::project_key(&b), "the rewrite took");
+    let key = |p: &Path| app.launch_key(p).unwrap();
+    let busy = app.within_caps(&key(&a), 1).unwrap_err();
+    assert_eq!(busy["reason"], "project_busy", "A is still busy: {busy}");
+    app.within_caps(&key(&b), 1).expect("B is still eligible");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn an_active_run_with_no_recorded_project_holds_every_start() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
+    let e = app.within_caps(&t.0.join("elsewhere"), 1).unwrap_err();
+    assert_eq!(code(&e), "project_not_recorded", "{e}");
+    app.sup.kill(&stream).unwrap();
+}
+
+#[test]
+fn a_symlink_alias_of_a_pinned_folder_reuses_its_pinned_project_after_a_git_rewrite() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, alias) = (t.0.join("a"), t.0.join("b"), t.0.join("a-alias"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    symlink(&a, &alias).unwrap();
+    let pinned = caps::project_key(&a);
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    // A worker rewrites a's .git to B's.
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    fs::write(a.join(".git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    assert_eq!(caps::project_key(&alias), caps::project_key(&b), "the rewrite took, seen through the alias");
+    assert_eq!(app.launch_key(&alias).unwrap(), pinned, "a resume through the alias keeps A");
+    assert_eq!(app.launch_key(&a).unwrap(), pinned);
+}
+
+#[test]
+fn recorded_runs_of_one_folder_that_disagree_on_its_project_refuse_the_launch() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, alias) = (t.0.join("a"), t.0.join("a-alias"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    symlink(&a, &alias).unwrap();
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_as("20261105-1231", &alias, &t.0.join("other/.git"), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap();
+    let e = app.launch_key(&a).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
