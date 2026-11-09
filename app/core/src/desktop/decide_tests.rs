@@ -247,6 +247,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
+    std::fs::create_dir_all(t.0.join("elsewhere")).unwrap();
     app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true, start_of(RUN)).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "guarded record names another directory");
 }
@@ -403,14 +404,16 @@ fn approve_ended_session_argv() {
 
 #[test]
 fn an_ended_session_that_cannot_be_resumed_fails_closed_and_the_plan_stays() {
-    // Another run is active, so the resume is refused before any process starts (no real claude is run).
+    // Another run is active in the same project, so the resume is held before any process starts (no real claude is run).
     let t = Tmp::new();
     let app = t.app();
     let sha = ready(&t, &app);
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
     lock(&app.runs).insert(format!("run-{other}"), Run { session_id: other.into(), run_id: "20261106-1000".into(), campaign: "c".into(), cwd: t.cwd(), nonces: Redactor::default() });
-    assert_eq!(code_of(&app.approve_plan(PLAN, &sha).unwrap_err()), "run_active");
+    app.record_run("20261106-1000", &t.cwd(), other, "c", true, 1).unwrap(); // a launched run is always recorded with its project
+    let held = app.approve_plan(PLAN, &sha).unwrap_err();
+    assert_eq!((code_of(&held).as_str(), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert_eq!(states(&t, "approve"), ["requested", "failed"], "requested first, then the failure");
     assert!(!t.audit().contains("approve id="), "a failed approve has no audit line");
     assert!(item_ids(&app).iter().any(|i| i == PLAN), "still in the inbox");

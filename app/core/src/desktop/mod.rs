@@ -212,9 +212,13 @@ pub struct App {
     runs: Mutex<HashMap<String, Run>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
-    /// Held from the one-active-run check until the run is recorded, so two
-    /// Start clicks cannot both pass the check.
+    /// Held from the caps check until the run is recorded, so two Start clicks
+    /// (or two projects at once) cannot both pass the check on the same count.
     launching: Mutex<()>,
+    /// The run caps (ADR-15 D5); in memory until the settings store (FG-08) persists them.
+    limits: Mutex<caps::RunLimits>,
+    /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
+    run_workers: Mutex<HashMap<String, u32>>,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -299,6 +303,8 @@ impl App {
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
+            limits: Mutex::new(caps::RunLimits::default()),
+            run_workers: Mutex::new(HashMap::new()),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -400,13 +406,47 @@ impl App {
         Ok(json!({"campaigns": list}))
     }
 
-    /// The control service steers one session, so one run is active at a time.
-    fn no_active_run(&self) -> Result<(), Value> {
+    /// ADR-15 D5: may a run in `cwd` with `workers` start now? One run per project, `max_runs` in the app, and the
+    /// worker ceiling across concurrent runs. Over a cap the start is held with a reason (`run_held`), never queued.
+    /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
+    /// concurrent run safe; the caps bound what runs at once.
+    ///
+    /// Projects are the keys pinned when each run was launched (`launch_key` for the requested folder, the guarded record
+    /// for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git` cannot
+    /// make its project look free or make another one look busy. A live run with no pinned key refuses the start.
+    fn within_caps(&self, key: &Path, workers: u32) -> Result<(), Value> {
         self.reap_locked();
-        if self.active_run_count() > 0 {
-            return Err(json!({"error": "run_active", "detail": "finish or stop the active run first"}));
+        let active: Vec<caps::Active> = {
+            let runs = lock(&self.runs);
+            let per = lock(&self.run_workers);
+            let mut v = Vec::new();
+            for (s, r) in runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)) {
+                let Some(project) = self.read_run_key(&r.run_id) else {
+                    return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
+                };
+                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
+            }
+            v
+        };
+        // Forget the worker counts of runs that ended.
+        {
+            let runs = lock(&self.runs);
+            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
-        Ok(())
+        let limits = *lock(&self.limits);
+        caps::check(limits, &active, key, workers).map_err(|h| h.to_json())
+    }
+
+    /// The run caps and their bounds.
+    pub fn run_limits(&self) -> Res {
+        Ok(lock(&self.limits).to_json())
+    }
+
+    /// Set the app-wide run cap (1 to 4). Running work is never stopped: a lower cap only holds new starts.
+    pub fn set_run_limits(&self, max_runs: u32) -> Res {
+        let l = caps::RunLimits::with_max_runs(max_runs)?;
+        *lock(&self.limits) = l;
+        Ok(l.to_json())
     }
 
     /// Runs whose PTY is still open.
@@ -453,7 +493,7 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_engine(Engine::Claude, session_id, run_id, campaign, cwd, argv, rotate)
+        self.launch_engine(Engine::Claude, session_id, run_id, campaign, cwd, argv, rotate, caps::DEFAULT_RUN_WORKERS)
     }
 
     /// `launch` for the chosen provider: the session is recorded with it so a later resume knows which CLI ran it.
@@ -467,8 +507,9 @@ impl App {
         cwd: &Path,
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
+        workers: u32,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, engine)
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, engine, workers)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -484,9 +525,30 @@ impl App {
         rotate: bool,
         workflow: bool,
         engine: Engine,
+        workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
-        self.no_active_run()?;
+        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
+        // are checked against.
+        // A session whose process is already running is never launched again: `start_session` would replace its live control
+        // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
+        // its control session. Checked under the launching lock, before anything is changed.
+        if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
+            return Err(fail("session_running", "this session is already running; stop it before starting it again"));
+        }
+        let (loc, key) = self.launch_identity(cwd)?;
+        self.within_caps(&key, workers)?;
+        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
+        // refused, so a resume never has to guess the provider from the worker-writable index.
+        if self.record_run_provider(run_id, engine).is_err() {
+            return Err(fail("io", "could not record the run's provider"));
+        }
+        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
+        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
+        // pin could never be held to its project (#80 review).
+        if self.record_run_pinned(run_id, cwd, &loc, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+            return Err(fail("io", "could not record the run's project"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -499,12 +561,6 @@ impl App {
                 }
             }
         };
-        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
-        // refused, so a resume never has to guess the provider from the worker-writable index.
-        if self.record_run_provider(run_id, engine).is_err() {
-            lock(&self.control).end_session(session_id);
-            return Err(fail("io", "could not record the run's provider"));
-        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -516,6 +572,7 @@ impl App {
             lock(&self.control).end_session(session_id);
             return Err(e);
         }
+        lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
             stream.clone(),
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
@@ -524,11 +581,6 @@ impl App {
         let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
-        }
-        // The guarded record of the run's directory (the index above is worker-writable): without it the Lead is
-        // refused for this run after a restart, but the launch itself goes on.
-        if self.record_run(run_id, cwd, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
-            self.note("lead_cwd_record_failed", &[]);
         }
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
@@ -605,6 +657,7 @@ impl App {
         let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
+        let workers = input.max_in_flight;
         let engine = self.chosen_engine(input.provider.as_deref())?;
         let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
             if engine == Engine::Claude {
@@ -612,13 +665,35 @@ impl App {
             } else {
                 adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
             }
-        }, false)?;
+        }, false, workers)?;
         self.note("run_started", &[]);
         Ok(r)
     }
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
+    /// The folder the guarded records say `session_id` runs in: `Ok(None)` when no record names it (a legacy session), `Err` when
+    /// records of the same session name different folders (the membership is inconsistent, so nothing resumes).
+    fn guarded_session_folder(&self, session_id: &str) -> Result<Option<PathBuf>, Value> {
+        let real = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        let mut found: Option<PathBuf> = None;
+        for run in self.recorded_runs() {
+            let Some((cwd, sid, _, _)) = self.read_run_record(&run) else { continue };
+            if sid != session_id {
+                continue;
+            }
+            // The folder pinned at launch, as stored: re-resolving a recorded path through today's filesystem would follow a symlink
+            // planted since. A record from before `cwd_real` existed has nothing better than its own path.
+            let cwd = self.read_run_cwd_real(&run).unwrap_or_else(|| real(cwd));
+            match &found {
+                Some(f) if *f != cwd => return Err(fail("project_membership_inconsistent", "earlier runs of this session were recorded in different folders")),
+                Some(_) => {}
+                None => found = Some(cwd),
+            }
+        }
+        Ok(found)
+    }
+
     pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
@@ -626,6 +701,16 @@ impl App {
         }
         if !bus::valid_stream_id(campaign) {
             return Err(invalid("campaign", "not a campaign slug"));
+        }
+        // The folder is the guarded records': the one the caller names came from the worker-writable index, and the index's run id
+        // is as forgeable as its cwd, so membership is looked up in the guarded records by SESSION, not by the index's run id. A
+        // session recorded in a folder is never resumed into another. A session with no guarded record at all is a legacy one
+        // (launched before records existed) and is resumed where the caller says.
+        if let Some(gcwd) = self.guarded_session_folder(session_id)? {
+            // The stored launch-time folder is compared as it is; only the folder the caller names is resolved.
+            if gcwd != std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone()) {
+                return Err(fail("resume_cwd_mismatch", "this session was started in a different folder; resume it there"));
+            }
         }
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
@@ -645,7 +730,7 @@ impl App {
         }
         let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
             adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true)?;
+        }, true, caps::DEFAULT_RUN_WORKERS)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }
@@ -1808,6 +1893,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod arrivals;
+mod caps;
 mod inbox;
 mod projects;
 mod wfresult;
