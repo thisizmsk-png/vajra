@@ -602,11 +602,22 @@ impl App {
 
     /// `launch_key` with the project location it was found at: the pair a launch records, as one look.
     pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
-        let want = git_location(cwd);
+        let mut want = git_location(cwd);
         let mut keys: Vec<PathBuf> = Vec::new();
         let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
         // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
-        for r in self.try_recorded_runs().map_err(|_| unreadable())? {
+        let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        // A folder keeps the membership it was pinned with: if a DEEPER recorded location holds it (its nested `.git` was removed or
+        // renamed), that location is still its project, never the enclosing one the nearest `.git` now names.
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        for r in &runs {
+            if let Some(l) = self.read_run_loc(r) {
+                if real.starts_with(&l) && l.components().count() > want.components().count() {
+                    want = l;
+                }
+            }
+        }
+        for r in runs {
             let dir = self.lead_sid_dir(&r);
             let Some(c) = self.read_run_cwd(&r) else {
                 // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
@@ -626,6 +637,12 @@ impl App {
                 (None, false) => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
             };
             if old {
+                // The derived location must identify to the record's own key before it is persisted (or the launch goes on): a folder
+                // redirected into another project is refused and nothing is written, even though the launch would fail anyway.
+                let derived = super::caps::try_key_of_entry(&loc, &loc).ok().map(|k| k.unwrap_or_else(|| loc.clone()));
+                if derived.as_ref() != Some(&key) {
+                    return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder no longer identifies as the project it was launched in"));
+                }
                 // Best effort: a record that cannot be written back is derived again next time.
                 let _ = fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes());
             }

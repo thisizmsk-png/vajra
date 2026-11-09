@@ -1342,3 +1342,48 @@ fn more_other_project_folders_than_the_rules_hold_refuses_the_ask() {
     let got = std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("settings.json")).unwrap();
     assert!(got.contains(&format!("Read(/{}/**)", t.0.join("many/p000").display())) && !got.contains(&format!("Read(/{}/**)", last.display())), "{got}");
 }
+
+/// #80 review [P1]: a legacy record's location is validated against its pinned key on the LAUNCH path too, before it is persisted, even
+/// when the launch then fails: a redirected folder must not leave a trusted-looking location behind for a later ask.
+#[test]
+fn a_launch_never_persists_a_legacy_location_that_does_not_identify_to_the_records_key() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    let loc = app.data.join("control/lead").join(RUN_ID).join("project_loc");
+    std::fs::remove_file(&loc).unwrap();
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    assert!(app.launch_key(&other).is_err(), "a fresh start in the other project is refused");
+    assert!(!loc.exists(), "no invalid location was persisted for the redirected legacy record");
+    assert!(app.other_project_roots(RUN_ID, &src).is_err(), "and a later ask for the redirected run stays refused");
+}
+
+/// #80 review [P1]: a recorded folder keeps its guarded membership when the nested Git boundary it was pinned under disappears.
+#[test]
+fn removing_a_nested_git_keeps_the_folders_pinned_project() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    for d in [outer.join(".git"), inner.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261108-1100", &outer, SID, "b", true, 1).unwrap();
+    app.record_run("20261108-1101", &inner, SID, "a", true, 1).unwrap();
+    let key_a = super::super::caps::project_key(&inner);
+    let key_b = super::super::caps::project_key(&outer);
+    assert_ne!(key_a, key_b, "the fixture nests two projects");
+    assert_eq!(app.launch_key(&inner).unwrap(), key_a, "healthy");
+    std::fs::rename(inner.join(".git"), inner.join(".git.saved")).unwrap();
+    let before = app.recorded_runs().len();
+    match app.launch_key(&inner) {
+        Ok(k) => assert_eq!(k, key_a, "the original pin, never the outer project's"),
+        Err(e) => assert_eq!(code(&e), "project_membership_inconsistent", "{e}"),
+    }
+    assert_eq!(app.recorded_runs().len(), before, "nothing was recorded");
+}
