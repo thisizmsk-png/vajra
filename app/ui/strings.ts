@@ -327,8 +327,6 @@ export const S = {
     workers: "Concurrent workers", rounds: "Fix rounds",
     caps: (runs: number, workers: number) => `Read-only guard caps: ${runs} active run, ${workers} workers per run. Preferences cannot raise these limits.`,
     defaultsHint: "Defaults apply to new tasks. System limits and native permissions still apply.",
-    notifications: "OS notifications", notificationsText: "Include item text",
-    notificationsHint: "Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply.",
     searchShortcut: "Search shortcut", settingsShortcut: "Settings shortcut",
     receipt: (state: string, id: string, reason?: string | null) => `Action ${state} · ${id}${reason ? ` · ${reason}` : ""}`,
     unsupported: "The core returned unsupported preferences. Update the desktop and reload.",

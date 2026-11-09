@@ -257,3 +257,9 @@ Settings General (PR 100 review): the editor and shell choices are hidden until 
 |---|---|---|
 | Default editor and shell for new terminals and editors. | Settings > General, lede | was "Default editor and shell for supported new opens. Active sessions keep their settings."; the section now shows "Not built yet" |
 | Default editor, System default, Editor CLI, Terminal shell, Login shell, /bin/sh, /bin/bash, /bin/zsh, "Launch preferences are saved for supported new opens. Running sessions keep their launch settings." | Settings > General | removed with the rows they labelled |
+
+Settings Notifications (PR 100 review): the section's controls are hidden until notifications are delivered; it shows "Not built yet". Stored values and defaults are unchanged.
+
+| String | Where | Note |
+|---|---|---|
+| OS notifications, Include item text, "Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply." | Settings > Notifications | removed with the controls they labelled |
