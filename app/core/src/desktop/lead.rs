@@ -725,7 +725,7 @@ impl App {
     }
 
     /// The canonical folder pinned when the run was launched.
-    fn read_run_cwd_real(&self, run_id: &str) -> Option<PathBuf> {
+    pub(super) fn read_run_cwd_real(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_REAL_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)

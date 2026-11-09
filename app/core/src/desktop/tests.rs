@@ -3442,6 +3442,33 @@ fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
     assert!(!lock(&app.control).has_session(sid), "and no control state was created");
 }
 
+/// #80 review (P1): a resume compares against the folder pinned at LAUNCH (`cwd_real`), never a re-resolution of the recorded path.
+/// A session recorded in a/src, whose folder is then renamed and replaced by a symlink to another project b, must not resume into b
+/// (by b's own path, or by the old path that now leads there); no record or control state is written.
+#[test]
+fn a_resume_after_the_recorded_folder_is_replaced_by_a_symlink_to_another_project_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(a.join("src")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    app.record_run("20261105-1230", &a.join("src"), sid, "c", true, 1).unwrap();
+    fs::rename(a.join("src"), a.join("src.old")).unwrap();
+    std::os::unix::fs::symlink(&b, a.join("src")).unwrap();
+    let line = runindex::Entry { campaign: "c".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: b.clone(), lead_session_id: None, provider: None };
+    runindex::append(&app.data.join("runs.jsonl"), &line).unwrap();
+    let records = || fs::read_dir(app.data.join("control/lead")).unwrap().count();
+    let before = records();
+    for ask in [b.clone(), a.join("src")] {
+        let e = app.resume_run(sid, "c", &ask.to_string_lossy(), None).unwrap_err();
+        assert_eq!(code(&e), "resume_cwd_mismatch", "{ask:?}: {e}");
+    }
+    assert_eq!(records(), before, "no run record was written");
+    assert!(!lock(&app.control).has_session(sid), "and no control state was created");
+}
+
 /// #80 round 8 (P2): every read of repository-controlled Git metadata is bounded (64 KiB) and never follows a link or blocks on
 /// a FIFO; an oversized or non-regular file is a refusal, not a truncation. Each oversized file here is otherwise valid, so an
 /// unbounded read would accept it.
