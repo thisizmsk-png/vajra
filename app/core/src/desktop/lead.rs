@@ -507,16 +507,20 @@ impl App {
             if self.pinned_project(&run).as_deref() == Some(own_project) {
                 continue;
             }
-            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            // Inside its own root is its own project (an inner project's root is denied above, from the store).
-            if own.starts_with(&real) || real.starts_with(&own) || out.contains(&cwd) {
-                continue;
+            // The run folder and the checkout root the launch pinned (`project_loc`, #80 review): a submodule's or a
+            // separate-git-dir repo's root is not the run folder, and may not be in the store.
+            for dir in std::iter::once(cwd).chain(self.read_run_loc(&run)) {
+                let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+                // Inside its own root is its own project (an inner project's root is denied above, from the store).
+                if own.starts_with(&real) || real.starts_with(&own) || out.contains(&dir) {
+                    continue;
+                }
+                if added >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} other run folders to deny; the Director-General cannot be started with all of them")));
+                }
+                out.push(dir);
+                added += 1;
             }
-            if added >= MAX_OTHER_ROOTS {
-                return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} other run folders to deny; the Director-General cannot be started with all of them")));
-            }
-            out.push(cwd);
-            added += 1;
         }
         Ok(out)
     }
@@ -624,8 +628,10 @@ impl App {
                 continue;
             }
             let common = match self.projects.get(&pid) {
+                // The store recorded the common dir canonical: one that now resolves anywhere else (replaced by a symlink,
+                // or under a redirected parent) has been redirected and admits nothing (#80 review). It still constrains.
                 Ok(p) => match p.root_key.git_common_dir {
-                    Some(c) => std::fs::canonicalize(&c).ok(),
+                    Some(c) => exact_self(Path::new(&c)),
                     None => continue, // a plain project's pin
                 },
                 Err(_) => None,
@@ -654,12 +660,9 @@ impl App {
             let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
             let real = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok());
-            let inside = |real: &PathBuf, common: &PathBuf| {
-                real.starts_with(common) && real.ancestors().take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err())
-            };
-            match real {
-                Some(real) if enclosing.iter().flatten().any(|c| inside(&real, c)) => real,
-                _ => return Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project")),
+            match real.and_then(|real| enclosing.iter().flatten().find_map(|common| nested_identity(&real, common))) {
+                Some(identity) => identity,
+                None => return Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project")),
             }
         } else {
             return Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project"));
@@ -677,7 +680,7 @@ impl App {
         }
         let at = std::fs::metadata(want).ok().map(|m| (m.dev(), m.ino()));
         let hit = listing.projects.into_iter().find(|p| {
-            at == Some((p.root_key.dev, p.root_key.ino)) || p.root_key.git_common_dir.as_ref().and_then(|c| std::fs::canonicalize(c).ok()).as_deref() == Some(identity)
+            at == Some((p.root_key.dev, p.root_key.ino)) || p.root_key.git_common_dir.as_ref().and_then(|c| exact_self(Path::new(c))).as_deref() == Some(identity)
         });
         match hit {
             Some(p) if p.archived.is_some() => Err(LeadError::ProjectArchived.to_json()),
@@ -1195,6 +1198,31 @@ mod tests;
 
 /// The project location of `cwd`: the real path of the nearest ancestor (or `cwd` itself) holding a `.git` file or directory,
 /// else the real folder itself. It names WHERE the project sits, never what its `.git` points at.
+/// `p` if it still canonicalizes to exactly itself (a path the store recorded canonical), else `None`: a common dir now
+/// reached through a symlink or a redirected parent is no longer the project it was recorded as (#80 review).
+fn exact_self(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok().filter(|c| c == p)
+}
+
+/// The identity of a nested `gitdir:` target `real` (canonical) inside an enclosing pinned Git project's common dir
+/// `common`, or `None`: no `commondir` above the target on the way up to `common`, and then either (a) none in the
+/// target itself, a submodule keyed by exactly the target; or (b) one that resolves to `common`, a linked worktree of the
+/// enclosing project keyed by its common dir. Any other `commondir` refuses (#80 review).
+fn nested_identity(real: &Path, common: &Path) -> Option<PathBuf> {
+    if !real.starts_with(common) || !real.ancestors().skip(1).take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
+        return None;
+    }
+    let cd = real.join("commondir");
+    match fsx::read_nofollow(&cd) {
+        Err(_) if std::fs::symlink_metadata(&cd).is_err() => Some(real.to_path_buf()),
+        Ok(c) => {
+            let resolved = String::from_utf8(c).ok().and_then(|c| std::fs::canonicalize(real.join(c.trim())).ok());
+            (resolved.as_deref() == Some(common)).then(|| common.to_path_buf())
+        }
+        Err(_) => None,
+    }
+}
+
 pub(super) fn git_location(cwd: &Path) -> PathBuf {
     let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     real.ancestors().find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok()).map_or_else(|| real.clone(), Path::to_path_buf)
