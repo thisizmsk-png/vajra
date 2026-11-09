@@ -18,6 +18,9 @@ use crate::procid::{same_process, start_stamp};
 /// Entries kept, and the longest line read back. A damaged or hostile file cannot grow memory without bound.
 const MAX_ENTRIES: usize = 256;
 const MAX_LINE: usize = 4096;
+/// The most of the file that is read at all (a real ledger is a few tens of KiB), so a corrupted or oversized one cannot
+/// take unbounded memory or hold up start-up.
+const MAX_BYTES: u64 = 1024 * 1024;
 pub const GRACE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +49,15 @@ pub struct Found {
     pub verdict: Verdict,
 }
 
+/// At most `MAX_BYTES` of the file as text (bytes that are not UTF-8 become U+FFFD, so one bad line costs only itself). A
+/// line cut by the cap fails to parse and is skipped.
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 pub struct Ledger {
     path: PathBuf,
     guard: Mutex<()>,
@@ -65,7 +77,7 @@ impl Ledger {
     }
 
     fn read(&self) -> Vec<Owner> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else { return Vec::new() };
+        let Some(text) = read_capped(&self.path) else { return Vec::new() };
         text.lines().filter(|l| l.len() <= MAX_LINE).filter_map(|l| serde_json::from_str::<Owner>(l).ok()).filter(|o| o.pid > 1).take(MAX_ENTRIES).collect()
     }
 
@@ -397,6 +409,29 @@ mod tests {
         assert_eq!(l.load().len(), 1);
         l.forget_for(2).unwrap();
         assert!(l.load().is_empty());
+    }
+
+    #[test]
+    fn an_oversized_ledger_is_read_only_up_to_the_byte_cap() {
+        use std::io::Write as _;
+        let p = tmp("huge");
+        let first = "{\"pid\":4242,\"stamp\":7,\"cwd\":\"/a\"}\n";
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(first.as_bytes()).unwrap();
+        f.set_len(256 * 1024 * 1024).unwrap(); // a sparse 256 MiB file: reading it whole would allocate that much
+        drop(f);
+        let text = read_capped(&p).unwrap();
+        assert!(text.len() as u64 <= MAX_BYTES, "read {} bytes", text.len());
+        assert_eq!(Ledger::new(p).load(), vec![Owner { pid: 4242, stamp: 7, cwd: "/a".into() }], "what is inside the cap still loads");
+    }
+
+    #[test]
+    fn a_ledger_with_bytes_that_are_not_utf8_still_loads_the_good_lines() {
+        let p = tmp("nonutf8");
+        let mut b = b"\xff\xfe garbage\n".to_vec();
+        b.extend_from_slice(b"{\"pid\":4242,\"stamp\":7,\"cwd\":\"/a\"}\n");
+        std::fs::write(&p, b).unwrap();
+        assert_eq!(Ledger::new(p).load().len(), 1);
     }
 
     #[test]
