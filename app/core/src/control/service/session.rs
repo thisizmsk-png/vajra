@@ -19,7 +19,7 @@ impl Service {
         };
         dir.sweep_temp();
         self.seq = self.seq.max(dir.max_seq());
-        let s = Session { id: session_id.into(), run_id: run_id.into(), dir, nonce: n, workers: Vec::new() };
+        let s = Session { id: session_id.into(), run_id: run_id.into(), dir, nonce: n, workers: Vec::new(), project: None };
         self.sessions.insert(session_id.into(), s);
         self.log("control_session_start", &[]);
         Ok(self.nonce(session_id).unwrap_or_default())
@@ -33,6 +33,24 @@ impl Service {
         s.nonce = nonce::rotate(&s.dir.root)?;
         self.log("control_nonce_rotated", &[]);
         Ok(self.nonce(session_id).unwrap_or_default())
+    }
+
+    /// The run session belongs to `project` (ADR-15 2.3): that project's Director-General sees and steers it.
+    pub fn set_project(&mut self, session_id: &str, project: &str) -> Result<()> {
+        if !crate::ids::valid_project_ref(project) {
+            return Err(ControlError::InvalidArgs("project".into()));
+        }
+        self.sessions.get_mut(session_id).ok_or(ControlError::ControlDisabled)?.project = Some(project.into());
+        Ok(())
+    }
+
+    /// The project's Director-General is now on conversation `generation`; calls from any other generation are refused.
+    pub fn set_generation(&mut self, project: &str, generation: u32) -> Result<()> {
+        if !crate::ids::valid_project_ref(project) {
+            return Err(ControlError::InvalidArgs("project".into()));
+        }
+        self.generations.insert(project.into(), generation);
+        Ok(())
     }
 
     /// The live sessions, in no particular order.

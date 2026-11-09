@@ -57,6 +57,10 @@ pub enum ControlError {
     NotStopped,
     /// A Lead bound to a run called a tool while that run is not the current control session.
     RunNotCurrent,
+    /// A Director-General's tool call carried an older conversation generation than the project's current one: the
+    /// process belongs to a conversation that was replaced, so it may not see or steer anything. Same wire code as a
+    /// stale worker attempt (`StaleGeneration`): the caller refreshes either way.
+    StaleLeadGeneration,
     ActionNotFound,
     /// A stop that named the attempt it saw (`expect_generation`) found a different one at the moment of the stop.
     StaleGeneration(u64),
@@ -75,6 +79,7 @@ impl ControlError {
             Self::NotPermitted => "not_permitted",
             Self::NotStopped => "not_stopped",
             Self::RunNotCurrent => "run_not_current",
+            Self::StaleLeadGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
             Self::StaleGeneration(_) => "stale_generation",
             Self::UnknownTool => "unknown_tool",
