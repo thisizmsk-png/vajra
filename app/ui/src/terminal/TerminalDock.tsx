@@ -3,7 +3,7 @@
 // `openTerminalHere(place)`. The xterm view is a lazy chunk, so a window that never opens a terminal pays nothing.
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { S } from "../../strings";
-import { api } from "../ipc";
+import { api, onChanged } from "../ipc";
 import type { Lifecycle, TermInfo } from "../ipc";
 import type { ViewState } from "./TerminalView";
 import "./terminal.css";
@@ -154,6 +154,22 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     );
     return () => void (stale = true);
   }, [open, shape, tick]);
+
+  // A run starting or ending changes what a close or a quit would do even when no terminal changed: ask again when the app
+  // says its runs changed (the same notice the rest of the app listens to), only while the dock is shown, and at most once
+  // per burst of notices.
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = onChanged(() => {
+      clearTimeout(timer);
+      timer = setTimeout(refreshLife, 250);
+    });
+    return () => {
+      off();
+      clearTimeout(timer);
+    };
+  }, [open, refreshLife]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

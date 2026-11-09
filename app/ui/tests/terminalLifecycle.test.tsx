@@ -51,6 +51,31 @@ describe("lifecycle line", () => {
     expect(line()).toMatch(/quit.*end/i);
   });
 
+  it("GIVEN the dock is open and a run starts then ends with no terminal change WHEN the app says its runs changed THEN the line follows", async () => {
+    let r = report({ close_keeps: { terminals: 1, runs: 0 }, quit_ends: { terminals: 1, runs: 0 } });
+    const f = await shown(r, { lifecycle: () => r });
+    await waitFor(() => expect(line()).toMatch(/1 terminal keeps running/i));
+    expect(line()).not.toMatch(/run\b|runs/i);
+    r = report({ close_keeps: { terminals: 1, runs: 1 }, quit_ends: { terminals: 1, runs: 1 } });
+    act(() => { f.emit("changed", {}); f.emit("changed", {}); }); // a burst is one refresh
+    await waitFor(() => expect(line()).toMatch(/1 terminal and 1 run keep running/i));
+    const asked = f.named("lifecycle").length;
+    r = report({ close_keeps: { terminals: 1, runs: 0 }, quit_ends: { terminals: 1, runs: 0 } });
+    act(() => f.emit("changed", {}));
+    await waitFor(() => expect(line()).not.toMatch(/run\b|runs/i));
+    expect(f.named("lifecycle").length).toBe(asked + 1);
+  });
+
+  it("GIVEN the dock is hidden WHEN the app says its runs changed THEN the core is not asked", async () => {
+    const f = fakeTerm({ lifecycle: report() });
+    setTransport(f.transport);
+    render(<TerminalDock defaultPlace={PLACE} />);
+    act(() => f.emit("changed", {}));
+    await new Promise((r) => setTimeout(r, 400));
+    expect(f.named("lifecycle").length).toBe(0);
+    expect(f.listenerCount("changed")).toBe(0);
+  });
+
   it("GIVEN several shells and no runs WHEN shown THEN it counts shells only, with plurals", async () => {
     await shown(report({ close_keeps: { terminals: 3, runs: 0 }, quit_ends: { terminals: 3, runs: 0 } }));
     await waitFor(() => expect(line()).toMatch(/3 terminals keep running/i));
