@@ -25,8 +25,8 @@ impl Probe for Fake {
     fn env(&self, key: &str) -> Option<OsString> {
         self.env.get(key).map(OsString::from)
     }
-    fn read_home_file(&self, rel: &str) -> Option<String> {
-        self.files.get(rel).map(|t| t.to_string())
+    fn read_cli_config(&self, dir: &str, name: &str) -> Option<String> {
+        self.files.get(format!("{dir}/{name}").as_str()).map(|t| t.to_string())
     }
 }
 
@@ -287,16 +287,56 @@ fn the_system_probe_reads_a_plain_config_file_under_home_and_refuses_links_and_b
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     let sys = System::new(vec![]).with_home(home.clone());
-    assert_eq!(sys.read_home_file(".codex/config.toml"), None, "missing");
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "missing");
     std::fs::write(home.join(".codex/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
     assert!(override_warning(Engine::Codex, &sys).is_some());
     std::fs::remove_file(home.join(".codex/config.toml")).unwrap();
     std::fs::write(home.join("elsewhere"), "OPENAI_API_KEY = \"x\"").unwrap();
     symlink(home.join("elsewhere"), home.join(".codex/config.toml")).unwrap();
-    assert_eq!(sys.read_home_file(".codex/config.toml"), None, "a link is not followed");
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "a link is not followed");
     std::fs::remove_file(home.join(".codex/config.toml")).unwrap();
     std::fs::write(home.join(".codex/config.toml"), vec![b'#'; 300 * 1024]).unwrap();
-    assert_eq!(sys.read_home_file(".codex/config.toml"), None, "too large");
-    assert_eq!(System::new(vec![]).read_home_file(".codex/config.toml"), None, "no home, no read");
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "too large");
+    assert_eq!(System::new(vec![]).read_cli_config(".codex", "config.toml"), None, "no home, no read");
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_symlinked_cli_directory_is_refused_even_when_the_file_inside_is_plain() {
+    use std::os::unix::fs::symlink;
+    let home = std::env::temp_dir().join(format!("vajra-acct-dirlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("elsewhere")).unwrap();
+    std::fs::write(home.join("elsewhere/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
+    symlink(home.join("elsewhere"), home.join(".codex")).unwrap();
+    let sys = System::new(vec![]).with_home(home.clone());
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "a linked directory is not followed");
+    assert!(override_warning(Engine::Codex, &sys).is_none());
+    // The same file through a real directory is read.
+    std::fs::remove_file(home.join(".codex")).unwrap();
+    std::fs::create_dir(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
+    assert!(override_warning(Engine::Codex, &sys).is_some());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+fn codex_warns(toml: &'static str) -> bool {
+    let mut f = both();
+    f.files.insert(".codex/config.toml", toml);
+    account(&accounts(&f), "codex").billing.override_warning.is_some()
+}
+
+#[test]
+fn the_codex_config_is_read_as_toml_so_comments_and_multiline_strings_are_not_settings() {
+    // An empty value with a trailing comment is still empty.
+    assert!(!codex_warns("OPENAI_API_KEY = \"\" # placeholder\n"));
+    assert!(!codex_warns("OPENAI_API_KEY = '' # \"x\"\n"));
+    // Assignment-looking text inside a multiline string is text, not a setting.
+    assert!(!codex_warns("notes = \"\"\"\nOPENAI_API_KEY = \"x\"\n\"\"\"\n"));
+    assert!(!codex_warns("notes = '''\nCODEX_API_KEY = \"x\"\n'''\n"));
+    // A real setting still counts, with a comment after it, at the top or inside a table.
+    assert!(codex_warns("OPENAI_API_KEY = \"x\" # mine\n"));
+    assert!(codex_warns("[shell_environment_policy.set]\nCODEX_API_KEY = \"x\"\n"));
+    // A file that is not valid TOML finds nothing.
+    assert!(!codex_warns("OPENAI_API_KEY = \"x\n"));
 }

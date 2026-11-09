@@ -28,9 +28,10 @@ pub trait Probe {
     /// Run `path args...` with the scrubbed environment and a timeout. `None` when it did not finish whole.
     fn run(&self, path: &Path, args: &[&str]) -> Option<Out>;
     fn env(&self, key: &str) -> Option<OsString>;
-    /// The text of a file under the user's home, for a CLI's own config only. `None` when it is missing, not a plain file,
-    /// too large or not text. The default reads nothing.
-    fn read_home_file(&self, _rel: &str) -> Option<String> {
+    /// The text of `name` inside the CLI's own directory `dir` under the user's home, for that CLI's config only. `None`
+    /// when it is missing, a link (the file or the directory), not a plain file, too large or not text. The default reads
+    /// nothing.
+    fn read_cli_config(&self, _dir: &str, _name: &str) -> Option<String> {
         None
     }
 }
@@ -75,11 +76,20 @@ impl Probe for System {
     fn env(&self, key: &str) -> Option<OsString> {
         std::env::var_os(key)
     }
-    fn read_home_file(&self, rel: &str) -> Option<String> {
+    fn read_cli_config(&self, dir: &str, name: &str) -> Option<String> {
         use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
-        let path = self.home.as_ref()?.join(rel);
-        let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // Each step is opened relative to the one before, and neither the directory nor the file may be a link: a link in
+        // the middle of the path would read a config outside the CLI's own directory.
+        let open_at = |parent: &std::fs::File, name: &str, flags: i32| {
+            let c = std::ffi::CString::new(name).ok()?;
+            // SAFETY: a valid directory fd and a NUL-terminated name for this call; a returned fd is owned exactly once.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), flags | libc::O_CLOEXEC) };
+            (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) })
+        };
+        let home = std::fs::OpenOptions::new().read(true).open(self.home.as_ref()?).ok()?;
+        let dir = open_at(&home, dir, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+        let f = open_at(&dir, name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
         if !f.metadata().ok()?.is_file() {
             return None;
         }
@@ -269,10 +279,10 @@ pub fn one(p: &dyn Probe, id: &str) -> Option<ProviderInfo> {
 
 /// The CLI's own config files that can hold a key setting. Never `auth.json` or a keychain item: those hold the login
 /// itself, which only the CLI reads.
-fn config_files(engine: Engine) -> &'static [&'static str] {
+fn config_files(engine: Engine) -> (&'static str, &'static [&'static str]) {
     match engine {
-        Engine::Claude => &[".claude/settings.json", ".claude/settings.local.json"],
-        Engine::Codex => &[".codex/config.toml"],
+        Engine::Claude => (".claude", &["settings.json", "settings.local.json"]),
+        Engine::Codex => (".codex", &["config.toml"]),
     }
 }
 
@@ -285,13 +295,15 @@ fn warn(name: &str, found_in: &str) -> OverrideWarning {
 ///
 /// - Claude settings (JSON): a non-empty `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` or
 ///   `ANTHROPIC_AUTH_TOKEN` with a non-empty value.
-/// - Codex config (TOML): a line that sets `OPENAI_API_KEY` or `CODEX_API_KEY` to a non-blank value (the value is only
-///   tested for being blank, never kept).
+/// - Codex config (TOML, parsed as TOML so comments and multiline strings are not mistaken for settings): a key named
+///   `OPENAI_API_KEY` or `CODEX_API_KEY`, in any table, whose string value is non-blank. The value is only tested for being
+///   blank, never kept.
 ///
 /// A file that is missing or not understood finds nothing: "cannot tell" never blocks.
 pub fn override_warning(engine: Engine, p: &dyn Probe) -> Option<OverrideWarning> {
-    config_files(engine).iter().find_map(|rel| {
-        let text = p.read_home_file(rel)?;
+    let (dir, names) = config_files(engine);
+    names.iter().find_map(|name| {
+        let text = p.read_cli_config(dir, name)?;
         match engine {
             Engine::Claude => claude_override(&text),
             Engine::Codex => codex_override(&text),
@@ -310,13 +322,14 @@ fn claude_override(text: &str) -> Option<OverrideWarning> {
 }
 
 fn codex_override(text: &str) -> Option<OverrideWarning> {
-    text.lines().find_map(|line| {
-        let (left, value) = line.trim_start().split_once('=')?;
-        let name = left.trim().trim_matches(|c| c == '"' || c == '\'');
-        // Same rule as Claude: an empty value is not a key. Only whether it is blank is looked at; it is never kept.
-        let blank = value.trim().trim_matches(|c| c == '"' || c == '\'').trim().is_empty();
-        adapter::CODEX_KEYS.iter().find(|k| **k == name && !blank).map(|k| warn(k, "cli_config"))
-    })
+    fn find(t: &toml::Table) -> Option<OverrideWarning> {
+        t.iter().find_map(|(k, v)| match v {
+            toml::Value::String(s) if adapter::CODEX_KEYS.contains(&k.as_str()) && !s.trim().is_empty() => Some(warn(k, "cli_config")),
+            toml::Value::Table(inner) => find(inner),
+            _ => None,
+        })
+    }
+    find(&text.parse::<toml::Table>().ok()?)
 }
 
 /// A masked address (`s…@example.com`), or `None` when it does not look like one.
