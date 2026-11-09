@@ -33,6 +33,8 @@ pub type Res = Result<Value, Value>;
 /// Emits a `changed` payload to the UI (see `App::set_change_sink`).
 pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
 
+pub use arrivals::EventSink;
+
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
@@ -242,6 +244,8 @@ pub struct App {
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
     sink: Mutex<Option<ChangeSink>>,
+    /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
+    events: Arc<arrivals::Hub>,
 }
 
 impl App {
@@ -262,6 +266,7 @@ impl App {
             preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
             sink: Mutex::new(None),
+            events: Default::default(),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
@@ -1305,6 +1310,11 @@ impl App {
         ctl(lock(&self.control).message_worker(Actor::Human, worker, text))
     }
 
+    /// `control_message` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_message_expecting(&self, worker: &str, text: &str, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).message_worker_expecting(Actor::Human, worker, text, expect))
+    }
+
     pub fn control_redirect(&self, worker: &str, text: &str) -> Res {
         ctl(lock(&self.control).redirect_worker(Actor::Human, worker, text))
     }
@@ -1797,6 +1807,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod arrivals;
 mod inbox;
 mod projects;
 mod wfresult;
