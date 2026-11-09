@@ -11,6 +11,7 @@ struct Fake {
     bins: HashMap<&'static str, &'static str>,
     answers: HashMap<(&'static str, &'static str), (i32, &'static str)>,
     env: HashMap<&'static str, &'static str>,
+    files: HashMap<&'static str, &'static str>,
 }
 
 impl Probe for Fake {
@@ -23,6 +24,9 @@ impl Probe for Fake {
     }
     fn env(&self, key: &str) -> Option<OsString> {
         self.env.get(key).map(OsString::from)
+    }
+    fn read_cli_config(&self, dir: &str, name: &str) -> Option<String> {
+        self.files.get(format!("{dir}/{name}").as_str()).map(|t| t.to_string())
     }
 }
 
@@ -186,4 +190,153 @@ fn a_real_signed_out_codex_writes_not_logged_in_to_stderr_and_still_reads_as_sig
     std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in --version) echo 'codex-cli 0.166.0';; login) echo 'config error' >&2; exit 1;; esac\n").unwrap();
     assert_eq!(get(&list(&System::new(vec![d.clone()])), "codex").login.state, LoginState::CannotTell);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- accounts ----------------------------------------------------------------------------------------------------------
+
+use crate::providers::contract::{parse_account_list, BillingKind};
+
+fn account(l: &AccountList, id: &str) -> Account {
+    l.accounts.iter().find(|a| a.id == id).unwrap().clone()
+}
+
+/// Every object key in a JSON value, to prove no field is named like a secret.
+fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(m) => m.iter().for_each(|(k, x)| {
+            out.push(k.clone());
+            keys(x, out);
+        }),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| keys(x, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn the_override_detector_flags_a_codex_key_setting_and_reports_the_name_never_the_value() {
+    let mut f = both();
+    f.files.insert(".codex/config.toml", "model = \"gpt\"\nOPENAI_API_KEY = \"x\"\n");
+    let w = account(&accounts(&f), "codex").billing.override_warning.unwrap();
+    assert_eq!((w.name.as_str(), w.found_in.as_str()), ("OPENAI_API_KEY", "cli_config"));
+    // A distinctive value shows nothing of it can leak into the answer.
+    f.files.insert(".codex/config.toml", "[shell_environment_policy.set]\n\"OPENAI_API_KEY\" = \"sk-LEAK-CANARY-123\"\n");
+    let json = serde_json::to_string(&accounts(&f)).unwrap();
+    assert!(json.contains("OPENAI_API_KEY") && !json.contains("LEAK-CANARY") && !json.contains("sk-"), "{json}");
+}
+
+#[test]
+fn the_override_detector_reads_claude_settings_names_and_ignores_empty_values_and_comments() {
+    let mut f = both();
+    f.files.insert(".claude/settings.json", r#"{"env":{"ANTHROPIC_API_KEY":"sk-LEAK-CANARY-9"}}"#);
+    let w = account(&accounts(&f), "claude").billing.override_warning.unwrap();
+    assert_eq!((w.name.as_str(), w.found_in.as_str()), ("ANTHROPIC_API_KEY", "cli_env_block"));
+    assert!(!serde_json::to_string(&accounts(&f)).unwrap().contains("LEAK-CANARY"));
+    f.files.insert(".claude/settings.json", r#"{"apiKeyHelper":"/bin/get-key"}"#);
+    assert_eq!(account(&accounts(&f), "claude").billing.override_warning.unwrap().found_in, "cli_api_key_helper");
+    f.files.insert(".claude/settings.json", r#"{"env":{"ANTHROPIC_API_KEY":""},"apiKeyHelper":" "}"#);
+    f.files.insert(".claude/settings.local.json", "not json at all");
+    f.files.insert(".codex/config.toml", "# OPENAI_API_KEY = \"x\"\nnote = \"OPENAI_API_KEY\"\nOPENAI_API_KEY = \"\"\nCODEX_API_KEY = ''\nOPENAI_API_KEY =   \" \"\n");
+    let l = accounts(&f);
+    assert!(l.accounts.iter().all(|a| a.billing.override_warning.is_none()), "{l:?}");
+}
+
+#[test]
+fn billing_comes_from_the_clis_own_status_and_a_masked_key_line_is_never_kept() {
+    let mut f = both();
+    f.answers.insert(("/bin/claude", "auth status --json"), (0, r#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max","email":"someone@example.com"}"#));
+    let c = account(&accounts(&f), "claude");
+    assert_eq!((c.state, c.billing.kind, c.billing.account_label.as_deref()), (AccountState::SignedIn, BillingKind::Subscription, Some("max, s…@example.com")));
+    f.answers.insert(("/bin/codex", "login status"), (0, "Logged in using an API key - sk-abc1234***\n"));
+    let x = account(&accounts(&f), "codex");
+    assert_eq!((x.billing.kind, x.billing.account_label.clone()), (BillingKind::ApiKey, None));
+    assert!(!serde_json::to_string(&accounts(&f)).unwrap().contains("sk-"));
+    f.answers.insert(("/bin/codex", "login status"), (0, "Logged in using ChatGPT\n"));
+    assert_eq!(account(&accounts(&f), "codex").billing.account_label.as_deref(), Some("ChatGPT"));
+}
+
+#[test]
+fn cannot_tell_never_blocks_and_a_missing_cli_is_a_row() {
+    let mut f = both();
+    f.answers.remove(&("/bin/codex", "login status"));
+    f.bins.remove("claude");
+    let l = accounts(&f);
+    assert_eq!(account(&l, "codex").state, AccountState::CannotTell);
+    assert_eq!(account(&l, "claude").state, AccountState::NotInstalled);
+    assert!(account(&l, "codex").billing.kind == BillingKind::Unknown && account(&l, "codex").billing.account_label.is_none());
+    assert!(parse_account_list(&serde_json::to_vec(&l).unwrap()).is_ok());
+    // Nothing readable at all: still an answer, with no warning.
+    assert!(accounts(&Fake::default()).accounts.iter().all(|a| a.state == AccountState::NotInstalled && a.billing.override_warning.is_none()));
+}
+
+#[test]
+fn the_answer_round_trips_and_has_no_field_that_could_hold_a_secret() {
+    let mut f = both();
+    f.files.insert(".codex/config.toml", "OPENAI_API_KEY = \"x\"");
+    let l = accounts(&f);
+    let bytes = serde_json::to_vec(&l).unwrap();
+    assert_eq!(parse_account_list(&bytes).unwrap(), l);
+    let mut names = Vec::new();
+    keys(&serde_json::from_slice(&bytes).unwrap(), &mut names);
+    assert!(!names.is_empty() && names.iter().all(|k| !["key", "token", "secret", "password", "api_key"].contains(&k.as_str())), "{names:?}");
+}
+
+#[test]
+fn the_system_probe_reads_a_plain_config_file_under_home_and_refuses_links_and_big_files() {
+    use std::os::unix::fs::symlink;
+    let home = std::env::temp_dir().join(format!("vajra-acct-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let sys = System::new(vec![]).with_home(home.clone());
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "missing");
+    std::fs::write(home.join(".codex/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
+    assert!(override_warning(Engine::Codex, &sys).is_some());
+    std::fs::remove_file(home.join(".codex/config.toml")).unwrap();
+    std::fs::write(home.join("elsewhere"), "OPENAI_API_KEY = \"x\"").unwrap();
+    symlink(home.join("elsewhere"), home.join(".codex/config.toml")).unwrap();
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "a link is not followed");
+    std::fs::remove_file(home.join(".codex/config.toml")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), vec![b'#'; 300 * 1024]).unwrap();
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "too large");
+    assert_eq!(System::new(vec![]).read_cli_config(".codex", "config.toml"), None, "no home, no read");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_symlinked_cli_directory_is_refused_even_when_the_file_inside_is_plain() {
+    use std::os::unix::fs::symlink;
+    let home = std::env::temp_dir().join(format!("vajra-acct-dirlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("elsewhere")).unwrap();
+    std::fs::write(home.join("elsewhere/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
+    symlink(home.join("elsewhere"), home.join(".codex")).unwrap();
+    let sys = System::new(vec![]).with_home(home.clone());
+    assert_eq!(sys.read_cli_config(".codex", "config.toml"), None, "a linked directory is not followed");
+    assert!(override_warning(Engine::Codex, &sys).is_none());
+    // The same file through a real directory is read.
+    std::fs::remove_file(home.join(".codex")).unwrap();
+    std::fs::create_dir(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/config.toml"), "OPENAI_API_KEY = \"x\"\n").unwrap();
+    assert!(override_warning(Engine::Codex, &sys).is_some());
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+fn codex_warns(toml: &'static str) -> bool {
+    let mut f = both();
+    f.files.insert(".codex/config.toml", toml);
+    account(&accounts(&f), "codex").billing.override_warning.is_some()
+}
+
+#[test]
+fn the_codex_config_is_read_as_toml_so_comments_and_multiline_strings_are_not_settings() {
+    // An empty value with a trailing comment is still empty.
+    assert!(!codex_warns("OPENAI_API_KEY = \"\" # placeholder\n"));
+    assert!(!codex_warns("OPENAI_API_KEY = '' # \"x\"\n"));
+    // Assignment-looking text inside a multiline string is text, not a setting.
+    assert!(!codex_warns("notes = \"\"\"\nOPENAI_API_KEY = \"x\"\n\"\"\"\n"));
+    assert!(!codex_warns("notes = '''\nCODEX_API_KEY = \"x\"\n'''\n"));
+    // A real setting still counts, with a comment after it, at the top or inside a table.
+    assert!(codex_warns("OPENAI_API_KEY = \"x\" # mine\n"));
+    assert!(codex_warns("[shell_environment_policy.set]\nCODEX_API_KEY = \"x\"\n"));
+    // A file that is not valid TOML finds nothing.
+    assert!(!codex_warns("OPENAI_API_KEY = \"x\n"));
 }
