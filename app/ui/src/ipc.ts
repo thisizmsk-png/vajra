@@ -1,3 +1,4 @@
+import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceActResult } from "./preferenceContract";
 // The one place that names the core's IPC commands. Screens call `api.*`, never `invoke`, so a screen can be tested
 // against `setTransport(fake)` and a command rename is a one-file change. Argument names are camelCase here; Tauri maps
 // them to the snake_case parameters of the Rust commands.
@@ -194,6 +195,8 @@ export function newActionId(): string {
 }
 
 export const api = {
+  preferencesRead: (projectId: string | null) => call<PreferenceView>("preferences_read", { projectId }),
+  preferencesAct: (envelope: PreferenceEnvelope, patch: PreferencePatch, reset = false) => call<PreferenceActResult>("act_preferences_update", { envelope, patch, reset }),
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
   /** The signed delivery report, verified on the bytes the core read; `text` only when integrity is "ok". */
