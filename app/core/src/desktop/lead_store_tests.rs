@@ -306,3 +306,34 @@ fn with_a_subfolder_run_another_projects_folder_is_still_denied() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     assert!(app.isolation(RUN_ID, &elsewhere).is_err(), "an unrelated folder is not this run's");
 }
+
+/// #103 review: runs of the same store project are one project whatever folders they started in. With the root run AND a
+/// later subfolder run both kept, an ask from either is answered, and neither's folder is denied to the other as another
+/// project's; a run pinned to another store project is still another project, even in this project's folders.
+#[test]
+fn a_root_run_and_a_subfolder_run_of_one_project_are_both_its_own() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    // The fixture's run (RUN_ID) is at the root; a second, finished run of the same project started in the subfolder.
+    let (sid2, run2) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1300");
+    live_run(&app, sid2, run2, sub.clone());
+    app.record_run(run2, &sub, sid2, "deliver-y", true, 1).unwrap();
+    assert_eq!(app.pinned_project(run2), app.pinned_project(RUN_ID), "both are pinned to one store project");
+    assert_ne!(crate::desktop::caps::project_key(&sub), crate::desktop::caps::project_key(&t.repo()), "under different keys");
+    for run in [RUN_ID, run2] {
+        let iso = app.isolation(run, &t.repo()).unwrap();
+        assert!(!iso.deny.iter().any(|d| d.starts_with(t.repo())), "{run}: nothing of its own is denied: {:?}", iso.deny);
+    }
+    app.ask_lead(run2, "from the subfolder").unwrap();
+    wait_until("the subfolder ask", || idle(&app) && t.ask_states().len() == 3);
+    app.ask_lead(RUN_ID, "from the root").unwrap();
+    wait_until("the root ask", || idle(&app) && t.ask_states().len() == 6);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:", "queued:", "delivered:", "done:"]);
+    // A run pinned to another store project is still another project's, even recorded in this project's subfolder.
+    let other = project_of(&t, &t.0.join("elsewhere"));
+    app.record_run("20261109-1301", &sub, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-z", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1301"), "project", other.as_bytes()).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "a folder claimed by two projects refuses");
+}

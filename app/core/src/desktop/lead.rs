@@ -503,6 +503,11 @@ impl App {
         }
         let unreadable = || guard("a launch record cannot be read, so the Lead cannot tell which folders are other projects'");
         let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        // Which records are this project's (#103 review): two runs pinned to the same store project at launch are the same
+        // project whatever folders they started in (the root and a subfolder record different keys), and two pinned to
+        // different store projects are not, even under one key. The key decides only for a record without a store pin.
+        let store_pin = |run: &str| self.pinned_project(run).filter(|p| crate::projects::contract::valid_project_id(p));
+        let own_pin = store_pin(own_run);
         let mut own_folders: Vec<PathBuf> = Vec::new();
         let mut other_recorded: Vec<PathBuf> = Vec::new();
         let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
@@ -516,6 +521,10 @@ impl App {
                 continue;
             };
             let key = self.read_run_key(&run);
+            let same_project = match (&own_pin, store_pin(&run)) {
+                (Some(a), Some(b)) => *a == b,
+                _ => key.as_ref() == Some(&own),
+            };
             let (cwd_real, loc) = (self.read_run_cwd_real(&run), self.read_run_loc(&run));
             if (present(CWD_REAL_FILE) && cwd_real.is_none()) || (present(LOC_FILE) && loc.is_none()) {
                 return Err(unreadable());
@@ -524,11 +533,11 @@ impl App {
             // unresolved one). Recorded unresolved by every record of the key: the checkout cannot be protected, so the ask is refused.
             let main = match self.project_main_of(&run, key.as_ref()) {
                 Some(Some(m)) => Some(m),
-                Some(None) if key.as_ref() == Some(&own) => None,
+                Some(None) if same_project => None,
                 Some(None) => return Err(guard("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project once from its main folder (the folder that holds its .git), then ask again")),
                 None => None,
             };
-            if key.as_ref() == Some(&own) {
+            if same_project {
                 own_folders.extend(cwd_real.into_iter().chain(loc).chain(main));
                 continue;
             }

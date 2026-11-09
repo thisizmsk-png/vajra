@@ -1604,7 +1604,10 @@ fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
         std::fs::create_dir_all(d).unwrap();
     }
     app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    // The nested project is its own store project (an unregistered nested `.git` is part of the outer store project).
+    let pi = super::super::test_project(&t.data(), &t.home(), &inner);
     app.record_run("20261108-1100", &inner, SID, "c", true, 1).unwrap();
+    assert_eq!(app.pinned_project("20261108-1100").as_deref(), Some(pi.as_str()));
     assert_ne!(super::super::caps::project_key(&inner), super::super::caps::project_key(&src), "the fixture nests two projects");
     assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&inner), "healthy: the nested project is denied");
     std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
@@ -1840,8 +1843,11 @@ fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
     let t = Tmp::new();
     let app = t.app();
     std::fs::create_dir_all(t.repo().join(".git")).unwrap();
-    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`).
+    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`),
+    // and to another store project: one location claimed by two projects refuses.
+    let other = super::super::test_project(&t.data(), &t.home(), &t.0.join("elsewhere"));
     app.record_run("20261108-1100", &t.repo(), SID, "c", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261108-1100"), "project", other.as_bytes()).unwrap();
     let e = app.other_project_roots(RUN_ID, &t.repo());
-    assert!(e.is_err(), "two keys at one location refuse: {e:?}");
+    assert!(e.is_err(), "two projects at one location refuse: {e:?}");
 }
