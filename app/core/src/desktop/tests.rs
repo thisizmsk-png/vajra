@@ -3427,3 +3427,56 @@ fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
     assert_eq!(code(&e), "resume_cwd_mismatch", "forged run id: {e}");
     assert!(!lock(&app.control).has_session(sid), "and no control state was created");
 }
+
+/// #80 round 8 (P2): every read of repository-controlled Git metadata is bounded (64 KiB) and never follows a link or blocks on
+/// a FIFO; an oversized or non-regular file is a refusal, not a truncation. Each oversized file here is otherwise valid, so an
+/// unbounded read would accept it.
+#[test]
+fn oversized_or_non_regular_git_metadata_is_refused_not_read() {
+    let t = Tmp::new();
+    let (app, a, _, _) = pinned_a_and_b(&t);
+    let pad = " ".repeat(200 * 1024);
+    // An oversized nested `.git` file whose first line is a valid submodule gitdir.
+    fs::create_dir_all(a.join(".git/modules/sub")).unwrap();
+    fs::write(a.join("sub/.git"), format!("gitdir: ../.git/modules/sub{pad}\n")).unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "oversized .git: {e}");
+    // An oversized commondir on a linked worktree that would otherwise be admitted.
+    let wt = a.join(".claude/worktrees/w");
+    linked_worktree(&a, &wt, "w");
+    fs::write(a.join(".git/worktrees/w/commondir"), format!("../..{pad}\n")).unwrap();
+    let e = app.launch_key(&wt).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "oversized commondir: {e}");
+    // A FIFO as the nested `.git` and as a commondir is refused without blocking.
+    let fifo = |p: &Path| {
+        let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    };
+    fs::create_dir_all(a.join("pipe")).unwrap();
+    fifo(&a.join("pipe/.git"));
+    let e = app.launch_key(&a.join("pipe")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "fifo .git: {e}");
+    fs::create_dir_all(a.join(".git/modules/fifo")).unwrap();
+    fifo(&a.join(".git/modules/fifo/commondir"));
+    fs::create_dir_all(a.join("sub3")).unwrap();
+    fs::write(a.join("sub3/.git"), "gitdir: ../.git/modules/fifo\n").unwrap();
+    let e = app.launch_key(&a.join("sub3")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "fifo commondir: {e}");
+}
+
+#[test]
+fn an_oversized_submodule_config_leaves_the_main_checkout_unresolved() {
+    let t = Tmp::new();
+    let (sup, sub, wt) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("sub-wt"));
+    let git = sup.join(".git/modules/sub");
+    fs::create_dir_all(git.join("worktrees/wt")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", git.join("worktrees/wt").display())).unwrap();
+    let (key, loc) = (fs::canonicalize(&git).unwrap(), fs::canonicalize(&wt).unwrap());
+    fs::write(git.join("config"), "[core]\n\tworktree = ../../../sub\n").unwrap();
+    assert!(super::lead::main_checkout(&loc, &key).is_some(), "the normal config resolves");
+    fs::write(git.join("config"), format!("[core]\n\tworktree = ../../../sub\n{}", "# pad\n".repeat(40_000))).unwrap();
+    assert!(super::lead::main_checkout(&loc, &key).is_none(), "an oversized config is not read");
+}
