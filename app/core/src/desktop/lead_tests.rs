@@ -1390,6 +1390,38 @@ fn an_external_worktree_of_the_leads_own_project_keeps_its_secret_file_rules() {
     assert!(!got.contains(&format!("Read(/{}/**)", wt.display())), "its own worktree is never denied wholesale: {got}");
 }
 
+/// #82 sweep: a guarded record of the Lead's own project that exists but cannot be read (its cwd, or the directory of runs) refuses
+/// the ask. Skipping it would leave that folder's secret files without deny rules.
+#[test]
+fn an_unreadable_record_of_the_leads_own_project_refuses_instead_of_dropping_its_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    for what in ["cwd", "LIST"] {
+        let t = Tmp::new();
+        let app = t.app();
+        let wt = t.0.join("repo-wt");
+        for d in [t.repo().join(".git/worktrees/repo-wt"), wt.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(t.repo().join(".git/worktrees/repo-wt/commondir"), "../..\n").unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", t.repo().join(".git/worktrees/repo-wt").display())).unwrap();
+        app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+        app.record_run("20261108-1100", &wt, SID, "deliver-x", true, 1).unwrap();
+        let healthy = app.own_project_folders(RUN_ID, &t.repo()).unwrap();
+        assert!(healthy.contains(&wt), "{what}: the fixture lists the worktree: {healthy:?}");
+        let lead = app.data.join("control/lead");
+        if what == "LIST" {
+            std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o300)).unwrap();
+        } else {
+            let f = lead.join("20261108-1100").join("cwd");
+            std::fs::remove_file(&f).unwrap();
+            std::fs::create_dir(&f).unwrap();
+        }
+        let r = app.own_project_folders(RUN_ID, &t.repo());
+        let _ = std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o700));
+        assert!(r.is_err(), "{what}: refused, not silently without the worktree: {r:?}");
+    }
+}
+
 /// #82 review [P2]: the Director-General's conversation is shared by all of a project's runs. After a restart the history
 /// replayed for run B must not show run A's persisted nonce, even though B is the first run queried.
 #[test]

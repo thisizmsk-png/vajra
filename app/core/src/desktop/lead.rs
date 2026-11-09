@@ -561,8 +561,15 @@ impl App {
     pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
-        for run in self.recorded_runs() {
-            let Some(cwd) = self.read_run_cwd(&run) else { continue };
+        let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Lead cannot guard all of its folders".into());
+        for run in self.try_recorded_runs().map_err(|_| unreadable())? {
+            let Some(cwd) = self.read_run_cwd(&run) else {
+                // No cwd file is a launch that never completed; one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(self.lead_sid_dir(&run).join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
+                continue;
+            };
             // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
             // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
             let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
