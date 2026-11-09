@@ -95,7 +95,9 @@ fn the_inbox_shows_the_exact_ask_and_start_runs_exactly_it_in_the_project_folder
     let it = &items[0];
     assert_eq!((it["ask"].as_str(), it["body"].as_str(), it["base"].as_str(), it["rounds"].as_u64()), (Some(ask), Some(ask), Some(SHA), Some(1)));
     let root = t.repo().to_string_lossy().into_owned();
-    assert_eq!((it["project_id"].as_str(), it["project"].as_str(), it["project_name"].as_str()), (Some(pid.as_str()), Some(root.as_str()), Some("repo")));
+    assert_eq!((it["orchestrator_id"].as_str(), it["project"].as_str(), it["project_name"].as_str()), (Some(pid.as_str()), Some(root.as_str()), Some("repo")));
+    // FG-02c: the Director-General serves a store project, so its id IS the store id the UI keys on.
+    assert_eq!(it["project_id"].as_str(), Some(pid.as_str()), "{it}");
     assert_eq!(it["source"].as_str(), Some(FROM_DIRECTOR_GENERAL));
     assert_eq!(it["actions"], json!(["start", "dismiss"]));
     let id = it["id"].as_str().unwrap().to_string();
@@ -215,7 +217,8 @@ fn a_proposal_names_its_project_by_the_full_recorded_root() {
     assert_eq!(recorded, nested, "the recorded root is the nested repo");
     assert_eq!(it["project"].as_str(), Some(nested.to_string_lossy().as_ref()), "{it}");
     assert_eq!(it["project_name"].as_str(), Some("harbor-api"));
-    assert_eq!(it["project_id"].as_str(), Some(pid.as_str()));
+    assert_eq!(it["orchestrator_id"].as_str(), Some(pid.as_str()));
+    assert_eq!(it["project_id"].as_str(), Some(pid.as_str()), "the store project of the nested repo");
     assert_ne!(super::super::orchestrator::project_ref(&t.0.join("other/harbor-api")).0, pid, "same name, different project");
 }
 
@@ -250,7 +253,8 @@ fn proposals_belong_to_store_projects_and_old_ones_can_only_be_dismissed() {
     let k = "k_0123456789abcdef0123456789abcdef";
     let item = old_proposal(&t, k, '1');
     let old = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap();
-    assert_eq!((old["actions"].clone(), old["pre_store"].as_bool(), old["project_id"].as_str()), (json!(["dismiss"]), Some(true), Some(k)), "{old}");
+    // Not carried over: Unsorted (never the k_ id, which the UI cannot key on), the stand-in in orchestrator_id.
+    assert_eq!((old["actions"].clone(), old["pre_store"].as_bool(), old["project_id"].as_str(), old["orchestrator_id"].as_str()), (json!(["dismiss"]), Some(true), Some("p_unsorted"), Some(k)), "{old}");
     let e = app.start_proposal_with(&item, old["proposal_sha256"].as_str().unwrap(), |_, _| panic!("must not start")).unwrap_err();
     assert_eq!(code(&e), "proposal_changed");
     assert_eq!(app.dismiss_proposal(&item).unwrap()["state"], "dismissed");
@@ -298,4 +302,39 @@ fn proposal_decisions_through_receipts_run_once_and_name_the_listed_project() {
     assert_eq!(s["receipt"]["reason"], "proposal_changed", "{s}");
     let d = app.act_dismiss_proposal(&env("a_dismiss_old_01", &pid), &item);
     assert_eq!(d["receipt"]["state"], "done", "{d}");
+    // One never carried over is listed under Unsorted: that is the envelope that dismisses it, never its k_ id.
+    let k2 = "k_fedcba9876543210fedcba9876543210";
+    let item = old_proposal(&t, k2, '4');
+    let listed = proposals(&app).into_iter().find(|i| i["id"] == item.as_str()).unwrap();
+    assert_eq!(listed["project_id"].as_str(), Some("p_unsorted"), "{listed}");
+    assert_eq!(code(&app.act_dismiss_proposal(&env("a_dismiss_old_02", k2), &item)["error"]), "project_mismatch");
+    let d = app.act_dismiss_proposal(&env("a_dismiss_old_03", "p_unsorted"), &item);
+    assert_eq!(d["receipt"]["state"], "done", "{d}");
+}
+
+/// Review on #83: `project_id` is the project store's id (what the UI, `inbox_new` and the read fingerprints key on).
+/// FG-02c: the Director-General is now identified by that same store id, so `orchestrator_id` equals it (no `k_`
+/// stand-in is made for a store project).
+#[test]
+fn a_proposal_in_a_registered_project_carries_the_store_id_and_the_stand_in_separately() {
+    let t = Tmp::new();
+    let (app, pid) = proposed(&t, &["tidy the README"]);
+    let store_id = app.projects.add(&t.repo(), false).unwrap().project().id.clone();
+    assert!(store_id.starts_with("p_"), "{store_id}");
+    assert_eq!(store_id, pid, "the Director-General is the store project's");
+    let items = proposals(&app);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["project_id"].as_str(), Some(store_id.as_str()), "{}", items[0]);
+    assert_eq!(items[0]["orchestrator_id"].as_str(), Some(pid.as_str()));
+}
+
+/// vajra-1: the badge counts what needs the human in a campaign. `count` stays the total ("needs you"); `campaign_count`
+/// leaves out `run_proposal` items, which belong to the Director-General surface.
+#[test]
+fn the_inbox_counts_campaign_items_apart_from_the_total_when_a_proposal_waits() {
+    let t = Tmp::new();
+    let (app, _) = proposed(&t, &["tidy the README"]);
+    let inbox = app.inbox().unwrap();
+    assert_eq!(inbox["count"].as_u64(), Some(1), "{inbox}");
+    assert_eq!(inbox["campaign_count"].as_u64(), Some(0), "{inbox}");
 }
