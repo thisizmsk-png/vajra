@@ -523,12 +523,31 @@ impl App {
     /// The key to pin for a launch in `cwd`, read before anything is spawned: the one pinned by the folder's first
     /// recorded launch if there is one (a resume must not take up a `.git` a worker of the earlier run rewrote), else
     /// the folder's key now.
-    pub(super) fn launch_key(&self, cwd: &Path) -> PathBuf {
-        self.recorded_runs()
-            .into_iter()
-            .rev()
-            .find_map(|r| (self.read_run_cwd(&r).as_deref() == Some(cwd)).then(|| self.read_run_key(&r)).flatten())
-            .unwrap_or_else(|| super::caps::project_key(cwd))
+    ///
+    /// "The folder" is by its real path: `repo_dir` accepts a symlink alias of a folder, and a resume through the alias must
+    /// find the folder's existing membership, not fall back to the (worker-writable) `.git`. Recorded runs of the same real
+    /// folder that disagree on its project are inconsistent and refuse the launch rather than guess.
+    pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let want = real(cwd);
+        let mut keys: Vec<PathBuf> = Vec::new();
+        for r in self.recorded_runs() {
+            let Some(c) = self.read_run_cwd(&r) else { continue };
+            if real(&c) != want {
+                continue;
+            }
+            match self.read_run_key(&r) {
+                Some(k) if !keys.contains(&k) => keys.push(k),
+                Some(_) => {}
+                // A recorded run of this folder with no pinned project: the membership is incomplete.
+                None => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
+            }
+        }
+        match keys.len() {
+            0 => Ok(super::caps::project_key(cwd)),
+            1 => Ok(keys.remove(0)),
+            _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
+        }
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {

@@ -1453,7 +1453,7 @@ fn a_rewritten_dot_git_cannot_make_another_project_the_leads_own() {
     std::fs::remove_dir_all(t.repo().join(".git")).unwrap();
     std::fs::write(t.repo().join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
     assert_eq!(super::super::caps::project_key(&t.repo()), super::super::caps::project_key(&other), "the rewrite took");
-    assert_eq!(app.launch_key(&t.repo()), pinned, "a later launch (a resume) in the folder keeps the first pinned project");
+    assert_eq!(app.launch_key(&t.repo()).unwrap(), pinned, "a later launch (a resume) in the folder keeps the first pinned project");
 
     app.ask_lead(RUN_ID, "hi").unwrap();
     wait_until("the ask", || idle(&app));
