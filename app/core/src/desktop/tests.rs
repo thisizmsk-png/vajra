@@ -3420,4 +3420,10 @@ fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
     runindex::append(&app.data.join("runs.jsonl"), &line).unwrap();
     let e = app.resume_run(sid, "c", &b.to_string_lossy(), None).unwrap_err();
     assert_eq!(code(&e), "resume_cwd_mismatch", "{e}");
+    // The index line can name any run id: a forged, unused one must not slip past the guarded membership.
+    let forged = runindex::Entry { campaign: "c".into(), session_id: sid.into(), run_id: "20261105-1299".into(), cwd: b.clone(), lead_session_id: None, provider: None };
+    runindex::append(&app.data.join("runs.jsonl"), &forged).unwrap();
+    let e = app.resume_run(sid, "c", &b.to_string_lossy(), None).unwrap_err();
+    assert_eq!(code(&e), "resume_cwd_mismatch", "forged run id: {e}");
+    assert!(!lock(&app.control).has_session(sid), "and no control state was created");
 }

@@ -465,7 +465,7 @@ impl App {
     }
 
     /// Every run with a record under the guarded control dir, newest first.
-    fn recorded_runs(&self) -> Vec<String> {
+    pub(super) fn recorded_runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
             .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
             .unwrap_or_default();
