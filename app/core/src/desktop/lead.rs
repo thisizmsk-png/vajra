@@ -551,8 +551,10 @@ impl App {
             let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
             if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
-                for common in enclosing.iter().filter_map(|k| std::fs::canonicalize(k).ok()) {
-                    if real.starts_with(&common) && real.ancestors().take_while(|d| d.starts_with(&common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
+                // A pinned common dir counts only while it is still exactly itself: the key was stored canonical, so one that now
+                // resolves anywhere else (replaced by a symlink, or under a redirected parent) has been redirected and admits nothing.
+                for common in enclosing.iter().filter(|k| std::fs::canonicalize(k).is_ok_and(|c| &c == *k)) {
+                    if real.starts_with(common) && real.ancestors().take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
                         return Ok(real);
                     }
                 }

@@ -3276,3 +3276,19 @@ fn a_plain_folder_pin_does_not_block_a_plain_subfolder_but_a_git_pin_still_refus
     fs::write(a.join("sub/.git"), "gitdir: /no/such/place\n").unwrap();
     assert!(app2.launch_key(&a.join("sub")).is_err());
 }
+
+/// #80 round 6: a pinned common dir that was replaced by a symlink is no longer the project it was pinned as; it cannot admit a
+/// new location, so a planted `gitdir:` into another project's common dir is refused.
+#[test]
+fn a_redirected_pinned_common_dir_cannot_admit_a_new_location() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let (app, a, b, _) = pinned_a_and_b(&t);
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    symlink(b.join(".git"), a.join(".git")).unwrap();
+    fs::write(a.join("sub/.git"), format!("gitdir: {}\n", b.join(".git").display())).unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a), "B's deny roots still cover A: {denied:?}");
+}
