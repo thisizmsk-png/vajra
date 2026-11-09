@@ -179,6 +179,7 @@ type WorktreeCache = HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
+    preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
     home: PathBuf,
     claude: PathBuf,
@@ -258,6 +259,7 @@ impl App {
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             projects,
+            preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
             sink: Mutex::new(None),
             data: data.to_path_buf(),
@@ -1821,3 +1823,5 @@ fn task_meta(run_id: &str, label: &str) -> (Option<String>, Option<u32>) {
     let round = parts.rev().find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()));
     (Some(format!("{run_id}.{id}")), round)
 }
+
+mod preferences;

@@ -35,6 +35,15 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn preferences_read(app: State<'_, App>, project_id: Option<String>) -> Res {
+    app.preferences_read(project_id.as_deref())
+}
+#[tauri::command(async)]
+fn act_preferences_update(app: State<'_, App>, envelope: Envelope, patch: vajra_desktop::preferences::Patch, reset: bool) -> Value {
+    app.act_preferences_update(&envelope, patch, reset)
+}
+
+#[tauri::command(async)]
 fn inbox(app: State<'_, App>) -> Res {
     app.inbox()
 }
@@ -452,6 +461,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            preferences_read,
+            act_preferences_update,
             preflight,
             list_campaigns,
             campaign_integrity,
