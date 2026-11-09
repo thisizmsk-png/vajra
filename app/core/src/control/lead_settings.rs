@@ -100,6 +100,12 @@ pub fn deny_rules(home: &Path, repo: &Path, data: &Path) -> Result<Vec<String>, 
 /// caller leaves out its own project and any folder that holds it. A root that is not a plain absolute path is
 /// refused like any other base: the Lead fails closed rather than run without that rule.
 pub fn deny_rules_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    deny_rules_iso(home, repo, data, others, &[])
+}
+
+/// `deny_rules_with` plus the secret-file rules (`REPO_RULES`) for each of `secret_dirs`: other projects' folders that hold the Lead's
+/// own folder (a project nested inside another one), which cannot be denied whole without denying the Lead itself.
+pub fn deny_rules_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |r: String| {
         if !out.contains(&r) {
@@ -118,6 +124,13 @@ pub fn deny_rules_with(home: &Path, repo: &Path, data: &Path, others: &[std::pat
     for other in others {
         for form in forms(other, "another project's folder")? {
             for suffix in OTHER_PROJECT_RULES {
+                push(rule(&form, suffix));
+            }
+        }
+    }
+    for dir in secret_dirs {
+        for form in forms(dir, "the folder of a project holding this one")? {
+            for suffix in REPO_RULES {
                 push(rule(&form, suffix));
             }
         }
@@ -160,6 +173,16 @@ pub fn settings(home: &Path, repo: &Path, data: &Path) -> Result<String, LeadErr
 /// `settings` with the other projects' folders denied too (ADR-15 D8).
 pub fn settings_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
     Ok(render(&deny_rules_with(home, repo, data, others)?, true))
+}
+
+/// `settings_with` plus secret-file rules for the folders that hold this project (`deny_rules_iso`).
+pub fn settings_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_iso(home, repo, data, others, secret_dirs)?, true))
+}
+
+/// `settings_iso` with the hooks removed (the startup self-test).
+pub fn settings_no_hooks_iso(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf], secret_dirs: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_iso(home, repo, data, others, secret_dirs)?, false))
 }
 
 /// The same file with the hooks removed. Used by the startup self-test and the live deny-rule tests, which must
