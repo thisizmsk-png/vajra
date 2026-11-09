@@ -121,8 +121,11 @@ export function Inbox() {
                 <p>{i.plan.target} · {S.inbox.risk(i.plan.risk)}</p>
                 <ul aria-label={S.inbox.commands}>{i.plan.commands.map((c) => <li key={c}><code>{c}</code></li>)}</ul>
                 {i.plan.rollback.length > 0 && <ul aria-label={S.inbox.rollback}>{i.plan.rollback.map((c) => <li key={c}><code>{c}</code></li>)}</ul>}
+                {i.plan.health_checks.length > 0 && <ul aria-label={S.inbox.healthChecks}>{i.plan.health_checks.map((c) => <li key={c}><code>{c}</code></li>)}</ul>}
               </>
             )}
+            {typeof i.action === "string" && i.action && <p>{S.inbox.action(i.action)}</p>}
+            {i.body && <p className="v-ibx__body">{i.body}</p>}
             {i.plan_sha256 && <p>{S.inbox.planHash}: <code className="v-ibx__hash">{i.plan_sha256}</code></p>}
             {i.invalid && <p role="note">{i.invalid}</p>}
           </div>

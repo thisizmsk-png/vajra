@@ -120,6 +120,20 @@ describe("Approve and reject", () => {
     expect(n("act_approve_plan")).toBe(0);
   });
 
+  it("shows every part of the plan the hash covers before Approve: commands, rollback, health checks, action and why", async () => {
+    items = [plan({ action: "deploy", body: "Ship the limiter to staging" })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    expect(within(c).getByText("make deploy")).toBeTruthy();
+    expect(within(c).getByText("make rollback")).toBeTruthy();
+    expect(within(c).getByText("curl /health")).toBeTruthy();
+    expect(within(c).getByRole("list", { name: S.inbox.healthChecks })).toBeTruthy();
+    expect(within(c).getByText("Ship the limiter to staging")).toBeTruthy();
+    expect(within(c).getByText(S.inbox.action("deploy"))).toBeTruthy();
+    expect(n("act_approve_plan")).toBe(0);
+  });
+
   it("approves exactly the hash shown, with a project envelope, and shows the receipt", async () => {
     mount();
     await screen.findByText("Deploy to staging");

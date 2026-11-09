@@ -117,6 +117,8 @@ export const S = {
     planHash: "Plan hash",
     commands: "Commands",
     rollback: "Rollback",
+    healthChecks: "Health checks",
+    action: (a: string) => `Action: ${a}`,
     risk: (r: string) => `Risk: ${r}`,
     kinds: { plan: "Plan to approve", question: "Question", task: "Waiting on you", failed: "Failed" },
     receipt: {
