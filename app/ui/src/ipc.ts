@@ -183,7 +183,7 @@ export type ProjectState =
       workers: Json[];
       receipts: Receipt[];
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
-      inbox: { ok: true; count: number; items: InboxItem[] } | { ok: false; error?: string };
+      inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
     };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
@@ -266,7 +266,7 @@ export const api = {
   /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
   startProposal: (id: string, proposalSha256: string) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256 }),
   dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
-  inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  inbox: () => call<{ count: number; campaign_count?: number; items: InboxItem[] }>("inbox"),
   /** Which record versions this build reads (`vajra.app_info/1`). */
   appInfo: () => call<AppInfo>("app_info"),
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */

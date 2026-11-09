@@ -249,6 +249,17 @@ describe("The Inbox tab counts campaign items only: run proposals live on the Di
     expect(inboxBadge([], 0)).toBe("");
   });
 
+  it("uses the core's campaign-only count exactly when it sends one, past the cut and with proposals left out", () => {
+    expect(inboxBadge([item("p", "plan"), item("r", "run_proposal")], 120, 57)).toBe("57");
+    expect(inboxBadge([item("r", "run_proposal")], 9, 0)).toBe("");
+    expect(inboxBadge([item("p", "plan"), item("q", "question"), item("r", "run_proposal")], 3, 2)).toBe("2");
+  });
+
+  it("Given the core sends campaign_count with a cut list, Then the tab gives that exact number, not a '+'", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 120, campaign_count: 57, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 57`));
+  });
+
   it("Given the fixture's plan, question and proposal, Then the tab reads Inbox 2, while the project still counts all three as needing you", async () => {
     boot(`#/p/${API}/orch`, { inbox: { count: 3, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
     await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2`));

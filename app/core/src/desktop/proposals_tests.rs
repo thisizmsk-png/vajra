@@ -233,3 +233,14 @@ fn a_proposal_in_a_registered_project_carries_the_store_id_and_the_stand_in_sepa
     assert_eq!(items[0]["project_id"].as_str(), Some(store_id.as_str()), "{}", items[0]);
     assert_eq!(items[0]["orchestrator_id"].as_str(), Some(pid.as_str()));
 }
+
+/// vajra-1: the badge counts what needs the human in a campaign. `count` stays the total ("needs you"); `campaign_count`
+/// leaves out `run_proposal` items, which belong to the Director-General surface.
+#[test]
+fn the_inbox_counts_campaign_items_apart_from_the_total_when_a_proposal_waits() {
+    let t = Tmp::new();
+    let (app, _) = proposed(&t, &["tidy the README"]);
+    let inbox = app.inbox().unwrap();
+    assert_eq!(inbox["count"].as_u64(), Some(1), "{inbox}");
+    assert_eq!(inbox["campaign_count"].as_u64(), Some(0), "{inbox}");
+}

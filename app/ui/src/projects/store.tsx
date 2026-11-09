@@ -29,6 +29,9 @@ export type ProjectsView = {
   inboxFailed: boolean;
   /** The core's full pending total; `inbox` is cut at 200, so the badge uses this. */
   inboxCount: number;
+  /** The core's total without `run_proposal` items: what the Inbox badge counts. `inboxCount` stays the "needs you" total.
+   * null when the core did not send a usable one (an older core): the badge then counts the list it has. */
+  inboxCampaignCount: number | null;
   crew: ActiveCrew | null;
   /** How many runs the core says are live (today at most one; ADR-15 D5 raises it). */
   runs: number;
@@ -55,11 +58,11 @@ export function workersOf(root: CrewNodeDto): WorkerRow[] {
 
 const EMPTY: ProjectIndex = { projects: [], byCampaign: {} };
 const Ctx = createContext<ProjectsView>({
-  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxFailed: false, crew: null, runs: 0, summaries: new Map(), reload: () => {},
+  state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, summaries: new Map(), reload: () => {},
 });
 
 export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxFailed: false, crew: null, runs: 0, summaries: new Map() });
+  const [data, setData] = useState<Omit<ProjectsView, "reload">>({ state: "loading", error: "", ...EMPTY, runIds: {}, campaigns: [], inbox: [], inboxCount: 0, inboxCampaignCount: null, inboxFailed: false, crew: null, runs: 0, summaries: new Map() });
   const seq = useRef(0);
   const last = useRef(0);
 
@@ -100,7 +103,12 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       // A newer load started while the crew was asked for: whatever this one learned (answer or failure) is stale.
       if (mine !== seq.current) return;
       const runs = active.status === "fulfilled" && Array.isArray(active.value?.runs) ? active.value.runs.length : 0;
-      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxFailed: inbox.status === "rejected", crew, runs, summaries: summarize(index, campaigns, items, crew) });
+      // The core's campaign-only total when it is sane (a whole number, at least what the list shows, at most the total);
+      // else null: an older core sent none, and the badge must not mistake the cut list for the total.
+      const listed = items.filter((i) => i.kind !== "run_proposal").length;
+      const cc = inbox.status === "fulfilled" ? inbox.value?.campaign_count : undefined;
+      const campaignCount = typeof cc === "number" && Number.isSafeInteger(cc) && cc >= listed && cc <= (inbox.status === "fulfilled" ? inbox.value.count : listed) ? cc : null;
+      setData({ state: "ok", error: "", ...index, runIds, campaigns, inbox: items, inboxCount: inbox.status === "fulfilled" && Number.isSafeInteger(inbox.value?.count) && inbox.value.count >= items.length ? inbox.value.count : items.length, inboxCampaignCount: campaignCount, inboxFailed: inbox.status === "rejected", crew, runs, summaries: summarize(index, campaigns, items, crew) });
     })();
   }, []);
 

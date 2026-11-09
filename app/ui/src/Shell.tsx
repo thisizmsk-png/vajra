@@ -166,7 +166,7 @@ function Frame() {
           )}
           <div className="v-center">
             {project && route.screen !== "settings" && (
-              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={inboxBadge(P.inbox, P.inboxCount)} onClose={closeTab}
+              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={inboxBadge(P.inbox, P.inboxCount, P.inboxCampaignCount)} onClose={closeTab}
                 inspector={inspectable ? inspector : null} onInspector={() => setInspector((x) => !x)} />
             )}
             <div className="v-work">
