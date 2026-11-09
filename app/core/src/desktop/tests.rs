@@ -3142,3 +3142,65 @@ fn nested_repos_with_their_own_git_stay_separate_projects() {
     assert!(denied.contains(&inner), "the outer Lead denies the inner project: {denied:?}");
     app.sup.kill(&stream).unwrap();
 }
+
+/// #80 residual: a NEW `.git` location found inside an already-pinned project's tree is admitted as its own project only
+/// when it is a self-contained nested repo or a submodule of the enclosing project. A pointer into anything else is refused
+/// and never pinned.
+fn pinned_a_and_b(t: &Tmp) -> (App, PathBuf, PathBuf, PathBuf) {
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git/worktrees/x")).unwrap();
+    fs::create_dir_all(a.join("sub")).unwrap();
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let pinned = caps::project_key(&a);
+    (app, a, b, pinned)
+}
+
+#[test]
+fn a_planted_git_pointer_into_another_project_under_a_pinned_tree_is_refused_and_never_pinned() {
+    let t = Tmp::new();
+    let (app, a, b, pinned) = pinned_a_and_b(&t);
+    fs::write(a.join("sub/.git"), format!("gitdir: {}\n", b.join(".git/worktrees/x").display())).unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    assert_eq!(app.launch_key(&a).unwrap(), pinned, "A's pin is unchanged");
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&a), "B's Lead still denies A: {denied:?}");
+}
+
+#[test]
+fn a_symlinked_or_redirected_git_under_a_pinned_tree_is_refused() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let (app, a, b, _) = pinned_a_and_b(&t);
+    symlink(b.join(".git"), a.join("sub/.git")).unwrap();
+    let e = app.launch_key(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "symlink: {e}");
+    // A real directory whose commondir redirects elsewhere is not self-contained.
+    fs::create_dir_all(a.join("cd/.git")).unwrap();
+    fs::write(a.join("cd/.git/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    let e = app.launch_key(&a.join("cd")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "commondir: {e}");
+    // A gitdir file whose target does not resolve.
+    fs::create_dir_all(a.join("gone")).unwrap();
+    fs::write(a.join("gone/.git"), "gitdir: /no/such/place\n").unwrap();
+    let e = app.launch_key(&a.join("gone")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "unresolvable: {e}");
+}
+
+#[test]
+fn a_self_contained_nested_clone_and_a_real_submodule_are_their_own_projects() {
+    let t = Tmp::new();
+    let (app, a, _, pinned) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join("clone/.git")).unwrap();
+    let k = app.launch_key(&a.join("clone")).expect("a self-contained nested repo");
+    assert_eq!(k, caps::project_key(&a.join("clone")));
+    assert_ne!(k, pinned);
+    // A submodule: its gitdir file points into the enclosing project's own common dir.
+    fs::create_dir_all(a.join(".git/modules/sub")).unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    let k = app.launch_key(&a.join("sub")).expect("a submodule of the enclosing project");
+    assert_ne!(k, pinned, "the submodule is its own project");
+}
