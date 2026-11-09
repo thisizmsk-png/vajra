@@ -7,7 +7,7 @@ use crate::projects::contract::{SessionKind, SessionStatus};
 fn project_with(t: &Tmp, app: &App, slugs: &[String]) -> String {
     let pid = test_project(&t.0.join("data"), &t.home(), &t.0.join("repo"));
     for (i, s) in slugs.iter().enumerate() {
-        let mut line = super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some(("20261105-1810", s)), 1, SessionStatus::Running);
+        let mut line = super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some(("20261105-1810", s)), "claude", 1, SessionStatus::Running);
         line.started = format!("2026-11-05T18:{:02}:00Z", 10 + i);
         app.projects.append_session(&line).unwrap();
     }
