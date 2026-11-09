@@ -1561,6 +1561,31 @@ fn a_run_folder_redirected_into_another_project_fails_closed() {
     assert!(e.is_err(), "a redirected run folder refuses the ask: {e:?}");
 }
 
+/// #80 review: a legacy record (no `project_loc`) has its location derived once from the guarded cwd; a folder redirected before that
+/// write-back must not be laundered into a trusted location. The derived location has to identify to the record's own pinned key.
+#[test]
+fn a_legacy_record_redirected_before_the_location_write_back_is_refused_and_not_written() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    let loc = app.data.join("control/lead").join(RUN_ID).join("project_loc");
+    std::fs::remove_file(&loc).unwrap();
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    assert!(app.other_project_roots(RUN_ID, &src).is_err(), "a redirected legacy folder is refused");
+    assert!(!loc.exists(), "nothing was written back for it");
+    // Untouched, the same legacy record is migrated once and works.
+    std::fs::remove_file(&src).unwrap();
+    std::fs::rename(t.repo().join("src-moved"), &src).unwrap();
+    assert!(app.other_project_roots(RUN_ID, &src).is_ok());
+    assert!(loc.exists(), "a legitimate legacy record is migrated");
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
