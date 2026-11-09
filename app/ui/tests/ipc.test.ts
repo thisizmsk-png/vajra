@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { api, errorText, isIpcError, onChanged, setTransport } from "../src/ipc";
+import { api, errorText, isIpcError, onChanged, onInboxNew, setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
 
 afterEach(() => setTransport());
@@ -85,6 +85,28 @@ describe("typed ipc", () => {
       { cmd: "approve_plan", args: { id: "plan:20261106-0911.0", planSha256: "ab".repeat(32) } },
       { cmd: "reject_plan", args: { id: "plan:20261106-0911.0", reason: "too risky" } },
     ]);
+  });
+
+  it("maps the receipt-wrapped inbox actions and the arrival event (FG-07)", async () => {
+    const f = fakeIpc({ act_reject_plan: { receipt: null }, act_answer_question: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-0001-aaaa", project_id: "p_1", expect_generation: null };
+    const sha = "123456789abcdef1" + "0".repeat(48); // the 16-hex prefix is above 2^53: it must travel as the string
+    await api.actRejectPlan(envelope, "plan:r.0", "no", sha);
+    await api.actAnswerQuestion(envelope, "task:c1.t1", "use the key id");
+    expect(f.calls).toEqual([
+      { cmd: "act_reject_plan", args: { envelope, id: "plan:r.0", reason: "no", planSha256: sha } },
+      { cmd: "act_answer_question", args: { envelope, id: "task:c1.t1", text: "use the key id" } },
+    ]);
+    // Through JSON the hash is unchanged (a number would have rounded 0x123456789abcdef1).
+    expect(JSON.parse(JSON.stringify(f.calls[0].args)).planSha256).toBe(sha);
+    expect(Number.isSafeInteger(Number.parseInt("123456789abcdef1", 16))).toBe(false); // as a number it would have been rounded
+    const got: unknown[] = [];
+    const off = onInboxNew((p) => got.push(p));
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 2 });
+    off();
+    f.emit("inbox_new", { project_id: "p_1", kind: "plan", count: 3 });
+    expect(got).toEqual([{ project_id: "p_1", kind: "plan", count: 2 }]);
   });
 
   it("maps inbox to the inbox command", async () => {

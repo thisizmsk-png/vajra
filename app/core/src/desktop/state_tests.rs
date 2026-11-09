@@ -389,3 +389,198 @@ fn project_generation_is_durable_independent_of_receipts() {
     let stale = app.act_start_run(&env("run-0023-wwww", Some(0)), RunInput { ask: String::new(), max_rounds: 1, base: "x".into(), max_in_flight: 1, campaign: None, provider: None }, "/nonexistent");
     assert_eq!(stale["receipt"]["reason"], "stale_generation");
 }
+
+// ---- FG-07: answer a waiting task from the inbox ------------------------------------------------------------------
+
+/// The run index line that says campaign `slug` was launched as run `run`.
+fn launched(t: &Tmp, slug: &str, run: &str) {
+    let e = runindex::Entry { campaign: slug.into(), session_id: SID.into(), run_id: run.into(), cwd: t.0.join("repo"), lead_session_id: None, provider: None };
+    runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
+}
+
+fn waiting_in(t: &Tmp, slug: &str, status: &str) {
+    let d = t.0.join("home/.claude/vajra/campaigns").join(slug);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": slug, "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": slug, "schema": "vajra.tasks/v1", "tasks": [{"id": "t1", "status": status, "title": "Which key?"}]}).to_string()).unwrap();
+}
+
+/// Campaign c1, launched as the run the seeded worker belongs to (`20261105-1810`), with its task waiting.
+fn waiting_task(t: &Tmp, status: &str) {
+    launched(t, "c1", "20261105-1810");
+    let d = t.0.join("home/.claude/vajra/campaigns/c1");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": "c1", "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": "c1", "schema": "vajra.tasks/v1", "tasks": [{"id": "t1", "status": status, "title": "Which key?"}]}).to_string()).unwrap();
+}
+
+fn queued_messages(app: &App) -> Vec<Value> {
+    app.ledger().unwrap()["records"].as_array().unwrap().iter().filter(|r| r["kind"] == "message").cloned().collect()
+}
+
+// Given a worker's task is waiting with a question, When the human answers through a receipt, Then the answer is queued
+// to that worker as a message, the receipt is done, and a second click with the same action id queues nothing more.
+#[test]
+fn answering_a_question_messages_the_worker_once() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let e = env("ans-0001-aaaa", None);
+    let r = app.act_answer_question(&e, "task:c1.t1", "use the key id; $(rm -rf /) is just text");
+    assert_eq!(state_of(&r), "done", "{r}");
+    assert_eq!(r["receipt"]["action"], "answer_question");
+    assert_eq!(queued_messages(&app).len(), 1);
+    assert!(queued_messages(&app)[0].to_string().contains("$(rm -rf /) is just text"), "the text is kept as plain text");
+    let again = app.act_answer_question(&e, "task:c1.t1", "use the key id");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(queued_messages(&app).len(), 1, "no second message");
+}
+
+// Given the worker moved to another attempt since the human looked, Then the answer is refused as stale.
+#[test]
+fn an_answer_for_an_older_attempt_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 3);
+    waiting_task(&t, "question");
+    let r = app.act_answer_question(&env("ans-0002-bbbb", Some(2)), "task:c1.t1", "x");
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")));
+    assert!(queued_messages(&app).is_empty());
+}
+
+// Given the worker is gone or the item is no longer waiting, Then the receipt says so and no message is queued.
+#[test]
+fn an_answer_with_no_worker_or_no_waiting_item_is_a_rejected_receipt() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let gone = app.act_answer_question(&env("ans-0003-cccc", None), "task:c1.t7", "x");
+    assert_eq!(gone["receipt"]["reason"], "not_found");
+    waiting_task(&t, "in_progress");
+    let moved = app.act_answer_question(&env("ans-0004-dddd", None), "task:c1.t1", "x");
+    assert_eq!(moved["receipt"]["reason"], "not_found");
+    assert!(queued_messages(&app).is_empty());
+}
+
+// A run-level question has no worker to message: it is refused with a clear code (answered in the conversation).
+#[test]
+fn a_run_level_question_is_not_answerable_from_here() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = app.act_answer_question(&env("ans-0005-eeee", None), "question:20261106-0911", "x");
+    assert_eq!(r["receipt"]["reason"], "not_answerable");
+}
+
+// The answer is bounded and plain: empty and oversize text are invalid and nothing is queued.
+#[test]
+fn an_answer_must_be_text_of_a_sane_size() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    for (i, bad) in ["", "   ", &"x".repeat(100_000)].into_iter().enumerate() {
+        let r = app.act_answer_question(&env(&format!("ans-1000-{i:04}"), None), "task:c1.t1", bad);
+        assert_eq!(r["receipt"]["state"], "rejected", "{r}");
+    }
+    assert!(queued_messages(&app).is_empty());
+}
+
+// Answering is a human decision: the MCP caller is refused before anything is queued.
+#[test]
+fn answering_is_human_only() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1);
+    waiting_task(&t, "question");
+    let r = app.act(&env("ans-0006-ffff", None), Caller::Mcp, true, "answer_question", "task:c1.t1", None, || app.control_message("t1", "x"));
+    assert_eq!(r["receipt"]["reason"], "human_only");
+    assert!(queued_messages(&app).is_empty());
+}
+
+fn worker_of(agent: &str, run: &str, round: u32) -> WorkerInfo {
+    let mut w = worker(round);
+    w.worker.agent_id = agent.into();
+    w.task_id = Some(format!("{run}.t1"));
+    w
+}
+
+fn message_workers(app: &App) -> Vec<String> {
+    queued_messages(app).iter().map(|r| r["worker"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+// Given two campaigns that both have a task t1 waiting and only the OTHER campaign's worker is live, When the human
+// answers the first campaign's t1, Then it is refused (no worker of that campaign) and nothing reaches the other one.
+#[test]
+fn an_answer_never_reaches_another_campaigns_worker_with_the_same_task_name() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1); // the worker of run 20261105-1810 (campaign c2 below)
+    waiting_in(&t, "c1", "question");
+    launched(&t, "c1", "20261104-0900"); // c1 ran earlier; no worker of it is live
+    waiting_in(&t, "c2", "question");
+    launched(&t, "c2", "20261105-1810");
+    let r = app.act_answer_question(&env("ans-2000-aaaa", None), "task:c1.t1", "for c1");
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("not_found")), "{r}");
+    assert!(queued_messages(&app).is_empty(), "nothing was queued to c2's worker");
+    let ok = app.act_answer_question(&env("ans-2001-bbbb", None), "task:c2.t1", "for c2");
+    assert_eq!(state_of(&ok), "done", "{ok}");
+    assert_eq!(queued_messages(&app).len(), 1);
+}
+
+// Given both campaigns have a live t1, Then each answer goes to its own campaign's worker, never ambiguous.
+#[test]
+fn two_campaigns_sharing_a_task_name_are_answered_separately() {
+    let t = Tmp::new();
+    let app = t.app();
+    {
+        let mut c = lock(&app.control);
+        c.start_session(SID, "20261105-1810").unwrap();
+        c.set_workers(SID, vec![worker_of("aaaaaaaaaaaaaaaaa", "20261105-1810", 1), worker_of("bbbbbbbbbbbbbbbbb", "20261104-0900", 1)]);
+    }
+    waiting_in(&t, "c1", "question");
+    launched(&t, "c1", "20261104-0900");
+    waiting_in(&t, "c2", "question");
+    launched(&t, "c2", "20261105-1810");
+    assert_eq!(state_of(&app.act_answer_question(&env("ans-2002-cccc", None), "task:c1.t1", "one")), "done");
+    assert_eq!(state_of(&app.act_answer_question(&env("ans-2003-dddd", None), "task:c2.t1", "two")), "done");
+    assert_eq!(message_workers(&app), ["bbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaa"]);
+}
+
+// Given the worker moved to a newer attempt between the receipt's check and the message's publication, Then the
+// message path itself refuses (the check is under the control lock), and nothing is queued.
+#[test]
+fn an_answer_is_checked_against_the_attempt_at_publication() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 2); // the worker is now on attempt 2
+    waiting_task(&t, "question");
+    // The receipt's own pre-check saw attempt 1 (the stale read it was given), so it lets the effect run...
+    let r = app.act(&env("ans-4000-aaaa", Some(1)), Caller::Ui, true, "answer_question", "task:c1.t1", Some(1), || app.control_message_expecting("t1", "old answer", Some(1)));
+    // ...and the message path refuses it.
+    assert_eq!((state_of(&r), r["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")), "{r}");
+    assert!(queued_messages(&app).is_empty());
+    let ok = app.act_answer_question(&env("ans-4001-bbbb", Some(2)), "task:c1.t1", "new answer");
+    assert_eq!(state_of(&ok), "done", "{ok}");
+}
+
+// The workflow writes tasks.json ids already namespaced (`<run>.t1`), so a real inbox item is `task:<slug>.<run>.t1`.
+// Given such an item, Then the answer reaches the worker whose task id is that same `<run>.t1`.
+#[test]
+fn an_answer_to_a_workflow_namespaced_task_reaches_its_worker() {
+    let t = Tmp::new();
+    let app = t.app();
+    seed_session(&app, 1); // worker task id 20261105-1810.t1
+    launched(&t, "c1", "20261105-1810");
+    let d = t.0.join("home/.claude/vajra/campaigns/c1");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("campaign.json"), json!({"slug": "c1", "goal": "g", "status": "active", "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z"}).to_string()).unwrap();
+    fs::write(d.join("tasks.json"), json!({"campaign": "c1", "schema": "vajra.tasks/v1", "tasks": [{"id": "20261105-1810.t1", "status": "question", "title": "Which key?"}]}).to_string()).unwrap();
+    let r = app.act_answer_question(&env("ans-5000-aaaa", None), "task:c1.20261105-1810.t1", "use the key id");
+    assert_eq!(state_of(&r), "done", "{r}");
+    assert_eq!(queued_messages(&app).len(), 1);
+    // Another campaign's run never matches, namespaced or not.
+    let other = app.act_answer_question(&env("ans-5001-bbbb", None), "task:c2.20261105-1810.t1", "x");
+    assert_eq!(other["receipt"]["reason"], "not_found");
+}

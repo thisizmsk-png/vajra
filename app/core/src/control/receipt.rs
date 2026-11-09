@@ -289,7 +289,8 @@ impl Store {
         rc.reason = reason.map(Into::into);
         rc.detail = detail.map(Into::into);
         rc.retry = match state {
-            State::Rejected if reason == Some("stale_generation") => Retry::AfterRefresh,
+            // Both say the target moved since the caller looked: reload and review before another try.
+            State::Rejected if matches!(reason, Some("stale_generation" | "revision_conflict")) => Retry::AfterRefresh,
             State::Done | State::Accepted | State::Rejected => Retry::No,
             State::Failed => Retry::Safe,
             State::Unknown => Retry::AfterRefresh,

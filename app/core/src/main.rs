@@ -35,6 +35,15 @@ fn is_mcp(args: &[String]) -> bool {
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
+fn preferences_read(app: State<'_, App>, project_id: Option<String>) -> Res {
+    app.preferences_read(project_id.as_deref())
+}
+#[tauri::command(async)]
+fn act_preferences_update(app: State<'_, App>, envelope: Envelope, patch: vajra_desktop::preferences::Patch, reset: bool) -> Value {
+    app.act_preferences_update(&envelope, patch, reset)
+}
+
+#[tauri::command(async)]
 fn inbox(app: State<'_, App>) -> Res {
     app.inbox()
 }
@@ -48,6 +57,16 @@ fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
 #[tauri::command(async)]
 fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sha256: String) -> Value {
     app.act_approve_plan(&envelope, &id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String, plan_sha256: String) -> Value {
+    app.act_reject_plan(&envelope, &id, &reason, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_answer_question(app: State<'_, App>, envelope: Envelope, id: String, text: String) -> Value {
+    app.act_answer_question(&envelope, &id, &text)
 }
 
 #[tauri::command(async)]
@@ -438,6 +457,10 @@ fn main() {
             handle.state::<App>().set_change_sink(Box::new(move |p| {
                 let _ = sink_handle.emit(CHANGED, p);
             }));
+            let event_handle = handle.clone();
+            handle.state::<App>().set_event_sink(Box::new(move |name, p| {
+                let _ = event_handle.emit(name, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
@@ -469,6 +492,8 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            preferences_read,
+            act_preferences_update,
             preflight,
             list_campaigns,
             campaign_integrity,
@@ -517,6 +542,8 @@ fn main() {
             project_migration_suggest,
             project_migration_confirm,
             act_approve_plan,
+            act_reject_plan,
+            act_answer_question,
             act_stop_worker,
             act_start_run,
             project_state,
