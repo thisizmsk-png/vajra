@@ -76,9 +76,11 @@ export function Inbox() {
   const set = (k: string, o: Outcome) => setOutcome((m) => ({ ...m, [k]: o }));
   const approve = (i: InboxItem) => {
     const k = keyOf(i);
-    if (outcome[k]?.busy || !i.plan_sha256) return;
+    const project = P.byCampaign[i.campaign];
+    // No project owns this campaign: there is no id to send, so nothing is sent (the card says why).
+    if (outcome[k]?.busy || !i.plan_sha256 || !project) return;
     set(k, { busy: true, text: "" });
-    const envelope = { action_id: newActionId(), project_id: P.byCampaign[i.campaign] ?? "", expect_generation: null };
+    const envelope = { action_id: newActionId(), project_id: project, expect_generation: null };
     void api.actApprovePlan(envelope, i.id, i.plan_sha256).then(
       (r) => { set(k, { busy: false, text: receiptText(r) }); P.reload(); },
       () => { set(k, { busy: false, text: S.inbox.receipt.notDone }); },
@@ -134,8 +136,9 @@ export function Inbox() {
         <div className="v-ibx__acts">
           <Button size="sm" variant="ghost" onClick={() => open(i)}>{S.inbox.open}</Button>
           {i.kind === "plan" && !i.invalid && i.plan_sha256 && (
-            <Button size="sm" disabled={o?.busy} onClick={() => approve(i)}>{S.inbox.approve}</Button>
+            <Button size="sm" disabled={o?.busy || !P.byCampaign[i.campaign]} onClick={() => approve(i)}>{S.inbox.approve}</Button>
           )}
+          {i.kind === "plan" && !i.invalid && i.plan_sha256 && !P.byCampaign[i.campaign] && <p className="v-ibx__warn" role="note">{S.inbox.needsProject}</p>}
           {isSnoozed
             ? <Button size="sm" variant="ghost" onClick={() => setUntil((u) => { const { [k]: _, ...rest } = u; return rest; })}>{S.inbox.unsnooze}</Button>
             : <Button size="sm" variant="ghost" onClick={() => setUntil((u) => ({ ...u, [k]: Date.now() + SNOOZE_MS }))}>{S.inbox.snooze}</Button>}

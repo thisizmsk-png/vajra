@@ -134,6 +134,22 @@ describe("Approve and reject", () => {
     expect(n("act_approve_plan")).toBe(0);
   });
 
+  it("cannot approve a plan whose campaign no project owns: Approve is off with a reason and sends nothing", async () => {
+    items = [plan({ campaign: "brand-new-run" })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    const b = within(c).getByRole("button", { name: S.inbox.approve });
+    expect(b.getAttribute("aria-disabled")).toBe("true");
+    expect(within(c).getByText(S.inbox.needsProject)).toBeTruthy();
+    fireEvent.click(b);
+    expect(n("act_approve_plan")).toBe(0);
+    // Reject does not need the project id and still works.
+    fireEvent.change(within(c).getByLabelText(S.inbox.reason), { target: { value: "not yet" } });
+    fireEvent.click(within(c).getByRole("button", { name: S.inbox.reject }));
+    await waitFor(() => expect(n("reject_plan")).toBe(1));
+  });
+
   it("approves exactly the hash shown, with a project envelope, and shows the receipt", async () => {
     mount();
     await screen.findByText("Deploy to staging");

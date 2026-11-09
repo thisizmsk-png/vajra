@@ -107,6 +107,7 @@ export const S = {
     emptyHint: "Questions, plans to approve and failures from every project appear here.",
     open: "Open",
     approve: "Approve",
+    needsProject: "Add this campaign to a project to approve it",
     reject: "Reject",
     reason: "Reason for rejecting",
     snooze: "Snooze 15 min",
