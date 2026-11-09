@@ -1,3 +1,4 @@
+import { ACCOUNTS, AGENTS, USAGE } from "./accountsFixture";
 import { DEFAULT_PREFERENCES } from "./preferenceContract";
 // Dev only: a fixture engine state for screenshots and the click crawl (DESIGN.md "Verification"). main.tsx loads it
 // when the dev server runs with `?fixture`; production builds drop the import (import.meta.env.DEV is false there).
@@ -187,6 +188,10 @@ export function installFixture(mode = "") {
   let global = { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
   const receipts = new Map<string, unknown>();
+  // Multi-provider fixture state. A saved key flips the account to "key saved"; the key itself is dropped on the floor.
+  let accounts: { schema: string; accounts: Array<Record<string, unknown> & { id: string; credential: object }> } = structuredClone(ACCOUNTS);
+  let agents: unknown = structuredClone(AGENTS);
+  const setKey = (id: string, saved: boolean) => { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === id ? { ...a, state: saved ? "key_saved" : "key_missing", credential: { ...a.credential, saved } } : a) }; };
   const preferenceView = (id: string | null) => {
     const overrides = id ? projects.get(id) ?? {} : {};
     return { schema: "vajra.preferences/1", rev: revision, project_id: id, global, overrides, caps: { active_runs: 1, workers_per_run: 16, editable: false },
@@ -213,6 +218,13 @@ export function installFixture(mode = "") {
         receipts.set(envelope.action_id, receipt);
         return { receipt, result: preferenceView(id) };
       }
+      if (cmd === "provider_accounts") return accounts;
+      if (cmd === "provider_usage") return USAGE;
+      if (cmd === "provider_key_save") { setKey(String(args?.accountId), true); return null; }
+      if (cmd === "provider_key_remove") { setKey(String(args?.accountId), false); return null; }
+      if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
+      if (cmd === "provider_agents") return agents;
+      if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
       const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
