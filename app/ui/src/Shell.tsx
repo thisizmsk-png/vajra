@@ -6,11 +6,13 @@ import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { ProjectsProvider, useProjects } from "./projects/store";
+import { useProjectState } from "./projects/state";
+import { proposalsFor } from "./screens/orch/dgApi";
 import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
 import { ProjectColumn } from "./shell/ProjectColumn";
-import { ViewTabs } from "./shell/ViewTabs";
+import { ViewTabs, inboxBadge } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
@@ -25,9 +27,9 @@ import "./shell/frame.css";
 /** In the macOS app the title bar is an overlay (tauri.conf.json): the traffic lights sit at the left of the title row. */
 const OVERLAY = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && /Mac/.test(navigator.userAgent);
 /** Views that have something to say in the inspector. Review has its own panes; Settings and the legacy views have none. */
-const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "board", "worker"]);
+const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "launch", "board", "worker"]);
 /** Views that make sense in another project; anything tied to one campaign or worker becomes the Director-General. */
-const PORTABLE: ReadonlySet<Screen> = new Set(["orch", "board", "history", "settings"]);
+const PORTABLE: ReadonlySet<Screen> = new Set(["orch", "launch", "board", "history", "settings"]);
 const MAX_WORKER_TABS = 4;
 
 /** Shell B: project tabs in the title bar, the project column, the main area with its view tabs, the inspector, the status bar. */
@@ -60,13 +62,19 @@ function Frame() {
     : P.projects[0]?.id ?? null;
   const project = P.projects.find((p) => p.id === pid) ?? null;
   useEffect(() => { if (pid) rememberProject(pid); }, [pid]);
+  const projected = useProjectState(project?.registered ? project.id : null).proposals;
 
   const current: Current = useMemo(() => {
     const campaigns = project ? P.campaigns.filter((c) => P.byCampaign[c.slug] === project.id)
       .sort((a, b) => ((b.updated ?? b.created ?? "") > (a.updated ?? a.created ?? "") ? 1 : -1)) : [];
     const mine = P.crew && project && P.byCampaign[P.crew.campaign] === project.id ? P.crew : null;
-    return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null };
-  }, [project, P.campaigns, P.byCampaign, P.crew]);
+    const dgRun = mine?.runId ?? campaigns.map((c) => P.runIds[c.slug]).find(Boolean) ?? null;
+    // A registered project's come from its own projection, picked before any inbox cut (#90 review). Otherwise, or until
+    // that answers: by the T1 id for a project the core has registered (#77), and by its full root for any project.
+    const proposals = !project ? [] : project.registered && projected ? projected
+      : proposalsFor(P.inbox, project.registered ? project.id : null, project.root);
+    return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null, dgRun, proposals };
+  }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox, projected]);
   const crew = current.runId ? P.crew : null;
   const focusCampaign = current.campaigns.find((c) => c.slug === current.focus) ?? null;
 
@@ -165,7 +173,7 @@ function Frame() {
           )}
           <div className="v-center">
             {project && route.screen !== "settings" && (
-              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={P.inboxCount} onClose={closeTab}
+              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={inboxBadge(P.inbox, P.inboxCount, P.inboxCampaignCount)} onClose={closeTab}
                 inspector={inspectable ? inspector : null} onInspector={() => setInspector((x) => !x)} />
             )}
             <div className="v-work">
