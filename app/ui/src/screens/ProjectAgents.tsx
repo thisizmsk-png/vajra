@@ -5,10 +5,9 @@ import { useEffect, useId, useState } from "react";
 import { Button, Text } from "../../components/ui/base";
 import { S } from "../../strings";
 import { api } from "../ipc";
-import { parseAgents, ROLES } from "../accountsContract";
+import { choiceKey, coveredByAccount, modelLine, parseAgents, ROLES } from "../accountsContract";
 import type { Account, AgentPick, Agents } from "../accountsContract";
 import { PickRow, allEntries, sameEntry } from "./AgentPickers";
-import { choiceKey, modelLine } from "../accountsContract";
 import { ProviderIcon } from "./ProviderIcon";
 import { problemDetail } from "./states";
 import "./providers.css";
@@ -75,8 +74,9 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
         <ul className="v-allowed">
           {allEntries(accounts).map((e) => {
             const key = choiceKey(e.account.id, e.model);
-            const on = draft.allowed.some((x) => sameEntry(x, { account: e.account.id, model: e.model }));
-            const locked = on && inUse({ account: e.account.id, model: e.model });
+            const covered = e.model !== null && coveredByAccount(draft.allowed, e.account.id);
+            const on = covered || draft.allowed.some((x) => sameEntry(x, { account: e.account.id, model: e.model }));
+            const locked = covered || (on && inUse({ account: e.account.id, model: e.model }));
             return (
               <li key={key}>
                 <label>
@@ -84,7 +84,7 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
                   <ProviderIcon family={e.account.models.find((m) => m.id === e.model)?.family ?? e.account.provider} via={e.model && e.account.provider === "openrouter" ? "openrouter" : undefined} />
                   <span data-model-line>{modelLine(e.account, e.model, WORD)}</span>
                 </label>
-                {locked && <span id={`${heading}-${key}`} className="v-text v-text--body-sm v-text--muted">{C.inUse}</span>}
+                {locked && <span id={`${heading}-${key}`} className="v-text v-text--body-sm v-text--muted">{covered ? C.coveredByAccount : C.inUse}</span>}
               </li>
             );
           })}

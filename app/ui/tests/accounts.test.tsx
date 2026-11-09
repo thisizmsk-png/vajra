@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ACCOUNTS as FIXTURE_ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
-import { baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
+import { allowedChoices, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
 import type { Account } from "../src/accountsContract";
 import { setTransport } from "../src/ipc";
 import { PreferencesProvider } from "../src/preferences";
@@ -284,8 +284,34 @@ describe("advanced: base URL", () => {
 });
 
 describe("Project scope: the default, role defaults and the allowed set", () => {
+  it("an account allowed at null offers every model on it; a concrete allowance offers only that model", () => {
+    const r = parseAccounts(FIXTURE_ACCOUNTS);
+    if (!r.ok) throw new Error("fixture accounts");
+    const list = r.value.accounts;
+    const or = list.find((a) => a.id === "openrouter")!;
+    expect(or.models.length).toBeGreaterThan(1);
+    const all = allowedChoices(list, [{ account: "openrouter", model: null }]).map((c) => c.model);
+    expect(all).toEqual(or.models.map((m) => m.id)); // no bogus "default" entry for a gateway
+    const one = allowedChoices(list, [{ account: "openrouter", model: or.models[0].id }]).map((c) => c.model);
+    expect(one).toEqual([or.models[0].id]);
+    const cli = allowedChoices(list, [{ account: "claude", model: null }]);
+    expect(cli[0].model).toBeNull();
+    expect(cli.length).toBe(1 + list.find((a) => a.id === "claude")!.models.length);
+  });
+
   const section = async () => screen.findByRole("region", { name: "harbor-api" });
   const options = (select: HTMLElement) => [...select.querySelectorAll("option")].map((o) => o.textContent);
+
+  it("a project allowing the gateway account at null lists its models, and a saved concrete model is not stale", async () => {
+    const allowed = [...AGENTS.allowed.filter((a) => a.account !== "openrouter"), { account: "openrouter", model: null }];
+    settings({ provider_agents: { ...clone(AGENTS), allowed } });
+    const s = await section();
+    const docs = within(s).getByLabelText(A.pickLabel(A.role.docs)) as HTMLSelectElement;
+    expect(docs.value).toBe("openrouter|deepseek/deepseek-v3.2");
+    expect(docs.querySelector("option[disabled]")).toBeNull(); // not shown as stale
+    expect(options(docs)).toContain("DeepSeek V3.2 · OpenRouter");
+    expect(options(docs)).toContain("Grok 4 · OpenRouter"); // every model on the account is in the ceiling
+  });
 
   it("reads the project's agents; every option reads Model · provider; only allowed choices are offered", async () => {
     settings();

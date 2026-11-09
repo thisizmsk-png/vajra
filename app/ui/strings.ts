@@ -604,6 +604,7 @@ export const S = {
     noEffort: "No effort setting",
     allowed: "Allowed for workers",
     inUse: "In use as a default. Choose another default first.",
+    coveredByAccount: "Allowed because every model on this account is allowed.",
     save: "Save agents",
     discard: "Discard",
     saved: "Saved.",

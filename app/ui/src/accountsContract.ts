@@ -186,11 +186,16 @@ export function pct(w: UsageWindow): number | null {
   return null;
 }
 
-/** Every choice a project may use: one per allowed account default, one per allowed model. Same order as the accounts. */
+/** True when an allowance for the whole account (`model: null`) covers this entry. The core reads `{account, model: null}` as every model on that account. */
+export const coveredByAccount = (allowed: Allowed[], account: string): boolean => allowed.some((x) => x.account === account && x.model === null);
+
+/** Every choice a project may use, in the accounts' order. An account allowed at `null` offers its own default (a CLI login only) and all of its models; a concrete allowance offers just that model. */
 export function allowedChoices(accounts: Account[], allowed: Allowed[]): Array<{ account: Account; model: string | null }> {
   const out: Array<{ account: Account; model: string | null }> = [];
   for (const a of accounts) {
-    for (const al of allowed) if (al.account === a.id && (al.model === null || a.models.some((m) => m.id === al.model))) out.push({ account: a, model: al.model });
+    const all = coveredByAccount(allowed, a.id);
+    if (all && a.credential.source === "cli_login") out.push({ account: a, model: null });
+    for (const m of a.models) if (all || allowed.some((x) => x.account === a.id && x.model === m.id)) out.push({ account: a, model: m.id });
   }
   return out;
 }
