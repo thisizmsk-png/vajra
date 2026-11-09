@@ -1,3 +1,4 @@
+import { DEFAULT_PREFERENCES } from "./preferenceContract";
 // Dev only: a fixture engine state for screenshots and the click crawl (DESIGN.md "Verification"). main.tsx loads it
 // when the dev server runs with `?fixture`; production builds drop the import (import.meta.env.DEV is false there).
 // Nothing here reaches a real engine: every command answers from the objects below.
@@ -103,10 +104,26 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     ],
   }),
   // Three folders: harbor-api (the live run), harbor-web, and one campaign started in a terminal (Unsorted).
+  provider_list: () => ({ schema: "vajra.providers/1", providers: [
+    { id: "claude", name: "Claude Code", installed: true, path: "/Users/you/.local/bin/claude", version: "2.1.0", tested: "tested", tested_range: "2.x",
+      capabilities: { pty_attach: true, transcript: true, inspect: true, message: true, redirect: true, stop: "hook_block", resume: true, vajra_workflow: true },
+      limits: [], login: { route: "Uses your Claude Code login", state: "signed_in", checked_by: "cli_status", detail: null }, billing: { source: "login", key_in_app_env: null } },
+    { id: "codex", name: "Codex CLI", installed: true, path: "/opt/homebrew/bin/codex", version: "0.170.0", tested: "untested", tested_range: "0.166",
+      capabilities: { pty_attach: true, transcript: false, inspect: false, message: false, redirect: false, stop: "terminate", resume: true, vajra_workflow: false },
+      limits: [
+        { control: "transcript", code: "no_transcript", reason: "Codex does not write a transcript Vajra can read" },
+        { control: "inspect", code: "no_inspect", reason: "Codex has no inspect hook" },
+        { control: "message", code: "no_message_mid_run", reason: "Codex cannot take a message mid-run" },
+        { control: "redirect", code: "no_redirect_mid_run", reason: "Codex cannot be redirected mid-run" },
+        { control: "vajra_workflow", code: "no_vajra_workflow", reason: "Codex does not run the Vajra workflow" },
+        { control: "stop", code: "stop_ends_process", reason: "Codex has no hand-off: Stop ends its process" },
+      ],
+      login: { route: "Uses your Codex login", route_code: "uses_codex_login", state: "signed_in", checked_by: "cli_status", detail: null }, billing: { source: "login", key_in_app_env: "OPENAI_API_KEY" } },
+  ] }),
   resume_targets: () => ({ targets: {
     [SLUG]: { session_id: "s-2140", run_id: RUN, cwd: "~/code/harbor-api" },
     "deliver-20261105-1610": { session_id: "s-1610", run_id: "20261105-1610", cwd: "~/code/harbor-api" },
-    "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api" },
+    "deliver-20261104-0930": { session_id: "s-0930", run_id: "20261104-0930", cwd: "~/code/harbor-api", provider: "codex" },
     "deliver-20261103-1120": { session_id: "s-1120", run_id: "20261103-1120", cwd: "~/code/harbor-api/" },
     "deliver-20261102-1505": { session_id: "s-1505", run_id: "20261102-1505", cwd: "~/code/harbor-api" },
     "deliver-20261107-1840": { session_id: "s-1840", run_id: "20261107-1840", cwd: "~/code/harbor-web" },
@@ -119,7 +136,9 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     ];
     return { lines: text.map((t, i) => ({ seq: i + 1, text: t })), head_seq: text.length, first_seq: 1, at_start: true, at_end: true, gap: false };
   },
-  inbox: () => ({ count: 1, items: [
+  act_approve_plan: () => ({ receipt: null, error: { error: "not_in_fixture", detail: "approve" } }),
+  inbox: () => ({ count: 2, items: [
+    { id: "p-deploy", kind: "plan", campaign: SLUG, origin: "app", created: "2026-11-06T22:03:00Z", age_s: 120, title: "Deploy the limiter to staging", body: "", actions: ["approve", "reject"], plan_sha256: "9f2c4e7a1b8d03c5e6f7a89b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5", action: "deploy", plan: { target: "staging", commands: ["make deploy ENV=staging"], rollback: ["make rollback ENV=staging"], health_checks: ["curl -f https://staging.example/health"], risk: "low" }, invalid: null },
     { id: "q-t4", kind: "question", campaign: SLUG, origin: "app", created: "2026-11-06T22:01:00Z", age_s: 240, title: "Should the 429 body name the limit and the reset time?", body: "", actions: ["answer"] },
   ] }),
   run_overview: () => ({
@@ -164,10 +183,36 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
 /** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
 export function installFixture(mode = "") {
   const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }), inbox: () => ({ count: 0, items: [] }) };
+  let revision = 0;
+  let global = { ...DEFAULT_PREFERENCES };
+  const projects = new Map<string, Record<string, unknown>>();
+  const receipts = new Map<string, unknown>();
+  const preferenceView = (id: string | null) => {
+    const overrides = id ? projects.get(id) ?? {} : {};
+    return { schema: "vajra.preferences/1", rev: revision, project_id: id, global, overrides, caps: { active_runs: 1, workers_per_run: 16, editable: false },
+      effective: { ...global, ...overrides }, sources: Object.fromEntries(Object.keys(global).map(k => [k, k in overrides ? "project" : "global"])) };
+  };
   const t: Transport = {
     async call(cmd, args) {
       // A core that does not answer: Tauri rejects with a plain string, not the core's {error, detail}.
       if (mode === "down") throw `command ${cmd} failed: the core is not running`;
+      if (cmd === "preferences_read") return preferenceView(args?.projectId as string | null);
+      if (cmd === "act_preferences_update") {
+        const envelope = args?.envelope as { action_id: string; project_id: string; expect_generation: number };
+        if (receipts.has(envelope.action_id)) return { receipt: receipts.get(envelope.action_id), replayed: true };
+        if (envelope.expect_generation !== revision) return { receipt: { action_id: envelope.action_id, state: "rejected", reason: "revision_conflict" } };
+        const id = envelope.project_id === "global" ? null : envelope.project_id;
+        const { inherit = [], ...patch } = args?.patch as Record<string, unknown> & { inherit?: string[] };
+        if (id) {
+          const next = args?.reset ? {} : { ...projects.get(id), ...patch };
+          for (const key of inherit) delete next[key];
+          projects.set(id, next);
+        } else global = args?.reset ? { ...DEFAULT_PREFERENCES } : { ...global, ...patch };
+        revision++;
+        const receipt = { action_id: envelope.action_id, state: "done" };
+        receipts.set(envelope.action_id, receipt);
+        return { receipt, result: preferenceView(id) };
+      }
       const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);

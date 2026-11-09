@@ -114,12 +114,19 @@ impl App {
     /// An ended session continues from the approval: `claude --resume <sid> "Execute approved plan <id> (<action>)"` in a new PTY.
     fn resume_with_turn(&self, e: &runindex::Entry, turn: &ApprovedPlanTurn) -> Result<(), Value> {
         let (_, run_id) = self.fresh_run_id(crate::ids::unix_now())?;
-        self.launch_kind(&e.session_id, &run_id, &e.campaign, &e.cwd, |_| argv::build_approve_resume_argv(&e.session_id, turn).map_err(super::invalid_input), true, false, crate::adapter::Engine::Claude).map(|_| ())
+        self.launch_kind(&e.session_id, &run_id, &e.campaign, &e.cwd, |_| argv::build_approve_resume_argv(&e.session_id, turn).map_err(super::invalid_input), true, false, crate::adapter::Engine::Claude, 1).map(|_| ())
     }
 
     /// Reject plan `id` with a reason (1 to 500 characters, controls dropped). The reason goes into the signed
     /// campaign progress log as one argument; if that fails the plan stays in the inbox.
     pub fn reject_plan(&self, id: &str, reason: &str) -> Res {
+        self.reject_plan_expecting(id, reason, None)
+    }
+
+    /// `reject_plan` that also refuses (`stale_generation`) when the plan in the result file NOW is not the one the
+    /// caller read: `expect` is the full `plan_sha256` the caller read. Compared with the entry read inside the
+    /// decision guard, before any ledger line or progress call, never with the cached hash the last inbox read left.
+    pub(super) fn reject_plan_expecting(&self, id: &str, reason: &str, expect: Option<&str>) -> Res {
         let (run_id, index) = parse_plan_id(id).ok_or_else(|| invalid("id", "not a plan id"))?;
         // One line: the progress log is line-oriented, so every whitespace run (newlines included) becomes one space.
         let reason = sanitise(reason, &Redactor::default()).split_whitespace().collect::<Vec<_>>().join(" ");
@@ -129,6 +136,10 @@ impl App {
         let _one = self.begin_decision(id)?;
         let e = self.plan_run(run_id)?;
         let sha = self.waiting(&e).and_then(|w| w.plans.iter().find(|p| p.index == index).map(|p| plan_sha(&p.raw))).ok_or_else(|| fail("not_found", "no such plan"))?;
+        if expect.is_some_and(|want| want != sha) {
+            let have = u64::from_str_radix(sha.get(..16).unwrap_or(""), 16).ok();
+            return Err(json!({"error": "stale_generation", "detail": "the plan changed since you read it", "current_generation": have}));
+        }
         self.undecided(id)?;
         let sha = Some(sha.as_str());
         let action = self.decision_line(Decision::Reject, None, id, &e, sha, DecisionState::Requested, Some(&reason))?;

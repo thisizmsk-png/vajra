@@ -8,6 +8,7 @@ import { useRoute } from "../src/router";
 import { REGISTRY } from "../src/screens/registry";
 import { projectId } from "../src/projects/adapter";
 import { S } from "../strings";
+import { DEFAULT_PREFERENCES } from "../src/preferenceContract";
 
 const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], role: string | null = null) =>
   ({ id, kind, title, engine_id: null, role, status, overlays: [], children });
@@ -67,7 +68,7 @@ describe("Shell B frame (FG-03)", () => {
     expect(tabs().getAllByRole("link").map((l) => l.textContent)).toEqual([
       expect.stringContaining("api"), expect.stringContaining("web"), expect.stringContaining(S.projects.unsorted),
     ]);
-    for (const old of [S.nav.home, S.nav.run, S.nav.crew, S.nav.chat, S.nav.inbox, S.nav.history]) {
+    for (const old of [S.nav.home, S.nav.run, S.nav.crew, S.nav.chat, S.nav.history]) {
       expect(screen.queryByRole("link", { name: old })).toBeNull();
     }
   });
@@ -230,5 +231,17 @@ describe("Shell B frame (FG-03)", () => {
     expect(screen.getByText("review b")).toBeTruthy();
     REGISTRY.review = orig;
     err.mockRestore();
+  });
+});
+
+describe("Preferences inside a project the core has not registered (PR 100 review)", () => {
+  const view = { schema: "vajra.preferences/1", rev: 0, project_id: null, caps: { active_runs: 1, workers_per_run: 16, editable: false }, global: { ...DEFAULT_PREFERENCES }, overrides: {}, effective: { ...DEFAULT_PREFERENCES }, sources: Object.fromEntries(Object.keys(DEFAULT_PREFERENCES).map((k) => [k, "global"])) };
+  it("Given a folder-derived project id, Then preferences are read as global defaults and Start is not blocked", async () => {
+    // The core refuses any project scope that is not a T1 id, as the real store does.
+    boot(`#/p/${API}/orch`, { preflight: { rows: [], start_enabled: true }, preferences_read: (a?: Record<string, unknown>) => a?.projectId ? Promise.reject(new Error("invalid_project")) : view });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "preferences_read")).toBe(true));
+    expect(ipc.calls.filter((c) => c.cmd === "preferences_read").map((c) => c.args?.projectId ?? null)).toEqual(expect.arrayContaining([null]));
+    expect(ipc.calls.some((c) => c.cmd === "preferences_read" && c.args?.projectId)).toBe(false);
+    await waitFor(() => expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true"));
   });
 });

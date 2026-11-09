@@ -51,6 +51,8 @@ struct Session {
     dir: SessionDir,
     nonce: String,
     workers: Vec<WorkerInfo>,
+    /// The project the run belongs to (ADR-15 2.3), set by the app at launch. Its Director-General sees this session.
+    project: Option<String>,
 }
 
 pub struct Service {
@@ -60,8 +62,11 @@ pub struct Service {
     logger: Option<Logger>,
     /// Live run sessions by session id.
     sessions: HashMap<String, Session>,
-    /// While a Lead tool call runs: the one session it is bound to. `None` for human calls, which see every session.
-    scope: Option<String>,
+    /// While a Lead tool call runs: the sessions it is bound to (one run, or every run of one project). `None` for human
+    /// calls, which see every session.
+    scope: Option<Vec<String>>,
+    /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
+    generations: HashMap<String, u32>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
@@ -90,6 +95,7 @@ impl Service {
             logger,
             sessions: HashMap::new(),
             scope: None,
+            generations: HashMap::new(),
             pending: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
@@ -168,13 +174,37 @@ impl Service {
 
     /// The sessions the current call may see: the bound session for a Lead call, every session for a human one.
     fn in_scope(&self) -> impl Iterator<Item = &Session> {
-        self.sessions.values().filter(|s| self.scope.as_deref().is_none_or(|b| b == s.id))
+        self.sessions.values().filter(|s| self.scope.as_ref().is_none_or(|b| b.contains(&s.id)))
     }
 
     /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
     /// that is ambiguous across sessions has no generation (the caller must use the agent id).
     pub fn worker_generation(&self, arg: &str) -> Option<u64> {
         self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
+    }
+
+    /// The one worker of a campaign's run(s) on task `task` (the bare id in `tasks.json`; the workflow namespaces worker
+    /// task ids as `<run_id>.<task>`). Matches only those exact ids, so a worker of another campaign with the same task
+    /// name is never found. `Ok(None)`: no such worker. `Err`: more than one live worker matches. Read only.
+    pub fn task_worker(&self, runs: &[String], task: &str) -> std::result::Result<Option<String>, ControlError> {
+        let hit: Vec<&WorkerInfo> = self
+            .in_scope()
+            .flat_map(|s| s.workers.iter())
+            .filter(|w| {
+                w.task_id.as_deref().is_some_and(|t| {
+                    // The workflow writes tasks.json ids already namespaced (`<run>.t1`), and so are worker task ids: an
+                    // exact match whose run is one of the campaign's. A bare id (`t1`) matches the remainder after `<run>.`.
+                    runs.iter().any(|r| t.strip_prefix(r.as_str()).and_then(|x| x.strip_prefix('.')).is_some_and(|rest| t == task || rest == task))
+                })
+            })
+            .collect();
+        let live: Vec<&&WorkerInfo> = hit.iter().filter(|w| !w.finished()).collect();
+        match (hit.as_slice(), live.as_slice()) {
+            ([], _) => Ok(None),
+            (_, [w]) => Ok(Some(w.key().to_string())),
+            (_, []) => Ok(hit.last().map(|w| w.key().to_string())),
+            _ => Err(ControlError::WorkerAmbiguous),
+        }
     }
 
     /// The workers as `list_workers` shows them (every session in scope), without recording a list action (for

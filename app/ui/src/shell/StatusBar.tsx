@@ -1,11 +1,15 @@
 // The 24 px status bar: what is running on the left; the phone and Settings on the right. Usage appears here once the
 // core reports it (FG-19); until then nothing stands in for it.
 import { Icon, ariaShortcut } from "../../components/ui/base";
+import { usePreferences } from "../preferences";
+import { DEFAULT_PREFERENCES, shortcutKeys } from "../preferenceContract";
 import { S } from "../../strings";
 
 export function StatusBar({ runs, compact, onColumn, onPhone, onSettings }: {
   runs: number; compact: boolean | null; onColumn: () => void; onPhone: () => void; onSettings: () => void;
 }) {
+  const prefs = usePreferences();
+  const keys = shortcutKeys(prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings);
   return (
     <footer className="v-sbar" aria-label={S.frame.status}>
       {compact !== null && (
@@ -17,7 +21,7 @@ export function StatusBar({ runs, compact, onColumn, onPhone, onSettings }: {
       <span className={runs > 0 ? "v-sbar__runs v-sbar__runs--live" : "v-sbar__runs"}><i aria-hidden="true" />{S.frame.runs(runs)}</span>
       <span className="v-sbar__end">
         <button type="button" className="v-sb-btn" onClick={onPhone}><Icon name="phone" size={12} />{S.frame.phone}</button>
-        <button type="button" className="v-sb-btn" onClick={onSettings} aria-keyshortcuts={ariaShortcut(["⌘", ","])} title={`${S.views.settings} (⌘,)`}>
+        <button type="button" className="v-sb-btn" onClick={onSettings} aria-keyshortcuts={ariaShortcut(keys)} title={`${S.views.settings} (${keys.join("")})`}>
           <Icon name="settings" size={12} />{S.views.settings}
         </button>
       </span>

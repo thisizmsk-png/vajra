@@ -11,7 +11,7 @@ describe("hash router", () => {
     expect(parseHash("#/run?slug=a&id=b")).toEqual({ screen: "review", params: { slug: "a", id: "b" }, project: null });
     expect(parseHash("#/home").screen).toBe("orch");
     expect(parseHash("#/chat").screen).toBe("orch");
-    expect(parseHash("#/inbox").screen).toBe("orch");
+    expect(parseHash("#/inbox").screen).toBe("inbox");
     expect(parseHash("#/crew?slug=camp&id=r1")).toEqual({ screen: "crew", params: { slug: "camp", id: "r1" }, project: null });
     expect(parseHash("#/history").screen).toBe("history");
     expect(parseHash("#/settings?section=mobile")).toEqual({ screen: "settings", params: { section: "mobile" }, project: null });

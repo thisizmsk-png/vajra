@@ -127,16 +127,13 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, allowed_uid: u32) -> io::R
                 Some(tool) => {
                     let args = v.get("args").cloned().unwrap_or(Value::Null);
                     let mut s = crate::lock(svc);
-                    let run = match v.get("run") {
-                        None | Some(Value::Null) => None,
-                        Some(Value::String(r)) => Some(r.as_str()),
-                        Some(_) => {
-                            drop(s);
-                            reply(&mut conn, &json!({"error": "invalid_args", "detail": "run"}))?;
-                            continue;
-                        }
+                    let out = match Binding::from_request(&v) {
+                        Err(field) => Err(super::service::ControlError::InvalidArgs(field.into())),
+                        Ok(Binding::None) => s.call_tool_for_run(None, tool, &args),
+                        Ok(Binding::Run(r)) => s.call_tool_for_run(Some(&r), tool, &args),
+                        Ok(Binding::Project(p, g)) => s.call_tool_for_project(&p, g, tool, &args),
                     };
-                    match s.call_tool_for_run(run, tool, &args) {
+                    match out {
                         Ok(r) => json!({"ok": r}),
                         Err(e) => e.to_json(),
                     }
@@ -154,13 +151,51 @@ pub fn request(path: &Path, tool: &str, args: &Value) -> io::Result<Value> {
     request_for(path, None, tool, args)
 }
 
+/// What a tool call is bound to: nothing (a human-side client), one run (an ADR-13 Lead) or one project's
+/// Director-General at one conversation generation (ADR-15 2.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    None,
+    Run(String),
+    Project(String, u32),
+}
+
+impl Binding {
+    /// The binding a request names. `run` and `project` together, a `project` without its `generation` (or the other
+    /// way round), or a value of the wrong type is a bad request, never "unbound". A key set to JSON null is present
+    /// with a bad value, not omitted (#81 review): only a request with none of the three keys is unbound.
+    fn from_request(v: &Value) -> Result<Self, &'static str> {
+        let present = |k: &str| v.get(k).is_some();
+        match (present("run"), present("project"), present("generation")) {
+            (false, false, false) => Ok(Self::None),
+            (true, false, false) => v["run"].as_str().map(|r| Self::Run(r.into())).ok_or("run"),
+            (false, true, true) => {
+                let p = v["project"].as_str().ok_or("project")?;
+                let g = v["generation"].as_u64().and_then(|g| u32::try_from(g).ok()).ok_or("generation")?;
+                Ok(Self::Project(p.into(), g))
+            }
+            _ => Err("binding"),
+        }
+    }
+}
+
 /// Like `request`, bound to `run` when given.
 pub fn request_for(path: &Path, run: Option<&str>, tool: &str, args: &Value) -> io::Result<Value> {
+    request_bound(path, &run.map_or(Binding::None, |r| Binding::Run(r.into())), tool, args)
+}
+
+/// Like `request`, with an explicit binding.
+pub fn request_bound(path: &Path, binding: &Binding, tool: &str, args: &Value) -> io::Result<Value> {
     let mut s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut req = json!({"tool": tool, "args": args});
-    if let Some(r) = run {
-        req["run"] = json!(r);
+    match binding {
+        Binding::None => {}
+        Binding::Run(r) => req["run"] = json!(r),
+        Binding::Project(p, g) => {
+            req["project"] = json!(p);
+            req["generation"] = json!(g);
+        }
     }
     let mut line = req.to_string();
     line.push('\n');
