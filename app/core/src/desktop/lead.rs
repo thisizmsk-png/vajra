@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{Value, json};
 
 use super::{App, Res, Run, project_slug, runindex};
+use super::caps::GIT_META_CAP;
 use crate::paths;
 use crate::bus::Bus;
 use crate::control::lead::{self, LeadError, frame};
@@ -465,7 +466,7 @@ impl App {
     }
 
     /// Every run with a record under the guarded control dir, newest first.
-    fn recorded_runs(&self) -> Vec<String> {
+    pub(super) fn recorded_runs(&self) -> Vec<String> {
         let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
             .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
             .unwrap_or_default();
@@ -564,7 +565,7 @@ impl App {
             return if key.parent() == Some(want) && key.file_name() == Some(std::ffi::OsStr::new(".git")) { Ok(key) } else { Err(refuse("this folder's .git changed while it was checked")) };
         }
         if md.is_file() {
-            let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
+            let body = fsx::read_nofollow_capped(&git, GIT_META_CAP).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read or is too large"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
             if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
                 // A pinned common dir counts only while it is still exactly itself: the key was stored canonical, so one that now
@@ -574,7 +575,7 @@ impl App {
                     if !real.starts_with(common) || !real.ancestors().skip(1).take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
                         continue;
                     }
-                    match fsx::read_nofollow(&real.join("commondir")) {
+                    match fsx::read_nofollow_capped(&real.join("commondir"), GIT_META_CAP) {
                         // A submodule's git dir: its own common dir, keyed by exactly the target that was checked.
                         Err(_) if std::fs::symlink_metadata(real.join("commondir")).is_err() => return Ok(real),
                         // A linked worktree of the enclosing project: its `commondir` must resolve to this pinned common dir.
@@ -1041,14 +1042,14 @@ pub(super) fn main_checkout(loc: &Path, key: &Path) -> Option<PathBuf> {
         }
     }
     let names_key = |dir: &Path| -> bool {
-        let Ok(body) = fsx::read_nofollow(&dir.join(".git")) else { return false };
+        let Ok(body) = fsx::read_nofollow_capped(&dir.join(".git"), GIT_META_CAP) else { return false };
         let Ok(text) = String::from_utf8(body) else { return false };
         text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).and_then(|t| std::fs::canonicalize(dir.join(t)).ok()).is_some_and(|t| t == key)
     };
     if std::fs::symlink_metadata(loc.join(".git")).is_ok_and(|m| m.is_dir()) || names_key(loc) {
         return Some(loc.to_path_buf());
     }
-    let config = String::from_utf8(fsx::read_nofollow(&key.join("config")).ok()?).ok()?;
+    let config = String::from_utf8(fsx::read_nofollow_capped(&key.join("config"), GIT_META_CAP).ok()?).ok()?;
     let rel = config.lines().map(str::trim).find_map(|l| l.strip_prefix("worktree").and_then(|r| r.trim_start().strip_prefix('=')).map(str::trim))?;
     let cand = std::fs::canonicalize(key.join(rel)).ok()?;
     names_key(&cand).then_some(cand)
