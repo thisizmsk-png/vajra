@@ -215,7 +215,7 @@ fn term_open(
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record(Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
     }
     Ok(term_value(&i))
 }
@@ -252,9 +252,7 @@ fn term_ack(terms: State<'_, Terminals>, id: u32, bytes: usize) -> Res {
 
 #[tauri::command(async)]
 fn term_close(terms: State<'_, Terminals>, own: State<'_, Ownership>, id: u32) -> Res {
-    if let Some(i) = terms.list().into_iter().find(|i| i.id == id) {
-        let _ = own.ledger.forget_pid(i.pid);
-    }
+    let _ = own.ledger.forget_for(id); // exactly the record this terminal made, not whatever shares its pid now
     terms.close(id).map(|()| serde_json::json!({})).map_err(term_err)
 }
 

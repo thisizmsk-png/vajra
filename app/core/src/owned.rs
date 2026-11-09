@@ -49,11 +49,13 @@ pub struct Found {
 pub struct Ledger {
     path: PathBuf,
     guard: Mutex<()>,
+    /// Which owner (pid and start stamp) each open terminal recorded, so closing a tab forgets exactly that one.
+    ids: Mutex<std::collections::HashMap<u32, (u32, u64)>>,
 }
 
 impl Ledger {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, guard: Mutex::new(()) }
+        Self { path, guard: Mutex::new(()), ids: Mutex::new(std::collections::HashMap::new()) }
     }
 
     /// Every readable entry. A bad line is skipped, not fatal.
@@ -103,16 +105,20 @@ impl Ledger {
         self.write(&all)
     }
 
-    /// Forget a record by pid when the human closes its tab. Removing our own record signals nothing.
-    pub fn forget_pid(&self, pid: u32) -> std::io::Result<()> {
-        let _g = lock(&self.guard);
-        let mut all = self.read();
-        let n = all.len();
-        all.retain(|x| x.pid != pid);
-        if all.len() == n {
-            return Ok(());
+    /// Record the shell of terminal `id`, remembering which record is its own.
+    pub fn record_for(&self, id: u32, o: Owner) -> std::io::Result<()> {
+        lock(&self.ids).insert(id, (o.pid, o.stamp));
+        self.record(o)
+    }
+
+    /// The human closed terminal `id`: forget the record that terminal made, and only that one (an ended tab can outlive
+    /// its shell while the OS gives the pid to a newer shell, whose record must stay). Removing our own record signals nothing.
+    pub fn forget_for(&self, id: u32) -> std::io::Result<()> {
+        let own = lock(&self.ids).remove(&id);
+        match own {
+            Some((pid, stamp)) => self.forget(pid, stamp),
+            None => Ok(()),
         }
-        self.write(&all)
     }
 
     /// A clean quit ended every shell: nothing is left to recover.
@@ -376,6 +382,21 @@ mod tests {
         l.forget(4243, 2).unwrap();
         assert_eq!(l.load(), vec![a]);
         assert_eq!(std::fs::metadata(&l.path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn closing_a_tab_forgets_only_the_owner_it_recorded_even_when_the_pid_was_reused() {
+        let l = Ledger::new(tmp("reuse"));
+        // An ended terminal (id 1) that is still in the tab list, and a newer shell (id 2) that got the same pid.
+        l.record_for(1, Owner { pid: 4242, stamp: 10, cwd: "/old".into() }).unwrap();
+        l.record_for(2, Owner { pid: 4242, stamp: 20, cwd: "/new".into() }).unwrap();
+        l.forget_for(1).unwrap();
+        assert_eq!(l.load(), vec![Owner { pid: 4242, stamp: 20, cwd: "/new".into() }], "the newer shell stays recoverable");
+        l.forget_for(1).unwrap(); // closing it again, or a terminal that was never recorded, changes nothing
+        l.forget_for(99).unwrap();
+        assert_eq!(l.load().len(), 1);
+        l.forget_for(2).unwrap();
+        assert!(l.load().is_empty());
     }
 
     #[test]
