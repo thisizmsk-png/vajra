@@ -136,6 +136,8 @@ export type InboxItem = {
   ask?: string; base?: string; rounds?: number;
   /** The project this item belongs to (ADR-15 §2.6): the store's id of the project that owns the run's folder; `p_unsorted` for a run no project owns. */
   project_id?: string;
+  /** `run_proposal` only: the Director-General's own id for the project (`k_` plus 32 hex). Never a project-store id. */
+  orchestrator_id?: string;
   /** The project's full recorded root: what the UI matches projects on. `project_name` is only its label. */
   project?: string | null; project_name?: string | null; generation?: number;
   /** What `start_proposal` must be given back: the hash of exactly what was shown. */
