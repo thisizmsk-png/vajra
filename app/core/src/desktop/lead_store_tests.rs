@@ -223,3 +223,86 @@ fn another_projects_director_general_cannot_name_this_projects_worker() {
     assert!(matches!(e, ControlError::ControlDisabled | ControlError::WorkerNotFound), "{e:?}");
     svc.end_session(SID);
 }
+
+/// #103 review: a run launched from a SUBFOLDER of a plain project records that subfolder, while its Director-General runs in
+/// the store's root; an actual ask from it is delivered and answered.
+#[test]
+fn an_ask_from_a_subfolder_of_a_plain_project_is_answered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+}
+
+/// #103 review: the registered root counts as the run's own only as the store recorded it. A root moved away and replaced at
+/// the same path by another folder, or by a link, is not the project's folder, and the ask from a subfolder starts nothing.
+#[test]
+fn a_registered_root_replaced_by_another_folder_or_a_link_is_refused() {
+    for link in [false, true] {
+        let t = Tmp::new();
+        let app = t.app();
+        let sub = t.repo().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        live_run(&app, SID, RUN_ID, sub.clone());
+        app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+        let moved = t.0.join("moved");
+        std::fs::rename(t.repo(), &moved).unwrap();
+        if link {
+            std::os::unix::fs::symlink(&moved, t.repo()).unwrap();
+        } else {
+            std::fs::create_dir_all(t.repo().join("sub")).unwrap();
+        }
+        assert!(app.ask_lead(RUN_ID, "hi").is_err(), "link={link}: refused");
+        assert!(t.count("ask.count") == 0 && t.ask_states().is_empty(), "link={link}: nothing was spawned or recorded");
+    }
+}
+
+/// #103 review: a project registered inside a Git checkout (its root below the checkout's top), with the run launched
+/// below the project root: the run records the checkout, its Director-General runs in the project's root, and the ask is
+/// answered.
+#[test]
+fn an_ask_from_below_a_project_registered_inside_a_git_checkout_is_answered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let g = t.0.join("checkout");
+    std::fs::create_dir_all(g.join(".git/objects")).unwrap();
+    std::fs::write(g.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let p = g.join("proj");
+    let sub = p.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let id = project_of(&t, &p);
+    assert_eq!(app.projects.get(&id).unwrap().root, p.to_string_lossy(), "the project's root is its own folder");
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["project_id"].as_str(), Some(id.as_str()));
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+}
+
+/// #103 review: accepting the registered root opens nothing else. Another project's folder is still denied to this
+/// Director-General, and asking as if from that folder, or from this project's subfolder rather than its root, is refused.
+#[test]
+fn with_a_subfolder_run_another_projects_folder_is_still_denied() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    let other = t.0.join("sibling");
+    project_of(&t, &other);
+    app.record_run("20261109-1200", &other, "3c8fad5b-d9cb-469f-a165-70867728950e", "deliver-z", true, 1).unwrap();
+    let iso = app.isolation(RUN_ID, &t.repo()).unwrap();
+    assert!(iso.deny.contains(&other), "the other project's folder is denied: {:?}", iso.deny);
+    assert!(!iso.deny.iter().any(|d| d.starts_with(t.repo())), "nothing of its own is denied: {:?}", iso.deny);
+    assert!(app.isolation(RUN_ID, &other).is_err(), "the other project's folder is not this run's");
+    let elsewhere = t.0.join("loose");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    assert!(app.isolation(RUN_ID, &elsewhere).is_err(), "an unrelated folder is not this run's");
+}

@@ -541,7 +541,19 @@ impl App {
             // project's, unless it resolves to the Lead's own folder: the same folder, launched again, is the same project.
             candidates.push((dirs, loc_missing));
         }
-        // The identity check: the asking folder is exactly one of its own project's recorded folders.
+        // The registered project root (#103 review): a run launched in a SUBFOLDER of a plain project, or below a project registered
+        // inside a Git checkout, records that subfolder or the checkout, while its Director-General runs in the store's root. That root
+        // is its own only as the store recorded it: compared without resolving it again (the store keeps it canonical) and by device
+        // and inode, so a root moved away, or replaced by a link or another folder, still refuses.
+        if let Some(p) = self.pinned_project(own_run).filter(|p| crate::projects::contract::valid_project_id(p)).and_then(|p| self.projects.get(&p).ok()) {
+            use std::os::unix::fs::MetadataExt;
+            let root = PathBuf::from(&p.root);
+            let same_inode = std::fs::metadata(&own_real).is_ok_and(|m| (m.dev(), m.ino()) == (p.root_key.dev, p.root_key.ino));
+            if root == own_real && same_inode {
+                own_folders.push(root);
+            }
+        }
+        // The identity check: the asking folder is exactly one of its own project's recorded folders, or its registered root.
         if !own_folders.contains(&own_real) {
             return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Lead is not started"));
         }
