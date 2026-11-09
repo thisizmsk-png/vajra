@@ -3324,6 +3324,40 @@ fn a_linked_worktree_nested_under_its_pinned_repo_is_admitted_with_the_repos_key
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
 
+/// #80 review (P2): a linked worktree of a SUBMODULE, started outside the submodule checkout but inside the pinned superproject, is its
+/// own project keyed by the submodule's common dir. A `commondir` that leaves the enclosing common dir, lands on another module that
+/// does not hold the worktree's git dir, or names a module that itself redirects, is still refused.
+#[test]
+fn a_linked_worktree_of_a_submodule_inside_the_pinned_superproject_is_admitted_under_the_submodules_key() {
+    let t = Tmp::new();
+    let (app, a, b, pinned) = pinned_a_and_b(&t);
+    let module = a.join(".git/modules/sub");
+    fs::create_dir_all(module.join("worktrees/w")).unwrap();
+    fs::write(module.join("worktrees/w/commondir"), "../..\n").unwrap();
+    let wt = a.join("sub-wt");
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", module.join("worktrees/w").display())).unwrap();
+    let (loc, key) = app.launch_identity(&wt).expect("a worktree of a submodule of the enclosing project");
+    assert_eq!(key, fs::canonicalize(&module).unwrap(), "it is the submodule's project, not the superproject's");
+    assert_ne!(key, pinned);
+    assert_eq!(loc, fs::canonicalize(&wt).unwrap());
+    // Redirects are refused: to another project, to a sibling module that does not hold the worktree's git dir, and to a module whose own
+    // `commondir` redirects.
+    fs::create_dir_all(a.join(".git/modules/other")).unwrap();
+    fs::create_dir_all(a.join(".git/modules/hop")).unwrap();
+    fs::write(a.join(".git/modules/hop/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    for (n, redirect) in [b.join(".git"), a.join(".git/modules/other"), a.join(".git/modules/hop")].into_iter().enumerate() {
+        let gd = module.join(format!("worktrees/r{n}"));
+        fs::create_dir_all(&gd).unwrap();
+        fs::write(gd.join("commondir"), format!("{}\n", redirect.display())).unwrap();
+        let bad = a.join(format!("bad-wt{n}"));
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+        let e = app.launch_key(&bad).unwrap_err();
+        assert_eq!(code(&e), "project_membership_inconsistent", "{redirect:?}: {e}");
+    }
+}
+
 /// #80 round 6 (P1): another project's Lead denies the other run's pinned location too, so a submodule launched from a subfolder
 /// has its checkout root denied, not only the subfolder.
 #[test]
