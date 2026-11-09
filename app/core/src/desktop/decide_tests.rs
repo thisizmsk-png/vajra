@@ -247,6 +247,7 @@ fn a_forged_run_line_cannot_point_the_reader_elsewhere() {
     let e = runindex::Entry { campaign: CAMP.into(), session_id: SID.into(), run_id: RUN.into(), cwd: t.cwd(), lead_session_id: None, provider: None };
     runindex::append(&t.0.join("data/runs.jsonl"), &e).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "no guarded record");
+    std::fs::create_dir_all(t.0.join("elsewhere")).unwrap();
     app.record_run(RUN, &t.0.join("elsewhere"), SID, CAMP, true, start_of(RUN)).unwrap();
     assert_eq!(app.inbox().unwrap()["count"], 0, "guarded record names another directory");
 }
