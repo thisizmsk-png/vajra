@@ -403,15 +403,23 @@ impl App {
     /// worker ceiling across concurrent runs. Over a cap the start is held with a reason (`run_held`), never queued.
     /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
     /// concurrent run safe; the caps bound what runs at once.
-    fn within_caps(&self, cwd: &Path, workers: u32) -> Result<(), Value> {
+    ///
+    /// Projects are the keys pinned when each run was launched (`launch_key` for the requested folder, the guarded record
+    /// for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git` cannot
+    /// make its project look free or make another one look busy. A live run with no pinned key refuses the start.
+    fn within_caps(&self, key: &Path, workers: u32) -> Result<(), Value> {
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
             let per = lock(&self.run_workers);
-            runs.iter()
-                .filter(|(s, _)| self.sup.is_running(s).unwrap_or(false))
-                .map(|(s, r)| caps::Active { project: caps::project_key(&r.cwd), workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) })
-                .collect()
+            let mut v = Vec::new();
+            for (s, r) in runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)) {
+                let Some(project) = self.read_run_key(&r.run_id) else {
+                    return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
+                };
+                v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
+            }
+            v
         };
         // Forget the worker counts of runs that ended.
         {
@@ -419,7 +427,7 @@ impl App {
             lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
         let limits = *lock(&self.limits);
-        caps::check(limits, &active, &caps::project_key(cwd), workers).map_err(|h| h.to_json())
+        caps::check(limits, &active, key, workers).map_err(|h| h.to_json())
     }
 
     /// The run caps and their bounds.
@@ -513,9 +521,10 @@ impl App {
         workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
-        self.within_caps(cwd, workers)?;
-        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review).
-        let key = self.launch_key(cwd);
+        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
+        // are checked against.
+        let key = self.launch_key(cwd)?;
+        self.within_caps(&key, workers)?;
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
