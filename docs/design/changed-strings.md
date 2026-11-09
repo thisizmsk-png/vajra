@@ -250,3 +250,10 @@ Settings keyboard (PR 100 review).
 | String | Where | Note |
 |---|---|---|
 | Use global shortcuts (both) | Settings > Keyboard, project scope | replaces the two per-shortcut "Use global ..." buttons: shortcuts are one override, so the one control says it resets both (PR 100 review) |
+
+Settings General (PR 100 review): the editor and shell choices are hidden until a new terminal or editor reads them.
+
+| String | Where | Note |
+|---|---|---|
+| Default editor and shell for new terminals and editors. | Settings > General, lede | was "Default editor and shell for supported new opens. Active sessions keep their settings."; the section now shows "Not built yet" |
+| Default editor, System default, Editor CLI, Terminal shell, Login shell, /bin/sh, /bin/bash, /bin/zsh, "Launch preferences are saved for supported new opens. Running sessions keep their launch settings." | Settings > General | removed with the rows they labelled |

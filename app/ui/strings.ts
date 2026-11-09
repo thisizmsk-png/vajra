@@ -322,9 +322,6 @@ export const S = {
     inherit: (label: string) => `Use global ${label}`,
     inheritShortcuts: "Use global shortcuts (both)",
     theme: "Theme", systemTheme: "Follow system", dark: "Dark", light: "Light",
-    editor: "Default editor", systemEditor: "System default", editorCli: "Editor CLI",
-    shell: "Terminal shell", loginShell: "Login shell", sh: "/bin/sh", bash: "/bin/bash", zsh: "/bin/zsh",
-    launchHint: "Launch preferences are saved for supported new opens. Running sessions keep their launch settings.",
     nativeModel: "Native CLI default",
     modelHint: (model: string) => `Model: ${model}. Choosing a model needs a supported adapter. The agent is chosen under Providers.`,
     workers: "Concurrent workers", rounds: "Fix rounds",
@@ -399,7 +396,7 @@ export const S = {
     sectionsLabel: "Settings sections",
     later: "Not built yet",
     sections: {
-      general: { title: "General", lede: "Default editor and shell for supported new opens. Active sessions keep their settings." },
+      general: { title: "General", lede: "Default editor and shell for new terminals and editors." },
       providers: { title: "Providers", lede: "Vajra runs the agent CLIs you already use and pay for. These checks decide whether a run can start." },
       models: { title: "Models and capacity", lede: "Default agent and task capacity. Project overrides apply to new work; native capabilities and system limits still apply." },
       mobile: { title: "Mobile", lede: "Follow your projects from your phone. Pairing comes after its security review; until then no phone can connect, and nothing listens on the network." },
