@@ -3323,6 +3323,7 @@ fn another_leads_deny_roots_include_a_submodules_pinned_location_not_just_the_ru
     fs::create_dir_all(sup.join(".git/modules/sub")).unwrap();
     fs::create_dir_all(sub.join("src")).unwrap();
     fs::create_dir_all(b.join(".git")).unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap(); // a real submodule checkout names its git dir
     let key = fs::canonicalize(sup.join(".git/modules/sub")).unwrap();
     let loc = fs::canonicalize(&sub).unwrap();
     app.record_run_pinned("20261105-1230", &sub.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
@@ -3354,4 +3355,32 @@ fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_c
     assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), nonce, "the nonce was not rotated");
     assert!(app.sup.is_running(&stream).unwrap(), "the original process still runs");
     app.sup.kill(&stream).unwrap();
+}
+
+/// #80 round 7 (P1): a submodule whose first app run is from an OUTSIDE linked worktree still has its main checkout pinned and
+/// denied to other Leads; when that checkout cannot be resolved the asking Lead is refused rather than left unprotected.
+#[test]
+fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_other_leads() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sup, sub, wt, b) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("sub-wt"), t.0.join("b"));
+    let git = sup.join(".git/modules/sub");
+    fs::create_dir_all(git.join("worktrees/wt")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&wt).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    fs::write(git.join("config"), "[core]\n\tworktree = ../../../sub\n").unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", git.join("worktrees/wt").display())).unwrap();
+    fs::write(git.join("worktrees/wt/commondir"), "../..\n").unwrap();
+    let key = fs::canonicalize(&git).unwrap();
+    let loc = fs::canonicalize(&wt).unwrap();
+    app.record_run_pinned("20261105-1230", &wt, &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let denied = app.other_project_roots("20261105-1229", &b).unwrap();
+    assert!(denied.contains(&fs::canonicalize(&sub).unwrap()), "the submodule's main checkout is denied: {denied:?}");
+    // The same layout with a config that names no worktree: the main checkout cannot be resolved, so the asking Lead is refused.
+    fs::write(git.join("config"), "[core]\n").unwrap();
+    app.record_run_pinned("20261105-1232", &wt, &loc, &key, "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
+    assert!(app.other_project_roots("20261105-1229", &b).is_err(), "an unprotectable checkout refuses the Lead");
 }
