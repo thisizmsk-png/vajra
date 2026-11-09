@@ -518,30 +518,64 @@ impl App {
     /// recorded launch if there is one (a resume must not take up a `.git` a worker of the earlier run rewrote), else
     /// the folder's key now.
     ///
+    /// Membership comes from the guarded run records before any Git metadata is read. A record counts when its real
+    /// folder IS `cwd`'s real folder, or when it is a Git project's folder (its pinned key is a `.git`) that CONTAINS `cwd`:
+    /// a start in `/work/a/src` takes `/work/a`'s pin, so a worker that rewrote `/work/a/.git` cannot move the subfolder
+    /// into another project (#80 review). The deepest such folder decides; records of that folder that disagree refuse the
+    /// launch rather than guess. A plain (non-Git) folder's pin is never taken by a subfolder, so a run started in `$HOME`
+    /// does not absorb the repos under it.
+    ///
     /// "The folder" is by its real path: `repo_dir` accepts a symlink alias of a folder, and a resume through the alias must
-    /// find the folder's existing membership, not fall back to the (worker-writable) `.git`. Recorded runs of the same real
-    /// folder that disagree on its project are inconsistent and refuse the launch rather than guess.
+    /// find the folder's existing membership, not fall back to the (worker-writable) `.git`.
+    ///
+    /// A record written before project keys existed (guarded cwd, session and campaign, no key file) is the known old
+    /// format: its key is derived once from its guarded cwd and written back (`migrate_old_key`). Any other record with no
+    /// usable key is malformed and refuses.
     pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
         let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let want = real(cwd);
-        let mut keys: Vec<PathBuf> = Vec::new();
+        let is_git = |k: &Path| k.file_name() == Some(std::ffi::OsStr::new(".git"));
+        // (depth of the recorded folder, key) of every record that decides membership for `cwd`.
+        let mut found: Vec<(usize, PathBuf)> = Vec::new();
         for r in self.recorded_runs() {
             let Some(c) = self.read_run_cwd(&r) else { continue };
-            if real(&c) != want {
+            let rc = real(&c);
+            if !want.starts_with(&rc) {
                 continue;
             }
-            match self.read_run_key(&r) {
-                Some(k) if !keys.contains(&k) => keys.push(k),
-                Some(_) => {}
-                // A recorded run of this folder with no pinned project: the membership is incomplete.
-                None => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
+            let exact = rc == want;
+            let key = match self.read_run_key(&r) {
+                Some(k) => k,
+                None => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+            };
+            if exact || is_git(&key) {
+                found.push((rc.components().count(), key));
+            }
+        }
+        let Some(deepest) = found.iter().map(|(d, _)| *d).max() else { return Ok(super::caps::project_key(cwd)) };
+        let mut keys: Vec<PathBuf> = Vec::new();
+        for (d, k) in found {
+            if d == deepest && !keys.contains(&k) {
+                keys.push(k);
             }
         }
         match keys.len() {
-            0 => Ok(super::caps::project_key(cwd)),
             1 => Ok(keys.remove(0)),
             _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
         }
+    }
+
+    /// The one-time migration of the old record format: a run with a guarded cwd, session and campaign but no key file was
+    /// written before keys existed. Derive its key from its guarded cwd now and write it back under the guard. A record
+    /// that is anything else (a key file that exists but is unusable, a missing session or campaign) is not migrated.
+    fn migrate_old_key(&self, run_id: &str, cwd: &Path) -> Option<PathBuf> {
+        let dir = self.lead_sid_dir(run_id);
+        if std::fs::symlink_metadata(dir.join(KEY_FILE)).is_ok() || self.read_run_record(run_id).is_none() {
+            return None;
+        }
+        let key = super::caps::project_key(cwd);
+        fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes()).ok()?;
+        self.read_run_key(run_id)
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
