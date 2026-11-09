@@ -2,7 +2,13 @@
 use super::{App, Res, lock};
 use crate::preferences::{Error, Patch};
 fn error(e: Error) -> serde_json::Value {
-    serde_json::json!({"error":e.code()})
+    match e.code() {
+        // settings.json was replaced but the write could not be confirmed: the receipt says unknown, not refused.
+        "outcome_unknown" => {
+            serde_json::json!({"error":"outcome_unknown","detail":"The new preferences were written but could not be confirmed on disk. Reload and review them before saving again."})
+        }
+        code => serde_json::json!({"error":code}),
+    }
 }
 impl App {
     pub fn preferences_read(&self, project_id: Option<&str>) -> Res {
@@ -95,6 +101,44 @@ mod tests {
         let v = app.preferences_read(None).unwrap();
         assert_eq!(v["effective"]["notifications"], true);
         assert_eq!(v["effective"]["notifications_text"], false);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_is_an_unknown_outcome_not_a_refusal() {
+        let temp = std::env::temp_dir().join(format!(
+            "vajra-pref-sync-{}",
+            crate::ids::uuid_v4().unwrap()
+        ));
+        std::fs::create_dir_all(temp.join("home/.claude/vajra/campaigns")).unwrap();
+        let app = App::open(&temp.join("data"), &temp.join("home")).unwrap();
+        let env = Envelope {
+            action_id: "prefs-sync-0001".into(),
+            project_id: "global".into(),
+            expect_generation: Some(0),
+        };
+        let patch = || serde_json::from_value::<Patch>(json!({"theme":"dark"})).unwrap();
+        crate::preferences::FAIL_SYNC_AFTER_RENAME.with(|f| f.set(true));
+        let out = app.act_preferences_update(&env, patch(), false);
+        crate::preferences::FAIL_SYNC_AFTER_RENAME.with(|f| f.set(false));
+        // The document changed: the new value and revision are on disk.
+        let v = app.preferences_read(None).unwrap();
+        assert_eq!(v["rev"], 1);
+        assert_eq!(v["effective"]["theme"], "dark");
+        // And the receipt says so honestly: unknown, with review guidance, never rejected.
+        assert_eq!(out["receipt"]["state"], "unknown", "{out}");
+        assert_eq!(out["receipt"]["reason"], "outcome_unknown");
+        assert!(
+            out["receipt"]["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Reload and review"),
+            "{out}"
+        );
+        // A replay of the same action reports the same unknown outcome, not a refusal.
+        let replay = app.act_preferences_update(&env, patch(), false);
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["receipt"]["state"], "unknown");
         std::fs::remove_dir_all(temp).unwrap();
     }
 }

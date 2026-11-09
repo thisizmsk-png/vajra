@@ -104,6 +104,11 @@ impl Error {
 fn bad() -> Error {
     Error("invalid_preferences")
 }
+#[cfg(test)]
+thread_local! {
+    /// Fault injection: fail the directory sync that follows a successful rename of settings.json.
+    pub(crate) static FAIL_SYNC_AFTER_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 impl From<std::io::Error> for Error {
     fn from(_: std::io::Error) -> Self {
         Self("preferences_io")
@@ -380,7 +385,7 @@ impl Store {
             crate::ids::uuid_v4().map_err(Error::from)?
         ))
         .map_err(|_| bad())?;
-        let result = (|| {
+        let staged = (|| {
             let mut f = open_at(
                 dir,
                 &name,
@@ -401,13 +406,20 @@ impl Store {
             {
                 return Err(std::io::Error::last_os_error().into());
             }
-            dir.sync_all()?;
             Ok(())
         })();
-        if result.is_err() {
+        if staged.is_err() {
+            // Nothing was replaced: drop the temporary file and report the refusal.
             unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+            return staged;
         }
-        result
+        // From here settings.json already holds the new document and revision. A failure now is not a refusal:
+        // the update may well have happened, so it is reported as an unknown outcome to reload and review.
+        #[cfg(test)]
+        if FAIL_SYNC_AFTER_RENAME.with(|f| f.get()) {
+            return Err(Error("outcome_unknown"));
+        }
+        dir.sync_all().map_err(|_| Error("outcome_unknown"))
     }
 }
 fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
