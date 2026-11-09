@@ -2866,6 +2866,7 @@ fn a_run_starts_only_in_an_active_project_and_is_recorded_under_its_orchestrator
     let run = log.iter().find(|s| s.kind == crate::projects::contract::SessionKind::Run).expect("a run line");
     let orch = fs::read_to_string(t.0.join("data/control/projects").join(&pid).join("orchestrator/record")).unwrap();
     assert_eq!((run.run_id.as_deref(), run.campaign.as_deref(), run.parent.as_deref()), (Some("20261105-1230"), Some("deliver-x"), Some(orch.as_str())));
+    assert_eq!(run.provider, "claude", "a Claude launch is recorded as claude");
     let _ = app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5));
 }
 
@@ -2921,6 +2922,12 @@ fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     app.launch_engine(Engine::Codex, other, "20261108-1201", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false, caps::DEFAULT_RUN_WORKERS).unwrap();
     let idx = fs::read_to_string(t.0.join("data/runs.jsonl")).unwrap();
     assert!(idx.contains("\"provider\":\"codex\""), "the run is still recorded with its provider");
+    // The project's session log records each run on the provider it actually launched on (#103 review), not a fixed claude.
+    let pid = app.projects.find_by_path(Path::new(&cwd)).unwrap().expect("the run's project").id;
+    let log = app.projects.sessions(&pid).unwrap().sessions;
+    let run_line = |run: &str| log.iter().find(|s| s.kind == crate::projects::contract::SessionKind::Run && s.run_id.as_deref() == Some(run)).map(|s| s.provider.clone());
+    assert_eq!(run_line("20261108-1201").as_deref(), Some("codex"), "the Codex run's session line: {log:?}");
+    assert_eq!(run_line("20261108-1200").as_deref(), Some("claude"), "the Claude run's session line: {log:?}");
     let targets = app.resume_targets().unwrap();
     assert_eq!(targets["targets"]["deliver-claude"]["provider"], "claude");
     assert!(targets["targets"].get("deliver-codex").is_none(), "the app-made id means nothing to codex resume: {targets}");

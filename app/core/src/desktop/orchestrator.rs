@@ -132,16 +132,17 @@ pub(super) fn project_gate(store: &Store, pid: &str) -> Result<(), ControlError>
     }
 }
 
-/// One `vajra.session/1` line.
+/// One `vajra.session/1` line. `provider` is the adapter the session runs on: the Director-General is always `claude`; a
+/// run is whatever engine the launch chose (FG-09), never assumed.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn session_line(id: String, project: &str, kind: SessionKind, parent: Option<String>, native: Option<&str>, run: Option<(&str, &str)>, generation: u32, status: SessionStatus) -> Session {
+pub(super) fn session_line(id: String, project: &str, kind: SessionKind, parent: Option<String>, native: Option<&str>, run: Option<(&str, &str)>, provider: &str, generation: u32, status: SessionStatus) -> Session {
     Session {
         schema: pc::SESSION_SCHEMA.into(),
         id,
         project_id: project.into(),
         kind,
         parent,
-        provider: "claude".into(),
+        provider: provider.into(),
         native_session_id: native.map(str::to_string),
         run_id: run.map(|r| r.0.to_string()),
         campaign: run.map(|r| r.1.to_string()),
@@ -258,19 +259,19 @@ impl App {
     /// Append the orchestrator's current state to its project's `sessions.jsonl` (display only; a failure is logged).
     pub(super) fn note_orchestrator(&self, orch: &Orchestrator, native: Option<&str>, status: SessionStatus) -> Option<String> {
         let id = self.orchestrator_record(orch)?;
-        let line = session_line(id.clone(), &orch.id, SessionKind::Orchestrator, None, native, None, orch.generation, status);
+        let line = session_line(id.clone(), &orch.id, SessionKind::Orchestrator, None, native, None, "claude", orch.generation, status);
         if self.projects.append_session(&line).is_err() {
             self.note("session_record_failed", &[]);
         }
         Some(id)
     }
 
-    /// A run of `project` started: one `kind: run` line, parented to the project's orchestrator.
-    pub(super) fn note_run(&self, project: &Project, run_id: &str, campaign: &str) {
+    /// A run of `project` started on `engine`: one `kind: run` line with that provider, parented to the project's orchestrator.
+    pub(super) fn note_run(&self, project: &Project, run_id: &str, campaign: &str, engine: crate::adapter::Engine) {
         let Ok(orch) = self.orchestrator(&project.id, Path::new(&project.root)) else { return };
         let parent = self.orchestrator_record(&orch);
         let Ok(id) = pc::fresh_id(pc::SESSION_PREFIX) else { return };
-        let line = session_line(id, &project.id, SessionKind::Run, parent, None, Some((run_id, campaign)), 1, SessionStatus::Running);
+        let line = session_line(id, &project.id, SessionKind::Run, parent, None, Some((run_id, campaign)), engine.id(), 1, SessionStatus::Running);
         if self.projects.append_session(&line).is_err() {
             self.note("session_record_failed", &[]);
         }

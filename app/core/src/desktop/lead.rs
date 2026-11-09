@@ -1024,7 +1024,7 @@ impl App {
             // The turn is over: the orchestrator is idle again (or its turn failed), still on this conversation.
             if let Some(id) = record {
                 let status = if matches!(&end, Ok(Done { is_error: false, .. })) { SessionStatus::Stopped } else { SessionStatus::Failed };
-                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, rec_gen, status);
+                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, "claude", rec_gen, status);
                 let _ = projects.append_session(&line);
             }
             lock(&active).remove(&project);
