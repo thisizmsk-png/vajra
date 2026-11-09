@@ -244,8 +244,12 @@ impl Term {
         let mut ok = true;
         if tail.skipped > 0 || alt.is_some() {
             ok = self.send(Event::Skipped { bytes: tail.skipped, alt });
+            if !ok {
+                // The notice did not get through, so the tail was not offered either: keep it for the next view.
+                h.ring.restore(std::mem::replace(&mut tail, hidden::Tail { bytes: Vec::new(), skipped: 0 }));
+            }
         }
-        if !tail.bytes.is_empty() {
+        if ok && !tail.bytes.is_empty() {
             let len = tail.bytes.len();
             *lock(&self.credit) += len;
             ok = ok && self.send(Event::Data(tail.bytes));

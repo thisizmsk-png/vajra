@@ -51,6 +51,12 @@ impl Ring {
         self.len += data.len();
     }
 
+    /// Put a taken tail back (it could not be delivered), counting what it had left out. Only valid on an emptied ring.
+    pub fn restore(&mut self, tail: Tail) {
+        self.push(&tail.bytes);
+        self.dropped += tail.skipped;
+    }
+
     /// The kept bytes in order, and how many were left out; the ring is empty (and its memory freed) afterwards.
     ///
     /// When older bytes were dropped the tail starts after the first newline, so it never begins in the middle of a
@@ -205,6 +211,17 @@ mod tests {
         let t = r.take();
         assert_eq!(t.bytes.len(), RING, "kept whole rather than trimmed to nothing");
         assert!(t.bytes.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn a_restored_tail_comes_out_again_with_its_count() {
+        let mut r = Ring::default();
+        r.push(&vec![b'x'; RING + 5]);
+        r.push(b"\nlast\n");
+        let first = r.take();
+        let copy = Tail { bytes: first.bytes.clone(), skipped: first.skipped };
+        r.restore(first);
+        assert_eq!(r.take(), copy);
     }
 
     #[test]

@@ -405,3 +405,27 @@ fn hiding_during_a_flood_never_sends_data_while_hidden_and_the_tail_continues_in
         assert_eq!(n.last(), Some(&400_000), "round {round}: the tail ends at the last line");
     }
 }
+
+#[test]
+fn a_view_that_refuses_the_skipped_notice_does_not_lose_the_tail_the_next_view_gets_it() {
+    let f = Fixture::new("hid-skipfail");
+    let t = f.terminals();
+    let (s, out) = sink();
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r2 = refuse.clone();
+    let gate: Sink = Arc::new(move |e| !(r2.load(Ordering::SeqCst) && matches!(e, Event::Skipped { .. })) && s(e));
+    let info = t.open(&f.root, &f.roots(), 24, 80, gate).unwrap();
+    out.until("$", 5);
+    t.ack(info.id, 1 << 20).unwrap();
+    out.now();
+    t.set_visible(info.id, false, false).unwrap();
+    run_hidden(&t, &f, info.id, "yes 'kept for later' | head -n 60000; echo ENDMARK_SKIPFAIL");
+    refuse.store(true, Ordering::SeqCst);
+    t.set_visible(info.id, true, false).unwrap(); // the notice is refused: nothing else may be sent, nothing lost
+    assert!(out.for_ms(300).iter().all(|e| !matches!(e, Event::Data(_) | Event::Skipped { .. })), "the tail is not sent after a refused notice");
+    let (s2, out2) = sink();
+    t.attach(info.id, s2).unwrap();
+    let got = out2.for_ms(500);
+    assert_eq!(skipped_of(&got).len(), 1, "{got:?}");
+    assert!(text(&got).contains("ENDMARK_SKIPFAIL") && text(&got).contains("kept for later"), "the new view gets the tail");
+}
