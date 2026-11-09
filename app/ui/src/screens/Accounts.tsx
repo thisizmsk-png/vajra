@@ -119,7 +119,7 @@ export function AccountRow({ account: a, usage, onReload, onKey, onRemove }: { a
             {a.models.map((m) => <ModelRow key={m.id} account={a} model={m} />)}
           </ul>
         )}
-        <BaseUrl key={a.base_url ?? ""} account={a} onSaved={onReload} />
+        {apiKey && <BaseUrl key={a.base_url ?? ""} account={a} onSaved={onReload} />}
       </div>
       <div className="v-acct__actions">
         {!apiKey && <Button size="sm" variant="ghost" aria-label={`${C.check}: ${a.label}`} onClick={onReload}>{C.check}</Button>}

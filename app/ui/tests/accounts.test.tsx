@@ -259,6 +259,16 @@ describe("the OpenRouter key", () => {
 });
 
 describe("advanced: base URL", () => {
+  it("is offered only for gateway (API key) accounts, never for CLI-login accounts", async () => {
+    settings();
+    const or = await account("OpenRouter");
+    expect(within(or).queryByLabelText(C.baseUrlLabel)).not.toBeNull();
+    for (const name of ["Claude Code", "Codex CLI"]) {
+      const row = await account(name);
+      expect(within(row).queryByText(C.advanced)).toBeNull();
+    }
+  });
+
   it("refuses a URL with a user name or password in it, and saves a plain one", async () => {
     const f = settings();
     const or = await account("OpenRouter");
