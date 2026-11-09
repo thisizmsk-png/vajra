@@ -586,6 +586,36 @@ impl App {
         runs
     }
 
+    /// The project a launch in `cwd` runs under, read before anything is spawned: the store project pinned by the folder's
+    /// recorded launches if there are any (a resume must not take up a `.git` a worker of the earlier run rewrote, which
+    /// the store's worktree lookup would follow), else the store project of the folder now (#80 review).
+    ///
+    /// "The folder" is by its real path, so a resume through a symlink alias finds the folder's existing membership.
+    /// Recorded runs of the same real folder that disagree on its project, or one with no pinned project, refuse the
+    /// launch rather than guess. A pinned project must still be active.
+    pub(super) fn launch_project(&self, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let want = real(cwd);
+        let mut ids: Vec<String> = Vec::new();
+        for r in self.recorded_runs() {
+            let Some(c) = self.read_run_cwd(&r) else { continue };
+            if real(&c) != want {
+                continue;
+            }
+            match self.pinned_project(&r).filter(|p| crate::projects::contract::valid_project_id(p)) {
+                Some(p) if !ids.contains(&p) => ids.push(p),
+                Some(_) => {}
+                // A recorded run of this folder with no pinned project: the membership is incomplete.
+                None => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
+            }
+        }
+        match ids.len() {
+            0 => self.project_of_folder(cwd).map_err(|e| e.to_json()),
+            1 => self.active_project(&ids[0]).map_err(|e| e.to_json()),
+            _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
+        }
+    }
+
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
