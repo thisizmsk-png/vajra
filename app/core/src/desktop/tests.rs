@@ -3064,6 +3064,26 @@ fn a_main_format_record_does_not_block_a_new_launch_in_its_folder_and_is_left_un
     assert!(app.other_project_roots("20261105-1240", &a).is_ok(), "the old record of the same folder does not refuse the ask");
 }
 
+/// #80 review (main format): an old record for folder X pins nothing, but X is still some project's folder: another project's Lead is
+/// denied it, as it is any other project's.
+#[test]
+fn a_main_format_record_still_denies_its_folder_to_another_projects_lead() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (x, b) = (t.0.join("x"), t.0.join("b"));
+    for d in [x.join(".git"), x.join("src"), b.join(".git")] {
+        fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261105-1230", &x, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let old = app.data.join("control/lead/20261105-1230");
+    for f in ["project_key", "project_loc", "project_main", "cwd_real"] {
+        let _ = fs::remove_file(old.join(f));
+    }
+    app.record_run("20261105-1240", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 2).unwrap();
+    let denied = app.other_project_roots("20261105-1240", &b).unwrap();
+    assert!(denied.contains(&x), "the old record's folder stays denied to another project's Lead: {denied:?}");
+}
+
 #[test]
 fn records_of_one_folder_under_two_different_projects_still_refuse() {
     let t = Tmp::new();
