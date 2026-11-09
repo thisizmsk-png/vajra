@@ -555,10 +555,49 @@ impl App {
             }
         }
         match keys.len() {
-            0 => Ok(super::caps::project_key(cwd)),
+            0 => {
+                self.admit_new_location(&want)?;
+                Ok(super::caps::project_key(cwd))
+            }
             1 => Ok(keys.remove(0)),
             _ => Err(super::fail("project_membership_inconsistent", "earlier runs of this folder were recorded under different projects")),
         }
+    }
+
+    /// A NEW project location `want` found inside the tree of an already-pinned location may become its own project only if
+    /// its `.git` is (a) a real directory (not a symlink) with no `commondir` file: a self-contained nested repository; or
+    /// (b) a `gitdir:` file whose target resolves, by canonical path, INSIDE an enclosing pinned project's own common dir:
+    /// a submodule of that project. Anything else (a pointer into another project, a symlinked `.git`, a redirecting
+    /// `commondir`, an unresolvable target) is refused and never pinned, so a worker cannot plant a `.git` that pulls a
+    /// subfolder into another project. A location outside every pinned tree is not constrained here.
+    fn admit_new_location(&self, want: &Path) -> Result<(), Value> {
+        let mut enclosing: Vec<PathBuf> = Vec::new();
+        for r in self.recorded_runs() {
+            let (Some(loc), Some(key)) = (self.read_run_loc(&r), self.read_run_key(&r)) else { continue };
+            if loc != want && want.starts_with(&loc) && !enclosing.contains(&key) {
+                enclosing.push(key);
+            }
+        }
+        if enclosing.is_empty() {
+            return Ok(());
+        }
+        let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
+        let git = want.join(".git");
+        let md = std::fs::symlink_metadata(&git).map_err(|_| refuse("this folder's .git cannot be read"))?;
+        if md.is_dir() {
+            return if std::fs::symlink_metadata(git.join("commondir")).is_err() { Ok(()) } else { Err(refuse("this folder's .git points at another project's common dir")) };
+        }
+        if md.is_file() {
+            let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
+            let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
+            let real = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok());
+            if let Some(real) = real {
+                if enclosing.iter().any(|k| std::fs::canonicalize(k).is_ok_and(|k| real.starts_with(k))) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project"))
     }
 
     /// The project location pinned when the run was launched.
