@@ -187,19 +187,21 @@ def launch_hidden(binary, env_extra, wait=20):
     args = ["open", "-g", "-j", "-n"] + [x for k, v in env_extra.items() for x in ("--env", f"{k}={v}")] + [app]
     subprocess.run(args, check=True, timeout=20)
     end = time.time() + wait
+    # A new process of the same binary is not necessarily ours (the human may start the app while we wait): only one whose
+    # environment holds the isolated data dir given to this `open` counts, both to return it and to end it.
+    def ours():
+        return sorted(pid for pid in {pid for pid, r in ps().items() if r[3] == exe} - have if started_by_us(pid, env_extra))
+
     while True:
-        new = {pid for pid, r in ps().items() if r[3] == exe} - have
-        if new:
-            return min(new)
+        mine = ours()
+        if mine:
+            return mine[0]
         if time.time() >= end:
             break
         time.sleep(0.25)
-    # Never found in time. One more look has just been made; anything that is new now is ours (it did not exist before
-    # `open`) and must not be left running.
-    new = {pid for pid, r in ps().items() if r[3] == exe} - have
-    for pid in sorted(new):
-        if started_by_us(pid, env_extra):
-            stop_pid(pid)
+    # Never found in time: one more look; anything of ours that is running now must not be left behind.
+    for pid in ours():
+        stop_pid(pid)
     raise SystemExit("the app did not start")
 
 

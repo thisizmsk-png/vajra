@@ -184,6 +184,36 @@ class LaunchFailure(unittest.TestCase):
             P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=0.0)
         self.assertEqual(stopped, [], "an app without our isolated data dir is the human's: never touched")
 
+    def test_given_an_unrelated_instance_appears_during_the_wait_when_launching_then_it_is_neither_returned_nor_stopped(self):
+        exe = "/x/Vajra.app/Contents/MacOS/vajra-desktop"
+        P.subprocess.run = lambda *a, **k: types.SimpleNamespace(stdout="/x/vajra-desktop HOME=/Users/human")  # `open`, and `ps eww`
+        calls = {"n": 0}
+
+        def ps():
+            calls["n"] += 1
+            return {} if calls["n"] == 1 else {999: (1, 1, 0.0, exe)}  # the human's app appears right after the launch
+
+        P.ps = ps
+        stopped = []
+        P.stop_pid = stopped.append
+        with self.assertRaises(SystemExit):
+            P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=0.3)
+        self.assertEqual(stopped, [], "never ended, and never taken for ours")
+
+    def test_given_ours_and_an_unrelated_instance_when_launching_then_ours_is_returned(self):
+        exe = "/x/Vajra.app/Contents/MacOS/vajra-desktop"
+        out = {"999": "/x/vajra-desktop HOME=/Users/human", "123": "/x/vajra-desktop VAJRA_DESKTOP_DATA=/tmp/iso HOME=/tmp/iso"}
+
+        def run(args, **k):
+            if args[0] == "ps":
+                return types.SimpleNamespace(stdout=out[args[-1]])
+            return None
+
+        P.subprocess.run = run
+        seq = iter([{}, {999: (1, 1, 0.0, exe), 123: (1, 1, 0.0, exe)}])
+        P.ps = lambda: next(seq, {999: (1, 1, 0.0, exe), 123: (1, 1, 0.0, exe)})
+        self.assertEqual(P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=1), 123)
+
     def test_given_the_launch_fails_when_main_runs_then_the_temp_home_is_removed(self):
         import tempfile
         made = []
