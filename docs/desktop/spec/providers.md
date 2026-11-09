@@ -122,8 +122,8 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
   of the setting and where it was found (`cli_env_block`, `cli_config`, `cli_api_key_helper`), never a value. The detector
   reads only the CLIs' own config: Claude's `settings.json` and `settings.local.json` under `~/.claude` (a non-empty
   `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` with a non-empty value) and Codex's
-  `config.toml` under `~/.codex` (a line that sets `OPENAI_API_KEY` / `CODEX_API_KEY`; only the text left of `=` is looked
-  at). It never opens `auth.json`, a keychain item or the app's own environment (`ENV_ALLOW` already scrubs that, and
+  `config.toml` under `~/.codex` (a line that sets `OPENAI_API_KEY` / `CODEX_API_KEY` to a non-blank value; as for Claude, an
+  empty value is not a key, and the value is only tested for being blank, never kept). It never opens `auth.json`, a keychain item or the app's own environment (`ENV_ALLOW` already scrubs that, and
   `providers[].billing.key_in_app_env` reports it). A plain file only, no link followed, at most 256 KiB; a file that is
   missing or not understood finds nothing.
 - **`state`**: `signed_in`, `signed_out`, `not_installed`, `key_saved`, `key_missing`, `cannot_tell`. An unknown value reads as

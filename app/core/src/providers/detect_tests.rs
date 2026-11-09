@@ -235,7 +235,7 @@ fn the_override_detector_reads_claude_settings_names_and_ignores_empty_values_an
     assert_eq!(account(&accounts(&f), "claude").billing.override_warning.unwrap().found_in, "cli_api_key_helper");
     f.files.insert(".claude/settings.json", r#"{"env":{"ANTHROPIC_API_KEY":""},"apiKeyHelper":" "}"#);
     f.files.insert(".claude/settings.local.json", "not json at all");
-    f.files.insert(".codex/config.toml", "# OPENAI_API_KEY = \"x\"\nnote = \"OPENAI_API_KEY\"\n");
+    f.files.insert(".codex/config.toml", "# OPENAI_API_KEY = \"x\"\nnote = \"OPENAI_API_KEY\"\nOPENAI_API_KEY = \"\"\nCODEX_API_KEY = ''\nOPENAI_API_KEY =   \" \"\n");
     let l = accounts(&f);
     assert!(l.accounts.iter().all(|a| a.billing.override_warning.is_none()), "{l:?}");
 }

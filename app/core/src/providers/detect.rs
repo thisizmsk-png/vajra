@@ -285,7 +285,8 @@ fn warn(name: &str, found_in: &str) -> OverrideWarning {
 ///
 /// - Claude settings (JSON): a non-empty `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` or
 ///   `ANTHROPIC_AUTH_TOKEN` with a non-empty value.
-/// - Codex config (TOML): a line that sets `OPENAI_API_KEY` or `CODEX_API_KEY`. Only the text left of `=` is looked at.
+/// - Codex config (TOML): a line that sets `OPENAI_API_KEY` or `CODEX_API_KEY` to a non-blank value (the value is only
+///   tested for being blank, never kept).
 ///
 /// A file that is missing or not understood finds nothing: "cannot tell" never blocks.
 pub fn override_warning(engine: Engine, p: &dyn Probe) -> Option<OverrideWarning> {
@@ -310,9 +311,11 @@ fn claude_override(text: &str) -> Option<OverrideWarning> {
 
 fn codex_override(text: &str) -> Option<OverrideWarning> {
     text.lines().find_map(|line| {
-        let (left, _value) = line.trim_start().split_once('=')?;
+        let (left, value) = line.trim_start().split_once('=')?;
         let name = left.trim().trim_matches(|c| c == '"' || c == '\'');
-        adapter::CODEX_KEYS.iter().find(|k| **k == name).map(|k| warn(k, "cli_config"))
+        // Same rule as Claude: an empty value is not a key. Only whether it is blank is looked at; it is never kept.
+        let blank = value.trim().trim_matches(|c| c == '"' || c == '\'').trim().is_empty();
+        adapter::CODEX_KEYS.iter().find(|k| **k == name && !blank).map(|k| warn(k, "cli_config"))
     })
 }
 
