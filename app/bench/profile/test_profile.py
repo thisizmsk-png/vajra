@@ -181,6 +181,47 @@ class Identity(unittest.TestCase):
         self.assertEqual(killed, [99991], "only the process that still matches is signalled")
 
 
+class StopApp(unittest.TestCase):
+    """The app pid is not our child, so its identity is taken at launch and re-checked before every signal."""
+
+    def setUp(self):
+        self._saved = (P.identity, P.os.kill, P.ps, P.OWN.copy())
+
+    def tearDown(self):
+        P.identity, P.os.kill, P.ps = self._saved[:3]
+        P.OWN.clear(); P.OWN.update(self._saved[3])
+
+    def run_stop(self, ident, now_seq, listed=True):
+        sent = []
+        P.os.kill = lambda pid, sig: sent.append((pid, sig))
+        it = iter(now_seq)
+        P.identity = lambda pid: next(it, now_seq[-1])
+        P.ps = lambda: {4242: (1, 0, 0, "x")} if listed else {}
+        P.stop_pid(4242, ident)
+        return sent
+
+    def test_given_the_same_process_when_stopping_then_term_then_kill_each_after_a_check(self):
+        ident = (500, "vajra-desktop")
+        sig = self.run_stop(ident, [ident], listed=True)  # never exits: both signals are sent
+        self.assertEqual([s for _, s in sig], [signal.SIGTERM, signal.SIGKILL])
+
+    def test_given_a_pid_reused_before_the_first_signal_when_stopping_then_nothing_is_sent(self):
+        self.assertEqual(self.run_stop((500, "vajra-desktop"), [(900, "sleep")]), [])
+
+    def test_given_the_app_exits_on_term_and_its_pid_is_reused_when_stopping_then_no_kill_follows(self):
+        ident = (500, "vajra-desktop")
+        # check before TERM: ours; then while waiting it is gone and the pid now belongs to another process
+        sig = self.run_stop(ident, [ident, (901, "sleep")], listed=True)
+        self.assertEqual([s for _, s in sig], [signal.SIGTERM])
+
+    def test_given_no_identity_was_ever_taken_when_stopping_then_nothing_is_sent(self):
+        P.OWN.pop(4242, None)
+        sent = []
+        P.os.kill = lambda pid, sig: sent.append((pid, sig))
+        P.stop_pid(4242)
+        self.assertEqual(sent, [])
+
+
 class LaunchFailure(unittest.TestCase):
     """If the app is started but its pid cannot be found, nothing is left behind (the review of #101)."""
 

@@ -180,6 +180,14 @@ def identity(pid):
     return (micro, comm) if comm else None
 
 
+def safe_identity(pid):
+    """identity(), or None if it could not be read (an app whose identity is unknown is never signalled)."""
+    try:
+        return identity(pid)
+    except Exception:
+        return None
+
+
 def snapshot_tree(pid):
     """Every descendant of `pid` with its identity, taken while the tree still hangs together (once the parent dies they
     are reparented to launchd and can no longer be told from anyone else's)."""
@@ -221,6 +229,9 @@ def started_by_us(pid, env_extra):
     return f"VAJRA_DESKTOP_DATA={mark}" in out
 
 
+OWN = {}  # pid -> identity() taken when launch_hidden found the app; stop_pid signals only while it still matches
+
+
 def launch_hidden(binary, env_extra, wait=20):
     """Start the .app without activating it and with its window hidden (`open -g -j`), so a bench run never takes focus or
     puts a window in front of the human. Returns the app's pid; it is not our child, so `stop_pid` ends exactly that pid. If the
@@ -244,26 +255,41 @@ def launch_hidden(binary, env_extra, wait=20):
     while True:
         mine = ours()
         if mine:
+            OWN[mine[0]] = safe_identity(mine[0])
             return mine[0]
         if time.time() >= end:
             break
         time.sleep(0.25)
     # Never found in time: one more look; anything of ours that is running now must not be left behind.
     for pid in ours():
+        OWN[pid] = safe_identity(pid)
         stop_pid(pid)
     raise SystemExit("the app did not start")
 
 
-def stop_pid(pid):
-    """Quit exactly this app pid (SIGTERM, then SIGKILL); never a match by name."""
+def signal_if_same(pid, ident, sig):
+    """Send `sig` to `pid` only if it is still the process identified by `ident` (start time to the microsecond, and command).
+    A pid that was reused, or whose identity was never taken, is not signalled. Returns True if the signal was sent."""
+    if ident is None or identity(pid) != ident:
+        print(f"warning: pid {pid} is not the app this run started (gone, reused or unverified): not signalling it", file=sys.stderr)
+        return False
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def stop_pid(pid, ident=None):
+    """Quit exactly this app pid (SIGTERM, then SIGKILL); never a match by name. The pid's identity is re-checked right
+    before EACH signal, so an app that exited (its pid possibly reused) is never signalled again."""
+    ident = ident if ident is not None else OWN.get(pid)
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.kill(pid, sig)
-        except ProcessLookupError:
+        if not signal_if_same(pid, ident, sig):
             return
         end = time.time() + 8
         while time.time() < end:
-            if pid not in ps():
+            if pid not in ps() or identity(pid) != ident:
                 return
             time.sleep(0.2)
 
