@@ -31,8 +31,8 @@ impl Default for Limits {
 }
 
 /// Where the user's login-shell environment comes from. The login shell rebuilds most of its environment from the
-/// user's profile; this supplies the base it starts from. Swappable: #70 resolves the login-shell PATH once at startup
-/// and implements this, so GUI launches find the same tools a Terminal window does.
+/// user's profile; this supplies the base it starts from. The app's implementation is `UserPathEnv`, which reads the
+/// login environment `userpath` resolved once at startup, so a tab finds the same tools a Terminal window does.
 pub trait LoginEnv: Send + Sync {
     /// The PATH to start the shell with, if one was resolved.
     fn path(&self) -> Option<OsString>;
@@ -44,16 +44,61 @@ pub trait LoginEnv: Send + Sync {
     }
 }
 
-/// Until #70 lands: no resolved PATH, and `$SHELL` from the app's own environment.
-pub struct ProcessEnv;
+/// The login environment `crate::userpath` resolved at startup: its PATH (the user's login-shell PATH, then the process
+/// PATH, then the usual install dirs; absolute entries only) and its login shell. A terminal is interactive, so it gets
+/// the USER PATH, unlike the scripts the app runs that hold keys, which stay on the system PATH.
+pub struct UserPathEnv {
+    home: Option<PathBuf>,
+    /// Fixed dirs (tests); `None` reads `userpath::current()` live.
+    dirs: Option<Vec<PathBuf>>,
+    shell: Option<PathBuf>,
+}
 
-impl LoginEnv for ProcessEnv {
+impl UserPathEnv {
+    /// The app's: `userpath`'s resolved PATH and login shell, and this HOME.
+    pub fn app(home: PathBuf) -> Self {
+        Self { home: Some(home), dirs: None, shell: None }
+    }
+
+    /// With a fixed PATH, for tests that resolve one themselves (with a temp HOME).
+    pub fn with_dirs(home: PathBuf, dirs: Vec<PathBuf>) -> Self {
+        Self { home: Some(home), dirs: Some(dirs), shell: None }
+    }
+
+    /// Use this shell instead of the resolved login shell (tests, so they get `/bin/sh`).
+    pub fn with_shell(mut self, shell: PathBuf) -> Self {
+        self.shell = Some(shell);
+        self
+    }
+}
+
+impl Default for UserPathEnv {
+    /// The process's own HOME.
+    fn default() -> Self {
+        Self { home: None, dirs: None, shell: None }
+    }
+}
+
+impl LoginEnv for UserPathEnv {
     fn path(&self) -> Option<OsString> {
-        None
+        match &self.dirs {
+            Some(d) => std::env::join_paths(d).ok(),
+            None => crate::userpath::joined(),
+        }
     }
     fn shell(&self) -> Option<PathBuf> {
-        std::env::var_os("SHELL").map(PathBuf::from)
+        self.shell.clone().or_else(|| pick_shell(std::env::var_os("SHELL").map(PathBuf::from), crate::userpath::login_shell()))
     }
+    fn home(&self) -> Option<PathBuf> {
+        self.home.clone()
+    }
+}
+
+/// The terminal's shell: the user's configured `$SHELL` when it is usable (absolute, an executable file), whatever it is
+/// (fish, nu, elvish...). Only otherwise the resolved login shell. The POSIX-only list in `userpath` belongs to its PATH
+/// probe script, not to which interactive shell the human gets.
+pub fn pick_shell(configured: Option<PathBuf>, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    configured.filter(|p| usable_shell(p)).or(fallback)
 }
 
 /// A shell program the core may run: absolute, an executable regular file. Anything else falls back to `/bin/sh`.
@@ -113,6 +158,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_configured_executable_shell_outside_the_probe_list_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("fish");
+        let fish = d.join("fish");
+        std::fs::write(&fish, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fish, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let zsh = Some(PathBuf::from("/bin/zsh"));
+        assert_eq!(pick_shell(Some(fish.clone()), zsh.clone()), Some(fish.clone()));
+        // and it reaches the shell the terminal runs
+        assert_eq!(choose_shell(&UserPathEnv::with_dirs(d.clone(), vec![]).with_shell(fish.clone())), fish);
+    }
+
+    #[test]
+    fn an_unusable_configured_shell_falls_back_to_the_resolved_login_shell() {
+        let d = dir("nofish");
+        let plain = d.join("fish"); // exists but is not executable
+        std::fs::write(&plain, "x").unwrap();
+        let zsh = Some(PathBuf::from("/bin/zsh"));
+        for bad in [Some(plain), Some(d.join("missing")), Some(PathBuf::from("fish")), None] {
+            assert_eq!(pick_shell(bad, zsh.clone()), zsh);
+        }
     }
 
     #[test]

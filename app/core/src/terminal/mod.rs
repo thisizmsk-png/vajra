@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::lock;
-pub use policy::{Limits, LoginEnv, Placement, ProcessEnv};
+pub use policy::{Limits, LoginEnv, Placement, UserPathEnv};
 
 const CHUNK: usize = 64 * 1024;
 /// Output that may be read ahead of the pace before the reader starts waiting (so a command's burst of output is free).
@@ -210,7 +210,7 @@ impl Default for Terminals {
 
 impl Terminals {
     pub fn new() -> Self {
-        Self::with(Limits::default(), Arc::new(ProcessEnv))
+        Self::with(Limits::default(), Arc::new(UserPathEnv::default()))
     }
 
     pub fn with(limits: Limits, env: Arc<dyn LoginEnv>) -> Self {

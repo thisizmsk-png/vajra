@@ -18,12 +18,13 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 use vajra_desktop::control::{self, mcp, service, socket};
-use vajra_desktop::desktop::{App, Res, collect_changes};
+use serde_json::Value;
+use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
 use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
-use vajra_desktop::terminal::{Event as TermEvent, LoginEnv, Sink as TermSink, Terminals};
+use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
 /// The one event the UI listens to.
 const CHANGED: &str = "changed";
@@ -44,9 +45,71 @@ fn approve_plan(app: State<'_, App>, id: String, plan_sha256: String) -> Res {
     app.approve_plan(&id, &plan_sha256)
 }
 
+/// Receipt-wrapped actions (FG-11): the answer is always a `vajra.receipt/1`; see `desktop::state`.
+#[tauri::command(async)]
+fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sha256: String) -> Value {
+    app.act_approve_plan(&envelope, &id, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
+    app.act_stop_worker(&envelope, &worker, reason.as_deref())
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String) -> Value {
+    app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign }, &cwd)
+}
+
+#[tauri::command(async)]
+fn project_state(app: State<'_, App>, project_id: String, since_rev: Option<u64>) -> Res {
+    app.project_state(&project_id, since_rev)
+}
+
 #[tauri::command(async)]
 fn reject_plan(app: State<'_, App>, id: String, reason: String) -> Res {
     app.reject_plan(&id, &reason)
+}
+
+#[tauri::command(async)]
+fn app_info(app: State<'_, App>) -> Res {
+    app.app_info()
+}
+
+#[tauri::command(async)]
+fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
+    app.project_list(include_archived.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_add(app: State<'_, App>, path: String, confirm_nested: Option<bool>) -> Res {
+    app.project_add(&path, confirm_nested.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn project_rename(app: State<'_, App>, id: String, name: String, expect_rev: Option<u64>) -> Res {
+    app.project_rename(&id, &name, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_archive(app: State<'_, App>, id: String, expect_rev: Option<u64>) -> Res {
+    app.project_archive(&id, expect_rev)
+}
+
+#[tauri::command(async)]
+fn project_sessions(app: State<'_, App>, id: String) -> Res {
+    app.project_sessions(&id)
+}
+
+#[tauri::command(async)]
+fn project_migration_suggest(app: State<'_, App>) -> Res {
+    app.project_migration_suggest()
+}
+
+#[tauri::command(async)]
+fn project_migration_confirm(app: State<'_, App>, roots: Vec<String>) -> Res {
+    app.project_migration_confirm(&roots)
 }
 
 #[tauri::command(async)]
@@ -162,23 +225,6 @@ fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
 // to the tab's own channel as raw bytes (an ArrayBuffer in the webview); the end of the shell is one JSON message
 // {"exit": code}. The core checks the cwd against the roots it knows and starts the login shell as argv; the UI never
 // names a program.
-
-/// The shell's environment base. Swap point for #70: return its resolved login-shell PATH from `path`.
-struct AppLoginEnv {
-    home: PathBuf,
-}
-
-impl LoginEnv for AppLoginEnv {
-    fn path(&self) -> Option<std::ffi::OsString> {
-        None
-    }
-    fn shell(&self) -> Option<PathBuf> {
-        std::env::var_os("SHELL").map(PathBuf::from)
-    }
-    fn home(&self) -> Option<PathBuf> {
-        Some(self.home.clone())
-    }
-}
 
 fn term_sink(ch: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> TermSink {
     use tauri::ipc::InvokeResponseBody as Body;
@@ -389,6 +435,8 @@ fn main() {
         std::process::exit(code);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // A Finder/Dock launch has the minimal GUI PATH: ask the login shell once (bounded by userpath::TIMEOUT).
+    vajra_desktop::userpath::init(&home);
     let app = match App::open(&data, &home) {
         Ok(a) => a,
         Err(e) => {
@@ -420,17 +468,26 @@ fn main() {
     let built = tauri::Builder::default()
         .manage(app)
         .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
-        .manage(Terminals::with(Default::default(), std::sync::Arc::new(AppLoginEnv { home: home.clone() })))
+        .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();
+            // Receipts notify on their own: an action with no bus output still moves the projection.
+            let sink_handle = handle.clone();
+            handle.state::<App>().set_change_sink(Box::new(move |p| {
+                let _ = sink_handle.emit(CHANGED, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
                 loop {
-                    if let Some(payload) = collect_changes(&sub, Duration::from_secs(1)) {
+                    let changed = collect_changes(&sub, Duration::from_secs(1));
+                    // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
+                    handle.state::<App>().refresh_workers();
+                    if let Some(mut payload) = changed {
+                        // The revision each known project is now at, so a subscriber refetches `project_state`.
+                        payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
                         let _ = handle.emit(CHANGED, payload);
                     }
-                    handle.state::<App>().refresh_workers();
                     // ADR-9 item 7: no App Nap while a run is active.
                     #[cfg(target_os = "macos")]
                     {
@@ -485,6 +542,18 @@ fn main() {
             inbox,
             approve_plan,
             reject_plan,
+            app_info,
+            project_list,
+            project_add,
+            project_rename,
+            project_archive,
+            project_sessions,
+            project_migration_suggest,
+            project_migration_confirm,
+            act_approve_plan,
+            act_stop_worker,
+            act_start_run,
+            project_state,
             term_open,
             term_attach,
             term_list,

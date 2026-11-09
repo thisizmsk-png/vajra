@@ -44,7 +44,7 @@ describe("History", () => {
     setTransport(fakeIpc({ list_campaigns: camps }).transport);
     render(<History />);
     fireEvent.click(await screen.findByRole("button", { name: "a-camp" }));
-    expect(window.location.hash).toBe("#/run?slug=a-camp");
+    expect(window.location.hash).toBe("#/review?slug=a-camp");
   });
 
   it("says when there are no campaigns", async () => {

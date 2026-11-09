@@ -12,6 +12,7 @@ pub mod lead_settings;
 pub mod mcp;
 pub mod nonce;
 pub mod queue;
+pub mod receipt;
 pub mod reconcile;
 pub mod service;
 pub mod sha256;

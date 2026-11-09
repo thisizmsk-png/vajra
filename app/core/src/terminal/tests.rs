@@ -17,8 +17,7 @@ fn types_a_command_and_sees_its_output_in_the_root_with_the_temp_home() {
 fn a_worker_worktree_is_a_valid_place() {
     let f = Fixture::new("wt");
     let t = f.terminals();
-    let (s, out) = sink();
-    let info = t.open(&f.worktree, &f.roots(), 24, 80, s).unwrap();
+    let (info, out) = open_at(&t, &f, &f.worktree);
     assert_eq!((info.cwd.clone(), info.root.clone()), (f.worktree.clone(), f.root.clone()));
     t.write(info.id, b"pwd\n").unwrap();
     assert!(out.until("w1", 5).contains("worktrees/w1"));
@@ -62,6 +61,38 @@ fn the_shell_gets_the_scrubbed_env_plus_the_resolved_path() {
     let seen = out.until("PATH2OK", 5);
     assert!(seen.contains("S=[] T=xterm-256color C=truecolor"), "{seen}");
     assert!(seen.contains("PATH2OK"), "the resolved PATH did not reach the shell: {seen}");
+}
+
+#[test]
+fn a_terminal_gets_the_users_login_path_from_the_resolved_login_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("userpath");
+    // A stand-in login shell that prints the PATH a real one would after sourcing the user's profile.
+    let fake = f.dir.join("fake-login-shell");
+    std::fs::write(&fake, "#!/bin/sh\nprintf '%s' '__VAJRA_PATH_BEGIN__/user/tools/bin:/usr/bin:/bin__VAJRA_PATH_END__'\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Resolve it the way the app does at startup (#70), with a temp HOME, then hand it to the terminal.
+    let login = crate::userpath::detect(&fake, &f.dir, Duration::from_secs(5)).expect("the stand-in shell resolves");
+    let dirs = crate::userpath::effective(Some(login), &[PathBuf::from("/usr/bin")], &f.dir);
+    let env = Arc::new(UserPathEnv::with_dirs(f.dir.clone(), dirs).with_shell("/bin/sh".into()));
+    let t = Terminals::with(Limits::default(), env);
+    let (info, out) = open_root(&t, &f);
+    t.write(info.id, b"case \":$PATH:\" in *:/user/tools/bin:*) echo USERPATH$((1+1))OK;; esac; echo HOME=$HOME\n").unwrap();
+    let home_line = format!("HOME={}", f.dir.display()); // the typed echo says HOME=$HOME, so this is the shell's answer
+    let seen = out.until(&home_line, 5);
+    assert!(seen.contains("USERPATH2OK"), "the user's login PATH did not reach the tab: {seen}");
+    assert!(seen.contains(&home_line), "{seen}");
+}
+
+#[test]
+fn the_app_environment_is_the_resolved_login_environment_and_nothing_secret_goes_with_it() {
+    let env = UserPathEnv::app(PathBuf::from("/home/someone"));
+    assert_eq!(env.path(), crate::userpath::joined());
+    // The rule, not a machine's shell: the configured $SHELL when usable, else the resolved login shell.
+    assert_eq!(env.shell(), policy::pick_shell(std::env::var_os("SHELL").map(PathBuf::from), crate::userpath::login_shell()));
+    assert_eq!(env.home(), Some(PathBuf::from("/home/someone")));
+    // The variables a terminal may inherit from the app are the same four as before: no token, key or nonce.
+    assert_eq!(policy::ENV_ALLOW, ["HOME", "USER", "LOGNAME", "LANG"]);
 }
 
 #[test]
@@ -291,8 +322,9 @@ fn a_flood_that_is_watched_and_acked_at_once_is_still_paced_to_the_output_rate()
 /// A shell running `sleep` in the foreground does not read its input, so a PTY write of any size would block.
 fn sleeping_terminal(t: &Terminals, f: &Fixture) -> (TermInfo, Collect) {
     let (info, out) = open_root(t, f);
-    t.write(info.id, b"sleep 60\n").unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    t.write(info.id, b"echo SLEEPING$((1+1)); sleep 60\n").unwrap();
+    out.until("SLEEPING2", 5);
+    std::thread::sleep(Duration::from_millis(100)); // the shell has printed; give it a moment to start `sleep`
     (info, out)
 }
 
@@ -385,8 +417,8 @@ fn many_small_writes_reach_the_shell_in_order() {
     let t = Arc::new(f.terminals());
     let (info, out) = open_root(&t, &f);
     let file = f.dir.join("typed.txt");
-    t.write(info.id, format!("cat > {}\n", file.display()).as_bytes()).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    t.write(info.id, format!("echo CATRDY$((1+1)); cat > {}\n", file.display()).as_bytes()).unwrap();
+    out.until("CATRDY2", 5);
     // One caller, many tiny writes: what the UI does while typing fast or pasting in pieces.
     for i in 0..500 {
         t.write(info.id, format!("{i}\n").as_bytes()).unwrap();
