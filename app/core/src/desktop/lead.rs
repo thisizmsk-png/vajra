@@ -480,7 +480,8 @@ impl App {
         if own.is_some() {
             return Some(own);
         }
-        let key = key?;
+        // No readable key: nothing else can vouch for it, so it stays unresolved (refused), not "nothing recorded".
+        let Some(key) = key else { return Some(None) };
         for other in self.recorded_runs() {
             if other != run && self.read_run_key(&other).as_ref() == Some(key) {
                 if let Some(Some(m)) = read(&other) {
