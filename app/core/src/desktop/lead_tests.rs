@@ -1479,6 +1479,37 @@ fn an_unresolved_main_on_a_run_with_no_key_still_refuses_the_ask() {
     assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
 }
 
+/// #80 review: a guarded record that exists but cannot be read is never "nothing recorded": the ask is refused. Covers the
+/// main, cwd and location files of another run, and a record directory that cannot be listed.
+#[test]
+fn a_guarded_record_that_exists_but_cannot_be_read_refuses_the_ask() {
+    use std::os::unix::fs::PermissionsExt;
+    for file in ["project_main", "cwd", "project_loc", "LIST"] {
+        let t = Tmp::new();
+        let app = t.app();
+        let other = t.0.join("other");
+        for d in [other.join(".git"), t.repo().join(".git")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+        app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+        assert!(app.other_project_roots(RUN_ID, &t.repo()).is_ok(), "{file}: the fixture is healthy");
+        let lead = app.data.join("control/lead");
+        if file == "LIST" {
+            // Traversable but not listable: the own record still reads, the directory of runs does not.
+            std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o300)).unwrap();
+        } else {
+            // A directory where the file should be: present, not a readable regular file.
+            let f = lead.join("20261108-1100").join(file);
+            let _ = std::fs::remove_file(&f);
+            std::fs::create_dir(&f).unwrap();
+        }
+        let r = app.other_project_roots(RUN_ID, &t.repo());
+        std::fs::set_permissions(&lead, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(r.is_err(), "{file}: an unreadable record refuses instead of allowing: {r:?}");
+    }
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
