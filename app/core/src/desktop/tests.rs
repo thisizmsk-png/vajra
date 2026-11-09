@@ -3037,8 +3037,11 @@ fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite()
     app.sup.kill(&stream).unwrap();
 }
 
+/// The base format: a record written before project keys and locations existed.
 fn without_key(app: &App, run: &str) {
-    fs::remove_file(app.data.join("control/lead").join(run).join("project_key")).unwrap();
+    for f in ["project_key", "project_loc"] {
+        let _ = fs::remove_file(app.data.join("control/lead").join(run).join(f));
+    }
 }
 
 /// #80 codex P1b: a record written before project keys existed (cwd, session and campaign, no key) is migrated once from
@@ -3112,5 +3115,30 @@ fn a_run_first_pinned_in_a_subfolder_keeps_the_whole_project_after_a_git_rewrite
     }
     let denied = app.other_project_roots("20261105-1229", &b).unwrap();
     assert!(denied.contains(&a) && denied.contains(&a.join("tests")) && denied.contains(&a.join("src")), "{denied:?}");
+    app.sup.kill(&stream).unwrap();
+}
+
+/// #80 round 4: genuinely nested repositories (their own `.git`, distinct common dirs) are separate projects: neither held
+/// busy by the other, and each Lead denies the other's folder.
+#[test]
+fn nested_repos_with_their_own_git_stay_separate_projects() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    fs::create_dir_all(outer.join(".git")).unwrap();
+    fs::create_dir_all(inner.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: outer.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &outer, sid, "c", true, 1).unwrap();
+    let key = app.launch_key(&inner).unwrap();
+    assert_eq!(key, caps::project_key(&inner), "the inner repo is its own project");
+    assert_ne!(key, caps::project_key(&outer));
+    app.within_caps(&key, 1).expect("the outer run does not hold the inner project");
+    app.record_run_as("20261105-1231", &inner, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert_eq!(app.launch_key(&inner).unwrap(), key, "and it stays so on the next launch");
+    let denied = app.other_project_roots("20261105-1230", &outer).unwrap();
+    assert!(denied.contains(&inner), "the outer Lead denies the inner project: {denied:?}");
     app.sup.kill(&stream).unwrap();
 }
