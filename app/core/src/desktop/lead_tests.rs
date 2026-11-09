@@ -1093,6 +1093,8 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     ] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
+    // The fixture's own run was pinned before the repo had a `.git`; pin it as the repo is now, so one location has one key.
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(RUN_ID), "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
     let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&other, &second, &second.join("sub")] {
         assert!(roots.contains(want), "every run folder of another project: {want:?} in {roots:?}");
@@ -1267,6 +1269,26 @@ fn a_legacy_record_redirected_before_the_location_write_back_is_refused_and_not_
     assert!(loc.exists(), "a legitimate legacy record is migrated");
 }
 
+/// #80 review [P1]: containment in the asking project's root does not prove ownership when repositories nest. An outer project's
+/// recorded subfolder replaced by a link into a recorded nested project belongs, by deepest guarded membership, to the nested one.
+#[test]
+fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (inner, src) = (t.repo().join("inner"), t.repo().join("src"));
+    for d in [t.repo().join(".git"), inner.join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &inner, SID, "c", true, 1).unwrap();
+    assert_ne!(super::super::caps::project_key(&inner), super::super::caps::project_key(&src), "the fixture nests two projects");
+    assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&inner), "healthy: the nested project is denied");
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&inner, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src);
+    assert!(e.is_err(), "a redirect into the nested project is refused: {e:?}");
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
@@ -1321,4 +1343,61 @@ fn more_other_project_folders_than_the_rules_hold_refuses_the_ask() {
     wait_until("the ask", || idle(&app));
     let got = std::fs::read_to_string(t.data().join("control/lead").join(RUN_ID).join("settings.json")).unwrap();
     assert!(got.contains(&format!("Read(/{}/**)", t.0.join("many/p000").display())) && !got.contains(&format!("Read(/{}/**)", last.display())), "{got}");
+}
+
+/// #80 review [P1]: a legacy record's location is validated against its pinned key on the LAUNCH path too, before it is persisted, even
+/// when the launch then fails: a redirected folder must not leave a trusted-looking location behind for a later ask.
+#[test]
+fn a_launch_never_persists_a_legacy_location_that_does_not_identify_to_the_records_key() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    let loc = app.data.join("control/lead").join(RUN_ID).join("project_loc");
+    std::fs::remove_file(&loc).unwrap();
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    assert!(app.launch_key(&other).is_err(), "a fresh start in the other project is refused");
+    assert!(!loc.exists(), "no invalid location was persisted for the redirected legacy record");
+    assert!(app.other_project_roots(RUN_ID, &src).is_err(), "and a later ask for the redirected run stays refused");
+}
+
+/// #80 review [P1]: a recorded folder keeps its guarded membership when the nested Git boundary it was pinned under disappears.
+#[test]
+fn removing_a_nested_git_keeps_the_folders_pinned_project() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    for d in [outer.join(".git"), inner.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261108-1100", &outer, SID, "b", true, 1).unwrap();
+    app.record_run("20261108-1101", &inner, SID, "a", true, 1).unwrap();
+    let key_a = super::super::caps::project_key(&inner);
+    let key_b = super::super::caps::project_key(&outer);
+    assert_ne!(key_a, key_b, "the fixture nests two projects");
+    assert_eq!(app.launch_key(&inner).unwrap(), key_a, "healthy");
+    std::fs::rename(inner.join(".git"), inner.join(".git.saved")).unwrap();
+    let before = app.recorded_runs().len();
+    match app.launch_key(&inner) {
+        Ok(k) => assert_eq!(k, key_a, "the original pin, never the outer project's"),
+        Err(e) => assert_eq!(code(&e), "project_membership_inconsistent", "{e}"),
+    }
+    assert_eq!(app.recorded_runs().len(), before, "nothing was recorded");
+}
+
+/// #80 review: one location recorded under two different keys is ambiguous and refuses the ask (no tie is allowed).
+#[test]
+fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`).
+    app.record_run("20261108-1100", &t.repo(), SID, "c", true, 1).unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo());
+    assert!(e.is_err(), "two keys at one location refuse: {e:?}");
 }
