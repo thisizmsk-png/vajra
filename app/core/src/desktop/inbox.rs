@@ -153,7 +153,9 @@ impl App {
     fn inbox_at(&self, now: i64) -> Res {
         let all = self.inbox_all_at(now)?;
         let count = all.len();
-        Ok(json!({"count": count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
+        // The total is "needs you"; the campaign count leaves out run proposals (they live on the Director-General surface).
+        let campaign_count = all.iter().filter(|i| i["kind"] != "run_proposal").count();
+        Ok(json!({"count": count, "campaign_count": campaign_count, "items": all.into_iter().take(MAX_ITEMS).collect::<Vec<_>>()}))
     }
 
     /// Every waiting item, oldest first, with no cut: a caller that counts or picks (a project's projection, the item an
