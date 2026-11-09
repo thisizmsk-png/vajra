@@ -6,6 +6,7 @@ import { toHash, useRoute } from "./router";
 import type { Screen } from "./router";
 import { REGISTRY } from "./screens/registry";
 import { ProjectsProvider, useProjects } from "./projects/store";
+import { useProjectState } from "./projects/state";
 import { proposalsFor } from "./screens/orch/dgApi";
 import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
@@ -60,16 +61,19 @@ function Frame() {
     : P.projects[0]?.id ?? null;
   const project = P.projects.find((p) => p.id === pid) ?? null;
   useEffect(() => { if (pid) rememberProject(pid); }, [pid]);
+  const projected = useProjectState(project?.registered ? project.id : null).proposals;
 
   const current: Current = useMemo(() => {
     const campaigns = project ? P.campaigns.filter((c) => P.byCampaign[c.slug] === project.id)
       .sort((a, b) => ((b.updated ?? b.created ?? "") > (a.updated ?? a.created ?? "") ? 1 : -1)) : [];
     const mine = P.crew && project && P.byCampaign[P.crew.campaign] === project.id ? P.crew : null;
     const dgRun = mine?.runId ?? campaigns.map((c) => P.runIds[c.slug]).find(Boolean) ?? null;
-    // By the T1 id for a project the core has registered (#77), and by its full root for any project.
-    const proposals = project ? proposalsFor(P.inbox, project.registered ? project.id : null, project.root) : [];
+    // A registered project's come from its own projection, picked before any inbox cut (#90 review). Otherwise, or until
+    // that answers: by the T1 id for a project the core has registered (#77), and by its full root for any project.
+    const proposals = !project ? [] : project.registered && projected ? projected
+      : proposalsFor(P.inbox, project.registered ? project.id : null, project.root);
     return { project, campaigns, focus: mine?.campaign ?? campaigns[0]?.slug ?? null, runId: mine?.runId ?? null, dgRun, proposals };
-  }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox]);
+  }, [project, P.campaigns, P.byCampaign, P.crew, P.runIds, P.inbox, projected]);
   const crew = current.runId ? P.crew : null;
   const focusCampaign = current.campaigns.find((c) => c.slug === current.focus) ?? null;
 

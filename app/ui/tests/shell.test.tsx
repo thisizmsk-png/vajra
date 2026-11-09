@@ -290,3 +290,25 @@ describe("Preferences inside a project the core has not registered (PR 100 revie
     await waitFor(() => expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true"));
   });
 });
+
+describe("Run proposals of a registered project come from its own projection (#90 review)", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const registered = { project_list: { projects: [{ schema: "vajra.project/1", id: T, name: "Harbor API", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 2 }], skipped: 0, truncated: false } };
+  const proposal = { id: "proposal:new", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "", age_s: 1, title: "Start a run?", body: "Ship the new limits", ask: "Ship the new limits", base: "main", rounds: 1, project_id: T, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
+  // The global read is full of older items and its cut left the new proposal out.
+  const full = { count: 251, campaign_count: 250, items: Array.from({ length: 200 }, (_, i) => ({ id: `task:fill-${i}.t1`, kind: "task", campaign: "api-1", project_id: T, origin: "app", created: "", age_s: 900, title: `filler ${i}`, body: "", actions: ["open"] })) };
+  const state = (proposals: unknown) => ({ schema: "vajra.project_state/1", project_id: T, rev: 7, unchanged: false, active_runs: 0, generations: { project: 1 }, workers: [], receipts: [], inbox: { ok: true, count: 251, items: [] }, proposals });
+
+  it("Given the inbox cut left a new proposal out, Then the Director-General still shows it", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, inbox: full, project_state: state({ ok: true, count: 1, more: 0, items: [proposal] }) });
+    const region = await screen.findByRole("region", { name: S.dg.proposals });
+    expect(within(region).getByText("Ship the new limits")).toBeTruthy();
+    expect(ipc.calls.some((c) => c.cmd === "project_state" && c.args?.projectId === T)).toBe(true);
+  });
+
+  it("Given the projection's proposals could not be read, Then the inbox is the fallback, never an empty list", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, inbox: { count: 1, items: [proposal] }, project_state: state({ ok: false, error: "io_error" }) });
+    const region = await screen.findByRole("region", { name: S.dg.proposals });
+    expect(within(region).getByText("Ship the new limits")).toBeTruthy();
+  });
+});
