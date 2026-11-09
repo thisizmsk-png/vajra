@@ -43,8 +43,9 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
   return <section className="v-pref" aria-label={C.region}>
     <p>{C.scopeDescription(projectId ? projectName ?? projectId : undefined)}</p>
     {section === "appearance" && select("theme", C.theme, [["system", C.systemTheme], ["dark", C.dark], ["light", C.light]])}
-    {/* General (editor, shell) has no form yet: nothing opens an editor or a terminal from those values, so a saved
-        choice would change nothing (PR 100 review). The stored keys stay in the contract until a new-open path reads them. */}
+    {/* General (editor, shell) and Notifications have no form yet: nothing opens an editor or a terminal, or delivers a
+        notification, from those values, so a saved choice would change nothing (PR 100 review). The stored keys and their
+        defaults stay in the contract until a consumer reads them. */}
     {section === "models" && <>
       {select("agent", C.agent, [["claude", C.claude], ["codex", C.codexUnavailable, true]])}
       <p>{C.modelHint(view.effective.model || C.nativeModel)}</p>
@@ -52,12 +53,6 @@ export function PreferenceForm({ projectId, projectName, section, onDirty }: { p
       {select("rounds", C.rounds, [["1", "1"], ["2", "2"], ["3", "3"]])}
       <p>{C.caps(view.caps?.active_runs ?? 1, view.caps?.workers_per_run ?? 16)}</p>
       <p>{C.defaultsHint}</p>
-    </>}
-    {section === "notifications" && <>
-      {([ ["notifications", C.notifications], ["notifications_text", C.notificationsText] ] as const).map(([key, label]) => <div className="v-pref__row" key={key}><label><span>{label}<small>{source(key)}</small></span><input type="checkbox" aria-label={label} checked={value(key)} disabled={locked} onChange={e => change(key, e.target.checked)} /></label>
-        {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
-      </div>)}
-      <p>{C.notificationsHint}</p>
     </>}
     {section === "keyboard" && <>
       {(["palette", "settings"] as const).map(key => <div className="v-pref__row" key={key}><label><span>{key === "palette" ? C.searchShortcut : C.settingsShortcut}<small>{source("shortcuts")}</small></span>

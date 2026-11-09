@@ -63,7 +63,7 @@ export function Settings() {
           <div className="v-settings__col">
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
-            {prefs.connected && ["appearance", "models", "notifications", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} />}
+            {prefs.connected && ["appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-checks" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">
@@ -84,7 +84,7 @@ export function Settings() {
                 </ul>
               </section>
             )}
-            {(section === "general" || section === "mobile" || section === "diagnostics") && (
+            {(section === "general" || section === "notifications" || section === "mobile" || section === "diagnostics") && (
               <p className="v-settings__later">{S.settings.later}</p>
             )}
           </div>

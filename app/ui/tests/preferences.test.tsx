@@ -50,14 +50,18 @@ describe("FG-08 preferences",()=>{
   fireEvent.change(field(),{target:{value:"9"}});await act(async()=>window.dispatchEvent(new CustomEvent("vajra-preferences-saved")));
   await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="preferences_read"&&c.args?.projectId===Q).length).toBeGreaterThan(1));expect(field().value).toBe("9");
  });
- it("shows no editor or shell choice until something opens with them, and a save elsewhere keeps their stored values",async()=>{
-  const stored={...view(),overrides:{editor:"code",shell:"zsh"},effective:{...DEFAULT_PREFERENCES,editor:"code",shell:"zsh"}};
+ it("shows no editor, shell or notification controls until something reads them, and a save elsewhere keeps their stored values",async()=>{
+  const stored={...view(),overrides:{editor:"code",shell:"zsh",notifications_text:true},effective:{...DEFAULT_PREFERENCES,editor:"code",shell:"zsh",notifications_text:true}};
   const f=fakeIpc({preferences_read:stored,provider_list:{schema:"vajra.providers/1",providers:[]},preflight:{rows:[],start_enabled:true},act_preferences_update:(a?:Record<string,unknown>)=>done({...stored,rev:1,effective:{...stored.effective,...(a?.patch as object)}})});setTransport(f.transport);
   window.location.hash="#/settings?section=general";
   const r=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
   expect(await screen.findByText("Not built yet")).toBeTruthy();
   expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
-  r.unmount();render(<PreferenceForm projectId={null} section="appearance"/>);
+  r.unmount();window.location.hash="#/settings?section=notifications";
+  const n=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
+  expect(await screen.findByText("Not built yet")).toBeTruthy();
+  expect(screen.queryByRole("checkbox")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
+  n.unmount();render(<PreferenceForm projectId={null} section="appearance"/>);
   fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
   const write=f.calls.find(c=>c.cmd==="act_preferences_update");expect(write?.args?.patch).toEqual({theme:"dark"});
   window.location.hash="";
@@ -75,13 +79,8 @@ describe("FG-08 preferences",()=>{
   fireEvent.click(await screen.findByRole("button",{name:"Retry same action"}));await screen.findByText("Saved.");
   const writes=f.calls.filter(c=>c.cmd==="act_preferences_update");expect(writes[0].args?.envelope).toEqual(writes[1].args?.envelope);expect(screen.getByText(/Action done/)).toBeTruthy();
  });
- it("preserves the notification default and keeps item text off until explicitly saved",async()=>{
-  const f=fakeIpc({preferences_read:view(),act_preferences_update:()=>done(view(null,1))});setTransport(f.transport);
-  render(<PreferenceForm projectId={null} section="notifications"/>);
-  expect((await screen.findByLabelText(/OS notifications/ ) as HTMLInputElement).checked).toBe(true);
-  expect((screen.getByLabelText(/Include item text/) as HTMLInputElement).checked).toBe(false);
-  fireEvent.click(screen.getByLabelText(/Include item text/));expect(f.calls.filter(c=>c.cmd==="act_preferences_update")).toHaveLength(0);
-  fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");expect(f.calls.find(c=>c.cmd==="act_preferences_update")?.args?.patch).toEqual({notifications_text:true});
+ it("keeps the agreed notification defaults (on, item text off) while the section has no controls",()=>{
+  expect([DEFAULT_PREFERENCES.notifications,DEFAULT_PREFERENCES.notifications_text]).toEqual([true,false]);
  });
  it("requires reload after an unknown outcome rather than creating a fresh action",async()=>{
   const f=fakeIpc({preferences_read:view(),act_preferences_update:()=>({receipt:{state:"unknown",action_id:"prefs-unknown"}})});setTransport(f.transport);
