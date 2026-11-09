@@ -354,10 +354,10 @@ fn recover_orphans(own: State<'_, Ownership>, pids: Vec<u32>) -> Res {
     let mut out = Vec::new();
     for f in &picked {
         let r = vajra_desktop::owned::recover(&f.owner);
-        let _ = own.ledger.forget(f.owner.pid, f.owner.stamp);
+        // Only an end (or a record that was not ours) settles it; members still running keep the record and the retry.
+        vajra_desktop::owned::apply_recovery(&own.ledger, &mut found_lock(&own), &f.owner, &r);
         out.push(serde_json::json!({"pid": f.owner.pid, "result": r}));
     }
-    found_lock(&own).retain(|f| !picked.iter().any(|p| p.owner == f.owner));
     for pid in pids.iter().filter(|p| !picked.iter().any(|f| f.owner.pid == **p)) {
         out.push(serde_json::json!({"pid": pid, "result": "not_owned"}));
     }

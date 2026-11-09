@@ -173,6 +173,22 @@ pub enum Recovery {
     NotOwned,
 }
 
+/// Settle one recovery: `Ended` and `NotOwned` forget the record (the ledger entry and the list the UI shows); `Survived`
+/// keeps both, with the number of processes that are really left, so the human can try again and a restart can still find it.
+pub fn apply_recovery(ledger: &Ledger, found: &mut Vec<Found>, owner: &Owner, result: &Recovery) {
+    match result {
+        Recovery::Survived { remaining } => {
+            if let Some(f) = found.iter_mut().find(|f| f.owner == *owner) {
+                f.verdict = Verdict::Owned { members: *remaining };
+            }
+        }
+        Recovery::Ended | Recovery::NotOwned => {
+            let _ = ledger.forget(owner.pid, owner.stamp);
+            found.retain(|f| f.owner != *owner);
+        }
+    }
+}
+
 /// Is this exact process (pid and start stamp) still running? A zombie is not.
 fn running(pid: u32, stamp: u64) -> bool {
     same_process(pid, stamp) && !crate::procid::is_zombie(pid)
@@ -432,6 +448,26 @@ mod tests {
         b.extend_from_slice(b"{\"pid\":4242,\"stamp\":7,\"cwd\":\"/a\"}\n");
         std::fs::write(&p, b).unwrap();
         assert_eq!(Ledger::new(p).load().len(), 1);
+    }
+
+    #[test]
+    fn a_recovery_that_left_members_running_keeps_the_record_and_the_retry_and_only_an_end_or_not_owned_settles_it() {
+        let l = Ledger::new(tmp("survived"));
+        let o = Owner { pid: 4242, stamp: 7, cwd: "/a".into() };
+        let other = Owner { pid: 4243, stamp: 8, cwd: "/b".into() };
+        l.record(o.clone()).unwrap();
+        l.record(other.clone()).unwrap();
+        let mut found = vec![Found { owner: o.clone(), verdict: Verdict::Owned { members: 3 } }, Found { owner: other.clone(), verdict: Verdict::Owned { members: 1 } }];
+        // Survived: still on disk (a restart can find it again) and still offered, with the count that is really left.
+        apply_recovery(&l, &mut found, &o, &Recovery::Survived { remaining: 2 });
+        assert!(l.load().contains(&o), "the durable record stays");
+        assert_eq!(found[0], Found { owner: o.clone(), verdict: Verdict::Owned { members: 2 } }, "still offered for another attempt, with what is left");
+        // Ended and NotOwned settle it: gone from the ledger and from the list.
+        apply_recovery(&l, &mut found, &o, &Recovery::Ended);
+        assert_eq!(l.load(), vec![other.clone()]);
+        assert_eq!(found.len(), 1);
+        apply_recovery(&l, &mut found, &other, &Recovery::NotOwned);
+        assert!(l.load().is_empty() && found.is_empty());
     }
 
     #[test]
