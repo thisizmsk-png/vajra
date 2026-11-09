@@ -3382,6 +3382,9 @@ fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_ot
     // The same layout with a config that names no worktree: the main checkout cannot be resolved, so the asking Lead is refused.
     fs::write(git.join("config"), "[core]\n").unwrap();
     app.record_run_pinned("20261105-1232", &wt, &loc, &key, "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
+    // The earlier run of the same key knew the checkout, so that knowledge repairs this one; with none left, nothing can.
+    assert!(app.other_project_roots("20261105-1229", &b).is_ok(), "any guarded record of the key resolves it");
+    fs::write(app.data.join("control/lead/20261105-1230/project_main"), "-").unwrap();
     assert!(app.other_project_roots("20261105-1229", &b).is_err(), "an unprotectable checkout refuses the Lead");
 }
 
