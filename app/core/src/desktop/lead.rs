@@ -518,7 +518,13 @@ impl App {
     /// Like `recorded_runs`, but a directory (or an entry) that cannot be read is an error, not an empty list.
     fn try_recorded_runs(&self) -> std::io::Result<Vec<String>> {
         let mut runs = Vec::new();
-        for e in std::fs::read_dir(self.data.join("control").join("lead"))? {
+        let entries = match std::fs::read_dir(self.data.join("control").join("lead")) {
+            Ok(r) => r,
+            // No directory yet: no run has been launched, which is a real "no records".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+            Err(e) => return Err(e),
+        };
+        for e in entries {
             if let Ok(n) = e?.file_name().into_string() {
                 if ids::valid_run_id(&n) {
                     runs.push(n);
@@ -557,11 +563,19 @@ impl App {
     pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
         let want = git_location(cwd);
         let mut keys: Vec<PathBuf> = Vec::new();
-        for r in self.recorded_runs() {
-            let Some(c) = self.read_run_cwd(&r) else { continue };
+        let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
+        // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
+        for r in self.try_recorded_runs().map_err(|_| unreadable())? {
             let dir = self.lead_sid_dir(&r);
+            let Some(c) = self.read_run_cwd(&r) else {
+                // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(dir.join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
+                continue;
+            };
             let old = std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err();
-            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).unwrap_or_default() };
+            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).ok_or_else(unreadable)? };
             if loc != want {
                 continue;
             }
@@ -606,7 +620,10 @@ impl App {
             }
         }
         if enclosing.is_empty() {
-            return Ok(super::caps::key_of_entry(want, want).unwrap_or_else(|| want.to_path_buf()));
+            return match super::caps::try_key_of_entry(want, want) {
+                Ok(k) => Ok(k.unwrap_or_else(|| want.to_path_buf())),
+                Err(()) => Err(super::fail("project_membership_inconsistent", "this folder's .git cannot be read as a Git repository (too large, not a regular file, or a link)")),
+            };
         }
         let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
         let git = want.join(".git");
@@ -664,7 +681,7 @@ impl App {
             return None;
         }
         // From the same location the caller matched on, never a second walk of the repo.
-        let key = super::caps::key_of_entry(loc, loc).unwrap_or_else(|| loc.to_path_buf());
+        let key = super::caps::try_key_of_entry(loc, loc).ok()?.unwrap_or_else(|| loc.to_path_buf());
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes()).ok()?;
         self.read_run_key(run_id)
     }

@@ -114,25 +114,35 @@ pub fn project_key(cwd: &Path) -> PathBuf {
     }
 }
 
-/// The project key of the `.git` entry directly in `dir` (one look, no walking up), or `None` if `dir` holds none.
-/// `fallback` is the key of a `.git` file that names no git dir.
-pub fn key_of_entry(dir: &Path, fallback: &Path) -> Option<PathBuf> {
+/// The project key of the `.git` entry directly in `dir` (one look, no walking up): `Ok(None)` if `dir` holds none,
+/// `fallback` for a `.git` file that names no git dir. A `.git` that exists but cannot be read as what it claims to be
+/// (oversized, a FIFO or other special file, a link, an unreadable `commondir`) is `Err(())`, never a guess: reading it as
+/// "a separate project" would skip the one-run-per-project cap for a worktree of a live project.
+pub fn try_key_of_entry(dir: &Path, fallback: &Path) -> Result<Option<PathBuf>, ()> {
     let dot = dir.join(".git");
     match std::fs::symlink_metadata(&dot) {
-        Ok(m) if m.is_dir() => Some(canon(&dot)),
+        Ok(m) if m.is_dir() => Ok(Some(canon(&dot))),
         Ok(m) if m.is_file() => {
-            if let Some(gitdir) = read_small(&dot).and_then(|t| t.trim().strip_prefix("gitdir:").map(|g| g.trim().to_string())) {
-                let gitdir = dir.join(gitdir);
-                let common = match read_small(&gitdir.join("commondir")) {
-                    Some(c) => gitdir.join(c.trim()),
-                    None => gitdir,
-                };
-                return Some(canon(&common));
-            }
-            Some(fallback.to_path_buf())
+            let body = read_small(&dot).ok_or(())?;
+            let Some(gitdir) = body.trim().strip_prefix("gitdir:").map(|g| g.trim().to_string()) else { return Ok(Some(fallback.to_path_buf())) };
+            let gitdir = dir.join(gitdir);
+            let cd = gitdir.join("commondir");
+            let common = match std::fs::symlink_metadata(&cd) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => gitdir,
+                Err(_) => return Err(()),
+                Ok(_) => gitdir.join(read_small(&cd).ok_or(())?.trim()),
+            };
+            Ok(Some(canon(&common)))
         }
-        _ => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => Err(()),
     }
+}
+
+/// `try_key_of_entry` with an unreadable entry read as none: for tests only.
+#[cfg(test)]
+pub fn key_of_entry(dir: &Path, fallback: &Path) -> Option<PathBuf> {
+    try_key_of_entry(dir, fallback).ok().flatten()
 }
 
 fn canon(p: &Path) -> PathBuf {

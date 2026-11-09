@@ -3483,3 +3483,65 @@ fn an_oversized_submodule_config_leaves_the_main_checkout_unresolved() {
     fs::write(git.join("config"), format!("[core]\n\tworktree = ../../../sub\n{}", "# pad\n".repeat(40_000))).unwrap();
     assert!(super::lead::main_checkout(&loc, &key).is_none(), "an oversized config is not read");
 }
+
+/// #80 sweep: a first launch at a location outside any pinned tree reads its `.git` once; metadata that exists but cannot be
+/// read (oversized, a FIFO, a link) refuses, and is never read as "a separate project" that skips the one-run-per-project cap.
+#[test]
+fn unreadable_git_metadata_at_a_first_launch_refuses_instead_of_keying_a_separate_project() {
+    let big = " ".repeat(200 * 1024);
+    let fifo = |p: &Path| {
+        let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    };
+    for case in ["big-commondir", "fifo-commondir", "big-gitfile", "fifo-gitfile", "symlinked-git"] {
+        let t = Tmp::new();
+        let app = t.app();
+        let (a, wt) = (t.0.join("a"), t.0.join("a-wt"));
+        fs::create_dir_all(a.join(".git")).unwrap();
+        linked_worktree(&a, &wt, "w");
+        let cd = a.join(".git/worktrees/w/commondir");
+        match case {
+            "big-commondir" => fs::write(&cd, format!("../..{big}\n")).unwrap(),
+            "fifo-commondir" => {
+                fs::remove_file(&cd).unwrap();
+                fifo(&cd);
+            }
+            "big-gitfile" => fs::write(wt.join(".git"), format!("gitdir: {}{big}\n", a.join(".git/worktrees/w").display())).unwrap(),
+            "fifo-gitfile" => {
+                fs::remove_file(wt.join(".git")).unwrap();
+                fifo(&wt.join(".git"));
+            }
+            _ => {
+                fs::remove_file(wt.join(".git")).unwrap();
+                std::os::unix::fs::symlink(a.join(".git"), wt.join(".git")).unwrap();
+            }
+        }
+        let r = app.launch_key(&wt);
+        assert!(r.as_ref().is_err_and(|e| code(e) == "project_membership_inconsistent"), "{case}: {r:?}");
+    }
+}
+
+/// #80 sweep: a guarded record of the folder that exists but cannot be read (cwd, location, or the directory of runs itself)
+/// refuses the launch. It is never skipped, which would pin the folder afresh and could give it another project.
+#[test]
+fn an_unreadable_guarded_record_refuses_a_launch_instead_of_re_pinning_the_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    for what in ["cwd", "project_loc", "LIST"] {
+        let t = Tmp::new();
+        let (app, a, _, _) = pinned_a_and_b(&t);
+        assert!(app.launch_key(&a).is_ok(), "{what}: healthy first");
+        let lead = app.data.join("control/lead");
+        if what == "LIST" {
+            fs::set_permissions(&lead, fs::Permissions::from_mode(0o300)).unwrap();
+        } else {
+            for r in ["20261105-1230", "20261105-1229"] {
+                let f = lead.join(r).join(what);
+                let _ = fs::remove_file(&f);
+                fs::create_dir(&f).unwrap();
+            }
+        }
+        let r = app.launch_key(&a);
+        let _ = fs::set_permissions(&lead, fs::Permissions::from_mode(0o700));
+        assert!(r.is_err(), "{what}: refused, not re-pinned: {r:?}");
+    }
+}
