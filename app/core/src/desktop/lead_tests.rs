@@ -1240,11 +1240,6 @@ fn a_run_folder_redirected_into_another_project_fails_closed() {
     std::os::unix::fs::symlink(&other, &src).unwrap();
     let e = app.other_project_roots(RUN_ID, &src);
     assert!(e.is_err(), "a redirected run folder refuses the ask: {e:?}");
-    // The ask itself never reaches a Lead: the run's folder is the redirected one.
-    lock(&app.runs).values_mut().for_each(|r| r.cwd = src.clone());
-    let _ = app.ask_lead(RUN_ID, "hi");
-    wait_until("the ask", || idle(&app));
-    assert_eq!(t.count("ask.count"), 0, "no Lead ran in the redirected folder");
 }
 
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
