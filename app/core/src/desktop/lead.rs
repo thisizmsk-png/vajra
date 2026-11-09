@@ -498,16 +498,26 @@ impl App {
         } else if self.read_run_loc(own_run).is_none() {
             return Err(LeadError::GuardMissing("this run's folder record cannot be read, so the Lead is not started".into()));
         }
+        // Every pinned (folder, project) pair, to find the DEEPEST project that holds the asking folder: repositories nest, so being
+        // inside the own project's root does not make the folder the own project's (a link into a nested project is not).
+        let mut members: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
         for run in self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))? {
-            if self.read_run_key(&run).as_ref() == Some(&own) {
-                bases.extend(self.read_run_loc(&run));
-                if let Some(Some(m)) = self.project_main_of(&run, Some(&own)) {
-                    bases.push(m);
+            let k = self.read_run_key(&run);
+            let main = self.project_main_of(&run, k.as_ref()).flatten();
+            for base in self.read_run_loc(&run).into_iter().chain(main) {
+                if k.as_ref() == Some(&own) {
+                    bases.push(base.clone());
                 }
+                members.push((base, k.clone()));
             }
         }
         if !bases.iter().any(|b| own_real.starts_with(b)) {
             return Err(LeadError::GuardMissing("this run's folder no longer resolves to where it was launched (it or a parent was replaced), so the Lead is not started".into()));
+        }
+        let depth = |p: &Path| p.components().count();
+        let own_depth = bases.iter().filter(|b| own_real.starts_with(b)).map(|b| depth(b)).max().unwrap_or(0);
+        if members.iter().any(|(b, k)| own_real.starts_with(b) && depth(b) >= own_depth && k.as_ref() != Some(&own)) {
+            return Err(LeadError::GuardMissing("this run's folder now resolves into another project nested with it, so the Lead is not started".into()));
         }
         let mut out: Vec<PathBuf> = Vec::new();
         // The directory of runs must list: an unlistable one would read as "no other projects" and deny nothing.
@@ -673,11 +683,22 @@ impl App {
 
     /// `launch_key` with the project location it was found at: the pair a launch records, as one look.
     pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
-        let want = git_location(cwd);
+        let mut want = git_location(cwd);
         let mut keys: Vec<PathBuf> = Vec::new();
         let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
         // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
-        for r in self.try_recorded_runs().map_err(|_| unreadable())? {
+        let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        // A folder keeps the membership it was pinned with: if a DEEPER recorded location holds it (its nested `.git` was removed or
+        // renamed), that location is still its project, never the enclosing one the nearest `.git` now names.
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        for r in &runs {
+            if let Some(l) = self.read_run_loc(r) {
+                if real.starts_with(&l) && l.components().count() > want.components().count() {
+                    want = l;
+                }
+            }
+        }
+        for r in runs {
             let dir = self.lead_sid_dir(&r);
             let Some(c) = self.read_run_cwd(&r) else {
                 // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
@@ -697,6 +718,12 @@ impl App {
                 (None, false) => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
             };
             if old {
+                // The derived location must identify to the record's own key before it is persisted (or the launch goes on): a folder
+                // redirected into another project is refused and nothing is written, even though the launch would fail anyway.
+                let derived = super::caps::try_key_of_entry(&loc, &loc).ok().map(|k| k.unwrap_or_else(|| loc.clone()));
+                if derived.as_ref() != Some(&key) {
+                    return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder no longer identifies as the project it was launched in"));
+                }
                 // Best effort: a record that cannot be written back is derived again next time.
                 let _ = fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes());
             }
