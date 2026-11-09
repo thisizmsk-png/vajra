@@ -480,7 +480,7 @@ export const S = {
     baseUrlLabel: "Base URL",
     baseUrlHint: "A web address only. Never put a key or a password in it.",
     baseUrlSave: "Save base URL",
-    baseUrlProblem: { empty: "Enter a web address.", scheme: "Use an http or https address.", credentials: "Remove the user name and password from the address. Keys are only saved in the Keychain." } as Record<string, string>,
+    baseUrlProblem: { empty: "Enter a web address.", scheme: "Use an https address (http only for this machine: localhost, 127.0.0.1 or ::1).", insecure: "Plain http would send your key unencrypted. Use https, or a localhost address.", credentials: "Remove the user name and password from the address. Keys are only saved in the Keychain." } as Record<string, string>,
     baseUrlFailed: "The base URL was not saved.",
     tileLegend: "Two-letter tiles mark where each provider's official mark goes once its terms are cleared. The plain icon is the fallback for anything else.",
   },

@@ -197,13 +197,16 @@ export function allowedChoices(accounts: Account[], allowed: Allowed[]): Array<{
 
 export const choiceKey = (account: string, model: string | null): string => `${account}|${model ?? ""}`;
 
-/** A gateway base URL is non-secret: http(s), a host, and no user:password in it (that would be a credential stored in the clear). */
-export function baseUrlProblem(raw: string): "empty" | "scheme" | "credentials" | null {
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** A gateway base URL is non-secret: https (http only to this machine, since the gateway key is sent to it), a host, and no user:password in it (that would be a credential stored in the clear). */
+export function baseUrlProblem(raw: string): "empty" | "scheme" | "insecure" | "credentials" | null {
   const s = raw.trim();
   if (s === "") return "empty";
   let u: URL;
   try { u = new URL(s); } catch { return "scheme"; }
   if (u.protocol !== "https:" && u.protocol !== "http:") return "scheme";
+  if (u.protocol === "http:" && !LOOPBACK.has(u.hostname)) return "insecure";
   if (u.username || u.password) return "credentials";
   return null;
 }

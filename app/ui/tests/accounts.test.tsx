@@ -86,6 +86,12 @@ describe("accounts contract", () => {
     expect(baseUrlProblem("https://openrouter.ai/api/v1")).toBeNull();
     expect(baseUrlProblem("http://localhost:11434")).toBeNull();
     expect(baseUrlProblem("")).toBe("empty");
+    expect(baseUrlProblem("http://127.0.0.1:8080")).toBeNull();
+    expect(baseUrlProblem("http://[::1]:8080/v1")).toBeNull();
+    // The gateway key is sent to this address: plain http to any other host would send it in the clear.
+    expect(baseUrlProblem("http://openrouter.ai/api/v1")).toBe("insecure");
+    expect(baseUrlProblem("http://10.0.0.5")).toBe("insecure");
+    expect(baseUrlProblem("http://localhost.evil.example")).toBe("insecure");
     expect(baseUrlProblem("ftp://x")).toBe("scheme");
     expect(baseUrlProblem("not a url")).toBe("scheme");
     expect(baseUrlProblem("https://user:hunter2@host/")).toBe("credentials");
@@ -233,6 +239,15 @@ describe("the OpenRouter key", () => {
     await waitFor(() => expect(f.calls.find((c) => c.cmd === "provider_key_remove")?.args).toEqual({ accountId: "openrouter" }));
   });
 
+  it("with no gateway account there is no Add button, so a key is never sent to an account id the core may not have", async () => {
+    const none = clone(FIXTURE_ACCOUNTS) as any;
+    none.accounts = none.accounts.slice(0, 2);
+    const f = settings({ provider_accounts: none });
+    await account("Claude Code");
+    expect(screen.queryByRole("button", { name: C.add })).toBeNull();
+    expect(f.calls.some((c) => c.cmd === "provider_key_save")).toBe(false);
+  });
+
   it("with no key saved the account offers Add, not Replace or Remove", async () => {
     const noKey = clone(FIXTURE_ACCOUNTS) as any;
     noKey.accounts[2] = { ...noKey.accounts[2], state: "key_missing", credential: { source: "api_key", saved: false } };
@@ -288,6 +303,18 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     expect(document.getElementById(claude.getAttribute("aria-describedby") ?? "")?.textContent).toBe(A.inUse);
     fireEvent.click(within(s).getByRole("checkbox", { name: /Grok 4 · OpenRouter/ }));
     expect(options(within(s).getByLabelText(A.pickLabel(A.role.backend)))).toContain("Grok 4 · OpenRouter");
+  });
+
+  it("a saved pick whose account is gone stays visible as a disabled option, so what is shown is what Save stores", async () => {
+    const gone = clone(AGENTS);
+    gone.roles.docs = { account: "retired", model: "old/model-1", effort: null };
+    settings({ provider_agents: gone });
+    const s = await section();
+    const docs = within(s).getByLabelText(A.pickLabel(A.role.docs)) as HTMLSelectElement;
+    expect(docs.value).toBe("retired|old/model-1");
+    const opt = [...docs.options].find((o) => o.value === "retired|old/model-1");
+    expect(opt?.disabled).toBe(true);
+    expect(opt?.textContent).toBe("old/model-1 · retired");
   });
 
   it("effort is offered only where the account has an effort setting", async () => {

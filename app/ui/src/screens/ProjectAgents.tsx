@@ -42,7 +42,7 @@ function PickRow({ label, pick, agents, accounts, onChange, inherit }: { label: 
       <label className="v-agent__label"><span>{label}</span>
         <select aria-label={C.pickLabel(label)} value={value} onChange={(e) => set(e.target.value)}>
           {inherit && <option value="">{C.useDefault}</option>}
-          {stale && pick && account && <option value={value} disabled>{modelLine(account, pick.model, WORD)}</option>}
+          {stale && pick && <option value={value} disabled>{account ? modelLine(account, pick.model, WORD) : `${pick.model ?? WORD} · ${pick.account}`}</option>}
           {choices.map((c) => <option key={choiceKey(c.account.id, c.model)} value={choiceKey(c.account.id, c.model)}>{modelLine(c.account, c.model, WORD)}</option>)}
         </select>
       </label>

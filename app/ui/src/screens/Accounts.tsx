@@ -161,11 +161,11 @@ export function KeySheet({ account, open, codexFound, onClose, onSaved }: { acco
   useEffect(() => { if (!open) { setKey(""); setError(""); } }, [open]);
   const close = () => { setKey(""); setError(""); onClose(); };
   const save = async () => {
-    if (key.trim() === "") return;
+    if (!account || key.trim() === "") return;
     setBusy(true);
     setError("");
     try {
-      await api.providerKeySave(account?.id ?? "openrouter", key.trim());
+      await api.providerKeySave(account.id, key.trim());
       setKey("");
       onSaved();
     } catch (e) {
@@ -214,7 +214,7 @@ export function AccountsPanel({ accounts }: { accounts: Accounts }) {
       <div className="v-panel__bar">
         <h2 id="v-settings-accounts" className="v-panel__title">{C.title}</h2>
         {list && <Text as="span" variant="body-sm" muted>{C.count(list.length)}</Text>}
-        {!gateway?.credential.saved && list && <span className="v-panel__end"><Button size="sm" onClick={() => openKey(gateway)}>{C.add}</Button></span>}
+        {gateway && !gateway.credential.saved && <span className="v-panel__end"><Button size="sm" onClick={() => openKey(gateway)}>{C.add}</Button></span>}
       </div>
       <div className="v-panel__body">
         {error && <p role="alert">{error}</p>}
