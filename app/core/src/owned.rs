@@ -53,8 +53,15 @@ pub struct Found {
 /// line cut by the cap fails to parse and is skipped.
 fn read_capped(path: &Path) -> Option<String> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // A link planted at the path is not followed (O_NOFOLLOW), and a FIFO with no writer cannot block the open
+    // (O_NONBLOCK); anything that is not a regular file is refused, so a hostile name costs an empty ledger, not a hang.
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut buf = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
+    f.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -670,5 +677,32 @@ mod tests {
         assert_eq!(l.load().len(), 1, "the ledger itself was written");
         let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp") && n.starts_with("owned.jsonl.") && n != "owned.jsonl.tmp").collect();
         assert!(left.is_empty(), "no temp file is left behind: {left:?}");
+    }
+
+    #[test]
+    fn given_a_fifo_or_a_symlink_at_the_ledger_path_when_read_then_it_is_empty_and_never_blocks() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = tmp("fifo");
+        let dir = path.parent().unwrap().to_path_buf();
+        // a FIFO with no writer: a plain open would block for ever
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p2 = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Ledger::new(p2).load().len());
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("reading a FIFO must not block"), 0);
+        // a symlink to a real ledger is not followed
+        let real = dir.join("real.jsonl");
+        std::fs::write(&real, format!("{}\n", serde_json::to_string(&Owner { pid: 4242, stamp: 1, cwd: "/tmp".into() }).unwrap())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert_eq!(Ledger::new(path.clone()).load().len(), 0, "the link is refused");
+        // a regular file still reads
+        std::fs::remove_file(&path).unwrap();
+        std::fs::copy(&real, &path).unwrap();
+        assert_eq!(Ledger::new(path).load().len(), 1);
     }
 }
