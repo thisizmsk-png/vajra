@@ -515,10 +515,13 @@ impl App {
     ///   than `MAX_OTHER_ROOTS` folders.
     pub(super) fn isolation(&self, own_run: &str, repo: &Path) -> Result<Isolation, LeadError> {
         let guard = |m: &str| LeadError::GuardMissing(m.into());
-        let own = self
-            .pinned_project(own_run)
-            .filter(|p| crate::projects::contract::valid_project_id(p))
-            .ok_or_else(|| guard("this run's project was not recorded when it was launched; start a new run"))?;
+        // This run's project: its guarded store identity (`store_identity`: a store id pin, or a stand-in pin that validates to
+        // one, #103 review). A pin that does not validate is refused.
+        let own = match self.store_identity(own_run) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Err(guard("this run's project was not recorded when it was launched; start a new run")),
+            Err(()) => return Err(guard("this run's project record does not match its folder; start a new run")),
+        };
         let own_real = std::fs::canonicalize(repo).map_err(|_| guard("this run's folder cannot be resolved"))?;
         if self.read_run_cwd_real(own_run).is_none() || self.read_run_loc(own_run).is_none() {
             return Err(guard("this run was recorded by an older build and its folder cannot be checked; start a new run"));
@@ -566,7 +569,10 @@ impl App {
                 }
                 continue;
             };
-            let pid = self.pinned_project(&run).filter(|p| crate::projects::contract::valid_project_id(p));
+            // Which records are this project's (#103 review): the guarded store identity of every record, never its folder or
+            // key. Runs of one store project are one project whatever folders they started in; a pin that does not validate
+            // (or no pin) belongs to no project, so its folders are another's.
+            let pid = self.store_identity(&run).ok().flatten();
             if present(orchestrator::PROJECT_FILE) && self.pinned_project(&run).is_none() {
                 return Err(unreadable());
             }
@@ -641,9 +647,11 @@ impl App {
     /// worker-writable index or `.git`. A folder inside another already listed is covered by its `**` rules and left out. A
     /// record that exists but cannot be read refuses, and so does more than `MAX_OTHER_ROOTS` folders.
     pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        // The project and its runs by their guarded store identity, as in `isolation` (#103 review).
         let own = self
-            .pinned_project(own_run)
-            .filter(|p| crate::projects::contract::valid_project_id(p))
+            .store_identity(own_run)
+            .ok()
+            .flatten()
             .ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
         let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Director-General cannot guard all of its folders".into());
@@ -655,7 +663,7 @@ impl App {
                 }
                 continue;
             };
-            if self.pinned_project(&run).as_deref() != Some(own.as_str()) {
+            if self.store_identity(&run).ok().flatten().as_deref() != Some(own.as_str()) {
                 continue;
             }
             // The project's recorded main checkout too: a submodule first launched from an outside worktree has no run in it, and
@@ -708,7 +716,7 @@ impl App {
         // No readable pin: nothing else can vouch for it, so it stays unresolved (refused), not "nothing recorded".
         let Some(pid) = pid else { return Some(None) };
         for other in self.recorded_runs() {
-            if other != run && self.pinned_project(&other).as_ref() == Some(pid) {
+            if other != run && self.store_identity(&other).ok().flatten().as_ref() == Some(pid) {
                 if let Some(Some(m)) = read(&other) {
                     return Some(Some(m));
                 }

@@ -189,6 +189,25 @@ impl App {
         read_text(&self.data.join("control").join("lead").join(run_id).join(PROJECT_FILE))
     }
 
+    /// A recorded run's store identity, for telling which records are one project (#103 review): its store id pin, or a
+    /// stand-in pin only once it validates as `run_project` validates it (its guarded folder still gives that stand-in and
+    /// is a store project), resolved to that project's id. `Ok(None)` is a record with no pin; `Err` is a pin that is not
+    /// valid or does not validate now (the store's read errors included), so it belongs to no project.
+    pub(super) fn store_identity(&self, run_id: &str) -> Result<Option<String>, ()> {
+        match self.pinned_project(run_id) {
+            None => Ok(None),
+            Some(p) if pc::valid_project_id(&p) => Ok(Some(p)),
+            Some(k) if ids::valid_standin_ref(&k) => {
+                let cwd = self.read_run_cwd(run_id).ok_or(())?;
+                if project_ref(&cwd).0 != k {
+                    return Err(());
+                }
+                self.projects.find_by_path(&cwd).ok().flatten().map(|p| Some(p.id)).ok_or(())
+            }
+            Some(_) => Err(()),
+        }
+    }
+
     /// The project of a run the app recorded, and the folder its Director-General's turns run in (the store's recorded
     /// root). The id pinned in the guarded record at launch decides; the folder is never re-read for it.
     /// - A store id must still be an active project (`project_archived`, `project_missing`).
