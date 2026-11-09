@@ -3,6 +3,7 @@
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
@@ -143,6 +144,49 @@ export type InboxItem = {
 };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
 
+/** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
+export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
+export type Receipt = {
+  schema: "vajra.receipt/1";
+  action_id: string;
+  project_id: string;
+  action: string;
+  target: string;
+  expect_generation: number | null;
+  current_generation: number | null;
+  state: ReceiptState;
+  reason: string | null;
+  detail: string | null;
+  /** `safe`: retry with a NEW action_id; `after_refresh`: read project_state first; `no`: nothing to do. */
+  retry: "no" | "safe" | "after_refresh";
+  rev: number;
+  ts_ms: number;
+};
+/** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
+export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
+/** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
+/** `vajra.project_state/1`: the one revisioned projection every surface reads. */
+export type ProjectState =
+  | { schema: "vajra.project_state/1"; project_id: string; rev: number; unchanged: true }
+  | {
+      schema: "vajra.project_state/1";
+      project_id: string;
+      rev: number;
+      unchanged: false;
+      active_runs: number;
+      generations: { project: number };
+      workers: Json[];
+      receipts: Receipt[];
+    };
+/** The `changed` event payload: which streams moved, and the new revision of each known project. */
+export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
+
+/** A fresh action id (8..=64 of A-Z a-z 0-9 - _). One per user intent; reuse it only to retry the SAME click. */
+export function newActionId(): string {
+  return `act-${globalThis.crypto.randomUUID()}`;
+}
+
 export const api = {
   preflight: () => call<Preflight>("preflight"),
   listCampaigns: (refresh = false) => call<{ campaigns: Campaign[] }>("list_campaigns", { refresh }),
@@ -153,6 +197,12 @@ export const api = {
   /** One campaign's badge (#28): `ok`, `failed` or `unknown`. The core runs at most four verifies at once. */
   campaignIntegrity: (slug: string, refresh = false) => call<{ slug: string; integrity: "ok" | "failed" | "unknown" }>("campaign_integrity", { slug, refresh }),
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
+  /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
+  actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
+  actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
+  /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
+  projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
   resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
@@ -204,6 +254,24 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   inbox: () => call<{ count: number; items: InboxItem[] }>("inbox"),
+  /** Which record versions this build reads (`vajra.app_info/1`). */
+  appInfo: () => call<AppInfo>("app_info"),
+  /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
+  projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
+  projectAdd: (path: string, confirmNested = false) =>
+    call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),
+  /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
+  projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
+  projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** Suggested projects for campaigns from before projects existed. Writes nothing; `done` once confirmed. `terminal` campaigns are read-only and never adopted. */
+  projectMigrationSuggest: () =>
+    call<{ done: boolean; groups: { root: string; name: string; campaigns: string[] }[]; unsorted: string[]; terminal: string[] }>("project_migration_suggest"),
+  /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
+  projectMigrationConfirm: (roots: string[]) =>
+    call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
+  /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
+  projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };
 
 /** The core says something changed under the Vajra state dir; payload is the list of changed campaign slugs. */
