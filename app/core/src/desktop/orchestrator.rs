@@ -64,15 +64,17 @@ pub(super) fn stream(project: &str, generation: u32) -> String {
 /// root for a folder inside a repo or one of its worktrees, else the folder itself).
 #[cfg(test)]
 pub(super) fn project_ref(cwd: &Path) -> (String, PathBuf) {
-    project_ref_of(&super::caps::project_key(cwd), cwd)
+    project_ref_of(&super::caps::project_key(cwd), &super::lead::git_location(cwd))
 }
 
-/// `project_ref` for a project key already found (the one a launch pinned before it spawned anything).
-pub(super) fn project_ref_of(key: &Path, cwd: &Path) -> (String, PathBuf) {
+/// `project_ref` for a project key and location already found (the pair a launch pinned before it spawned anything). The root
+/// is the main checkout when the key is a `.git` directory, else the checkout root at the launch-time `loc`: never the run
+/// folder, which can be any subfolder.
+pub(super) fn project_ref_of(key: &Path, loc: &Path) -> (String, PathBuf) {
     let digest = sha256::hex_digest(key.as_os_str().as_encoded_bytes());
     let root = match (key.file_name().and_then(|n| n.to_str()), key.parent()) {
         (Some(".git"), Some(p)) if p.is_dir() => p.to_path_buf(),
-        _ => std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+        _ => loc.to_path_buf(),
     };
     (format!("k_{}", &digest[..32]), root)
 }

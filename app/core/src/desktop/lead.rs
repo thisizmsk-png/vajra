@@ -228,7 +228,7 @@ impl App {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
-        let running = lock(&self.runs).values().any(|r| self.pinned_project(&r.run_id).as_deref() == Some(orch.id.as_str()));
+        let running = self.running_in_project(&orch.id);
         let (state, reason) = match (&busy, running) {
             (Some(_), _) => ("thinking", "answering a question"),
             (None, true) => ("running", "a run of this project is going"),
@@ -242,6 +242,13 @@ impl App {
             out["ask_id"] = json!(id);
         }
         Ok(out)
+    }
+
+    /// Whether a run of project `pid` is going now: one pinned to it whose process is still alive. `runs` keeps finished runs
+    /// for their crew views, so presence there is not liveness (the supervisor's state is).
+    pub(super) fn running_in_project(&self, pid: &str) -> bool {
+        let live: Vec<String> = lock(&self.runs).iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.run_id.clone()).collect();
+        live.iter().any(|run| self.pinned_project(run).as_deref() == Some(pid))
     }
 
     /// Cancel the question that is running: the Lead's whole process group is killed.
@@ -413,7 +420,7 @@ impl App {
         }
         // The project, its folder and its key, all from the one look at the repo the launch took before it spawned
         // anything (ADR-15 2.3; #80, #82 review).
-        let (pid, root) = orchestrator::project_ref_of(key, cwd);
+        let (pid, root) = orchestrator::project_ref_of(key, loc);
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
@@ -500,7 +507,11 @@ impl App {
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
         for run in self.recorded_runs() {
             let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            if self.read_run_key(&run).as_ref() != Some(&own) || out.iter().any(|d| cwd.starts_with(d)) {
+            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
+            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
+            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+            let covered = |d: &PathBuf| cwd.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+            if self.read_run_key(&run).as_ref() != Some(&own) || out.iter().any(covered) {
                 continue;
             }
             if out.len() >= MAX_OTHER_ROOTS {

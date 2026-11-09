@@ -3301,3 +3301,64 @@ fn a_plain_folder_pin_does_not_block_a_plain_subfolder_but_a_git_pin_still_refus
     fs::write(a.join("sub/.git"), "gitdir: /no/such/place\n").unwrap();
     assert!(app2.launch_key(&a.join("sub")).is_err());
 }
+
+/// #82 review (P1): an external worktree reached through a symlink inside the main checkout is a run folder whose canonical path
+/// is NOT covered by the checkout. It keeps its secret-file deny rules (supplied and canonical forms both reach the generator).
+#[test]
+fn an_external_worktree_reached_through_a_symlink_keeps_its_secret_file_rules() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    let link = repo.join("wt-link");
+    symlink(&wt, &link).unwrap();
+    let key = caps::project_key(&repo);
+    app.record_run_pinned("20261105-1230", &repo, &repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &link, &wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &repo).unwrap();
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let real_wt = fs::canonicalize(&wt).unwrap();
+    let want = format!("{}/**/.env)", real_wt.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "the external worktree's .env stays denied: {want} in {rules:?}");
+}
+
+/// #82 review (P2): a finished run no longer makes the Director-General "running"; the normal reaper is what ends it.
+#[test]
+fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_reaper() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0, sid, "c", true, 1).unwrap();
+    assert!(app.running_in_project(&orchestrator::project_ref(&t.0).0));
+    app.sup.kill(&stream).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.sup.is_running(&stream).unwrap_or(false) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    app.reap_runs();
+    assert!(lock(&app.runs).contains_key(&stream), "the entry stays for the crew view");
+    assert!(!app.running_in_project(&orchestrator::project_ref(&t.0).0), "but the project is no longer running");
+}
+
+/// #82 review (P2): the project root is the checkout root from the launch-time location, so a submodule first launched from a
+/// subfolder and then from its root pins the same root, never the subfolder.
+#[test]
+fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (parent, child) = (t.0.join("parent"), t.0.join("parent/child"));
+    fs::create_dir_all(parent.join(".git/modules/child")).unwrap();
+    fs::create_dir_all(child.join("src")).unwrap();
+    let key = fs::canonicalize(parent.join(".git/modules/child")).unwrap();
+    let loc = fs::canonicalize(&child).unwrap();
+    let root_of = |run: &str| fs::read_to_string(app.data.join("control/lead").join(run).join(orchestrator::PROJECT_ROOT_FILE)).unwrap();
+    app.record_run_pinned("20261105-1230", &child.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &child, &loc, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert_eq!(root_of("20261105-1230"), loc.to_string_lossy());
+    assert_eq!(root_of("20261105-1231"), loc.to_string_lossy());
+}
