@@ -1510,6 +1510,25 @@ fn a_guarded_record_that_exists_but_cannot_be_read_refuses_the_ask() {
     }
 }
 
+/// #80 review [P1]: the asking run's folder is checked against the location pinned at launch before any ancestor is exempted.
+/// A subfolder renamed away and replaced by a link into another recorded project must fail closed, not drop that project's roots.
+#[test]
+fn a_run_folder_redirected_into_another_project_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (other, src) = (t.0.join("other"), t.repo().join("src"));
+    for d in [other.join(".git"), t.repo().join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&other), "the healthy run denies the other project");
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&other, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src);
+    assert!(e.is_err(), "a redirected run folder refuses the ask: {e:?}");
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.

@@ -477,7 +477,32 @@ impl App {
     /// none is refused. More than `MAX_OTHER_ROOTS` folders refuses the ask rather than leave one undenied.
     pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
-        let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let own_real = std::fs::canonicalize(repo).map_err(|_| LeadError::GuardMissing("this run's folder cannot be resolved".into()))?;
+        // The folder was pinned at launch: it must still resolve under a location (or main checkout) recorded for this project. A path
+        // that now resolves anywhere else (the folder or an ancestor renamed away and replaced by a link) is refused before any
+        // ancestor is exempted from another project's deny rules.
+        let loc_path = self.lead_sid_dir(own_run).join(LOC_FILE);
+        let mut bases: Vec<PathBuf> = Vec::new();
+        if std::fs::symlink_metadata(&loc_path).is_err() {
+            // A record from before locations existed: derive it once from the guarded cwd and write it back (as `launch_identity` does).
+            let c = self.read_run_cwd(own_run).ok_or_else(|| LeadError::GuardMissing("this run's folder was not recorded when it was launched; start a new run".into()))?;
+            let loc = git_location(&c);
+            let _ = fsx::write_atomic(&self.lead_sid_dir(own_run), LOC_FILE, loc.to_string_lossy().as_bytes());
+            bases.push(loc);
+        } else if self.read_run_loc(own_run).is_none() {
+            return Err(LeadError::GuardMissing("this run's folder record cannot be read, so the Lead is not started".into()));
+        }
+        for run in self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))? {
+            if self.read_run_key(&run).as_ref() == Some(&own) {
+                bases.extend(self.read_run_loc(&run));
+                if let Some(Some(m)) = self.project_main_of(&run, Some(&own)) {
+                    bases.push(m);
+                }
+            }
+        }
+        if !bases.iter().any(|b| own_real.starts_with(b)) {
+            return Err(LeadError::GuardMissing("this run's folder no longer resolves to where it was launched (it or a parent was replaced), so the Lead is not started".into()));
+        }
         let mut out: Vec<PathBuf> = Vec::new();
         // The directory of runs must list: an unlistable one would read as "no other projects" and deny nothing.
         let runs = self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))?;
@@ -592,7 +617,13 @@ impl App {
     /// Like `recorded_runs`, but a directory (or an entry) that cannot be read is an error, not an empty list.
     fn try_recorded_runs(&self) -> std::io::Result<Vec<String>> {
         let mut runs = Vec::new();
-        for e in std::fs::read_dir(self.data.join("control").join("lead"))? {
+        let entries = match std::fs::read_dir(self.data.join("control").join("lead")) {
+            Ok(r) => r,
+            // No directory yet: no run has been launched, which is a real "no records".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+            Err(e) => return Err(e),
+        };
+        for e in entries {
             if let Ok(n) = e?.file_name().into_string() {
                 if ids::valid_run_id(&n) {
                     runs.push(n);
@@ -631,11 +662,19 @@ impl App {
     pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
         let want = git_location(cwd);
         let mut keys: Vec<PathBuf> = Vec::new();
-        for r in self.recorded_runs() {
-            let Some(c) = self.read_run_cwd(&r) else { continue };
+        let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
+        // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
+        for r in self.try_recorded_runs().map_err(|_| unreadable())? {
             let dir = self.lead_sid_dir(&r);
+            let Some(c) = self.read_run_cwd(&r) else {
+                // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(dir.join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
+                continue;
+            };
             let old = std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err();
-            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).unwrap_or_default() };
+            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).ok_or_else(unreadable)? };
             if loc != want {
                 continue;
             }
@@ -680,7 +719,10 @@ impl App {
             }
         }
         if enclosing.is_empty() {
-            return Ok(super::caps::key_of_entry(want, want).unwrap_or_else(|| want.to_path_buf()));
+            return match super::caps::try_key_of_entry(want, want) {
+                Ok(k) => Ok(k.unwrap_or_else(|| want.to_path_buf())),
+                Err(()) => Err(super::fail("project_membership_inconsistent", "this folder's .git cannot be read as a Git repository (too large, not a regular file, or a link)")),
+            };
         }
         let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
         let git = want.join(".git");
@@ -738,7 +780,7 @@ impl App {
             return None;
         }
         // From the same location the caller matched on, never a second walk of the repo.
-        let key = super::caps::key_of_entry(loc, loc).unwrap_or_else(|| loc.to_path_buf());
+        let key = super::caps::try_key_of_entry(loc, loc).ok()?.unwrap_or_else(|| loc.to_path_buf());
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes()).ok()?;
         self.read_run_key(run_id)
     }
