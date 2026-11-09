@@ -122,10 +122,13 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
   of the setting and where it was found (`cli_env_block`, `cli_config`, `cli_api_key_helper`), never a value. The detector
   reads only the CLIs' own config: Claude's `settings.json` and `settings.local.json` under `~/.claude` (a non-empty
   `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` with a non-empty value) and Codex's
-  `config.toml` under `~/.codex` (a line that sets `OPENAI_API_KEY` / `CODEX_API_KEY` to a non-blank value; as for Claude, an
-  empty value is not a key, and the value is only tested for being blank, never kept). It never opens `auth.json`, a keychain item or the app's own environment (`ENV_ALLOW` already scrubs that, and
-  `providers[].billing.key_in_app_env` reports it). A plain file only, no link followed, at most 256 KiB; a file that is
-  missing or not understood finds nothing.
+  `config.toml` under `~/.codex`. The Codex file is parsed as TOML: a key named `OPENAI_API_KEY` or `CODEX_API_KEY`, in any
+  table, whose string value is non-blank counts. As for Claude, an empty value is not a key, and the value is only tested for
+  being blank, never kept. Comments and the text of multiline strings are not settings, and a file that does not parse as
+  TOML finds nothing. It never opens `auth.json`, a keychain item or the app's own environment (`ENV_ALLOW` already scrubs
+  that, and `providers[].billing.key_in_app_env` reports it). A plain file only, at most 256 KiB, and no link followed: the
+  CLI directory and the file are each opened relative to the one before, and neither may be a link. A file that is missing
+  or not understood finds nothing.
 - **`state`**: `signed_in`, `signed_out`, `not_installed`, `key_saved`, `key_missing`, `cannot_tell`. An unknown value reads as
   `cannot_tell`, never `signed_in`. `cannot_tell` never blocks a start.
 - **`models`** (`id`, `family`): the models the user enabled on that account. Opaque ids passed straight through; `family`
