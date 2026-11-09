@@ -16,12 +16,13 @@ import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
 import { lastProject, rememberProject, useCompact, useInspector } from "./shell/layout";
 import { S } from "../strings";
+import { PreferencesProvider, preferenceScope, usePreferences } from "./preferences";
+import { DEFAULT_PREFERENCES, matchesShortcut, shortcutKeys } from "./preferenceContract";
 import "./shell.css";
 import "./shell/frame.css";
 
 /** In the macOS app the title bar is an overlay (tauri.conf.json): the traffic lights sit at the left of the title row. */
 const OVERLAY = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && /Mac/.test(navigator.userAgent);
-const SEARCH_KEYS = ["⌘", "K"];
 /** Views that have something to say in the inspector. Review has its own panes; Settings and the legacy views have none. */
 const INSPECTED: ReadonlySet<Screen> = new Set(["orch", "board", "worker"]);
 /** Views that make sense in another project; anything tied to one campaign or worker becomes the Director-General. */
@@ -109,7 +110,6 @@ function Frame() {
       if (p) { e.preventDefault(); goProject(p.id); }
     } else if (!e.shiftKey && k === "b" && project) { e.preventDefault(); setCompact((c) => !c); }
     else if (!e.shiftKey && k === "i" && inspectable) { e.preventDefault(); setInspector((x) => !x); }
-    else if (!e.shiftKey && e.key === ",") { e.preventDefault(); openSettings(); }
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => onKeyRef.current(e);
@@ -138,6 +138,8 @@ function Frame() {
   const workerRow = route.screen === "worker" ? P.crew?.workers.find((w) => w.id === wParam) ?? null : null;
 
   return (
+    <PreferencesProvider projectId={preferenceScope(project)}>
+      <PreferenceKeys openSettings={openSettings} />
     <PaletteHost commands={commands}>
       <CurrentProject.Provider value={current}>
         <div className={["v-app", OVERLAY && "v-app--overlay", showColumn ? "" : "v-app--nocol"].filter(Boolean).join(" ")}>
@@ -183,17 +185,32 @@ function Frame() {
         </div>
       </CurrentProject.Provider>
     </PaletteHost>
+    </PreferencesProvider>
   );
 }
 
 /** The palette for the mouse, in the title bar. */
 function Search() {
   const open = usePaletteOpener();
+  const prefs = usePreferences();
+  const keys = shortcutKeys(prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette);
   return (
-    <button type="button" className="v-tb__search" onClick={open} aria-keyshortcuts={ariaShortcut(SEARCH_KEYS)}>
+    <button type="button" className="v-tb__search" onClick={open} aria-keyshortcuts={ariaShortcut(keys)}>
       <Icon name="search" size={12} />
       <span>{S.frame.search}</span>
-      <Kbd keys={SEARCH_KEYS} decorative />
+      <Kbd keys={keys} decorative />
     </button>
   );
+}
+
+function PreferenceKeys({ openSettings }: { openSettings: () => void }) {
+  const prefs = usePreferences();
+  const binding = prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings;
+  const latest = useRef(openSettings); latest.current = openSettings;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (!e.repeat && matchesShortcut(e, binding)) { e.preventDefault(); latest.current(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [binding]);
+  return null;
 }
