@@ -60,6 +60,16 @@ fn act_approve_plan(app: State<'_, App>, envelope: Envelope, id: String, plan_sh
 }
 
 #[tauri::command(async)]
+fn act_reject_plan(app: State<'_, App>, envelope: Envelope, id: String, reason: String, plan_sha256: String) -> Value {
+    app.act_reject_plan(&envelope, &id, &reason, &plan_sha256)
+}
+
+#[tauri::command(async)]
+fn act_answer_question(app: State<'_, App>, envelope: Envelope, id: String, text: String) -> Value {
+    app.act_answer_question(&envelope, &id, &text)
+}
+
+#[tauri::command(async)]
 fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reason: Option<String>) -> Value {
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
@@ -430,6 +440,10 @@ fn main() {
             handle.state::<App>().set_change_sink(Box::new(move |p| {
                 let _ = sink_handle.emit(CHANGED, p);
             }));
+            let event_handle = handle.clone();
+            handle.state::<App>().set_event_sink(Box::new(move |name, p| {
+                let _ = event_handle.emit(name, p);
+            }));
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
@@ -508,6 +522,8 @@ fn main() {
             project_migration_suggest,
             project_migration_confirm,
             act_approve_plan,
+            act_reject_plan,
+            act_answer_question,
             act_stop_worker,
             act_start_run,
             project_state,

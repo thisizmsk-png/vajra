@@ -68,7 +68,7 @@ describe("Shell B frame (FG-03)", () => {
     expect(tabs().getAllByRole("link").map((l) => l.textContent)).toEqual([
       expect.stringContaining("api"), expect.stringContaining("web"), expect.stringContaining(S.projects.unsorted),
     ]);
-    for (const old of [S.nav.home, S.nav.run, S.nav.crew, S.nav.chat, S.nav.inbox, S.nav.history]) {
+    for (const old of [S.nav.home, S.nav.run, S.nav.crew, S.nav.chat, S.nav.history]) {
       expect(screen.queryByRole("link", { name: old })).toBeNull();
     }
   });

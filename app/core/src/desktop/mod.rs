@@ -33,6 +33,8 @@ pub type Res = Result<Value, Value>;
 /// Emits a `changed` payload to the UI (see `App::set_change_sink`).
 pub type ChangeSink = Box<dyn Fn(Value) + Send + Sync>;
 
+pub use arrivals::EventSink;
+
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
 /// Upper bound for one `tail` / `read_spill` page.
@@ -242,6 +244,8 @@ pub struct App {
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
     sink: Mutex<Option<ChangeSink>>,
+    /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
+    events: Arc<arrivals::Hub>,
 }
 
 impl App {
@@ -262,6 +266,7 @@ impl App {
             preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
             sink: Mutex::new(None),
+            events: Default::default(),
             data: data.to_path_buf(),
             home: home.to_path_buf(),
             lead: lead::LeadState::new(home),
@@ -494,6 +499,12 @@ impl App {
                 }
             }
         };
+        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
+        // refused, so a resume never has to guess the provider from the worker-writable index.
+        if self.record_run_provider(run_id, engine).is_err() {
+            lock(&self.control).end_session(session_id);
+            return Err(fail("io", "could not record the run's provider"));
+        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -530,8 +541,13 @@ impl App {
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
             // Only a provider that can resume is offered: a Codex run's app-made id means nothing to `codex resume`.
-            .filter(|(_, e)| Engine::from_id(e.provider.as_deref().unwrap_or("claude")).is_some_and(|g| adapter_for(g).capabilities().resume))
-            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": e.provider.as_deref().unwrap_or("claude")})))
+            .map(|(k, e)| {
+                // The guarded record decides; the index line's own `provider` is a worker-writable hint and is not used.
+                let engine = self.read_run_provider(&e.run_id).unwrap_or(Engine::Claude);
+                (k, engine, e)
+            })
+            .filter(|(_, engine, _)| adapter_for(*engine).capabilities().resume)
+            .map(|(k, engine, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": engine.id()})))
             .collect();
         Ok(json!({"targets": targets}))
     }
@@ -614,7 +630,15 @@ impl App {
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
-        let engine = self.chosen_engine(provider)?;
+        // The run this session belongs to, from the index (a lookup hint) and its guarded provider record: a request for
+        // a different provider than the one that ran it is refused, never run on the other.
+        let recorded = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id).and_then(|e| self.read_run_provider(&e.run_id));
+        if let (Some(rec), Some(asked)) = (recorded, provider) {
+            if rec.id() != asked {
+                return Err(fail("provider_mismatch", format!("that run was started on {}, not {asked}", rec.id())));
+            }
+        }
+        let engine = self.chosen_engine(provider.or(recorded.map(Engine::id)))?;
         let adapter = adapter_for(engine);
         if !adapter.capabilities().resume {
             return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
@@ -1286,6 +1310,11 @@ impl App {
         ctl(lock(&self.control).message_worker(Actor::Human, worker, text))
     }
 
+    /// `control_message` that refuses unless the worker is still on attempt `expect`, checked under the control lock.
+    pub(super) fn control_message_expecting(&self, worker: &str, text: &str, expect: Option<u64>) -> Res {
+        ctl(lock(&self.control).message_worker_expecting(Actor::Human, worker, text, expect))
+    }
+
     pub fn control_redirect(&self, worker: &str, text: &str) -> Res {
         ctl(lock(&self.control).redirect_worker(Actor::Human, worker, text))
     }
@@ -1778,6 +1807,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod arrivals;
 mod inbox;
 mod projects;
 mod wfresult;

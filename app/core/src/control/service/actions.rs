@@ -57,19 +57,31 @@ impl Service {
     // ------------------------------------------------------------ messages
 
     pub fn message_worker(&mut self, actor: Actor, worker: &str, text: &str) -> Result<Value> {
-        self.enqueue(Kind::Message, actor, worker, text)
+        self.enqueue(Kind::Message, actor, worker, text, None)
+    }
+
+    /// `message_worker` that also refuses when the worker it resolves to is not on attempt `expect`. Checked under the
+    /// same `&mut self` as the resolution and the publication, so a refresh cannot swap the attempt in between (FG-11).
+    pub fn message_worker_expecting(&mut self, actor: Actor, worker: &str, text: &str, expect: Option<u64>) -> Result<Value> {
+        self.enqueue(Kind::Message, actor, worker, text, expect)
     }
 
     pub fn redirect_worker(&mut self, actor: Actor, worker: &str, text: &str) -> Result<Value> {
-        self.enqueue(Kind::Redirect, actor, worker, text)
+        self.enqueue(Kind::Redirect, actor, worker, text, None)
     }
 
-    pub(super) fn enqueue(&mut self, kind: Kind, actor: Actor, worker: &str, text: &str) -> Result<Value> {
+    pub(super) fn enqueue(&mut self, kind: Kind, actor: Actor, worker: &str, text: &str, expect: Option<u64>) -> Result<Value> {
         let text = self.text_arg(text, MAX_TEXT, "text", false)?;
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
         }
         let (sid, w) = self.resolve(worker)?;
+        if let Some(want) = expect {
+            let have = u64::from(w.round.unwrap_or(0));
+            if have != want {
+                return Err(ControlError::StaleGeneration(have));
+            }
+        }
         // design 5b: only Execute-phase task workers take steering; verify, review
         // and merge steps are the independent gate (they can still be stopped).
         if !is_task_label(&w.worker.label) {
