@@ -3330,3 +3330,28 @@ fn another_leads_deny_roots_include_a_submodules_pinned_location_not_just_the_ru
     let denied = app.other_project_roots("20261105-1229", &b).unwrap();
     assert!(denied.contains(&loc), "the submodule's checkout root is denied to B's Lead: {denied:?}");
 }
+
+/// #80 round 7: resuming a session that is already running, with another project's folder, is refused before any control state
+/// changes: its nonce, control session and process stay exactly as they were.
+#[test]
+fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_control_state() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let nonce = lock(&app.control).nonce(sid).map(str::to_string);
+    assert!(nonce.is_some());
+    let e = app.launch_engine(Engine::Claude, sid, "20261105-1231", "c", &b, |_| Ok(vec!["sleep".into(), "30".into()]), true, caps::DEFAULT_RUN_WORKERS).unwrap_err();
+    assert_eq!(code(&e), "session_running", "{e}");
+    assert!(lock(&app.control).has_session(sid), "the control session is intact");
+    assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), nonce, "the nonce was not rotated");
+    assert!(app.sup.is_running(&stream).unwrap(), "the original process still runs");
+    app.sup.kill(&stream).unwrap();
+}

@@ -530,6 +530,12 @@ impl App {
         let _one = lock(&self.launching);
         // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
         // are checked against.
+        // A session whose process is already running is never launched again: `start_session` would replace its live control
+        // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
+        // its control session. Checked under the launching lock, before anything is changed.
+        if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
+            return Err(fail("session_running", "this session is already running; stop it before starting it again"));
+        }
         let (loc, key) = self.launch_identity(cwd)?;
         self.within_caps(&key, workers)?;
         let nonce = {
