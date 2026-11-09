@@ -1,0 +1,34 @@
+{
+  "id": "codex",
+  "name": "Codex CLI",
+  "installed": true,
+  "tested": "untested",
+  "login_state": "cannot_tell",
+  "capabilities": {
+    "pty_attach": true,
+    "transcript": false,
+    "inspect": false,
+    "message": false,
+    "redirect": false,
+    "stop": "terminate",
+    "resume": false,
+    "vajra_workflow": false
+  },
+  "limits": [
+    {
+      "control": "message",
+      "code": "no_message_mid_run",
+      "reason": "Codex cannot take a message mid-run"
+    },
+    {
+      "control": "stop",
+      "code": "stop_ends_process",
+      "reason": "Codex has no hand-off: Stop ends its process"
+    },
+    {
+      "control": "resume",
+      "code": "no_resume_session",
+      "reason": "Codex cannot be resumed: Vajra does not get its session id"
+    }
+  ]
+}

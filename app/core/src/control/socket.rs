@@ -162,9 +162,10 @@ pub enum Binding {
 
 impl Binding {
     /// The binding a request names. `run` and `project` together, a `project` without its `generation` (or the other
-    /// way round), or a value of the wrong type is a bad request, never "unbound".
+    /// way round), or a value of the wrong type is a bad request, never "unbound". A key set to JSON null is present
+    /// with a bad value, not omitted (#81 review): only a request with none of the three keys is unbound.
     fn from_request(v: &Value) -> Result<Self, &'static str> {
-        let present = |k: &str| v.get(k).is_some_and(|x| !x.is_null());
+        let present = |k: &str| v.get(k).is_some();
         match (present("run"), present("project"), present("generation")) {
             (false, false, false) => Ok(Self::None),
             (true, false, false) => v["run"].as_str().map(|r| Self::Run(r.into())).ok_or("run"),

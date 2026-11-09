@@ -3,6 +3,7 @@
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { ProviderList } from "./providerContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -87,7 +88,7 @@ export type Line = { seq: number; text: string };
 export type Tail = { lines: Line[]; gap: boolean; head_seq: number; spill_start: number | null; spill_end: number | null };
 /** `stream_window`: only the rows a view shows. `head_seq - first_seq + 1` is the row count the scrollbar stands for. */
 export type StreamWindow = { lines: Line[]; head_seq: number; first_seq: number; at_start: boolean; at_end: boolean; gap: boolean };
-export type ResumeTarget = { session_id: string; run_id: string; cwd: string };
+export type ResumeTarget = { session_id: string; run_id: string; cwd: string; /** The adapter that ran it; absent reads as claude. */ provider?: string };
 export type ActiveRuns = { count: number; runs: unknown[] };
 export type Json = Record<string, unknown>;
 export type EvidenceStatus = "pass" | "fail" | "not_run" | "unverified" | "checking" | "stale";
@@ -137,7 +138,10 @@ export type InboxItem = {
   /** What `start_proposal` must be given back: the hash of exactly what was shown. */
   proposal_sha256?: string;
 };
-export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null };
+export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null;
+  /** The effective `agent` preference (`claude` or `codex`) read when the form opened; omitted means claude. A provider that cannot start is refused, never swapped. */
+  provider?: string | null;
+};
 
 /** `vajra.receipt/1` (ADR-15 section 3): the answer to every guarded action. `accepted` is never `done`. */
 export type ReceiptState = "accepted" | "done" | "rejected" | "failed" | "unknown";
@@ -198,7 +202,9 @@ export const api = {
   actApprovePlan: (envelope: Envelope, id: string, planSha256: string) => call<ActResult>("act_approve_plan", { envelope, id, planSha256 }),
   /** Pass the last `rev` as `sinceRev`; `unchanged` means nothing to redraw. */
   projectState: (projectId: string, sinceRev?: number) => call<ProjectState>("project_state", { projectId, sinceRev: sinceRev ?? null }),
-  resumeRun: (sessionId: string, campaign: string, cwd: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd }),
+  resumeRun: (sessionId: string, campaign: string, cwd: string, provider?: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd, ...(provider ? { provider } : {}) }),
+  /** `vajra.providers/1`: each adapter with install state, version, capabilities (and `limits` reasons) and the CLI's own login check. Parse with `parseProviderList`. */
+  providerList: () => call<ProviderList>("provider_list"),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
@@ -260,6 +266,12 @@ export const api = {
   /** Fails `conflict` (with `current_rev`) when `expectRev` is stale. */
   projectRename: (id: string, name: string, expectRev?: number) => call<{ project: Project }>("project_rename", { id, name, expectRev }),
   projectArchive: (id: string, expectRev?: number) => call<{ project: Project }>("project_archive", { id, expectRev }),
+  /** Suggested projects for campaigns from before projects existed. Writes nothing; `done` once confirmed. `terminal` campaigns are read-only and never adopted. */
+  projectMigrationSuggest: () =>
+    call<{ done: boolean; groups: { root: string; name: string; campaigns: string[] }[]; unsorted: string[]; terminal: string[] }>("project_migration_suggest"),
+  /** Confirm the accepted suggested roots, once. Fails `already_migrated` the second time. */
+  projectMigrationConfirm: (roots: string[]) =>
+    call<{ projects: { id: string; name: string; outcome: string; sessions: number }[]; nested: string[]; unknown: string[] }>("project_migration_confirm", { roots }),
   /** `skipped` counts unusable lines; `unsupported` means a newer build wrote records this one cannot read, so show "update needed"; `truncated` means the log is longer than the window read, so older sessions may be missing. */
   projectSessions: (id: string) => call<{ sessions: Session[]; skipped: number; unsupported: boolean; truncated: boolean }>("project_sessions", { id }),
 };

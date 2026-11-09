@@ -172,6 +172,7 @@ export const S = {
     hide: "Hide terminal",
     show: "Show terminal",
     closeTab: (name: string) => `Close ${name}`,
+    agentTab: (name: string) => `${name} (agent)`,
     here: "Terminal here",
     starting: "Starting",
     ended: (code: number | null) => (code === null ? "The shell was stopped." : code === 0 ? "The shell ended." : `The shell ended with code ${code}.`),

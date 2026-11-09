@@ -174,6 +174,8 @@ impl Tmp {
             format!("run-{SID}"),
             Run { session_id: SID.into(), run_id: RUN_ID.into(), campaign: "deliver-x".into(), cwd: self.repo(), nonces },
         );
+        // Launched: its guarded record, with the project pinned.
+        app.record_run(RUN_ID, &self.repo(), SID, "deliver-x", true, 1).unwrap();
         app
     }
     fn ledger(&self) -> Vec<Value> {
@@ -219,12 +221,22 @@ fn remember_lead(t: &Tmp, sid: &str) {
     for d in [t.data().join("control"), t.data().join("control/lead"), dir.clone()] {
         fsx(&d);
     }
+    pin_record(t, &dir);
     crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
     let od = orch_dir(t);
     for d in [t.data().join("control/projects"), od.parent().unwrap().to_path_buf(), od.clone()] {
         fsx(&d);
     }
     crate::control::fsx::write_atomic(&od, "session", sid.as_bytes()).unwrap();
+}
+
+/// The project pins a launch writes into a run's guarded record (key, folder, id), for a run in the test repo.
+fn pin_record(t: &Tmp, dir: &Path) {
+    let (pid, root) = super::orchestrator::project_ref(&t.repo());
+    let w = |f: &str, v: &str| crate::control::fsx::write_atomic(dir, f, v.as_bytes()).unwrap();
+    w("project_key", &super::super::caps::project_key(&t.repo()).to_string_lossy());
+    w("project_root", &root.to_string_lossy());
+    w("project", &pid);
 }
 
 fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -338,6 +350,7 @@ fn ask_refused_for_terminal_run() {
     let t = Tmp::new();
     let app = t.app();
     lock(&app.runs).clear();
+    std::fs::remove_dir_all(t.data().join("control/lead").join(RUN_ID)).unwrap();
     let e = app.ask_lead(RUN_ID, "hello?").unwrap_err();
     assert_eq!((code(&e), e["detail"].as_str()), ("read_only", Some("run not launched by this app")));
     let s = app.lead_status(RUN_ID).unwrap();
@@ -345,7 +358,7 @@ fn ask_refused_for_terminal_run() {
     assert!(t.ledger().is_empty(), "a refused ask leaves no record");
     assert!(t.files("stdin.").is_empty(), "nothing was spawned");
     // A run that only runs.jsonl remembers (a finished run of this app) can still be asked about.
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     // ...once the app's own record of the run's directory agrees (without it the index alone is not believed).
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], false);
@@ -353,6 +366,7 @@ fn ask_refused_for_terminal_run() {
     crate::control::fsx::private_dir(&t.data().join("control")).unwrap();
     crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
     crate::control::fsx::private_dir(&dir).unwrap();
+    pin_record(&t, &dir);
     crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], true);
     assert!(app.ask_lead(RUN_ID, "still there?").is_ok());
@@ -553,11 +567,13 @@ fn lead_startup_selftest_failclosed() {
     app.ask_lead(RUN_ID, "again").unwrap();
     wait_until("the ask", || idle(&app));
     assert_eq!(t.count("selftest.count"), 7);
-    // So is a different repo (the generated rules change with it).
+    // So is a different repo (the generated rules change with it): a run launched there.
     let other = t.0.join("other-repo");
     std::fs::create_dir_all(&other).unwrap();
-    lock(&app.runs).values_mut().for_each(|r| r.cwd = other.clone());
-    app.ask_lead(RUN_ID, "again").unwrap();
+    let (sid_o, run_o) = ("6f8fad5b-d9cb-469f-a165-70867728950e", "20261106-0930");
+    app.record_run(run_o, &other, sid_o, "deliver-o", true, 1).unwrap();
+    lock(&app.runs).insert(format!("run-{sid_o}"), Run { session_id: sid_o.into(), run_id: run_o.into(), campaign: "deliver-o".into(), cwd: other.clone(), nonces: Redactor::default() });
+    app.ask_lead(run_o, "again").unwrap();
     wait_until("the ask", || idle(&app));
     assert_eq!(t.count("selftest.count"), 8);
 }
@@ -585,7 +601,7 @@ fn lead_stream_rebuilt_from_transcript_after_restart() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(&t, lead_sid);
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
@@ -648,6 +664,7 @@ fn two_projects_asking_at_once_each_get_their_own_settings() {
         format!("run-{sid_b}"),
         Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-y".into(), cwd: repo_b.clone(), nonces: Redactor::default() },
     );
+    app.record_run(run_b, &repo_b, sid_b, "deliver-y", true, 1).unwrap();
     t.set("mode", "slow");
     let (a, b) = std::thread::scope(|s| {
         let ha = s.spawn(|| app.ask_lead(RUN_ID, "a"));
@@ -740,7 +757,7 @@ fn a_delayed_lead_init_does_not_roll_the_campaign_back_to_an_older_run() {
     let t = Tmp::new();
     let app = t.app();
     let path = t.data().join("runs.jsonl");
-    let launch = |run: &str| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None };
+    let launch = |run: &str| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: run.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&path, &launch(RUN_ID)).unwrap();
     t.set("mode", "late");
     app.ask_lead(RUN_ID, "first question").unwrap();
@@ -782,7 +799,7 @@ fn after_a_restart_the_on_disk_nonce_stays_out_of_stdin_ledger_and_bus() {
     let t = Tmp::new();
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(&t, lead_sid);
     // The run's control nonce, as the earlier app life left it.
@@ -869,7 +886,7 @@ fn a_forged_lead_session_id_in_the_worker_writable_index_is_ignored() {
     let t = Tmp::new();
     let app = t.app();
     // A worker rewrites runs.jsonl and points the run's Lead session at another session (here the run's own worker).
-    let forged = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(SID.into()) };
+    let forged = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: Some(SID.into()), provider: None };
     std::fs::create_dir_all(t.data()).unwrap();
     runindex::append(&t.data().join("runs.jsonl"), &forged).unwrap();
     let r = app.ask_lead(RUN_ID, "hi").unwrap();
@@ -906,7 +923,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t = Tmp::new();
     let sid_a = "2b8fad5b-d9cb-469f-a165-70867728950e";
     std::fs::create_dir_all(t.data()).unwrap();
-    let a = runindex::Entry { campaign: "deliver-old".into(), session_id: sid_a.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let a = runindex::Entry { campaign: "deliver-old".into(), session_id: sid_a.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
     let app = t.app(); // in memory: campaign deliver-x, session SID, the same run id
     let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
@@ -919,7 +936,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t2 = Tmp::new();
     std::fs::create_dir_all(t2.data()).unwrap();
     for (c, s) in [("deliver-a", sid_a), ("deliver-b", SID)] {
-        let e = runindex::Entry { campaign: c.into(), session_id: s.into(), run_id: RUN_ID.into(), cwd: t2.repo(), lead_session_id: None };
+        let e = runindex::Entry { campaign: c.into(), session_id: s.into(), run_id: RUN_ID.into(), cwd: t2.repo(), lead_session_id: None, provider: None };
         runindex::append(&t2.data().join("runs.jsonl"), &e).unwrap();
     }
     let app2 = App::open(&t2.data(), &t2.home()).unwrap();
@@ -929,7 +946,7 @@ fn two_runs_with_one_minute_id_are_never_confused_across_a_restart() {
     let t3 = Tmp::new();
     std::fs::create_dir_all(t3.data()).unwrap();
     for _ in 0..2 {
-        let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t3.repo(), lead_session_id: None };
+        let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t3.repo(), lead_session_id: None, provider: None };
         runindex::append(&t3.data().join("runs.jsonl"), &e).unwrap();
     }
     let app3 = t3.app();
@@ -954,7 +971,7 @@ fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
     let evil = t.0.join("evil-repo");
     std::fs::create_dir_all(&evil).unwrap();
     let path = t.data().join("runs.jsonl");
-    let line = |cwd: &Path| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+    let line = |cwd: &Path| runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: None };
     runindex::append(&path, &line(&evil)).unwrap();
     let app2 = App::open(&t.data(), &t.home()).unwrap();
     app2.lead.set_bin(Some(t.bin("claude")));
@@ -975,7 +992,7 @@ fn a_forged_cwd_in_the_worker_writable_index_changes_nothing() {
 fn a_run_loaded_from_the_index_with_no_cwd_record_is_read_only() {
     let t = Tmp::new();
     std::fs::create_dir_all(t.data()).unwrap();
-    let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let e = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
     let app = App::open(&t.data(), &t.home()).unwrap();
     app.lead.set_bin(Some(t.bin("claude")));
@@ -1002,7 +1019,7 @@ fn a_run_launched_but_never_asked_about_can_be_asked_after_a_restart() {
     wait_until("the ask", || idle(&app2) && t.ask_states().len() == 3);
     // An index line with no guarded record (a legacy or forged entry) is still refused.
     let other = ("20261106-0912", "2b8fad5b-d9cb-469f-a165-70867728950e");
-    let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None };
+    let e = runindex::Entry { campaign: "deliver-y".into(), session_id: other.1.into(), run_id: other.0.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &e).unwrap();
     assert_eq!(code(&app2.ask_lead(other.0, "hi").unwrap_err()), "read_only");
 }
@@ -1034,11 +1051,11 @@ fn an_older_run_of_a_resumed_campaign_is_still_askable_after_a_restart() {
     wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
     drop(app);
     // A real launch also appends its line to the index (the test app keeps the run in memory only).
-    let a = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let a = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &a).unwrap();
     // The human resumes the same campaign into a later run B (a new minute, a new session): `latest` now names B.
     let sid_b = "2b8fad5b-d9cb-469f-a165-70867728950e";
-    let b = runindex::Entry { campaign: "deliver-x".into(), session_id: sid_b.into(), run_id: "20261106-1000".into(), cwd: t.repo(), lead_session_id: None };
+    let b = runindex::Entry { campaign: "deliver-x".into(), session_id: sid_b.into(), run_id: "20261106-1000".into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &b).unwrap();
     assert_eq!(runindex::latest(&t.data().join("runs.jsonl"))["deliver-x"].run_id, "20261106-1000");
     // Life 2: no run in memory. A is not the campaign's newest run, but it is a run this app launched.
@@ -1060,7 +1077,7 @@ fn an_older_run_of_a_resumed_campaign_is_still_askable_after_a_restart() {
 fn restarted_with_transcript(t: &Tmp, make: impl FnOnce(&std::path::Path)) -> App {
     let lead_sid = "1a8fad5b-d9cb-469f-a165-70867728950f";
     std::fs::create_dir_all(t.data()).unwrap();
-    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None };
+    let entry = runindex::Entry { campaign: "deliver-x".into(), session_id: SID.into(), run_id: RUN_ID.into(), cwd: t.repo(), lead_session_id: None, provider: None };
     runindex::append(&t.data().join("runs.jsonl"), &entry).unwrap();
     remember_lead(t, lead_sid);
     let proj = t.home().join(".claude/projects").join(project_slug(&t.repo()));
@@ -1108,6 +1125,8 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     for d in [other.join(".git"), second.join(".git"), second.join("sub"), t.repo().join(".git")] {
         std::fs::create_dir_all(d).unwrap();
     }
+    // Launched once the repo is one (the fixture recorded it before its `.git` existed).
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
     for (run, cwd) in [
         ("20261108-1100", other.clone()),
         ("20261108-1101", second.clone()),
@@ -1117,7 +1136,7 @@ fn a_lead_is_denied_other_projects_folders_but_not_its_own() {
     ] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
-    let roots = app.other_project_roots(&t.repo());
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&other, &second, &second.join("sub")] {
         assert!(roots.contains(want), "every run folder of another project: {want:?} in {roots:?}");
     }
@@ -1139,6 +1158,7 @@ fn second_run(t: &Tmp, app: &App) -> &'static str {
         format!("run-{sid_b}"),
         Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-z".into(), cwd: t.repo(), nonces: Redactor::default() },
     );
+    app.record_run(run_b, &t.repo(), sid_b, "deliver-z", true, 1).unwrap();
     run_b
 }
 
@@ -1183,6 +1203,7 @@ fn the_app_runs_at_most_two_director_general_turns() {
         let repo = t.0.join(format!("repo-{i}"));
         std::fs::create_dir_all(&repo).unwrap();
         let run = format!("20261106-092{i}");
+        app.record_run(&run, &repo, sid, &format!("c{i}"), true, 1).unwrap();
         lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: (*sid).into(), run_id: run.clone(), campaign: format!("c{i}"), cwd: repo, nonces: Redactor::default() });
         runs.push(run);
     }
@@ -1317,6 +1338,8 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     for d in [main.join(".git/worktrees/harbor-wt"), sub.clone(), wt.clone(), t.repo().join(".git")] {
         std::fs::create_dir_all(d).unwrap();
     }
+    // Launched once the repo is one (the fixture recorded it before its `.git` existed).
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
     std::fs::write(main.join(".git/worktrees/harbor-wt/commondir"), "../..\n").unwrap();
     std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/harbor-wt").display())).unwrap();
     assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&main), "the fixture is one project");
@@ -1324,7 +1347,7 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     for (run, cwd) in [("20261108-1100", sub.clone()), ("20261108-1101", wt.clone())] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
     }
-    let roots = app.other_project_roots(&t.repo());
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
     for want in [&main, &sub, &wt] {
         assert!(roots.contains(want), "{want:?} denied: {roots:?}");
     }
@@ -1336,4 +1359,95 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     for want in [&main, &wt] {
         assert!(got.contains(&format!("Read(/{}/**)", want.display())), "{want:?}: {got}");
     }
+}
+
+/// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
+/// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
+/// project cannot make that project "its own" and lift its deny rules.
+#[test]
+fn a_rewritten_dot_git_cannot_make_another_project_the_leads_own() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    let wt = t.0.join("other-wt");
+    for d in [other.join(".git/worktrees/other-wt"), wt.clone(), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(other.join(".git/worktrees/other-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", other.join(".git/worktrees/other-wt").display())).unwrap();
+    // Launched: the asking run in the repo, and the other project's run in its outside worktree.
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &wt, SID, "c", true, 1).unwrap();
+    let pinned = super::super::caps::project_key(&t.repo());
+    let od = orch_dir(&t);
+    // A worker of the repo's run rewrites its `.git` to the other project's.
+    std::fs::remove_dir_all(t.repo().join(".git")).unwrap();
+    std::fs::write(t.repo().join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
+    assert_eq!(super::super::caps::project_key(&t.repo()), super::super::caps::project_key(&other), "the rewrite took");
+    assert_eq!(app.launch_key(&t.repo()), pinned, "a later launch (a resume) in the folder keeps the first pinned project");
+
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(od.join("settings.json")).unwrap();
+    for want in [&other, &wt] {
+        assert!(got.contains(&format!("Read(/{}/**)", want.display())), "{want:?} still denied: {got}");
+    }
+}
+
+/// #80 review [P2]: more other-project folders than the deny rules hold refuses the ask, never drops some silently.
+#[test]
+fn more_other_project_folders_than_the_rules_hold_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git")).unwrap();
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    for i in 0..257 {
+        let dir = t.0.join("many").join(format!("p{i:03}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        app.record_run(&format!("20260101-{:02}{:02}", i / 60, i % 60), &dir, SID, "c", true, 1).unwrap();
+    }
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(e["error"], "lead_guard_missing", "{e}");
+    assert_eq!(t.count("ask.count"), 0, "no Lead ran");
+    // At the limit it still runs, and every folder is denied.
+    let last = t.0.join("many/p256");
+    std::fs::remove_dir_all(app.data.join("control/lead/20260101-0416")).unwrap();
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    assert!(got.contains(&format!("Read(/{}/**)", t.0.join("many/p000").display())) && !got.contains(&format!("Read(/{}/**)", last.display())), "{got}");
+}
+
+/// #82 review [P1]: the project ROOT is pinned at launch next to its id. A worktree whose `.git` a worker points at
+/// another project between launch and the first status or ask cannot make the Director-General run in, or record,
+/// that project's folder.
+#[test]
+fn a_worktree_redirected_after_launch_keeps_its_projects_root() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (wt, other) = (t.0.join("repo-wt"), t.0.join("other"));
+    for d in [t.repo().join(".git/worktrees/repo-wt"), wt.clone(), other.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(t.repo().join(".git/worktrees/repo-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", t.repo().join(".git/worktrees/repo-wt").display())).unwrap();
+    let (sid_w, run_w) = ("7a8fad5b-d9cb-469f-a165-70867728950e", "20261106-0940");
+    // Launched in the worktree, and the other project known to the app.
+    app.record_run(run_w, &wt, sid_w, "deliver-w", true, 1).unwrap();
+    lock(&app.runs).insert(format!("run-{sid_w}"), Run { session_id: sid_w.into(), run_id: run_w.into(), campaign: "deliver-w".into(), cwd: wt.clone(), nonces: Redactor::default() });
+    app.record_run("20261106-0941", &other, sid_w, "deliver-o", true, 1).unwrap();
+    let (own_dir, other_dir) = (orch_dir_of(&t, &t.repo()), orch_dir_of(&t, &other));
+    // A worker points the worktree at the other project before anything asked about it.
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
+    assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&other), "the rewrite took");
+
+    let s = app.lead_status(run_w).unwrap();
+    assert_eq!(s["project_id"], pid(&t), "{s}");
+    assert_eq!(std::fs::read_to_string(own_dir.join("root")).unwrap().trim(), t.repo().to_string_lossy(), "the pinned root, not the other project's");
+    assert!(!other_dir.exists(), "nothing was recorded for the other project");
+    app.ask_lead(run_w, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(own_dir.join("settings.json")).unwrap();
+    assert!(got.contains(&format!("Read(/{}/**)", other.display())), "the other project stays denied: {got}");
+    assert!(argvs(&t).iter().all(|a| !a.contains(&other.to_string_lossy().to_string()) || a.contains("Read(")), "no turn ran in the other folder");
 }

@@ -39,6 +39,12 @@ pub(super) const SANDBOX_NEEDED: &str = "Asking the Director-General needs the C
 const NO_TRUSTED_CWD: &str = "the app has no trusted record of this run's directory (it was not asked about before the restart)";
 /// File name of the run's directory inside `<data>/control/lead/<run_id>/`.
 const CWD_FILE: &str = "cwd";
+/// The run's project (its git common dir, `caps::project_key`) as the app found it at launch, before any worker ran.
+const KEY_FILE: &str = "project_key";
+/// Most other-project folders the Lead's deny rules hold; more refuses the ask (#80 review: never drop one).
+pub(super) const MAX_OTHER_ROOTS: usize = 256;
+/// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
+const PROVIDER_FILE: &str = "provider";
 const SESSION_FILE: &str = "session";
 const CAMPAIGN_FILE: &str = "campaign";
 /// Present for a run that started no new workflow (the approval-only resume).
@@ -219,7 +225,7 @@ impl App {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
-        let running = lock(&self.runs).values().any(|r| orchestrator::project_ref(&r.cwd).0 == orch.id);
+        let running = lock(&self.runs).values().any(|r| self.pinned_project(&r.run_id).as_deref() == Some(orch.id.as_str()));
         let (state, reason) = match (&busy, running) {
             (Some(_), _) => ("thinking", "answering a question"),
             (None, true) => ("running", "a run of this project is going"),
@@ -285,6 +291,7 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
+        self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
         let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
@@ -374,7 +381,14 @@ impl App {
     ///
     /// It also records the run's session id and campaign (ADR-14): `runs.jsonl` is worker-writable, so a plan approval
     /// or reject trusts only an index line whose directory, session and campaign all equal this record.
+    #[cfg(test)]
     pub(super) fn record_run(&self, run_id: &str, cwd: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
+        self.record_run_as(run_id, cwd, &super::caps::project_key(cwd), session_id, campaign, workflow, started)
+    }
+
+    /// `record_run` with the project `key` the launch pinned before it spawned anything (`launch_key`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_run_as(&self, run_id: &str, cwd: &Path, key: &Path, session_id: &str, campaign: &str, workflow: bool, started: i64) -> std::io::Result<()> {
         let control = self.data.join("control");
         fsx::private_dir(&control)?;
         fsx::private_dir(&control.join("lead"))?;
@@ -386,10 +400,32 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
-        // The project is pinned now, while the app itself has just chosen the directory (ADR-15 2.3).
-        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, orchestrator::project_ref(cwd).0.as_bytes())?;
+        // The project, its folder and its key, all from the one look at the repo the launch took before it spawned
+        // anything (ADR-15 2.3; #80, #82 review).
+        let (pid, root) = orchestrator::project_ref_of(key, cwd);
+        fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, pid.as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
+    }
+
+    /// Record, before the run starts, which adapter it runs on. A run launched by this build always has this record, so a
+    /// resume trusts it and never the worker-writable index. A failure here refuses the launch.
+    pub(super) fn record_run_provider(&self, run_id: &str, engine: crate::adapter::Engine) -> std::io::Result<()> {
+        let control = self.data.join("control");
+        fsx::private_dir(&control)?;
+        fsx::private_dir(&control.join("lead"))?;
+        let dir = self.lead_sid_dir(run_id);
+        fsx::private_dir(&dir)?;
+        fsx::write_atomic(&dir, PROVIDER_FILE, engine.id().as_bytes()).map(|_| ())
+    }
+
+    /// The guarded provider of a run: `Some` for a run this build launched, `None` for one from before providers
+    /// existed (all of which ran on claude) or whose record is unreadable.
+    pub(super) fn read_run_provider(&self, run_id: &str) -> Option<crate::adapter::Engine> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(PROVIDER_FILE)).ok()?;
+        crate::adapter::Engine::from_id(String::from_utf8(body).ok()?.trim())
     }
 
     /// The guarded (cwd, session id, campaign) of a run, or `None` if any part is missing (a run from before this
@@ -410,38 +446,64 @@ impl App {
     /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
     /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
     /// ancestor would deny the Lead its own project). Every distinct run folder, plus each project's main working tree.
-    pub(super) fn other_project_roots(&self, repo: &Path) -> Vec<PathBuf> {
-        const MAX_OTHER_ROOTS: usize = 256;
-        let own = super::caps::project_key(repo);
+    ///
+    /// Which project a run belongs to is the key pinned when the app launched it (`KEY_FILE`), for the asking run and
+    /// for every other one: the repo's `.git` and `commondir` are worker-writable, so they are never re-read here
+    /// (#80 review). A run with no pinned key counts as another project (its folder is denied); an asking run with
+    /// none is refused. More than `MAX_OTHER_ROOTS` folders refuses the ask rather than leave one undenied.
+    pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
-            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
-            .unwrap_or_default();
-        runs.sort_unstable_by(|a, b| b.cmp(a));
         let mut out: Vec<PathBuf> = Vec::new();
-        for run in runs {
-            if out.len() >= MAX_OTHER_ROOTS {
-                break;
-            }
+        for run in self.recorded_runs() {
             let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            let key = super::caps::project_key(&cwd);
-            if key == own {
+            let key = self.read_run_key(&run);
+            if key.as_ref() == Some(&own) {
                 continue;
             }
             // Every distinct run folder (a subfolder, an outside worktree) and the project's main working tree (the
-            // folder that holds its `.git` dir), so a project whose runs were all elsewhere still has its main folder
-            // denied (#80 review).
-            let main = (key.file_name() == Some(std::ffi::OsStr::new(".git")) && key.is_dir()).then(|| key.parent().map(Path::to_path_buf)).flatten();
+            // folder that holds its `.git` dir, from the pinned key), so a project whose runs were all elsewhere still
+            // has its main folder denied.
+            let main = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
             for dir in std::iter::once(cwd).chain(main) {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 if own_real.starts_with(&real) || out.contains(&dir) {
                     continue;
                 }
+                if out.len() >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} other project folders to deny; the Lead cannot be started with all of them")));
+                }
                 out.push(dir);
             }
         }
-        out.truncate(MAX_OTHER_ROOTS);
-        out
+        Ok(out)
+    }
+
+    /// Every run with a record under the guarded control dir, newest first.
+    fn recorded_runs(&self) -> Vec<String> {
+        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
+            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
+            .unwrap_or_default();
+        runs.sort_unstable_by(|a, b| b.cmp(a));
+        runs
+    }
+
+    /// The project key pinned when the run was launched.
+    pub(super) fn read_run_key(&self, run_id: &str) -> Option<PathBuf> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(KEY_FILE)).ok()?;
+        let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
+        p.is_absolute().then_some(p)
+    }
+
+    /// The key to pin for a launch in `cwd`, read before anything is spawned: the one pinned by the folder's first
+    /// recorded launch if there is one (a resume must not take up a `.git` a worker of the earlier run rewrote), else
+    /// the folder's key now.
+    pub(super) fn launch_key(&self, cwd: &Path) -> PathBuf {
+        self.recorded_runs()
+            .into_iter()
+            .rev()
+            .find_map(|r| (self.read_run_cwd(&r).as_deref() == Some(cwd)).then(|| self.read_run_key(&r)).flatten())
+            .unwrap_or_else(|| super::caps::project_key(cwd))
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
@@ -491,7 +553,7 @@ impl App {
         let dir = &orch.dir;
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let others = self.other_project_roots(&orch.root);
+        let others = self.other_project_roots(&t.run_id, &orch.root)?;
         let settings = self.write_lead_files(dir, &orch.root, &orch.id, orch.generation, &others)?;
         self.ensure_selftest(bin, &env, dir, &orch.root, &others, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
@@ -583,18 +645,24 @@ impl App {
 
     // ---------------------------------------------------------------- the guard (ADR-13 2a)
 
+    /// The Lead's generated files and the runs' guarded records live under `<data>/control/`, which the installed
+    /// worker guard protects only at its default place. Under any other data dir a worker could rewrite them, so the
+    /// Lead is not started (checked first, before any record there is believed).
+    fn data_dir_guarded(&self) -> Result<(), LeadError> {
+        let guarded = paths::resolve_data_dir(None, &self.home);
+        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+        if !same(&self.data, &guarded) {
+            return Err(LeadError::GuardMissing("Director-General unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)".into()));
+        }
+        Ok(())
+    }
+
     /// Nothing is spawned unless every one of these holds: the guard script is a regular file, the doctor passes,
     /// and the Lead's environment keeps `HOME` and a `PATH` that has `bash` and `jq` (without them the guard would
     /// fail closed and block every Lead tool).
     fn guard_preconditions(&self, env: &[(&'static str, OsString)]) -> Result<(), LeadError> {
         let miss = |why: &str| LeadError::GuardMissing(why.to_string());
-        // The Lead's generated files live under `<data>/control/`, which the installed worker guard protects only at
-        // its default place. Under any other data dir a worker could rewrite them, so the Lead is not started.
-        let guarded = paths::resolve_data_dir(None, &self.home);
-        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
-        if !same(&self.data, &guarded) {
-            return Err(miss("Director-General unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)"));
-        }
+        self.data_dir_guarded()?;
         let script = self.home.join(GUARD_SCRIPT);
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
             return Err(miss("pre-tool-use.sh is missing"));
