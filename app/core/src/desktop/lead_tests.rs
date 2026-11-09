@@ -202,6 +202,8 @@ fn remember_lead(t: &Tmp, sid: &str) {
     crate::control::fsx::private_dir(&dir).unwrap();
     crate::control::fsx::write_atomic(&dir, "lead_session", sid.as_bytes()).unwrap();
     crate::control::fsx::write_atomic(&dir, "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    crate::control::fsx::write_atomic(&dir, "project_loc", super::super::lead::git_location(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    crate::control::fsx::write_atomic(&dir, "cwd_real", std::fs::canonicalize(t.repo()).unwrap().to_string_lossy().as_bytes()).unwrap();
     crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
 }
 
@@ -331,6 +333,8 @@ fn ask_refused_for_terminal_run() {
     crate::control::fsx::private_dir(&t.data().join("control/lead")).unwrap();
     crate::control::fsx::private_dir(&dir).unwrap();
     crate::control::fsx::write_atomic(&dir, "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    crate::control::fsx::write_atomic(&dir, "project_loc", super::super::lead::git_location(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    crate::control::fsx::write_atomic(&dir, "cwd_real", std::fs::canonicalize(t.repo()).unwrap().to_string_lossy().as_bytes()).unwrap();
     crate::control::fsx::write_atomic(&dir, "cwd", t.repo().to_string_lossy().as_bytes()).unwrap();
     assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], true);
     assert!(app.ask_lead(RUN_ID, "still there?").is_ok());
@@ -1244,10 +1248,10 @@ fn a_run_folder_redirected_into_another_project_fails_closed() {
     assert!(e.is_err(), "a redirected run folder refuses the ask: {e:?}");
 }
 
-/// #80 review: a legacy record (no `project_loc`) has its location derived once from the guarded cwd; a folder redirected before that
-/// write-back must not be laundered into a trusted location. The derived location has to identify to the record's own pinned key.
+/// #80 identity model (TZKb): a run recorded by an older build (no `project_loc` / `cwd_real`) is refused on an ask, never migrated or
+/// written back, so a folder redirected before the upgrade cannot be laundered into a trusted location.
 #[test]
-fn a_legacy_record_redirected_before_the_location_write_back_is_refused_and_not_written() {
+fn a_legacy_own_record_is_refused_on_an_ask_and_nothing_is_written() {
     let t = Tmp::new();
     let app = t.app();
     let (other, src) = (t.0.join("other"), t.repo().join("src"));
@@ -1256,17 +1260,15 @@ fn a_legacy_record_redirected_before_the_location_write_back_is_refused_and_not_
     }
     app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
     app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
-    let loc = app.data.join("control/lead").join(RUN_ID).join("project_loc");
-    std::fs::remove_file(&loc).unwrap();
+    let dir = app.data.join("control/lead").join(RUN_ID);
+    for f in ["project_loc", "cwd_real"] {
+        std::fs::remove_file(dir.join(f)).unwrap();
+    }
     std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
     std::os::unix::fs::symlink(&other, &src).unwrap();
-    assert!(app.other_project_roots(RUN_ID, &src).is_err(), "a redirected legacy folder is refused");
-    assert!(!loc.exists(), "nothing was written back for it");
-    // Untouched, the same legacy record is migrated once and works.
-    std::fs::remove_file(&src).unwrap();
-    std::fs::rename(t.repo().join("src-moved"), &src).unwrap();
-    assert!(app.other_project_roots(RUN_ID, &src).is_ok());
-    assert!(loc.exists(), "a legitimate legacy record is migrated");
+    let e = app.other_project_roots(RUN_ID, &src).unwrap_err();
+    assert!(format!("{e:?}").contains("start a new run"), "{e:?}");
+    assert!(!dir.join("project_loc").exists() && !dir.join("cwd_real").exists(), "nothing was derived and persisted");
 }
 
 /// #80 review [P1]: containment in the asking project's root does not prove ownership when repositories nest. An outer project's
@@ -1287,6 +1289,83 @@ fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
     std::os::unix::fs::symlink(&inner, &src).unwrap();
     let e = app.other_project_roots(RUN_ID, &src);
     assert!(e.is_err(), "a redirect into the nested project is refused: {e:?}");
+}
+
+/// #80 identity model (Option A): a project nested inside another one. The Lead of the nested project is denied the outer project's
+/// secret files but not its whole folder (that would deny the Lead itself), and the nested project itself is denied to the outer Lead.
+#[test]
+fn a_nested_projects_lead_gets_secrets_only_denies_for_the_outer_folder() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    for d in [outer.join(".git"), inner.join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (run_outer, run_inner) = ("20261108-1100", "20261108-1101");
+    app.record_run(run_outer, &outer, SID, "b", true, 1).unwrap();
+    app.record_run(run_inner, &inner, SID, "a", true, 1).unwrap();
+    let iso = app.isolation(run_inner, &inner).unwrap();
+    assert!(iso.secrets.contains(&outer) && !iso.deny.contains(&outer), "the enclosing folder is secrets-only: {iso:?}");
+    let rules = crate::control::lead::deny_rules_iso(&t.home(), &inner, &t.data(), &iso.deny, &iso.secrets).unwrap();
+    let outer_s = outer.to_str().unwrap().trim_start_matches('/');
+    assert!(rules.contains(&format!("Read(//{outer_s}/**/.env)")), "the outer project's secrets stay denied: {rules:?}");
+    assert!(!rules.contains(&format!("Read(//{outer_s}/**)")), "the outer folder is not denied whole: {rules:?}");
+    // The other way round, the outer Lead is denied the nested project whole.
+    let up = app.isolation(run_outer, &outer).unwrap();
+    assert!(up.deny.contains(&inner), "the nested project is denied to the outer Lead: {up:?}");
+}
+
+/// #80 identity model: another project's recorded folder swapped for a link to the Lead's own folder is ambiguous and refuses.
+#[test]
+fn another_projects_folder_redirected_onto_the_leads_own_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    for d in [other.join(".git"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &t.repo(), SID, "x", true, 1).unwrap();
+    // The fixture's own run was pinned before the repo had a `.git`; pin it as the repo is now.
+    crate::control::fsx::write_atomic(&app.data.join("control/lead").join(RUN_ID), "project_key", super::super::caps::project_key(&t.repo()).to_string_lossy().as_bytes()).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_ok(), "healthy");
+    std::fs::rename(&other, t.0.join("other-moved")).unwrap();
+    std::os::unix::fs::symlink(t.repo(), &other).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "another project's folder now resolves to the Lead's own");
+}
+
+/// #80 identity model: the asking folder must EQUAL a recorded folder of its project. A recorded subfolder replaced by a link to an
+/// UNRECORDED folder of the same project is refused too (containment in the project's root would have allowed it).
+#[test]
+fn a_run_folder_replaced_by_a_link_to_an_unrecorded_folder_of_its_own_project_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let proj = t.0.join("proj");
+    let (src, elsewhere) = (proj.join("src"), proj.join("elsewhere"));
+    for d in [proj.join(".git"), src.clone(), elsewhere.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261108-1100", &src, SID, "x", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
+    std::fs::rename(&src, proj.join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &src).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_err(), "equal to a recorded folder, not merely inside the project");
+}
+
+/// #80 identity model: one recorded location claimed by two keys via DIFFERENT runs (so no single folder collides) is ambiguous and refuses.
+#[test]
+fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    let proj = t.0.join("proj");
+    let (src, lib) = (proj.join("src"), proj.join("lib"));
+    for d in [proj.join(".git"), src.clone(), lib.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261108-1100", &src, SID, "x", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
+    app.record_run_as("20261108-1101", &lib, &t.0.join("some/other/.git"), SID, "y", true, 1).unwrap();
+    assert!(app.isolation("20261108-1100", &src).is_err(), "the location is recorded under two keys");
 }
 
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
