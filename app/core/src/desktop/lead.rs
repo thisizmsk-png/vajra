@@ -581,7 +581,7 @@ impl App {
 
     /// The folders of the asking run's OWN project that need the secret-file rules: the project's main checkout
     /// (`root`) plus the folder of every recorded run of the same pinned project (a worktree outside the main checkout,
-    /// a subfolder), from the guarded records and never the worker-writable index or `.git`. A folder inside another
+    /// a subfolder, a checkout root, the recorded main checkout), from the guarded records and never the worker-writable index or `.git`. A folder inside another
     /// already listed is covered by its `**` rules and left out. More than `MAX_OTHER_ROOTS` refuses the ask.
     pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
@@ -602,7 +602,16 @@ impl App {
             // folder it ran in (its own spelling, which an alias of the root needs).
             // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
             // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
-            for folder in self.read_run_loc(&run).into_iter().chain(std::iter::once(cwd)) {
+            // The project's recorded main checkout too: a submodule first launched from an outside worktree has no run in it, and
+            // `isolation` leaves it out of other projects' rules because it is this project's own. Unresolved (`-`) adds nothing.
+            let main = self.project_main_of(&run, Some(&own)).flatten();
+            // A location record that exists but cannot be read leaves the checkout root unknown: refuse, never guard only the subfolder.
+            // No location file at all is the shipped format, which pins nothing; its folder is still guarded below.
+            let loc = self.read_run_loc(&run);
+            if loc.is_none() && std::fs::symlink_metadata(self.lead_sid_dir(&run).join(LOC_FILE)).is_ok() {
+                return Err(unreadable());
+            }
+            for folder in loc.into_iter().chain(main).chain(std::iter::once(cwd)) {
                 let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
                 let covered = |d: &PathBuf| folder.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                 if out.iter().any(covered) {

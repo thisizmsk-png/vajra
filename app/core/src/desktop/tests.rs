@@ -3541,6 +3541,56 @@ fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_ot
     assert!(app.other_project_roots("20261105-1229", &b).is_err(), "an unprotectable checkout refuses the Lead");
 }
 
+/// #82 review: a run whose `project_loc` record EXISTS but cannot be read leaves its checkout root unknown, so the ask is refused rather
+/// than guarding only the run's subfolder. A record with no location at all (the shipped format) is not that case.
+#[test]
+fn an_unreadable_project_loc_of_an_own_run_refuses_instead_of_leaving_the_root_uncovered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (repo, wt) = (t.0.join("repo"), t.0.join("repo-wt"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    linked_worktree(&repo, &wt, "wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    let key = caps::project_key(&repo);
+    let (real_repo, real_wt) = (fs::canonicalize(&repo).unwrap(), fs::canonicalize(&wt).unwrap());
+    app.record_run_pinned("20261105-1230", &repo, &real_repo, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run_pinned("20261105-1231", &wt.join("src"), &real_wt, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert!(app.own_project_folders("20261105-1230", &repo).is_ok());
+    let loc = app.data.join("control/lead/20261105-1231/project_loc");
+    fs::write(&loc, "not-an-absolute-path").unwrap();
+    let e = app.own_project_folders("20261105-1230", &repo).unwrap_err();
+    assert!(format!("{e:?}").contains("GuardMissing"), "{e:?}");
+    // No location file at all: the shipped format pins nothing, and the run's own folder is still guarded.
+    fs::remove_file(&loc).unwrap();
+    assert!(app.own_project_folders("20261105-1230", &repo).is_ok());
+}
+
+/// #82 review (P1): the same fixture seen from the OWN project: the Director-General's root is the outside worktree, and the recorded
+/// main checkout (`super/sub`, which no run was launched in) gets the secret-file rules too.
+#[test]
+fn a_submodule_run_from_an_outside_worktree_guards_its_own_main_checkouts_secrets() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (sup, sub, wt) = (t.0.join("super"), t.0.join("super/sub"), t.0.join("sub-wt"));
+    let git = sup.join(".git/modules/sub");
+    fs::create_dir_all(git.join("worktrees/wt")).unwrap();
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(git.join("config"), "[core]\n\tworktree = ../../../sub\n").unwrap();
+    fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", git.join("worktrees/wt").display())).unwrap();
+    fs::write(git.join("worktrees/wt/commondir"), "../..\n").unwrap();
+    let key = fs::canonicalize(&git).unwrap();
+    let loc = fs::canonicalize(&wt).unwrap();
+    app.record_run_pinned("20261105-1230", &wt, &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let folders = app.own_project_folders("20261105-1230", &wt).unwrap();
+    let real_sub = fs::canonicalize(&sub).unwrap();
+    assert!(folders.contains(&real_sub), "the recorded main checkout is guarded: {folders:?}");
+    let rules = crate::control::lead_settings::deny_rules_for(&t.home(), &folders, &t.0.join("data"), &[]).unwrap();
+    let want = format!("{}/**/.env)", real_sub.to_string_lossy().trim_start_matches('/'));
+    assert!(rules.iter().any(|r| r.ends_with(&want)), "the main checkout's .env is denied: {want} in {rules:?}");
+}
+
 /// #80 sweep, class (a): the guarded records are written before any control state changes, so a record that cannot be written
 /// refuses the launch with the session's nonce and control session exactly as they were.
 #[test]
