@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
+import { RunProvider } from "../ProviderControls";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
@@ -99,6 +100,7 @@ export function Run() {
   return (
     <div className="v-home">
       <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+      <RunProvider slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (

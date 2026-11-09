@@ -234,6 +234,33 @@ Terminal dock (standalone component, `app/ui/src/terminal/`).
 | This folder is not a project or one of its worktrees, so a terminal cannot start there. (and the other open errors) | error state | new; one line per core error code |
 | The shell is not reading input right now. What you typed was dropped. | transient note | new |
 
+FG-09 providers in the UI (Settings > Providers, Start, Resume, Run, Crew).
+
+| String | Where | Note |
+|---|---|---|
+| Default agent / Claude Code / Codex CLI (availability check required) | Models and capacity | removed; the one provider choice is now "Agent for new runs" under Providers |
+| Agent for new runs | Settings > Providers | new; replaces "Default agent", scoped global or per project |
+| New runs in this scope use this agent. A run keeps the agent it started on, and Resume continues on it. | under the choice | new |
+| NAME (not installed) / NAME (not tested with this version) | agent choices | new; not installed cannot be chosen, untested stays selectable |
+| Agents on this Mac / Checking the agent CLIs / Could not check the agent CLIs. | provider panel | new |
+| This build cannot read the agent check from the core. Update the desktop app. / The agent check answered something this build cannot read. | provider panel errors | new (another schema major, or a malformed answer) |
+| Version, Path, Login, Not read, Not on your PATH, Tested, Not tested with this version, Version not compared, Tested with RANGE | provider facts | new |
+| Signed in / Signed out / Could not tell / Not installed | login state | new; the CLI's own check |
+| Sign in with NAME itself. Vajra never handles the login. | signed out | new |
+| KEY is set where Vajra was opened. Vajra does not pass it to NAME; runs use your NAME login. | billing note | new; a variable name only, never a value |
+| Available: LIST. / Stop waits for the next tool call. / Stop ends the process. | what a provider can do | new |
+| Attach terminal, Transcript, Inspect, Message, Redirect, Stop, Resume, Vajra workflow, Start | disabled controls, with the provider's own reason beside each | new |
+| NAME does not support this. | an off control with no reason from the core | new |
+| Runs on NAME | Start, Run, Crew | new; shown only for a provider other than Claude |
+| NAME is not installed, so this run cannot start. Install it, or choose another agent in Settings, Providers. | Start | new; Start is off, nothing else is tried |
+| The saved agent "ID" is not one this build can run. Choose another in Settings, Providers. | Start | new |
+| NAME is not installed, so this run cannot be resumed here. | Resume, beside the disabled button | new |
+| Model: MODEL. Choosing a model needs a supported adapter. The agent is chosen under Providers. | Models and capacity | changed from "Additional agent and model selection requires a supported adapter." |
+| The saved model needs a supported adapter. Choose the native CLI default in Settings before starting. | launcher | changed: an agent other than Claude no longer blocks Start |
+| NAME cannot take a message while it runs. / NAME cannot be redirected while it runs. / NAME has no inspect step Vajra can read. / NAME does not write a transcript Vajra can read. / NAME does not run the Vajra workflow, so there is no crew to show. / Stop ends the NAME process. There is no hand-off at the next tool call. / NAME is not installed. / This build cannot run NAME. | limit codes (providers.md stable codes) | new; the core's own sentence shows only for a code not in this list |
+| Uses your Claude Code login / Uses your Codex login | login route codes | new |
+| The login check did not finish in time, so Vajra cannot tell. / The login check answered something Vajra could not read, so it cannot tell. | login detail codes | new |
+
 Settings keyboard (PR 100 review).
 
 | String | Where | Note |
