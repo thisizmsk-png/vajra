@@ -2851,6 +2851,13 @@ fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     assert_eq!(app.chosen_engine(Some("codex")).unwrap(), Engine::Codex);
     app.launch_engine(Engine::Claude, PSID, "20261108-1200", "deliver-claude", Path::new(&cwd), |_| Ok(vec!["true".into()]), false, caps::DEFAULT_RUN_WORKERS).unwrap();
     let other = "1a8fad5b-d9cb-469f-a165-70867728950f";
+    // `true` exits at once on an idle machine, but under load its PTY can still be open, and a second launch is refused
+    // while a run is active. Wait (bounded) for the first run to finish instead of assuming it already has.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while app.active_run_count() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.active_run_count(), 0, "the first run never finished");
     app.launch_engine(Engine::Codex, other, "20261108-1201", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false, caps::DEFAULT_RUN_WORKERS).unwrap();
     let idx = fs::read_to_string(t.0.join("data/runs.jsonl")).unwrap();
     assert!(idx.contains("\"provider\":\"codex\""), "the run is still recorded with its provider");
