@@ -437,6 +437,12 @@ impl App {
             // A record from before locations existed: derive it once from the guarded cwd and write it back (as `launch_identity` does).
             let c = self.read_run_cwd(own_run).ok_or_else(|| LeadError::GuardMissing("this run's folder was not recorded when it was launched; start a new run".into()))?;
             let loc = git_location(&c);
+            // The derived location must identify to this record's own pinned key: a folder redirected before this write-back is
+            // refused, never laundered into a trusted location.
+            let derived = super::caps::try_key_of_entry(&loc, &loc).ok().map(|k| k.unwrap_or_else(|| loc.clone()));
+            if derived.as_ref() != Some(&own) {
+                return Err(LeadError::GuardMissing("this run's folder no longer identifies as the project it was launched in, so the Lead is not started".into()));
+            }
             let _ = fsx::write_atomic(&self.lead_sid_dir(own_run), LOC_FILE, loc.to_string_lossy().as_bytes());
             bases.push(loc);
         } else if self.read_run_loc(own_run).is_none() {
