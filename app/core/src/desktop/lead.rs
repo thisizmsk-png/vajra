@@ -429,8 +429,18 @@ impl App {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
         let mut out: Vec<PathBuf> = Vec::new();
-        for run in self.recorded_runs() {
-            let Some(cwd) = self.read_run_cwd(&run) else { continue };
+        // The directory of runs must list: an unlistable one would read as "no other projects" and deny nothing.
+        let runs = self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))?;
+        for run in runs {
+            let present = |f: &str| std::fs::symlink_metadata(self.lead_sid_dir(&run).join(f)).is_ok();
+            let unreadable = || LeadError::GuardMissing("another project's launch record cannot be read, so the Lead cannot deny its folders".into());
+            let Some(cwd) = self.read_run_cwd(&run) else {
+                // No cwd file: a launch that never completed (the cwd is written last). One that exists but cannot be read refuses.
+                if present(CWD_FILE) {
+                    return Err(unreadable());
+                }
+                continue;
+            };
             let key = self.read_run_key(&run);
             if key.as_ref() == Some(&own) {
                 continue;
@@ -443,6 +453,9 @@ impl App {
             // The run folder, the project's main tree (from a `.git` key), and the checkout root the launch pinned (`project_loc`):
             // a submodule's or separate-git-dir repo's root is neither the cwd nor inferable from its key.
             let pinned_loc = self.read_run_loc(&run);
+            if pinned_loc.is_none() && present(LOC_FILE) {
+                return Err(unreadable());
+            }
             // The main checkout resolved at launch (a submodule or separate-git-dir repo run from an outside worktree has a key that
             // names no checkout). `-` means it could not be resolved: that checkout cannot be protected, so the ask is refused.
             let pinned_main = match self.project_main_of(&run, key_for_main.as_ref()) {
@@ -473,7 +486,12 @@ impl App {
     /// stay denied either way.
     fn project_main_of(&self, run: &str, key: Option<&PathBuf>) -> Option<Option<PathBuf>> {
         let read = |r: &str| -> Option<Option<PathBuf>> {
-            let m = fsx::read_nofollow(&self.lead_sid_dir(r).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok())?;
+            let path = self.lead_sid_dir(r).join(MAIN_FILE);
+            // Absent: this record never named a checkout. Present but unreadable: unresolved (refused), never "nothing recorded".
+            if std::fs::symlink_metadata(&path).is_err() {
+                return None;
+            }
+            let Some(m) = fsx::read_nofollow(&path).ok().and_then(|b| String::from_utf8(b).ok()) else { return Some(None) };
             Some(if m.trim() == "-" { None } else { Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()) })
         };
         let own = read(run)?;
@@ -494,11 +512,21 @@ impl App {
 
     /// Every run with a record under the guarded control dir, newest first.
     pub(super) fn recorded_runs(&self) -> Vec<String> {
-        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
-            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
-            .unwrap_or_default();
+        self.try_recorded_runs().unwrap_or_default()
+    }
+
+    /// Like `recorded_runs`, but a directory (or an entry) that cannot be read is an error, not an empty list.
+    fn try_recorded_runs(&self) -> std::io::Result<Vec<String>> {
+        let mut runs = Vec::new();
+        for e in std::fs::read_dir(self.data.join("control").join("lead"))? {
+            if let Ok(n) = e?.file_name().into_string() {
+                if ids::valid_run_id(&n) {
+                    runs.push(n);
+                }
+            }
+        }
         runs.sort_unstable_by(|a, b| b.cmp(a));
-        runs
+        Ok(runs)
     }
 
     /// The project key pinned when the run was launched.
