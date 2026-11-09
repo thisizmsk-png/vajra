@@ -125,6 +125,47 @@ class Bounds(unittest.TestCase):
         self.assertEqual(subprocess.run(["pgrep", "-f", f"sleep {marker}"], capture_output=True).returncode, 1, "the harness's own session leader must be gone after cancel")
 
 
+class Identity(unittest.TestCase):
+    """The cleanup signals a leftover descendant only while it is provably the same process (start time to the microsecond,
+    plus its command), re-checked right before each signal."""
+
+    def test_given_a_live_process_when_identified_twice_then_the_microsecond_start_agrees_and_differs_from_another_process(self):
+        a = subprocess.Popen(["sleep", "30"])
+        b = subprocess.Popen(["sleep", "30"])
+        try:
+            ia, ib = P.identity(a.pid), P.identity(a.pid)
+            self.assertIsNotNone(ia)
+            self.assertEqual(ia, ib)
+            self.assertNotEqual(P.identity(b.pid), ia, "two processes do not share an identity")
+            self.assertIsInstance(ia[0], int)
+        finally:
+            a.kill(); b.kill(); a.wait(); b.wait()
+
+    def test_given_a_gone_pid_when_identified_then_none(self):
+        p = subprocess.Popen(["true"])
+        p.wait()
+        self.assertIsNone(P.identity(p.pid))
+
+    def test_given_a_reused_pid_with_a_different_start_stamp_when_stopping_then_it_is_not_signalled(self):
+        saved = (P.snapshot_tree, P.identity, os.kill)
+        killed = []
+        harness = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            P.snapshot_tree = lambda pid: {99991: (111, "sleep"), 99992: (222, "sleep"), 99993: (333, "sleep"), 99994: None}
+            now = {99991: (111, "sleep"),      # unchanged: ours
+                   99992: (223, "sleep"),      # reused within the same second: a different microsecond
+                   99993: (333, "python3"),    # same stamp, other command
+                   99994: (444, "sleep")}      # no identity was ever taken
+            P.identity = lambda pid: now.get(pid)
+            real_kill = os.kill
+            P.os.kill = lambda pid, sig: killed.append(pid) if pid >= 99991 else real_kill(pid, sig)
+            P.stop(harness)
+        finally:
+            P.snapshot_tree, P.identity, P.os.kill = saved
+            harness.kill(); harness.wait()
+        self.assertEqual(killed, [99991], "only the process that still matches is signalled")
+
+
 class LaunchFailure(unittest.TestCase):
     """If the app is started but its pid cannot be found, nothing is left behind (the review of #101)."""
 

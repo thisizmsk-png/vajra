@@ -127,17 +127,44 @@ def sample(app_pid, run_roots, before):
             "load_1m": round(os.getloadavg()[0], 1), "front": frontmost()}
 
 
-def lstart(pid):
-    """The process's start time as `ps` prints it (1 s resolution): with the command name, its identity for the cleanup."""
-    out = subprocess.run(["ps", "-o", "lstart=,comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
-    return out or None
+def start_micro(pid):
+    """When the process started, in microseconds (the same `proc_pidinfo` call the core's `procid` uses), or None if it is
+    gone or cannot be read. `ps lstart` has a one-second resolution, which a reused pid can fall inside."""
+    import ctypes
+
+    class BsdInfo(ctypes.Structure):  # struct proc_bsdinfo, PROC_PIDTBSDINFO
+        _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32),
+                    ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32),
+                    ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+                    ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32),
+                    ("pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32), ("e_tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32),
+                    ("start_tvsec", ctypes.c_uint64), ("start_tvusec", ctypes.c_uint64)]
+
+    if sys.platform != "darwin" or pid <= 1:
+        return None
+    try:
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        info = BsdInfo()
+        got = lib.proc_pidinfo(int(pid), 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        return info.start_tvsec * 1_000_000 + info.start_tvusec if got == ctypes.sizeof(info) else None
+    except Exception:
+        return None
+
+
+def identity(pid):
+    """(start time in microseconds, command) of the process, or None. Both must still match before a signal."""
+    micro = start_micro(pid)
+    if micro is None:
+        return None
+    comm = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return (micro, comm) if comm else None
 
 
 def snapshot_tree(pid):
     """Every descendant of `pid` with its identity, taken while the tree still hangs together (once the parent dies they
     are reparented to launchd and can no longer be told from anyone else's)."""
     rows = ps()
-    return {p: lstart(p) for p in tree(rows, pid) - {pid}} if pid in rows else {}
+    return {p: identity(p) for p in tree(rows, pid) - {pid}} if pid in rows else {}
 
 
 def stop(p):
@@ -155,7 +182,9 @@ def stop(p):
         except Exception:
             pass
     for pid, ident in snap.items():
-        if ident is not None and lstart(pid) == ident:  # same pid, same start time, same command: ours
+        # The same pid, the same start time to the microsecond and the same command: ours. Checked again right before
+        # the signal; a process with no identity, or a different one, is skipped.
+        if ident is not None and identity(pid) == ident:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
