@@ -82,7 +82,8 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
     {message && <p role="status">{message}</p>}
     <div className="v-pref__actions">
       <Button variant="primary" disabled={!dirty || prefs.busy || prefs.uncertain || prefs.needsReview} busy={prefs.busy} onClick={() => void save()}>{C.save}</Button>
-      <Button disabled={!dirty || prefs.busy} onClick={() => { setPatch({}); setMessage(""); }}>{C.discard}</Button>
+      {/* Not while a save's outcome is uncertain: Retry would still apply the "discarded" draft (PR 100 review). */}
+      <Button disabled={!dirty || locked} onClick={() => { setPatch({}); setMessage(""); }}>{C.discard}</Button>
       <Button disabled={prefs.busy || prefs.uncertain || prefs.needsReview} onClick={() => void save(true)}>{C.reset}</Button>
       <Button variant="ghost" disabled={prefs.busy} onClick={() => { setPatch({}); setMessage(""); prefs.reload(); }}>{C.reload}</Button>
     </div>

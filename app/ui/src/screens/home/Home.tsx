@@ -61,16 +61,20 @@ export function Home() {
   const retryCamps = allCamps.state === "error" ? reloadCamps : reloadTargets;
   const campsFailed = allCamps.state === "error" ? S.home.campaignsFailed : S.home.targetsFailed;
   const [d, setD] = useState<Draft>({ repo: project?.root ?? "", ask: "", base: "HEAD", rounds: "3", maxInFlight: "4" });
-  const defaultsApplied = useRef(false);
+  // The preference scope whose defaults the form holds, or which the user has edited (PR 100 review): switching projects
+  // applies the next project's defaults once its own view arrives, and an edit keeps them only within its scope.
+  const scope = project && !project.bucket ? project.id : null;
+  const defaultsFor = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (!prefs.view || defaultsApplied.current) return;
-    defaultsApplied.current = true;
-    setD(x => ({ ...x, rounds: String(prefs.view!.effective.rounds), maxInFlight: String(prefs.view!.effective.workers) }));
-  }, [prefs.view]);
+    const view = prefs.view;
+    if (!view || view.project_id !== scope || defaultsFor.current === scope) return;
+    defaultsFor.current = scope;
+    setD(x => ({ ...x, rounds: String(view.effective.rounds), maxInFlight: String(view.effective.workers) }));
+  }, [prefs.view, scope]);
   const [shown, setShown] = useState(false); // show field errors only after the first try
   const [busy, setBusy] = useState<string | null>(null);
   const [fail, setFail] = useState("");
-  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsApplied.current = true; setD((x) => ({ ...x, [k]: v })); };
+  const set = (k: keyof Draft) => (v: string) => { if (k === "rounds" || k === "maxInFlight") defaultsFor.current = scope; setD((x) => ({ ...x, [k]: v })); };
   const errs = validate(d);
   const unsupported = !!prefs.view && prefs.view.effective.model !== "";
   // FG-09: the effective `agent` is the provider Start asks for. The provider check runs each CLI's status command, so it is
