@@ -456,8 +456,9 @@ impl App {
     /// the folder's key now.
     ///
     /// Membership comes from the guarded run records before any Git metadata is read. A record counts when its real
-    /// folder IS `cwd`'s real folder, or when it is a Git project's folder (its pinned key is a `.git`) that CONTAINS `cwd`:
-    /// a start in `/work/a/src` takes `/work/a`'s pin, so a worker that rewrote `/work/a/.git` cannot move the subfolder
+    /// folder IS `cwd`'s real folder, or when it is a Git project's folder (its pinned key is a `.git`) that CONTAINS `cwd`, or
+    /// when `cwd` is inside the main tree its pinned Git key implies (the key's parent): a start in `/work/a/src` takes
+    /// `/work/a`'s pin, and so does a start in `/work/a` after a first run in `/work/a/src`, so a worker that rewrote `/work/a/.git` cannot move the subfolder
     /// into another project (#80 review). The deepest such folder decides; records of that folder that disagree refuse the
     /// launch rather than guess. A plain (non-Git) folder's pin is never taken by a subfolder, so a run started in `$HOME`
     /// does not absorb the repos under it.
@@ -472,21 +473,25 @@ impl App {
         let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let want = real(cwd);
         let is_git = |k: &Path| k.file_name() == Some(std::ffi::OsStr::new(".git"));
-        // (depth of the recorded folder, key) of every record that decides membership for `cwd`.
+        // (depth of the folder, key) of every pinned folder that decides membership for `cwd`.
         let mut found: Vec<(usize, PathBuf)> = Vec::new();
         for r in self.recorded_runs() {
             let Some(c) = self.read_run_cwd(&r) else { continue };
             let rc = real(&c);
-            if !want.starts_with(&rc) {
-                continue;
-            }
-            let exact = rc == want;
+            let holds = want.starts_with(&rc);
             let key = match self.read_run_key(&r) {
                 Some(k) => k,
-                None => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+                // Only a record that holds `cwd` is migrated, and only one that does can refuse: an unrelated old record is left alone.
+                None if holds => self.migrate_old_key(&r, &c).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
+                None => continue,
             };
-            if exact || is_git(&key) {
-                found.push((rc.components().count(), key));
+            let git = is_git(&key);
+            // The run's own folder (exactly, or as a Git project's folder), and the project's main tree the pinned key implies:
+            // a first run in `/work/a/src` pinned `/work/a/.git`, so `/work/a` and `/work/a/tests` belong to it too.
+            let main = key.parent().filter(|_| git).map(real);
+            let own = (holds && (rc == want || git)).then_some(rc);
+            for root in own.into_iter().chain(main).filter(|r| want.starts_with(r)) {
+                found.push((root.components().count(), key.clone()));
             }
         }
         let Some(deepest) = found.iter().map(|(d, _)| *d).max() else { return Ok(super::caps::project_key(cwd)) };
