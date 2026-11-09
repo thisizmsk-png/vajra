@@ -12,6 +12,7 @@ import type { AttentionKind } from "../../projects/attention";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
 import { Empty, Problem } from "../states";
+import { escapeControls } from "../history/History";
 
 const SNOOZE_MS = 15 * 60_000;
 /** One blocker as the human saw it: a changed plan, or a different item, is a different key and cannot stay snoozed. */
@@ -128,7 +129,7 @@ export function Inbox() {
             )}
             {typeof i.action === "string" && i.action && <p>{S.inbox.action(i.action)}</p>}
             {i.body && <p className="v-ibx__body">{i.body}</p>}
-            {i.entry && <pre className="v-ibx__entry" aria-label={S.inbox.fullEntry} tabIndex={0}>{JSON.stringify(i.entry, null, 2)}</pre>}
+            {i.entry && <pre className="v-ibx__entry" aria-label={S.inbox.fullEntry} tabIndex={0}>{escapeControls(JSON.stringify(i.entry, null, 2))}</pre>}
             {i.plan_sha256 && <p>{S.inbox.planHash}: <code className="v-ibx__hash">{i.plan_sha256}</code></p>}
             {i.invalid && <p role="note">{i.invalid}</p>}
           </div>

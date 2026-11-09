@@ -144,6 +144,18 @@ describe("Approve and reject", () => {
     expect(full.textContent).toContain("run-extra-step --now");
   });
 
+  it("shows invisible and control characters in the entry as visible escapes, never raw", async () => {
+    items = [plan({ entry: { action: "deploy", note: "safe\u202e\u2066txt\u001b[31m\u200b", tag: "\u{e0041}" } })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const text = within(card("Deploy to staging")).getByLabelText(S.inbox.fullEntry).textContent ?? "";
+    expect(text).toContain("\\u202e");
+    expect(text).toContain("\\u2066");
+    expect(text).toContain("\\u200b");
+    expect(text).toContain("\\u{e0041}");
+    expect(text).not.toMatch(/[\u202e\u2066\u200b\u{e0041}\u001b]/u);
+  });
+
   it("cannot approve a plan whose campaign no project owns: Approve is off with a reason and sends nothing", async () => {
     items = [plan({ campaign: "brand-new-run" })];
     mount();
