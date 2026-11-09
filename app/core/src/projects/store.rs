@@ -300,6 +300,16 @@ impl Store {
         Ok(())
     }
 
+    /// The project that owns `folder` (the same folder through a symlink, or a worktree of its repository), or `None`:
+    /// a folder no project owns, one that is gone or refused. Read only: nothing is created, restored or written.
+    pub fn find(&self, folder: &Path) -> Result<Option<Project>> {
+        let Ok(r) = identity::resolve(folder, &self.guard) else { return Ok(None) };
+        let _g = self.lock();
+        let all = self.read_all()?.projects;
+        let same = |p: &&Project| (p.root_key.dev, p.root_key.ino) == (r.key.dev, r.key.ino) || (r.key.git_common_dir.is_some() && p.root_key.git_common_dir == r.key.git_common_dir);
+        Ok(all.iter().find(same).cloned())
+    }
+
     /// Add the folder `picked` as a project. The same folder again (through a symlink, in other letter case, or as a
     /// worktree of an existing project's repository) finds the existing project. A folder inside another project, or
     /// holding one, is refused unless `confirm_nested`.

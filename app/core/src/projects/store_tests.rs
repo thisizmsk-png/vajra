@@ -160,6 +160,32 @@ fn a_worktree_of_a_project_finds_that_project_and_never_makes_its_own() {
     assert_eq!(s.list(true).unwrap().projects.len(), 1);
 }
 
+// Given a run's folder, When the store is asked which project owns it, Then it answers with that project (through a
+// symlink or from a worktree too) and creates nothing; a folder no project owns, or one that is gone, is None.
+#[test]
+fn find_names_the_owning_project_and_never_creates_one() {
+    let t = Tmp::new("find");
+    let s = t.store();
+    let main = t.repo("src/vajra");
+    let other = t.repo("src/other");
+    let link = t.home().join("alias-to-vajra");
+    symlink(&main, &link).unwrap();
+    let wt_git = main.join(".git/worktrees/w1");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    let wt = t.home().join("work/w1");
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    let p = s.add(&main, false).unwrap().project().clone();
+    for folder in [&main, &link, &wt] {
+        assert_eq!(s.find(folder).unwrap().map(|f| f.id), Some(p.id.clone()), "{folder:?}");
+    }
+    assert!(s.find(&other).unwrap().is_none(), "a folder no project owns");
+    assert!(s.find(&t.home().join("gone")).unwrap().is_none(), "a folder that does not exist");
+    assert_eq!(s.list(true).unwrap().projects.len(), 1, "find wrote nothing");
+}
+
 #[test]
 fn a_folder_inside_or_holding_another_project_is_refused_until_confirmed() {
     let t = Tmp::new("nested");
@@ -534,7 +560,7 @@ fn a_log_longer_than_the_read_window_says_it_was_cut() {
 /// holds finds nothing.
 #[test]
 fn find_by_path_resolves_a_run_folder_to_its_project() {
-    let t = Tmp::new("find");
+    let t = Tmp::new("find-run");
     let s = t.store();
     let main = t.repo("src/vajra");
     let p = s.add(&main, false).unwrap().project().clone();
