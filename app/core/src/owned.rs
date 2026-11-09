@@ -194,33 +194,126 @@ fn running(pid: u32, stamp: u64) -> bool {
     same_process(pid, stamp) && !crate::procid::is_zombie(pid)
 }
 
+/// Reports which processes have exited, so a signal is never sent to a pid after its process is gone. A process is
+/// registered BEFORE its identity is read: if the stamp then matches, the registered pid is the right process, and its
+/// exit from then on is delivered here (an exited process that is not reaped still holds its pid). macOS only; elsewhere
+/// (or if no kqueue can be made) it reports nothing and the stamp check alone applies.
+struct ExitWatch {
+    kq: i32,
+    gone: std::collections::HashSet<u32>,
+}
+
+impl ExitWatch {
+    fn new() -> Self {
+        #[cfg(target_os = "macos")]
+        let kq = unsafe { libc::kqueue() };
+        #[cfg(not(target_os = "macos"))]
+        let kq = -1;
+        Self { kq, gone: Default::default() }
+    }
+
+    /// Watch `pid` for exit. False if it does not exist (already gone). True without a watch if there is no kqueue.
+    fn add(&mut self, pid: u32) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.kq >= 0 {
+            let ev = libc::kevent { ident: pid as usize, filter: libc::EVFILT_PROC, flags: libc::EV_ADD | libc::EV_ONESHOT, fflags: libc::NOTE_EXIT, data: 0, udata: std::ptr::null_mut() };
+            return unsafe { libc::kevent(self.kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) } >= 0;
+        }
+        let _ = pid;
+        true
+    }
+
+    /// Has `pid` exited since it was added? Reads the pending events without waiting.
+    fn exited(&mut self, pid: u32) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.kq >= 0 {
+            let none = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut out: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+            loop {
+                let n = unsafe { libc::kevent(self.kq, std::ptr::null(), 0, out.as_mut_ptr(), out.len() as i32, &none) };
+                if n <= 0 {
+                    break;
+                }
+                for e in &out[..n as usize] {
+                    if e.fflags & libc::NOTE_EXIT != 0 {
+                        self.gone.insert(e.ident as u32);
+                    }
+                }
+            }
+        }
+        self.gone.contains(&pid)
+    }
+}
+
+impl Drop for ExitWatch {
+    fn drop(&mut self) {
+        if self.kq >= 0 {
+            unsafe { libc::close(self.kq) };
+        }
+    }
+}
+
+/// Signal `pid` only if it has not exited since it was watched and is still the process with this start stamp, both read
+/// immediately before the call. Returns whether a signal was sent. Not atomic (macOS cannot signal by handle): what is
+/// left is the gap between this check and the `kill` syscall for this one pid, microseconds, and harm needs the pid to be
+/// reaped and reallocated to another process inside it, which needs the pid counter to wrap.
+fn signal_verified(w: &mut ExitWatch, pid: u32, stamp: u64, sig: libc::c_int) -> bool {
+    if w.exited(pid) || !running(pid, stamp) {
+        return false;
+    }
+    unsafe { libc::kill(pid as i32, sig) == 0 }
+}
+
+/// The leader and every other member of its session, each watched and stamped, or None if the leader is not provably
+/// ours. The leader is watched and verified first, then the session is listed, then the leader is verified again: if it
+/// held its pid across the listing, "session id equals its pid" really is its session. Each member is watched before its
+/// stamp is read and must still be in that session.
+fn snapshot(w: &mut ExitWatch, o: &Owner) -> Option<Vec<(u32, u64)>> {
+    if !w.add(o.pid) || !running(o.pid, o.stamp) {
+        return None;
+    }
+    let mut out = vec![(o.pid, o.stamp)];
+    for p in crate::terminal::kill::session_members(o.pid) {
+        let p = p as u32;
+        if p == o.pid || !w.add(p) {
+            continue;
+        }
+        let Some(stamp) = start_stamp(p) else { continue };
+        if unsafe { libc::getsid(p as i32) } == o.pid as i32 && !out.iter().any(|&(q, _)| q == p) {
+            out.push((p, stamp));
+        }
+    }
+    (running(o.pid, o.stamp) && !w.exited(o.pid)).then_some(out)
+}
+
 /// End a recorded shell's session, but only if the record still proves it is ours.
 ///
-/// Before the first signal the session's members are snapshotted, each with its own start stamp: once a leader that died
-/// on SIGHUP is reaped its pid (and with it the session id) can be reused, so members that ignored SIGHUP (`nohup`,
-/// `trap '' HUP`) could no longer be found. The steps: SIGHUP the session; wait up to `GRACE`; SIGKILL the session while
-/// the leader still holds it; then SIGKILL every snapshotted member that still matches its stamp, whether or not the
-/// leader is gone. `Ended` means none of them is still running; otherwise `Survived` says how many.
+/// The shell is watched for exit and its stamp checked, then its session is listed (`snapshot`), each member with its own
+/// stamp: once a leader that died on SIGHUP is reaped its pid (and with it the session id) can be reused, so members that
+/// ignored SIGHUP (`nohup`, `trap '' HUP`) could no longer be found. Every signal goes to one pid, and only after that
+/// pid is checked not to have exited and to still match its stamp (`signal_verified`); there is no signal to a group or
+/// to "everything in the session". The steps: SIGHUP each member; wait up to `GRACE`; list the session again while the
+/// leader still proves itself (members that started since) and SIGKILL each member that still matches. `Ended` means none
+/// of them is still running; otherwise `Survived` says how many.
 pub fn recover(o: &Owner) -> Recovery {
-    if !running(o.pid, o.stamp) {
-        return Recovery::NotOwned;
+    let mut w = ExitWatch::new();
+    let Some(mut members) = snapshot(&mut w, o) else { return Recovery::NotOwned };
+    for &(p, s) in &members {
+        signal_verified(&mut w, p, s, libc::SIGHUP);
     }
-    let mut members: Vec<(u32, u64)> = crate::terminal::kill::session_members(o.pid).into_iter().filter_map(|p| Some((p as u32, start_stamp(p as u32)?))).collect();
-    if !members.contains(&(o.pid, o.stamp)) {
-        members.push((o.pid, o.stamp));
-    }
-    crate::terminal::kill::signal_all(o.pid, true, libc::SIGHUP);
     let t0 = Instant::now();
     while t0.elapsed() < GRACE && members.iter().any(|&(p, s)| running(p, s)) {
         std::thread::sleep(Duration::from_millis(25));
     }
-    if running(o.pid, o.stamp) {
-        crate::terminal::kill::signal_all(o.pid, true, libc::SIGKILL); // also reaches members that started after the snapshot
+    if let Some(now) = snapshot(&mut w, o) {
+        for m in now {
+            if !members.contains(&m) {
+                members.push(m); // started after the first listing
+            }
+        }
     }
     for &(p, s) in &members {
-        if running(p, s) {
-            unsafe { libc::kill(p as i32, libc::SIGKILL) }; // proven by its stamp just now; never by name or a bare pid
-        }
+        signal_verified(&mut w, p, s, libc::SIGKILL);
     }
     let t1 = Instant::now();
     while t1.elapsed() < Duration::from_secs(1) && members.iter().any(|&(p, s)| running(p, s)) {
@@ -357,7 +450,8 @@ mod tests {
         assert_eq!(recover(&o), Recovery::Ended);
         reaper.join().unwrap();
         for p in job {
-            assert!(!alive(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
+            // `kill(pid, 0)` succeeds for an exited job its new parent has not reaped yet; that is not running.
+            assert!(!alive(p as u32) || crate::procid::is_zombie(p as u32), "the HUP-ignoring job {p} must be gone, not reported ended while running");
         }
     }
 
@@ -490,5 +584,61 @@ mod tests {
         for bad in ["killall", "pkill", "pgrep", "\"ps\""] {
             assert!(!code.contains(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn given_a_process_that_exited_when_watched_then_it_is_reported_and_nothing_is_signalled_to_it() {
+        let mut c = Command::new("sleep").arg("300").spawn().unwrap();
+        let stamp = start_stamp(c.id()).unwrap();
+        let mut w = ExitWatch::new();
+        assert!(w.add(c.id()));
+        assert!(!w.exited(c.id()), "alive: no exit event");
+        c.kill().unwrap(); // dead but not reaped: its pid is still held, as for an orphan's zombie
+        let t0 = Instant::now();
+        while !w.exited(c.id()) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(w.exited(c.id()), "the exit is reported");
+        assert!(!signal_verified(&mut w, c.id(), stamp, libc::SIGTERM), "an exited process is not signalled");
+        c.wait().unwrap();
+    }
+
+    #[test]
+    fn given_a_live_process_with_another_stamp_when_signalled_then_it_is_skipped_and_keeps_running() {
+        let c = Command::new("sleep").arg("300").spawn().unwrap();
+        let stamp = start_stamp(c.id()).unwrap();
+        let mut w = ExitWatch::new();
+        assert!(w.add(c.id()));
+        assert!(!signal_verified(&mut w, c.id(), stamp + 3, libc::SIGKILL), "not the recorded process");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(alive(c.id()), "the bystander was not touched");
+        assert!(signal_verified(&mut w, c.id(), stamp, libc::SIGTERM), "the matching process is signalled");
+        gone(c);
+    }
+
+    #[test]
+    fn given_a_pid_that_does_not_exist_when_watched_then_it_is_refused() {
+        let c = Command::new("true").spawn().unwrap();
+        let pid = c.id();
+        let mut c = c;
+        c.wait().unwrap();
+        let mut w = ExitWatch::new();
+        assert!(!w.add(pid), "a reaped pid cannot be watched, so recovery stops at NotOwned");
+    }
+
+    #[test]
+    fn given_a_member_that_exits_during_the_loop_when_the_loop_reaches_it_then_it_is_skipped() {
+        let (c, o) = leader();
+        let mut w = ExitWatch::new();
+        let members = snapshot(&mut w, &o).unwrap();
+        assert_eq!(members.len(), 2, "the shell and its job");
+        let (job, job_stamp) = *members.iter().find(|&&(p, _)| p != o.pid).unwrap();
+        unsafe { libc::kill(job as i32, libc::SIGKILL) }; // the job dies on its own before the loop reaches it
+        let t0 = Instant::now();
+        while !w.exited(job) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!signal_verified(&mut w, job, job_stamp, libc::SIGHUP), "skipped: it exited");
+        gone(c);
     }
 }
