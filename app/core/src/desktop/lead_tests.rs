@@ -1425,6 +1425,40 @@ fn after_a_restart_another_runs_nonce_in_the_shared_history_is_redacted_when_b_i
     assert!(lines.iter().all(|l| !l.contains(&nonce_a) && !l.contains(&nonce_b)), "no run's nonce reaches the bus: {lines:?}");
 }
 
+/// #80 review [P2]: an outside-worktree launch whose main checkout could not be resolved refuses other projects' Leads; a later
+/// launch from the project's main folder (the suggested recovery) repairs that, and every run folder stays denied.
+#[test]
+fn a_main_folder_launch_repairs_an_unresolved_checkout_and_every_folder_stays_denied() {
+    let t = Tmp::new();
+    let app = t.app();
+    let main = t.0.join("harbor");
+    let wt = t.0.join("harbor-wt");
+    for d in [main.join(".git/worktrees/harbor-wt"), wt.clone(), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(main.join(".git/worktrees/harbor-wt/commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/harbor-wt").display())).unwrap();
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &wt, SID, "c", true, 1).unwrap();
+    // That launch could not resolve the main checkout.
+    std::fs::write(app.data.join("control/lead/20261108-1100/project_main"), "-").unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo()).unwrap_err();
+    assert!(format!("{e:?}").contains("main folder"), "the refusal names the fix: {e:?}");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+    // The user starts the project from its main folder: the same pinned key, with the checkout resolved.
+    app.record_run("20261108-1200", &main, SID, "c", true, 1).unwrap();
+    let roots = app.other_project_roots(RUN_ID, &t.repo()).unwrap();
+    for want in [&main, &wt] {
+        assert!(roots.contains(want), "{want:?} denied: {roots:?}");
+    }
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app));
+    let got = std::fs::read_to_string(orch_dir(&t).join("settings.json")).unwrap();
+    for want in [&main, &wt] {
+        assert!(got.contains(&format!("Read(/{}/**)", want.display())), "{want:?}: {got}");
+    }
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
