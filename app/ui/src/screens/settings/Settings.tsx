@@ -1,6 +1,5 @@
-// Settings (shell B): a section list inside the page, and the section beside it. Providers holds the checks a run
-// needs (real); Keyboard lists the real shortcuts; Appearance states what the app really does. The other sections say
-// what they will hold and show no controls until they work (FG-08, FG-09, FG-21).
+// Settings in the project shell: explicit global defaults and per-project overrides.
+// Provider availability remains a separate check; preferences never grant execution permissions.
 import { useCallback, useEffect, useState } from "react";
 import { Kbd, Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
@@ -11,8 +10,12 @@ import { useCommands } from "../../palette";
 import { toHash, useRoute } from "../../router";
 import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import { PreflightList } from "../PreflightList";
+import { PreferenceForm } from "./PreferenceForm";
+import { useCurrentProject } from "../../projects/current";
+import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
+import { preferenceScope, usePreferences } from "../../preferences";
 
-export const SECTIONS = ["providers", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
+export const SECTIONS = ["providers", "general", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
 type Section = (typeof SECTIONS)[number];
 const isSection = (s: string | undefined): s is Section => !!s && (SECTIONS as readonly string[]).includes(s);
 
@@ -41,6 +44,8 @@ function useChecks(on: boolean) {
 
 export function Settings() {
   const [route] = useRoute();
+  const prefs = usePreferences();
+  const { project } = useCurrentProject();
   const section: Section = isSection(route.params.section) ? route.params.section : "providers";
   const meta = S.settings.sections[section];
   const checks = useChecks(section === "providers");
@@ -58,6 +63,7 @@ export function Settings() {
           <div className="v-settings__col">
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
+            {prefs.connected && ["appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-checks" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">
@@ -74,11 +80,11 @@ export function Settings() {
             {section === "keyboard" && (
               <section className="v-panel" aria-label={meta.title}>
                 <ul className="v-settings__keys">
-                  {SHORTCUTS.map((k) => <li key={k.label}><span>{k.label}</span><Kbd keys={k.keys} /></li>)}
+                  {SHORTCUTS.map((k) => <li key={k.label}><span>{k.label}</span><Kbd keys={k.label === S.settings.keys.palette ? shortcutKeys(prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette) : k.label === S.settings.keys.settings ? shortcutKeys(prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings) : k.keys} /></li>)}
                 </ul>
               </section>
             )}
-            {section !== "providers" && section !== "keyboard" && section !== "appearance" && (
+            {(section === "general" || section === "notifications" || section === "mobile" || section === "diagnostics") && (
               <p className="v-settings__later">{S.settings.later}</p>
             )}
           </div>
@@ -87,4 +93,13 @@ export function Settings() {
       {section === "providers" && <ActionBar label={S.settings.barLabel} actions={[{ id: "recheck", label: S.settings.recheck, run: checks.run }]} />}
     </div>
   );
+}
+
+function ScopedPreferences({ section }: { section: string }) {
+  const { project } = useCurrentProject(); const available = preferenceScope(project) ? project : null;
+  const [global, setGlobal] = useState(!available); const [dirty, setDirty] = useState(false);
+  return <><div className="v-pref-scope"><label>{S.preferences.scope}<select aria-label={S.preferences.scope} disabled={dirty} value={global ? "global" : "project"} onChange={e => setGlobal(e.target.value === "global")}>
+    <option value="global">{S.preferences.global}</option>{available && <option value="project">{available.name}</option>}
+  </select></label>{dirty && <p>{S.preferences.scopeHint}</p>}</div>
+  <PreferenceForm projectId={global ? null : available?.id ?? null} projectName={available?.name} section={section} onDirty={setDirty} /></>;
 }

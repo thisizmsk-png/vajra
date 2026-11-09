@@ -6,5 +6,5 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   build: { outDir: "dist", emptyOutDir: true, modulePreload: { polyfill: false } },
-  test: { environment: "jsdom", include: ["tests/**/*.test.{ts,tsx}"], css: false },
+  test: { environment: "jsdom", include: ["tests/**/*.test.{ts,tsx}"], setupFiles: ["tests/setup.ts"], css: false },
 });
