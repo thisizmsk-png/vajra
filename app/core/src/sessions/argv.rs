@@ -25,6 +25,9 @@ pub struct RunInput {
     pub max_in_flight: u32,
     /// Campaign slug to resume; `None` means `deliver-<run_id>`.
     pub campaign: Option<String>,
+    /// The adapter id to run (`claude` or `codex`), the effective `agent` preference the UI read at launch. `None`
+    /// means `claude`. There is no fallback: a provider that cannot start is refused, never swapped.
+    pub provider: Option<String>,
 }
 
 /// A rejected field. `field` is the JSON name the form shows the error under.

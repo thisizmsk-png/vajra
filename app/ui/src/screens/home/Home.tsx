@@ -91,7 +91,7 @@ export function Home() {
   const targetOf = (c: Campaign) => (targets.state === "ok" ? targets.data[c.slug] : undefined);
   const resume = (c: Campaign) => {
     const t = targetOf(c);
-    if (t) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd));
+    if (t) void launch(c.slug, () => api.resumeRun(t.session_id, c.slug, t.cwd, t.provider));
   };
   const err = (k: keyof Draft) => (shown ? errs[k] : undefined);
 

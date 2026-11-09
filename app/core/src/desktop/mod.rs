@@ -179,9 +179,15 @@ type WorktreeCache = HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
+    preferences: Mutex<crate::preferences::Store>,
     data: PathBuf,
     home: PathBuf,
     claude: PathBuf,
+    /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
+    provider_dirs: Option<Vec<PathBuf>>,
+    /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
+    /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
+    provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -253,6 +259,7 @@ impl App {
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             projects,
+            preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
             sink: Mutex::new(None),
             data: data.to_path_buf(),
@@ -273,6 +280,8 @@ impl App {
             },
             reader: Mutex::new(None),
             claude,
+            provider_dirs: None,
+            provider_cache: Mutex::new(None),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -450,7 +459,22 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
     ) -> Res {
-        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true)
+        self.launch_engine(Engine::Claude, session_id, run_id, campaign, cwd, argv, rotate)
+    }
+
+    /// `launch` for the chosen provider: the session is recorded with it so a later resume knows which CLI ran it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_engine(
+        &self,
+        engine: Engine,
+        session_id: &str,
+        run_id: &str,
+        campaign: &str,
+        cwd: &Path,
+        argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
+        rotate: bool,
+    ) -> Res {
+        self.launch_kind(session_id, run_id, campaign, cwd, argv, rotate, true, engine)
     }
 
     /// `workflow` is false only for the approval-only resume (ADR-14), which starts no new `vajra-deliver`: its run id
@@ -465,6 +489,7 @@ impl App {
         argv: impl FnOnce(&str) -> Result<Vec<String>, Value>,
         rotate: bool,
         workflow: bool,
+        engine: Engine,
     ) -> Res {
         let _one = lock(&self.launching);
         self.no_active_run()?;
@@ -480,6 +505,12 @@ impl App {
                 }
             }
         };
+        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
+        // refused, so a resume never has to guess the provider from the worker-writable index.
+        if self.record_run_provider(run_id, engine).is_err() {
+            lock(&self.control).end_session(session_id);
+            return Err(fail("io", "could not record the run's provider"));
+        }
         let stream = format!("run-{session_id}");
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
@@ -496,7 +527,7 @@ impl App {
             Run { session_id: session_id.into(), run_id: run_id.into(), campaign: campaign.into(), cwd: cwd.to_path_buf(), nonces },
         );
         // Remember which session ran this campaign, so it can be resumed into the same session after a restart.
-        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None };
+        let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
@@ -515,9 +546,46 @@ impl App {
         let targets: serde_json::Map<String, Value> = runindex::latest(&self.data.join("runs.jsonl"))
             .into_iter()
             .filter(|(_, e)| e.cwd.is_dir())
-            .map(|(k, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy()})))
+            // Only a provider that can resume is offered: a Codex run's app-made id means nothing to `codex resume`.
+            .map(|(k, e)| {
+                // The guarded record decides; the index line's own `provider` is a worker-writable hint and is not used.
+                let engine = self.read_run_provider(&e.run_id).unwrap_or(Engine::Claude);
+                (k, engine, e)
+            })
+            .filter(|(_, engine, _)| adapter_for(*engine).capabilities().resume)
+            .map(|(k, engine, e)| (k, json!({"session_id": e.session_id, "run_id": e.run_id, "cwd": e.cwd.to_string_lossy(), "provider": engine.id()})))
             .collect();
         Ok(json!({"targets": targets}))
+    }
+
+    /// The provider a start or resume runs on: the id the caller passed (the effective `agent` preference), else
+    /// `claude`. A provider that is unknown or not installed is refused. There is never a fallback to another one,
+    /// and a login that cannot be checked does not block (the CLI itself says if it is signed out).
+    fn chosen_engine(&self, requested: Option<&str>) -> Result<Engine, Value> {
+        let id = requested.unwrap_or("claude");
+        let engine = Engine::from_id(id).ok_or_else(|| invalid("provider", "must be claude or codex"))?;
+        if !self.provider_probe().installed(engine) {
+            return Err(fail("provider_not_installed", format!("{id} is not installed; install it or choose another provider")));
+        }
+        Ok(engine)
+    }
+
+    fn provider_probe(&self) -> crate::providers::detect::System {
+        crate::providers::detect::System::new(self.provider_dirs.clone().unwrap_or_else(preflight::path_dirs))
+    }
+
+    /// `provider_list` (`vajra.providers/1`): every adapter with its install state, version, capabilities and the
+    /// CLI's own login check. Read-only; a missing or broken CLI is a row, not an error.
+    pub fn provider_list(&self) -> Res {
+        let l = crate::providers::detect::list(&self.provider_probe());
+        let v = serde_json::to_value(&l).map_err(|e| fail("internal", e))?;
+        *lock(&self.provider_cache) = Some(l);
+        Ok(v)
+    }
+
+    /// The last `provider_list` answer, or `None` before the first. Never runs a process.
+    pub fn provider_cached(&self) -> Option<crate::providers::contract::ProviderList> {
+        lock(&self.provider_cache).clone()
     }
 
     /// The workflow takes only a commit sha, so a branch or ref is resolved
@@ -543,8 +611,13 @@ impl App {
         let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
-        let r = self.launch(&session_id, &run_id, &campaign, &cwd, |n| {
-            argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+        let engine = self.chosen_engine(input.provider.as_deref())?;
+        let r = self.launch_engine(engine, &session_id, &run_id, &campaign, &cwd, |n| {
+            if engine == Engine::Claude {
+                argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
+            } else {
+                adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
+            }
         }, false)?;
         self.note("run_started", &[]);
         Ok(r)
@@ -552,7 +625,7 @@ impl App {
 
     /// ADR-9 resume: `claude --resume <session_id>` continuing the campaign
     /// through `/vajra-deliver` with a rotated steering nonce (design 5).
-    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str) -> Res {
+    pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
@@ -563,9 +636,21 @@ impl App {
         // ADR-9 item 5: every resume is a new run with a fresh UTC id, never the id of an earlier resume.
         let (_, run_id) = self.fresh_run_id(ids::unix_now())?;
         let run_id = run_id.as_str();
-        let claude = adapter_for(Engine::Claude);
-        let r = self.launch(session_id, run_id, campaign, &cwd, |n| {
-            claude.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
+        // The run this session belongs to, from the index (a lookup hint) and its guarded provider record: a request for
+        // a different provider than the one that ran it is refused, never run on the other.
+        let recorded = runindex::latest(&self.data.join("runs.jsonl")).get(campaign).filter(|e| e.session_id == session_id).and_then(|e| self.read_run_provider(&e.run_id));
+        if let (Some(rec), Some(asked)) = (recorded, provider) {
+            if rec.id() != asked {
+                return Err(fail("provider_mismatch", format!("that run was started on {}, not {asked}", rec.id())));
+            }
+        }
+        let engine = self.chosen_engine(provider.or(recorded.map(Engine::id)))?;
+        let adapter = adapter_for(engine);
+        if !adapter.capabilities().resume {
+            return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
+        }
+        let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
+            adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
         }, true)?;
         self.note("run_resumed", &[]);
         Ok(r)
@@ -1749,3 +1834,5 @@ fn task_meta(run_id: &str, label: &str) -> (Option<String>, Option<u32>) {
     let round = parts.rev().find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()));
     (Some(format!("{run_id}.{id}")), round)
 }
+
+mod preferences;

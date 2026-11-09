@@ -21,6 +21,10 @@ pub struct Entry {
     /// Legacy field, read for compatibility and **not trusted**: this file is writable by a worker. The app keeps the
     /// run to Lead-session mapping in `<data>/control/lead/<run_id>/lead_session`, under the guarded control dir.
     pub lead_session_id: Option<String>,
+    /// The adapter that ran it (`claude` or `codex`); absent in older lines, which were all `claude`. Like the rest of
+    /// this file it is a hint and nothing decides on it: the provider a resume uses comes from the guarded per-run record
+    /// (`lead::record_run_provider`), because a worker could rewrite this line.
+    pub provider: Option<String>,
 }
 
 /// Serialises every read-modify-append of the index within the process, so a late metadata write cannot interleave
@@ -40,6 +44,9 @@ fn append_locked(path: &Path, e: &Entry) -> io::Result<()> {
     });
     if let Some(l) = &e.lead_session_id {
         line["lead_session_id"] = serde_json::json!(l);
+    }
+    if let Some(p) = &e.provider {
+        line["provider"] = serde_json::json!(p);
     }
     let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
     f.write_all(format!("{line}\n").as_bytes())
@@ -84,7 +91,8 @@ fn parse_line(line: &str) -> Option<Entry> {
     }
     // A malformed Lead id reads as absent, never as an error: the line is still a valid launch record.
     let lead_session_id = s("lead_session_id").filter(|l| ids::valid_session_id(l));
-    Some(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id })
+    let provider = s("provider").filter(|p| crate::adapter::Engine::from_id(p).is_some());
+    Some(Entry { campaign, session_id, run_id, cwd: PathBuf::from(cwd), lead_session_id, provider })
 }
 
 /// The longest single line the full reader looks at (a launch line is a few hundred bytes).
@@ -161,7 +169,7 @@ mod tests {
     }
 
     fn entry(c: &str, s: &str, r: &str) -> Entry {
-        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo"), lead_session_id: None }
+        Entry { campaign: c.into(), session_id: s.into(), run_id: r.into(), cwd: PathBuf::from("/repo"), lead_session_id: None, provider: None }
     }
 
     #[test]
