@@ -155,6 +155,8 @@ fn a_cancel_with_a_receipt_names_the_asks_project() {
 fn lead_status_by_project_needs_no_run_and_refuses_an_archived_project() {
     let t = Tmp::new();
     let app = t.app();
+    // The fixture's run is alive: its process is up, not just its entry kept for the crew view (#82 review).
+    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default() }).unwrap();
     let p = pid(&t);
     assert!(app.project_state(&p, None).unwrap()["generations"]["orchestrator"].is_null(), "no Director-General yet");
     let quiet = crate::desktop::test_project(&t.data(), &t.home(), &t.0.join("quiet"));
