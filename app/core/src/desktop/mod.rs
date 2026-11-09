@@ -611,7 +611,7 @@ impl App {
         if workflow && self.record_run_workers(run_id, workers).is_err() {
             self.note("run_workers_record_failed", &[]);
         }
-        self.note_run(&project, run_id, campaign);
+        self.note_run(&project, run_id, campaign, engine);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 

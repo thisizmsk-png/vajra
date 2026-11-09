@@ -611,11 +611,26 @@ impl App {
         let mut other_recorded: Vec<PathBuf> = Vec::new();
         let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
         // The store: this project's recorded root is its own; every other project's root (archived ones too: archiving hides a
-        // project, it does not make its folder readable to others) is another's.
+        // project, it does not make its folder readable to others) is another's. A run launched in a SUBFOLDER of a plain
+        // project, or below a project registered inside a Git checkout, records that subfolder or the checkout while its
+        // Director-General runs in this root (#103 review). The root is its own only as the store recorded it: compared without
+        // resolving it again (the store keeps it canonical) and by device and inode, so a root moved away, or replaced by a link
+        // or another folder, still refuses.
+        // The run records below hold that root by path (`project_main` is the store's root at launch), so they never admit it:
+        // only this check does.
+        let mut own_root: Option<PathBuf> = None;
+        // Every folder this project claims (its root and its runs' records, unfiltered), for the ambiguity check below.
+        let mut own_claimed: Vec<PathBuf> = Vec::new();
         for p in listing.projects {
             let root = PathBuf::from(&p.root);
             if p.id == own {
-                own_folders.push(std::fs::canonicalize(&root).unwrap_or(root));
+                use std::os::unix::fs::MetadataExt;
+                let same_inode = std::fs::metadata(&own_real).is_ok_and(|m| (m.dev(), m.ino()) == (p.root_key.dev, p.root_key.ino));
+                if root == own_real && same_inode {
+                    own_folders.push(root.clone());
+                }
+                own_claimed.push(root.clone());
+                own_root = Some(root);
             } else {
                 candidates.push((vec![root], false));
             }
@@ -646,7 +661,8 @@ impl App {
                 None => None,
             };
             if pid.as_deref() == Some(own.as_str()) {
-                own_folders.extend(cwd_real.into_iter().chain(loc).chain(main));
+                own_claimed.extend(cwd_real.iter().chain(&loc).chain(&main).cloned());
+                own_folders.extend(cwd_real.into_iter().chain(loc).chain(main).filter(|f| own_root.as_ref() != Some(f)));
                 continue;
             }
             let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
@@ -656,12 +672,12 @@ impl App {
             // project's, unless it resolves to the Director-General's own folder: the same folder, launched again, is the same project.
             candidates.push((dirs, loc_missing));
         }
-        // The identity check: the asking folder is exactly one of its own project's recorded folders.
+        // The identity check: the asking folder is exactly one of its own project's recorded folders, or its registered root.
         if !own_folders.contains(&own_real) {
             return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Director-General is not started"));
         }
         // Ambiguity: one recorded folder claimed by two projects.
-        if other_recorded.iter().any(|f| own_folders.contains(f)) {
+        if other_recorded.iter().any(|f| own_folders.contains(f) || own_claimed.contains(f)) {
             return Err(guard("a folder is recorded under two different projects, so the Director-General cannot tell which one owns it"));
         }
         let mut iso = Isolation::default();
@@ -1178,7 +1194,7 @@ impl App {
             // The turn is over: the orchestrator is idle again (or its turn failed), still on this conversation.
             if let Some(id) = record {
                 let status = if matches!(&end, Ok(Done { is_error: false, .. })) { SessionStatus::Stopped } else { SessionStatus::Failed };
-                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, rec_gen, status);
+                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, "claude", rec_gen, status);
                 let _ = projects.append_session(&line);
             }
             lock(&active).remove(&project);
