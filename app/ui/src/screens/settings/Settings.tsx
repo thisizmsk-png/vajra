@@ -16,7 +16,7 @@ import { ProviderCard, useProviders } from "../ProviderControls";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
-import { usePreferences } from "../../preferences";
+import { preferenceScope, usePreferences } from "../../preferences";
 
 export const SECTIONS = ["providers", "general", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
 type Section = (typeof SECTIONS)[number];
@@ -120,7 +120,7 @@ function agentChoices(list: ProviderInfo[] | null): AgentChoice[] {
 }
 
 function ScopedPreferences({ section, agents }: { section: string; agents: AgentChoice[] }) {
-  const { project } = useCurrentProject(); const available = project && !project.bucket ? project : null;
+  const { project } = useCurrentProject(); const available = preferenceScope(project) ? project : null;
   const [global, setGlobal] = useState(!available); const [dirty, setDirty] = useState(false);
   return <><div className="v-pref-scope"><label>{S.preferences.scope}<select aria-label={S.preferences.scope} disabled={dirty} value={global ? "global" : "project"} onChange={e => setGlobal(e.target.value === "global")}>
     <option value="global">{S.preferences.global}</option>{available && <option value="project">{available.name}</option>}
