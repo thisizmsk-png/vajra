@@ -484,7 +484,10 @@ impl App {
             // folder that holds its `.git` dir, from the pinned key), so a project whose runs were all elsewhere still
             // has its main folder denied.
             let main = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
-            for dir in std::iter::once(cwd).chain(main) {
+            // The run folder, the project's main tree (from a `.git` key), and the checkout root the launch pinned (`project_loc`):
+            // a submodule's or separate-git-dir repo's root is neither the cwd nor inferable from its key.
+            let pinned_loc = self.read_run_loc(&run);
+            for dir in std::iter::once(cwd).chain(main).chain(pinned_loc) {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 if own_real.starts_with(&real) || out.contains(&dir) {
                     continue;
@@ -625,9 +628,24 @@ impl App {
             let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
             if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
-                for common in enclosing.iter().filter_map(|k| std::fs::canonicalize(k).ok()) {
-                    if real.starts_with(&common) && real.ancestors().take_while(|d| d.starts_with(&common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
-                        return Ok(real);
+                // A pinned common dir counts only while it is still exactly itself: the key was stored canonical, so one that now
+                // resolves anywhere else (replaced by a symlink, or under a redirected parent) has been redirected and admits nothing.
+                for common in enclosing.iter().filter(|k| std::fs::canonicalize(k).is_ok_and(|c| &c == *k)) {
+                    // No `commondir` above the target on the way up to the common dir.
+                    if !real.starts_with(common) || !real.ancestors().skip(1).take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
+                        continue;
+                    }
+                    match fsx::read_nofollow(&real.join("commondir")) {
+                        // A submodule's git dir: its own common dir, keyed by exactly the target that was checked.
+                        Err(_) if std::fs::symlink_metadata(real.join("commondir")).is_err() => return Ok(real),
+                        // A linked worktree of the enclosing project: its `commondir` must resolve to this pinned common dir.
+                        Ok(c) => {
+                            let resolved = String::from_utf8(c).ok().and_then(|c| std::fs::canonicalize(real.join(c.trim())).ok());
+                            if resolved.as_ref() == Some(common) {
+                                return Ok(common.clone());
+                            }
+                        }
+                        Err(_) => {}
                     }
                 }
             }
