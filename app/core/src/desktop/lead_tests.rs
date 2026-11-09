@@ -1427,7 +1427,7 @@ fn more_other_project_folders_than_the_rules_hold_refuses_the_ask() {
 /// #80 review [P1]: a legacy record's location is validated against its pinned key on the LAUNCH path too, before it is persisted, even
 /// when the launch then fails: a redirected folder must not leave a trusted-looking location behind for a later ask.
 #[test]
-fn a_launch_never_persists_a_legacy_location_that_does_not_identify_to_the_records_key() {
+fn a_launch_never_persists_a_location_for_a_record_that_has_none() {
     let t = Tmp::new();
     let app = t.app();
     let (other, src) = (t.0.join("other"), t.repo().join("src"));
@@ -1440,8 +1440,10 @@ fn a_launch_never_persists_a_legacy_location_that_does_not_identify_to_the_recor
     std::fs::remove_file(&loc).unwrap();
     std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
     std::os::unix::fs::symlink(&other, &src).unwrap();
-    assert!(app.launch_key(&other).is_err(), "a fresh start in the other project is refused");
-    assert!(!loc.exists(), "no invalid location was persisted for the redirected legacy record");
+    // The record has no location (the shipped build's format): it pins nothing, so a fresh start in the other project is not blocked by
+    // it, and it is never written to.
+    assert!(app.launch_key(&other).is_ok(), "a record that pins nothing does not block a fresh start");
+    assert!(!loc.exists(), "no location was derived and persisted for the redirected legacy record");
     assert!(app.other_project_roots(RUN_ID, &src).is_err(), "and a later ask for the redirected run stays refused");
 }
 

@@ -3037,53 +3037,62 @@ fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite()
     app.sup.kill(&stream).unwrap();
 }
 
-/// The base format: a record written before project keys and locations existed.
-fn without_key(app: &App, run: &str) {
-    for f in ["project_key", "project_loc"] {
-        let _ = fs::remove_file(app.data.join("control/lead").join(run).join(f));
-    }
-}
-
-/// #80 identity model: a record from an older build (no project key or location) is never migrated or written back; a launch whose
-/// folder it could hold or be held by is refused, and one elsewhere is unaffected.
+/// #80 review (main format): a run record written by the shipped build has only cwd, session and campaign. It must not block a new
+/// launch in that folder or anywhere near it; it pins nothing, is never migrated or written to, and the new launch pins the folder.
 #[test]
-fn an_old_record_without_a_project_key_is_refused_never_migrated() {
+fn a_main_format_record_does_not_block_a_new_launch_in_its_folder_and_is_left_untouched() {
     let t = Tmp::new();
     let app = t.app();
     let (a, far) = (t.0.join("a"), t.0.join("far"));
-    for d in [a.join(".git"), far.join(".git")] {
+    for d in [a.join(".git"), a.join("src"), far.join(".git")] {
         fs::create_dir_all(d).unwrap();
     }
+    // The base format: cwd, session, campaign, started (what `main` wrote), and nothing about projects.
     app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
-    without_key(&app, "20261105-1230");
-    let e = app.launch_key(&a).unwrap_err();
-    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
-    assert_eq!(app.read_run_key("20261105-1230"), None, "nothing was written back");
-    assert!(!app.data.join("control/lead/20261105-1230/project_loc").exists(), "no location was derived and persisted");
-    assert!(app.launch_key(&far).is_ok(), "an unrelated folder is not blocked by it");
+    let old = app.data.join("control/lead/20261105-1230");
+    for f in ["project_key", "project_loc", "project_main", "cwd_real"] {
+        let _ = fs::remove_file(old.join(f));
+    }
+    let before: Vec<_> = { let mut v: Vec<_> = fs::read_dir(&old).unwrap().flatten().map(|e| e.file_name()).collect(); v.sort(); v };
+    for folder in [&a, &a.join("src"), &far] {
+        assert!(app.launch_key(folder).is_ok(), "a launch in or near {folder:?} is not blocked by the old record");
+    }
+    let after: Vec<_> = { let mut v: Vec<_> = fs::read_dir(&old).unwrap().flatten().map(|e| e.file_name()).collect(); v.sort(); v };
+    assert_eq!(before, after, "the old record was neither migrated nor written to");
+    // After the new launch is recorded, the Lead of that project can still be asked: the old record of the same folder is not an ambiguity.
+    app.record_run("20261105-1240", &a, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 2).unwrap();
+    assert!(app.other_project_roots("20261105-1240", &a).is_ok(), "the old record of the same folder does not refuse the ask");
+}
+
+/// #80 review (main format): an old record for folder X pins nothing, but X is still some project's folder: another project's Lead is
+/// denied it, as it is any other project's.
+#[test]
+fn a_main_format_record_still_denies_its_folder_to_another_projects_lead() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (x, b) = (t.0.join("x"), t.0.join("b"));
+    for d in [x.join(".git"), x.join("src"), b.join(".git")] {
+        fs::create_dir_all(d).unwrap();
+    }
+    app.record_run("20261105-1230", &x, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let old = app.data.join("control/lead/20261105-1230");
+    for f in ["project_key", "project_loc", "project_main", "cwd_real"] {
+        let _ = fs::remove_file(old.join(f));
+    }
+    app.record_run("20261105-1240", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 2).unwrap();
+    let denied = app.other_project_roots("20261105-1240", &b).unwrap();
+    assert!(denied.contains(&x), "the old record's folder stays denied to another project's Lead: {denied:?}");
 }
 
 #[test]
-fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
+fn records_of_one_folder_under_two_different_projects_still_refuse() {
     let t = Tmp::new();
     let app = t.app();
     let a = t.0.join("a");
     fs::create_dir_all(a.join(".git")).unwrap();
-    // Conflict: an old record, and a keyed record of the same folder under another project.
     app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
-    without_key(&app, "20261105-1230");
     app.record_run_as("20261105-1231", &a, &t.0.join("other/.git"), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "c", true, 1).unwrap();
     let e = app.launch_key(&a).unwrap_err();
-    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
-    // Malformed: a cwd record with no session and no key is not the base format.
-    let t2 = Tmp::new();
-    let app2 = t2.app();
-    let a2 = t2.0.join("a");
-    fs::create_dir_all(a2.join(".git")).unwrap();
-    app2.record_run("20261105-1230", &a2, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
-    without_key(&app2, "20261105-1230");
-    fs::remove_file(app2.data.join("control/lead/20261105-1230/session")).unwrap();
-    let e = app2.launch_key(&a2).unwrap_err();
     assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
 }
 

@@ -452,7 +452,7 @@ impl App {
         let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
         let mut own_folders: Vec<PathBuf> = Vec::new();
         let mut other_recorded: Vec<PathBuf> = Vec::new();
-        let mut candidates: Vec<Vec<PathBuf>> = Vec::new();
+        let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
         for run in runs {
             let present = |f: &str| std::fs::symlink_metadata(self.lead_sid_dir(&run).join(f)).is_ok();
             let Some(cwd) = self.read_run_cwd(&run) else {
@@ -482,8 +482,11 @@ impl App {
             // The run folder, the project's main tree (from a `.git` key), the recorded location, canonical folder and resolved main.
             let from_key = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
             let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(from_key).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
+            let loc_missing = !present(LOC_FILE);
             other_recorded.extend(cwd_real.into_iter().chain(loc).chain(main));
-            candidates.push(dirs);
+            // A record from the shipped build (no location) is skipped for identity but its folder is still denied like any other
+            // project's, unless it resolves to the Lead's own folder: the same folder, launched again, is the same project.
+            candidates.push((dirs, loc_missing));
         }
         // The identity check: the asking folder is exactly one of its own project's recorded folders.
         if !own_folders.contains(&own_real) {
@@ -494,9 +497,12 @@ impl App {
             return Err(guard("a folder is recorded under two different projects, so the Lead cannot tell which one owns it"));
         }
         let mut iso = Isolation::default();
-        for dirs in candidates {
+        for (dirs, legacy) in candidates {
             for dir in dirs {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+                if real == own_real && legacy {
+                    continue;
+                }
                 if real == own_real {
                     return Err(guard("another project's folder resolves to this run's own folder, so the Lead cannot tell which one owns it"));
                 }
@@ -597,7 +603,7 @@ impl App {
     ///
     /// This is the ONLY place a path becomes a project. A deeper recorded location that holds the folder keeps the folder's original
     /// membership if its nested `.git` is gone. Records of one location that disagree on its project refuse the launch rather than
-    /// guess, and so does a record from an older build (no `project_loc`) near the folder: nothing is migrated or written back.
+    /// guess. A record with no `project_loc` (the shipped build's format) pins nothing and is skipped: nothing is migrated or written back.
     #[cfg(test)]
     pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
         self.launch_identity(cwd).map(|(_, key)| key)
@@ -612,20 +618,17 @@ impl App {
         let mut recorded: Vec<(PathBuf, String)> = Vec::new();
         for r in runs {
             let dir = self.lead_sid_dir(&r);
-            let Some(c) = self.read_run_cwd(&r) else {
+            if self.read_run_cwd(&r).is_none() {
                 // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
                 if std::fs::symlink_metadata(dir.join(CWD_FILE)).is_ok() {
                     return Err(unreadable());
                 }
                 continue;
-            };
+            }
             if std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err() {
-                // Recorded by an older build, before locations were: its project cannot be confirmed, so a folder it could hold or be
-                // held by is refused rather than guessed at. Nothing is derived or written back.
-                let lc = std::fs::canonicalize(&c).unwrap_or(c);
-                if lc.starts_with(&real) || real.starts_with(&lc) {
-                    return Err(super::fail("project_membership_inconsistent", "an earlier run near this folder was recorded by an older build and its project cannot be confirmed; clear that run from the app's recorded runs, then start again"));
-                }
+                // A record with no location (written by the shipped build, before projects were recorded) pins nothing, so there is
+                // nothing for this launch to be consistent with. It is left untouched (never migrated or written to), and `isolation`
+                // still denies its folder as another project's.
                 continue;
             }
             recorded.push((self.read_run_loc(&r).ok_or_else(unreadable)?, r));
