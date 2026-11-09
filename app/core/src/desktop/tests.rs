@@ -3133,8 +3133,10 @@ fn a_plain_folders_pin_is_not_taken_by_a_repo_inside_it() {
     assert_eq!(app.launch_project(&plain.join("sub")).unwrap().id, pp);
 }
 
+/// The base format: a record written before store pins and project locations existed.
 fn without_pin(app: &App, run: &str) {
     fs::remove_file(app.data.join("control/lead").join(run).join(super::orchestrator::PROJECT_FILE)).unwrap();
+    let _ = fs::remove_file(app.data.join("control/lead").join(run).join("project_loc"));
 }
 
 /// #80 codex P1b, on the store id: a record from before pins (cwd, session and campaign, no pin) and one with a pre-store
@@ -3151,6 +3153,8 @@ fn an_old_record_without_a_store_pin_is_migrated_once_and_a_fresh_start_works() 
     assert_eq!(app.pinned_project("20261105-1230"), None, "this is the base format");
     assert_eq!(app.launch_project(&a).expect("the old record is recognised, not refused").id, pa);
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()), "written back under the guard");
+    let loc = fs::read_to_string(app.data.join("control/lead/20261105-1230/project_loc")).unwrap();
+    assert_eq!(Path::new(loc.trim()), fs::canonicalize(&a).unwrap(), "and its location too");
     assert_eq!(app.launch_project(&a).unwrap().id, pa, "and stable on the next call");
     // A pre-store stand-in pin that its folder still gives migrates the same way.
     let k = super::orchestrator::project_ref(&a).0;
@@ -3190,4 +3194,145 @@ fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
     pin(&app, "k_0123456789abcdef0123456789abcdef");
     assert_eq!(refused(&app, &a), "project_membership_inconsistent");
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some("k_0123456789abcdef0123456789abcdef"), "nothing was overwritten");
+}
+
+/// #80 codex P1 (round 2), on the store id: the first run was in a SUBFOLDER of a worktree. Its location is the worktree's
+/// `.git`, so a later start in the worktree's root or in a sibling folder keeps that pin too, even after a worker re-linked
+/// the worktree to another project.
+#[test]
+fn a_run_first_pinned_in_a_subfolder_keeps_the_whole_project_after_a_git_rewrite() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b, wt) = (t.0.join("a"), t.0.join("b"), t.0.join("a-wt"));
+    store_git(&a);
+    store_git(&b);
+    store_worktree(&a, &wt, "a-wt");
+    for d in [wt.join("src"), wt.join("tests")] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.join("src"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.join("src"), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &wt.join("src"), sid, "c", true, 1).unwrap(); // A, first started in a-wt/src
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap(); // B, finished
+    assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
+    store_worktree(&b, &wt, "a-wt");
+    assert_eq!(app.projects.find_by_path(&wt.join("tests")).unwrap().map(|p| p.id), Some(pb.clone()), "the rewrite took");
+    for (n, dir) in [wt.clone(), wt.join("tests")].into_iter().enumerate() {
+        let p = app.launch_project(&dir).unwrap();
+        assert_eq!(p.id, pa, "{}: a start here keeps A", dir.display());
+        let busy = app.within_caps(&p.id, 1).unwrap_err();
+        assert_eq!(busy["reason"], "project_busy", "{}: A is still busy: {busy}", dir.display());
+        app.record_run_as(&format!("20261105-123{}", n + 1), &dir, Some(&p.id), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "e", true, 1).unwrap();
+    }
+    let denied = app.other_project_roots(&pb, &b).unwrap();
+    let real: Vec<PathBuf> = denied.iter().map(|d| fs::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+    for want in [wt.clone(), wt.join("tests"), wt.join("src"), a.clone()] {
+        assert!(real.contains(&fs::canonicalize(&want).unwrap()), "{want:?} not denied: {denied:?}");
+    }
+    app.sup.kill(&stream).unwrap();
+}
+
+/// #80 round 4, on the store id: genuinely nested repositories (their own `.git`, their own store projects) are separate:
+/// neither held busy by the other, and the outer Director-General denies the inner project's folder.
+#[test]
+fn nested_repos_with_their_own_git_stay_separate_projects() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (outer, inner) = (t.0.join("outer"), t.0.join("outer/inner"));
+    store_git(&outer);
+    store_git(&inner);
+    let po = test_project(&t.0.join("data"), &t.home(), &outer);
+    let pi = test_project(&t.0.join("data"), &t.home(), &inner);
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let stream = format!("run-{sid}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: outer.clone(), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &outer, sid, "c", true, 1).unwrap();
+    let p = app.launch_project(&inner).unwrap();
+    assert_eq!(p.id, pi, "the inner repo is its own project");
+    assert_ne!(p.id, po);
+    app.within_caps(&p.id, 1).expect("the outer run does not hold the inner project");
+    app.record_run_as("20261105-1231", &inner, Some(&p.id), "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    assert_eq!(app.launch_project(&inner).unwrap().id, pi, "and it stays so on the next launch");
+    assert_eq!(app.launch_project(&outer).unwrap().id, po);
+    let denied = app.other_project_roots(&po, &outer).unwrap();
+    let real: Vec<PathBuf> = denied.iter().map(|d| fs::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+    assert!(real.contains(&fs::canonicalize(&inner).unwrap()), "the outer Director-General denies the inner project: {denied:?}");
+    app.sup.kill(&stream).unwrap();
+}
+
+/// #80 residual, on the store id: a NEW `.git` location found inside an already-pinned project's tree is admitted as its
+/// own project only when it is a self-contained nested repo or a submodule of the enclosing project. A pointer into
+/// anything else is refused and never pinned.
+fn pinned_a_and_b(t: &Tmp) -> (App, PathBuf, PathBuf, String, String) {
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    store_git(&a);
+    store_git(&b);
+    fs::create_dir_all(b.join(".git/worktrees/x")).unwrap();
+    fs::create_dir_all(a.join("sub")).unwrap();
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    app.record_run("20261105-1230", &a, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
+    (app, a, b, pa, pb)
+}
+
+#[test]
+fn a_planted_git_pointer_into_another_project_under_a_pinned_tree_is_refused_and_never_pinned() {
+    let t = Tmp::new();
+    let (app, a, b, pa, pb) = pinned_a_and_b(&t);
+    fs::write(a.join("sub/.git"), format!("gitdir: {}\n", b.join(".git/worktrees/x").display())).unwrap();
+    let e = app.launch_project(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    assert_eq!(app.launch_project(&a).unwrap().id, pa, "A's pin is unchanged");
+    let denied = app.other_project_roots(&pb, &b).unwrap();
+    let real: Vec<PathBuf> = denied.iter().map(|d| fs::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+    assert!(real.contains(&fs::canonicalize(&a).unwrap()), "B's Director-General still denies A: {denied:?}");
+}
+
+#[test]
+fn a_symlinked_or_redirected_git_under_a_pinned_tree_is_refused() {
+    use std::os::unix::fs::symlink;
+    let t = Tmp::new();
+    let (app, a, b, _, _) = pinned_a_and_b(&t);
+    symlink(b.join(".git"), a.join("sub/.git")).unwrap();
+    let e = app.launch_project(&a.join("sub")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "symlink: {e}");
+    // A real directory whose commondir redirects elsewhere is not self-contained.
+    fs::create_dir_all(a.join("cd/.git")).unwrap();
+    fs::write(a.join("cd/.git/commondir"), format!("{}\n", b.join(".git").display())).unwrap();
+    let e = app.launch_project(&a.join("cd")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "commondir: {e}");
+    // A gitdir file whose target does not resolve.
+    fs::create_dir_all(a.join("gone")).unwrap();
+    fs::write(a.join("gone/.git"), "gitdir: /no/such/place\n").unwrap();
+    let e = app.launch_project(&a.join("gone")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "unresolvable: {e}");
+    // The enclosing Git project's `.git` removed: its subfolder is now a location with no `.git`, which never escapes.
+    fs::create_dir_all(a.join("plain")).unwrap();
+    fs::rename(a.join(".git"), t.0.join("a-git-moved")).unwrap();
+    let e = app.launch_project(&a.join("plain")).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "removed .git: {e}");
+}
+
+#[test]
+fn a_self_contained_nested_clone_and_a_real_submodule_are_their_own_projects() {
+    let t = Tmp::new();
+    let (app, a, _, pa, _) = pinned_a_and_b(&t);
+    store_git(&a.join("clone"));
+    let pc = test_project(&t.0.join("data"), &t.home(), &a.join("clone"));
+    let p = app.launch_project(&a.join("clone")).expect("a self-contained nested repo");
+    assert_eq!(p.id, pc);
+    assert_ne!(p.id, pa);
+    // A submodule: its gitdir file points into the enclosing project's own common dir.
+    fs::create_dir_all(a.join(".git/modules/sub/objects")).unwrap();
+    fs::write(a.join(".git/modules/sub/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    let ps = test_project(&t.0.join("data"), &t.home(), &a.join("sub"));
+    let p = app.launch_project(&a.join("sub")).expect("a submodule of the enclosing project");
+    assert_eq!(p.id, ps);
+    assert_ne!(p.id, pa, "the submodule is its own project");
 }
