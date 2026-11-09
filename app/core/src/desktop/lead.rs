@@ -485,6 +485,7 @@ impl App {
             if key.as_ref() == Some(&own) {
                 continue;
             }
+            let key_for_main = key.clone();
             // Every distinct run folder (a subfolder, an outside worktree) and the project's main working tree (the
             // folder that holds its `.git` dir, from the pinned key), so a project whose runs were all elsewhere still
             // has its main folder denied.
@@ -494,11 +495,11 @@ impl App {
             let pinned_loc = self.read_run_loc(&run);
             // The main checkout resolved at launch (a submodule or separate-git-dir repo run from an outside worktree has a key that
             // names no checkout). `-` means it could not be resolved: that checkout cannot be protected, so the ask is refused.
-            let pinned_main = match fsx::read_nofollow(&self.lead_sid_dir(&run).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok()) {
-                Some(m) if m.trim() == "-" => {
-                    return Err(LeadError::GuardMissing("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project from its main folder".into()));
+            let pinned_main = match self.project_main_of(&run, key_for_main.as_ref()) {
+                Some(Some(m)) => Some(m),
+                Some(None) => {
+                    return Err(LeadError::GuardMissing("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project once from its main folder (the folder that holds its .git), then ask again".into()));
                 }
-                Some(m) => Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()),
                 None => None,
             };
             for dir in std::iter::once(cwd).chain(main).chain(pinned_loc).chain(pinned_main) {
@@ -537,6 +538,31 @@ impl App {
             out.push(cwd);
         }
         Ok(out)
+    }
+
+    /// The main checkout recorded for `run`'s project: `Some(Some(path))` when known, `Some(None)` when it was recorded
+    /// unresolved (`-`) and no record of the same pinned key knows it, `None` when `run` recorded nothing. This is the one
+    /// resolver: a launch from the project's main folder records the checkout, and that knowledge serves every run of the
+    /// same key, so an earlier unresolved launch is repaired by it (#80 review). Run folders are denied separately and
+    /// stay denied either way.
+    fn project_main_of(&self, run: &str, key: Option<&PathBuf>) -> Option<Option<PathBuf>> {
+        let read = |r: &str| -> Option<Option<PathBuf>> {
+            let m = fsx::read_nofollow(&self.lead_sid_dir(r).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok())?;
+            Some(if m.trim() == "-" { None } else { Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()) })
+        };
+        let own = read(run)?;
+        if own.is_some() {
+            return Some(own);
+        }
+        let key = key?;
+        for other in self.recorded_runs() {
+            if other != run && self.read_run_key(&other).as_ref() == Some(key) {
+                if let Some(Some(m)) = read(&other) {
+                    return Some(Some(m));
+                }
+            }
+        }
+        Some(None)
     }
 
     /// Every run with a record under the guarded control dir, newest first.
