@@ -496,7 +496,7 @@ impl App {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
             // The run's project's Director-General sees and steers it (ADR-15 2.3).
-            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref(cwd).0) {
+            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref_of(&key, cwd).0) {
                 svc.end_session(session_id);
                 return Err(e.to_json());
             }

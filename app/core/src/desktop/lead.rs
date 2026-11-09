@@ -223,7 +223,7 @@ impl App {
             return off("claude not found".into());
         }
         // ADR-15 2.1 states, each with its reason in words.
-        let running = lock(&self.runs).values().any(|r| orchestrator::project_ref(&r.cwd).0 == orch.id);
+        let running = lock(&self.runs).values().any(|r| self.pinned_project(&r.run_id).as_deref() == Some(orch.id.as_str()));
         let (state, reason) = match (&busy, running) {
             (Some(_), _) => ("thinking", "answering a question"),
             (None, true) => ("running", "a run of this project is going"),
@@ -289,6 +289,7 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
+        self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
         let bin = lock(&self.lead.bin).clone().ok_or(LeadError::ClaudeNotFound)?;
@@ -397,9 +398,12 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
-        // The project is pinned now, while the app itself has just chosen the directory (ADR-15 2.3).
-        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, orchestrator::project_ref(cwd).0.as_bytes())?;
+        // The project, its folder and its key, all from the one look at the repo the launch took before it spawned
+        // anything (ADR-15 2.3; #80, #82 review).
+        let (pid, root) = orchestrator::project_ref_of(key, cwd);
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
+        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, pid.as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -621,18 +625,24 @@ impl App {
 
     // ---------------------------------------------------------------- the guard (ADR-13 2a)
 
+    /// The Lead's generated files and the runs' guarded records live under `<data>/control/`, which the installed
+    /// worker guard protects only at its default place. Under any other data dir a worker could rewrite them, so the
+    /// Lead is not started (checked first, before any record there is believed).
+    fn data_dir_guarded(&self) -> Result<(), LeadError> {
+        let guarded = paths::resolve_data_dir(None, &self.home);
+        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+        if !same(&self.data, &guarded) {
+            return Err(LeadError::GuardMissing("Director-General unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)".into()));
+        }
+        Ok(())
+    }
+
     /// Nothing is spawned unless every one of these holds: the guard script is a regular file, the doctor passes,
     /// and the Lead's environment keeps `HOME` and a `PATH` that has `bash` and `jq` (without them the guard would
     /// fail closed and block every Lead tool).
     fn guard_preconditions(&self, env: &[(&'static str, OsString)]) -> Result<(), LeadError> {
         let miss = |why: &str| LeadError::GuardMissing(why.to_string());
-        // The Lead's generated files live under `<data>/control/`, which the installed worker guard protects only at
-        // its default place. Under any other data dir a worker could rewrite them, so the Lead is not started.
-        let guarded = paths::resolve_data_dir(None, &self.home);
-        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
-        if !same(&self.data, &guarded) {
-            return Err(miss("Director-General unavailable: data dir is not guard-protected (VAJRA_DESKTOP_DATA override)"));
-        }
+        self.data_dir_guarded()?;
         let script = self.home.join(GUARD_SCRIPT);
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
             return Err(miss("pre-tool-use.sh is missing"));
