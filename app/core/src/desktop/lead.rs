@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use super::orchestrator::{self, Orchestrator};
 use super::{App, Res, Run, project_slug, runindex};
+use super::caps::GIT_META_CAP;
 use crate::paths;
 use crate::bus::Bus;
 use crate::control::lead::{self, LeadError, frame};
@@ -45,10 +46,22 @@ const KEY_FILE: &str = "project_key";
 /// Where the run's project sits: the folder holding the nearest `.git` entry (`git_location`), as found at launch. The pin
 /// is keyed by this LOCATION, never by what `.git` later contains.
 const LOC_FILE: &str = "project_loc";
+/// The canonical path of the run's folder as found at launch. The Lead may only be asked about, and run in, a folder that still
+/// resolves to exactly this (or another recorded folder of its own project); anything else was redirected and is refused.
+const CWD_REAL_FILE: &str = "cwd_real";
 /// The project's main checkout as resolved at launch, or `-` when it could not be (`main_checkout`). Guarded like the others.
 const MAIN_FILE: &str = "project_main";
 /// Most other-project folders the Lead's deny rules hold; more refuses the ask (#80 review: never drop one).
 pub(super) const MAX_OTHER_ROOTS: usize = 256;
+
+/// The other-project folders the Lead is denied (`App::isolation`).
+#[derive(Debug, Default)]
+pub(super) struct Isolation {
+    /// Denied wholesale.
+    pub deny: Vec<PathBuf>,
+    /// Hold the Lead's own folder (a project nested inside another one): only their secret files are denied.
+    pub secrets: Vec<PathBuf>,
+}
 /// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
 const PROVIDER_FILE: &str = "provider";
 const SESSION_FILE: &str = "session";
@@ -432,6 +445,8 @@ impl App {
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         let main = main_checkout(loc, key);
         fsx::write_atomic(&dir, MAIN_FILE, main.as_ref().map_or("-".into(), |m| m.to_string_lossy()).as_bytes())?;
+        let real = std::fs::canonicalize(cwd)?;
+        fsx::write_atomic(&dir, CWD_REAL_FILE, real.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
     }
@@ -468,86 +483,206 @@ impl App {
         String::from_utf8(body).ok()?.trim().parse::<i64>().ok().filter(|t| *t > 0)
     }
 
-    /// The folders of the app's other projects, for the Lead's deny rules (ADR-15 D8): the cwd of every run this app
-    /// recorded under its guarded control dir (never the worker-writable run index), newest first and at most
-    /// `MAX_OTHER_ROOTS`, minus every run of `repo`'s own project and every folder that holds `repo` (denying an
-    /// ancestor would deny the Lead its own project). Every distinct run folder, plus each project's main working tree.
+    /// What the Lead is denied, decided from recorded IDENTITY only (ADR-15 D8, the isolation model of #80):
     ///
-    /// Which project a run belongs to is the key pinned when the app launched it (`KEY_FILE`), for the asking run and
-    /// for every other one: the repo's `.git` and `commondir` are worker-writable, so they are never re-read here
-    /// (#80 review). A run with no pinned key counts as another project (its folder is denied); an asking run with
-    /// none is refused. More than `MAX_OTHER_ROOTS` folders refuses the ask rather than leave one undenied.
-    pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
-        let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
-        let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-        let mut out: Vec<PathBuf> = Vec::new();
-        for run in self.recorded_runs() {
-            let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            let key = self.read_run_key(&run);
-            if key.as_ref() == Some(&own) {
-                continue;
-            }
-            // Every distinct run folder (a subfolder, an outside worktree) and the project's main working tree (the
-            // folder that holds its `.git` dir, from the pinned key), so a project whose runs were all elsewhere still
-            // has its main folder denied.
-            let main = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
-            // The run folder, the project's main tree (from a `.git` key), and the checkout root the launch pinned (`project_loc`):
-            // a submodule's or separate-git-dir repo's root is neither the cwd nor inferable from its key.
-            let pinned_loc = self.read_run_loc(&run);
-            // The main checkout resolved at launch (a submodule or separate-git-dir repo run from an outside worktree has a key that
-            // names no checkout). `-` means it could not be resolved: that checkout cannot be protected, so the ask is refused.
-            let pinned_main = match fsx::read_nofollow(&self.lead_sid_dir(&run).join(MAIN_FILE)).ok().and_then(|b| String::from_utf8(b).ok()) {
-                Some(m) if m.trim() == "-" => {
-                    return Err(LeadError::GuardMissing("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project from its main folder".into()));
+    /// - The Lead's own folders are exactly the `cwd_real`, `project_loc` and `project_main` recorded under the guard for runs of its
+    ///   pinned key. The folder it is asked about must EQUAL one of them (canonical path): a folder or parent replaced by a link, or
+    ///   moved, resolves to something else and the ask is refused. Nothing about which project a folder belongs to is inferred from
+    ///   containment between paths.
+    /// - Every folder recorded for any OTHER key is denied wholesale, except one that holds the Lead's own folder (a project nested
+    ///   inside another): that one gets only the secret-file rules, since denying it whole would deny the Lead itself.
+    /// - Any ambiguity refuses: a folder recorded under two keys, one of another project's folders resolving to the Lead's own, a
+    ///   record that exists but cannot be read, a main checkout that could not be resolved, an own run recorded by an older build
+    ///   (no `cwd_real` / `project_loc`; start a new run), or more than `MAX_OTHER_ROOTS` folders.
+    pub(super) fn isolation(&self, own_run: &str, repo: &Path) -> Result<Isolation, LeadError> {
+        let guard = |m: &str| LeadError::GuardMissing(m.into());
+        let own = self.read_run_key(own_run).ok_or_else(|| guard("this run's project was not recorded when it was launched; start a new run"))?;
+        let own_real = std::fs::canonicalize(repo).map_err(|_| guard("this run's folder cannot be resolved"))?;
+        if self.read_run_cwd_real(own_run).is_none() || self.read_run_loc(own_run).is_none() {
+            return Err(guard("this run was recorded by an older build and its folder cannot be checked; start a new run"));
+        }
+        let unreadable = || guard("a launch record cannot be read, so the Lead cannot tell which folders are other projects'");
+        let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        let mut own_folders: Vec<PathBuf> = Vec::new();
+        let mut other_recorded: Vec<PathBuf> = Vec::new();
+        let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
+        for run in runs {
+            let present = |f: &str| std::fs::symlink_metadata(self.lead_sid_dir(&run).join(f)).is_ok();
+            let Some(cwd) = self.read_run_cwd(&run) else {
+                // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
+                if present(CWD_FILE) {
+                    return Err(unreadable());
                 }
-                Some(m) => Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()),
+                continue;
+            };
+            let key = self.read_run_key(&run);
+            let (cwd_real, loc) = (self.read_run_cwd_real(&run), self.read_run_loc(&run));
+            if (present(CWD_REAL_FILE) && cwd_real.is_none()) || (present(LOC_FILE) && loc.is_none()) {
+                return Err(unreadable());
+            }
+            // The main checkout: this run's own record, or any record of the same key that resolved it (a main-folder launch repairs an
+            // unresolved one). Recorded unresolved by every record of the key: the checkout cannot be protected, so the ask is refused.
+            let main = match self.project_main_of(&run, key.as_ref()) {
+                Some(Some(m)) => Some(m),
+                Some(None) if key.as_ref() == Some(&own) => None,
+                Some(None) => return Err(guard("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project once from its main folder (the folder that holds its .git), then ask again")),
                 None => None,
             };
-            for dir in std::iter::once(cwd).chain(main).chain(pinned_loc).chain(pinned_main) {
+            if key.as_ref() == Some(&own) {
+                own_folders.extend(cwd_real.into_iter().chain(loc).chain(main));
+                continue;
+            }
+            // The run folder, the project's main tree (from a `.git` key), the recorded location, canonical folder and resolved main.
+            let from_key = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
+            let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(from_key).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
+            let loc_missing = !present(LOC_FILE);
+            other_recorded.extend(cwd_real.into_iter().chain(loc).chain(main));
+            // A record from the shipped build (no location) is skipped for identity but its folder is still denied like any other
+            // project's, unless it resolves to the Lead's own folder: the same folder, launched again, is the same project.
+            candidates.push((dirs, loc_missing));
+        }
+        // The identity check: the asking folder is exactly one of its own project's recorded folders.
+        if !own_folders.contains(&own_real) {
+            return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Lead is not started"));
+        }
+        // Ambiguity: one recorded folder claimed by two projects.
+        if other_recorded.iter().any(|f| own_folders.contains(f)) {
+            return Err(guard("a folder is recorded under two different projects, so the Lead cannot tell which one owns it"));
+        }
+        let mut iso = Isolation::default();
+        for (dirs, legacy) in candidates {
+            for dir in dirs {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-                if own_real.starts_with(&real) || out.contains(&dir) {
+                if real == own_real && legacy {
                     continue;
                 }
-                if out.len() >= MAX_OTHER_ROOTS {
-                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} other project folders to deny; the Lead cannot be started with all of them")));
+                if real == own_real {
+                    return Err(guard("another project's folder resolves to this run's own folder, so the Lead cannot tell which one owns it"));
                 }
-                out.push(dir);
+                if iso.deny.contains(&dir) || iso.secrets.contains(&dir) {
+                    continue;
+                }
+                if iso.deny.len() + iso.secrets.len() >= MAX_OTHER_ROOTS {
+                    return Err(guard(&format!("more than {MAX_OTHER_ROOTS} other project folders to deny; the Lead cannot be started with all of them")));
+                }
+                // A folder that holds the Lead's own (a project nested in this one): secret files only, or the Lead would be denied itself.
+                if own_real.starts_with(&real) {
+                    iso.secrets.push(dir);
+                } else {
+                    iso.deny.push(dir);
+                }
             }
         }
-        Ok(out)
+        Ok(iso)
+    }
+
+    /// The folders denied wholesale (`isolation`), for tests.
+    #[cfg(test)]
+    pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
+        self.isolation(own_run, repo).map(|i| i.deny)
     }
 
     /// The folders of the asking run's OWN project that need the secret-file rules: the project's main checkout
     /// (`root`) plus the folder of every recorded run of the same pinned project (a worktree outside the main checkout,
-    /// a subfolder), from the guarded records and never the worker-writable index or `.git`. A folder inside another
+    /// a subfolder, a checkout root, the recorded main checkout), from the guarded records and never the worker-writable index or `.git`. A folder inside another
     /// already listed is covered by its `**` rules and left out. More than `MAX_OTHER_ROOTS` refuses the ask.
     pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
-        for run in self.recorded_runs() {
-            let Some(cwd) = self.read_run_cwd(&run) else { continue };
-            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
-            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
-            let real = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-            let covered = |d: &PathBuf| cwd.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
-            if self.read_run_key(&run).as_ref() != Some(&own) || out.iter().any(covered) {
+        let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Lead cannot guard all of its folders".into());
+        for run in self.try_recorded_runs().map_err(|_| unreadable())? {
+            let Some(cwd) = self.read_run_cwd(&run) else {
+                // No cwd file is a launch that never completed; one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(self.lead_sid_dir(&run).join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
+                continue;
+            };
+            if self.read_run_key(&run).as_ref() != Some(&own) {
                 continue;
             }
-            if out.len() >= MAX_OTHER_ROOTS {
-                return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+            // The run's checkout root (its guarded `project_loc`: a worktree started in a subfolder still guards its whole root) and the
+            // folder it ran in (its own spelling, which an alias of the root needs).
+            // Dropped only when BOTH its spelling and its real path sit under `d`: a folder spelled under `d` (a symlink) can really
+            // be outside it, and one spelled differently (`/var` vs `/private/var`) needs its own supplied-form rules.
+            // The project's recorded main checkout too: a submodule first launched from an outside worktree has no run in it, and
+            // `isolation` leaves it out of other projects' rules because it is this project's own. Unresolved (`-`) adds nothing.
+            let main = self.project_main_of(&run, Some(&own)).flatten();
+            // A location record that exists but cannot be read leaves the checkout root unknown: refuse, never guard only the subfolder.
+            // No location file at all is the shipped format, which pins nothing; its folder is still guarded below.
+            let loc = self.read_run_loc(&run);
+            if loc.is_none() && std::fs::symlink_metadata(self.lead_sid_dir(&run).join(LOC_FILE)).is_ok() {
+                return Err(unreadable());
             }
-            out.push(cwd);
+            for folder in loc.into_iter().chain(main).chain(std::iter::once(cwd)) {
+                let real = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+                let covered = |d: &PathBuf| folder.starts_with(d) && real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
+                if out.iter().any(covered) {
+                    continue;
+                }
+                if out.len() >= MAX_OTHER_ROOTS {
+                    return Err(LeadError::GuardMissing(format!("more than {MAX_OTHER_ROOTS} folders of this project to guard; the Lead cannot be started with all of them")));
+                }
+                out.push(folder);
+            }
         }
         Ok(out)
     }
 
+    /// The main checkout recorded for `run`'s project: `Some(Some(path))` when known, `Some(None)` when it was recorded
+    /// unresolved (`-`) and no record of the same pinned key knows it, `None` when `run` recorded nothing. This is the one
+    /// resolver: a launch from the project's main folder records the checkout, and that knowledge serves every run of the
+    /// same key, so an earlier unresolved launch is repaired by it (#80 review). Run folders are denied separately and
+    /// stay denied either way.
+    fn project_main_of(&self, run: &str, key: Option<&PathBuf>) -> Option<Option<PathBuf>> {
+        let read = |r: &str| -> Option<Option<PathBuf>> {
+            let path = self.lead_sid_dir(r).join(MAIN_FILE);
+            // Absent: this record never named a checkout. Present but unreadable: unresolved (refused), never "nothing recorded".
+            if std::fs::symlink_metadata(&path).is_err() {
+                return None;
+            }
+            let Some(m) = fsx::read_nofollow(&path).ok().and_then(|b| String::from_utf8(b).ok()) else { return Some(None) };
+            Some(if m.trim() == "-" { None } else { Some(PathBuf::from(m.trim())).filter(|p| p.is_absolute()) })
+        };
+        let own = read(run)?;
+        if own.is_some() {
+            return Some(own);
+        }
+        // No readable key: nothing else can vouch for it, so it stays unresolved (refused), not "nothing recorded".
+        let Some(key) = key else { return Some(None) };
+        for other in self.recorded_runs() {
+            if other != run && self.read_run_key(&other).as_ref() == Some(key) {
+                if let Some(Some(m)) = read(&other) {
+                    return Some(Some(m));
+                }
+            }
+        }
+        Some(None)
+    }
+
     /// Every run with a record under the guarded control dir, newest first.
-    fn recorded_runs(&self) -> Vec<String> {
-        let mut runs: Vec<String> = std::fs::read_dir(self.data.join("control").join("lead"))
-            .map(|r| r.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| ids::valid_run_id(n)).collect())
-            .unwrap_or_default();
+    pub(super) fn recorded_runs(&self) -> Vec<String> {
+        self.try_recorded_runs().unwrap_or_default()
+    }
+
+    /// Like `recorded_runs`, but a directory (or an entry) that cannot be read is an error, not an empty list.
+    fn try_recorded_runs(&self) -> std::io::Result<Vec<String>> {
+        let mut runs = Vec::new();
+        let entries = match std::fs::read_dir(self.data.join("control").join("lead")) {
+            Ok(r) => r,
+            // No directory yet: no run has been launched, which is a real "no records".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+            Err(e) => return Err(e),
+        };
+        for e in entries {
+            if let Ok(n) = e?.file_name().into_string() {
+                if ids::valid_run_id(&n) {
+                    runs.push(n);
+                }
+            }
+        }
         runs.sort_unstable_by(|a, b| b.cmp(a));
-        runs
+        Ok(runs)
     }
 
     /// The project key pinned when the run was launched.
@@ -566,9 +701,9 @@ impl App {
     /// `.git` cannot move any of them to another project. A nested repository has its own `.git` at another location, so it
     /// is its own project. A linked worktree is its own location, mapped to its main project by its first launch's pin.
     ///
-    /// Records of one location that disagree on its project refuse the launch rather than guess. A record written before
-    /// locations existed (no `project_loc`) has its location derived once from its guarded cwd and written back; one with
-    /// neither key nor location is the base format, migrated by `migrate_old_key`. Anything else malformed refuses.
+    /// This is the ONLY place a path becomes a project. A deeper recorded location that holds the folder keeps the folder's original
+    /// membership if its nested `.git` is gone. Records of one location that disagree on its project refuse the launch rather than
+    /// guess. A record with no `project_loc` (the shipped build's format) pins nothing and is skipped: nothing is migrated or written back.
     #[cfg(test)]
     pub(super) fn launch_key(&self, cwd: &Path) -> Result<PathBuf, Value> {
         self.launch_identity(cwd).map(|(_, key)| key)
@@ -576,25 +711,42 @@ impl App {
 
     /// `launch_key` with the project location it was found at: the pair a launch records, as one look.
     pub(super) fn launch_identity(&self, cwd: &Path) -> Result<(PathBuf, PathBuf), Value> {
-        let want = git_location(cwd);
-        let mut keys: Vec<PathBuf> = Vec::new();
-        for r in self.recorded_runs() {
-            let Some(c) = self.read_run_cwd(&r) else { continue };
+        let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
+        // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
+        let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut recorded: Vec<(PathBuf, String)> = Vec::new();
+        for r in runs {
             let dir = self.lead_sid_dir(&r);
-            let old = std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err();
-            let loc = if old { git_location(&c) } else { self.read_run_loc(&r).unwrap_or_default() };
-            if loc != want {
+            if self.read_run_cwd(&r).is_none() {
+                // No cwd file is a launch that never completed (the cwd is written last); one that exists but cannot be read refuses.
+                if std::fs::symlink_metadata(dir.join(CWD_FILE)).is_ok() {
+                    return Err(unreadable());
+                }
                 continue;
             }
-            let key = match (self.read_run_key(&r), old) {
-                (Some(k), _) => k,
-                (None, true) => self.migrate_old_key(&r, &loc).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?,
-                (None, false) => return Err(super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project")),
-            };
-            if old {
-                // Best effort: a record that cannot be written back is derived again next time.
-                let _ = fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes());
+            if std::fs::symlink_metadata(dir.join(LOC_FILE)).is_err() {
+                // A record with no location (written by the shipped build, before projects were recorded) pins nothing, so there is
+                // nothing for this launch to be consistent with. It is left untouched (never migrated or written to), and `isolation`
+                // still denies its folder as another project's.
+                continue;
             }
+            recorded.push((self.read_run_loc(&r).ok_or_else(unreadable)?, r));
+        }
+        // The one place a path becomes a project: the nearest `.git`'s location, unless a DEEPER recorded location holds the folder (its
+        // nested `.git` was removed or renamed), which keeps the folder's original membership.
+        let mut want = git_location(cwd);
+        for (l, _) in &recorded {
+            if real.starts_with(l) && l.components().count() > want.components().count() {
+                want = l.clone();
+            }
+        }
+        let mut keys: Vec<PathBuf> = Vec::new();
+        for (l, r) in &recorded {
+            if *l != want {
+                continue;
+            }
+            let key = self.read_run_key(r).ok_or_else(|| super::fail("project_membership_inconsistent", "an earlier run of this folder has no recorded project"))?;
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -613,7 +765,8 @@ impl App {
     /// symlink) with no `commondir` file: a self-contained nested repository, keyed by that directory; or (b) a `gitdir:`
     /// file whose canonical target lies INSIDE an enclosing pinned project's common dir AND has no `commondir` file on the
     /// resolution path (the target and every directory up to that common dir): a submodule, keyed by exactly the canonical
-    /// target that was checked. Anything else (a pointer into another project, a symlinked `.git`, a redirecting
+    /// target that was checked; or a linked worktree of such a submodule (its `commondir` names the submodule's common dir, an
+    /// ancestor of its git dir inside the pinned one). Anything else (a pointer into another project, a symlinked `.git`, a redirecting
     /// `commondir`, an unresolvable target) is refused and never pinned, so a worker cannot plant a `.git` that pulls a
     /// subfolder into another project.
     fn identify_new_location(&self, want: &Path) -> Result<PathBuf, Value> {
@@ -627,7 +780,10 @@ impl App {
             }
         }
         if enclosing.is_empty() {
-            return Ok(super::caps::key_of_entry(want, want).unwrap_or_else(|| want.to_path_buf()));
+            return match super::caps::try_key_of_entry(want, want) {
+                Ok(k) => Ok(k.unwrap_or_else(|| want.to_path_buf())),
+                Err(()) => Err(super::fail("project_membership_inconsistent", "this folder's .git cannot be read as a Git repository (too large, not a regular file, or a link)")),
+            };
         }
         let refuse = |why: &str| super::fail("project_membership_inconsistent", why);
         let git = want.join(".git");
@@ -641,7 +797,7 @@ impl App {
             return if key.parent() == Some(want) && key.file_name() == Some(std::ffi::OsStr::new(".git")) { Ok(key) } else { Err(refuse("this folder's .git changed while it was checked")) };
         }
         if md.is_file() {
-            let body = fsx::read_nofollow(&git).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read"))?;
+            let body = fsx::read_nofollow_capped(&git, GIT_META_CAP).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| refuse("this folder's .git cannot be read or is too large"))?;
             let target = body.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).filter(|t| !t.is_empty());
             if let Some(real) = target.and_then(|t| std::fs::canonicalize(want.join(t)).ok()) {
                 // A pinned common dir counts only while it is still exactly itself: the key was stored canonical, so one that now
@@ -651,14 +807,19 @@ impl App {
                     if !real.starts_with(common) || !real.ancestors().skip(1).take_while(|d| d.starts_with(common)).all(|d| std::fs::symlink_metadata(d.join("commondir")).is_err()) {
                         continue;
                     }
-                    match fsx::read_nofollow(&real.join("commondir")) {
+                    match fsx::read_nofollow_capped(&real.join("commondir"), GIT_META_CAP) {
                         // A submodule's git dir: its own common dir, keyed by exactly the target that was checked.
                         Err(_) if std::fs::symlink_metadata(real.join("commondir")).is_err() => return Ok(real),
                         // A linked worktree of the enclosing project: its `commondir` must resolve to this pinned common dir.
                         Ok(c) => {
                             let resolved = String::from_utf8(c).ok().and_then(|c| std::fs::canonicalize(real.join(c.trim())).ok());
-                            if resolved.as_ref() == Some(common) {
-                                return Ok(common.clone());
+                            match resolved {
+                                Some(r) if r == *common => return Ok(common.clone()),
+                                // A linked worktree of a SUBMODULE: its `commondir` names the submodule's own common dir, which must sit
+                                // inside the enclosing pinned common dir, hold this very worktree git dir, and not redirect itself. It
+                                // is its own project, keyed by that checked common dir.
+                                Some(r) if r.starts_with(common) && real.starts_with(&r) && std::fs::symlink_metadata(r.join("commondir")).is_err() => return Ok(r),
+                                _ => {}
                             }
                         }
                         Err(_) => {}
@@ -669,25 +830,18 @@ impl App {
         Err(refuse("this folder's .git is neither a nested repository nor a submodule of the enclosing project"))
     }
 
+    /// The canonical folder pinned when the run was launched.
+    pub(super) fn read_run_cwd_real(&self, run_id: &str) -> Option<PathBuf> {
+        let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(CWD_REAL_FILE)).ok()?;
+        let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
+        p.is_absolute().then_some(p)
+    }
+
     /// The project location pinned when the run was launched.
     fn read_run_loc(&self, run_id: &str) -> Option<PathBuf> {
         let body = fsx::read_nofollow(&self.lead_sid_dir(run_id).join(LOC_FILE)).ok()?;
         let p = PathBuf::from(String::from_utf8(body).ok()?.trim());
         p.is_absolute().then_some(p)
-    }
-
-    /// The one-time migration of the base record format: a run with a guarded cwd, session and campaign but neither a key nor
-    /// a location was written before they existed. Derive its key from its guarded cwd now and write it back under the guard.
-    /// Anything else (a key file that exists but is unusable, a missing session or campaign) is not migrated.
-    fn migrate_old_key(&self, run_id: &str, loc: &Path) -> Option<PathBuf> {
-        let dir = self.lead_sid_dir(run_id);
-        if std::fs::symlink_metadata(dir.join(KEY_FILE)).is_ok() || self.read_run_record(run_id).is_none() {
-            return None;
-        }
-        // From the same location the caller matched on, never a second walk of the repo.
-        let key = super::caps::key_of_entry(loc, loc).unwrap_or_else(|| loc.to_path_buf());
-        fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes()).ok()?;
-        self.read_run_key(run_id)
     }
 
     pub(super) fn read_run_cwd(&self, run_id: &str) -> Option<PathBuf> {
@@ -776,15 +930,15 @@ impl App {
         let dir = &orch.dir;
         // One snapshot of the other projects' folders (ADR-15 D8) for this whole ask: the self-test, the files and the
         // recheck below all use the same rules. A project that first appears during the ask is in the next one.
-        let others = self.other_project_roots(&t.run_id, &orch.root)?;
+        let iso = self.isolation(&t.run_id, &orch.root)?;
         // The project's own folders (main checkout plus every recorded run or worktree folder) all get the secret-file
         // rules; the self-test and the recheck below use this same set.
         let repos = self.own_project_folders(&t.run_id, &orch.root)?;
-        let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &others)?;
-        self.ensure_selftest(bin, &env, dir, &repos, &others, &settings, &t.run_id, handle)?;
+        let settings = self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)?;
+        self.ensure_selftest(bin, &env, dir, &repos, &iso, &settings, &t.run_id, handle)?;
         // The self-test can take minutes; a worker with the same uid could have rewritten the files meanwhile. Write
         // them again and check both byte for byte, immediately before the real launch.
-        if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &others)? != settings {
+        if self.write_lead_files(dir, &repos, &orch.id, orch.generation, &iso)? != settings {
             return Err(LeadError::GuardMissing("the Director-General's settings changed during the self-test".into()));
         }
         // Only this generation's MCP calls are served from now on.
@@ -940,12 +1094,12 @@ impl App {
     /// Write `<orchestrator dir>/{settings,mcp}.json` and check the settings file on disk is the generated one, byte for
     /// byte. Returns the settings' sha256. Rewritten on every ask, so an edit between asks never matters; the check
     /// closes the gap between writing and spawning.
-    fn write_lead_files(&self, dir: &Path, repos: &[PathBuf], project: &str, generation: u32, others: &[PathBuf]) -> Result<String, LeadError> {
+    fn write_lead_files(&self, dir: &Path, repos: &[PathBuf], project: &str, generation: u32, iso: &Isolation) -> Result<String, LeadError> {
         if !self.data.is_absolute() {
             return Err(LeadError::GuardMissing("the data dir must be an absolute path".into()));
         }
         fsx::private_dir(dir).map_err(io)?;
-        let want = lead_settings::settings_for(&self.home, repos, &self.data, others)?;
+        let want = lead_settings::settings_for_iso(&self.home, repos, &self.data, &iso.deny, &iso.secrets)?;
         let mcp = json!({"mcpServers": {"vajra-desktop": {
             "command": self.lead.exe.to_string_lossy(),
             "args": ["--mcp"],
@@ -972,7 +1126,7 @@ impl App {
     /// runs before the first real ask: a random file under the data dir, covered by a generated rule, with the hooks
     /// removed. The turn must be denied and the content must be absent from stdout, or the Lead is not started.
     #[allow(clippy::too_many_arguments)]
-    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], others: &[PathBuf], settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
+    fn ensure_selftest(&self, bin: &Path, env: &[(&'static str, OsString)], dir: &Path, repos: &[PathBuf], iso: &Isolation, settings_sha: &str, run_id: &str, h: &Arc<Handle>) -> Result<(), LeadError> {
         let version = claude_version(bin, env)?;
         let key = (settings_sha.to_string(), version);
         if lock(&self.lead.proven).contains(&key) {
@@ -986,7 +1140,7 @@ impl App {
         let file = fsx::write_atomic(&canary_dir, "c.txt", secret.as_bytes()).map_err(io)?;
         let result = (|| {
             // The deny layer alone: the same generated rules, no hooks.
-            let bare = lead_settings::settings_no_hooks_for(&self.home, repos, &self.data, others)?;
+            let bare = lead_settings::settings_no_hooks_for_iso(&self.home, repos, &self.data, &iso.deny, &iso.secrets)?;
             let bare_path = fsx::write_atomic(dir, "selftest-settings.json", bare.as_bytes()).map_err(io)?;
             verify_settings_file(&bare_path, &bare)?;
             // Two tries: the model may answer without touching the file, which proves nothing.
@@ -1183,14 +1337,14 @@ pub(super) fn main_checkout(loc: &Path, key: &Path) -> Option<PathBuf> {
         }
     }
     let names_key = |dir: &Path| -> bool {
-        let Ok(body) = fsx::read_nofollow(&dir.join(".git")) else { return false };
+        let Ok(body) = fsx::read_nofollow_capped(&dir.join(".git"), GIT_META_CAP) else { return false };
         let Ok(text) = String::from_utf8(body) else { return false };
         text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim).and_then(|t| std::fs::canonicalize(dir.join(t)).ok()).is_some_and(|t| t == key)
     };
     if std::fs::symlink_metadata(loc.join(".git")).is_ok_and(|m| m.is_dir()) || names_key(loc) {
         return Some(loc.to_path_buf());
     }
-    let config = String::from_utf8(fsx::read_nofollow(&key.join("config")).ok()?).ok()?;
+    let config = String::from_utf8(fsx::read_nofollow_capped(&key.join("config"), GIT_META_CAP).ok()?).ok()?;
     let rel = config.lines().map(str::trim).find_map(|l| l.strip_prefix("worktree").and_then(|r| r.trim_start().strip_prefix('=')).map(str::trim))?;
     let cand = std::fs::canonicalize(key.join(rel)).ok()?;
     names_key(&cand).then_some(cand)
