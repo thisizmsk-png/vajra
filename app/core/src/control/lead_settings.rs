@@ -100,15 +100,27 @@ pub fn deny_rules(home: &Path, repo: &Path, data: &Path) -> Result<Vec<String>, 
 /// caller leaves out its own project and any folder that holds it. A root that is not a plain absolute path is
 /// refused like any other base: the Lead fails closed rather than run without that rule.
 pub fn deny_rules_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    deny_rules_for(home, std::slice::from_ref(&repo.to_path_buf()), data, others)
+}
+
+/// `deny_rules_with` where the project has more than one folder (its main checkout plus worktrees or run folders
+/// elsewhere): the repo secret-file rules (`.env`, `id_rsa*`, ...) are generated under EVERY one of `repos`, so a
+/// worktree outside the main checkout keeps them. At least one repo is required.
+pub fn deny_rules_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<Vec<String>, LeadError> {
+    if repos.is_empty() {
+        return Err(LeadError::GuardMissing("no project folder to guard".into()));
+    }
     let mut out: Vec<String> = Vec::new();
     let mut push = |r: String| {
         if !out.contains(&r) {
             out.push(r);
         }
     };
-    for (base, what, table) in
-        [(home, "HOME", &HOME_RULES[..]), (repo, "repo", &REPO_RULES[..]), (data, "data dir", &DATA_RULES[..])]
-    {
+    let bases: Vec<(&Path, &str, &[&str])> = std::iter::once((home, "HOME", &HOME_RULES[..]))
+        .chain(repos.iter().map(|r| (r.as_path(), "repo", &REPO_RULES[..])))
+        .chain(std::iter::once((data, "data dir", &DATA_RULES[..])))
+        .collect();
+    for (base, what, table) in bases {
         for form in forms(base, what)? {
             for suffix in table {
                 push(rule(&form, suffix));
@@ -160,6 +172,16 @@ pub fn settings(home: &Path, repo: &Path, data: &Path) -> Result<String, LeadErr
 /// `settings` with the other projects' folders denied too (ADR-15 D8).
 pub fn settings_with(home: &Path, repo: &Path, data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
     Ok(render(&deny_rules_with(home, repo, data, others)?, true))
+}
+
+/// `settings_with` for a project with several folders (see `deny_rules_for`).
+pub fn settings_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for(home, repos, data, others)?, true))
+}
+
+/// `settings_no_hooks_with` for a project with several folders.
+pub fn settings_no_hooks_for(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf]) -> Result<String, LeadError> {
+    Ok(render(&deny_rules_for(home, repos, data, others)?, false))
 }
 
 /// The same file with the hooks removed. Used by the startup self-test and the live deny-rule tests, which must
