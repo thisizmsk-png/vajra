@@ -30,6 +30,37 @@ fn eighty_percent_sets_the_flag_and_a_reset_time_is_carried_only_if_given() {
 }
 
 #[test]
+fn the_percentage_is_the_current_limits_spend_not_lifetime_usage() {
+    // After a daily reset: 100 spent all time, but only 1 of the current 10 allowance is gone.
+    let reset = br#"{"data":{"usage":100.0,"usage_daily":1.0,"limit":10.0,"limit_remaining":9.0}}"#;
+    let u = parse_key_response("openrouter", reset, AT).unwrap();
+    assert_eq!((u.windows[0].used_pct, u.windows[0].warn), (10, false), "lifetime usage does not drive the window");
+    assert_eq!(u.amounts.as_ref().unwrap().usage, 100.0, "the reported figure is still shown as it is");
+    // The remaining amount decides: 8.4 of 10 gone is 84% even when usage is far larger or smaller.
+    let near = br#"{"data":{"usage":0.5,"limit":10.0,"limit_remaining":1.6}}"#;
+    assert_eq!(parse_key_response("openrouter", near, AT).unwrap().windows[0].used_pct, 84);
+    // More remaining than the limit (a raised cap) clamps to zero use.
+    let over = br#"{"data":{"usage":3.0,"limit":10.0,"limit_remaining":12.0}}"#;
+    assert_eq!(parse_key_response("openrouter", over, AT).unwrap().windows[0].used_pct, 0);
+}
+
+#[test]
+fn without_the_current_limit_figures_there_is_no_percentage() {
+    // Spent a lot, no limit set; a limit without the remaining amount; a zero limit: none of these gets a made-up number.
+    for body in [
+        &br#"{"data":{"usage":100.0,"limit":null,"limit_remaining":null}}"#[..],
+        br#"{"data":{"usage":100.0,"limit":10.0}}"#,
+        br#"{"data":{"usage":100.0,"limit":10.0,"limit_remaining":null}}"#,
+        br#"{"data":{"usage":100.0,"limit":0.0,"limit_remaining":0.0}}"#,
+        br#"{"data":{"usage":100.0,"limit_remaining":3.0}}"#,
+    ] {
+        let u = parse_key_response("openrouter", body, AT).unwrap();
+        assert!(u.windows.is_empty(), "{}", String::from_utf8_lossy(body));
+        assert_eq!(u.amounts.as_ref().unwrap().usage, 100.0);
+    }
+}
+
+#[test]
 fn without_a_spending_limit_there_is_no_percentage_and_odd_answers_read_as_not_reported() {
     let no_limit = br#"{"data":{"usage":3.0,"usage_daily":0.5,"limit":null,"limit_remaining":null}}"#;
     let u = parse_key_response("openrouter", no_limit, AT).unwrap();

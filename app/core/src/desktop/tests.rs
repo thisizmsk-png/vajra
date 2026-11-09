@@ -3783,7 +3783,7 @@ impl crate::providers::usage::UsageSource for CountingUsage {
     }
     fn key_info(&self, _: &str) -> Option<Vec<u8>> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Some(br#"{"data":{"label":"LABEL-CANARY","usage":8.4,"limit":10.0}}"#.to_vec())
+        Some(br#"{"data":{"label":"LABEL-CANARY","usage":8.4,"limit":10.0,"limit_remaining":1.6}}"#.to_vec())
     }
 }
 

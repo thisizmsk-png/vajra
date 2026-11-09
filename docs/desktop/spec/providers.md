@@ -180,7 +180,9 @@ as a cache read. One entry per account:
   only if the source gave one.
 - **OpenRouter** (`source: "gateway_key"`): `GET /api/v1/key`. Only `usage`, `usage_daily`, `limit` and `limit_remaining` are
   kept (`amounts`, in the key's own currency). The answer also carries the key's label; it is never deserialized, so it cannot
-  reach any reply. A percentage (`credit` window) exists only when the key has a spending `limit`.
+  reach any reply. `usage` is all-time spend, while `limit` can reset daily, weekly or monthly and `limit_remaining` is what is
+  left of the current cap. So the `credit` window is `(limit - limit_remaining) / limit` and exists only when both are reported
+  and `limit` is above zero; otherwise there is no percentage (the figures in `amounts` are still shown as reported).
 - **When it calls out.** Only while Settings > Providers is open (`page_open`) or a run is active, and at most once a minute per
   account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. A failed read keeps the
   previous answer (its `read_at` shows its age) and still counts as the minute's attempt.

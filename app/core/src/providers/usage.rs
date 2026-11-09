@@ -111,8 +111,13 @@ pub fn parse_key_response(account: &str, bytes: &[u8], read_at: &str) -> Option<
         return None;
     }
     let usage = d.usage?;
-    // A percentage only when the key has a spending limit to be a percentage of.
-    let windows = d.limit.filter(|l| *l > 0.0).map(|l| vec![Window::new("credit", usage / l * 100.0, None)]).unwrap_or_default();
+    // `usage` is all-time spend, while `limit` can reset daily, weekly or monthly and `limit_remaining` is the current cap's
+    // room left. So the current window's use is `limit - limit_remaining`; without both figures there is no percentage,
+    // and none is made up from `usage`.
+    let windows = match (d.limit, d.limit_remaining) {
+        (Some(limit), Some(left)) if limit > 0.0 => vec![Window::new("credit", (limit - left) / limit * 100.0, None)],
+        _ => Vec::new(),
+    };
     Some(Usage {
         account: account.into(),
         read_at: Some(read_at.into()),
