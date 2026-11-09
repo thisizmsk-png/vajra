@@ -405,6 +405,7 @@ fn an_ended_session_that_cannot_be_resumed_fails_closed_and_the_plan_stays() {
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
     lock(&app.runs).insert(format!("run-{other}"), Run { session_id: other.into(), run_id: "20261106-1000".into(), campaign: "c".into(), cwd: t.cwd(), nonces: Redactor::default() });
+    app.record_run("20261106-1000", &t.cwd(), other, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let held = app.approve_plan(PLAN, &sha).unwrap_err();
     assert_eq!((code_of(&held).as_str(), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
     assert_eq!(states(&t, "approve"), ["requested", "failed"], "requested first, then the failure");
