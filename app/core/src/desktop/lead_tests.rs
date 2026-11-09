@@ -1459,6 +1459,26 @@ fn a_main_folder_launch_repairs_an_unresolved_checkout_and_every_folder_stays_de
     }
 }
 
+/// #80 review: an unresolved (`-`) main checkout on a run with no readable pinned key is still refused, never read as "nothing
+/// recorded" (the key that could have repaired it is the very thing that is missing).
+#[test]
+fn an_unresolved_main_on_a_run_with_no_key_still_refuses_the_ask() {
+    let t = Tmp::new();
+    let app = t.app();
+    let other = t.0.join("other");
+    for d in [other.join(".git"), t.repo().join(".git")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &other, SID, "c", true, 1).unwrap();
+    let dir = app.data.join("control/lead/20261108-1100");
+    std::fs::write(dir.join("project_main"), "-").unwrap();
+    std::fs::remove_file(dir.join("project_key")).unwrap();
+    let e = app.other_project_roots(RUN_ID, &t.repo()).unwrap_err();
+    assert!(format!("{e:?}").contains("main checkout"), "{e:?}");
+    assert_eq!(code(&app.ask_lead(RUN_ID, "hi").unwrap_err()), "lead_guard_missing");
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
