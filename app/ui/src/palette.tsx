@@ -3,10 +3,12 @@ import type { MutableRefObject, ReactNode } from "react";
 import { CommandPalette } from "../components/ui/desktop";
 import type { Command } from "../components/ui/desktop";
 
+import { usePreferences } from "./preferences";
+import { DEFAULT_PREFERENCES, matchesShortcut, shortcutKeys } from "./preferenceContract";
+
 type Source = MutableRefObject<readonly Command[]>;
 type Register = (key: string, source: Source | null) => void;
 const Ctx = createContext<{ register: Register; open: () => void }>({ register: () => {}, open: () => {} });
-const KEYS = ["⌘", "K"];
 
 /**
  * Adds a screen's commands to the ⌘K palette while the screen is mounted. Only commands the screen can really run
@@ -27,6 +29,8 @@ export function useCommands(commands: readonly Command[]) {
 
 /** ⌘K opens the palette on every screen, ⌘K or Esc closes it. `commands` are the shell's own; screens add theirs. */
 export function PaletteHost({ commands, children }: { commands: readonly Command[]; children: ReactNode }) {
+  const prefs = usePreferences();
+  const binding = prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette;
   const [open, setOpen] = useState(false);
   // The palette is mounted the first time it opens and kept after, so the idle window holds none of it (idle memory).
   const [used, setUsed] = useState(false);
@@ -42,7 +46,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
   }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey || e.isComposing || e.key.toLowerCase() !== "k") return;
+      if (e.repeat || !matchesShortcut(e, binding)) return;
       e.preventDefault();
       setOpen((o) => !o);
     };
@@ -54,7 +58,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("hashchange", onRoute);
     };
-  }, []);
+  }, [binding]);
   const ctx = useMemo(() => ({ register, open: () => setOpen(true) }), [register]);
   // Screen commands first (they are about what is on screen), then the shell's. Ids are namespaced per source.
   const all: Command[] = [];
@@ -63,7 +67,7 @@ export function PaletteHost({ commands, children }: { commands: readonly Command
     const n = i++;
     for (const c of src.current) all.push({ ...c, id: `s${n}-${c.id}` });
   }
-  for (const c of commands) all.push({ ...c, id: `shell-${c.id}` });
+  for (const c of commands) all.push({ ...c, keys: c.id === "settings" ? shortcutKeys(prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings) : c.keys, id: `shell-${c.id}` });
   return (
     <Ctx.Provider value={ctx}>
       {children}

@@ -9,6 +9,7 @@ import { REGISTRY } from "../src/screens/registry";
 import { projectId } from "../src/projects/adapter";
 import { inboxBadge } from "../src/shell/ViewTabs";
 import { S } from "../strings";
+import { DEFAULT_PREFERENCES } from "../src/preferenceContract";
 
 const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], role: string | null = null) =>
   ({ id, kind, title, engine_id: null, role, status, overlays: [], children });
@@ -275,5 +276,17 @@ describe("The Inbox tab counts campaign items only: run proposals live on the Di
   it("Given more waiting than the core sends, Then the tab gives the campaign count it has with a '+', not a wrong exact number", async () => {
     boot(`#/p/${API}/orch`, { inbox: { count: 120, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
     await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2+`));
+  });
+});
+
+describe("Preferences inside a project the core has not registered (PR 100 review)", () => {
+  const view = { schema: "vajra.preferences/1", rev: 0, project_id: null, caps: { active_runs: 1, workers_per_run: 16, editable: false }, global: { ...DEFAULT_PREFERENCES }, overrides: {}, effective: { ...DEFAULT_PREFERENCES }, sources: Object.fromEntries(Object.keys(DEFAULT_PREFERENCES).map((k) => [k, "global"])) };
+  it("Given a folder-derived project id, Then preferences are read as global defaults and Start is not blocked", async () => {
+    // The core refuses any project scope that is not a T1 id, as the real store does.
+    boot(`#/p/${API}/launch`, { preflight: { rows: [], start_enabled: true }, preferences_read: (a?: Record<string, unknown>) => a?.projectId ? Promise.reject(new Error("invalid_project")) : view });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "preferences_read")).toBe(true));
+    expect(ipc.calls.filter((c) => c.cmd === "preferences_read").map((c) => c.args?.projectId ?? null)).toEqual(expect.arrayContaining([null]));
+    expect(ipc.calls.some((c) => c.cmd === "preferences_read" && c.args?.projectId)).toBe(false);
+    await waitFor(() => expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).not.toBe("true"));
   });
 });

@@ -70,6 +70,15 @@ describe("Command palette in the shell", () => {
     expect(dialogOpen()).toBe(false);
   });
 
+  it("on a Mac, Control+K is the terminal's and never opens the palette; Cmd+K still does", async () => {
+    boot();
+    await screen.findByRole("navigation", { name: S.frame.projects });
+    act(() => { fireEvent.keyDown(window, { key: "k", ctrlKey: true }); });
+    expect(dialogOpen()).toBe(false);
+    cmdK();
+    expect(dialogOpen()).toBe(true);
+  });
+
   it("opens from the title bar's search field too", async () => {
     boot();
     const btn = await screen.findByRole("button", { name: S.frame.search });
