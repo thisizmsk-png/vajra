@@ -334,6 +334,16 @@ export interface UsageList {
   usage: Usage[];
 }
 
+/** Accept a `provider_usage` answer only if it has the shape the chip reads; anything else is "not reported" (null). */
+export function parseUsage(v: unknown): UsageList | null {
+  if (!isObj(v) || v.schema !== USAGE_SCHEMA || !Array.isArray(v.usage)) return null;
+  const windowOk = (w: unknown): w is UsageWindow => isObj(w) && str(w.kind) && typeof w.used_pct === "number" && Number.isFinite(w.used_pct)
+    && typeof w.warn === "boolean" && (w.resets_at === null || w.resets_at === undefined || str(w.resets_at));
+  const entryOk = (u: unknown): u is Usage => isObj(u) && str(u.account) && validProvider(u.account) && Array.isArray(u.windows) && u.windows.every(windowOk);
+  if (v.usage.length > MAX_PROVIDERS * 2 || !v.usage.every(entryOk)) return null;
+  return { schema: USAGE_SCHEMA, usage: v.usage.map((u) => ({ ...u, windows: u.windows.map((w) => ({ ...w, resets_at: w.resets_at ?? null })) })) };
+}
+
 /** The window the status bar chip is about: the most used one that is at or over the warning level. */
 export function usageWarning(list: UsageList | null | undefined): { account: string; window: UsageWindow } | null {
   let worst: { account: string; window: UsageWindow } | null = null;
