@@ -239,11 +239,13 @@ describe("The Inbox tab counts campaign items only: run proposals live on the Di
   const proposal = { id: "proposal:1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "", age_s: 1, title: "Start a run?", body: "", ask: "do it", base: "main", rounds: 2, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
   const inboxTab = () => screen.getByRole("link", { name: new RegExp(`^${S.views.inbox}`) });
 
-  it("counts a full list exactly, leaving proposals out; a cut list says '+'; nothing to count shows nothing", () => {
+  it("counts a full list exactly, leaving proposals out; a cut list always says '+'; a full list with nothing to count shows nothing", () => {
     expect(inboxBadge([item("p", "plan"), item("q", "question"), item("r", "run_proposal")], 3)).toBe("2");
     expect(inboxBadge([item("p", "plan"), item("r", "run_proposal")], 40)).toBe("1+");
     expect(inboxBadge([item("r", "run_proposal")], 1)).toBe("");
-    expect(inboxBadge([item("r", "run_proposal")], 9)).toBe("");
+    // A cut list whose sent items are all proposals may still hide campaign items: it says so, never nothing.
+    expect(inboxBadge([item("r", "run_proposal")], 9)).toBe("+");
+    expect(inboxBadge([], 5)).toBe("+");
     expect(inboxBadge([], 0)).toBe("");
   });
 

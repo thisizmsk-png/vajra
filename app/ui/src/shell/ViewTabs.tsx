@@ -8,11 +8,12 @@ import type { InboxItem } from "../ipc";
 
 /** The Inbox tab's count: campaign items only, since a run proposal is shown on the Director-General surface, not in the
  * Inbox. `count` is the core's total over every kind. When the core sent fewer items than it counts, the campaign total
- * is not known, so the count it has gets a "+" (and no number at all if that is 0). Empty means no badge. */
+ * is not known and more may be waiting past the cut, so it always shows a "+": the count it has ("2+"), or a bare "+"
+ * when every sent item was a proposal (PR 90 review), never "0+" and never nothing. Empty means no badge. */
 export function inboxBadge(items: readonly InboxItem[], count: number): string {
   const campaign = items.filter((i) => i.kind !== "run_proposal").length;
-  if (campaign === 0) return "";
-  return count > items.length ? `${campaign}+` : String(campaign);
+  if (count > items.length) return campaign > 0 ? `${campaign}+` : "+";
+  return campaign > 0 ? String(campaign) : "";
 }
 
 export type WorkerTab = { slug: string; id: string; worker: string; name: string };
