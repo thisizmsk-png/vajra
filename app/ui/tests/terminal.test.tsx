@@ -12,10 +12,16 @@ import { FakeXterm, fakeTerm } from "./fakeTerm";
 vi.mock("@xterm/xterm", async () => ({ Terminal: (await import("./fakeTerm")).FakeXterm }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 
+// A working in-memory localStorage (this machine's Node shadows jsdom's; CI's does not), cleared before every test: the
+// dock saves its tab layout there, and a layout saved by one test must not restore tabs in the next.
+const store = new Map<string, string>();
+vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k), clear: () => store.clear() });
+
 const PLACE = { cwd: "/work/app", label: "app" };
 const ctrlTick = (target: Element | Window = window) => fireEvent.keyDown(target, { key: "`", code: "Backquote", ctrlKey: true });
 
 beforeEach(() => {
+  store.clear();
   FakeXterm.all = [];
   (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe() {} disconnect() {} };
 });

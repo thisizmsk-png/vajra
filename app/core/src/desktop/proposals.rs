@@ -67,7 +67,7 @@ impl App {
         let root = root.to_str().ok_or_else(|| fail("not_found", "the project's folder is not a plain path"))?.to_string();
         // Written before anything starts: a crash after this line leaves the proposal decided, never started twice.
         let action = self.proposal_line(Decision::Approve, None, &p, DecisionState::Requested, None, None)?;
-        let input = RunInput { ask: p.ask.clone(), max_rounds: p.rounds, base: p.base.clone(), max_in_flight: caps::DEFAULT_RUN_WORKERS, campaign: None };
+        let input = RunInput { ask: p.ask.clone(), max_rounds: p.rounds, base: p.base.clone(), max_in_flight: caps::DEFAULT_RUN_WORKERS, campaign: None, provider: None };
         match start(input, &root) {
             Ok(run) => {
                 self.proposal_line(Decision::Approve, Some(&action), &p, DecisionState::Final, run["run_id"].as_str(), None)?;
