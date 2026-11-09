@@ -503,11 +503,12 @@ impl App {
         }
         let unreadable = || guard("a launch record cannot be read, so the Lead cannot tell which folders are other projects'");
         let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
-        // Which records are this project's (#103 review): two runs pinned to the same store project at launch are the same
-        // project whatever folders they started in (the root and a subfolder record different keys), and two pinned to
-        // different store projects are not, even under one key. The key decides only for a record without a store pin.
-        let store_pin = |run: &str| self.pinned_project(run).filter(|p| crate::projects::contract::valid_project_id(p));
-        let own_pin = store_pin(own_run);
+        // Which records are this project's (#103 review): decided by the guarded store identity of every record (`store_identity`:
+        // a store id pin, or a stand-in pin that validates to one), never by the recorded key text. Two runs of the same store
+        // project are one project whatever folders they started in (a root and a subfolder record different keys), and two of
+        // different store projects are not, even under one key. A pin that does not validate belongs to no project: this
+        // run's own is refused, another record's is another project's. The key decides only for a record with no pin.
+        let own_pin = self.store_identity(own_run).map_err(|_| guard("this run's project record does not match its folder; start a new run"))?;
         let mut own_folders: Vec<PathBuf> = Vec::new();
         let mut other_recorded: Vec<PathBuf> = Vec::new();
         let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
@@ -521,9 +522,11 @@ impl App {
                 continue;
             };
             let key = self.read_run_key(&run);
-            let same_project = match (&own_pin, store_pin(&run)) {
-                (Some(a), Some(b)) => *a == b,
-                _ => key.as_ref() == Some(&own),
+            let same_project = match (&own_pin, self.store_identity(&run)) {
+                (_, Err(())) => false,
+                (Some(a), Ok(Some(b))) => *a == b,
+                (None, Ok(Some(_))) => false,
+                (_, Ok(None)) => key.as_ref() == Some(&own),
             };
             let (cwd_real, loc) = (self.read_run_cwd_real(&run), self.read_run_loc(&run));
             if (present(CWD_REAL_FILE) && cwd_real.is_none()) || (present(LOC_FILE) && loc.is_none()) {
@@ -554,7 +557,7 @@ impl App {
         // inside a Git checkout, records that subfolder or the checkout, while its Director-General runs in the store's root. That root
         // is its own only as the store recorded it: compared without resolving it again (the store keeps it canonical) and by device
         // and inode, so a root moved away, or replaced by a link or another folder, still refuses.
-        if let Some(p) = self.pinned_project(own_run).filter(|p| crate::projects::contract::valid_project_id(p)).and_then(|p| self.projects.get(&p).ok()) {
+        if let Some(p) = own_pin.as_ref().and_then(|p| self.projects.get(p).ok()) {
             use std::os::unix::fs::MetadataExt;
             let root = PathBuf::from(&p.root);
             let same_inode = std::fs::metadata(&own_real).is_ok_and(|m| (m.dev(), m.ino()) == (p.root_key.dev, p.root_key.ino));
