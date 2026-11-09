@@ -106,9 +106,15 @@ impl App {
                 let first = crate::control::time::parse_iso(&p.ts).unwrap_or(now);
                 // `project` is the project's full recorded root, the key the UI matches projects on (#90 review);
                 // `project_name` is its name in the store. Neither is a fresh read of the repo. A stand-in proposal is
-                // shown under the project its conversation went to, if any, and can only be dismissed.
+                // shown under the project its conversation went to, if any (Unsorted if none), and can only be dismissed.
+                // `project_id` is always a store id (what the UI and `inbox_new` key on); the Director-General's own id
+                // travels in `orchestrator_id` (#83 review).
                 let standin = ids::valid_standin_ref(&p.project);
-                let project_id = if standin { self.standin_mapped_to(&p.project).unwrap_or_else(|| p.project.clone()) } else { p.project.clone() };
+                let project_id = if standin {
+                    self.standin_mapped_to(&p.project).unwrap_or_else(|| super::inbox::UNSORTED_PROJECT.to_string())
+                } else {
+                    p.project.clone()
+                };
                 let (root, name) = match self.projects.get(&project_id) {
                     Ok(sp) => (Some(sp.root), Some(sp.name)),
                     Err(_) => {
@@ -122,7 +128,7 @@ impl App {
                     "id": p.item, "kind": "run_proposal", "origin": "app", "source": FROM_DIRECTOR_GENERAL,
                     "created": created, "age_s": (now - first).max(0),
                     "title": "Start a run?", "body": p.ask, "ask": p.ask, "base": p.base, "rounds": p.rounds,
-                    "project_id": project_id, "project": root, "project_name": name, "generation": p.generation,
+                    "project_id": project_id, "orchestrator_id": p.project, "project": root, "project_name": name, "generation": p.generation,
                     "proposal_sha256": p.proposal_sha256, "actions": actions,
                 });
                 let mut v = v;
