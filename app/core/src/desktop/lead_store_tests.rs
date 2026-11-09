@@ -329,3 +329,110 @@ fn with_a_subfolder_run_another_projects_folder_is_still_denied() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     assert!(app.isolation(RUN_ID, &elsewhere).is_err(), "an unrelated folder is not this run's");
 }
+
+/// #103 review: runs of the same store project are one project whatever folders they started in. With the root run AND a
+/// later subfolder run both kept, an ask from either is answered, and neither's folder is denied to the other as another
+/// project's; a run pinned to another store project is still another project, even in this project's folders.
+#[test]
+fn a_root_run_and_a_subfolder_run_of_one_project_are_both_its_own() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    // The fixture's run (RUN_ID) is at the root; a second, finished run of the same project started in the subfolder.
+    let (sid2, run2) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1300");
+    live_run(&app, sid2, run2, sub.clone());
+    app.record_run(run2, &sub, sid2, "deliver-y", true, 1).unwrap();
+    assert_eq!(app.pinned_project(run2), app.pinned_project(RUN_ID), "both are pinned to one store project");
+    assert_ne!(crate::desktop::caps::project_key(&sub), crate::desktop::caps::project_key(&t.repo()), "under different keys");
+    let sibling = t.0.join("sibling");
+    project_of(&t, &sibling);
+    app.record_run("20261109-1302", &sibling, "5c8fad5b-d9cb-469f-a165-70867728950e", "deliver-s", true, 1).unwrap();
+    for run in [RUN_ID, run2] {
+        let iso = app.isolation(run, &t.repo()).unwrap();
+        assert!(!iso.deny.iter().any(|d| d.starts_with(t.repo())), "{run}: nothing of its own is denied: {:?}", iso.deny);
+        assert!(iso.deny.contains(&sibling), "{run}: another project's folder is still denied: {:?}", iso.deny);
+    }
+    app.ask_lead(run2, "from the subfolder").unwrap();
+    wait_until("the subfolder ask", || idle(&app) && t.ask_states().len() == 3);
+    app.ask_lead(RUN_ID, "from the root").unwrap();
+    wait_until("the root ask", || idle(&app) && t.ask_states().len() == 6);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:", "queued:", "delivered:", "done:"]);
+    // A run pinned to another store project is still another project's, even recorded in this project's subfolder.
+    let other = project_of(&t, &t.0.join("elsewhere"));
+    app.record_run("20261109-1301", &sub, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-z", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1301"), "project", other.as_bytes()).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "a folder claimed by two projects refuses");
+}
+
+/// #103 review: a run from before the store, launched in a SUBFOLDER of a plain project, keeps its stand-in pin. Once
+/// that pin validates (its guarded folder still gives the same stand-in, and that folder is a store project) it is that
+/// project's run: the ask from it is answered, the project's other run is its own, and another project is still denied.
+#[test]
+fn a_stand_in_run_in_a_subfolder_is_answered_once_its_pin_validates() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let (sid2, run2) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1400");
+    live_run(&app, sid2, run2, sub.clone());
+    app.record_run(run2, &sub, sid2, "deliver-y", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&sub).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(run2), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.pinned_project(run2).as_deref(), Some(k.as_str()), "a stand-in pin");
+    let sibling = t.0.join("sibling");
+    project_of(&t, &sibling);
+    app.record_run("20261109-1402", &sibling, "5c8fad5b-d9cb-469f-a165-70867728950e", "deliver-s", true, 1).unwrap();
+    for run in [run2, RUN_ID] {
+        let iso = app.isolation(run, &t.repo()).unwrap();
+        assert!(!iso.deny.iter().any(|d| d.starts_with(t.repo())), "{run}: nothing of its own is denied: {:?}", iso.deny);
+        assert!(iso.deny.contains(&sibling), "{run}: another project's folder is still denied: {:?}", iso.deny);
+    }
+    // Another record whose stand-in pin claims this project's folder but does not validate (its own folder gives another
+    // stand-in) is no project's: it is never this project's run, and its folder stays denied.
+    let forged = t.0.join("forged");
+    std::fs::create_dir_all(&forged).unwrap();
+    app.record_run("20261109-1403", &forged, "6c8fad5b-d9cb-469f-a165-70867728950e", "deliver-f", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1403"), "project", k.as_bytes()).unwrap();
+    let iso = app.isolation(run2, &t.repo()).unwrap();
+    assert!(iso.deny.contains(&forged), "a record whose pin does not validate is another's: {:?}", iso.deny);
+    app.ask_lead(run2, "from a stand-in run in the subfolder").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+}
+
+/// #103 review: a stand-in pin that does not validate (it names another folder's stand-in) is no project's. Its own ask
+/// is refused, by the launch check and by the isolation check itself, and nothing starts.
+#[test]
+fn a_stand_in_pin_that_does_not_validate_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&t.0.join("elsewhere")).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(RUN_ID), "project", k.as_bytes()).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "the isolation check refuses it");
+    assert!(app.isolation(RUN_ID, &sub).is_err(), "from its own folder too");
+    assert!(app.ask_lead(RUN_ID, "hi").is_err(), "the ask is refused");
+    assert!(t.count("ask.count") == 0 && t.ask_states().is_empty(), "nothing was spawned or recorded");
+}
+
+/// #103 review, the reported case: the project's only run is a stand-in run from before the store, in a SUBFOLDER. Its
+/// validated pin carries into the registered-root check, so the ask in the project's root is answered.
+#[test]
+fn a_lone_stand_in_run_in_a_subfolder_is_answered() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sub = t.repo().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&sub).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead").join(RUN_ID), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["available"], true);
+    app.ask_lead(RUN_ID, "hi").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    assert_eq!(t.ask_states(), ["queued:", "delivered:", "done:"]);
+}
