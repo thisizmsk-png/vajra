@@ -33,6 +33,8 @@ use crate::lock;
 pub use policy::{Limits, LoginEnv, Placement, UserPathEnv};
 
 const CHUNK: usize = 64 * 1024;
+/// Output that may be read ahead of the pace before the reader starts waiting (so a command's burst of output is free).
+pub const RATE_BURST: usize = 256 * 1024;
 const BATCH_WAIT: Duration = Duration::from_millis(4);
 /// After SIGHUP, how long the shell gets before SIGKILL.
 pub const KILL_GRACE: Duration = Duration::from_millis(500);
@@ -299,7 +301,7 @@ impl Terminals {
             wake,
         });
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        let window = self.limits.window;
+        let (window, rate) = (self.limits.window, self.limits.max_rate);
         // The three I/O threads are part of the terminal: if any cannot start, end the shell and what is started and
         // report the error, instead of publishing a terminal that cannot deliver output or accept input.
         let started = (|| -> std::io::Result<()> {
@@ -308,7 +310,7 @@ impl Terminals {
             let t = term.clone();
             *lock(&term.flusher) = Some(std::thread::Builder::new().name(format!("term-flush-{id}")).spawn(move || flush_loop(&t.pending, &t))?);
             let t = term.clone();
-            *lock(&term.reader) = Some(std::thread::Builder::new().name(format!("term-{id}")).spawn(move || read_loop(reader, &t, window))?);
+            *lock(&term.reader) = Some(std::thread::Builder::new().name(format!("term-{id}")).spawn(move || read_loop(reader, &t, window, rate))?);
             Ok(())
         })();
         if let Err(e) = started {
@@ -653,8 +655,12 @@ fn flush_loop(pending: &(Mutex<Pending>, Condvar), t: &Term) {
     }
 }
 
-fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize) {
+fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize, rate: usize) {
     let low = window / 2;
+    // Token bucket as a clock: `due` is when the bytes read so far have been paid for at `rate`. It may lag `now` by up to
+    // one burst, so time lost to a sleep that overshoots (small reads) is repaid instead of lowering the rate.
+    let ahead = if rate > 0 { Duration::from_secs_f64(RATE_BURST as f64 / rate as f64) } else { Duration::ZERO };
+    let mut due = Instant::now();
     let mut buf = vec![0u8; CHUNK];
     loop {
         {
@@ -666,10 +672,20 @@ fn read_loop(mut reader: Box<dyn Read + Send>, t: &Arc<Term>, window: usize) {
                 }
             }
         }
+        if rate > 0 {
+            // Ahead of the pace: wait, in slices so a close is never held up by it.
+            while due > Instant::now() && !t.exited.load(Ordering::SeqCst) {
+                std::thread::sleep((due - Instant::now()).min(Duration::from_millis(10)));
+            }
+        }
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(_) if t.exited.load(Ordering::SeqCst) => break, // `stop` reaped the shell while this read was blocked (defensive: the tty is normally hung up when the leader exits, but a holder that keeps the PTY open must not make a closed terminal buffer output)
             Ok(n) => {
+                if rate > 0 {
+                    let now = Instant::now();
+                    due = due.max(now.checked_sub(ahead).unwrap_or(now)) + Duration::from_secs_f64(n as f64 / rate as f64);
+                }
                 *lock(&t.credit) += n;
                 let (m, cv) = &*t.pending;
                 lock(m).buf.extend_from_slice(&buf[..n]);
