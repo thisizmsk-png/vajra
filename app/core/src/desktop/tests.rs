@@ -3384,3 +3384,40 @@ fn a_submodule_run_from_an_outside_worktree_still_denies_the_main_checkout_to_ot
     app.record_run_pinned("20261105-1232", &wt, &loc, &key, "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
     assert!(app.other_project_roots("20261105-1229", &b).is_err(), "an unprotectable checkout refuses the Lead");
 }
+
+/// #80 sweep, class (a): the guarded records are written before any control state changes, so a record that cannot be written
+/// refuses the launch with the session's nonce and control session exactly as they were.
+#[test]
+fn a_record_that_cannot_be_written_refuses_a_resume_before_the_nonce_rotates() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("a");
+    fs::create_dir_all(a.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    lock(&app.control).start_session(sid, "20261105-1230").unwrap();
+    let nonce = lock(&app.control).nonce(sid).map(str::to_string);
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap(); // makes control/lead
+    fs::write(app.data.join("control/lead/20261105-1231"), b"in the way").unwrap(); // the next run's record dir cannot be created
+    let e = app.launch_engine(Engine::Claude, sid, "20261105-1231", "c", &a, |_| Ok(vec!["sleep".into(), "30".into()]), true, caps::DEFAULT_RUN_WORKERS).unwrap_err();
+    assert_eq!(code(&e), "io", "{e}");
+    assert!(lock(&app.control).has_session(sid), "the control session is intact");
+    assert_eq!(lock(&app.control).nonce(sid).map(str::to_string), nonce, "the nonce was not rotated");
+}
+
+/// #80 sweep, class (b): a resume runs in the guarded record's folder. The folder the caller names comes from the worker-writable
+/// index, so a different one is refused before anything starts.
+#[test]
+fn a_resume_into_a_different_folder_than_the_guarded_record_is_refused() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (a, b) = (t.0.join("a"), t.0.join("b"));
+    fs::create_dir_all(a.join(".git")).unwrap();
+    fs::create_dir_all(b.join(".git")).unwrap();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
+    // The index (worker-writable) is made to say this session lives in b.
+    let line = runindex::Entry { campaign: "c".into(), session_id: sid.into(), run_id: "20261105-1230".into(), cwd: b.clone(), lead_session_id: None, provider: None };
+    runindex::append(&app.data.join("runs.jsonl"), &line).unwrap();
+    let e = app.resume_run(sid, "c", &b.to_string_lossy(), None).unwrap_err();
+    assert_eq!(code(&e), "resume_cwd_mismatch", "{e}");
+}
