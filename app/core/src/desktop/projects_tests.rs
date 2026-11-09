@@ -122,6 +122,9 @@ fn a_symlinked_projects_folder_does_not_stop_the_app_opening() {
     assert_eq!(e["path"], data.join("projects").to_str().unwrap());
     assert!(e["detail"].as_str().unwrap().contains("symbolic link") && e["fix"].as_str().is_some_and(|f| !f.is_empty()), "{e}");
     assert_eq!(err(app.project_add(&repo(&root, "src/a"), false))["error"], "projects_unavailable");
+    // #106 review: the migration was never done (no marker could be written), so neither command may say it was.
+    assert_eq!(err(app.project_migration_suggest())["error"], "projects_unavailable");
+    assert_eq!(err(app.project_migration_confirm(&[]))["error"], "projects_unavailable");
     let row = app.projects_row().expect("a preflight row");
     assert_eq!((row["ok"].as_bool(), row["name"].as_str()), (Some(false), Some("Projects folder")), "{row}");
     assert!(row["detail"].as_str().unwrap().contains(data.join("projects").to_str().unwrap()), "{row}");

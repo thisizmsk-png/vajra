@@ -53,6 +53,15 @@ impl App {
         Some(json!({"name": "Projects folder", "ok": false, "detail": format!("{} ({})", u.what(), u.path.display()), "fix": u.fix()}))
     }
 
+    /// A refused projects folder refuses the command (`projects_unavailable`). Needed where the store's own answer would
+    /// mislead: with no folder, the migration marker reads as written though it never was (#106 review).
+    fn projects_usable(&self) -> Result<(), Value> {
+        match self.projects.unavailable() {
+            Some(u) => Err(refusal(StoreError::Unavailable(u.clone()))),
+            None => Ok(()),
+        }
+    }
+
     pub fn app_info(&self) -> Res {
         Ok(info())
     }
@@ -82,6 +91,7 @@ impl App {
     /// What the owner is asked to confirm once: suggested projects for campaigns started before projects existed.
     /// Nothing is written. `done` is true once the owner has confirmed.
     pub fn project_migration_suggest(&self) -> Res {
+        self.projects_usable()?;
         if migrate::is_done(&self.projects) {
             return Ok(json!({"done": true, "groups": [], "unsorted": [], "terminal": []}));
         }
@@ -94,6 +104,7 @@ impl App {
 
     /// The owner accepted these suggested roots (each must be in a fresh suggestion). Runs once.
     pub fn project_migration_confirm(&self, roots: &[String]) -> Res {
+        self.projects_usable()?;
         let (launches, campaigns) = self.migration_inputs()?;
         match migrate::confirm(&self.projects, &self.data, self.projects.guard(), &launches, &campaigns, roots) {
             Ok(o) => Ok(serde_json::to_value(o).unwrap_or_else(|_| json!({}))),
