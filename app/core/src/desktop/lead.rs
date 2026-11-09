@@ -448,16 +448,26 @@ impl App {
         } else if self.read_run_loc(own_run).is_none() {
             return Err(LeadError::GuardMissing("this run's folder record cannot be read, so the Lead is not started".into()));
         }
+        // Every pinned (folder, project) pair, to find the DEEPEST project that holds the asking folder: repositories nest, so being
+        // inside the own project's root does not make the folder the own project's (a link into a nested project is not).
+        let mut members: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
         for run in self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))? {
-            if self.read_run_key(&run).as_ref() == Some(&own) {
-                bases.extend(self.read_run_loc(&run));
-                if let Some(Some(m)) = self.project_main_of(&run, Some(&own)) {
-                    bases.push(m);
+            let k = self.read_run_key(&run);
+            let main = self.project_main_of(&run, k.as_ref()).flatten();
+            for base in self.read_run_loc(&run).into_iter().chain(main) {
+                if k.as_ref() == Some(&own) {
+                    bases.push(base.clone());
                 }
+                members.push((base, k.clone()));
             }
         }
         if !bases.iter().any(|b| own_real.starts_with(b)) {
             return Err(LeadError::GuardMissing("this run's folder no longer resolves to where it was launched (it or a parent was replaced), so the Lead is not started".into()));
+        }
+        let depth = |p: &Path| p.components().count();
+        let own_depth = bases.iter().filter(|b| own_real.starts_with(b)).map(|b| depth(b)).max().unwrap_or(0);
+        if members.iter().any(|(b, k)| own_real.starts_with(b) && depth(b) > own_depth && k.as_ref() != Some(&own)) {
+            return Err(LeadError::GuardMissing("this run's folder now resolves into another project nested with it, so the Lead is not started".into()));
         }
         let mut out: Vec<PathBuf> = Vec::new();
         // The directory of runs must list: an unlistable one would read as "no other projects" and deny nothing.

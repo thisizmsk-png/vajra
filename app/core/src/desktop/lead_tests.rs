@@ -1267,6 +1267,26 @@ fn a_legacy_record_redirected_before_the_location_write_back_is_refused_and_not_
     assert!(loc.exists(), "a legitimate legacy record is migrated");
 }
 
+/// #80 review [P1]: containment in the asking project's root does not prove ownership when repositories nest. An outer project's
+/// recorded subfolder replaced by a link into a recorded nested project belongs, by deepest guarded membership, to the nested one.
+#[test]
+fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (inner, src) = (t.repo().join("inner"), t.repo().join("src"));
+    for d in [t.repo().join(".git"), inner.join(".git"), src.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    app.record_run("20261108-1100", &inner, SID, "c", true, 1).unwrap();
+    assert_ne!(super::super::caps::project_key(&inner), super::super::caps::project_key(&src), "the fixture nests two projects");
+    assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&inner), "healthy: the nested project is denied");
+    std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
+    std::os::unix::fs::symlink(&inner, &src).unwrap();
+    let e = app.other_project_roots(RUN_ID, &src);
+    assert!(e.is_err(), "a redirect into the nested project is refused: {e:?}");
+}
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
