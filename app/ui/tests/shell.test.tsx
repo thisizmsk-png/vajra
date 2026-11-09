@@ -7,6 +7,7 @@ import { Shell } from "../src/Shell";
 import { useRoute } from "../src/router";
 import { REGISTRY } from "../src/screens/registry";
 import { projectId } from "../src/projects/adapter";
+import { inboxBadge } from "../src/shell/ViewTabs";
 import { S } from "../strings";
 
 const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], role: string | null = null) =>
@@ -230,5 +231,36 @@ describe("Shell B frame (FG-03)", () => {
     expect(screen.getByText("review b")).toBeTruthy();
     REGISTRY.review = orig;
     err.mockRestore();
+  });
+});
+
+describe("The Inbox tab counts campaign items only: run proposals live on the Director-General surface", () => {
+  const item = (id: string, kind: string) => ({ id, kind, campaign: kind === "run_proposal" ? undefined : "api-1", origin: "app", created: "", age_s: 1, title: id, body: "", actions: [] }) as never;
+  const proposal = { id: "proposal:1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "", age_s: 1, title: "Start a run?", body: "", ask: "do it", base: "main", rounds: 2, project: "/src/api", generation: 1, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] };
+  const inboxTab = () => screen.getByRole("link", { name: new RegExp(`^${S.views.inbox}`) });
+
+  it("counts a full list exactly, leaving proposals out; a cut list says '+'; nothing to count shows nothing", () => {
+    expect(inboxBadge([item("p", "plan"), item("q", "question"), item("r", "run_proposal")], 3)).toBe("2");
+    expect(inboxBadge([item("p", "plan"), item("r", "run_proposal")], 40)).toBe("1+");
+    expect(inboxBadge([item("r", "run_proposal")], 1)).toBe("");
+    expect(inboxBadge([item("r", "run_proposal")], 9)).toBe("");
+    expect(inboxBadge([], 0)).toBe("");
+  });
+
+  it("Given the fixture's plan, question and proposal, Then the tab reads Inbox 2, while the project still counts all three as needing you", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 3, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2`));
+    expect(tabs().getByText(S.frame.needsYou(3))).toBeTruthy();
+  });
+
+  it("Given only a run proposal waiting, Then the Inbox tab shows no count", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 1, items: [proposal] } });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "inbox")).toBe(true));
+    await waitFor(() => expect(inboxTab().textContent).toBe(S.views.inbox));
+  });
+
+  it("Given more waiting than the core sends, Then the tab gives the campaign count it has with a '+', not a wrong exact number", async () => {
+    boot(`#/p/${API}/orch`, { inbox: { count: 120, items: [...(replies().inbox as { items: unknown[] }).items, proposal] } });
+    await waitFor(() => expect(inboxTab().textContent).toBe(`${S.views.inbox} 2+`));
   });
 });

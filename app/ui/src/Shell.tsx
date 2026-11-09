@@ -11,7 +11,7 @@ import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
 import { ProjectColumn } from "./shell/ProjectColumn";
-import { ViewTabs } from "./shell/ViewTabs";
+import { ViewTabs, inboxBadge } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
 import { StatusBar } from "./shell/StatusBar";
@@ -166,7 +166,7 @@ function Frame() {
           )}
           <div className="v-center">
             {project && route.screen !== "settings" && (
-              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={P.inboxCount} onClose={closeTab}
+              <ViewTabs route={route} project={pid} review={reviewParams} workers={workerTabs} waiting={inboxBadge(P.inbox, P.inboxCount)} onClose={closeTab}
                 inspector={inspectable ? inspector : null} onInspector={() => setInspector((x) => !x)} />
             )}
             <div className="v-work">
