@@ -427,7 +427,22 @@ impl App {
     /// none is refused. More than `MAX_OTHER_ROOTS` folders refuses the ask rather than leave one undenied.
     pub(super) fn other_project_roots(&self, own_run: &str, repo: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
-        let own_real = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+        let own_real = std::fs::canonicalize(repo).map_err(|_| LeadError::GuardMissing("this run's folder cannot be resolved".into()))?;
+        // The run's folder was pinned at launch under its project location. A path that now resolves anywhere else (the folder or an
+        // ancestor renamed away and replaced by a link) is refused before any ancestor is exempted from another project's deny rules.
+        let loc_path = self.lead_sid_dir(own_run).join(LOC_FILE);
+        let pinned_loc = if std::fs::symlink_metadata(&loc_path).is_err() {
+            // A record from before locations existed: derive it once from the guarded cwd and write it back (as `launch_identity` does).
+            let c = self.read_run_cwd(own_run).ok_or_else(|| LeadError::GuardMissing("this run's folder was not recorded when it was launched; start a new run".into()))?;
+            let loc = git_location(&c);
+            let _ = fsx::write_atomic(&self.lead_sid_dir(own_run), LOC_FILE, loc.to_string_lossy().as_bytes());
+            loc
+        } else {
+            self.read_run_loc(own_run).ok_or_else(|| LeadError::GuardMissing("this run's folder record cannot be read, so the Lead is not started".into()))?
+        };
+        if !own_real.starts_with(&pinned_loc) {
+            return Err(LeadError::GuardMissing("this run's folder no longer resolves to where it was launched (it or a parent was replaced), so the Lead is not started".into()));
+        }
         let mut out: Vec<PathBuf> = Vec::new();
         // The directory of runs must list: an unlistable one would read as "no other projects" and deny nothing.
         let runs = self.try_recorded_runs().map_err(|_| LeadError::GuardMissing("the recorded runs cannot be listed, so the Lead cannot deny other projects".into()))?;
