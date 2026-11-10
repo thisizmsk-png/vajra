@@ -49,12 +49,12 @@ TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
 
 IN_GIT=0; HEAD_SHA=""; TREE=""; TREE_AFTER=""; DIRTY="false"; TOP=""
-EXCL=""   # pathspec excluding the walkthrough base dir when it lies inside the repo
+EXCL=""   # pathspec excluding the walkthrough base dir when it lies inside the repo (literal: no glob in its name matches a neighbour)
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   IN_GIT=1
   TOP="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
   BASE_ABS="$(cd "$BASE" && pwd -P)"
-  case "$BASE_ABS/" in "$TOP"/*) EXCL=":(exclude)${BASE_ABS#"$TOP"/}" ;; esac
+  case "$BASE_ABS/" in "$TOP"/*) EXCL=":(exclude,literal)${BASE_ABS#"$TOP"/}" ;; esac
   HEAD_SHA="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
 fi
 

@@ -325,11 +325,13 @@ impl Bridge {
             // verify-work excludes its walkthrough base directory only when that directory lies inside the repository (its
             // `case "$BASE_ABS/" in "$TOP"/*`), as a path relative to the top level. The same rule here: an `exclude` entry is an
             // absolute directory or one relative to the run's directory (`repo`), and one outside the repository leaves nothing out.
+            // Both exclude the directory LITERALLY (`literal` magic): a base whose name holds `*`, `?` or `[` never leaves out a
+            // neighbour it would match as a glob, whose edits would then be missing from both trees (#134 review).
             let top_dir = top.borrow().clone();
             add.extend(exclude.iter().filter_map(|d| {
                 let abs = if Path::new(d).is_absolute() { PathBuf::from(d) } else { repo.join(d) };
                 let abs = abs.canonicalize().unwrap_or(abs);
-                abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude){}", r.display()))
+                abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude,literal){}", r.display()))
             }));
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
             #[cfg(test)]

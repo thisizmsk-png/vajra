@@ -1595,6 +1595,34 @@ fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
     assert_eq!(run(&["write-tree"]), tree);
 }
 
+/// #134 review: the walkthrough base is left out of the tree LITERALLY, by the verifier and here alike. A base named with a
+/// glob character (`out/w*`) must not also leave out a neighbour it would match (`out/wx/`): that neighbour's edits count,
+/// and the desktop's tree is still exactly the one `vajra-verify-work.sh` records.
+#[test]
+fn a_walkthrough_base_with_glob_characters_leaves_out_only_itself() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let base = repo.join("out/w*");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(repo.join("out/wx")).unwrap();
+    fs::write(repo.join("out/wx/n.txt"), b"one").unwrap();
+    let verify = || {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-verify-work.sh");
+        let o = std::process::Command::new("bash").current_dir(&repo).env("VAJRA_WALKTHROUGH_DIR", &base).arg(&script).args(["green-run", "true"]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let doc: Value = serde_json::from_slice(&fs::read(base.join("green-run/evidence.json")).unwrap()).unwrap();
+        doc["git"]["worktreeTree"].as_str().unwrap().to_string()
+    };
+    let base_s = base.to_string_lossy().into_owned();
+    let recorded = verify();
+    assert_eq!(app.bridge.tree_id(&repo, &[&base_s]).as_deref(), Some(recorded.as_str()), "the desktop's tree is the verifier's");
+    fs::write(repo.join("out/wx/n.txt"), b"edited").unwrap();
+    assert_ne!(app.bridge.tree_id(&repo, &[&base_s]).as_deref(), Some(recorded.as_str()), "a neighbour the glob would match still counts");
+    assert_ne!(verify(), recorded, "and the verifier records it too");
+    assert_eq!(app.bridge.tree_id(&repo, &[&base_s]), Some(verify()), "the two still agree after the edit");
+}
+
 /// #134 review: the repository's `info/exclude` and `info/attributes` are read by this process, so they cannot make the
 /// tree id hang (a FIFO with no writer) or read without bound (a link to `/dev/zero`, an oversized file). Each is refused
 /// quickly and the tree is not computed (the evidence then reads `unverified`); an ordinary info file is still honored.
