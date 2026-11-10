@@ -50,7 +50,7 @@ describe("validate", () => {
 describe("Home start envelope", () => {
   const T = "p_01JC3H0000000000000000000A";
   const stored = { schema: "vajra.project/1", id: T, name: "Harbor", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 };
-  it("names the store's project id when the folder is a registered project, trailing slash and all", async () => {
+  it("an older core without project_for_folder: falls back to the registered root, trailing slash and all", async () => {
     const f = fakeIpc({ preflight: rows(true), list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_list: { projects: [stored], skipped: 0, truncated: false }, act_start_run: started });
     setTransport(f.transport);
     render(<ProjectsProvider><Home /></ProjectsProvider>);
@@ -64,6 +64,39 @@ describe("Home start envelope", () => {
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
     const env = (f.calls.find((c) => c.cmd === "act_start_run")!.args as { envelope: { project_id: string } }).envelope;
     expect(env.project_id).toBe(T);
+  });
+});
+
+describe("Home start envelope: the core's identity", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const startFrom = async (folder: string, replies: Record<string, unknown>) => {
+    const f = fakeIpc({ preflight: rows(true), list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, act_start_run: started, ...replies });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Home /></ProjectsProvider>);
+    await screen.findByText("registered");
+    fill(S.home.repo, ` ${folder} `);
+    fill(S.home.ask, "fix the bug");
+    fill(S.home.base, "main");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    return f;
+  };
+  const envelope = (f: Awaited<ReturnType<typeof startFrom>>) => (f.calls.find((c) => c.cmd === "act_start_run")!.args as { envelope: { project_id: string } }).envelope;
+
+  it("names the project the core finds for a symlinked or linked-worktree folder, which no literal root match would", async () => {
+    const f = await startFrom("/worktrees/api-fix", { project_for_folder: { project_id: T } });
+    expect(f.calls.find((c) => c.cmd === "project_for_folder")?.args).toEqual({ path: "/worktrees/api-fix" });
+    expect(envelope(f).project_id).toBe(T);
+  });
+
+  it("names p_unsorted when the core says no project owns the folder", async () => {
+    const f = await startFrom("/elsewhere", { project_for_folder: { project_id: "p_unsorted" } });
+    expect(envelope(f).project_id).toBe("p_unsorted");
+  });
+
+  it("never sends an id the core did not give: a malformed answer is Unsorted", async () => {
+    const f = await startFrom("/elsewhere", { project_for_folder: { project_id: "p_" + "x".repeat(300) } });
+    expect(envelope(f).project_id).toBe("p_unsorted");
   });
 });
 
