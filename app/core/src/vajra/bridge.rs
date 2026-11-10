@@ -310,10 +310,10 @@ impl Bridge {
             for name in ["exclude", "attributes"] {
                 let p = git(&["rev-parse", "--git-path", &format!("info/{name}")], false)?.stdout.trim().to_string();
                 let p = if Path::new(&p).is_absolute() { PathBuf::from(p) } else { top.borrow().join(p) };
-                match std::fs::read(&p) {
-                    Ok(b) => info.push((name, b)),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(_) => return None,
+                // Repo-controlled: read without following a link, blocking on a FIFO or growing without bound; a file
+                // that is refused fails the tree closed (the caller then shows `unverified`), never a guess (#134 review).
+                if let Some(b) = read_info_file(&p).ok()? {
+                    info.push((name, b));
                 }
             }
             private_git_dir(&gitdir, &frozen, &info)?;
@@ -415,6 +415,31 @@ fn private_git_dir(gitdir: &Path, frozen: &FrozenConfig, info: &[(&str, Vec<u8>)
 thread_local! {
     /// Tests: run between the config check and `git add` in `tree_id` (a worker rewriting the config in that window).
     pub(crate) static BEFORE_ADD: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The most of a repository's `info/exclude` or `info/attributes` that `tree_id` reads; a larger one is refused.
+const INFO_FILE_MAX: u64 = 1 << 20;
+
+/// A repository's info file, read so that the repository cannot block or grow this process through it: opened read-only
+/// with `O_NOFOLLOW | O_NONBLOCK` (never through a symbolic link at the last component, never waiting on a FIFO), the
+/// OPENED handle must be a regular file, and at most `INFO_FILE_MAX` bytes are read. `Ok(None)`: there is no such file.
+/// `Err`: refused (a link, a FIFO or device, too large, unreadable).
+fn read_info_file(p: &Path) -> Result<Option<Vec<u8>>, ()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if !f.metadata().map_err(|_| ())?.is_file() {
+        return Err(());
+    }
+    let mut b = Vec::new();
+    f.take(INFO_FILE_MAX + 1).read_to_end(&mut b).map_err(|_| ())?;
+    if b.len() as u64 > INFO_FILE_MAX {
+        return Err(());
+    }
+    Ok(Some(b))
 }
 
 /// Create `path` readable by its owner alone (mode 0700, before any object is written into it): `git add` stores the
