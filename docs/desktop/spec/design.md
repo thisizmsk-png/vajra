@@ -1013,7 +1013,7 @@ Status: proposed 2026-11-10, design only. This is revision 5. It applies the own
 - **Every run with worker picks is led by a lead session on the customer's chosen harness.** It drives the run through the core's **run protocol**: a `vajra-run` MCP server with planning, dispatch and integration tools (16.5).
 - **The core keeps the rules** the deliver workflow keeps in code today: the plan's shape, file ownership, rounds, what counts as done, and merging. So the guarantees come from the core, not from the lead's harness.
 - **The core runs every phase of today's workflow itself, on any harness (N4, 16.5a).** That covers verification, the design review, the security review, the evidence re-run and check, the signed campaign record and the project-memory write-back. The lead can't skip or reorder any of them. A run says **"Verified"** (or, when its evidence ran outside the guard, **"Verified (evidence ran outside the guard)"**, N17) only when the same gate today's workflow uses has passed, the evidence bundle is green for the integration commit, and the signed record checks out.
-- **The engine's scripts stay the only code that signs and the only writers of the stores. The app never reads the key.** The core calls them, unchanged, through the bridge (16.11). Evidence made by a session that can read the key is labelled "Verified (evidence ran outside the guard)", and that label is signed into the record (N17, T13).
+- **The engine's scripts stay the only code that signs and the only writers of the stores. The app never reads the key.** The core calls them, unchanged, through the bridge (16.11). Evidence whose commands came from a session that can read the key is labelled "Verified (evidence ran outside the guard)", and that label is signed into the record (N17, T13).
 - **Worktrees and commits belong to the core** (N1, 16.6). A narrow git writer is added beside the read-only bridge.
 - **The human-started proposal is the only authority** (16.1–16.3). It is held as a guarded `seats.json`.
 
@@ -1809,7 +1809,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - a background process that rewrites `evidence.json` after signing makes `CheckEvidence` fail;
     - the app process never opens the key (file-access trace, as in 6h);
     - a suite past `evidence_run_max_s` is killed: `not_verified`.
-  - **A Codex verifier whose setup command writes outside the worktree:** the evidence runs on that Codex seat inside its sandbox, and the write is denied. It never runs in a Claude session. The run is `evidence_unguarded`, or `not_verified`.
+  - **A Codex verifier whose setup command writes outside the evidence worktree, or reads the key:** the core's evidence runner runs it, and the runner profile denies the write or the read. It never runs in any agent session, Claude or Codex. The run is `evidence_unguarded`, or `not_verified` when the denied step makes a check fail.
   - A green round finalizes as `verified` with no `finish_run`, and a Stop after that changes nothing.
   - A bundle for another head is refused.
   - A record whose signature fails gives `not_verified`.
