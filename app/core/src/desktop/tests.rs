@@ -3325,6 +3325,36 @@ fn an_old_record_without_a_store_pin_is_migrated_once_and_a_fresh_start_works() 
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
 }
 
+/// #104 review [P2]: an old record is migrated from its OWN guarded folder, never from the Git location it shares with
+/// another store project. A pre-store stand-in run (and an unpinned one) in `checkout/team`, with the checkout and the
+/// team folder registered separately: a launch anywhere at that location writes the team's id into the old record, as
+/// `store_identity` resolves it, and each folder still launches as its own project.
+#[test]
+fn an_old_record_in_a_registered_subfolder_is_migrated_to_that_subfolders_project() {
+    for standin in [true, false] {
+        let t = Tmp::new();
+        let app = t.app();
+        let c = t.0.join("checkout");
+        store_git(&c);
+        let team = c.join("team");
+        fs::create_dir_all(c.join("lib")).unwrap();
+        let pc = test_project(&t.0.join("data"), &t.home(), &c);
+        let pt = test_project(&t.0.join("data"), &t.home(), &team);
+        app.record_run("20261105-1230", &team, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+        let rec = app.data.join("control/lead/20261105-1230").join(super::orchestrator::PROJECT_FILE);
+        if standin {
+            fs::write(&rec, super::orchestrator::project_ref(&team).0).unwrap();
+            assert_eq!(app.store_identity("20261105-1230"), Ok(Some(pt.clone())), "the stand-in resolves to the team");
+        } else {
+            without_pin(&app, "20261105-1230");
+        }
+        assert_eq!(app.launch_project(&c.join("lib")).unwrap().1.id, pc, "standin {standin}: the checkout's folder is the checkout's");
+        assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pt.as_str()), "standin {standin}: the old record keeps the team");
+        assert_eq!(app.launch_project(&team).unwrap().1.id, pt);
+        assert_eq!(app.launch_project(&c).unwrap().1.id, pc);
+    }
+}
+
 #[test]
 fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
     let fresh = || {
@@ -3502,6 +3532,44 @@ fn a_self_contained_nested_clone_and_a_real_submodule_are_their_own_projects() {
     let p = app.launch_project(&a.join("sub")).expect("a submodule of the enclosing project").1;
     assert_eq!(p.id, ps);
     assert_ne!(p.id, pa, "the submodule is its own project");
+}
+
+/// #104 review [P1]: the outer project has a run; a project registered at a subfolder (no `.git` of its own) of an admitted
+/// nested checkout is that subfolder's project on its FIRST launch there, whether or not the checkout is registered too,
+/// never the checkout's project and never `not_a_project`. The checkout's other folders stay the checkout's.
+#[test]
+fn a_first_launch_in_a_registered_subfolder_of_a_nested_checkout_is_the_subfolders_project() {
+    for clone_registered in [true, false] {
+        let t = Tmp::new();
+        let (app, a, _, pa, _) = pinned_a_and_b(&t);
+        let clone = a.join("clone");
+        store_git(&clone);
+        let team = clone.join("team");
+        fs::create_dir_all(team.join("src")).unwrap();
+        fs::create_dir_all(clone.join("lib")).unwrap();
+        let pc = clone_registered.then(|| test_project(&t.0.join("data"), &t.home(), &clone));
+        let pt = test_project(&t.0.join("data"), &t.home(), &team);
+        let (loc, p) = app.launch_project(&team.join("src")).expect("the registered subfolder");
+        assert_eq!((loc.clone(), p.id.clone()), (fs::canonicalize(&clone).unwrap(), pt.clone()), "clone registered: {clone_registered}");
+        assert_ne!(p.id, pa);
+        app.within_caps(&p.id, 1).unwrap();
+        app.record_run_pinned("20261105-1240", &team.join("src"), &loc, Some(&p.id), "3c8fad5b-d9cb-469f-a165-70867728950e", "t", true, 1).unwrap();
+        assert_eq!(app.launch_project(&team).unwrap().1.id, pt, "and again once it has a run");
+        match pc {
+            Some(pc) => assert_eq!(app.launch_project(&clone.join("lib")).unwrap().1.id, pc, "the checkout's other folders are the checkout's"),
+            None => assert_eq!(code(&app.launch_project(&clone.join("lib")).unwrap_err()), "not_a_project"),
+        }
+    }
+    // A registered subfolder of a submodule of the enclosing project, the same way.
+    let t = Tmp::new();
+    let (app, a, _, _, _) = pinned_a_and_b(&t);
+    fs::create_dir_all(a.join(".git/modules/sub/objects")).unwrap();
+    fs::write(a.join(".git/modules/sub/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(a.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    let ps = test_project(&t.0.join("data"), &t.home(), &a.join("sub"));
+    let pt = test_project(&t.0.join("data"), &t.home(), &a.join("sub/team"));
+    assert_eq!(app.launch_project(&a.join("sub/team")).unwrap().1.id, pt);
+    assert_eq!(app.launch_project(&a.join("sub")).unwrap().1.id, ps);
 }
 
 /// #80 round 5: the submodule target passes the "inside A's common dir" check, but a `commondir` file there would redirect
