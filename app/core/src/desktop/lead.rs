@@ -937,17 +937,18 @@ impl App {
         self.project_with_identity(want, &identity, cwd)
     }
 
-    /// The store project rooted at `want` (by device and inode) or recorded with `identity` as its common dir, compared by
-    /// canonical path: the project an admitted nested location names, found without reading its `.git` again.
+    /// The project an admitted nested location names, found without reading its `.git` again: the store project whose root
+    /// is the deepest folder from the canonical `cwd` up to `want` (by device and inode, so a project registered at a
+    /// subfolder of the nested checkout is its own, #104 review), else the one recorded with `identity` as its common dir,
+    /// compared by canonical path.
     fn project_with_identity(&self, want: &Path, identity: &Path, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
-        use std::os::unix::fs::MetadataExt;
         let listing = self.projects.list(true).map_err(|e| super::fail("io", e))?;
         if listing.truncated {
             return Err(super::fail("io", "the project store could not be read whole"));
         }
-        let at = std::fs::metadata(want).ok().map(|m| (m.dev(), m.ino()));
-        let hit = listing.projects.into_iter().find(|p| {
-            at == Some((p.root_key.dev, p.root_key.ino)) || p.root_key.git_common_dir.as_ref().and_then(|c| exact_self(Path::new(c))).as_deref() == Some(identity)
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let hit = store_root_holding(&listing.projects, &real, want).cloned().or_else(|| {
+            listing.projects.into_iter().find(|p| p.root_key.git_common_dir.as_ref().and_then(|c| exact_self(Path::new(c))).as_deref() == Some(identity))
         });
         match hit {
             Some(p) if p.archived.is_some() => Err(LeadError::ProjectArchived.to_json()),
