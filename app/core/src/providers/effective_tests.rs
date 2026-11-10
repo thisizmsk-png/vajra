@@ -191,7 +191,8 @@ fn the_diff_comes_from_git_for_a_run_that_only_edited_through_a_shell() {
 
     let bridge = Bridge::new(PathBuf::from("/nonexistent"));
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
-    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], added: 1, removed: 0 });
+    // One line appended to a.txt and one line in the new b.txt.
+    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], added: 2, removed: 0 });
     // A clean tree is an empty diff, not a failure; an unknown base is a failure (None), not an empty diff.
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "w"]);
@@ -226,8 +227,32 @@ fn git_paths_are_real_paths_even_with_odd_characters_or_a_staged_rename() {
     got.sort();
     want.sort();
     assert_eq!(got, want);
-    assert_eq!((d.added, d.removed), (1, 0), "the rename itself adds and removes no lines");
+    // keep.txt gains a line, the four new files hold one line each, and the rename itself adds and removes none.
+    assert_eq!((d.added, d.removed), (5, 0));
     for f in &d.files {
         assert!(repo.join(f).is_file(), "{f:?} is a real path");
     }
+}
+
+#[test]
+fn a_run_that_only_created_files_counts_their_lines_as_added() {
+    let repo = tmp();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.invalid"]);
+    git(&repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    // Only new files: no tracked edit anywhere, so every line count comes from the untracked ones.
+    std::fs::write(repo.join("new one.txt"), "a\nb\nc\n").unwrap();
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::write(repo.join("sub/two.txt"), "x\ny\n").unwrap();
+    std::fs::write(repo.join("empty.txt"), "").unwrap();
+    std::fs::write(repo.join("blob.bin"), b"\0\x01\x02\0").unwrap();
+    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
+    let mut files = d.files.clone();
+    files.sort();
+    assert_eq!(files, ["blob.bin", "empty.txt", "new one.txt", "sub/two.txt"]);
+    assert_eq!((d.added, d.removed), (5, 0), "3 + 2 lines; the empty and binary files add none");
 }

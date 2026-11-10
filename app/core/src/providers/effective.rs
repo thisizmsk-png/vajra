@@ -32,6 +32,8 @@ pub const FROM_EVENT: &str = "harness_event";
 const MAX_READ: u64 = 1024 * 1024;
 /// Records scanned for the first `turn_context`.
 const MAX_RECORDS: usize = 400;
+/// New files whose lines are counted into a `Diff`; every one is still listed.
+const MAX_UNTRACKED: usize = 500;
 
 /// What the slot's choice asked for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -293,7 +295,7 @@ pub struct Diff {
 }
 
 /// The diff of `cwd` (the worker's worktree) against `base`, read through the read-only git bridge: tracked changes
-/// from `git diff --numstat <base>` and new files from `git ls-files --others --exclude-standard`. `None` when git could
+/// from `git diff --numstat <base>` and new files from `git ls-files --others --exclude-standard` (their lines count as added). `None` when git could
 /// not answer; an empty `Diff` means git saw no change.
 pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
     let git = |args: &[&str]| {
@@ -320,7 +322,22 @@ pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
             diff.files.push(path.into());
         }
     }
-    diff.files.extend(untracked.split('\0').filter(|l| !l.is_empty()).map(String::from));
+    // A new file is all added lines. Git counts them (`--no-index` against /dev/null, which exits 1 when the file differs,
+    // as it always does here) and does not follow a link: a link counts as one line, its target text. A binary file adds
+    // none. At most `MAX_UNTRACKED` files are counted, so a tree of thousands of new files is not read one by one.
+    for path in untracked.split('\0').filter(|l| !l.is_empty()) {
+        if diff.files.len() < MAX_UNTRACKED {
+            let args = ["diff", "--numstat", "-z", "--no-index", "--", "/dev/null", path].map(String::from).to_vec();
+            if let Ok(out) = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }) {
+                if matches!(out.code, Some(0 | 1)) && out.whole() {
+                    let mut f = out.stdout.split('\0').next().unwrap_or("").splitn(3, '\t');
+                    diff.added += f.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
+                    diff.removed += f.next().and_then(|r| r.parse::<u64>().ok()).unwrap_or(0);
+                }
+            }
+        }
+        diff.files.push(path.into());
+    }
     Some(diff)
 }
 
