@@ -2,6 +2,7 @@
 //! and login check come after it. The stock CLI owns its login: Vajra never reads, stores or forwards a CLI credential.
 //! The one exception (D3) is `keychain`: a pasted API key, written once into the Keychain and never read back.
 
+pub mod codex_home;
 pub mod contract;
 pub mod detect;
 pub mod keychain;

@@ -165,6 +165,22 @@ writes):
 - **In memory.** The core wraps the key at once (no `Clone`, no `Display`, a redacting `Debug`) and zeroes its copies after
   the write. Copies the IPC layer makes are out of its reach.
 
+### Gateway launch (harness B)
+
+A Codex-harness run on the `gateway` or `api_key` route (code id `vajra-openrouter`) starts like this:
+
+- **Own `CODEX_HOME`.** `<data dir>/codex-home/<account>` (0700), holding a generated `config.toml` (0600) that is rewritten
+  at every launch. The user's `~/.codex` is never read or written. The file names the provider, a non-secret `https://`
+  `base_url`, `wire_api = "responses"` and `[model_providers.vajra-openrouter.auth]` with
+  `command = "/usr/bin/security"`, `args = [find-generic-password, -s, vajra.provider.<account>, -a, <account>, -w]`. There is
+  no `env_key` and nothing secret in the file: Codex runs that command itself each time it needs the key.
+- **argv.** `codex exec --json --sandbox workspace-write -m <model>`, then `-c` overrides: `model_reasoning_effort` (only when
+  set), `request_max_retries=0` and `stream_max_retries=0` on the provider (the core owns the retry policy), and
+  `sandbox_workspace_write.exclude_slash_tmp=true` / `exclude_tmpdir_env_var=true`. The ask is the last element, after `--`.
+  The command line is wrapped in a fixed `/bin/sh -c 'exec "$@" </dev/null'` so stdin is `/dev/null`; the wrapper never
+  parses the ask or the model.
+- **Environment.** `ENV_ALLOW` plus `CODEX_HOME`, nothing else, and no key in the argv or the environment.
+
 ### `preferences.agents` (replaces the `agent` preference)
 
 ```json
