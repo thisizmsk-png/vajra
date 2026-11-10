@@ -24,6 +24,7 @@ use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
 use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
+use vajra_desktop::desktop::WorktreeTerminals;
 use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
 /// The one event the UI listens to.
@@ -75,10 +76,73 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
 
+/// The user terminals as closing a worker sees them: how many in a worktree are running something, and hanging them up
+/// (ledger-recorded like any tab close). A close that fails keeps the worker open.
+struct WorktreeTerms<'a>(&'a Terminals, &'a Ownership);
+
+impl WorktreeTerminals for WorktreeTerms<'_> {
+    fn busy(&self, wt: &std::path::Path) -> u32 {
+        self.0.ids_under(wt).into_iter().filter(|&id| self.0.is_busy(id)).count() as u32
+    }
+    fn release(&self, wt: &std::path::Path) -> Result<(), String> {
+        for id in self.0.ids_under(wt) {
+            match self.1.ledger.close_then_forget(id, || self.0.close(id)) {
+                Ok(()) | Err(vajra_desktop::terminal::TermError::NotFound) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>, busy_terminals: Option<u32>, no_upstream: Option<bool>) -> Value {
+    // "Close anyway" sends everything the human confirmed; all four or none.
+    let anyway = changed_files.zip(unpushed_commits).zip(busy_terminals).zip(no_upstream).map(|(((f, c), b), n)| (f, c, b, n));
+    app.act_close_worker(&envelope, &worker, anyway, &WorktreeTerms(&terms, &own))
+}
+
+#[tauri::command(async)]
+fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
+    app.act_close_finished(&envelope, &WorktreeTerms(&terms, &own))
+}
+
+#[tauri::command(async)]
+fn closeout_status(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, slug: String, run_id: String) -> Res {
+    app.closeout_status(&slug, &run_id, &WorktreeTerms(&terms, &own))
+}
+
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_rounds: u32, base: String, max_in_flight: u32, campaign: Option<String>, cwd: String, provider: Option<String>) -> Value {
     app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
+}
+
+/// The Director-General's actions as receipts (FG-02c, decision Q2); see `desktop::lead_acts`.
+#[tauri::command(async)]
+fn act_ask_lead(app: State<'_, App>, envelope: Envelope, run_id: String, text: String) -> Value {
+    app.act_ask_lead(&envelope, &run_id, &text)
+}
+
+#[tauri::command(async)]
+fn act_new_conversation(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
+    app.act_new_conversation(&envelope, &run_id)
+}
+
+#[tauri::command(async)]
+fn act_cancel_ask(app: State<'_, App>, envelope: Envelope, ask_id: String) -> Value {
+    app.act_cancel_ask(&envelope, &ask_id)
+}
+
+#[tauri::command(async)]
+fn act_start_proposal(app: State<'_, App>, envelope: Envelope, id: String, proposal_sha256: String) -> Value {
+    app.act_start_proposal(&envelope, &id, &proposal_sha256)
+}
+
+#[tauri::command(async)]
+fn act_dismiss_proposal(app: State<'_, App>, envelope: Envelope, id: String) -> Value {
+    app.act_dismiss_proposal(&envelope, &id)
 }
 
 #[tauri::command(async)]
@@ -181,6 +245,33 @@ fn provider_accounts(app: State<'_, App>) -> Res {
     app.provider_accounts()
 }
 
+/// Stored API keys (D3). The key arrives once, goes to the Keychain through stdin, and is never sent back: every answer
+/// is `{account, saved}`.
+#[tauri::command(async)]
+fn provider_key_saved(app: State<'_, App>, account: String) -> Res {
+    app.provider_key_saved(&account)
+}
+
+#[tauri::command(async)]
+fn provider_key_save(app: State<'_, App>, account: String, key: String) -> Res {
+    app.provider_key_save(&account, key)
+}
+
+#[tauri::command(async)]
+fn provider_key_replace(app: State<'_, App>, account: String, key: String) -> Res {
+    app.provider_key_replace(&account, key)
+}
+
+#[tauri::command(async)]
+fn provider_key_remove(app: State<'_, App>, account: String) -> Res {
+    app.provider_key_remove(&account)
+}
+
+#[tauri::command(async)]
+fn provider_usage(app: State<'_, App>, page_open: bool) -> Res {
+    app.provider_usage(page_open)
+}
+
 #[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
@@ -259,10 +350,13 @@ fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
 fn term_sink(ch: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> TermSink {
     use tauri::ipc::InvokeResponseBody as Body;
     std::sync::Arc::new(move |e| {
-        let _ = match e {
+        let sent = match e {
             TermEvent::Data(d) => ch.send(Body::Raw(d)),
             TermEvent::Exit(c) => ch.send(Body::Json(format!("{{\"exit\":{}}}", c.map_or("null".into(), |c| c.to_string())))),
+            TermEvent::Skipped { bytes, alt } => ch.send(Body::Json(format!("{{\"skipped\":{bytes},\"alt\":{}}}", alt.map_or("null".into(), |a| a.to_string())))),
+            TermEvent::Activity => ch.send(Body::Json("{\"activity\":true}".into())),
         };
+        sent.is_ok() // false once the webview is gone: the core then keeps the newest output for the view that attaches
     })
 }
 
@@ -305,6 +399,12 @@ fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Chann
 #[tauri::command]
 fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Res {
     terms.write(id, data.as_bytes()).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+/// The view shows or hides a pane (the dock hidden, another tab selected). `alt`: it was on the alternate screen when it hid.
+#[tauri::command]
+fn term_visible(terms: State<'_, Terminals>, id: u32, visible: bool, alt: Option<bool>) -> Res {
+    terms.set_visible(id, visible, alt.unwrap_or(false)).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
 #[tauri::command]
@@ -433,9 +533,14 @@ fn cancel_ask(app: State<'_, App>, ask_id: String) -> Res {
     app.cancel_ask(&ask_id)
 }
 
+/// By run (`runId`) or, with no run, by project (`projectId`, FG-02c): exactly one of them.
 #[tauri::command(async)]
-fn lead_status(app: State<'_, App>, run_id: String) -> Res {
-    app.lead_status(&run_id)
+fn lead_status(app: State<'_, App>, run_id: Option<String>, project_id: Option<String>) -> Res {
+    match (run_id, project_id) {
+        (Some(r), None) => app.lead_status(&r),
+        (None, Some(p)) => app.lead_status_for_project(&p),
+        _ => Err(serde_json::json!({"error": "invalid_args", "detail": "give runId or projectId"})),
+    }
 }
 
 /// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
@@ -547,6 +652,17 @@ fn main() {
                     let changed = collect_changes(&sub, Duration::from_secs(1));
                     // Workers are published before anyone is told: a subscriber that refetches on the event sees them.
                     handle.state::<App>().refresh_workers();
+                    // Finished workers that lose nothing are closed on their own (setting `auto_close_finished`). Git is
+                    // asked off this loop, so a slow repo never delays worker refreshes.
+                    if handle.state::<App>().closeout_due() {
+                        let h = handle.clone();
+                        std::thread::spawn(move || {
+                            let n = h.state::<App>().closeout_auto(&WorktreeTerms(&h.state::<Terminals>(), &h.state::<Ownership>()));
+                            if n > 0 {
+                                let _ = h.emit(CHANGED, serde_json::json!({"projects": h.state::<App>().bump_all_projects()}));
+                            }
+                        });
+                    }
                     if let Some(mut payload) = changed {
                         // The revision each known project is now at, so a subscriber refetches `project_state`.
                         payload["projects"] = Value::Array(handle.state::<App>().bump_all_projects());
@@ -580,6 +696,11 @@ fn main() {
             resume_run,
             provider_list,
             provider_accounts,
+            provider_key_saved,
+            provider_key_save,
+            provider_key_replace,
+            provider_key_remove,
+            provider_usage,
             verify_campaign,
             read_report,
             resume_targets,
@@ -627,7 +748,15 @@ fn main() {
             act_reject_plan,
             act_answer_question,
             act_stop_worker,
+            act_close_worker,
+            act_close_finished,
+            closeout_status,
             act_start_run,
+            act_ask_lead,
+            act_new_conversation,
+            act_cancel_ask,
+            act_start_proposal,
+            act_dismiss_proposal,
             project_state,
             term_open,
             term_attach,
@@ -637,6 +766,7 @@ fn main() {
             diagnostics_preview,
             term_write,
             term_resize,
+            term_visible,
             term_ack,
             term_close,
         ])

@@ -1,7 +1,7 @@
 // Mirror of the core's bounded preferences DTO; this contains no auth, permissions, hooks or environment values.
 export type Preferences = {
   theme: "system" | "dark" | "light"; editor: "system" | "code"; shell: "login" | "sh" | "bash" | "zsh";
-  notifications: boolean; notifications_text: boolean; agent: "claude" | "codex"; model: string; workers: number; rounds: number;
+  notifications: boolean; notifications_text: boolean; agent: "claude" | "codex"; model: string; workers: number; rounds: number; auto_close_finished: boolean;
   shortcuts: { palette: string; settings: string };
 };
 export type PreferenceKey = keyof Preferences;
@@ -10,7 +10,7 @@ export type PreferenceView = { schema: "vajra.preferences/1"; rev: number; proje
   caps: { active_runs: number; workers_per_run: number; editable: false };
   global: Preferences; overrides: Partial<Preferences>; effective: Preferences; sources: Record<PreferenceKey, "global" | "project"> };
 export const DEFAULT_PREFERENCES: Preferences = { theme: "system", editor: "system", shell: "login", notifications: true, notifications_text: false,
-  agent: "claude", model: "", workers: 4, rounds: 2, shortcuts: { palette: "Primary+K", settings: "Primary+," } };
+  agent: "claude", model: "", workers: 4, rounds: 2, auto_close_finished: true, shortcuts: { palette: "Primary+K", settings: "Primary+," } };
 export const SHORTCUT_CHOICES = ["Primary+K", "Primary+,", "Primary+Shift+K", "Primary+Shift+P", "Primary+Shift+S", "F6", "F7"];
 export const shortcutKeys = (binding: string) => binding.split("+").map(k => k === "Primary" ? "⌘" : k === "Shift" ? "⇧" : k.toUpperCase());
 /** Read once: the platform modifier is Command on macOS and Control elsewhere (the same test Shell uses for the overlay). */
@@ -32,6 +32,7 @@ export function isPreferenceView(input: unknown): input is PreferenceView {
     && typeof p.model === "string" && p.model.length <= 80
     && Number.isInteger(p.workers) && p.workers >= 1 && p.workers <= 16
     && Number.isInteger(p.rounds) && p.rounds >= 1 && p.rounds <= 3
+    && typeof p.auto_close_finished === "boolean"
     && p.shortcuts && SHORTCUT_CHOICES.includes(p.shortcuts.palette) && SHORTCUT_CHOICES.includes(p.shortcuts.settings)
     && p.shortcuts.palette !== p.shortcuts.settings;
   return v.schema === "vajra.preferences/1" && Number.isSafeInteger(v.rev) && v.rev >= 0

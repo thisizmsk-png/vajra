@@ -190,6 +190,11 @@ pub struct App {
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
+    keys: crate::providers::keychain::Keys,
+    /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
+    usage: crate::providers::usage::Meter,
+    usage_source: Box<dyn crate::providers::usage::UsageSource>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -219,6 +224,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Workers closed once finished (see `closeout`); persisted.
+    closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -243,7 +250,7 @@ pub struct App {
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
     /// ADR-15: the project records under `<data>/projects`.
-    projects: crate::projects::store::Store,
+    projects: Arc<crate::projects::store::Store>,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
@@ -262,8 +269,13 @@ impl App {
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
-        let projects = crate::projects::store::Store::open(data, home)?;
+        let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
+        {
+            // FG-02c: every Director-General call is refused while its project is archived or gone from the store.
+            let store = projects.clone();
+            svc.set_project_gate(Box::new(move |pid: &str| orchestrator::project_gate(&store, pid)));
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             projects,
@@ -291,6 +303,14 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
+            // A test build never reaches the real Keychain: its default `security` path does not exist.
+            keys: crate::providers::keychain::Keys::cli(
+                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
+                home,
+            ),
+            usage: Default::default(),
+            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
+            usage_source: Box::new(crate::providers::usage::NoSource),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -305,6 +325,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -411,17 +432,18 @@ impl App {
     /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
     /// concurrent run safe; the caps bound what runs at once.
     ///
-    /// Projects are the keys pinned when each run was launched (`launch_key` for the requested folder, the guarded record
-    /// for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git` cannot
-    /// make its project look free or make another one look busy. A live run with no pinned key refuses the start.
-    fn within_caps(&self, key: &Path, workers: u32) -> Result<(), Value> {
+    /// Projects are the store ids pinned when each run was launched (`launch_project` for the requested start, the guarded
+    /// record for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git`
+    /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
+    /// start. The caps compare the ids as opaque keys.
+    fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
             let per = lock(&self.run_workers);
             let mut v = Vec::new();
             for (s, r) in runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)) {
-                let Some(project) = self.read_run_key(&r.run_id) else {
+                let Some(project) = self.pinned_project(&r.run_id).filter(|p| crate::projects::contract::valid_project_id(p)).map(PathBuf::from) else {
                     return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
                 };
                 v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
@@ -434,7 +456,7 @@ impl App {
             lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
         let limits = *lock(&self.limits);
-        caps::check(limits, &active, key, workers).map_err(|h| h.to_json())
+        caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
 
     /// The run caps and their bounds.
@@ -539,32 +561,31 @@ impl App {
         workers: u32,
     ) -> Res {
         let _one = lock(&self.launching);
-        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
-        // are checked against.
         // A session whose process is already running is never launched again: `start_session` would replace its live control
         // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
-        // its control session. Checked under the launching lock, before anything is changed.
+        // its control session. Checked under the launching lock, before anything is read or changed (#80 review).
         if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
             return Err(fail("session_running", "this session is already running; stop it before starting it again"));
         }
-        let (loc, key) = self.launch_identity(cwd)?;
-        self.within_caps(&key, workers)?;
-        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
-        // refused, so a resume never has to guess the provider from the worker-writable index.
+        // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently. The run's project: pinned
+        // before any worker of it can touch the repo's `.git` (#80 review), and the one the caps are checked against.
+        let (loc, project) = self.launch_project(cwd)?;
+        self.within_caps(&project.id, workers)?;
+        // Before any control state changes: which adapter this run is on, and the guarded record with the exact (location,
+        // project) checked above. If either cannot be written the launch is refused with the session's control state and
+        // nonce untouched: a resume never guesses the provider from the worker-writable index, and a run without its pin
+        // could never be held to its project (#80 review).
         if self.record_run_provider(run_id, engine).is_err() {
             return Err(fail("io", "could not record the run's provider"));
         }
-        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
-        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
-        // pin could never be held to its project (#80 review).
-        if self.record_run_pinned(run_id, cwd, &loc, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+        if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
         }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
             // The run's project's Director-General sees and steers it (ADR-15 2.3).
-            if let Err(e) = svc.set_project(session_id, &orchestrator::project_ref_of(&key, &loc).0) {
+            if let Err(e) = svc.set_project(session_id, &project.id) {
                 svc.end_session(session_id);
                 return Err(e.to_json());
             }
@@ -598,6 +619,7 @@ impl App {
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
         }
+        self.note_run(&project, run_id, campaign, engine);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
     }
 
@@ -650,6 +672,57 @@ impl App {
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
         serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
+    pub fn provider_key_saved(&self, account: &str) -> Res {
+        key_state(account, self.keys.saved(account))
+    }
+
+    /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
+    pub fn provider_key_save(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_replace`: overwrite the stored key (or store the first one).
+    pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
+    pub fn provider_key_remove(&self, account: &str) -> Res {
+        key_state(account, self.keys.remove(account).map(|()| false))
+    }
+
+    /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
+    /// `page_open` is true while Settings > Providers is open. A key endpoint is called only when that is true or a run is
+    /// active, and at most once a minute per account; otherwise the last answer is returned and no call is made.
+    pub fn provider_usage(&self, page_open: bool) -> Res {
+        // What `project_state` serves now, against what this read leaves in the cache.
+        let before = self.provider_usage_cached().fingerprint();
+        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
+        // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
+        if now.fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+        serde_json::to_value(now).map_err(|e| fail("internal", e))
+    }
+
+    /// The last usage answers, for `project_state`. Never calls out.
+    pub(super) fn provider_usage_cached(&self) -> crate::providers::usage::UsageList {
+        self.usage_snapshot(false)
+    }
+
+    fn usage_snapshot(&self, active: bool) -> crate::providers::usage::UsageList {
+        use crate::providers::usage::{Usage, UsageList, USAGE_SCHEMA};
+        let (now, read_at) = (std::time::Instant::now(), crate::control::time::iso_secs(std::time::SystemTime::now()));
+        // The CLI logins report no windows today, so they read "Not reported".
+        let mut usage: Vec<Usage> = ["claude", "codex"].iter().map(|a| Usage::not_reported(a)).collect();
+        usage.extend(self.usage_source.accounts().iter().map(|a| self.usage.read(a, active, now, &read_at, self.usage_source.as_ref())));
+        UsageList { schema: USAGE_SCHEMA.into(), usage }
     }
 
     /// The last `provider_list` answer, or `None` before the first. Never runs a process.
@@ -897,6 +970,10 @@ impl App {
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
+        // A closed worker is no longer tailed: no file reads, no new stream lines. Its record stays for the history view.
+        if self.worker_closed(id) {
+            return tree::worker_from(id, meta, j, map.get(id));
+        }
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
@@ -1344,12 +1421,8 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
-    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
-    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
-    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
-    /// the run repo's HEAD.
-    pub fn worktree_info(&self, worker: &str) -> Res {
+    /// `(worktree, run repo)` of a worker, both resolved; refused for anything that is not a crew worktree.
+    pub(super) fn crew_worktree(&self, worker: &str) -> Result<(PathBuf, PathBuf), Value> {
         if !bus::valid_stream_id(&worker_stream(worker)) {
             return Err(invalid("worker", "not a worker id"));
         }
@@ -1369,6 +1442,16 @@ impl App {
         if !wt.is_dir() {
             return Err(refuse());
         }
+        Ok((wt, repo))
+    }
+
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        let (wt, repo) = self.crew_worktree(worker)?;
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
             (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
@@ -1856,6 +1939,14 @@ fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
     }
 }
 
+/// The answer of every `provider_key_*` command: a `KeyState` or a fixed error. Never echoes input.
+fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) -> Res {
+    match r {
+        Ok(saved) => serde_json::to_value(crate::providers::contract::KeyState { account: account.into(), saved }).map_err(|e| fail("internal", e)),
+        Err(e) => Err(fail(e.code(), e.detail())),
+    }
+}
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -1917,6 +2008,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod closeout;
+pub use closeout::WorktreeTerminals;
 mod orchestrator;
 mod proposals;
 mod inbox;
@@ -1924,6 +2017,7 @@ mod projects;
 mod wfresult;
 mod decide;
 mod lead;
+mod lead_acts;
 mod runindex;
 mod runview;
 mod state;
@@ -1933,6 +2027,15 @@ pub use state::Envelope;
 mod tests;
 #[cfg(test)]
 mod state_tests;
+
+/// Tests: make `dir` (created if needed) a project in the store under `data`, as the window's "Add project" does.
+/// Returns its `p_` id. Idempotent: the same folder again is the same project.
+#[cfg(test)]
+pub(crate) fn test_project(data: &Path, home: &Path, dir: &Path) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    paths::ensure_private_dir(data).unwrap();
+    crate::projects::store::Store::open(data, home).unwrap().add(dir, true).unwrap().project().id.clone()
+}
 
 /// The namespaced task id (`<run_id>.<task>`) and round of a workflow label such as `task.t1.r2`; `(None, None)` for
 /// a label that names no task (`verify.r1`, `kb.search`). The workflow namespaces ids as `${RUN}.${id}`.

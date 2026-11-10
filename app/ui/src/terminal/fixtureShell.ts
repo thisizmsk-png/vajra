@@ -1,5 +1,5 @@
 // Dev only (loaded by devFixture.ts): a pretend shell behind the term_* commands, so the dock can be seen and clicked
-// through with `?fixture#terminal` and no core. It echoes what is typed and answers a few lines.
+// through with `?fixture#terminal` and no core. It echoes what is typed and answers a few lines (`flood`, `ping`, `exit`).
 import { setTransport } from "../ipc";
 import type { Transport } from "../ipc";
 
@@ -14,6 +14,7 @@ export function terminalFixture(base: Transport): Transport {
   const info = (id: number, cwd: string) => ({ id, cwd, root: cwd, rows: 24, cols: 80, alive: true });
   const run = (id: number, s: Sess, line: string) => {
     if (line === "exit") return s.send({ exit: 0 });
+    if (line === "ping") setTimeout(() => s.send({ activity: true }), 600); // what the core sends for output in a hidden pane
     if (line === "flood") out(s, Array.from({ length: 400 }, (_, i) => `line ${i + 1} of the flood`).join("\r\n") + "\r\n");
     else if (line) out(s, `fixture: no such command: ${line}\r\n`);
     prompt(s);
@@ -43,7 +44,7 @@ export function terminalFixture(base: Transport): Transport {
         return {};
       }
       if (cmd === "term_close") { sessions.delete(Number(args?.id)); return {}; }
-      if (cmd === "term_resize" || cmd === "term_ack") return {};
+      if (cmd === "term_resize" || cmd === "term_ack" || cmd === "term_visible") return {};
       return base.call(cmd, args);
     },
     async channel(cmd, args, onMessage) {
@@ -53,7 +54,7 @@ export function terminalFixture(base: Transport): Transport {
         const id = next++;
         const s: Sess = { send: onMessage, line: "" };
         sessions.set(id, s);
-        setTimeout(() => { out(s, `Fixture shell in ${cwd}. Type flood or exit.\r\n`); prompt(s); }, 0);
+        setTimeout(() => { out(s, `Fixture shell in ${cwd}. Type flood, ping or exit.\r\n`); prompt(s); }, 0);
         return info(id, cwd);
       }
       throw { error: "not_in_fixture", detail: cmd };

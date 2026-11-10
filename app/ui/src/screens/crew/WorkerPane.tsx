@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
+import { AlertDialog, Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { DiffView, Tabs } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
-import { api, errorText } from "../../ipc";
+import { api, errorText, newActionId } from "../../ipc";
+import { unsavedText, useCloseout } from "../../projects/closeout";
+import { useCurrentProject } from "../../projects/current";
 import type { CrewNodeDto, Json, WorktreeInfo } from "../../ipc";
 import { StreamTab } from "./StreamTab";
 import { ProviderLine } from "../ProviderLine";
@@ -129,6 +131,24 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
     const poll = setInterval(() => { if (!document.hidden) void read(); }, TASK_POLL_MS);
     return () => { live = false; clearInterval(poll); };
   }, [slug, taskId]);
+  // A finished worker with work that exists only in its worktree: shown with the exact counts, and the one way to close it.
+  const closeout = useCloseout(slug, runId);
+  const { project } = useCurrentProject();
+  const co = closeout.rows.get(agent);
+  const [confirming, setConfirming] = useState(false);
+  const [closeMsg, setCloseMsg] = useState("");
+  const closeAnyway = () => {
+    setConfirming(false);
+    if (!co || !project) return;
+    const confirmed = { changedFiles: co.changed_files ?? 0, unpushedCommits: co.unpushed_commits ?? 0, busyTerminals: co.busy_terminals ?? 0, noUpstream: co.no_upstream ?? false };
+    void api.actCloseWorker({ action_id: newActionId(), project_id: project.id, expect_generation: null }, agent, confirmed).then(
+      (r) => {
+        const e = r.error as { error?: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number } | undefined;
+        setCloseMsg(r.receipt?.state === "done" && !e ? "" : e?.error === "unsaved_work_changed" ? S.closeout.changed(unsavedText(e)) : S.closeout.notDone);
+      },
+      () => setCloseMsg(S.closeout.notDone),
+    ).finally(closeout.reload);
+  };
   const taskObj = task && task !== "none" && !("err" in task) ? task : null;
 
   const shape = (STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown";
@@ -142,6 +162,17 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           {wp && <ProviderLine p={wp} live />}
           <span className="v-crew__task">{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</span>
         </div>
+        {co?.state === "closed" && <p className="v-closeout" role="status">{S.closeout.closedHint}</p>}
+        {(co?.state === "unsaved_work" || co?.state === "terminal_busy") && (
+          <div className="v-closeout v-closeout--warn" role="group" aria-label={S.closeout.unsaved}>
+            <p>{S.closeout.hasUnsaved(unsavedText(co))}</p>
+            <Button size="sm" variant="danger" onClick={() => setConfirming(true)}>{S.closeout.closeAnyway}</Button>
+          </div>
+        )}
+        {closeMsg && <p className="v-closeout" role="alert">{closeMsg}</p>}
+        <AlertDialog open={confirming} title={S.closeout.confirmTitle} confirmLabel={S.closeout.confirm} destructive onConfirm={closeAnyway} onCancel={() => setConfirming(false)}>
+          <p>{co ? S.closeout.confirmBody(unsavedText(co)) : ""}</p>
+        </AlertDialog>
         <Tabs
           label={S.crew.tabsLabel}
           value={tab}

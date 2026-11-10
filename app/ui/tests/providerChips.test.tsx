@@ -14,7 +14,6 @@ import { workersOf } from "../src/projects/store";
 import { CrewTree } from "../components/ui/desktop";
 import { DirectorGeneral } from "../src/screens/orch/DirectorGeneral";
 import { ProviderLine, iconOf } from "../src/screens/ProviderLine";
-import { StatusBar } from "../src/shell/StatusBar";
 import { errorText, parseWorkerProvider, ranOn, workerLine } from "../src/workerProvider";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -90,31 +89,6 @@ describe("workers on every surface", () => {
     expect(screen.getByRole("treeitem", { name: /Backend/ })).toBeTruthy();
     expect(container.querySelector(".v-pt")?.getAttribute("aria-hidden")).toBe("true");
     expect(container.querySelector(".v-pt")?.textContent).toBe("CC");
-  });
-});
-
-describe("status bar: the 80% usage warning", () => {
-  const bar = (runs: number, replies: Record<string, unknown> = {}) => {
-    const f = fakeIpc({ provider_accounts: ACCOUNTS, provider_usage: USAGE, ...replies });
-    setTransport(f.transport);
-    render(<StatusBar runs={runs} compact={null} onColumn={() => {}} onPhone={() => {}} onSettings={() => {}} />);
-    return f;
-  };
-  it("with a run active it names the fullest account past 80% and when it resets", async () => {
-    bar(1);
-    const text = W.usageWarn("Claude Code", 84, W.weekly, "Thu 09:00");
-    expect((await screen.findByText(text)).getAttribute("aria-label")).toBe(W.usageWarnLabel(text));
-  });
-  it("with no run active it reads nothing at all", () => {
-    const f = bar(0);
-    expect(f.calls).toHaveLength(0);
-  });
-  it("below 80% there is no warning", async () => {
-    const low = clone(USAGE);
-    low.usage[0].windows[1].used_pct = 79;
-    const f = bar(1, { provider_usage: low });
-    await waitFor(() => expect(f.calls.some((c) => c.cmd === "provider_usage")).toBe(true));
-    expect(screen.queryByText(/% (weekly|this window)/)).toBeNull();
   });
 });
 

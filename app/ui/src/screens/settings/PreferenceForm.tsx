@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button } from "../../../components/ui/base";
+import { Button, Switch } from "../../../components/ui/base";
 import { usePreferenceScope } from "../../preferences";
 import { SHORTCUT_CHOICES, shortcutKeys } from "../../preferenceContract";
 import type { PreferenceKey, PreferencePatch, Preferences } from "../../preferenceContract";
@@ -45,9 +45,17 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
   return <section className="v-pref" aria-label={C.region}>
     <p>{C.scopeDescription(projectId ? projectName ?? projectId : undefined)}</p>
     {section === "appearance" && select("theme", C.theme, [["system", C.systemTheme], ["dark", C.dark], ["light", C.light]])}
-    {/* General (editor, shell) and Notifications have no form yet: nothing opens an editor or a terminal, or delivers a
+    {/* Editor, shell and Notifications have no form yet: nothing opens an editor or a terminal, or delivers a
         notification, from those values, so a saved choice would change nothing (PR 100 review). The stored keys and their
-        defaults stay in the contract until a consumer reads them. */}
+        defaults stay in the contract until a consumer reads them. General holds only what the core reads: closing finished workers. */}
+    {section === "general" && <>
+      <div className="v-pref__row">
+        <label><span>{C.autoClose}<small>{source("auto_close_finished")}</small></span>
+          <Switch label={C.autoClose} checked={value("auto_close_finished")} onChange={v => { if (!locked) change("auto_close_finished", v); }} /></label>
+        {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit("auto_close_finished")}>{C.inherit(C.autoClose)}</Button>}
+      </div>
+      <p>{C.autoCloseHint}</p>
+    </>}
     {section === "providers" && <>
       {/* A saved value this list does not offer (an older choice, or a check that has not answered) stays visible, never silently swapped. */}
       {select("agent", S.providers.agent, agents.some(([v]) => v === value("agent")) ? agents : [...agents, [value("agent"), value("agent"), true]])}

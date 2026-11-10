@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { S } from "../strings";
 import { api } from "./ipc";
-import { parseAccounts, parseUsage, pct, warnWindow } from "./accountsContract";
-import type { Account, Usage, UsageWindow } from "./accountsContract";
+import { parseAccounts, parseUsage } from "./accountsContract";
+import type { Account, Usage } from "./accountsContract";
 import { problemDetail } from "./screens/states";
 
 const C = S.accounts;
@@ -33,22 +33,4 @@ export function useAccounts(on: boolean): Accounts {
     return () => { ++seq.current; };
   }, [on, reload]);
   return { ...s, reload };
-}
-
-
-const WORD: Record<UsageWindow["kind"], string> = { "5h": S.workerProvider.fiveHour, daily: S.workerProvider.daily, weekly: S.workerProvider.weekly, credit: S.workerProvider.credit };
-
-/** The one usage warning for the status bar: the fullest window at or past 80% over every account, else null. One read, made only while a run is active. */
-export async function readUsageWarning(): Promise<string | null> {
-  const [a, u] = await Promise.all([api.providerAccounts(), api.providerUsage()]);
-  const accounts = parseAccounts(a), usage = parseUsage(u);
-  if (!accounts.ok || !usage.ok) return null;
-  let best: { text: string; pct: number } | null = null;
-  for (const x of usage.value) {
-    const acct = accounts.value.accounts.find((y: Account) => y.id === x.account);
-    const w = warnWindow(x);
-    const p = w ? pct(w) : null;
-    if (acct && w && p !== null && (!best || p > best.pct)) best = { pct: p, text: S.workerProvider.usageWarn(acct.label, p, WORD[w.kind], w.resets_at) };
-  }
-  return best?.text ?? null;
 }

@@ -203,6 +203,21 @@ impl Store {
         self.by_id.get(action_id)
     }
 
+    /// Whether `begin` at `now_ms` would answer `action_id` from a stored receipt (a replay or `action_id_reuse`): it
+    /// expires first, exactly as `begin` does, so a check made with this and the `begin` under the same lock agree.
+    /// Ages a stored receipt by `by_ms`, for tests of the dedupe window through code that reads the real clock.
+    #[cfg(test)]
+    pub fn backdate(&mut self, action_id: &str, by_ms: u64) {
+        if let Some(r) = self.by_id.get_mut(action_id) {
+            r.ts_ms = r.ts_ms.saturating_sub(by_ms);
+        }
+    }
+
+    pub fn live(&mut self, action_id: &str, now_ms: u64) -> bool {
+        self.expire(now_ms);
+        self.by_id.contains_key(action_id)
+    }
+
     fn make(req: &Request<'_>, state: State, reason: Option<&str>, detail: Option<&str>, retry: Retry, rev: u64, now_ms: u64) -> Receipt {
         Receipt {
             schema: SCHEMA.into(),
