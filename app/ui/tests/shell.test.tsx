@@ -322,7 +322,7 @@ describe("The usage chip comes from the project state (#120 review)", () => {
   it("Given the project state reports a warned window, Then the status bar shows the chip", async () => {
     boot(`#/p/${T}/orch`, { ...registered, project_state: state(usage) });
     const bar = await screen.findByLabelText(S.frame.status);
-    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude Code 84% used this week."));
   });
 
   it("Given the usage changes later, Then the chip follows when the core announces a newer revision", async () => {
@@ -330,10 +330,10 @@ describe("The usage chip comes from the project state (#120 review)", () => {
     let answer: unknown = state(at(84));
     boot(`#/p/${T}/orch`, { ...registered, project_state: () => answer });
     const bar = await screen.findByLabelText(S.frame.status);
-    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude Code 84% used this week."));
     answer = { ...state(at(91)), rev: 8 };
     act(() => ipc.emit("changed", { streams: [], snapshot_needed: false, projects: [{ project_id: T, rev: 8 }] }));
-    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 91% used this week."), { timeout: 3000 });
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude Code 91% used this week."), { timeout: 3000 });
   });
 
   it("Given nothing is near its limit, Then there is no chip", async () => {
