@@ -310,7 +310,6 @@ def main():
     mode = sys.argv[1]
     home = tempfile.mkdtemp(prefix="vajra-fg12-home-")
     env = dict(os.environ, HOME=home, VAJRA_DESKTOP_DATA=os.path.join(home, "data"))
-    before = webkit(ps())
     p = None
     if mode == "bin":
         binary, out, secs = sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -326,6 +325,7 @@ def main():
     pid = None
     try:
         # Launching is inside the guard too: a failure here still removes the temp HOME and ends what was started.
+        before = webkit(ps())
         if mode == "bin":
             pid = launch_hidden(binary, {"HOME": home, "VAJRA_DESKTOP_DATA": os.path.join(home, "data")})
         else:
