@@ -2075,6 +2075,7 @@ fn node_json(n: &Node) -> Value {
         "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
+        "provider": n.provider,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
     })
 }

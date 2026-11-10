@@ -18,6 +18,7 @@ fn svc() -> (Service, PathBuf) {
             prompt_first_line: None,
             branch: None,
             status: Status::InProgress,
+            provider: None,
         },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
@@ -577,7 +578,7 @@ fn a_check_failure_is_logged_once_per_distinct_error() {
     let mut s = Service::open(&dir, dir.join("audit.log"), Some(crate::logging::Logger::open(&logs).unwrap())).unwrap();
     s.start_session(SID, "20261105-1810").unwrap();
     s.set_workers(SID, vec![WorkerInfo {
-        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: "task.t1.r1".into(), prompt_first_line: None, branch: None, status: Status::InProgress },
+        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: "task.t1.r1".into(), prompt_first_line: None, branch: None, status: Status::InProgress, provider: None },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
         round: Some(1),
@@ -763,4 +764,16 @@ fn rebuild_skips_receipt_lines() {
     l.append(&json!({"v": 1, "kind": "receipt", "action_id": "act-0001-aaaa", "receipt": {"state": "accepted"}})).unwrap();
     assert!(Service::open(&dir, dir.join("audit.log"), None).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_worker_in_the_state_view_carries_its_provider_or_null() {
+    let (mut s, dir) = svc();
+    let view = s.workers_view();
+    assert_eq!(view[0]["provider"], Value::Null, "not reported: null, not a guess");
+    let mut w = s.in_scope().next().unwrap().workers[0].clone();
+    w.worker.provider = Some(crate::providers::effective::ProviderTag::new("claude", "claude-model-x", "subscription", None));
+    s.set_workers(SID, vec![w]);
+    assert_eq!(s.workers_view()[0]["provider"], json!({"account": "claude", "label": "Claude Code", "family": "claude", "model": "claude-model-x", "model_name": null, "billing": "subscription", "requested": null, "error": null}));
+    let _ = fs::remove_dir_all(dir);
 }

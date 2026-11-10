@@ -35,7 +35,7 @@ fn env(id: &str, expect: Option<u64>) -> Envelope {
 
 fn worker(round: u32) -> WorkerInfo {
     WorkerInfo {
-        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: format!("task.t1.r{round}"), prompt_first_line: None, branch: None, status: Status::InProgress },
+        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: format!("task.t1.r{round}"), prompt_first_line: None, branch: None, status: Status::InProgress, provider: None },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
         round: Some(round),

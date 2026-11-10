@@ -354,3 +354,40 @@ export function usageWarning(list: UsageList | null | undefined): { account: str
   }
   return worst;
 }
+
+// ---- launch receipt (H3): what a slot asked for next to what the harness said it ran on ---------------------------------
+// A value the harness did not report is the text "unknown" ("Not reported"); it is never the requested one.
+
+export const UNKNOWN = "unknown";
+
+export interface LaunchRequested {
+  account: string;
+  harness: string;
+  model: string;
+  effort: string | null;
+}
+
+export interface LaunchEffective extends LaunchRequested {
+  sandbox: string;
+  billing: string;
+  /** `harness_session_file`, `harness_event`, or `null` when nothing was read. */
+  read_from: string | null;
+}
+
+export interface LaunchReceipt {
+  slot: string;
+  session_id: string;
+  source: string;
+  requested: LaunchRequested;
+  effective: LaunchEffective;
+}
+
+/** The fields that differ between what was asked for and what ran; a value reported as "unknown" never counts. */
+export function launchMismatches(r: Pick<LaunchReceipt, "requested" | "effective">): string[] {
+  const { requested: q, effective: e } = r;
+  const out: string[] = [];
+  if (e.model !== UNKNOWN && e.model !== q.model) out.push("model");
+  if (q.effort !== null && e.effort !== null && e.effort !== UNKNOWN && e.effort !== q.effort) out.push("effort");
+  if (e.account !== UNKNOWN && e.account !== q.account) out.push("account");
+  return out;
+}

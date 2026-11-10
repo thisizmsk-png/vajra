@@ -245,6 +245,62 @@ as a cache read. One entry per account:
   subscriber stops showing a removed key's usage and starts showing a new one. Until the first lookup finishes after launch,
   the list is empty.
 
+## Launch receipt (requested vs effective)
+
+Multi-provider, PR 4 (H3). `app/core/src/providers/effective.rs` (readers) and `control/receipt.rs` (`LaunchReceipt`). One entry
+per worker slot, built from what the harness reports about itself once it starts:
+
+```json
+{"slot": "w3", "session_id": "s_…", "source": "role_default",
+ "requested": {"account": "openrouter", "harness": "codex", "model": "vendor/model-a", "effort": "high"},
+ "effective": {"account": "openrouter", "harness": "codex", "model": "vendor/model-a", "effort": "high",
+               "sandbox": "workspace-write", "billing": "gateway", "read_from": "harness_session_file"}}
+```
+
+- **Codex.** The `--json` stream names a `thread_id` (`thread.started`) but not the model. The model, effort and sandbox come
+  from `<CODEX_HOME>/sessions/**/rollout-*-<thread_id>.jsonl` (`session_meta.model_provider`, `turn_context.model`, `.effort`,
+  `.sandbox_policy.type`); `read_from` is `harness_session_file`. That is what Codex sent, not proof of what a gateway served.
+  A `model_provider` id Vajra did not write gives an `unknown` account.
+  Only the id Vajra wrote for its own gateway account names a billing route (`gateway`); `openai` is used with a plan and
+  with an API key alike, so its billing is `unknown`.
+- **Claude.** The `system`/`init` event of its stream (`read_from: harness_event`). It has no effort setting here, so the
+  effective `effort` is `null`, and billing is `unknown`: the stream does not report how the CLI was signed in.
+- **Unknown, never copied.** A value the harness does not report is `"unknown"` ("Not reported"); with no session file or
+  event every field is `unknown` and `read_from` is `null`. Reported strings are kept only if short printable ASCII.
+  Session files are read from the Vajra-owned home only: the walk starts from the held home and each step
+  (`sessions`, year, month, day, the file) is a no-follow open relative to the one before, so a link at any of them,
+  including the home, is refused; the file must be a regular file; at most 1 MiB is read.
+- **Mismatch.** The core never falls back. If `model`, `effort` (when one was asked for) or `account` is reported and differs
+  from the request, `launch_mismatch` goes to the Director-General: `{"type": "launch_mismatch", "slot", "session_id",
+  "fields": ["model"], "requested", "effective"}`. An `unknown` value is not a mismatch.
+- **Diff.** A worker's diff is read from git in its worktree (`git diff --numstat -z <base>` plus `git ls-files --others -z`, through the
+  read-only git bridge), never from events: a shell-only edit leaves no edit event. `-z` gives real, unquoted paths; a
+  rename or copy is two records and the new path is kept. A new (untracked) file's lines count as added: git counts them
+  (`diff --no-index` against `/dev/null`, not following a link); a binary or empty file adds none. Counting is one git call per new file, so it stops
+  after 500 files or 2 s, whichever is first; every file is still listed and `partial: true` says `added`/`removed` are a lower bound. `partial` is also set when a
+  count could not be had (git failed, timed out, was cut short, or answered in a shape that is not a numstat record).
+  It runs once when a run's receipt is built, never on the `project_state` poll path.
+- **Provider tag.** Crew-tree nodes and the `workers` of `project_state` carry a `provider` object, or `null` while the
+  model is not reported. It is the shape `parseWorkerProvider` (`app/ui/src/workerProvider.ts`) requires;
+  `app/core/tests/fixtures/launch/worker-provider.json` pins it, and the core and UI tests both check that file. Nothing in
+  it is a credential. Fields:
+  - `account`: the account that ran the worker (`claude`, `codex`, `openrouter`), or `unknown`.
+  - `label`: the provider's name for display ("Claude Code", "Codex", "OpenRouter"); an account Vajra has no name for shows
+    as its own id.
+  - `family`: the model family that picks the icon. The vendor part of a `vendor/model` id, `claude` for a `claude*` id,
+    otherwise the account.
+  - `model`: the model id the harness reported, or `"unknown"` when it did not.
+  - `model_name`: a display name for the model. None is known yet, so it is `null`.
+  - `billing`: `subscription`, `api_key`, `gateway` or `unknown`. Claude workers read `unknown`, since a transcript does not
+    say how the CLI was signed in.
+  - `requested`: `{model, model_name, label}` of what was asked for, or `null` where that is not known. A card shows "Ran on X
+    (asked for Y)" only when it differs.
+  - `error`: the worker's current provider error, `{kind, action, attempt, retry_at}`, or `null` when there is none (always
+    `null` until the provider-errors work attaches one).
+  Claude workers take the model from their transcript's first assistant record.
+- **Not yet wired.** These readers and the receipt exist; nothing yet builds a receipt at worker start, since core-launched
+  non-Claude workers arrive with the later launch PRs.
+
 ## Versioning
 
 A `provider_list` whose schema is another major is reported as "update needed" and not read further. Adding fields is not a

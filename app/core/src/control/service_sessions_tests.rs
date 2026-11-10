@@ -20,6 +20,7 @@ fn worker(agent: &str, task: &str, cwd: &Path) -> WorkerInfo {
             prompt_first_line: None,
             branch: None,
             status: Status::InProgress,
+            provider: None,
         },
         task_id: Some(task.into()),
         title: None,

@@ -92,6 +92,7 @@ fn worker(agent_id: &str, engine: &str, task: &str, cwd: &str) -> WorkerInfo {
             prompt_first_line: None,
             branch: None,
             status: Status::InProgress,
+            provider: None,
         },
         task_id: Some(format!("{RUN}.{task}")),
         title: Some(format!("title of {task}")),
