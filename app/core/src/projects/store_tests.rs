@@ -527,8 +527,10 @@ fn the_projects_folder_swapped_for_a_symlink_after_open_redirects_nothing() {
     assert_eq!(fs::read(outside.join(&p.id).join("project.json")).unwrap(), planted);
     assert!(!outside.join(&p.id).join("sessions.jsonl").exists());
     assert!(t.0.join("moved-projects").join(&p.id).join("sessions.jsonl").exists());
-    // A store opened afterwards refuses the symlinked folder.
-    assert!(Store::open(&t.data(), &t.home()).is_err());
+    // A store opened afterwards refuses the symlinked folder: it opens refusing (#77 follow-up), and reads nothing.
+    let later = Store::open(&t.data(), &t.home()).unwrap();
+    assert_eq!(later.unavailable().map(|u| u.reason), Some(UnavailableReason::Symlink));
+    assert!(matches!(later.get(&p.id), Err(StoreError::Unavailable(_))), "the planted record is never read");
 }
 
 #[test]
@@ -552,6 +554,41 @@ fn a_log_longer_than_the_read_window_says_it_was_cut() {
     assert!(log.truncated, "the caller can tell the history is incomplete");
     assert_eq!(log.skipped, 0, "the cut first line is not counted as damage");
     assert!(log.sessions.iter().all(|x| x.id == busy), "the old session is outside the window");
+}
+
+/// #77 follow-up: a `<data>/projects` that is a symbolic link (or not a folder) is still never used, but the store opens
+/// in a refusing state instead of failing the app's launch: every call says what is wrong, which path, and what to do,
+/// and nothing is ever written through the link.
+#[test]
+fn a_symlinked_or_non_folder_projects_dir_is_refused_by_every_call_without_failing_open() {
+    let t = Tmp::new("unavail");
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(t.data()).unwrap();
+    let dir = t.data().join("projects");
+    symlink(&elsewhere, &dir).unwrap();
+    let s = t.store();
+    let u = s.unavailable().expect("refusing, not open");
+    assert_eq!((u.path.as_path(), u.reason), (dir.as_path(), UnavailableReason::Symlink));
+    for r in [s.list(true).map(|_| ()), s.get("p_01M6YKE1Q5YEQZWJSJ91A6DQYT").map(|_| ()), s.add(&t.repo("src/a"), false).map(|_| ())] {
+        assert!(matches!(r, Err(StoreError::Unavailable(ref e)) if e.reason == UnavailableReason::Symlink), "{r:?}");
+    }
+    assert!(s.migration_done(), "no migration runs into a refused folder");
+    assert!(s.mark_migrated().is_err());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing was written through the link");
+    assert_ne!(mode(&elsewhere), 0o700, "the link's target was not touched");
+    let text = format!("{} {}", u.what(), u.fix());
+    assert!(text.contains("symbolic link") && u.fix().contains(dir.to_str().unwrap()), "{text}");
+
+    // A plain file in its place: refused the same way, with its own reason.
+    fs::remove_file(&dir).unwrap();
+    fs::write(&dir, b"x").unwrap();
+    assert_eq!(t.store().unavailable().map(|u| u.reason), Some(UnavailableReason::NotAFolder));
+    // Fixed (moved aside): the next open is a normal store.
+    fs::remove_file(&dir).unwrap();
+    let s = t.store();
+    assert!(s.unavailable().is_none());
+    assert!(s.list(true).unwrap().projects.is_empty());
 }
 
 /// FG-02c: a run's folder finds its project the way the owner's "Add" did: the folder itself, any folder inside it, the
@@ -601,6 +638,29 @@ fn find_by_path_resolves_a_run_folder_to_its_project() {
     assert_eq!(found(&t.home().join("does-not-exist")), None);
 }
 
+/// #106 review: a symlink swapped in after `open_root`'s check (this calls the step after it directly) is refused, and
+/// nothing is done through it: its target keeps its mode and stays empty. A plain file there is "not a folder".
+#[test]
+fn a_symlink_swapped_in_after_the_check_is_refused_and_its_target_untouched() {
+    let t = Tmp::new("swap");
+    let (data, target) = (t.0.join("data"), t.0.join("target"));
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&target, data.join("projects")).unwrap();
+    let e = pin_root(&data.join("projects")).err().expect("refused");
+    assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755, "the target was chmod-ed");
+    assert_eq!(e.reason, UnavailableReason::Symlink, "{e:?}");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    fs::remove_file(data.join("projects")).unwrap();
+    fs::write(data.join("projects"), b"x").unwrap();
+    assert_eq!(pin_root(&data.join("projects")).err().expect("refused").reason, UnavailableReason::NotAFolder);
+    // And the normal case: made at 0700.
+    fs::remove_file(data.join("projects")).unwrap();
+    assert!(pin_root(&data.join("projects")).is_ok());
+    assert_eq!(fs::metadata(data.join("projects")).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
 /// #77 optional: rename and archive read and write through the one pinned project folder (one open), not by opening
 /// it again for the write.
 #[test]
@@ -615,4 +675,30 @@ fn rename_and_archive_open_the_project_folder_once() {
     s.archive(&p.id, None).unwrap();
     assert_eq!(s.child_opens() - before, 1, "archive");
     assert_eq!(s.get(&p.id).unwrap().name, "renamed");
+}
+
+/// #106 review: the copyable `mv` example quotes the path for a POSIX shell. Run as printed on a path full of shell
+/// syntax, it moves the folder aside and nothing in the path runs or expands. A path with a control character gets no
+/// command at all.
+#[test]
+fn the_fix_example_runs_safely_on_a_hostile_path() {
+    let t = Tmp::new("quote");
+    let hostile = t.0.join("d $(touch PWNED) `touch PWNED2` $HOME it's \"q\" \\x");
+    fs::create_dir_all(&hostile).unwrap();
+    let (dir, target) = (hostile.join("projects"), t.0.join("target"));
+    fs::create_dir_all(&target).unwrap();
+    symlink(&target, &dir).unwrap();
+    let u = open_root(&dir).err().expect("refused");
+    let fix = u.fix();
+    let start = fix.find("for example: ").expect("an example") + "for example: ".len();
+    let cmd = &fix[start..fix.rfind("), then restart").expect("end of example")];
+    let out = std::process::Command::new("/bin/sh").arg("-c").arg(cmd).current_dir(&t.0).env("HOME", "/nonexistent-home").output().unwrap();
+    assert!(out.status.success(), "{cmd}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!t.0.join("PWNED").exists() && !t.0.join("PWNED2").exists(), "the path ran a command: {cmd}");
+    assert!(fs::symlink_metadata(&dir).is_err(), "moved aside");
+    assert!(fs::symlink_metadata(hostile.join("projects.old")).unwrap().file_type().is_symlink(), "to the literal .old path");
+
+    let odd = Unavailable { path: t.0.join("line\nbreak/projects"), reason: UnavailableReason::Symlink };
+    assert!(!odd.fix().contains("mv"), "{}", odd.fix());
+    assert!(odd.fix().starts_with("Move "));
 }

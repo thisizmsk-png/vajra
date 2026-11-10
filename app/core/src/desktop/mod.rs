@@ -328,6 +328,8 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
+        // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
         {
             // FG-02c: every Director-General call is refused while its project is archived or gone from the store.
@@ -442,10 +444,7 @@ impl App {
     pub fn preflight(&self) -> Res {
         let allow = self.allow()?;
         let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
-        let ok = preflight::start_enabled(&rows);
-        let rows: Vec<Value> =
-            rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
-        Ok(json!({"rows": rows, "start_enabled": ok}))
+        Ok(preflight_json(&rows, self.projects_row()))
     }
 
     pub fn list_campaigns(&self) -> Res {
@@ -854,6 +853,8 @@ impl App {
     }
 
     pub fn start_run(&self, mut input: RunInput, cwd: &str) -> Res {
+        // Every start reads the project store (the run's project): a refused projects folder says so first (#106 review).
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
@@ -898,6 +899,7 @@ impl App {
     }
 
     pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
@@ -2240,6 +2242,19 @@ pub use state::Envelope;
 mod tests;
 #[cfg(test)]
 mod state_tests;
+
+/// The preflight answer: the checks' rows, then a refused projects folder's row. A refused projects folder is shown
+/// (what, where, what to do) and holds up starting a run: every start reads the project store to find the run's project
+/// (FG-02c), so it would only be refused (#106 review).
+fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
+    let mut ok = preflight::start_enabled(rows);
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    if let Some(row) = projects_row {
+        out.push(row);
+        ok = false;
+    }
+    json!({"rows": out, "start_enabled": ok})
+}
 
 /// Tests: make `dir` (created if needed) a project in the store under `data`, as the window's "Add project" does.
 /// Returns its `p_` id. Idempotent: the same folder again is the same project.
