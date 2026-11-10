@@ -33,6 +33,11 @@ pub fn is_role(role: &str) -> bool {
     ROLES.iter().any(|(r, _)| *r == role)
 }
 
+/// The keys a per-role default may use: the seat roles, plus `architect` (the planner, which has no seat of its own).
+pub fn is_pref_role(role: &str) -> bool {
+    is_role(role) || role == "architect"
+}
+
 pub fn kind_of(role: &str) -> Option<Kind> {
     ROLES.iter().find(|(r, _)| *r == role).map(|(_, k)| *k)
 }
@@ -85,6 +90,6 @@ mod tests {
         for r in [VERIFIER, REVIEWER, SECURITY_REVIEWER] {
             assert_eq!(kind_of(r), Some(Kind::Checker));
         }
-        assert!(!is_role("architect") && role_of("arjuna").is_none());
+        assert!(!is_role("architect") && is_pref_role("architect") && !is_pref_role("arjuna") && role_of("arjuna").is_none());
     }
 }

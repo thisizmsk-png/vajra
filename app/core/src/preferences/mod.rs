@@ -96,6 +96,14 @@ impl Agents {
             .iter()
             .any(|a| a.account == c.account && (a.model.is_none() || a.model == c.model))
     }
+    /// A role key outside the crew roles is refused on write (`unknown_role`). It is never checked on read: a file already
+    /// on disk with an older or newer key must still load, and the key is simply never used.
+    fn check_role_keys(&self) -> Result<(), Error> {
+        if self.roles.keys().any(|r| !crate::crew::roles::is_pref_role(r)) {
+            return Err(Error("unknown_role"));
+        }
+        Ok(())
+    }
     fn validate(&self) -> Result<(), Error> {
         use crate::projects::contract::valid_provider;
         let model_ok = |m: &Option<String>| {
@@ -112,9 +120,6 @@ impl Agents {
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 })
         };
-        if self.roles.keys().any(|r| !crate::crew::roles::is_role(r)) {
-            return Err(Error("unknown_role"));
-        }
         if self.roles.len() > 16
             || self.account_caps.len() > 32
             || self.account_caps.iter().any(|(a, n)| !valid_provider(a) || !(1..=64).contains(n))
@@ -424,6 +429,10 @@ impl Store {
         reset: bool,
     ) -> Result<View, Error> {
         Self::scope(project)?;
+        // Only the roles this write brings are checked, so an old key already on disk never blocks an unrelated write.
+        if let Some(a) = &patch.agents {
+            a.check_role_keys()?;
+        }
         let dir = self.directory()?;
         lock_file(&dir, true)?;
         let mut doc = Self::load(&dir)?;
