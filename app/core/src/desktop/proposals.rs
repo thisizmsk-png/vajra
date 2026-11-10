@@ -45,6 +45,18 @@ impl App {
         ctl(lock(&self.control).record_proposal_decision(&r))
     }
 
+    /// The project an open proposal is listed under in the inbox (the same rule as the listing): its own, or for one from
+    /// before projects the project its conversation was carried over to, else Unsorted. The receipt's `project_id` must
+    /// name it, and a `k_` stand-in id is never one the window can send.
+    pub(super) fn proposal_project(&self, id: &str) -> Result<String, Value> {
+        let p = self.open_proposal(id)?;
+        Ok(if ids::valid_standin_ref(&p.project) {
+            self.standin_mapped_to(&p.project).unwrap_or_else(|| super::inbox::UNSORTED_PROJECT.to_string())
+        } else {
+            p.project
+        })
+    }
+
     /// Start proposal `id` as the human saw it (`proposal_sha256` is the hash the inbox returned).
     pub fn start_proposal(&self, id: &str, proposal_sha256: &str) -> Res {
         self.start_proposal_with(id, proposal_sha256, |input, cwd| self.start_run(input, cwd))

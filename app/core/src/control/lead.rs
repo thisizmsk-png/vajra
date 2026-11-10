@@ -45,6 +45,9 @@ pub enum LeadError {
     /// The app's projects folder was refused at open (a symbolic link, not a folder; #106 review): what is wrong, what to
     /// do (the fix names the path), and the path in its own field. Nothing that needs the store can run until it is fixed.
     ProjectsUnavailable { detail: String, fix: String, path: String },
+    /// A receipt-wrapped action aimed at an older conversation (FG-02c, decision Q2): the Director-General is at this
+    /// generation now.
+    StaleGeneration(u32),
     Io(String),
 }
 
@@ -67,6 +70,7 @@ impl LeadError {
             Self::ProjectArchived => "project_archived",
             Self::ProjectMissing => "project_missing",
             Self::ProjectsUnavailable { .. } => "projects_unavailable",
+            Self::StaleGeneration(_) => "stale_generation",
             Self::Io(_) => "io_error",
         }
     }
@@ -81,6 +85,7 @@ impl LeadError {
             Self::ProjectArchived => Some(PROJECT_ARCHIVED.into()),
             Self::ProjectMissing => Some(PROJECT_MISSING.into()),
             Self::ProjectsUnavailable { detail, .. } => Some(detail.clone()),
+            Self::StaleGeneration(_) => Some(STALE_CONVERSATION.into()),
             _ => None,
         }
     }
@@ -92,6 +97,9 @@ impl LeadError {
         if let Self::ProjectsUnavailable { detail, fix, path } = self {
             return serde_json::json!({"error": self.code(), "detail": detail, "fix": fix, "path": path});
         }
+        if let Self::StaleGeneration(g) = self {
+            return serde_json::json!({"error": self.code(), "detail": STALE_CONVERSATION, "current_generation": g});
+        }
         match self.detail() {
             Some(d) => serde_json::json!({"error": self.code(), "detail": d}),
             None => serde_json::json!({"error": self.code()}),
@@ -102,6 +110,7 @@ impl LeadError {
 pub const NOT_A_PROJECT: &str = "This folder is not a project. Add it as a project first.";
 pub const PROJECT_ARCHIVED: &str = "This project is archived. Restore it to use it again.";
 pub const PROJECT_MISSING: &str = "This project is no longer in the app's project list.";
+pub const STALE_CONVERSATION: &str = "The Director-General started a new conversation since you looked. Refresh and try again.";
 
 /// `not_a_project` with the one-click action the UI offers (decision Q1, a UX default the owner can flip).
 pub fn not_a_project_json(path: &str) -> serde_json::Value {

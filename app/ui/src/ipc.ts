@@ -68,6 +68,11 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
     const b = bytes(m);
     if (b) onMsg({ data: b });
     else if (typeof m === "object" && m !== null && "exit" in m) onMsg({ exit: (m as { exit: number | null }).exit });
+    else if (typeof m === "object" && m !== null && "skipped" in m) {
+      const r = m as { skipped: unknown; alt?: unknown };
+      onMsg({ skipped: Number(r.skipped) || 0, alt: typeof r.alt === "boolean" ? r.alt : null });
+    }
+    else if (typeof m === "object" && m !== null && "activity" in m) onMsg({ activity: true });
   }) as Promise<TermInfo>;
 }
 
@@ -94,7 +99,13 @@ export type RunDiag = { stream: string; pid: number };
 export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
 export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
-export type TermMsg = { data: Uint8Array } | { exit: number | null };
+export type TermMsg =
+  | { data: Uint8Array }
+  | { exit: number | null }
+  /** A hidden pane was shown: `skipped` bytes of its output are not coming; `alt` says it entered (true) or left (false) the alternate screen meanwhile. */
+  | { skipped: number; alt: boolean | null }
+  /** New output arrived in a pane that is hidden (the core sends it at most twice a second). */
+  | { activity: true };
 /** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
 export const TERM_WRITE_CHUNK = 32 * 1024;
 
@@ -198,7 +209,8 @@ export type ProjectState =
       rev: number;
       unchanged: false;
       active_runs: number;
-      generations: { project: number };
+      /** `orchestrator`: the project's Director-General conversation (FG-02c), null before its first use. */
+      generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
@@ -264,6 +276,8 @@ export const api = {
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),
   termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
   termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
+  /** The pane is shown or hidden; `alt` says it was on the alternate screen when it hid. */
+  termVisible: (id: number, visible: boolean, alt = false) => call<Json>("term_visible", { id, visible, alt }),
   termAck: (id: number, bytes: number) => call<Json>("term_ack", { id, bytes }),
   termClose: (id: number) => call<Json>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
@@ -284,6 +298,16 @@ export const api = {
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
+  /** The project's Director-General with no run (FG-02c). The stream is rebuilt after a restart only by `leadStatus`. */
+  leadStatusForProject: (projectId: string) => call<LeadStatus>("lead_status", { projectId }),
+  /** Guarded Director-General actions (FG-02c, decision Q2): at most once per `action_id`. `envelope.project_id` is
+   *  the run's project and `expect_generation` the conversation shown (`stale_generation` when it moved on). */
+  actAskLead: (envelope: Envelope, runId: string, text: string) => call<ActResult<AskStarted>>("act_ask_lead", { envelope, runId, text }),
+  actNewConversation: (envelope: Envelope, runId: string) => call<ActResult<NewConversation>>("act_new_conversation", { envelope, runId }),
+  actCancelAsk: (envelope: Envelope, askId: string) => call<ActResult>("act_cancel_ask", { envelope, askId }),
+  /** `envelope.project_id` is the project the inbox lists the proposal under. */
+  actStartProposal: (envelope: Envelope, id: string, proposalSha256: string) => call<ActResult<{ action_id: string; state: string; run: Json }>>("act_start_proposal", { envelope, id, proposalSha256 }),
+  actDismissProposal: (envelope: Envelope, id: string) => call<ActResult<{ action_id: string; state: string }>>("act_dismiss_proposal", { envelope, id }),
   /** The run's project's Director-General starts generation n+1, on an empty stream. Refused (`lead_busy`) mid-turn. */
   newConversation: (runId: string) => call<NewConversation>("new_conversation", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */

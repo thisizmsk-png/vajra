@@ -221,6 +221,26 @@ impl Sink for Probe {
     fn event(&mut self, _: Tag, _: &str) {}
 }
 
+/// The Director-General cannot be asked: why, in words.
+fn status_off(why: String) -> Res {
+    Ok(json!({"available": false, "read_only_reason": why, "busy": false, "name": orchestrator::NAME}))
+}
+
+/// `status_off` for a lookup that failed. A store refusal says which, so the window can offer "Add this folder as a
+/// project" (decision Q1).
+fn store_refusal(e: &LeadError) -> Res {
+    let mut v = status_off(e.detail().unwrap_or_else(|| e.code().to_string()))?;
+    if let LeadError::NotAProject(_) | LeadError::ProjectArchived | LeadError::ProjectMissing = e {
+        let j = e.to_json();
+        for k in ["error", "action", "path"] {
+            if let Some(x) = j.get(k) {
+                v[k] = x.clone();
+            }
+        }
+    }
+    Ok(v)
+}
+
 impl App {
     // ---------------------------------------------------------------- commands
 
@@ -229,30 +249,51 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(super::invalid("run_id", "must be YYYYMMDD-HHMM"));
         }
-        let off = |why: String| Ok(json!({"available": false, "read_only_reason": why, "busy": false, "name": orchestrator::NAME}));
         let t = match self.lead_target(run_id) {
             Ok(t) => t,
-            Err(e) => return off(e.detail().unwrap_or_else(|| NOT_OURS.to_string())),
+            Err(e) => return status_off(e.detail().unwrap_or_else(|| NOT_OURS.to_string())),
         };
         let orch = match self.orchestrator_for_run(&t.run_id, &t.cwd) {
             Ok(o) => o,
-            Err(e) => {
-                // A store refusal says which, so the window can offer "Add this folder as a project" (decision Q1).
-                let mut v = off(e.detail().unwrap_or_else(|| e.code().to_string()))?;
-                if let LeadError::NotAProject(_) | LeadError::ProjectArchived | LeadError::ProjectMissing = e {
-                    let j = e.to_json();
-                    for k in ["error", "action", "path"] {
-                        if let Some(x) = j.get(k) {
-                            v[k] = x.clone();
-                        }
-                    }
-                }
-                return Ok(v);
-            }
+            Err(e) => return store_refusal(&e),
         };
-        let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
         // After a restart the bus is empty; bring the history back from the Director-General's own transcript.
         self.rebuild_lead_stream(&orch, &self.project_redactor(&t, &orch));
+        self.orchestrator_status(&orch)
+    }
+
+    /// `lead_status` by project (FG-02c, decision Q2): the project's Director-General, with no run needed. A read only:
+    /// nothing is created and no stand-in conversation is carried over (the first ask does that), so a project never
+    /// asked reads `not_started`. The stream is not rebuilt from the transcript here (that needs a run's nonces to
+    /// redact); the run form does it.
+    pub fn lead_status_for_project(&self, project_id: &str) -> Res {
+        if !crate::projects::contract::valid_project_id(project_id) {
+            return Err(super::invalid("project_id", "must be a project id"));
+        }
+        let project = match self.active_project(project_id) {
+            Ok(p) => p,
+            Err(e) => return store_refusal(&e),
+        };
+        match self.recorded_orchestrator(project_id) {
+            Ok(Some(orch)) => self.orchestrator_status(&orch),
+            Ok(None) => {
+                // Shown as conversation 1 in the project's folder, which is what its first ask starts.
+                let orch = Orchestrator { id: project.id.clone(), root: PathBuf::from(&project.root), dir: self.orchestrator_dir(&project.id), generation: 1, session: None };
+                let mut v = self.orchestrator_status(&orch)?;
+                if v["state"] == "idle" {
+                    v["state"] = json!("not_started");
+                    v["reason"] = json!("not asked yet");
+                }
+                Ok(v)
+            }
+            Err(e) => status_off(e.detail().unwrap_or_else(|| e.code().to_string())),
+        }
+    }
+
+    /// The ADR-15 2.1 state of one Director-General.
+    fn orchestrator_status(&self, orch: &Orchestrator) -> Res {
+        let off = status_off;
+        let busy = lock(&self.lead.active).get(&orch.id).map(|a| a.ask_id.clone());
         if lock(&self.lead.bin).is_none() {
             return off("claude not found".into());
         }
@@ -271,6 +312,11 @@ impl App {
             out["ask_id"] = json!(id);
         }
         Ok(out)
+    }
+
+    /// The project whose Director-General is running ask `ask_id`, if one is.
+    pub(super) fn ask_owner(&self, ask_id: &str) -> Option<String> {
+        lock(&self.lead.active).iter().find(|(_, a)| a.ask_id == ask_id).map(|(p, _)| p.clone())
     }
 
     /// Whether a run of project `pid` is going now: one pinned to it whose process is still alive. `runs` keeps finished runs
@@ -323,10 +369,12 @@ impl App {
     /// The ask can be cancelled meanwhile: `cancel_ask` kills the self-test process too, because both share the
     /// ask's handle, and the call then returns `cancelled`.
     pub fn ask_lead(&self, run_id: &str, text: &str) -> Res {
-        self.ask_lead_inner(run_id, text).map_err(|e| e.to_json())
+        self.ask_lead_expecting(run_id, text, None).map_err(|e| e.to_json())
     }
 
-    fn ask_lead_inner(&self, run_id: &str, text: &str) -> Result<Value, LeadError> {
+    /// `ask_lead` aimed at conversation `expect` (a receipt's `expect_generation`): checked again under the ask lock, so
+    /// a "New conversation" that lands first turns the ask into `stale_generation`, never into a turn of the new one.
+    pub(super) fn ask_lead_expecting(&self, run_id: &str, text: &str, expect: Option<u32>) -> Result<Value, LeadError> {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
@@ -368,7 +416,12 @@ impl App {
         // `new_conversation` bumps them only while no entry is held, so this copy is the current conversation; the one
         // read before the lock may predate a "New conversation" and must never be resumed or re-published.
         // The project is checked again here, not only when the request came in: one archived meanwhile gets nothing.
-        let orch = match self.active_project(&orch.id).and_then(|_| self.orchestrator(&orch.id, &orch.root)) {
+        let fresh = self.active_project(&orch.id).and_then(|_| self.orchestrator(&orch.id, &orch.root));
+        let fresh = fresh.and_then(|o| match expect {
+            Some(g) if g != o.generation => Err(LeadError::StaleGeneration(o.generation)),
+            _ => Ok(o),
+        });
+        let orch = match fresh {
             Ok(o) => o,
             Err(e) => {
                 lock(&self.lead.active).remove(&orch.id);

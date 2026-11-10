@@ -76,6 +76,26 @@ describe("typed ipc", () => {
     ]);
   });
 
+  it("maps the receipt-wrapped Director-General actions to their commands (FG-02c)", async () => {
+    const f = fakeIpc({ lead_status: { available: true, busy: false, name: "Director-General" }, act_ask_lead: { receipt: null }, act_new_conversation: { receipt: null }, act_cancel_ask: { receipt: null }, act_start_proposal: { receipt: null }, act_dismiss_proposal: { receipt: null } });
+    setTransport(f.transport);
+    const envelope = { action_id: "act-1234abcd", project_id: "p_1", expect_generation: 2 };
+    await api.leadStatusForProject("p_1");
+    await api.actAskLead(envelope, "20261106-0911", "hi");
+    await api.actNewConversation(envelope, "20261106-0911");
+    await api.actCancelAsk(envelope, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    await api.actStartProposal(envelope, "proposal:a1", "ab".repeat(32));
+    await api.actDismissProposal(envelope, "proposal:a2");
+    expect(f.calls).toEqual([
+      { cmd: "lead_status", args: { projectId: "p_1" } },
+      { cmd: "act_ask_lead", args: { envelope, runId: "20261106-0911", text: "hi" } },
+      { cmd: "act_new_conversation", args: { envelope, runId: "20261106-0911" } },
+      { cmd: "act_cancel_ask", args: { envelope, askId: "01ARZ3NDEKTSV4RRFFQ69G5FAV" } },
+      { cmd: "act_start_proposal", args: { envelope, id: "proposal:a1", proposalSha256: "ab".repeat(32) } },
+      { cmd: "act_dismiss_proposal", args: { envelope, id: "proposal:a2" } },
+    ]);
+  });
+
   it("maps approve and reject to their commands with camelCase arguments", async () => {
     const f = fakeIpc({ approve_plan: { action_id: "a1", state: "delivered", via: "session" }, reject_plan: { action_id: "a2", state: "rejected" } });
     setTransport(f.transport);
