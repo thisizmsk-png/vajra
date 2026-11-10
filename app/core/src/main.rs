@@ -24,6 +24,7 @@ use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
 use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
+use vajra_desktop::desktop::ReleaseError;
 use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
 /// The one event the UI listens to.
@@ -75,14 +76,19 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
 
-/// Hangs up the user terminals opened in a worker's worktree (ledger-recorded like any tab close). A close that fails
-/// stops the worker's close: nothing is marked closed while a shell still runs there.
-fn release_terminals<'a>(terms: &'a Terminals, own: &'a Ownership) -> impl Fn(&std::path::Path) -> Result<(), String> + 'a {
-    move |wt| {
-        for id in terms.ids_under(wt) {
+/// Hangs up the user terminals opened in a worker's worktree (ledger-recorded like any tab close). A terminal still
+/// running something (a dev server, an editor) is left alone and the worker stays open, unless `force` (the human's
+/// "Close anyway"). A close that fails stops the worker's close: nothing is marked closed while a shell still runs there.
+fn release_terminals<'a>(terms: &'a Terminals, own: &'a Ownership) -> impl Fn(&std::path::Path, bool) -> Result<(), ReleaseError> + 'a {
+    move |wt, force| {
+        let ids = terms.ids_under(wt);
+        if !force && ids.iter().any(|&id| terms.is_busy(id)) {
+            return Err(ReleaseError::Busy);
+        }
+        for id in ids {
             match own.ledger.close_then_forget(id, || terms.close(id)) {
                 Ok(()) | Err(vajra_desktop::terminal::TermError::NotFound) => {}
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(ReleaseError::Failed(e.to_string())),
             }
         }
         Ok(())

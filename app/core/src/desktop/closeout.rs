@@ -2,8 +2,8 @@
 //!
 //! A worker is *finished* when its task ended: done, failed or stopped. It is closed only when that loses nothing:
 //! its worktree is clean (`git status` empty) and nothing is unpushed (no commit ahead of its upstream; no upstream at
-//! all counts as unpushed). Closing releases what the worker holds: the user terminals open in its worktree are
-//! hung up and its transcript is no longer tailed. The worker is marked closed in a small persisted set and stays in
+//! all counts as unpushed) and no terminal in its worktree is running anything. Closing releases what the worker
+//! holds: the idle user terminals open in its worktree are hung up and its transcript is no longer tailed. The worker is marked closed in a small persisted set and stays in
 //! the crew view and history. Nothing on disk (worktree, branch, transcript) is deleted.
 //!
 //! Never closed: the Director-General (it is not a subagent, so it is never a candidate), a worker that is mid-turn
@@ -142,7 +142,16 @@ struct Cand {
     pending: bool,
 }
 
-type Release<'a> = &'a dyn Fn(&Path) -> Result<(), String>;
+/// Why a worktree's terminals could not be released.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReleaseError {
+    /// A terminal there is still running something (a dev server, an editor): ended only when the human forces it.
+    Busy,
+    Failed(String),
+}
+
+/// Releases a worktree's terminals; the flag is `force` (the human confirmed "Close anyway", busy terminals included).
+pub type Release<'a> = &'a dyn Fn(&Path, bool) -> Result<(), ReleaseError>;
 
 impl App {
     /// Whether a worker was closed (the crew and the pump skip tailing it).
@@ -203,8 +212,11 @@ impl App {
         if u.is_clean() { Ok(wt) } else { Err(Skip::Unsaved(u)) }
     }
 
-    fn closeout_release(&self, id: &str, wt: &Path, release: Release) -> Res {
-        release(wt).map_err(|e| fail("release_failed", e))?;
+    fn closeout_release(&self, id: &str, wt: &Path, force: bool, release: Release) -> Res {
+        release(wt, force).map_err(|e| match e {
+            ReleaseError::Busy => fail("terminal_busy", "a terminal in its worktree is still running something"),
+            ReleaseError::Failed(m) => fail("release_failed", m),
+        })?;
         self.closeout.mark(id).map_err(|e| fail("io_error", e))?;
         self.note("worker_closed", &[]);
         Ok(json!({"ok": true, "worker": id, "closed": true}))
@@ -220,7 +232,7 @@ impl App {
         }
         let cand = self.closeout_candidates().into_iter().find(|c| c.worker.agent_id == id).ok_or_else(|| fail("not_found", "no such open worker"))?;
         match self.closeout_assess(&cand, false) {
-            Ok(wt) => self.closeout_release(id, &wt, release),
+            Ok(wt) => self.closeout_release(id, &wt, false, release),
             Err(Skip::Unsaved(u)) => {
                 let confirmed = anyway.is_some_and(|(f, c)| (f, c) == (u.changed_files, u.unpushed_commits));
                 if !confirmed {
@@ -231,7 +243,7 @@ impl App {
                     return Err(e);
                 }
                 let (wt, _) = self.crew_worktree(id)?;
-                self.closeout_release(id, &wt, release)
+                self.closeout_release(id, &wt, true, release)
             }
             Err(skip) => Err(fail(skip.code(), "this worker cannot be closed now")),
         }
@@ -243,7 +255,7 @@ impl App {
         for c in self.closeout_candidates() {
             let (id, label) = (c.worker.agent_id.as_str(), c.worker.label.as_str());
             match self.closeout_assess(&c, false) {
-                Ok(wt) => match self.closeout_release(id, &wt, release) {
+                Ok(wt) => match self.closeout_release(id, &wt, false, release) {
                     Ok(_) => closed.push(json!({"worker": id, "label": label})),
                     Err(e) => skipped.push(json!({"worker": id, "label": label, "reason": e["error"]})),
                 },
@@ -295,7 +307,7 @@ impl App {
     }
 
     /// Returns how many workers it closed (the caller tells the UI when it is not zero).
-    pub fn closeout_auto(&self, release: &dyn Fn(&Path) -> Result<(), String>) -> usize {
+    pub fn closeout_auto(&self, release: Release) -> usize {
         /// Frees the slot even if the pass panics, so one bad pass cannot stop automatic closing for the session.
         struct Free<'a>(&'a AtomicBool);
         impl Drop for Free<'_> {

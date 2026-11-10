@@ -662,3 +662,20 @@ fn ids_under_finds_the_terminals_in_a_worktree_and_not_the_ones_in_the_project_f
     t.close(wt_term.id).unwrap();
     assert!(t.ids_under(&f.worktree).is_empty());
 }
+
+#[test]
+fn a_terminal_running_something_is_busy_and_an_idle_or_ended_one_is_not() {
+    let f = Fixture::new("busy");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    assert!(!t.is_busy(info.id), "an idle shell");
+    t.write(info.id, b"sleep 30\n").unwrap();
+    let start = Instant::now();
+    while !t.is_busy(info.id) && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(t.is_busy(info.id), "a shell running a command");
+    drop(out);
+    t.close(info.id).unwrap();
+    assert!(!t.is_busy(info.id), "a closed terminal is not busy");
+}

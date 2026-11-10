@@ -343,6 +343,13 @@ impl Terminals {
         self.list().into_iter().filter(|t| t.cwd.canonicalize().unwrap_or_else(|_| t.cwd.clone()).starts_with(&dir)).map(|t| t.id).collect()
     }
 
+    /// Whether the terminal's shell has a child process (a dev server, an editor, a build): closing it would end that.
+    /// A shell that cannot be asked counts as busy; an ended shell is never busy.
+    pub fn is_busy(&self, id: u32) -> bool {
+        let Some(t) = self.list().into_iter().find(|t| t.id == id).filter(|t| t.alive) else { return false };
+        std::process::Command::new("/usr/bin/pgrep").args(["-P", &t.pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_or(true, |s| s.success())
+    }
+
     /// Keystrokes or a paste typed by the human. The caller is the UI's own terminal view; there is no other path in.
     /// Never blocks: the bytes go to a bounded queue a writer thread drains into the PTY, and a full queue (the shell is
     /// not reading) answers `QueueFull` instead of waiting.
