@@ -165,3 +165,32 @@ fn a_refused_projects_folder_alone_disables_start() {
     assert_eq!(pf["start_enabled"], false, "{pf}");
     assert_eq!(pf["rows"].as_array().unwrap().len(), 2, "{pf}");
 }
+
+// A run started from a symlink to a registered project, or from a linked worktree of its repository, belongs to that
+// project: the start receipt must be keyed by the project the store finds, not by a literal path comparison in the UI.
+#[test]
+fn a_folder_resolves_to_its_project_through_a_symlink_and_a_linked_worktree() {
+    let (root, app) = setup("for-folder");
+    let main = repo(&root, "src/api");
+    let id = app.project_add(&main, false).unwrap()["project"]["id"].as_str().unwrap().to_string();
+    let id_of = |p: &str| app.project_for_folder(p).unwrap()["project_id"].as_str().unwrap().to_string();
+    assert_eq!(id_of(&main), id);
+    let link = root.join("home/link-to-api");
+    std::os::unix::fs::symlink(&main, &link).unwrap();
+    assert_eq!(id_of(link.to_str().unwrap()), id, "a symlink to the project folder");
+    let wt_git = std::path::Path::new(&main).join(".git/worktrees/fix");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    fs::write(wt_git.join("HEAD"), "ref: refs/heads/fix\n").unwrap();
+    let wt = root.join("home/worktrees/api-fix");
+    fs::create_dir_all(&wt).unwrap();
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    assert_eq!(id_of(wt.to_str().unwrap()), id, "a linked worktree of the project's repository");
+    let other = repo(&root, "src/other");
+    assert_eq!(id_of(&other), "p_unsorted", "a folder no project owns is Unsorted, and is not registered by asking");
+    assert_eq!(app.project_list(false).unwrap()["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(id_of("/no/such/folder"), "p_unsorted");
+    assert_eq!(err(app.project_for_folder("relative/dir"))["error"], "invalid_args");
+    let _ = fs::remove_dir_all(root);
+}

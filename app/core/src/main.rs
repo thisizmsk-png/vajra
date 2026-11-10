@@ -161,6 +161,11 @@ fn app_info(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn project_for_folder(app: State<'_, App>, path: String) -> Res {
+    app.project_for_folder(&path)
+}
+
+#[tauri::command(async)]
 fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
     app.project_list(include_archived.unwrap_or(false))
 }
@@ -742,6 +747,7 @@ fn main() {
             reject_plan,
             app_info,
             project_list,
+            project_for_folder,
             project_add,
             project_rename,
             project_archive,

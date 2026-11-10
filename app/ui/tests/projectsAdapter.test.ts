@@ -198,3 +198,20 @@ describe("T1 project store ids (#77)", () => {
     expect(proposalsFor(items, null, "/src/web").map((i) => i.id)).toEqual(["c"]);
   });
 });
+
+describe("summarize: the core's project_id on a campaign item", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const idx = groupProjects([camp("a1")], { a1: { session_id: "s", run_id: "r", cwd: "/src/api" } as never }, [{ schema: "vajra.project/1", id: T, name: "api", root: "/src/api", root_key: {}, created: null, archived: null, rev: 1 } as never]);
+  it("counts a campaign item under the project the core names, even when the campaign list says another", () => {
+    const other = groupProjects([camp("a1"), camp("b1")], { a1: { session_id: "s", run_id: "r", cwd: "/src/api" } as never, b1: { session_id: "s", run_id: "r2", cwd: "/src/web" } as never }, [{ schema: "vajra.project/1", id: T, name: "api", root: "/src/api", root_key: {}, created: null, archived: null, rev: 1 } as never]);
+    const web = other.projects.find((p) => p.root === "/src/web")!;
+    const item = { ...inbox("b1"), project_id: T };
+    const s = summarize(other, [camp("a1"), camp("b1")], [item], null);
+    expect(s.get(T)?.needsYou).toBe(1);
+    expect(s.get(web.id)?.needsYou).toBe(0);
+  });
+  it("falls back to the campaign's own project when the core says p_unsorted or sends nothing", () => {
+    const s = summarize(idx, [camp("a1")], [{ ...inbox("a1"), project_id: "p_unsorted" }, inbox("a1")], null);
+    expect(s.get(T)?.needsYou).toBe(2);
+  });
+});

@@ -71,6 +71,19 @@ impl App {
         Ok(json!({"projects": l.projects.iter().map(project_json).collect::<Vec<_>>(), "skipped": l.skipped, "truncated": l.truncated}))
     }
 
+    /// The project that owns `path`, by the store's own identity rules (the same folder through a symlink, or a linked
+    /// worktree of its repository): `{project_id}`, or `p_unsorted` when no project owns it, it is gone or it is refused.
+    /// Read only: it never registers anything. The UI names this id in `act_start_run`, so the receipt, revision and run
+    /// generation land on the project the run belongs to.
+    pub fn project_for_folder(&self, path: &str) -> Res {
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() {
+            return Err(invalid("path", "must be an absolute folder path"));
+        }
+        let id = self.projects.find(p).map_err(refusal)?.map_or_else(|| super::inbox::UNSORTED_PROJECT.to_string(), |p| p.id);
+        Ok(json!({"project_id": id}))
+    }
+
     pub fn project_add(&self, path: &str, confirm_nested: bool) -> Res {
         let p = std::path::Path::new(path);
         if !p.is_absolute() {

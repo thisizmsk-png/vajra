@@ -351,6 +351,8 @@ export const api = {
   /** Which record versions this build reads (`vajra.app_info/1`). */
   appInfo: () => call<AppInfo>("app_info"),
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
+  /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
+  projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
   projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
   /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
   projectAdd: (path: string, confirmNested = false) =>

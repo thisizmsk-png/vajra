@@ -5,24 +5,27 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { ProjectsProvider } from "../src/projects/store";
-import { projectId } from "../src/projects/adapter";
+import { UNSORTED_ID } from "../src/projects/adapter";
 import { attentionText } from "../src/projects/attention";
 import { Inbox } from "../src/screens/inbox/Inbox";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
-const API = projectId("/src/api");
-const WEB = projectId("/src/web");
+// The core's ids (#77 store): items carry them as `project_id`; the UI never makes its own.
+const API = "p_01JC3H0000000000000000000A";
+const WEB = "p_01JC3H0000000000000000000B";
+const stored = (id: string, name: string, root: string) => ({ schema: "vajra.project/1", id, name, root, root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 });
 const SHA = "a".repeat(64);
 const plan = (over: Record<string, unknown> = {}) => ({
-  id: "plan1", kind: "plan", campaign: "api-1", origin: "app", created: "", age_s: 9, title: "Deploy to staging", body: "SECRET-BODY", actions: ["approve", "reject"],
+  id: "plan1", kind: "plan", campaign: "api-1", origin: "app", project_id: API, created: "", age_s: 9, title: "Deploy to staging", body: "SECRET-BODY", actions: ["approve", "reject"],
   source: "Written by the workflow; unsigned", plan_sha256: SHA, action: "deploy",
   plan: { target: "staging", commands: ["make deploy"], rollback: ["make rollback"], health_checks: ["curl /health"], risk: "low" }, invalid: null, ...over,
 });
-const question = (over: Record<string, unknown> = {}) => ({ id: "q1", kind: "question", campaign: "web-1", origin: "app", created: "", age_s: 5, title: "Which key?", body: "", actions: [], ...over });
+const question = (over: Record<string, unknown> = {}) => ({ id: "q1", kind: "question", campaign: "web-1", origin: "app", project_id: WEB, created: "", age_s: 5, title: "Which key?", body: "", actions: [], ...over });
 let items: unknown[];
 const done = (state: string, extra: Record<string, unknown> = {}) => ({ receipt: { schema: "vajra.receipt/1", action_id: "x", project_id: API, action: "approve_plan", target: "plan1", expect_generation: null, current_generation: null, state, reason: null, detail: null, retry: "no", rev: 1, ts_ms: 1, ...extra } });
 let act_result: unknown;
+let reject_result: unknown;
 let ipc: ReturnType<typeof fakeIpc>;
 const mount = (replies: Record<string, unknown> = {}) => {
   ipc = fakeIpc({
@@ -32,8 +35,10 @@ const mount = (replies: Record<string, unknown> = {}) => {
     ] },
     resume_targets: { targets: { "api-1": { session_id: "s", run_id: "r1", cwd: "/src/api" }, "web-1": { session_id: "s2", run_id: "r2", cwd: "/src/web" } } },
     active_runs: { count: 0, runs: [] },
+    project_list: { projects: [stored(API, "api", "/src/api"), stored(WEB, "web", "/src/web")], skipped: 0, truncated: false },
     inbox: () => ({ count: items.length, items }),
     act_approve_plan: () => act_result,
+    act_reject_plan: () => reject_result,
     reject_plan: { action_id: "r", state: "rejected" },
     ...replies,
   });
@@ -43,7 +48,7 @@ const mount = (replies: Record<string, unknown> = {}) => {
 const n = (cmd: string) => ipc.calls.filter((c) => c.cmd === cmd).length;
 const card = (title: string) => screen.getByRole("article", { name: new RegExp(title) });
 
-beforeEach(() => { items = [plan(), question()]; act_result = done("done"); window.location.hash = ""; });
+beforeEach(() => { items = [plan(), question()]; act_result = done("done"); reject_result = done("done", { action: "reject_plan" }); window.location.hash = ""; });
 afterEach(() => { cleanup(); setTransport(); window.location.hash = ""; vi.useRealTimers(); });
 
 describe("Inbox lists what needs you, from every project", () => {
@@ -56,7 +61,7 @@ describe("Inbox lists what needs you, from every project", () => {
   });
 
   it("never hides an item whose campaign the project list does not know (a run that just started)", async () => {
-    items = [plan(), question({ id: "q9", campaign: "brand-new-run", title: "Fresh blocker" })];
+    items = [plan(), question({ id: "q9", campaign: "brand-new-run", project_id: UNSORTED_ID, title: "Fresh blocker" })];
     mount();
     expect(await screen.findByText("Fresh blocker")).toBeTruthy();
     expect(screen.getByRole("heading", { name: S.projects.unsorted })).toBeTruthy();
@@ -95,7 +100,7 @@ describe("Opening an item focuses the exact project and campaign, and never appr
     mount();
     await screen.findByText("Deploy to staging");
     fireEvent.click(within(card("Deploy to staging")).getByRole("button", { name: S.inbox.open }));
-    expect(window.location.hash).toBe(`#/p/${API}/review?slug=api-1`);
+    expect(window.location.hash).toBe(`#/p/${API}/review?slug=api-1&pin=1`);
     expect(n("act_approve_plan")).toBe(0);
     expect(n("approve_plan")).toBe(0);
   });
@@ -156,8 +161,8 @@ describe("Approve and reject", () => {
     expect(text).not.toMatch(/[\u202e\u2066\u200b\u{e0041}\u001b]/u);
   });
 
-  it("cannot approve a plan whose campaign no project owns: Approve is off with a reason and sends nothing", async () => {
-    items = [plan({ campaign: "brand-new-run" })];
+  it("an older core that sends no project_id, for a campaign no project owns: Approve is off with a reason and sends nothing", async () => {
+    items = [plan({ campaign: "brand-new-run", project_id: undefined })];
     mount();
     await screen.findByText("Deploy to staging");
     const c = card("Deploy to staging");
@@ -166,10 +171,35 @@ describe("Approve and reject", () => {
     expect(within(c).getByText(S.inbox.needsProject)).toBeTruthy();
     fireEvent.click(b);
     expect(n("act_approve_plan")).toBe(0);
-    // Reject does not need the project id and still works.
+    // Reject still works; it names Unsorted, the bucket for what no project owns.
     fireEvent.change(within(c).getByLabelText(S.inbox.reason), { target: { value: "not yet" } });
     fireEvent.click(within(c).getByRole("button", { name: S.inbox.reject }));
-    await waitFor(() => expect(n("reject_plan")).toBe(1));
+    await waitFor(() => expect(n("act_reject_plan")).toBe(1));
+    expect((ipc.calls.find((x) => x.cmd === "act_reject_plan")?.args?.envelope as { project_id: string }).project_id).toBe(UNSORTED_ID);
+  });
+
+  it("a campaign the folder list cannot place carries the core's p_unsorted: Approve is on and names p_unsorted", async () => {
+    items = [plan({ campaign: "brand-new-run", project_id: UNSORTED_ID })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    expect(within(c).queryByText(S.inbox.needsProject)).toBeNull();
+    fireEvent.click(within(c).getByRole("button", { name: S.inbox.approve }));
+    await waitFor(() => expect(n("act_approve_plan")).toBe(1));
+    expect((ipc.calls.find((x) => x.cmd === "act_approve_plan")?.args?.envelope as { project_id: string }).project_id).toBe(UNSORTED_ID);
+    expect(screen.getByRole("heading", { name: S.projects.unsorted })).toBeTruthy();
+  });
+
+  it("the core's project_id decides the group and the envelope, not the folder the campaign list guesses", async () => {
+    // The campaign list says api-1 ran in /src/api (API), but the core says this item belongs to WEB.
+    items = [plan({ project_id: WEB })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const web = screen.getByRole("region", { name: "web" });
+    expect(within(web).getByText("Deploy to staging")).toBeTruthy();
+    fireEvent.click(within(card("Deploy to staging")).getByRole("button", { name: S.inbox.approve }));
+    await waitFor(() => expect(n("act_approve_plan")).toBe(1));
+    expect((ipc.calls.find((x) => x.cmd === "act_approve_plan")?.args?.envelope as { project_id: string }).project_id).toBe(WEB);
   });
 
   it("approves exactly the hash shown, with a project envelope, and shows the receipt", async () => {
@@ -221,6 +251,29 @@ describe("Approve and reject", () => {
     expect(await screen.findByText(S.inbox.receipt.notDone)).toBeTruthy();
   });
 
+  it("shows a stale reject as a refusal and never as rejected", async () => {
+    reject_result = done("rejected", { action: "reject_plan", reason: "stale_generation", retry: "after_refresh" });
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    fireEvent.change(within(c).getByLabelText(S.inbox.reason), { target: { value: "no" } });
+    fireEvent.click(within(c).getByRole("button", { name: S.inbox.reject }));
+    expect(await screen.findByText(S.inbox.receipt.planChanged)).toBeTruthy();
+    expect(screen.queryByText(S.inbox.receipt.rejected)).toBeNull();
+  });
+
+  it("cannot reject a plan that carries no hash: nothing is sent", async () => {
+    items = [plan({ plan_sha256: undefined })];
+    mount();
+    await screen.findByText("Deploy to staging");
+    const c = card("Deploy to staging");
+    fireEvent.change(within(c).getByLabelText(S.inbox.reason), { target: { value: "no" } });
+    const b = within(c).getByRole("button", { name: S.inbox.reject });
+    expect(b.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(b);
+    expect(n("act_reject_plan")).toBe(0);
+  });
+
   it("offers only reject when the plan cannot be approved", async () => {
     items = [plan({ invalid: "unsupported action", actions: ["reject"] })];
     mount();
@@ -239,8 +292,13 @@ describe("Approve and reject", () => {
     expect(send.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(within(c).getByLabelText(S.inbox.reason), { target: { value: "not yet" } });
     fireEvent.click(send);
-    await waitFor(() => expect(n("reject_plan")).toBe(1));
-    expect(ipc.calls.find((x) => x.cmd === "reject_plan")?.args).toEqual({ id: "plan1", reason: "not yet" });
+    await waitFor(() => expect(n("act_reject_plan")).toBe(1));
+    // Through the receipt door, with the project and the exact hash the human read; never the legacy hash-less command.
+    const call = ipc.calls.find((x) => x.cmd === "act_reject_plan")!;
+    expect(call.args).toMatchObject({ id: "plan1", reason: "not yet", planSha256: SHA });
+    expect(call.args?.envelope).toMatchObject({ project_id: API, expect_generation: null });
+    expect(n("reject_plan")).toBe(0);
+    expect(await screen.findByText(S.inbox.receipt.rejected)).toBeTruthy();
   });
 
   it("reloads the inbox once after an action so the list follows the core", async () => {

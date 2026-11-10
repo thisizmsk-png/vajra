@@ -4,7 +4,9 @@ import { ActionBar } from "../../../components/ui/desktop";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
 import { api, newActionId, onChanged } from "../../ipc";
-import { projectId } from "../../projects/adapter";
+import { UNSORTED_ID, normRoot } from "../../projects/adapter";
+import { useProjects } from "../../projects/store";
+import { validId } from "../../projectContract";
 import { LoadingRows, Problem, problemDetail, CheckedAt } from "../states";
 import type { Campaign, Preflight, ResumeTarget } from "../../ipc";
 import { preferenceScope, usePreferences } from "../../preferences";
@@ -46,6 +48,16 @@ export function Home() {
   const prefs = usePreferences();
   // Inside a project the folder is the project's, and the list is the project's own campaigns (FG-03).
   const { project } = useCurrentProject();
+  const { projects } = useProjects();
+  // The core decides which project owns a folder (a symlink or a linked worktree is its project too); a core that
+  // cannot answer falls back to a literal match on a registered root, else the Unsorted bucket.
+  const storeProject = async (cwd: string): Promise<string> => {
+    try {
+      const r = await api.projectForFolder(cwd);
+      if (r && (r.project_id === UNSORTED_ID || validId("p", r.project_id))) return r.project_id;
+    } catch { /* an older core, or a folder it refuses: use what the list knows */ }
+    return projects.find((p) => p.registered && p.root !== null && normRoot(p.root) === normRoot(cwd))?.id ?? UNSORTED_ID;
+  };
   const [pre, recheck, checkedAt] = useLoad<Preflight>(fetchPreflight);
   const [allCamps, reloadCamps] = useLoad<Campaign[]>(fetchCampaigns, true);
   const [targets, reloadTargets] = useLoad<Record<string, ResumeTarget>>(fetchTargets, true);
@@ -110,12 +122,13 @@ export function Home() {
   };
 
   // Start goes through an action receipt (FG-11): one fresh action id per click, so a retried call never starts twice.
-  // The envelope names the folder the run starts in (the core's project ids replace this when the board reads them,
-  // wave 3) and asks for no generation check, so what the person sees is unchanged: the run opens, or the refusal shows.
+  // The envelope names the store's project for the folder the run starts in (a registered project's root), else the
+  // core's Unsorted bucket: the core keys receipts and generations by it, so it is never an id the UI made up. It asks
+  // for no generation check, so what the person sees is unchanged: the run opens, or the refusal shows.
   const startViaReceipt = async () => {
     const cwd = d.repo.trim();
     // The effective agent preference goes with it, as a direct start sends it: a provider that cannot start is refused, never swapped.
-    const r = await api.actStartRun({ action_id: newActionId(), project_id: projectId(cwd), expect_generation: null }, { ...toInput(d), ...(agent ? { provider: agent } : {}) }, cwd);
+    const r = await api.actStartRun({ action_id: newActionId(), project_id: await storeProject(cwd), expect_generation: null }, { ...toInput(d), ...(agent ? { provider: agent } : {}) }, cwd);
     if (r.receipt?.state === "done" && r.result) return r.result;
     throw r.error ?? { error: r.receipt?.reason ?? "failed", detail: r.receipt?.detail ?? undefined };
   };

@@ -165,6 +165,28 @@ describe("Shell B frame (FG-03)", () => {
     expect(window.location.hash).toBe(`#/p/${API}/orch`);
   });
 
+  it("Open on an inbox item goes to the project the core filed it under, even when its campaign's folder says another", async () => {
+    const A = "p_01JC3H0000000000000000000A";
+    const W = "p_01JC3H0000000000000000000B";
+    const stored = (id: string, root: string) => ({ schema: "vajra.project/1", id, name: root.split("/").pop(), root, root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 });
+    boot("#/inbox", {
+      project_list: { projects: [stored(A, "/src/api"), stored(W, "/src/web")], skipped: 0, truncated: false },
+      inbox: { count: 1, items: [{ id: "i9", kind: "question", campaign: "api-1", project_id: W, origin: "app", created: "", age_s: 5, title: "Which key?", body: "", actions: [] }] },
+    });
+    const open = await screen.findByRole("button", { name: S.inbox.open });
+    fireEvent.click(open);
+    await waitFor(() => expect(window.location.hash).toContain(`#/p/${W}/`));
+    await waitFor(() => expect(tabs().getByRole("link", { name: /^web/ }).getAttribute("aria-current")).toBe("page"));
+    expect(tabs().getByRole("link", { name: /^api/ }).getAttribute("aria-current")).not.toBe("page");
+  });
+
+  it("History opens a campaign of another project in that project's frame", async () => {
+    boot(`#/p/${API}/history`);
+    fireEvent.click(await screen.findByRole("button", { name: "web-1" }));
+    await waitFor(() => expect(tabs().getByRole("link", { name: /^web/ }).getAttribute("aria-current")).toBe("page"));
+    expect(tabs().getByRole("link", { name: /^api/ }).getAttribute("aria-current")).not.toBe("page");
+  });
+
   it("places an old campaign link in its project: #/run?slug=web-1 is web's Review", async () => {
     boot("#/run?slug=web-1");
     await waitFor(() => expect(tabs().getByRole("link", { name: /^web/ }).getAttribute("aria-current")).toBe("page"));

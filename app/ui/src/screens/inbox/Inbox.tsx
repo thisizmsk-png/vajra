@@ -7,6 +7,7 @@ import { Badge, Button } from "../../../components/ui/base";
 import { S } from "../../../strings";
 import { api, newActionId } from "../../ipc";
 import type { ActResult, InboxItem } from "../../ipc";
+import { UNSORTED_ID, actionProject, itemProject } from "../../projects/adapter";
 import { attentionText } from "../../projects/attention";
 import type { AttentionKind } from "../../projects/attention";
 import { useProjects } from "../../projects/store";
@@ -24,10 +25,10 @@ const kindOf = (i: CampaignItem): AttentionKind => (i.kind === "task" && i.statu
 
 type Outcome = { busy: boolean; text: string };
 
-function receiptText(r: ActResult): string {
+function receiptText(r: ActResult, done: string = S.inbox.receipt.done): string {
   const c = r.receipt;
   if (!c) return S.inbox.receipt.notDone;
-  if (c.state === "done") return S.inbox.receipt.done;
+  if (c.state === "done") return done;
   if (c.state === "accepted") return S.inbox.receipt.accepted;
   if (c.state === "unknown") return S.inbox.receipt.unknown;
   if (c.state === "failed") return S.inbox.receipt.failed;
@@ -45,7 +46,9 @@ export function Inbox() {
   const seen = useRef<Set<string> | null>(null);
   const [said, setSaid] = useState("");
 
-  const name = (campaign: string) => P.projects.find((p) => p.id === P.byCampaign[campaign])?.name ?? S.projects.unsorted;
+  const index = useMemo(() => ({ projects: P.projects, byCampaign: P.byCampaign }), [P.projects, P.byCampaign]);
+  // The core's ids decide where an item belongs and what an action names; the campaign's folder is only the fallback.
+  const name = (i: CampaignItem) => P.projects.find((p) => p.id === itemProject(index, i))?.name ?? S.projects.unsorted;
   // Expiry must cause a render by itself: nothing else re-renders an idle inbox. One timer, for the earliest snooze.
   const [ticks, tick] = useState(0);
   useEffect(() => {
@@ -68,21 +71,23 @@ export function Inbox() {
     if (before === null) return null;
     const fresh = inbox.filter((i) => !before.has(keyOf(i)));
     const last = fresh[fresh.length - 1];
-    return last ? attentionText(kindOf(last), name(last.campaign)) : null;
+    return last ? attentionText(kindOf(last), name(last)) : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys, P.state]);
   if (announce && announce !== said) setSaid(announce);
 
   const open = (i: CampaignItem) => {
-    const project = P.byCampaign[i.campaign] ?? null;
-    if (i.kind !== "plan" && P.crew && P.crew.campaign === i.campaign) go("crew", { slug: i.campaign, id: P.crew.runId }, project);
-    else go("review", { slug: i.campaign }, project);
+    const project = itemProject(index, i) ?? null;
+    // The link pins this project: the shell would otherwise place the campaign by its own folder.
+    const pin: Record<string, string> = project ? { pin: "1" } : {};
+    if (i.kind !== "plan" && P.crew && P.crew.campaign === i.campaign) go("crew", { slug: i.campaign, id: P.crew.runId, ...pin }, project);
+    else go("review", { slug: i.campaign, ...pin }, project);
   };
   const set = (k: string, o: Outcome) => setOutcome((m) => ({ ...m, [k]: o }));
   const approve = (i: CampaignItem) => {
     const k = keyOf(i);
-    const project = P.byCampaign[i.campaign];
-    // No project owns this campaign: there is no id to send, so nothing is sent (the card says why).
+    const project = actionProject(index, i);
+    // No id at all (an older core, a campaign no folder places): nothing is sent (the card says why).
     if (outcome[k]?.busy || !i.plan_sha256 || !project) return;
     set(k, { busy: true, text: "" });
     const envelope = { action_id: newActionId(), project_id: project, expect_generation: null };
@@ -94,15 +99,17 @@ export function Inbox() {
   const reject = (i: CampaignItem) => {
     const k = keyOf(i);
     const reason = (reasons[k] ?? "").trim();
-    if (outcome[k]?.busy || reason.length < 1 || reason.length > 500) return;
+    // The hash the human read is required: a reject without it could land on whichever plan is current, unseen.
+    if (outcome[k]?.busy || !i.plan_sha256 || reason.length < 1 || reason.length > 500) return;
     set(k, { busy: true, text: "" });
-    void api.rejectPlan(i.id, reason).then(
-      () => { set(k, { busy: false, text: S.inbox.receipt.rejected }); P.reload(); },
+    const envelope = { action_id: newActionId(), project_id: actionProject(index, i) ?? UNSORTED_ID, expect_generation: null };
+    void api.actRejectPlan(envelope, i.id, reason, i.plan_sha256).then(
+      (r) => { set(k, { busy: false, text: receiptText(r, S.inbox.receipt.rejected) }); P.reload(); },
       () => { set(k, { busy: false, text: S.inbox.receipt.notDone }); },
     );
   };
 
-  const groups = P.projects.map((p) => ({ p, items: live.filter((i) => P.byCampaign[i.campaign] === p.id) })).filter((g) => g.items.length > 0);
+  const groups = P.projects.map((p) => ({ p, items: live.filter((i) => itemProject(index, i) === p.id) })).filter((g) => g.items.length > 0);
   // An item whose campaign no project owns yet (a run that just started, or a list that lagged the inbox) still shows:
   // under Unsorted, never dropped. Nothing waiting on you can be hidden by a missing project.
   const placed = new Set(groups.flatMap((g) => g.items));
@@ -142,9 +149,9 @@ export function Inbox() {
         <div className="v-ibx__acts">
           <Button size="sm" variant="ghost" onClick={() => open(i)}>{S.inbox.open}</Button>
           {i.kind === "plan" && !i.invalid && i.plan_sha256 && (
-            <Button size="sm" disabled={o?.busy || !P.byCampaign[i.campaign]} onClick={() => approve(i)}>{S.inbox.approve}</Button>
+            <Button size="sm" disabled={o?.busy || !actionProject(index, i)} onClick={() => approve(i)}>{S.inbox.approve}</Button>
           )}
-          {i.kind === "plan" && !i.invalid && i.plan_sha256 && !P.byCampaign[i.campaign] && <p className="v-ibx__warn" role="note">{S.inbox.needsProject}</p>}
+          {i.kind === "plan" && !i.invalid && i.plan_sha256 && !actionProject(index, i) && <p className="v-ibx__warn" role="note">{S.inbox.needsProject}</p>}
           {isSnoozed
             ? <Button size="sm" variant="ghost" onClick={() => setUntil((u) => { const { [k]: _, ...rest } = u; return rest; })}>{S.inbox.unsnooze}</Button>
             : <Button size="sm" variant="ghost" onClick={() => setUntil((u) => ({ ...u, [k]: Date.now() + SNOOZE_MS }))}>{S.inbox.snooze}</Button>}
@@ -152,7 +159,7 @@ export function Inbox() {
         {i.kind === "plan" && (
           <div className="v-ibx__rej">
             <input type="text" placeholder={S.inbox.reason} aria-label={S.inbox.reason} value={reason} onChange={(e) => setReasons((m) => ({ ...m, [k]: e.target.value }))} />
-            <Button size="sm" variant="ghost" disabled={o?.busy || reason.trim().length < 1 || reason.trim().length > 500} onClick={() => reject(i)}>{S.inbox.reject}</Button>
+            <Button size="sm" variant="ghost" disabled={o?.busy || !i.plan_sha256 || reason.trim().length < 1 || reason.trim().length > 500} onClick={() => reject(i)}>{S.inbox.reject}</Button>
           </div>
         )}
         {o?.text && <p role="status" className="v-ibx__out">{o.text}</p>}
