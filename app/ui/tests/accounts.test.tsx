@@ -41,7 +41,7 @@ function settings(replies: Record<string, unknown> = {}, inProject = true) {
     preflight: { rows: [], start_enabled: true }, provider_list: providerList, preferences_read: view,
     provider_accounts: () => accounts, provider_usage: USAGE, provider_agents: clone(AGENTS),
     provider_key_save: () => { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === "openrouter" ? { ...a, state: "key_saved" } : a) }; return null; },
-    provider_key_remove: () => null, provider_base_url_save: () => null,
+    provider_key_replace: () => null, provider_key_remove: () => null, provider_base_url_save: () => null,
     provider_agents_save: (a?: Record<string, unknown>) => ({ schema: AGENTS.schema, ...(a?.agents as object) }),
     ...replies,
   });
@@ -195,20 +195,37 @@ describe("the OpenRouter key", () => {
     expect(screen.getByText(C.keyHarness(true))).toBeTruthy();
   });
 
-  it("Save sends the key once, then the field and the page hold no trace of it, and reopening shows an empty field", async () => {
+  it("Replace on a saved account sends the key to provider_key_replace (never Save, which refuses a second key), then the field and the page hold no trace of it", async () => {
     const f = await open();
     const field = screen.getByLabelText(C.keyLabel) as HTMLInputElement;
     fireEvent.change(field, { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.save }));
-    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_save")).toHaveLength(1));
-    expect(f.calls.find((c) => c.cmd === "provider_key_save")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_replace")).toHaveLength(1));
+    expect(f.calls.find((c) => c.cmd === "provider_key_replace")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    expect(f.calls.some((c) => c.cmd === "provider_key_save")).toBe(false);
     await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_accounts").length).toBeGreaterThan(1));
     await waitFor(() => expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe(""));
     expect(document.body.innerHTML).not.toContain(FAKE_KEY);
-    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_save"))).not.toContain(FAKE_KEY);
+    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_replace"))).not.toContain(FAKE_KEY);
     const or = await account("OpenRouter");
     fireEvent.click(within(or).getByRole("button", { name: `${C.replace}: OpenRouter` }));
     expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe("");
+  });
+
+  it("Add on an account with no key sends the key to provider_key_save once, and nothing else carries it", async () => {
+    const none = clone(FIXTURE_ACCOUNTS) as any;
+    none.accounts = none.accounts.map((a: any) => (a.id === "openrouter" ? { ...a, state: "key_missing", credential: { source: "api_key", saved: false } } : a));
+    const f = settings({ provider_accounts: none });
+    const or = await account("OpenRouter");
+    // No key yet: Add, and no Remove.
+    expect(within(or).queryByRole("button", { name: `${C.remove}: OpenRouter` })).toBeNull();
+    fireEvent.click(within(or).getByRole("button", { name: `${C.add}: OpenRouter` }));
+    fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
+    fireEvent.click(screen.getByRole("button", { name: C.save }));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_save")).toHaveLength(1));
+    expect(f.calls.find((c) => c.cmd === "provider_key_save")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    expect(f.calls.some((c) => c.cmd === "provider_key_replace")).toBe(false);
+    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_save"))).not.toContain(FAKE_KEY);
   });
 
   it("Cancel drops what was typed; Save is off while the field is empty", async () => {
@@ -217,11 +234,11 @@ describe("the OpenRouter key", () => {
     fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.cancel }));
     expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe("");
-    expect(f.calls.some((c) => c.cmd === "provider_key_save")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "provider_key_save" || c.cmd === "provider_key_replace")).toBe(false);
   });
 
-  it("a failed save says so and still never shows the key", async () => {
-    await open({ provider_key_save: new Error("x") });
+  it("a failed replace says so and still never shows the key", async () => {
+    await open({ provider_key_replace: new Error("x") });
     fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.save }));
     const sheet = screen.getByLabelText(C.keyLabel).closest("dialog") as HTMLElement;

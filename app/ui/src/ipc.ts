@@ -277,7 +277,10 @@ export const api = {
   providerAccounts: () => call<unknown>("provider_accounts"),
   providerUsage: () => call<unknown>("provider_usage"),
   /** Hands the pasted key to the core, which writes it to the Keychain. Nothing answers with it, and nothing here keeps it. */
+  providerKeySaved: (accountId: string) => call<unknown>("provider_key_saved", { accountId }),
   providerKeySave: (accountId: string, key: string) => call<void>("provider_key_save", { accountId, key }),
+  /** Overwrites the stored key. Save refuses a second key, so a saved account's Replace must come here. */
+  providerKeyReplace: (accountId: string, key: string) => call<void>("provider_key_replace", { accountId, key }),
   providerKeyRemove: (accountId: string) => call<void>("provider_key_remove", { accountId }),
   providerBaseUrlSave: (accountId: string, baseUrl: string) => call<void>("provider_base_url_save", { accountId, baseUrl }),
   providerAgents: (projectId: string) => call<unknown>("provider_agents", { projectId }),

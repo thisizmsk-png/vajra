@@ -248,23 +248,23 @@ fn provider_accounts(app: State<'_, App>) -> Res {
 /// Stored API keys (D3). The key arrives once, goes to the Keychain through stdin, and is never sent back: every answer
 /// is `{account, saved}`.
 #[tauri::command(async)]
-fn provider_key_saved(app: State<'_, App>, account: String) -> Res {
-    app.provider_key_saved(&account)
+fn provider_key_saved(app: State<'_, App>, account_id: String) -> Res {
+    app.provider_key_saved(&account_id)
 }
 
 #[tauri::command(async)]
-fn provider_key_save(app: State<'_, App>, account: String, key: String) -> Res {
-    app.provider_key_save(&account, key)
+fn provider_key_save(app: State<'_, App>, account_id: String, key: String) -> Res {
+    app.provider_key_save(&account_id, key)
 }
 
 #[tauri::command(async)]
-fn provider_key_replace(app: State<'_, App>, account: String, key: String) -> Res {
-    app.provider_key_replace(&account, key)
+fn provider_key_replace(app: State<'_, App>, account_id: String, key: String) -> Res {
+    app.provider_key_replace(&account_id, key)
 }
 
 #[tauri::command(async)]
-fn provider_key_remove(app: State<'_, App>, account: String) -> Res {
-    app.provider_key_remove(&account)
+fn provider_key_remove(app: State<'_, App>, account_id: String) -> Res {
+    app.provider_key_remove(&account_id)
 }
 
 #[tauri::command(async)]

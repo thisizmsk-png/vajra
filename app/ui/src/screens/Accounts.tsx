@@ -142,7 +142,8 @@ export function KeySheet({ account, open, codexFound, onClose, onSaved }: { acco
     setBusy(true);
     setError("");
     try {
-      await api.providerKeySave(account.id, key.trim());
+      // Save writes a first key and refuses a second; a saved account's key is overwritten by Replace.
+      await (account.credential.saved ? api.providerKeyReplace : api.providerKeySave)(account.id, key.trim());
       setKey("");
       onSaved();
     } catch (e) {

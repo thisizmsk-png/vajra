@@ -1,0 +1,6 @@
+{
+  "provider_key_saved": ["accountId"],
+  "provider_key_save": ["accountId", "key"],
+  "provider_key_replace": ["accountId", "key"],
+  "provider_key_remove": ["accountId"]
+}
