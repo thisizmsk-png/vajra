@@ -584,3 +584,20 @@ fn an_answer_to_a_workflow_namespaced_task_reaches_its_worker() {
     let other = app.act_answer_question(&env("ans-5001-bbbb", None), "task:c2.20261105-1810.t1", "x");
     assert_eq!(other["receipt"]["reason"], "not_found");
 }
+
+// #107 review sweep: the worker list changed with no bump of its own (here straight on the control service, as
+// `end_session` does) still moves the revision, so a `since_rev` poll never keeps an old list; steady stays unchanged.
+#[test]
+fn a_worker_list_changed_without_a_bump_moves_the_revision() {
+    let t = Tmp::new();
+    let app = t.app();
+    let rev0 = app.project_state("proj-w", None).unwrap()["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state("proj-w", Some(rev0)).unwrap()["unchanged"], true);
+    seed_session(&app, 2);
+    let after = app.project_state("proj-w", Some(rev0)).unwrap();
+    assert_eq!(after["unchanged"], false, "{after}");
+    assert!(!after["workers"].as_array().unwrap().is_empty(), "{after}");
+    assert_eq!(app.project_state("proj-w", after["rev"].as_u64()).unwrap()["unchanged"], true, "steady again");
+    lock(&app.control).end_session(SID);
+    assert_eq!(app.project_state("proj-w", after["rev"].as_u64()).unwrap()["unchanged"], false, "the session ended");
+}
