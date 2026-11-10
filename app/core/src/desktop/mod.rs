@@ -1257,9 +1257,12 @@ impl App {
                 if checks {
                     repos.insert(r.clone(), self.worktree_state(r, deadline));
                 } else {
+                    // Cache-only (the board): only a known state counts. A cached failed read (`Some(None)`) is as unknown as
+                    // no entry, so a green live verdict reads `checking`, never a pass the repo state could not confirm (#107
+                    // review). A full `evidence_list` call keeps its rule: a check's verdict stands when git cannot be read.
                     match self.worktree_state_cached(r) {
-                        Some(st) => { repos.insert(r.clone(), st); }
-                        None => { unknown.insert(r.clone()); }
+                        Some(Some(st)) => { repos.insert(r.clone(), Some(st)); }
+                        _ => { unknown.insert(r.clone()); }
                     }
                 }
             }
