@@ -13,7 +13,9 @@
 //!   cards. No status ever moves a card to done by itself.
 //! - (d) Cost: cards read the evidence verdicts already cached (the ones `evidence_list` fills) and never start a check;
 //!   a criterion not checked yet reads unverified, so its card stays in review.
-//! - (e) Revision: cards ride the existing `rev` bumps; there is no new revision source.
+//! - (e) Revision: cards ride the existing `rev` bumps, and `project_state` also folds a fingerprint of the cards into
+//!   its quiet-field check, so a card whose inputs changed without a bump (a verdict `evidence_list` cached, a task file
+//!   the engine rewrote) moves the revision before `since_rev` is answered (#107 review).
 
 use std::collections::HashMap;
 
