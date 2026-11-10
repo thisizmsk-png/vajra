@@ -632,3 +632,24 @@ mod topology {
         }
     }
 }
+
+/// #103 review: a record whose pin does not validate has nothing to vouch for whose checkout it names, so its location
+/// counts as owned by it. Its location at this project's root claims that root, and the ask refuses.
+#[test]
+fn an_unidentified_record_whose_location_is_this_root_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git/objects")).unwrap();
+    std::fs::write(t.repo().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (lib, sub) = (t.repo().join("lib"), t.repo().join("sub"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_ok(), "healthy");
+    app.record_run("20261109-1710", &lib, "3c8fad5b-d9cb-469f-a165-70867728950e", "deliver-o", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&t.0.join("elsewhere")).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1710"), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.read_run_loc("20261109-1710"), Some(t.repo()));
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "an unidentified record's location at this root claims it");
+}
