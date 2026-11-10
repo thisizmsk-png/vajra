@@ -221,19 +221,28 @@ fn wiring_dir(tag: &str) -> PathBuf {
 fn only_an_account_with_a_stored_key_is_metered_and_asking_never_prints_the_key() {
     let d = wiring_dir("accounts");
     let sec = fake_security(&d);
-    assert!(KeychainKeys::new(&sec, &d).accounts().is_empty(), "no key stored: nothing to meter");
+    let calls = |d: &std::path::Path| std::fs::read_to_string(d.join("security.log")).unwrap_or_default().lines().count();
+    let none = KeychainKeys::new(&sec, &d);
+    none.refresh(true);
+    assert!(none.accounts().is_empty(), "no key stored: nothing to meter");
     std::fs::write(d.join("store/vajra.provider.openrouter"), format!("{SENTINEL_KEY}\n")).unwrap();
     let keys = KeychainKeys::new(&sec, &d);
+    let before = calls(&d);
+    assert!(keys.accounts().is_empty(), "before a refresh the list is empty");
+    assert_eq!(calls(&d), before, "reading the list never runs security");
+    keys.refresh(true);
     assert_eq!(keys.accounts(), ["openrouter"]);
     let log = std::fs::read_to_string(d.join("security.log")).unwrap();
     assert!(log.lines().all(|l| !l.contains(" -w") && !l.contains("SENTINEL")), "the existence check never asks for the password: {log}");
-    // A burst of reads (project_state) runs `security` once, not once each.
-    let calls = |d: &std::path::Path| std::fs::read_to_string(d.join("security.log")).unwrap().lines().count();
+    // Reads cost nothing, and a refresh that is not forced reuses the lookup made a moment ago.
     let before = calls(&d);
     for _ in 0..5 {
         assert_eq!(keys.accounts(), ["openrouter"]);
+        keys.refresh(false);
     }
-    assert_eq!(calls(&d), before, "the list is reused inside the TTL");
+    assert_eq!(calls(&d), before, "no further lookup inside the TTL");
+    keys.refresh(true);
+    assert!(calls(&d) > before, "a forced refresh looks again");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -261,6 +270,7 @@ fn a_stored_key_reaches_the_endpoint_call_only_through_stdin_and_the_answer_hold
     let curl = script(&d, "curl", &format!("echo \"$@\" > {0}/curl-argv.txt\nenv > {0}/curl-env.txt\n/bin/cat > {0}/curl-stdin.txt\nprintf '%s' '{FIXTURE}'", d.display()));
     let src = CurlSource::new(Box::new(KeychainKeys::new(&fake_security(&d), &d))).with_curl(curl);
 
+    src.refresh(true);
     assert_eq!(src.accounts(), ["openrouter"]);
     let body = src.key_info("openrouter").expect("the fake curl answered");
     let usage = parse_key_response("openrouter", &body, AT).unwrap();
@@ -285,8 +295,34 @@ fn no_stored_key_means_no_call() {
     let src: Box<dyn UsageSource> = Box::new(CurlSource::new(Box::new(KeychainKeys::new(&fake_security(&d), &d))).with_curl(curl));
     // The meter reads only the accounts the source lists, so with no stored key the transfer tool is never started.
     let m = Meter::default();
+    src.refresh(true);
     let list: Vec<Usage> = src.accounts().iter().map(|a| m.read(a, true, Instant::now(), AT, src.as_ref())).collect();
     assert!(list.is_empty());
     assert!(!d.join("curl-ran.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A `security` that takes two seconds to answer, as a locked or prompting Keychain can.
+fn slow_security(d: &std::path::Path) -> PathBuf {
+    script(d, "security", &format!("echo \"$*\" >> '{}/slow.log'\n/bin/sleep 2\nexit 0", d.display()))
+}
+
+#[test]
+fn reading_the_list_never_waits_for_a_slow_lookup_and_a_second_refresh_does_not_queue() {
+    let d = wiring_dir("slow");
+    let keys = Arc::new(KeychainKeys::new(&slow_security(&d), &d));
+    let worker = {
+        let keys = keys.clone();
+        std::thread::spawn(move || keys.refresh(true))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let start = Instant::now();
+    assert!(keys.accounts().is_empty(), "the lookup is still running: the last list (empty) is served");
+    keys.refresh(true);
+    assert!(start.elapsed() < Duration::from_millis(500), "neither a read nor a second refresh waited for security: {:?}", start.elapsed());
+    worker.join().unwrap();
+    assert_eq!(keys.accounts(), ["openrouter"], "the finished lookup is what is served next");
+    let lookups = std::fs::read_to_string(d.join("slow.log")).unwrap().lines().count();
+    assert_eq!(lookups, 1, "one security call, not two");
     let _ = std::fs::remove_dir_all(&d);
 }

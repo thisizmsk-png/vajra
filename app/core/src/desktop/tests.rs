@@ -2972,7 +2972,6 @@ fn the_login_check_runs_only_when_provider_list_is_called_and_is_cached_otherwis
     fs::create_dir_all(&d).unwrap();
     let script = format!("#!/bin/sh\ncase \"$1\" in --version) echo '2.0.1';; auth) echo x >> '{}'; echo '{{\"loggedIn\": true}}';; esac\n", counter.display());
     fs::write(d.join("claude"), script).unwrap();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut fs::metadata(d.join("claude")).unwrap().permissions(), 0o755);
     fs::set_permissions(d.join("claude"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut app = app;
     app.provider_dirs = Some(vec![d]);
@@ -4225,6 +4224,116 @@ fn provider_usage_calls_out_only_while_the_page_is_open_and_at_most_once_a_minut
     // Page closed again: the last answer, still one call.
     assert_eq!(app.provider_usage_cached().usage[2].source, "gateway_key");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+const STORED_KEY: &str = "SENTINELnotakey-0123456789abcdef";
+
+/// An app whose Keychain store and usage source both go through a fake `security` (never the real Keychain).
+fn key_app(t: &Tmp, bin: &crate::providers::keychain::tests::FakeBin) -> App {
+    use crate::providers::usage::{CurlSource, KeychainKeys};
+    let mut app = t.app();
+    app.keys = bin.keys();
+    // The transfer tool is a fake that fails: a test never makes a network call.
+    let fake = bin.0.join("fake-transfer");
+    fs::write(&fake, "#!/bin/sh\n/bin/cat >/dev/null\nexit 22\n").unwrap();
+    fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The usage side runs its own fake `security` over the same store: it understands a trailing `-w` and logs to usage-argv.log.
+    let sec = bin.0.join("usage-security");
+    let d = bin.0.display();
+    fs::write(&sec, format!("#!/bin/sh\nD='{d}'\necho \"$*\" >> \"$D/usage-argv.log\"\n[ \"$1\" = find-generic-password ] || exit 1\nshift\nsvc=; w=\nwhile [ $# -gt 0 ]; do case $1 in -s) svc=$2; shift 2;; -w) w=1; shift;; *) shift;; esac; done\n[ -f \"$D/store/$svc\" ] || exit 44\n[ -n \"$w\" ] && /bin/cat \"$D/store/$svc\"\nexit 0\n")).unwrap();
+    fs::set_permissions(&sec, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    app.usage_source = Box::new(CurlSource::new(Box::new(KeychainKeys::new(&sec, &bin.0))).with_curl(fake));
+    app
+}
+
+fn usage_rows(state: &Value) -> Vec<String> {
+    state["usage"]["usage"].as_array().unwrap().iter().map(|u| u["account"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn saving_and_removing_a_key_advance_the_revision_so_a_subscriber_drops_the_removed_keys_usage() {
+    let bin = crate::providers::keychain::tests::FakeBin::new();
+    let t = Tmp::new();
+    let app = key_app(&t, &bin);
+    let events = std::sync::Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = events.clone();
+    app.set_change_sink(Box::new(move |p| sink.lock().unwrap().push(p)));
+    let rev0 = app.project_state("p_usage", None).unwrap()["rev"].as_u64().unwrap();
+
+    // Saving a key adds the account to the usage view at once, without the Providers page: the revision moves, the UI is
+    // told, and a subscriber holding the old revision gets a full answer with the new row.
+    app.provider_key_save("openrouter", STORED_KEY.into()).unwrap();
+    assert_eq!(events.lock().unwrap().len(), 1);
+    let saved = app.project_state("p_usage", Some(rev0)).unwrap();
+    assert_eq!(saved["unchanged"], false);
+    assert_eq!(usage_rows(&saved), ["claude", "codex", "openrouter"]);
+    let rev1 = saved["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state("p_usage", Some(rev1)).unwrap()["unchanged"], true);
+
+    // Removing it takes the row away the same way, even though the list was cached a moment ago.
+    app.provider_key_remove("openrouter").unwrap();
+    assert_eq!(events.lock().unwrap().len(), 2);
+    let removed = app.project_state("p_usage", Some(rev1)).unwrap();
+    assert_eq!(removed["unchanged"], false, "the subscriber must not keep the removed key's usage");
+    assert_eq!(usage_rows(&removed), ["claude", "codex"]);
+    // The key never appears in the answer, the log of calls or the environment.
+    assert!(!removed.to_string().contains("SENTINEL") && !bin.log("argv.log").contains("SENTINEL") && !bin.log("env.log").contains("SENTINEL"));
+}
+
+#[test]
+fn cached_reads_never_run_security_and_an_active_read_finds_the_key_and_says_so() {
+    let bin = crate::providers::keychain::tests::FakeBin::new();
+    fs::write(bin.0.join("store/vajra.provider.openrouter"), "x").unwrap();
+    let t = Tmp::new();
+    let app = key_app(&t, &bin);
+    let events = std::sync::Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = events.clone();
+    app.set_change_sink(Box::new(move |p| sink.lock().unwrap().push(p)));
+    let rev0 = app.project_state("p_usage", None).unwrap()["rev"].as_u64().unwrap();
+
+    // Page closed: project_state and the cached usage read never look at the Keychain, however often they are asked.
+    for _ in 0..3 {
+        app.provider_usage_cached();
+        app.provider_usage(false).unwrap();
+        assert_eq!(usage_rows(&app.project_state("p_usage", None).unwrap()), ["claude", "codex"], "the stored key is not known until a lookup");
+    }
+    assert_eq!(bin.log("usage-argv.log"), "", "no security call on the cached path");
+    assert!(events.lock().unwrap().is_empty());
+
+    // Page open: the account list is looked up, the new row is a change, and the revision moves.
+    app.provider_usage(true).unwrap();
+    assert!(bin.log("usage-argv.log").starts_with("find-generic-password -s vajra.provider.openrouter"));
+    // The lookup never asks for the password; the one `-w` call is the endpoint read's key command, with the fixed argv.
+    let calls = bin.log("usage-argv.log");
+    assert!(!calls.lines().next().unwrap().contains(" -w"), "{calls}");
+    assert!(calls.lines().skip(1).all(|l| l == "find-generic-password -s vajra.provider.openrouter -a openrouter -w"), "{calls}");
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert_eq!(usage_rows(&app.project_state("p_usage", Some(rev0)).unwrap()), ["claude", "codex", "openrouter"]);
+}
+
+#[test]
+fn discovering_accounts_at_start_does_not_block_project_state_while_security_is_slow() {
+    use crate::providers::usage::{CurlSource, KeychainKeys};
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let sec = t.0.join("slow-security");
+    fs::write(&sec, "#!/bin/sh\n/bin/sleep 2\nexit 0\n").unwrap();
+    fs::set_permissions(&sec, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut app = t.app();
+    app.usage_source = Box::new(CurlSource::new(Box::new(KeychainKeys::new(&sec, &t.0))));
+    std::thread::scope(|s| {
+        // What the app does once at start, on its own thread.
+        let discovery = s.spawn(|| app.discover_usage_accounts());
+        std::thread::sleep(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let state = app.project_state("p_usage", None).unwrap();
+        app.provider_usage_cached();
+        assert!(started.elapsed() < Duration::from_millis(1000), "project_state waited for the Keychain: {:?}", started.elapsed());
+        assert_eq!(usage_rows(&state), ["claude", "codex"], "no account is known until discovery finishes");
+        discovery.join().unwrap();
+    });
+    // Once it finishes the account shows, and a subscriber is told.
+    assert_eq!(usage_rows(&app.project_state("p_usage", None).unwrap()), ["claude", "codex", "openrouter"]);
 }
 
 #[test]

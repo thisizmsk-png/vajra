@@ -236,8 +236,14 @@ as a cache read. One entry per account:
   straight into curl's pipe, so the key is never in argv, the environment, a file, a log or this process's memory. There is no
   getter for a key. The key command is `[/usr/bin/security, find-generic-password, -s, vajra.provider.<a>, -a, <a>, -w]`, run with
   a cleared environment plus the user's `HOME`, and only for an account in the Keychain store's fixed list. An account is
-  metered only while its key is stored (checked without `-w`, and reused for 5 seconds so a burst of `project_state` reads
-  runs `security` once); with no key stored there is no metered account and no call.
+  metered only while its key is stored; with no key stored there is no metered account and no call.
+- **Account discovery never blocks a read.** Which accounts have a stored key is looked up without `-w` (it never prints a
+  key) by one `refresh` that may take as long as the Keychain does. The lookup runs once on a background thread at app start,
+  when the Providers page is open or a run is active (reused for 5 seconds), and after a key is saved, replaced or removed.
+  `project_state` and the cached usage read only copy the last list from memory, so they never run `security` or wait for it,
+  and no lock is held while it runs. A change in the list advances the project revisions and emits `changed`, so a
+  subscriber stops showing a removed key's usage and starts showing a new one. Until the first lookup finishes after launch,
+  the list is empty.
 
 ## Versioning
 

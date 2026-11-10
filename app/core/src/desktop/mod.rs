@@ -681,18 +681,40 @@ impl App {
     /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
     pub fn provider_key_save(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        self.key_changed(account);
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_replace`: overwrite the stored key (or store the first one).
     pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        self.key_changed(account);
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
     pub fn provider_key_remove(&self, account: &str) -> Res {
-        key_state(account, self.keys.remove(account).map(|()| false))
+        let r = self.keys.remove(account).map(|()| false);
+        self.key_changed(account);
+        key_state(account, r)
+    }
+
+    /// A key was saved, replaced or removed: forget the account's old figures, look the metered accounts up again and, if
+    /// what is shown changed, advance the revisions and say so, so a subscriber does not keep a removed key's usage.
+    fn key_changed(&self, account: &str) {
+        self.usage.forget(account);
+        self.discover_usage_accounts();
+    }
+
+    /// Look up which accounts have a stored key (this runs `security`, so never on a cache read) and publish a change in
+    /// what the usage view shows. The app calls it once on a background thread at start, so the row appears shortly after
+    /// launch without opening the Providers page.
+    pub fn discover_usage_accounts(&self) {
+        let before = self.provider_usage_cached().fingerprint();
+        self.usage_source.refresh(true);
+        if self.provider_usage_cached().fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
@@ -701,7 +723,12 @@ impl App {
     pub fn provider_usage(&self, page_open: bool) -> Res {
         // What `project_state` serves now, against what this read leaves in the cache.
         let before = self.provider_usage_cached().fingerprint();
-        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        let active = page_open || self.active_run_count() > 0;
+        if active {
+            // Account discovery runs here, after `before` was taken from the cache, so a changed account list is a change.
+            self.usage_source.refresh(false);
+        }
+        let now = self.usage_snapshot(active);
         // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
         // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
         if now.fingerprint() != before {
