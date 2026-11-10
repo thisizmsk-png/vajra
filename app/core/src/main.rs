@@ -24,7 +24,7 @@ use vajra_desktop::logging;
 use vajra_desktop::paths;
 use vajra_desktop::sessions::argv::RunInput;
 use vajra_desktop::owned::{Found, Ledger, Owner, Verdict};
-use vajra_desktop::desktop::ReleaseError;
+use vajra_desktop::desktop::WorktreeTerminals;
 use vajra_desktop::terminal::{Event as TermEvent, Sink as TermSink, Terminals, UserPathEnv};
 
 /// The one event the UI listens to.
@@ -76,19 +76,19 @@ fn act_stop_worker(app: State<'_, App>, envelope: Envelope, worker: String, reas
     app.act_stop_worker(&envelope, &worker, reason.as_deref())
 }
 
-/// Hangs up the user terminals opened in a worker's worktree (ledger-recorded like any tab close). A terminal still
-/// running something (a dev server, an editor) is left alone and the worker stays open, unless `force` (the human's
-/// "Close anyway"). A close that fails stops the worker's close: nothing is marked closed while a shell still runs there.
-fn release_terminals<'a>(terms: &'a Terminals, own: &'a Ownership) -> impl Fn(&std::path::Path, bool) -> Result<(), ReleaseError> + 'a {
-    move |wt, force| {
-        let ids = terms.ids_under(wt);
-        if !force && ids.iter().any(|&id| terms.is_busy(id)) {
-            return Err(ReleaseError::Busy);
-        }
-        for id in ids {
-            match own.ledger.close_then_forget(id, || terms.close(id)) {
+/// The user terminals as closing a worker sees them: how many in a worktree are running something, and hanging them up
+/// (ledger-recorded like any tab close). A close that fails keeps the worker open.
+struct WorktreeTerms<'a>(&'a Terminals, &'a Ownership);
+
+impl WorktreeTerminals for WorktreeTerms<'_> {
+    fn busy(&self, wt: &std::path::Path) -> u32 {
+        self.0.ids_under(wt).into_iter().filter(|&id| self.0.is_busy(id)).count() as u32
+    }
+    fn release(&self, wt: &std::path::Path) -> Result<(), String> {
+        for id in self.0.ids_under(wt) {
+            match self.1.ledger.close_then_forget(id, || self.0.close(id)) {
                 Ok(()) | Err(vajra_desktop::terminal::TermError::NotFound) => {}
-                Err(e) => return Err(ReleaseError::Failed(e.to_string())),
+                Err(e) => return Err(e.to_string()),
             }
         }
         Ok(())
@@ -96,20 +96,21 @@ fn release_terminals<'a>(terms: &'a Terminals, own: &'a Ownership) -> impl Fn(&s
 }
 
 #[tauri::command(async)]
-fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>) -> Value {
-    // "Close anyway" sends the counts the human confirmed; both or neither.
-    let anyway = changed_files.zip(unpushed_commits);
-    app.act_close_worker(&envelope, &worker, anyway, &release_terminals(&terms, &own))
+#[allow(clippy::too_many_arguments)]
+fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>, busy_terminals: Option<u32>) -> Value {
+    // "Close anyway" sends the counts the human confirmed; all three or none.
+    let anyway = changed_files.zip(unpushed_commits).zip(busy_terminals).map(|((f, c), b)| (f, c, b));
+    app.act_close_worker(&envelope, &worker, anyway, &WorktreeTerms(&terms, &own))
 }
 
 #[tauri::command(async)]
 fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
-    app.act_close_finished(&envelope, &release_terminals(&terms, &own))
+    app.act_close_finished(&envelope, &WorktreeTerms(&terms, &own))
 }
 
 #[tauri::command(async)]
-fn closeout_status(app: State<'_, App>, slug: String, run_id: String) -> Res {
-    app.closeout_status(&slug, &run_id)
+fn closeout_status(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, slug: String, run_id: String) -> Res {
+    app.closeout_status(&slug, &run_id, &WorktreeTerms(&terms, &own))
 }
 
 #[tauri::command(async)]
@@ -594,7 +595,7 @@ fn main() {
                     if handle.state::<App>().closeout_due() {
                         let h = handle.clone();
                         std::thread::spawn(move || {
-                            let n = h.state::<App>().closeout_auto(&release_terminals(&h.state::<Terminals>(), &h.state::<Ownership>()));
+                            let n = h.state::<App>().closeout_auto(&WorktreeTerms(&h.state::<Terminals>(), &h.state::<Ownership>()));
                             if n > 0 {
                                 let _ = h.emit(CHANGED, serde_json::json!({"projects": h.state::<App>().bump_all_projects()}));
                             }

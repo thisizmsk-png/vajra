@@ -34,9 +34,12 @@ export function useCloseout(slug: string | null, runId: string | null) {
   return { rows, reload: load };
 }
 
-/** "3 changed files, 2 unpushed commits" — the exact counts; "no upstream branch" when nothing tracks the branch. */
-export function unsavedText(r: { changed_files?: number; unpushed_commits?: number; no_upstream?: boolean }): string {
-  const parts = [S.closeout.files(r.changed_files ?? 0), S.closeout.commits(r.unpushed_commits ?? 0)];
+/** "3 changed files, 2 unpushed commits, 1 terminal still running something": the exact counts; "no upstream branch" when nothing tracks the branch. */
+export function unsavedText(r: { changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }): string {
+  const parts: string[] = [];
+  // A worker kept only for a busy terminal has clean git: leave the zero counts out rather than list them.
+  if (r.busy_terminals === undefined || r.busy_terminals === 0 || r.changed_files || r.unpushed_commits || r.no_upstream) parts.push(S.closeout.files(r.changed_files ?? 0), S.closeout.commits(r.unpushed_commits ?? 0));
   if (r.no_upstream) parts.push(S.closeout.noUpstream);
+  if (r.busy_terminals) parts.push(S.closeout.busy(r.busy_terminals));
   return parts.join(", ");
 }

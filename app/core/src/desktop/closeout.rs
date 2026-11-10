@@ -8,8 +8,8 @@
 //!
 //! Never closed: the Director-General (it is not a subagent, so it is never a candidate), a worker that is mid-turn
 //! (working), one waiting on the human (blocked, a question, a queued message) or one whose git state cannot be read.
-//! A worker with unsaved work is kept and reported with exact counts; only the human's "Close anyway" closes it, and
-//! only if the counts they confirmed still hold.
+//! A worker with unsaved work or a busy terminal is kept and reported with exact counts; only the human's "Close anyway"
+//! closes it, and only if the counts they confirmed (files, commits, busy terminals) still hold.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -36,11 +36,26 @@ pub(super) struct Unsaved {
     pub changed_files: u32,
     pub unpushed_commits: u32,
     pub no_upstream: bool,
+    /// Terminals in the worktree still running something (a dev server, an editor): closing would end them.
+    pub busy_terminals: u32,
 }
 
 impl Unsaved {
-    fn is_clean(&self) -> bool {
+    fn git_clean(&self) -> bool {
         self.changed_files == 0 && self.unpushed_commits == 0 && !self.no_upstream
+    }
+    fn is_clean(&self) -> bool {
+        self.git_clean() && self.busy_terminals == 0
+    }
+    /// The counts "Close anyway" asks the human to confirm: changed files, unpushed commits, busy terminals.
+    fn confirm_key(&self) -> (u32, u32, u32) {
+        (self.changed_files, self.unpushed_commits, self.busy_terminals)
+    }
+    fn put(&self, v: &mut Value) {
+        v["changed_files"] = json!(self.changed_files);
+        v["unpushed_commits"] = json!(self.unpushed_commits);
+        v["no_upstream"] = json!(self.no_upstream);
+        v["busy_terminals"] = json!(self.busy_terminals);
     }
 }
 
@@ -65,6 +80,7 @@ impl Skip {
             Skip::WaitingOnYou => "waiting_on_you",
             Skip::NoWorktree => "no_worktree",
             Skip::Unreadable => "git_unreadable",
+            Skip::Unsaved(u) if u.git_clean() => "terminal_busy",
             Skip::Unsaved(_) => "unsaved_work",
         }
     }
@@ -77,9 +93,7 @@ impl Skip {
     fn to_json(self, worker: &str, label: &str) -> Value {
         let mut v = json!({"worker": worker, "label": label, "reason": self.code()});
         if let Skip::Unsaved(u) = self {
-            v["changed_files"] = json!(u.changed_files);
-            v["unpushed_commits"] = json!(u.unpushed_commits);
-            v["no_upstream"] = json!(u.no_upstream);
+            u.put(&mut v);
         }
         v
     }
@@ -142,16 +156,13 @@ struct Cand {
     pending: bool,
 }
 
-/// Why a worktree's terminals could not be released.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ReleaseError {
-    /// A terminal there is still running something (a dev server, an editor): ended only when the human forces it.
-    Busy,
-    Failed(String),
+/// What closing does to a worktree's user terminals (the app's `Terminals` in production, a fake in tests).
+pub trait WorktreeTerminals {
+    /// How many terminals opened in the worktree are running something (a shell that cannot be asked counts).
+    fn busy(&self, wt: &Path) -> u32;
+    /// Hang up every terminal opened in the worktree. An error keeps the worker open.
+    fn release(&self, wt: &Path) -> Result<(), String>;
 }
-
-/// Releases a worktree's terminals; the flag is `force` (the human confirmed "Close anyway", busy terminals included).
-pub type Release<'a> = &'a dyn Fn(&Path, bool) -> Result<(), ReleaseError>;
 
 impl App {
     /// Whether a worker was closed (the crew and the pump skip tailing it).
@@ -190,7 +201,7 @@ impl App {
         let has_upstream = git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])?.exit() == Some(0);
         let log = if has_upstream { git(&["log", "--format=%H", "@{u}..HEAD"]) } else { git(&["log", "--format=%H", "HEAD", "--not", "--remotes"]) }
             .filter(|o| o.exit() == Some(0))?;
-        Some(Unsaved { changed_files: count(&status), unpushed_commits: count(&log), no_upstream: !has_upstream })
+        Some(Unsaved { changed_files: count(&status), unpushed_commits: count(&log), no_upstream: !has_upstream, busy_terminals: 0 })
     }
 
     fn inspect_cached(&self, wt: &Path) -> Option<Unsaved> {
@@ -205,18 +216,16 @@ impl App {
     }
 
     /// The worktree to release if closing `c` loses nothing, else why not.
-    fn closeout_assess(&self, c: &Cand, cached: bool) -> Result<PathBuf, Skip> {
+    fn closeout_assess(&self, c: &Cand, cached: bool, terms: &dyn WorktreeTerminals) -> Result<PathBuf, Skip> {
         judge(c.worker.status, c.stopped, c.pending)?;
         let (wt, _) = self.crew_worktree(&c.worker.agent_id).map_err(|_| Skip::NoWorktree)?;
-        let u = if cached { self.inspect_cached(&wt) } else { self.inspect_unsaved(&wt) }.ok_or(Skip::Unreadable)?;
+        let mut u = if cached { self.inspect_cached(&wt) } else { self.inspect_unsaved(&wt) }.ok_or(Skip::Unreadable)?;
+        u.busy_terminals = terms.busy(&wt);
         if u.is_clean() { Ok(wt) } else { Err(Skip::Unsaved(u)) }
     }
 
-    fn closeout_release(&self, id: &str, wt: &Path, force: bool, release: Release) -> Res {
-        release(wt, force).map_err(|e| match e {
-            ReleaseError::Busy => fail("terminal_busy", "a terminal in its worktree is still running something"),
-            ReleaseError::Failed(m) => fail("release_failed", m),
-        })?;
+    fn closeout_release(&self, id: &str, wt: &Path, terms: &dyn WorktreeTerminals) -> Res {
+        terms.release(wt).map_err(|e| fail("release_failed", e))?;
         self.closeout.mark(id).map_err(|e| fail("io_error", e))?;
         self.note("worker_closed", &[]);
         Ok(json!({"ok": true, "worker": id, "closed": true}))
@@ -226,36 +235,34 @@ impl App {
     /// human confirmed: changed files, unpushed commits) a worker with unsaved work is closed too, but only if those
     /// are still the counts; otherwise nothing is closed and the fresh counts come back to be confirmed again.
     /// A working, waiting or unreadable worker is never closed, forced or not.
-    pub(super) fn close_worker(&self, id: &str, anyway: Option<(u32, u32)>, release: Release) -> Res {
+    pub(super) fn close_worker(&self, id: &str, anyway: Option<(u32, u32, u32)>, terms: &dyn WorktreeTerminals) -> Res {
         if self.closeout.is_closed(id) {
             return Ok(json!({"ok": true, "worker": id, "closed": true, "already": true}));
         }
         let cand = self.closeout_candidates().into_iter().find(|c| c.worker.agent_id == id).ok_or_else(|| fail("not_found", "no such open worker"))?;
-        match self.closeout_assess(&cand, false) {
-            Ok(wt) => self.closeout_release(id, &wt, false, release),
+        match self.closeout_assess(&cand, false, terms) {
+            Ok(wt) => self.closeout_release(id, &wt, terms),
             Err(Skip::Unsaved(u)) => {
-                let confirmed = anyway.is_some_and(|(f, c)| (f, c) == (u.changed_files, u.unpushed_commits));
+                let confirmed = anyway == Some(u.confirm_key());
                 if !confirmed {
-                    let mut e = fail(if anyway.is_some() { "unsaved_work_changed" } else { "unsaved_work" }, "this worker has work that exists nowhere else");
-                    e["changed_files"] = json!(u.changed_files);
-                    e["unpushed_commits"] = json!(u.unpushed_commits);
-                    e["no_upstream"] = json!(u.no_upstream);
+                    let mut e = fail(if anyway.is_some() { "unsaved_work_changed" } else { Skip::Unsaved(u).code() }, "this worker holds work that closing would lose");
+                    u.put(&mut e);
                     return Err(e);
                 }
                 let (wt, _) = self.crew_worktree(id)?;
-                self.closeout_release(id, &wt, true, release)
+                self.closeout_release(id, &wt, terms)
             }
             Err(skip) => Err(fail(skip.code(), "this worker cannot be closed now")),
         }
     }
 
     /// Close every worker that loses nothing; say what was kept and why.
-    pub(super) fn close_finished(&self, release: Release) -> Res {
+    pub(super) fn close_finished(&self, terms: &dyn WorktreeTerminals) -> Res {
         let (mut closed, mut skipped) = (Vec::new(), Vec::new());
         for c in self.closeout_candidates() {
             let (id, label) = (c.worker.agent_id.as_str(), c.worker.label.as_str());
-            match self.closeout_assess(&c, false) {
-                Ok(wt) => match self.closeout_release(id, &wt, false, release) {
+            match self.closeout_assess(&c, false, terms) {
+                Ok(wt) => match self.closeout_release(id, &wt, terms) {
                     Ok(_) => closed.push(json!({"worker": id, "label": label})),
                     Err(e) => skipped.push(json!({"worker": id, "label": label, "reason": e["error"]})),
                 },
@@ -268,7 +275,7 @@ impl App {
 
     /// Per worker of a run: `closed`, `closable`, `working`, `waiting_on_you`, `unsaved_work` (with counts), `no_worktree`
     /// or `git_unreadable`. Read-only; the crew view and the sidebar ask for it.
-    pub fn closeout_status(&self, slug: &str, run_id: &str) -> Res {
+    pub fn closeout_status(&self, slug: &str, run_id: &str, terms: &dyn WorktreeTerminals) -> Res {
         let Some((_, run)) = self.run_by_id(slug, run_id) else { return Ok(json!({"workers": []})) };
         let workers = self.discover_workers(&run)?;
         let sig = lock(&self.control).signals(&run.session_id);
@@ -280,7 +287,7 @@ impl App {
                 }
                 let c = Cand { stopped: sig.stopped.contains(&w.agent_id), pending: sig.message_pending.contains(&w.agent_id), worker: w };
                 let id = c.worker.agent_id.clone();
-                match self.closeout_assess(&c, true) {
+                match self.closeout_assess(&c, true, terms) {
                     Ok(_) => json!({"worker": id, "state": "closable"}),
                     Err(s) => {
                         let mut v = s.to_json(&id, &c.worker.label);
@@ -307,7 +314,7 @@ impl App {
     }
 
     /// Returns how many workers it closed (the caller tells the UI when it is not zero).
-    pub fn closeout_auto(&self, release: Release) -> usize {
+    pub fn closeout_auto(&self, terms: &dyn WorktreeTerminals) -> usize {
         /// Frees the slot even if the pass panics, so one bad pass cannot stop automatic closing for the session.
         struct Free<'a>(&'a AtomicBool);
         impl Drop for Free<'_> {
@@ -317,15 +324,15 @@ impl App {
         }
         let _free = Free(&self.closeout.busy);
         let on = self.preferences_read(None).ok().and_then(|v| v["effective"]["auto_close_finished"].as_bool()).unwrap_or(true);
-        if on { self.close_finished(release).ok().and_then(|r| r["closed"].as_array().map(Vec::len)).unwrap_or(0) } else { 0 }
+        if on { self.close_finished(terms).ok().and_then(|r| r["closed"].as_array().map(Vec::len)).unwrap_or(0) } else { 0 }
     }
 
-    pub fn act_close_worker(&self, env: &super::Envelope, worker: &str, anyway: Option<(u32, u32)>, release: Release) -> Value {
-        self.act(env, crate::control::receipt::Caller::Ui, true, "close_worker", worker, None::<u64>, || self.close_worker(worker, anyway, release))
+    pub fn act_close_worker(&self, env: &super::Envelope, worker: &str, anyway: Option<(u32, u32, u32)>, terms: &dyn WorktreeTerminals) -> Value {
+        self.act(env, crate::control::receipt::Caller::Ui, true, "close_worker", worker, None::<u64>, || self.close_worker(worker, anyway, terms))
     }
 
-    pub fn act_close_finished(&self, env: &super::Envelope, release: Release) -> Value {
-        self.act(env, crate::control::receipt::Caller::Ui, true, "close_finished", &env.project_id, None::<u64>, || self.close_finished(release))
+    pub fn act_close_finished(&self, env: &super::Envelope, terms: &dyn WorktreeTerminals) -> Value {
+        self.act(env, crate::control::receipt::Caller::Ui, true, "close_finished", &env.project_id, None::<u64>, || self.close_finished(terms))
     }
 }
 
@@ -350,8 +357,9 @@ mod tests {
 
     #[test]
     fn no_upstream_alone_is_unsaved_work() {
-        let u = Unsaved { changed_files: 0, unpushed_commits: 0, no_upstream: true };
+        let u = Unsaved { changed_files: 0, unpushed_commits: 0, no_upstream: true, busy_terminals: 0 };
         assert!(!u.is_clean());
-        assert!(Unsaved { changed_files: 0, unpushed_commits: 0, no_upstream: false }.is_clean());
+        assert!(!Unsaved { changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 1 }.is_clean(), "a busy terminal alone keeps it open");
+        assert!(Unsaved { changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 0 }.is_clean());
     }
 }

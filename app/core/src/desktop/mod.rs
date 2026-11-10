@@ -1966,7 +1966,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 mod arrivals;
 mod caps;
 mod closeout;
-pub use closeout::ReleaseError;
+pub use closeout::WorktreeTerminals;
 mod orchestrator;
 mod proposals;
 mod inbox;

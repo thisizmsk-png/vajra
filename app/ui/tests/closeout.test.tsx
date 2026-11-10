@@ -56,6 +56,19 @@ describe("closing finished workers: sidebar", () => {
     expect((call?.args?.envelope as { project_id: string }).project_id).toBe("p_1");
   });
 
+  it("shows a worker kept only for a busy terminal, with the count and no zero git counts", async () => {
+    const f = fakeIpc({
+      closeout_status: { workers: [{ worker: "w-open", state: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] },
+      act_close_finished: { receipt: { state: "done" }, result: { closed: [], skipped: [{ worker: "w-open", label: "t1", reason: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] } },
+    });
+    setTransport(f.transport);
+    column();
+    const tag = await screen.findByText(S.closeout.busyTag);
+    expect(tag.getAttribute("title")).toBe("2 terminals still running something");
+    fireEvent.click(screen.getByRole("button", { name: S.closeout.closeFinished }));
+    expect(await screen.findByText("Backend: busy terminal (2 terminals still running something)")).toBeTruthy();
+  });
+
   it("is disabled when no worker is finished and open", async () => {
     setTransport(fakeIpc({ closeout_status: { workers: [{ worker: "w-open", state: "working" }, { worker: "w-closed", state: "closed" }] } }).transport);
     column();
@@ -91,7 +104,20 @@ describe("closing finished workers: Close anyway", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: S.closeout.confirm }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_close_worker")).toBe(true));
     const args = f.calls.find((c) => c.cmd === "act_close_worker")?.args;
-    expect([args?.worker, args?.changedFiles, args?.unpushedCommits]).toEqual(["w-unsaved", 3, 2]);
+    expect([args?.worker, args?.changedFiles, args?.unpushedCommits, args?.busyTerminals]).toEqual(["w-unsaved", 3, 2, 0]);
+  });
+
+  it("Close anyway on a busy-terminal worker lists the busy terminals and sends the confirmed count", async () => {
+    const busyRows = { workers: [{ worker: "w-unsaved", state: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] };
+    const f = fakeIpc({ closeout_status: busyRows, act_close_worker: { receipt: { state: "done" }, result: { closed: true } } });
+    pane(f);
+    fireEvent.click(await screen.findByRole("button", { name: S.closeout.closeAnyway }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(S.closeout.confirmBody("2 terminals still running something"))).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: S.closeout.confirm }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_close_worker")).toBe(true));
+    const args = f.calls.find((c) => c.cmd === "act_close_worker")?.args;
+    expect([args?.changedFiles, args?.unpushedCommits, args?.busyTerminals]).toEqual([0, 0, 2]);
   });
 
   it("cancelling sends nothing, and a stale count is shown fresh to confirm again", async () => {

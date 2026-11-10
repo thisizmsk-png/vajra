@@ -137,10 +137,10 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   const closeAnyway = () => {
     setConfirming(false);
     if (!co || !project) return;
-    const confirmed = { changedFiles: co.changed_files ?? 0, unpushedCommits: co.unpushed_commits ?? 0 };
+    const confirmed = { changedFiles: co.changed_files ?? 0, unpushedCommits: co.unpushed_commits ?? 0, busyTerminals: co.busy_terminals ?? 0 };
     void api.actCloseWorker({ action_id: newActionId(), project_id: project.id, expect_generation: null }, agent, confirmed).then(
       (r) => {
-        const e = r.error as { error?: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean } | undefined;
+        const e = r.error as { error?: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number } | undefined;
         setCloseMsg(r.receipt?.state === "done" && !e ? "" : e?.error === "unsaved_work_changed" ? S.closeout.changed(unsavedText(e)) : S.closeout.notDone);
       },
       () => setCloseMsg(S.closeout.notDone),
@@ -159,7 +159,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
           <span className="v-crew__task">{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</span>
         </div>
         {co?.state === "closed" && <p className="v-closeout" role="status">{S.closeout.closedHint}</p>}
-        {co?.state === "unsaved_work" && (
+        {(co?.state === "unsaved_work" || co?.state === "terminal_busy") && (
           <div className="v-closeout v-closeout--warn" role="group" aria-label={S.closeout.unsaved}>
             <p>{S.closeout.hasUnsaved(unsavedText(co))}</p>
             <Button size="sm" variant="danger" onClick={() => setConfirming(true)}>{S.closeout.closeAnyway}</Button>
