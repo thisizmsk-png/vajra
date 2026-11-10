@@ -4230,12 +4230,17 @@ const STORED_KEY: &str = "SENTINELnotakey-0123456789abcdef";
 
 /// An app whose Keychain store and usage source both go through a fake `security` (never the real Keychain).
 fn key_app(t: &Tmp, bin: &crate::providers::keychain::tests::FakeBin) -> App {
+    key_app_answering(t, bin, "exit 22")
+}
+
+/// `key_app` with a transfer tool that runs `curl_body` after reading its stdin (the key command's output).
+fn key_app_answering(t: &Tmp, bin: &crate::providers::keychain::tests::FakeBin, curl_body: &str) -> App {
     use crate::providers::usage::{CurlSource, KeychainKeys};
     let mut app = t.app();
     app.keys = bin.keys();
     // The transfer tool is a fake that fails: a test never makes a network call.
     let fake = bin.0.join("fake-transfer");
-    fs::write(&fake, "#!/bin/sh\n/bin/cat >/dev/null\nexit 22\n").unwrap();
+    fs::write(&fake, format!("#!/bin/sh\n/bin/cat >/dev/null\n{curl_body}\n")).unwrap();
     fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     // The usage side runs its own fake `security` over the same store: it understands a trailing `-w` and logs to usage-argv.log.
     let sec = bin.0.join("usage-security");
@@ -4278,6 +4283,36 @@ fn saving_and_removing_a_key_advance_the_revision_so_a_subscriber_drops_the_remo
     assert_eq!(usage_rows(&removed), ["claude", "codex"]);
     // The key never appears in the answer, the log of calls or the environment.
     assert!(!removed.to_string().contains("SENTINEL") && !bin.log("argv.log").contains("SENTINEL") && !bin.log("env.log").contains("SENTINEL"));
+}
+
+#[test]
+fn replacing_a_key_drops_its_figures_and_says_so_but_a_refused_save_changes_nothing() {
+    let bin = crate::providers::keychain::tests::FakeBin::new();
+    let t = Tmp::new();
+    let app = key_app_answering(&t, &bin, r#"echo '{"data":{"usage":8.4,"limit":10.0,"limit_remaining":1.6}}'"#);
+    let events = std::sync::Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = events.clone();
+    app.set_change_sink(Box::new(move |p| sink.lock().unwrap().push(p)));
+    app.provider_key_save("openrouter", STORED_KEY.into()).unwrap();
+    // The page is open: the figures are read and cached.
+    app.provider_usage(true).unwrap();
+    let shown = app.project_state("p_usage", None).unwrap();
+    assert_eq!(shown["usage"]["usage"][2]["source"], "gateway_key");
+    let (rev, told) = (shown["rev"].as_u64().unwrap(), events.lock().unwrap().len());
+
+    // A second Save is refused: the key is as it was, so the figures stay and nothing is published.
+    assert_eq!(app.provider_key_save("openrouter", STORED_KEY.into()).unwrap_err()["error"], "already_saved");
+    assert_eq!(events.lock().unwrap().len(), told);
+    let same = app.project_state("p_usage", Some(rev)).unwrap();
+    assert_eq!(same["unchanged"], true);
+    assert_eq!(app.provider_usage_cached().usage[2].source, "gateway_key", "a refused Save kept the cached figures");
+
+    // Replacing the key keeps the account list but drops the old key's figures; that is a change and is published.
+    app.provider_key_replace("openrouter", "another-key-0123456789abcdef".into()).unwrap();
+    assert_eq!(events.lock().unwrap().len(), told + 1);
+    let replaced = app.project_state("p_usage", Some(rev)).unwrap();
+    assert_eq!(replaced["unchanged"], false, "a subscriber must not keep the old key's figures");
+    assert_eq!(replaced["usage"]["usage"][2]["source"], "none");
 }
 
 #[test]

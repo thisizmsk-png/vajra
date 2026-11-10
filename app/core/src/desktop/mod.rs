@@ -681,40 +681,51 @@ impl App {
     /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
     pub fn provider_key_save(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
-        self.key_changed(account);
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_replace`: overwrite the stored key (or store the first one).
     pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
-        self.key_changed(account);
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
     pub fn provider_key_remove(&self, account: &str) -> Res {
         let r = self.keys.remove(account).map(|()| false);
-        self.key_changed(account);
+        self.key_changed(account, r.is_ok());
         key_state(account, r)
     }
 
-    /// A key was saved, replaced or removed: forget the account's old figures, look the metered accounts up again and, if
-    /// what is shown changed, advance the revisions and say so, so a subscriber does not keep a removed key's usage.
-    fn key_changed(&self, account: &str) {
-        self.usage.forget(account);
-        self.discover_usage_accounts();
+    /// A key was saved, replaced or removed (`ok`: the operation succeeded). The account's old figures are forgotten only
+    /// when it did, since a refused or failed one left the key as it was. The metered accounts are looked up again either
+    /// way (a failed Replace has already deleted the old key), and if what is shown changed the revisions advance and the
+    /// UI is told, so a subscriber does not keep a removed key's usage. What was shown is taken BEFORE the figures are
+    /// forgotten: replacing a key keeps the account list, and only the dropped figures differ.
+    fn key_changed(&self, account: &str, ok: bool) {
+        self.rediscover(ok.then_some(account));
+    }
+
+    /// Look the metered accounts up again, forgetting `forget`'s figures in between, and publish a change in what the usage
+    /// view shows. The "before" is read first, so dropped figures count as a change even when the account list is the same.
+    fn rediscover(&self, forget: Option<&str>) {
+        let before = self.provider_usage_cached().fingerprint();
+        if let Some(account) = forget {
+            self.usage.forget(account);
+        }
+        self.usage_source.refresh(true);
+        if self.provider_usage_cached().fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
     }
 
     /// Look up which accounts have a stored key (this runs `security`, so never on a cache read) and publish a change in
     /// what the usage view shows. The app calls it once on a background thread at start, so the row appears shortly after
     /// launch without opening the Providers page.
     pub fn discover_usage_accounts(&self) {
-        let before = self.provider_usage_cached().fingerprint();
-        self.usage_source.refresh(true);
-        if self.provider_usage_cached().fingerprint() != before {
-            self.emit_projects(self.bump_all_projects());
-        }
+        self.rediscover(None);
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
