@@ -12,8 +12,12 @@ export const PROVIDER_NAME: Record<string, string> = { claude: "Claude Code", co
 
 /** A gateway model id's vendor prefix ("x-ai/grok-4" -> "x-ai") named as the registry knows it. A vendor with a MARKS entry shows its mark;
  *  adding a mark for another vendor is just a new MARKS entry (and an alias here if the prefix differs from the key). */
-const VENDOR_KEY: Record<string, string> = { "x-ai": "grok", openai: "codex", anthropic: "claude" };
-export const vendorOf = (model?: string | null): string | undefined => { const v = model && model.includes("/") ? model.split("/")[0] : undefined; return v ? (VENDOR_KEY[v] ?? v) : undefined; };
+const VENDOR_KEY: Record<string, string> = { "x-ai": "grok", openai: "codex", anthropic: "claude", "meta-llama": "meta", bytedance: "bytedance-seed" };
+/** "~openai/..." is OpenRouter's alias form of "openai/...". */
+export const vendorOf = (model?: string | null): string | undefined => {
+  const v = model && model.includes("/") ? model.split("/")[0].replace(/^~/, "").toLowerCase() : undefined;
+  return v ? (VENDOR_KEY[v] ?? v) : undefined;
+};
 
 /** The mark, or the monogram when there is none or an image fails to load (blocked, missing): a tile is never left empty. */
 function Mark({ id, className }: { id: string; className: string }) {
@@ -38,7 +42,7 @@ export function ProviderIcon({ family: given, model, via, large, named }: { fami
   const name = PROVIDER_NAME[family] ?? (model ? model.split("/")[0] : family);
   const a11y = named ? { role: "img", "aria-label": via && PROVIDER_NAME[via] ? `${name} · ${PROVIDER_NAME[via]}` : name } : { "aria-hidden": true as const };
   return (
-    <span className={cn("v-pt", large && "v-pt--lg", !known && "v-pt--fb", MARKS[family] && "v-pt--mark")} {...a11y} data-family={known ? family : "unknown"}>
+    <span className={cn("v-pt", large && "v-pt--lg", !known && "v-pt--fb", MARKS[family] && "v-pt--mark", MARKS[family]?.plate && "v-pt--plate")} {...a11y} data-family={known ? family : "unknown"}>
       {known ? <Mark id={family} className="v-pt__mk" /> : <span className="v-pt__fb" dangerouslySetInnerHTML={{ __html: fallback }} />}
       {badge && <span className="v-pt__via"><Mark id={badge} className="v-pt__mk v-pt__mk--sm" /></span>}
     </span>
