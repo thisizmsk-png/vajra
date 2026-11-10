@@ -22,6 +22,11 @@
 # evaluated by the shell. bash 3.2 compatible (macOS /bin/bash).
 
 unset CDPATH
+# NFR-SEC-2: a hook runs outside the guard, and the programs it starts can read the HMAC key file. A same-uid worker
+# can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
+# and python3 only from its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+PYTHON3="/usr/bin/python3"
 umask 077
 exec 3>&2 2>/dev/null
 

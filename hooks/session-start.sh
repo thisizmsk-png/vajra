@@ -19,6 +19,13 @@
 
 set -uo pipefail
 
+# NFR-SEC-2: this script handles the HMAC key and passes it to openssl. A same-uid worker can write user dirs (for
+# example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs and openssl from
+# its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+OPENSSL="/usr/bin/openssl"
+PYTHON3="/usr/bin/python3"
+
 SKILL_DIR="${HOME}/.claude/skills/vajra"
 VAJRA_DIR="${HOME}/.claude/vajra"
 MANIFEST="${SKILL_DIR}/manifest.json"
@@ -44,9 +51,22 @@ sha256_of() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# A tool the hooks need that is not in the pinned dirs: say so in every session (the guard blocks every tool call
+# without both jq and python3; without python3 the router, atman and the knowledge prime are off), never a silent break.
+missing_tools() {
+  if ! command -v jq >/dev/null 2>&1; then
+    if [ -x "$PYTHON3" ]; then
+      echo "Vajra: jq was not found in /usr/bin, /bin, /usr/sbin or /sbin. The guard parses with /usr/bin/python3, but the integrity check, campaigns, replay and Vajra Desktop's control hook need jq. Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq."
+    else
+      echo "Vajra: jq was not found, so the guard blocks every tool call. Vajra's hooks use only /usr/bin, /bin, /usr/sbin and /sbin: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses."
+    fi
+  fi
+  [ -x "$PYTHON3" ] || echo "Vajra: python3 was not found at $PYTHON3, so the router, atman and the knowledge prime are off. Vajra uses only /usr/bin/python3 (xcode-select --install provides it)."
+}
+
 # One line per problem; empty output = clean.
 integrity_problems() {
-  if ! command -v jq >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  if ! command -v jq >/dev/null 2>&1 || [ ! -x "$OPENSSL" ]; then
     echo "cannot verify: jq and openssl are required"
     return
   fi
@@ -68,7 +88,7 @@ integrity_problems() {
   else
     local want got
     want="$(tr -d '[:space:]' < "$SIG_FILE")"
-    got="$(sha256_of "$MANIFEST" | tr -d '\n' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex 2>/dev/null | awk '{print $NF}')"
+    got="$(sha256_of "$MANIFEST" | tr -d '\n' | "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex 2>/dev/null | awk '{print $NF}')"
     if [ -z "$got" ] || [ "$got" != "$want" ]; then
       echo "manifest.json signature does not match (changed after install)"
     fi
@@ -100,6 +120,8 @@ if [ "$CHECK_ONLY" = 1 ]; then
 fi
 
 mkdir -p "$VAJRA_DIR" 2>/dev/null || true
+
+missing_tools
 
 case "$PROBLEMS" in
   "")
@@ -164,7 +186,7 @@ fi
 # 5 seconds and 8000 characters, and its output is always (re)wrapped in one
 # <untrusted-data source="vajra-kb"> block: it is data, not instructions.
 KB_SH="${SKILL_DIR}/scripts/vajra_kb.py"
-if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && command -v python3 >/dev/null 2>&1; then
+if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && [ -x "$PYTHON3" ]; then
   KB_CWD=""
   if command -v jq >/dev/null 2>&1 && [ -n "$PAYLOAD" ]; then
     KB_CWD="$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null || true)"
@@ -172,7 +194,7 @@ if [ -f "$KB_SH" ] && [ -d "${VAJRA_DIR}/kb" ] && command -v python3 >/dev/null 
   { [ -n "$KB_CWD" ] && [ -d "$KB_CWD" ]; } || KB_CWD="$PWD"
   KB_TMP="$(mktemp "${TMPDIR:-/tmp}/vajra-prime-XXXXXX" 2>/dev/null)" || KB_TMP=""
   if [ -n "$KB_TMP" ]; then
-    ( cd "$KB_CWD" 2>/dev/null && exec python3 -I "$KB_SH" prime --budget 1500 ) > "$KB_TMP" 2>/dev/null </dev/null &
+    ( cd "$KB_CWD" 2>/dev/null && exec "$PYTHON3" -I "$KB_SH" prime --budget 1500 ) > "$KB_TMP" 2>/dev/null </dev/null &
     kb_pid=$!
     kb_waited=0
     while kill -0 "$kb_pid" 2>/dev/null && [ "$kb_waited" -lt 50 ]; do sleep 0.1; kb_waited=$((kb_waited + 1)); done

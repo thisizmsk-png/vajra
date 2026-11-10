@@ -208,9 +208,16 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   act_close_finished: () => ({ receipt: { action_id: "a_fixture3", state: "done" }, result: { closed: [], skipped: [{ worker: "architect", label: "t1", reason: "unsaved_work", changed_files: 3, unpushed_commits: 2, no_upstream: false, busy_terminals: 0 }, { worker: "verifier", label: "t5", reason: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] } }),
   worktree_info: (a) => ({ worker: String(a?.worker), worktree: `.claude/worktrees/${String(a?.worker)}`, branch: `vajra/${RUN}/t2`, base: "4e1c9a2" }),
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),
-  tail: (a) => {
-    const after = Number(a?.afterSeq ?? 0);
-    return { lines: stream.filter((l) => l.seq > after), gap: false, head_seq: stream.length, spill_start: null, spill_end: null };
+  // The real StreamWindow shape: up to `maxLines` rows starting at `from` (the newest rows when `from` is null). One worker
+  // (`w-sepoy-backend-1`) lost line 5, so any window covering it reports `gap` and leaves that row out.
+  stream_window: (a) => {
+    const lost = String(a?.stream) === "w-sepoy-backend-1" ? 5 : 0;
+    const head = stream.length;
+    const max = Math.max(1, Number(a?.maxLines ?? 220));
+    const from = a?.from === null || a?.from === undefined ? null : Number(a.from);
+    const start = from === null ? Math.max(1, head - max + 1) : Math.max(1, from);
+    const end = Math.min(head, start + max - 1);
+    return { lines: stream.filter((l) => l.seq >= start && l.seq <= end && l.seq !== lost), head_seq: head, first_seq: 1, at_start: start <= 1, at_end: end >= head, gap: lost >= start && lost <= end };
   },
   start_run: () => ({ stream: "s-new", session_id: "u-new", run_id: RUN, campaign: SLUG }),
   read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
@@ -219,7 +226,6 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
     { id: "k2", kind: "lesson", title: "Redis MULTI in tests needs the ioredis-mock pipeline shim" },
   ] }),
-  read_spill_before: () => ({ lines: [], at_start: true, gap: false }),
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 

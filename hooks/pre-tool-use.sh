@@ -24,6 +24,11 @@
 
 set -u
 unset CDPATH
+# NFR-SEC-2: a hook runs outside the guard, and the programs it starts can read the HMAC key file. A same-uid worker
+# can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
+# and python3 only from its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+PYTHON3="/usr/bin/python3"
 # Path comparisons are case-insensitive (nocasematch is switched on only inside
 # classify/inside/icase, so `case` on flags like -c vs -C stays exact).
 
@@ -60,15 +65,43 @@ allow() {
 }
 
 TOOL=""
-command -v jq >/dev/null 2>&1 || block "jq is not installed, so the payload cannot be checked (fail-closed). Install jq."
+NOJQ="jq was not found in /usr/bin, /bin, /usr/sbin or /sbin and /usr/bin/python3 could not parse the payload, so every tool call is blocked (fail-closed). Vajra's hooks use only those root-owned system dirs: a jq in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; otherwise xcode-select --install provides /usr/bin/python3, which the guard then uses. Retry after."
 
 PAYLOAD="$(cat)"
 CWD_IN="" CMD="" P1="" P2="" P3="" PAT="" AID=""
+if command -v jq >/dev/null 2>&1; then
 PARSED="$(jq -r '
   def s: if type == "string" then . elif . == null then "" else tostring end;
   (.tool_input | if type == "object" then . else {} end) as $i
   | @sh "TOOL=\(.tool_name | s) CWD_IN=\(.cwd | s) CMD=\($i.command | s) P1=\($i.file_path | s) P2=\($i.path | s) P3=\($i.notebook_path | s) PAT=\($i.pattern | s) AID=\(.agent_id | s)"
 ' <<<"$PAYLOAD" 2>/dev/null)" || block "unparseable hook payload (fail-closed)"
+elif [ -x "$PYTHON3" ]; then
+  # No jq in the system dirs (macOS 14): the same fields, quoted as jq's @sh does, by the pinned python3's json module.
+  # A non-object payload, bad JSON or a python3 that cannot run (the Command Line Tools stub) all block.
+  PARSED="$("$PYTHON3" -I -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+if not isinstance(d, dict):
+    sys.exit(1)
+def s(v):
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return ""
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+def q(v):
+    t = chr(39)
+    return t + s(v).replace(t, t + "\\" + t + t) + t
+i = d.get("tool_input")
+if not isinstance(i, dict):
+    i = {}
+sys.stdout.write("TOOL=%s CWD_IN=%s CMD=%s P1=%s P2=%s P3=%s PAT=%s AID=%s" % (q(d.get("tool_name")), q(d.get("cwd")),
+    q(i.get("command")), q(i.get("file_path")), q(i.get("path")), q(i.get("notebook_path")), q(i.get("pattern")),
+    q(d.get("agent_id"))))
+' <<<"$PAYLOAD" 2>/dev/null)" || block "$NOJQ"
+else
+  block "$NOJQ"
+fi
 eval "$PARSED"
 [ -n "$TOOL" ] || block "payload has no tool_name (fail-closed)"
 
