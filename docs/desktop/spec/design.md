@@ -1484,6 +1484,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 
 **Tamper checks.** At `worktree_add` the core hashes every git config file that the core's later git calls will read:
 - the worktree's `.git` file;
+- **the worktree's `<gitdir>/commondir`**, which tells git where the common directory is, and with it the `config`, `info/attributes` and objects it reads ([gitrepository-layout](https://git-scm.com/docs/gitrepository-layout)). The core also records the **resolved common directory**: its canonical path, plus the device and inode of that directory and of its `config` file;
 - the repo's files: `<common>/config`, `<common>/info/attributes`, and `<gitdir>/config.worktree` when present;
 - **the user's global files:** `~/.gitconfig`, and `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config` when the variable is unset). A missing file is hashed as "absent", so creating one counts as a change;
 - **every file those files include**, through `include.path` or any `includeIf.<cond>.path`. The core follows git's own rules: relative paths, `~/`, and a depth of at most 10. It hashes each include whether or not its condition matches today. An include that can't be read is hashed as "unreadable".
@@ -1492,6 +1493,8 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 
 **After the worker's process group is gone, and before every later git call on that repo,** the core checks all of these:
 - the `.git` file and repo config hashes are unchanged. The global ones only feed a card note, because the core reads a frozen copy (below);
+- **`<gitdir>/commondir` is unchanged, and resolves to the same common directory** (same canonical path, device and inode, and the same `config` device and inode). The core checks this with plain filesystem reads, never by asking git, because git would already be reading the redirected directory. A worker that rewrites `commondir` to point at its own directory, with the original objects plus its own `config` and `info/attributes`, leaves HEAD at `dispatch_head` and needs no `.gitattributes` change. With this check, the ticket is `tampered`;
+- **The common directory is also pinned.** Every core git call on a worker's worktree sets `GIT_DIR=<gitdir>` and `GIT_COMMON_DIR=<recorded common directory>`, together with `GIT_WORK_TREE`. Git then never reads `commondir` or the `.git` file at all. It is a second layer; the check above is the rule;
 - HEAD equals `dispatch_head` (16.5): the HEAD after `merge_deps` and the clones, recorded before the worker started;
 - **HEAD is still detached.** `git symbolic-ref -q HEAD` must fail (exit 1), and `<gitdir>/HEAD` must hold exactly the `dispatch_head` sha. A worker that runs `git symbolic-ref HEAD refs/heads/main` while `main` sits at `dispatch_head` leaves the sha unchanged, so the sha check alone can't see it. With this check, the ticket is `tampered`. Even without it, `snapshot` never writes through HEAD (above), so the user's branch can't move. The retry rule's "unchanged tree" test also requires a detached HEAD;
 - there is no nested `.git` and no new or changed `.gitmodules`;
@@ -1699,6 +1702,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - A changed `<common>/config` (`gpg.program`) gives `tampered`.
     - A rewritten `.git` file gives `tampered`.
     - So do a worker commit and a nested `.git`.
+    - **A worker redirects `<gitdir>/commondir`** to a directory with the original objects and its own `config`, where a `filter.x.clean` writes a marker, plus an `info/attributes` line that applies it. HEAD still resolves to `dispatch_head`, and no `.gitattributes` changes. The result is `tampered` before any `add`, and the marker never appears. With the check disabled in the test, the pinned `GIT_COMMON_DIR` still keeps the filter from running.
     - **A worker runs `git symbolic-ref HEAD refs/heads/main` while `main` is at `dispatch_head`:** the result is `tampered`, `main` doesn't move, and no commit is made on it. With the detached check disabled in the test, `snapshot`'s plumbing path still leaves `main` untouched.
     - `update-ref` refuses to overwrite an existing `vajra/` task ref.
     - **Pre-staged files:** a worker makes one allowed edit, and also runs `git add` on an out-of-task source file and an edited `AGENTS.md`. Only the allowed edit enters the snapshot. The other two become leftovers, and the tree check passes.
