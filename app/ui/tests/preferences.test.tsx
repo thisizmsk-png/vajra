@@ -50,13 +50,14 @@ describe("FG-08 preferences",()=>{
   fireEvent.change(field(),{target:{value:"9"}});await act(async()=>window.dispatchEvent(new CustomEvent("vajra-preferences-saved")));
   await waitFor(()=>expect(f.calls.filter(c=>c.cmd==="preferences_read"&&c.args?.projectId===Q).length).toBeGreaterThan(1));expect(field().value).toBe("9");
  });
- it("shows no editor, shell or notification controls until something reads them, and a save elsewhere keeps their stored values",async()=>{
+ it("shows only the controls something reads (no editor, shell or notification controls) until something reads them, and a save elsewhere keeps their stored values",async()=>{
   const stored={...view(),overrides:{editor:"code",shell:"zsh",notifications_text:true},effective:{...DEFAULT_PREFERENCES,editor:"code",shell:"zsh",notifications_text:true}};
   const f=fakeIpc({preferences_read:stored,provider_list:{schema:"vajra.providers/1",providers:[]},preflight:{rows:[],start_enabled:true},act_preferences_update:(a?:Record<string,unknown>)=>done({...stored,rev:1,effective:{...stored.effective,...(a?.patch as object)}})});setTransport(f.transport);
   window.location.hash="#/settings?section=general";
   const r=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
-  expect(await screen.findByText("Not built yet")).toBeTruthy();
-  expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
+  // General holds only what the core reads (closing finished workers); editor and shell stay hidden.
+  expect(await screen.findByRole("switch",{name:"Close finished workers automatically"})).toBeTruthy();
+  expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByText("Not built yet")).toBeNull();
   r.unmount();window.location.hash="#/settings?section=notifications";
   const n=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
   expect(await screen.findByText("Not built yet")).toBeTruthy();

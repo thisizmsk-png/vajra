@@ -492,7 +492,7 @@ fn a_reader_still_blocked_after_close_reaped_the_shell_stops_at_its_next_read_an
     // What `stop` leaves behind when the real reader is still blocked: the shell reaped, so `exited` is set.
     term.exited.store(true, Ordering::SeqCst);
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window, Limits::default().max_rate);
+    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window, Limits::default().max_rate, 0);
     assert!(reads.load(Ordering::SeqCst) <= 1, "the reader kept consuming after the shell was reaped: {} reads", reads.load(Ordering::SeqCst));
     assert!(lock(&term.pending.0).buf.len() <= 1000, "output was buffered with no flusher to drain it");
     t.close(info.id).unwrap();
@@ -514,7 +514,7 @@ fn a_reader_blocked_with_the_slave_held_open_is_woken_without_a_signal_and_ends(
     let wake = wake.expect("a wake pipe");
     let th = {
         let term = term.clone();
-        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window, Limits::default().max_rate))
+        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window, Limits::default().max_rate, 0))
     };
     std::thread::sleep(Duration::from_millis(200)); // let it block in select
     assert!(!th.is_finished(), "the reader should be blocked");
@@ -648,4 +648,34 @@ fn bench_memory_and_idle_cpu() {
     let shells: Vec<u64> = keep.iter().map(|(i, _)| rss_kb(t.pid(i.id).unwrap())).collect();
     println!("BENCH core RSS before {base} KB, after 8 terminals {after} KB => {} KB per terminal (core side)", after.saturating_sub(base) / 8);
     println!("BENCH shell RSS per terminal: avg {} KB", shells.iter().sum::<u64>() / shells.len() as u64);
+}
+
+#[test]
+fn ids_under_finds_the_terminals_in_a_worktree_and_not_the_ones_in_the_project_folder() {
+    let f = Fixture::new("ids-under");
+    let t = f.terminals();
+    let (root_term, _o1) = open_root(&t, &f);
+    let (wt_term, _o2) = open_at(&t, &f, &f.worktree);
+    assert_eq!(t.ids_under(&f.worktree), vec![wt_term.id]);
+    assert!(!t.ids_under(&f.worktree).contains(&root_term.id));
+    assert_eq!(t.ids_under(&f.root).len(), 2, "the folder contains its worktrees");
+    t.close(wt_term.id).unwrap();
+    assert!(t.ids_under(&f.worktree).is_empty());
+}
+
+#[test]
+fn a_terminal_running_something_is_busy_and_an_idle_or_ended_one_is_not() {
+    let f = Fixture::new("busy");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    assert!(!t.is_busy(info.id), "an idle shell");
+    t.write(info.id, b"sleep 30\n").unwrap();
+    let start = Instant::now();
+    while !t.is_busy(info.id) && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(t.is_busy(info.id), "a shell running a command");
+    drop(out);
+    t.close(info.id).unwrap();
+    assert!(!t.is_busy(info.id), "a closed terminal is not busy");
 }

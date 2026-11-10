@@ -52,6 +52,11 @@ pub(super) struct Hub {
     inbox_fp: HashMap<String, u64>,
     /// Whether the last inbox read worked (it starts true).
     inbox_ok: bool,
+    /// project_id -> the fields `project_state` shows that change without a bump of their own, as it last saw them: the
+    /// Director-General generation (a conversation created or renewed by any path: plain `new_conversation`,
+    /// `lead_status`) and the count of active runs (a PTY that closes with nothing on the bus). One that moved bumps the
+    /// revision before the `since_rev` check (#105 review).
+    quiet: HashMap<String, (Option<u32>, usize)>,
 }
 
 /// Where `act` gets the target's current generation.
@@ -83,7 +88,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new(), inbox_ok: true })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new(), inbox_ok: true, quiet: HashMap::new() })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -121,6 +126,15 @@ impl App {
     /// effect returned when it ran. `current_generation` is the target's generation now.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn act(&self, env: &Envelope, caller: Caller, human_only: bool, action: &str, target: &str, current_generation: impl Into<Gen>, effect: impl FnOnce() -> Res) -> Value {
+        self.act_bound(env, None, caller, human_only, action, target, current_generation, effect)
+    }
+
+    /// `act` for a target bound to a project (`bind`: the project the target resolved to, or why it has none). The binding
+    /// is enforced under the same lock as the replay decision, after the same expiry `begin` applies: only an `action_id`
+    /// that `begin` will answer from a stored receipt (a replay, or `action_id_reuse`) skips it. Anything else that names
+    /// another project (`project_mismatch`) or a target with no project is refused with nothing stored (#105 review).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn act_bound(&self, env: &Envelope, bind: Option<Result<String, Value>>, caller: Caller, human_only: bool, action: &str, target: &str, current_generation: impl Into<Gen>, effect: impl FnOnce() -> Res) -> Value {
         let current_generation = current_generation.into();
         let req = Request { action_id: &env.action_id, project_id: &env.project_id, action, target, expect_generation: env.expect_generation, caller, human_only };
         // Start runs are judged and finished one at a time: a second start waits here, then sees the generation the
@@ -133,9 +147,19 @@ impl App {
                 Gen::Given(g) => g,
                 Gen::ProjectRuns => Some(h.run_gen.get(&env.project_id).copied().unwrap_or(0)),
             };
+            let now = now_ms();
+            // Expired exactly as `begin` will: a receipt past the dedupe window is not a replay, so it neither skips the
+            // binding nor counts as "already there".
+            let existed = h.store.live(&env.action_id, now);
+            if !existed {
+                match bind {
+                    Some(Ok(p)) if p != env.project_id => return json!({"receipt": null, "error": {"error": "project_mismatch", "detail": "this action names a different project than its target; refresh and try again"}}),
+                    Some(Err(e)) => return json!({"receipt": null, "error": e}),
+                    _ => {}
+                }
+            }
             let rev = h.rev(&env.project_id);
-            let existed = h.store.get(&env.action_id).is_some();
-            (h.store.begin(&req, current_generation, rev, now_ms()), existed)
+            (h.store.begin(&req, current_generation, rev, now), existed)
         };
         let (rc, outcome) = match begun {
             // The ledger would not take the receipt: nothing was done, and nothing is claimed.
@@ -391,13 +415,26 @@ impl App {
             // Never "nothing waiting" on a failed read.
             Err(e) => (json!({"ok": false, "error": e["error"]}), json!({"ok": false, "error": e["error"]})),
         };
+        // Read before the revision: a field that moved since the last read without bumping it (`Hub::quiet`) bumps it now,
+        // so `since_rev` never answers `unchanged` across a new or renewed conversation or a run that ended quietly.
+        let orch_gen = self.orchestrator_generation(project_id);
+        let active_runs = self.active_run_count();
+        let mut moved: Vec<Value> = Vec::new();
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
+            let seen = h.revs.contains_key(project_id);
+            let now = (orch_gen, active_runs);
+            if h.quiet.insert(project_id.to_string(), now) != Some(now) && seen {
+                moved.push(json!({"project_id": project_id, "rev": h.bump(project_id)}));
+            }
             let rev = h.rev(project_id);
             let rg = h.run_gen.get(project_id).copied().unwrap_or(0);
             let recent: Vec<Receipt> = h.store.recent(project_id, RECENT).into_iter().cloned().collect();
             (rev, rg, recent)
         };
+        if !moved.is_empty() {
+            self.emit_projects(moved);
+        }
         if since_rev == Some(rev) {
             return Ok(json!({"schema": "vajra.project_state/1", "project_id": project_id, "rev": rev, "unchanged": true}));
         }
@@ -407,8 +444,8 @@ impl App {
             "project_id": project_id,
             "rev": rev,
             "unchanged": false,
-            "active_runs": self.active_run_count(),
-            "generations": {"project": run_gen},
+            "active_runs": active_runs,
+            "generations": {"project": run_gen, "orchestrator": orch_gen},
             "workers": workers,
             "receipts": recent,
             "inbox": inbox,

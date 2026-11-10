@@ -11,11 +11,13 @@ import type { AppInfo, Project, Session } from "./projectContract";
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
+const PLAIN = new Set(["lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
+
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
-  // The Director-General's guard preconditions and its turn cap already carry a one-line "why and what to do" (for
-  // example the sandbox one), so they are shown as they are, without the code in front.
-  if (isIpcError(e) && (e.error === "lead_guard_missing" || e.error === "turns_full") && e.detail) return e.detail;
+  // The Director-General's guard preconditions, its turn cap and the project-store refusals (FG-02c) already carry a
+  // one-line "why and what to do" (for example the sandbox one), so they are shown as they are, without the code.
+  if (isIpcError(e) && PLAIN.has(e.error) && e.detail) return e.detail;
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }
@@ -61,6 +63,11 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
     const b = bytes(m);
     if (b) onMsg({ data: b });
     else if (typeof m === "object" && m !== null && "exit" in m) onMsg({ exit: (m as { exit: number | null }).exit });
+    else if (typeof m === "object" && m !== null && "skipped" in m) {
+      const r = m as { skipped: unknown; alt?: unknown };
+      onMsg({ skipped: Number(r.skipped) || 0, alt: typeof r.alt === "boolean" ? r.alt : null });
+    }
+    else if (typeof m === "object" && m !== null && "activity" in m) onMsg({ activity: true });
   }) as Promise<TermInfo>;
 }
 
@@ -87,7 +94,13 @@ export type RunDiag = { stream: string; pid: number };
 export type Found = { pid: number; stamp: number; cwd: string; verdict: "owned" | "gone" | "reused"; members?: number };
 export type Lifecycle = { terminals: TermDiag[]; runs: RunDiag[]; found: Found[]; close_keeps: { terminals: number; runs: number }; quit_ends: { terminals: number; runs: number }; archive_leaves: number[] };
 /** One message on a terminal's channel: output bytes, or the end of the shell (`code` null when a signal ended it). */
-export type TermMsg = { data: Uint8Array } | { exit: number | null };
+export type TermMsg =
+  | { data: Uint8Array }
+  | { exit: number | null }
+  /** A hidden pane was shown: `skipped` bytes of its output are not coming; `alt` says it entered (true) or left (false) the alternate screen meanwhile. */
+  | { skipped: number; alt: boolean | null }
+  /** New output arrived in a pane that is hidden (the core sends it at most twice a second). */
+  | { activity: true };
 /** The largest `term_write` the core accepts is 256 KiB; the UI sends pieces far below it. */
 export const TERM_WRITE_CHUNK = 32 * 1024;
 
@@ -115,11 +128,16 @@ export type RunOverview = {
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 /** ADR-15 2: one Director-General per project; `generation` is its conversation number (1, then +1 per "New conversation"). */
-export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; generation: number; name: string };
+export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; project_name?: string | null; generation: number; name: string };
 export type DirectorGeneralState = "idle" | "thinking" | "running";
 export type LeadStatus = {
   available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string; name: string;
   state?: DirectorGeneralState; reason?: string; project_id?: string; generation?: number; stream?: string;
+  /** The store project's name (FG-02c). */
+  project_name?: string | null;
+  /** When unavailable because of the project store: `not_a_project`, `project_archived` or `project_missing`. For
+   *  `not_a_project`, `action: "add_project"` and the folder `path` let the window offer to add it (decision Q1). */
+  error?: "not_a_project" | "project_archived" | "project_missing"; action?: "add_project"; path?: string;
 };
 export type NewConversation = { project_id: string; generation: number; stream: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
@@ -176,6 +194,9 @@ export type Receipt = {
 /** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
 export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
 /** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type CloseoutState = "closed" | "closable" | "working" | "waiting_on_you" | "unsaved_work" | "terminal_busy" | "no_worktree" | "git_unreadable";
+export type CloseoutRow = { worker: string; state: CloseoutState; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number };
+export type CloseFinishedResult = { closed: { worker: string; label: string }[]; skipped: { worker: string; label: string; reason: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }[] };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
@@ -186,7 +207,8 @@ export type ProjectState =
       rev: number;
       unchanged: false;
       active_runs: number;
-      generations: { project: number };
+      /** `orchestrator`: the project's Director-General conversation (FG-02c), null before its first use. */
+      generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
@@ -218,6 +240,12 @@ export const api = {
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  /** Per worker of a run: whether it is closed, could be closed now, or why it is kept (with the exact counts of unsaved work). */
+  closeoutStatus: (slug: string, runId: string) => call<{ workers: CloseoutRow[] }>("closeout_status", { slug, runId }),
+  /** Close one finished worker. Without `confirmed` only a worker that loses nothing closes; "Close anyway" sends the counts the human saw (files, commits, busy terminals, no upstream), and anything that changed refuses. */
+  actCloseWorker: (envelope: Envelope, worker: string, confirmed?: { changedFiles: number; unpushedCommits: number; busyTerminals: number; noUpstream: boolean }) => call<ActResult>("act_close_worker", { envelope, worker, changedFiles: confirmed?.changedFiles ?? null, unpushedCommits: confirmed?.unpushedCommits ?? null, busyTerminals: confirmed?.busyTerminals ?? null, noUpstream: confirmed?.noUpstream ?? null }),
+  /** Close every finished worker that loses nothing; the result lists what was kept and why. */
+  actCloseFinished: (envelope: Envelope) => call<ActResult<CloseFinishedResult>>("act_close_finished", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
   actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256 }),
@@ -252,6 +280,8 @@ export const api = {
   termList: () => call<{ terminals: TermInfo[] }>("term_list"),
   termWrite: (id: number, data: string) => call<Json>("term_write", { id, data }),
   termResize: (id: number, rows: number, cols: number) => call<Json>("term_resize", { id, rows, cols }),
+  /** The pane is shown or hidden; `alt` says it was on the alternate screen when it hid. */
+  termVisible: (id: number, visible: boolean, alt = false) => call<Json>("term_visible", { id, visible, alt }),
   termAck: (id: number, bytes: number) => call<Json>("term_ack", { id, bytes }),
   termClose: (id: number) => call<Json>("term_close", { id }),
   diff: (cwd: string, base: string) => call<{ code: number | null; diff: string; truncated: boolean; timed_out: boolean; untracked?: string[]; untracked_truncated?: boolean }>("diff", { cwd, base }),
@@ -272,6 +302,16 @@ export const api = {
   askLead: (runId: string, text: string) => call<AskStarted>("ask_lead", { runId, text }),
   cancelAsk: (askId: string) => call<Json>("cancel_ask", { askId }),
   leadStatus: (runId: string) => call<LeadStatus>("lead_status", { runId }),
+  /** The project's Director-General with no run (FG-02c). The stream is rebuilt after a restart only by `leadStatus`. */
+  leadStatusForProject: (projectId: string) => call<LeadStatus>("lead_status", { projectId }),
+  /** Guarded Director-General actions (FG-02c, decision Q2): at most once per `action_id`. `envelope.project_id` is
+   *  the run's project and `expect_generation` the conversation shown (`stale_generation` when it moved on). */
+  actAskLead: (envelope: Envelope, runId: string, text: string) => call<ActResult<AskStarted>>("act_ask_lead", { envelope, runId, text }),
+  actNewConversation: (envelope: Envelope, runId: string) => call<ActResult<NewConversation>>("act_new_conversation", { envelope, runId }),
+  actCancelAsk: (envelope: Envelope, askId: string) => call<ActResult>("act_cancel_ask", { envelope, askId }),
+  /** `envelope.project_id` is the project the inbox lists the proposal under. */
+  actStartProposal: (envelope: Envelope, id: string, proposalSha256: string) => call<ActResult<{ action_id: string; state: string; run: Json }>>("act_start_proposal", { envelope, id, proposalSha256 }),
+  actDismissProposal: (envelope: Envelope, id: string) => call<ActResult<{ action_id: string; state: string }>>("act_dismiss_proposal", { envelope, id }),
   /** The run's project's Director-General starts generation n+1, on an empty stream. Refused (`lead_busy`) mid-turn. */
   newConversation: (runId: string) => call<NewConversation>("new_conversation", { runId }),
   /** Everything waiting on the human, oldest first. Derived on each call; poll it like `crew`. */
