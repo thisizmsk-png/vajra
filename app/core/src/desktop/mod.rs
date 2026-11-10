@@ -192,6 +192,9 @@ pub struct App {
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
     /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
     keys: crate::providers::keychain::Keys,
+    /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
+    usage: crate::providers::usage::Meter,
+    usage_source: Box<dyn crate::providers::usage::UsageSource>,
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
@@ -298,6 +301,9 @@ impl App {
                 Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
                 home,
             ),
+            usage: Default::default(),
+            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
+            usage_source: Box::new(crate::providers::usage::NoSource),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -679,6 +685,35 @@ impl App {
     /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
     pub fn provider_key_remove(&self, account: &str) -> Res {
         key_state(account, self.keys.remove(account).map(|()| false))
+    }
+
+    /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
+    /// `page_open` is true while Settings > Providers is open. A key endpoint is called only when that is true or a run is
+    /// active, and at most once a minute per account; otherwise the last answer is returned and no call is made.
+    pub fn provider_usage(&self, page_open: bool) -> Res {
+        // What `project_state` serves now, against what this read leaves in the cache.
+        let before = self.provider_usage_cached().fingerprint();
+        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
+        // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
+        if now.fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+        serde_json::to_value(now).map_err(|e| fail("internal", e))
+    }
+
+    /// The last usage answers, for `project_state`. Never calls out.
+    pub(super) fn provider_usage_cached(&self) -> crate::providers::usage::UsageList {
+        self.usage_snapshot(false)
+    }
+
+    fn usage_snapshot(&self, active: bool) -> crate::providers::usage::UsageList {
+        use crate::providers::usage::{Usage, UsageList, USAGE_SCHEMA};
+        let (now, read_at) = (std::time::Instant::now(), crate::control::time::iso_secs(std::time::SystemTime::now()));
+        // The CLI logins report no windows today, so they read "Not reported".
+        let mut usage: Vec<Usage> = ["claude", "codex"].iter().map(|a| Usage::not_reported(a)).collect();
+        usage.extend(self.usage_source.accounts().iter().map(|a| self.usage.read(a, active, now, &read_at, self.usage_source.as_ref())));
+        UsageList { schema: USAGE_SCHEMA.into(), usage }
     }
 
     /// The last `provider_list` answer, or `None` before the first. Never runs a process.

@@ -306,3 +306,51 @@ export interface Agents {
   roles: Record<string, AgentChoice>;
   allowed: AllowedAgent[];
 }
+
+// ---- `vajra.provider_usage/1` (H5): what an account has used, as its own source reports it ------------------------------
+// `windows` is empty when nothing is reported: say "Not reported", never estimate. `warn` is set at 80% used.
+
+export const USAGE_SCHEMA = "vajra.provider_usage/1";
+
+export interface UsageWindow {
+  /** `5h`, `daily`, `weekly` or `credit` (a key's own spending limit). */
+  kind: string;
+  used_pct: number;
+  resets_at: string | null;
+  warn: boolean;
+}
+
+export interface Usage {
+  account: string;
+  read_at: string | null;
+  /** `none` or `gateway_key`. */
+  source: string;
+  windows: UsageWindow[];
+  amounts: { usage: number; usage_daily: number | null; limit: number | null; limit_remaining: number | null } | null;
+}
+
+export interface UsageList {
+  schema: string;
+  usage: Usage[];
+}
+
+/** Accept a `provider_usage` answer only if it has the shape the chip reads; anything else is "not reported" (null). */
+export function parseUsage(v: unknown): UsageList | null {
+  if (!isObj(v) || v.schema !== USAGE_SCHEMA || !Array.isArray(v.usage)) return null;
+  const windowOk = (w: unknown): w is UsageWindow => isObj(w) && str(w.kind) && typeof w.used_pct === "number" && Number.isFinite(w.used_pct)
+    && typeof w.warn === "boolean" && (w.resets_at === null || w.resets_at === undefined || str(w.resets_at));
+  const entryOk = (u: unknown): u is Usage => isObj(u) && str(u.account) && validProvider(u.account) && Array.isArray(u.windows) && u.windows.every(windowOk);
+  if (v.usage.length > MAX_PROVIDERS * 2 || !v.usage.every(entryOk)) return null;
+  return { schema: USAGE_SCHEMA, usage: v.usage.map((u) => ({ ...u, windows: u.windows.map((w) => ({ ...w, resets_at: w.resets_at ?? null })) })) };
+}
+
+/** The window the status bar chip is about: the most used one that is at or over the warning level. */
+export function usageWarning(list: UsageList | null | undefined): { account: string; window: UsageWindow } | null {
+  let worst: { account: string; window: UsageWindow } | null = null;
+  for (const u of list?.usage ?? []) {
+    for (const w of u.windows) {
+      if (w.warn && (worst === null || w.used_pct > worst.window.used_pct)) worst = { account: u.account, window: w };
+    }
+  }
+  return worst;
+}

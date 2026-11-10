@@ -63,6 +63,13 @@ export const S = {
     show: (view: string) => `Show ${view}`,
     openSettings: "Open Settings",
     status: "Status",
+    usageWarn: (account: string, kind: string, pct: number, resets: string | null) => {
+      const name = ({ claude: "Claude", codex: "Codex" } as Record<string, string>)[account] ?? account;
+      const what = ({ "5h": " this 5-hour window", daily: " today", weekly: " this week", credit: " of its credit limit" } as Record<string, string>)[kind] ?? "";
+      const when = resets ? new Date(resets) : null;
+      const reset = when && !Number.isNaN(when.getTime()) ? ` Resets ${when.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}.` : "";
+      return `${name} ${pct}% used${what}.${reset}`;
+    },
     runs: (n: number) => (n === 0 ? "No runs active" : n === 1 ? "1 run active" : `${n} runs active`),
     phone: "Phone not connected",
     loadFailed: "Could not read your projects.",
