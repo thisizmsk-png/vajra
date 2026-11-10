@@ -56,8 +56,8 @@ pub(super) struct Hub {
     /// Director-General generation (a conversation created or renewed by any path: plain `new_conversation`,
     /// `lead_status`) and the count of active runs (a PTY that closes with nothing on the bus). One that moved bumps the
     /// revision before the `since_rev` check (#105 review). And a fingerprint of what the full answer shows that can change
-    /// with no bump of its own: the board's cards (cached verdicts, task files, waiting plans), the worker list and the
-    /// usage cache (#107 review).
+    /// with no bump of its own: the board's cards (cached verdicts, task files, waiting plans) and the worker list (#107
+    /// review).
     quiet: HashMap<String, (Option<u32>, usize, u64)>,
 }
 
@@ -421,11 +421,12 @@ impl App {
         // so `since_rev` never answers `unchanged` across a new or renewed conversation or a run that ended quietly.
         let orch_gen = self.orchestrator_generation(project_id);
         let active_runs = self.active_run_count();
-        // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`). The board, the worker list and the usage
-        // cache are read before the revision and fingerprinted into the quiet fields, so a change to any of them that no
-        // path bumped (a verdict cached by `evidence_list`, a task file rewritten, a worker list changed by `end_session`)
-        // is never answered `unchanged` (#107 review). Receipts and the run generation only change under a bump; the inbox
-        // has its own fingerprint above.
+        // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`). The board and the worker list are read
+        // before the revision and fingerprinted into the quiet fields, so a change to either that no path bumped (a verdict
+        // cached by `evidence_list`, a task file rewritten, a worker list changed by `end_session`) is never answered
+        // `unchanged` (#107 review). Receipts and the run generation only change under a bump; the inbox has its own
+        // fingerprint above; the usage cache changes only in `provider_usage`, which bumps every project itself (so it is
+        // not in the fingerprint: that would move the revision a second time and send a second `changed`).
         let cur_rev = lock(&self.acts).revs.get(project_id).copied();
         let (board, board_fp) = self.board_for_state(project_id, cur_rev);
         let workers = lock(&self.control).workers_view();
@@ -435,7 +436,6 @@ impl App {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             board_fp.hash(&mut h);
             Value::from(workers.clone()).to_string().hash(&mut h);
-            usage.fingerprint().hash(&mut h);
             h.finish()
         };
         let mut moved: Vec<Value> = Vec::new();
