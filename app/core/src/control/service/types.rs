@@ -67,6 +67,9 @@ pub enum ControlError {
     /// The Director-General's project is archived, or gone from the store (FG-02c): it may not see or steer anything.
     ProjectArchived,
     ProjectMissing,
+    /// The app's projects folder was refused at open (#106 review), so no project can be checked. The detail says what is
+    /// wrong; the fix and path stay with the app's own UI (a tool result never carries a path).
+    ProjectsUnavailable(String),
     UnknownTool,
     InvalidArgs(String),
     Io(io::Error),
@@ -87,6 +90,7 @@ impl ControlError {
             Self::StaleGeneration(_) => "stale_generation",
             Self::ProjectArchived => "project_archived",
             Self::ProjectMissing => "project_missing",
+            Self::ProjectsUnavailable(_) => "projects_unavailable",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
             Self::Io(_) => "io_error",
@@ -95,7 +99,7 @@ impl ControlError {
     /// The error as a tool result. I/O detail stays out (it can carry paths).
     pub fn to_json(&self) -> Value {
         match self {
-            Self::InvalidArgs(m) => json!({"error": self.code(), "detail": m}),
+            Self::InvalidArgs(m) | Self::ProjectsUnavailable(m) => json!({"error": self.code(), "detail": m}),
             Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
             _ => json!({"error": self.code()}),
         }

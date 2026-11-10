@@ -266,7 +266,13 @@ fn a_cached_failed_git_read_keeps_a_live_pass_out_of_done() {
     assert_eq!(app.evidence_list(&slug).unwrap()["rows"][0]["status"], "pass", "a full check caches a green verdict and the repo state");
     assert_eq!(card(&app.board(&pid), "t1")["lane"], "done", "with a known, matching repo state");
     // The repo state read failed and that failure is cached (as `worktree_state` does for 30 s).
-    lock(&app.worktree_state).insert(repo.clone(), (std::time::Instant::now(), None));
+    // Keyed by (repo, walkthrough base) since POS-1.3: fail every cached read of this repo, whatever its base.
+    let mut failed = 0;
+    for (_, v) in lock(&app.worktree_state).iter_mut().filter(|(k, _)| k.0 == repo) {
+        *v = (std::time::Instant::now(), None);
+        failed += 1;
+    }
+    assert!(failed > 0, "the full check cached this repo's state");
     assert_eq!(app.evidence_list_with(&slug, false).unwrap()["rows"][0]["status"], "checking");
     let c = card(&app.board(&pid), "t1").clone();
     assert_eq!((c["lane"].as_str(), c["criteria"]["pass"].as_u64()), (Some("review"), Some(0)), "{c}");
@@ -304,4 +310,44 @@ fn a_live_verdict_with_no_head_is_not_a_pass_on_the_board() {
     let full = app.evidence_list(&slug).unwrap();
     assert_eq!(full["rows"][0]["status"], "pass", "a full check: the verdict stands (its rule is unchanged): {full}");
     assert_eq!(app.evidence_list_with(&slug, false).unwrap()["rows"][0]["status"], "checking");
+}
+
+/// batch-3 x main (POS-1.3 under the #107 cache): the board follows the tree comparison through its cached build. Evidence
+/// verified on an uncommitted tree is Done and steady polls rebuild nothing; committing that same tree keeps it Done; once a
+/// full check reads a different tree, the very next poll rebuilds (the repo-state write moves the board's input stamp)
+/// and the card leaves Done, and a client holding the old revision is not told `unchanged`.
+#[test]
+fn the_board_follows_the_tree_comparison_through_its_cache() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo) = verified_repo(&t);
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    fs::write(repo.join("f.txt"), b"work in progress").unwrap();
+    super::verify_work(&repo);
+    let full = |app: &App| {
+        lock(&app.worktree_state).clear(); // the 5 s state cache would otherwise hide the change
+        app.evidence_list(&slug).unwrap()["rows"][0]["status"].as_str().unwrap().to_string()
+    };
+    assert_eq!(full(&app), "pass", "verified on this dirty tree");
+    let first = app.project_state(&pid, None).unwrap();
+    assert_eq!(card(&first["board"], "t1")["lane"], "done", "{first}");
+    let mut rev = first["rev"].as_u64();
+    for _ in 0..3 {
+        rev = app.project_state(&pid, rev).unwrap()["rev"].as_u64().or(rev);
+    }
+    let before = builds(&app);
+    for _ in 0..10 {
+        assert_eq!(app.project_state(&pid, rev).unwrap()["unchanged"], true);
+    }
+    assert_eq!(builds(&app), before, "a steady poll rebuilt the board");
+
+    git_in(&repo, &["commit", "-qam", "same tree, new commit"]);
+    assert_eq!(full(&app), "pass", "HEAD moved, the tree did not");
+    assert_eq!(card(&board(&app, &pid), "t1")["lane"], "done");
+
+    fs::write(repo.join("f.txt"), b"a different tree").unwrap();
+    assert_eq!(full(&app), "stale");
+    let after = app.project_state(&pid, rev).unwrap();
+    assert_eq!(after["unchanged"], false, "a client holding the old revision is told");
+    assert_ne!(card(&after["board"], "t1")["lane"], "done", "{after}");
 }

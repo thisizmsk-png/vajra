@@ -311,6 +311,33 @@ class LaunchFailure(unittest.TestCase):
         P.ps = lambda: next(seq, {999: (1, 1, 0.0, exe), 123: (1, 1, 0.0, exe)})
         self.assertEqual(P.launch_hidden(exe, {"VAJRA_DESKTOP_DATA": "/tmp/iso"}, wait=1), 123)
 
+    def test_given_process_inspection_is_denied_when_main_runs_then_the_temp_home_is_removed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as parent:
+            made = []
+            original_mkdtemp, original_ps, original_argv = tempfile.mkdtemp, P.ps, sys.argv
+            handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+            def make(*args, **kwargs):
+                path = original_mkdtemp(*args, **dict(kwargs, dir=parent))
+                made.append(path)
+                return path
+
+            def denied():
+                raise PermissionError("process inspection denied")
+
+            tempfile.mkdtemp, P.ps = make, denied
+            try:
+                sys.argv = ["x", "bin", "/nonexistent/NotAnApp", os.path.join(parent, "o.json"), "5"]
+                with self.assertRaises(PermissionError):
+                    P.main()
+            finally:
+                tempfile.mkdtemp, P.ps, sys.argv = original_mkdtemp, original_ps, original_argv
+                for sig, handler in handlers.items():
+                    signal.signal(sig, handler)
+            self.assertEqual(len(made), 1)
+            self.assertFalse(os.path.exists(made[0]), "no temp HOME left after denied process inspection")
+
     def test_given_the_launch_fails_when_main_runs_then_the_temp_home_is_removed(self):
         import tempfile
         made = []

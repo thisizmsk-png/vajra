@@ -192,3 +192,157 @@ fn the_fingerprint_ignores_when_it_was_read_and_notices_what_it_says() {
     assert_ne!(list(a.clone()).fingerprint(), list(moved).fingerprint());
     assert_ne!(list(a).fingerprint(), list(Usage::not_reported("openrouter")).fingerprint());
 }
+
+// ---- the Keychain wiring: a fake `security` and a fake `curl`, a temp HOME, never the real Keychain -------------------
+
+const SENTINEL_KEY: &str = "SENTINEL-sk-or-v1-0123456789abcdef";
+
+/// A `security` stand-in over files under `store/`: `find-generic-password -s <svc> -a <acct> [-w]` exits 44 when there is
+/// no item, prints the item only with `-w`. Every call's argv and `HOME` are logged.
+fn fake_security(d: &std::path::Path) -> PathBuf {
+    script(
+        d,
+        "security",
+        &format!(
+            "D='{d}'\nprintf '%s|HOME=%s\\n' \"$*\" \"$HOME\" >> \"$D/security.log\"\n[ \"$1\" = find-generic-password ] || exit 1\nsvc=; w=\nshift\nwhile [ $# -gt 0 ]; do case $1 in -s) svc=$2; shift 2;; -w) w=1; shift;; -a) shift 2;; *) shift;; esac; done\n[ -f \"$D/store/$svc\" ] || exit 44\n[ -n \"$w\" ] && /bin/cat \"$D/store/$svc\"\nexit 0",
+            d = d.display()
+        ),
+    )
+}
+
+fn wiring_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("vajra-usage-wiring-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("store")).unwrap();
+    d
+}
+
+#[test]
+fn only_an_account_with_a_stored_key_is_metered_and_asking_never_prints_the_key() {
+    let d = wiring_dir("accounts");
+    let sec = fake_security(&d);
+    let calls = |d: &std::path::Path| std::fs::read_to_string(d.join("security.log")).unwrap_or_default().lines().count();
+    let none = KeychainKeys::new(&sec, &d);
+    none.refresh(true);
+    assert!(none.accounts().is_empty(), "no key stored: nothing to meter");
+    std::fs::write(d.join("store/vajra.provider.openrouter"), format!("{SENTINEL_KEY}\n")).unwrap();
+    let keys = KeychainKeys::new(&sec, &d);
+    let before = calls(&d);
+    assert!(keys.accounts().is_empty(), "before a refresh the list is empty");
+    assert_eq!(calls(&d), before, "reading the list never runs security");
+    keys.refresh(true);
+    assert_eq!(keys.accounts(), ["openrouter"]);
+    let log = std::fs::read_to_string(d.join("security.log")).unwrap();
+    assert!(log.lines().all(|l| !l.contains(" -w") && !l.contains("SENTINEL")), "the existence check never asks for the password: {log}");
+    // Reads cost nothing, and a refresh that is not forced reuses the lookup made a moment ago.
+    let before = calls(&d);
+    for _ in 0..5 {
+        assert_eq!(keys.accounts(), ["openrouter"]);
+        keys.refresh(false);
+    }
+    assert_eq!(calls(&d), before, "no further lookup inside the TTL");
+    keys.refresh(true);
+    assert!(calls(&d) > before, "a forced refresh looks again");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_key_command_is_the_fixed_security_read_for_a_key_account_only() {
+    let d = wiring_dir("argv");
+    let sec = fake_security(&d);
+    let keys = KeychainKeys::new(&sec, &d);
+    let want: Vec<String> = [sec.to_str().unwrap(), "find-generic-password", "-s", "vajra.provider.openrouter", "-a", "openrouter", "-w"].map(String::from).into();
+    assert_eq!(keys.argv("openrouter"), Some(want));
+    for other in ["claude", "codex", "", "../x", "openrouter -w", "openrouter\n"] {
+        assert_eq!(keys.argv(other), None, "{other:?}");
+    }
+    assert_eq!(keys.home(), Some(d.as_path()));
+    // The real build points at the system binary.
+    let real = KeychainKeys::new(Path::new(keychain::SECURITY), &d);
+    assert_eq!(real.argv("openrouter").unwrap()[..2], ["/usr/bin/security", "find-generic-password"]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_stored_key_reaches_the_endpoint_call_only_through_stdin_and_the_answer_holds_no_key() {
+    let d = wiring_dir("e2e");
+    std::fs::write(d.join("store/vajra.provider.openrouter"), format!("{SENTINEL_KEY}\n")).unwrap();
+    let curl = script(&d, "curl", &format!("echo \"$@\" > {0}/curl-argv.txt\nenv > {0}/curl-env.txt\n/bin/cat > {0}/curl-stdin.txt\nprintf '%s' '{FIXTURE}'", d.display()));
+    let src = CurlSource::new(Box::new(KeychainKeys::new(&fake_security(&d), &d))).with_curl(curl);
+
+    src.refresh(true);
+    assert_eq!(src.accounts(), ["openrouter"]);
+    let body = src.key_info("openrouter").expect("the fake curl answered");
+    let usage = parse_key_response("openrouter", &body, AT).unwrap();
+    assert_eq!(usage.windows[0].used_pct, 84);
+
+    let read = |f: &str| std::fs::read_to_string(d.join(f)).unwrap();
+    assert_eq!(read("curl-stdin.txt"), format!("Authorization: Bearer {SENTINEL_KEY}\n"), "the key goes security -> curl's stdin");
+    for f in ["curl-argv.txt", "curl-env.txt"] {
+        assert!(!read(f).contains("SENTINEL"), "{f} holds the key");
+    }
+    assert!(!serde_json::to_string(&usage).unwrap().contains("SENTINEL"));
+    // The read is exactly the I3 argv, run with the given HOME and nothing else of the environment.
+    let reads: Vec<String> = read("security.log").lines().filter(|l| l.contains(" -w")).map(String::from).collect();
+    assert_eq!(reads, [format!("find-generic-password -s vajra.provider.openrouter -a openrouter -w|HOME={}", d.display())]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn no_stored_key_means_no_call() {
+    let d = wiring_dir("nokey");
+    let curl = script(&d, "curl", &format!("echo called > {}/curl-ran.txt", d.display()));
+    let src: Box<dyn UsageSource> = Box::new(CurlSource::new(Box::new(KeychainKeys::new(&fake_security(&d), &d))).with_curl(curl));
+    // The meter reads only the accounts the source lists, so with no stored key the transfer tool is never started.
+    let m = Meter::default();
+    src.refresh(true);
+    let list: Vec<Usage> = src.accounts().iter().map(|a| m.read(a, true, Instant::now(), AT, src.as_ref())).collect();
+    assert!(list.is_empty());
+    assert!(!d.join("curl-ran.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A `security` that takes two seconds to answer, as a locked or prompting Keychain can.
+fn slow_security(d: &std::path::Path) -> PathBuf {
+    script(d, "security", &format!("echo \"$*\" >> '{}/slow.log'\n/bin/sleep 2\nexit 0", d.display()))
+}
+
+#[test]
+fn reading_the_list_never_waits_for_a_slow_lookup_and_a_second_refresh_does_not_queue() {
+    let d = wiring_dir("slow");
+    let keys = Arc::new(KeychainKeys::new(&slow_security(&d), &d));
+    let worker = {
+        let keys = keys.clone();
+        std::thread::spawn(move || keys.refresh(true))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let start = Instant::now();
+    assert!(keys.accounts().is_empty(), "the lookup is still running: the last list (empty) is served");
+    keys.refresh(false); // a forced one goes round again instead: see the test below
+    assert!(start.elapsed() < Duration::from_millis(500), "neither a read nor a second refresh waited for security: {:?}", start.elapsed());
+    worker.join().unwrap();
+    assert_eq!(keys.accounts(), ["openrouter"], "the finished lookup is what is served next");
+    let lookups = std::fs::read_to_string(d.join("slow.log")).unwrap().lines().count();
+    assert_eq!(lookups, 1, "one security call, not two");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_key_saved_while_a_slow_lookup_is_running_still_appears() {
+    let d = wiring_dir("dirty");
+    // The answer is decided when the lookup starts, then it is slow: like a lookup that checked before the key was saved.
+    let sec = script(&d, "security", &format!("if [ -f '{0}/saved' ]; then r=0; else r=44; fi\n/bin/sleep 1\nexit $r", d.display()));
+    let keys = Arc::new(KeychainKeys::new(&sec, &d));
+    let first = {
+        let keys = keys.clone();
+        std::thread::spawn(move || keys.refresh(false))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(d.join("saved"), "").unwrap();
+    let start = Instant::now();
+    keys.refresh(true); // what key_changed does: it finds the lookup running and must not be lost
+    assert!(start.elapsed() < Duration::from_millis(500), "the forced refresh did not wait");
+    first.join().unwrap();
+    assert_eq!(keys.accounts(), ["openrouter"], "the running lookup went round again and saw the saved key");
+    let _ = std::fs::remove_dir_all(&d);
+}

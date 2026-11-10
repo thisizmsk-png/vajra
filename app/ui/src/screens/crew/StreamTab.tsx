@@ -33,6 +33,10 @@ export function StreamTab({ stream }: { stream: string }) {
   const queued = useRef(false);
   /** The `from` of a scroll request that has not been answered yet: a background refresh re-asks for it, never for the old window's start. */
   const nav = useRef<number | null>(null);
+  /** The last numeric request that was answered, and the first row held after it. Asking again for the same `from` while the held window has not moved is a loop (a lost prefix is answered with later rows and `gap`). */
+  const answered = useRef<{ from: number; held0: number } | null>(null);
+  /** The first row held after a request whose prefix the core had lost (it answered with later rows and `gap`). The poll re-reads from that held start; its answer carries no `gap` of its own, so it must not clear the notice or the guard above. */
+  const lostHeld0 = useRef<number | null>(null);
   /** The latest `reconcile`, for `fetchWin` to re-check the view once an answer lands (an answer does not re-render the list's range). */
   const reconcileRef = useRef<() => void>(() => {});
   const last = useRef(0);
@@ -44,11 +48,24 @@ export function StreamTab({ stream }: { stream: string }) {
     const g = gen.current;
     last.current = Date.now();
     try {
-      const w = await api.streamWindow(stream, from, WINDOW_ROWS);
+      let w = await api.streamWindow(stream, from, WINDOW_ROWS);
       if (g !== gen.current || want.current !== from) return;
       setErr("");
+      const first = w.lines[0]?.seq;
+      // A poll re-reading the held start of a lost-prefix window: same rows, still short of what was asked, so still a gap.
+      const rereadOfLost = from !== null && first !== undefined && lostHeld0.current === first && from === first;
+      if (rereadOfLost) w = { ...w, gap: true };
       winRef.current = w;
       if (nav.current === from) nav.current = null;
+      if (from !== null && first !== undefined && !rereadOfLost) {
+        answered.current = { from, held0: first };
+        lostHeld0.current = w.gap && from < first ? first : null;
+      } else if (from === null || first === undefined) {
+        // The tail (or an empty answer) replaced the held window: an earlier numeric answer no longer describes it, so a
+        // later return to the same `from` must be asked again.
+        answered.current = null;
+        lostHeld0.current = null;
+      }
       setWin(w);
       // The view may still lie outside what came back (a short, byte-capped window): look again with the new window.
       setTimeout(() => reconcileRef.current(), 0);
@@ -99,6 +116,8 @@ export function StreamTab({ stream }: { stream: string }) {
     const short = !w.at_end && w.lines.length < WINDOW_ROWS;
     const margin = short ? Math.min(MARGIN, Math.max(0, Math.floor((w.lines.length - VISIBLE) / 2))) : MARGIN;
     const from = Math.max(w.first_seq, s0 - margin);
+    // An answered request that left the held window where it was made no progress: its rows are gone for good (the gap notice says so).
+    if (answered.current?.from === from && answered.current.held0 === held0) return;
     if (from !== held0) { nav.current = from; void fetchWin(from); }
   }, [fetchWin]);
   reconcileRef.current = reconcile;
@@ -116,6 +135,8 @@ export function StreamTab({ stream }: { stream: string }) {
     busy.current = false;
     queued.current = false;
     nav.current = null;
+    answered.current = null;
+    lostHeld0.current = null;
     followRef.current = true;
     winRef.current = null;
     setFollowing(true);

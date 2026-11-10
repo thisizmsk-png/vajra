@@ -13,12 +13,15 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+use super::keychain::{self, Keys, KEY_ACCOUNTS};
 
 pub const USAGE_SCHEMA: &str = "vajra.provider_usage/1";
 /// At this percentage used a window carries `warn`.
@@ -136,11 +139,15 @@ pub fn parse_key_response(account: &str, bytes: &[u8], read_at: &str) -> Option<
     })
 }
 
-/// Where metered accounts and their key-endpoint answers come from. PR 2 (the Keychain store) supplies the real source
-/// through `CurlSource`; until then `NoSource` reports nothing.
+/// Where metered accounts and their key-endpoint answers come from. The real source is `CurlSource` over `KeychainKeys`
+/// (the Keychain store); `NoSource` reports nothing.
 pub trait UsageSource: Send + Sync {
-    /// Accounts that have a key to meter.
+    /// Accounts that have a key to meter, as of the last `refresh`. An in-memory read: it never runs a process or waits.
     fn accounts(&self) -> Vec<String>;
+    /// Look the accounts up again. This is the only call that may run a process or wait, so it is made from an explicit
+    /// action, an active read or a background thread, never from a cache read. Without `force`, a lookup made a moment
+    /// ago is reused.
+    fn refresh(&self, _force: bool) {}
     /// The raw answer of the key endpoint for `account`, or `None` when it could not be read.
     fn key_info(&self, account: &str) -> Option<Vec<u8>>;
 }
@@ -161,7 +168,90 @@ impl UsageSource for NoSource {
 /// vajra.provider.<account> -w`). It is run only as the producer of curl's stdin; its output never enters this process.
 pub trait KeyCommands: Send + Sync {
     fn accounts(&self) -> Vec<String>;
+    fn refresh(&self, _force: bool) {}
     fn argv(&self, account: &str) -> Option<Vec<String>>;
+    /// The `HOME` the key command runs with (the Keychain lookup needs the user's home), when it needs one.
+    fn home(&self) -> Option<&Path> {
+        None
+    }
+}
+
+/// The accounts whose key is stored in the Keychain (PR 2), and the `security` command that prints one on stdout. The
+/// core never reads the key: this only names the command, which `CurlSource` runs as the producer of curl's stdin.
+pub struct KeychainKeys {
+    keys: Keys,
+    security: PathBuf,
+    home: PathBuf,
+    /// The accounts found by the last `refresh` (empty before the first) and when that lookup finished. The lock is held
+    /// only to copy or store the list, never while `security` runs.
+    listed: Mutex<(Option<Instant>, Vec<String>)>,
+    /// A lookup is running: another `refresh` returns at once instead of queueing a second `security`.
+    refreshing: AtomicBool,
+    /// A forced refresh found a lookup running: that lookup may have checked before the key changed, so it runs once more.
+    dirty: AtomicBool,
+}
+
+/// How long a lookup is reused by a refresh that is not forced. Short, so the Providers page notices a key quickly.
+const LIST_TTL: Duration = Duration::from_secs(5);
+
+impl KeychainKeys {
+    pub fn new(security: &Path, home: &Path) -> Self {
+        Self {
+            keys: Keys::cli(security, home),
+            security: security.to_path_buf(),
+            home: home.to_path_buf(),
+            listed: Mutex::new((None, Vec::new())),
+            refreshing: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
+        }
+    }
+    fn listed(&self) -> std::sync::MutexGuard<'_, (Option<Instant>, Vec<String>)> {
+        self.listed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl KeyCommands for KeychainKeys {
+    /// The accounts the last `refresh` found. Never runs `security` and never waits for it.
+    fn accounts(&self) -> Vec<String> {
+        self.listed().1.clone()
+    }
+    /// Ask `security` which accounts have a stored key (no `-w`, so it never prints a key). Runs without any lock held;
+    /// a refresh that finds one already running returns at once, but a forced one makes the running
+    /// lookup go round again, so a key saved mid-lookup is not missed.
+    fn refresh(&self, force: bool) {
+        if !force && self.listed().0.is_some_and(|at| at.elapsed() < LIST_TTL) {
+            return;
+        }
+        // Marked before the claim: a lookup that is just finishing sees the mark when it re-checks after letting go.
+        if force {
+            self.dirty.store(true, Ordering::SeqCst);
+        }
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        loop {
+            self.dirty.store(false, Ordering::SeqCst);
+            let accounts: Vec<String> = KEY_ACCOUNTS.iter().filter(|a| self.keys.saved(a) == Ok(true)).map(|a| a.to_string()).collect();
+            *self.listed() = (Some(Instant::now()), accounts);
+            if self.dirty.load(Ordering::SeqCst) {
+                continue;
+            }
+            self.refreshing.store(false, Ordering::SeqCst);
+            // A forced refresh may have marked the list between the check and the release; if so, take the lookup again.
+            if !(self.dirty.load(Ordering::SeqCst) && !self.refreshing.swap(true, Ordering::SeqCst)) {
+                return;
+            }
+        }
+    }
+    /// `[security, find-generic-password, -s, vajra.provider.<a>, -a, <a>, -w]`: the account must be a key account.
+    fn argv(&self, account: &str) -> Option<Vec<String>> {
+        let service = keychain::service(account).ok()?;
+        let security = self.security.to_str()?;
+        Some([security, "find-generic-password", "-s", &service, "-a", account, "-w"].map(String::from).into())
+    }
+    fn home(&self) -> Option<&Path> {
+        Some(&self.home)
+    }
 }
 
 /// `GET /api/v1/key` through curl, with the key piped from its key command into curl's stdin as a header file (`-H @-`).
@@ -179,7 +269,7 @@ impl CurlSource {
     }
     /// Tests point this at a fake curl.
     #[cfg(test)]
-    fn with_curl(mut self, curl: PathBuf) -> Self {
+    pub(crate) fn with_curl(mut self, curl: PathBuf) -> Self {
         self.curl = curl;
         self
     }
@@ -195,14 +285,23 @@ impl UsageSource for CurlSource {
         self.keys.accounts()
     }
 
+    fn refresh(&self, force: bool) {
+        self.keys.refresh(force);
+    }
+
     fn key_info(&self, account: &str) -> Option<Vec<u8>> {
         let key_cmd = self.keys.argv(account)?;
         // sh prints the header name, then becomes the key command: its stdout continues the same pipe into curl.
-        let mut producer = Command::new("/bin/sh")
+        let mut producer = Command::new("/bin/sh");
+        producer
             .args(["-c", "printf 'Authorization: Bearer '; exec \"$@\"", "sh"])
             .args(&key_cmd)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        if let Some(home) = self.keys.home() {
+            producer.env("HOME", home);
+        }
+        let mut producer = producer
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -257,6 +356,11 @@ pub struct Meter {
 }
 
 impl Meter {
+    /// Drop what was last read for `account` (its key was removed or replaced), so a later key never shows the old figures.
+    pub fn forget(&self, account: &str) {
+        lock(&self.last).remove(account);
+    }
+
     /// The usage for `account`. A fresh enough answer (under `MIN_INTERVAL`) is returned as is. When `active` is false (the
     /// Providers page is closed and no run is going) nothing is read: the last answer, or "Not reported", is returned. A
     /// failed read keeps the previous answer (its `read_at` shows its age) and still counts as an attempt.

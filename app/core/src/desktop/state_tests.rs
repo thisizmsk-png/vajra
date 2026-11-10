@@ -35,7 +35,7 @@ fn env(id: &str, expect: Option<u64>) -> Envelope {
 
 fn worker(round: u32) -> WorkerInfo {
     WorkerInfo {
-        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: format!("task.t1.r{round}"), prompt_first_line: None, branch: None, status: Status::InProgress },
+        worker: Worker { agent_id: "aa870dd40540481f0".into(), engine_id: "bhima".into(), label: format!("task.t1.r{round}"), prompt_first_line: None, branch: None, status: Status::InProgress, provider: None },
         task_id: Some("20261105-1810.t1".into()),
         title: None,
         round: Some(round),
@@ -243,6 +243,28 @@ fn generations_and_revisions_survive_a_restart() {
     assert_eq!(bad["receipt"]["reason"], "stale_generation");
     let ok = app.act(&env("run-0014-nnnn", Some(1)), Caller::Ui, false, "start_run", "proj-a", Some(1), || Ok(json!({})));
     assert_eq!(state_of(&ok), "done");
+}
+
+// A first quiet sighting never bumps: a reopen with a clock that has not moved (the same millisecond, or one that went
+// back) still starts past every revision a client saw, from the durable receipts alone.
+#[test]
+fn a_same_ms_reopen_never_reuses_a_revision_a_client_saw() {
+    let t = Tmp::new();
+    let seen = {
+        let app = t.app();
+        let r = app.act(&env("run-0016-pppp", Some(0)), Caller::Ui, false, "start_run", "proj-a", Some(0), || Ok(json!({})));
+        assert_eq!(state_of(&r), "done");
+        let first = app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap();
+        let again = app.project_state("proj-a", None).unwrap()["rev"].as_u64().unwrap();
+        assert_eq!(first, again, "a steady read moves nothing");
+        assert_eq!(first, r["receipt"]["rev"].as_u64().unwrap(), "a first read lands on the durable receipt revision");
+        first
+    };
+    let app = t.app();
+    *lock(&app.acts) = state::Hub::open_at(&t.0.join("data"), 0).unwrap();
+    let ps = app.project_state("proj-a", Some(seen)).unwrap();
+    assert!(ps["rev"].as_u64().unwrap() > seen, "a clock that has not moved never hands out a revision a client saw");
+    assert_eq!(ps["unchanged"], false);
 }
 
 // Review P2: an interrupted action changes the projection after restart, so a client holding the old revision

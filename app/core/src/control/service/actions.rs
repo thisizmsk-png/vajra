@@ -28,6 +28,7 @@ impl Service {
             "task_id": w.task_id,
             "title": w.title.as_deref().map(|t| untrusted(&self.redact(t))),
             "status": w.worker.status.as_str(),
+            "provider": w.worker.provider,
             "round": w.round,
             "live": w.live,
             "last_activity": w.last_activity,

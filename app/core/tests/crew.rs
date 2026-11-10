@@ -108,6 +108,7 @@ mod crew {
             prompt_first_line: None,
             branch: None,
             status,
+            provider: None,
         }
     }
 
@@ -326,6 +327,38 @@ mod crew {
         assert_eq!(ui_name("general-purpose"), "General Purpose");
         assert_eq!(title_case("kb.search"), "Kb Search");
         assert_eq!(title_case("deploy_plan"), "Deploy Plan");
+    }
+
+    // ---- provider (launch receipt) ----
+
+    #[test]
+    fn a_transcript_reports_its_model_and_a_crew_node_carries_the_provider() {
+        use vajra_desktop::providers::effective::ProviderTag;
+        let h = Home::new();
+        let p = h.project().join("model.jsonl");
+        let rec = json!({"type": "assistant", "message": {"model": "claude-model-x", "role": "assistant", "content": [{"type": "text", "text": "ok"}]}});
+        fs::write(&p, format!("{rec}\n")).unwrap();
+        let mut tr = Transcript::new(Tailer::new(h.allow(), p), Redactor::new(None));
+        assert_eq!(tr.model(), None, "nothing read yet");
+        tr.poll().unwrap();
+        assert_eq!(tr.model(), Some("claude-model-x"));
+
+        let mut w = worker("a1", "bhima", "task.t1.r1", Status::InProgress);
+        w.provider = Some(ProviderTag::new("claude", "claude-model-x", "subscription", None));
+        let tasks = json!({"tasks": [{"id": "t1", "owner_agent": "bhima", "status": "in_progress"}]});
+        let workers = vec![w, worker("a2", "bhima", "task.t1.r2", Status::InProgress)];
+        let signals = Signals::default();
+        let root = tree::build(&CrewInput { run_id: RUN, lead: None, run_status: Status::InProgress, tasks: Some(&tasks), workers: &workers, signals: &signals });
+        fn nodes<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+            out.push(n);
+            n.children.iter().for_each(|c| nodes(c, out));
+        }
+        let mut all = Vec::new();
+        nodes(&root, &mut all);
+        let with = all.iter().find(|n| n.id == "agent:a1").expect("worker node");
+        assert_eq!(with.provider.as_ref().map(|p| (p.account.as_str(), p.model.as_str(), p.billing.as_str())), Some(("claude", "claude-model-x", "subscription")));
+        assert_eq!(with.provider.as_ref().map(|p| (p.label.as_str(), p.family.as_str())), Some(("Claude Code", "claude")));
+        assert_eq!(all.iter().find(|n| n.id == "agent:a2").unwrap().provider, None, "not reported: no tag, never a guess");
     }
 
     // ---- tree ----

@@ -13,7 +13,7 @@
 pub mod ansi;
 pub mod argv;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -27,6 +27,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
 use crate::logging::Logger;
+use crate::providers::errors::{self, Ident, ProviderError};
 
 #[cfg(test)]
 mod tests;
@@ -161,10 +162,13 @@ struct Session {
     exit: Mutex<Option<ExitInfo>>,
     exited: Condvar,
     reader: Mutex<Option<JoinHandle<()>>>,
+    /// Vajra asked this process to stop (`kill`, `shutdown`): its exit is ours, not a failure to report.
+    stop_asked: AtomicBool,
 }
 
 impl Session {
     fn signal(&self, sig: libc::c_int) {
+        self.stop_asked.store(true, Ordering::SeqCst);
         let exit = lock(&self.exit);
         if exit.is_none() {
             // The child is a session leader (setsid), so -pid is its group.
@@ -204,6 +208,26 @@ pub struct Supervisor {
     log: Option<Arc<Logger>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     closing: AtomicBool,
+    /// Where a worker's failed exit is reported (H9). Unset: nothing is reported.
+    errors: Mutex<Option<ErrorSink>>,
+}
+
+/// Receives the `provider_error` event of a worker that died. The app installs one that tells the lead and the DG.
+pub type ErrorSink = Arc<dyn Fn(&ProviderError) + Send + Sync>;
+
+/// What the reader thread does when its child is gone.
+struct ExitHooks {
+    log: Option<Arc<Logger>>,
+    report: Option<(ProviderTag, ErrorSink)>,
+}
+
+/// Who a spawned worker is, for its `provider_error` event. Owned by the session for its whole life: nothing here can be
+/// changed after spawn, so a failure is always reported against the account it ran on (H7).
+#[derive(Debug, Clone)]
+pub struct ProviderTag {
+    pub slot: String,
+    pub session_id: String,
+    pub account: String,
 }
 
 impl Supervisor {
@@ -213,7 +237,12 @@ impl Supervisor {
             log,
             sessions: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
+            errors: Mutex::new(None),
         }
+    }
+
+    pub fn set_error_sink(&self, sink: ErrorSink) {
+        *lock(&self.errors) = Some(sink);
     }
 
     fn log(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -232,6 +261,11 @@ impl Supervisor {
     /// Start `spec.argv` in a new PTY; its output goes to bus stream `id`.
     /// An exited session's id can be reused.
     pub fn spawn(&self, id: &str, spec: SpawnSpec) -> Result<(), SessionError> {
+        self.spawn_tagged(id, spec, None)
+    }
+
+    /// `spawn` for a provider worker: a failed exit is reported as a `provider_error` against `tag`.
+    pub fn spawn_tagged(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -312,6 +346,7 @@ impl Supervisor {
             exit: Mutex::new(None),
             exited: Condvar::new(),
             reader: Mutex::new(None),
+            stop_asked: AtomicBool::new(false),
         });
         let handle = {
             let session = session.clone();
@@ -319,9 +354,10 @@ impl Supervisor {
             let log = self.log.clone();
             let stream = id.to_string();
             let redact = spec.redact.clone();
+            let report = tag.and_then(|t| lock(&self.errors).clone().map(|sink| (t, sink)));
             std::thread::Builder::new()
                 .name(format!("pty-{id}"))
-                .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, log.as_deref()))
+                .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, ExitHooks { log, report }))
                 .map_err(|e| SessionError::Io(e.to_string()))?
         };
         *lock(&session.reader) = Some(handle);
@@ -458,10 +494,14 @@ impl Drop for Supervisor {
     }
 }
 
-fn push_line(bus: &Bus, stream: &str, redactor: &Redactor, raw: &[u8]) {
+fn push_line(bus: &Bus, stream: &str, redactor: &Redactor, tail: &mut VecDeque<String>, raw: &[u8]) {
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     let text = String::from_utf8_lossy(raw);
     let clean = redactor.redact(ansi::sanitize(&text));
+    if tail.len() == errors::TAIL_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(clean.clone());
     // The id was validated at spawn, so push cannot fail.
     let _ = bus.push(stream, &clean);
 }
@@ -473,8 +513,11 @@ fn read_loop(
     mut reader: Box<dyn Read + Send>,
     mut child: Box<dyn Child + Send + Sync>,
     session: &Session,
-    log: Option<&Logger>,
+    exit: ExitHooks,
 ) {
+    let ExitHooks { log, report } = exit;
+    let log = log.as_deref();
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(errors::TAIL_LINES);
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -484,12 +527,12 @@ fn read_loop(
                 pending.extend_from_slice(&buf[..n]);
                 let mut start = 0;
                 while let Some(i) = pending[start..].iter().position(|&b| b == b'\n') {
-                    push_line(bus, stream, redactor, &pending[start..start + i]);
+                    push_line(bus, stream, redactor, &mut tail, &pending[start..start + i]);
                     start += i + 1;
                 }
                 pending.drain(..start);
                 if pending.len() >= MAX_PENDING {
-                    push_line(bus, stream, redactor, &pending);
+                    push_line(bus, stream, redactor, &mut tail, &pending);
                     pending.clear();
                 }
             }
@@ -498,7 +541,7 @@ fn read_loop(
         }
     }
     if !pending.is_empty() {
-        push_line(bus, stream, redactor, &pending);
+        push_line(bus, stream, redactor, &mut tail, &pending);
     }
 
     // Reap. Poll under the exit lock so `signal` never races the reap.
@@ -520,8 +563,14 @@ fn read_loop(
                         ],
                     );
                 }
+                let failed = (info.code != 0 || info.signal.is_some()) && !session.stop_asked.load(Ordering::SeqCst);
+                let (code, signal) = (info.code, info.signal.clone());
                 *exit = Some(info);
                 session.exited.notify_all();
+                drop(exit);
+                if let (true, Some((tag, sink))) = (failed, report) {
+                    report_exit(&tag, &sink, Some(code), signal.as_deref(), tail.make_contiguous());
+                }
                 return;
             }
             Ok(None) => {}
@@ -531,10 +580,23 @@ fn read_loop(
                     signal: None,
                 });
                 session.exited.notify_all();
+                drop(exit);
+                if let (Some((tag, sink)), false) = (report, session.stop_asked.load(Ordering::SeqCst)) {
+                    report_exit(&tag, &sink, None, None, tail.make_contiguous());
+                }
                 return;
             }
         }
         drop(exit);
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A worker died: report its own typed error if its last lines held one, else `unexplained_exit` with the exit code and
+/// those lines. The action comes from the policy; the account is the one the worker was spawned with. A worker never
+/// just disappears.
+fn report_exit(tag: &ProviderTag, sink: &ErrorSink, code: Option<u32>, signal: Option<&str>, tail: &[String]) {
+    let (c, text) = errors::classify_exit(code, signal, tail);
+    let who = Ident { slot: &tag.slot, session_id: &tag.session_id, account: &tag.account };
+    sink(&ProviderError::new(&who, &c, 1, &text, errors::decide(c.kind, 1, c.retry_after_s).action));
 }

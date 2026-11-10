@@ -110,8 +110,17 @@ fn io(e: impl std::fmt::Display) -> LeadError {
     LeadError::Io(e.to_string())
 }
 
-/// A store failure that is not about the project itself. The text never carries a path.
+/// A refused projects folder as the refusal every command gives (#106 review): what is wrong, what to do, the path.
+pub(super) fn projects_unavailable(u: &crate::projects::store::Unavailable) -> LeadError {
+    LeadError::ProjectsUnavailable { detail: u.what(), fix: u.fix(), path: u.path.to_string_lossy().into_owned() }
+}
+
+/// A store failure that is not about the project itself. The text never carries a path, except a refused projects
+/// folder, which says what to do (`projects_unavailable`).
 fn store_io(e: &StoreError) -> LeadError {
+    if let StoreError::Unavailable(u) = e {
+        return projects_unavailable(u);
+    }
     LeadError::Io(match e {
         StoreError::Full => "the project list is too large to search".into(),
         _ => "the project store could not be read".into(),
@@ -128,6 +137,7 @@ pub(super) fn project_gate(store: &Store, pid: &str) -> Result<(), ControlError>
         Ok(p) if p.archived.is_some() => Err(ControlError::ProjectArchived),
         Ok(_) => Ok(()),
         Err(StoreError::NotFound | StoreError::Invalid(_)) => Err(ControlError::ProjectMissing),
+        Err(StoreError::Unavailable(u)) => Err(ControlError::ProjectsUnavailable(u.what())),
         Err(e) => Err(ControlError::Io(std::io::Error::other(e.to_string()))),
     }
 }

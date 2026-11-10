@@ -10,7 +10,8 @@
 # Run: bash tests/hooks/run-install.sh
 
 set -uo pipefail
-for t in jq openssl git; do command -v "$t" >/dev/null || { echo "SKIP: $t required"; exit 0; }; done
+# The installer (like the hooks) uses only the root-owned system dirs, so that is where the tools must be.
+for t in jq openssl git; do PATH="/usr/bin:/bin:/usr/sbin:/sbin" command -v "$t" >/dev/null || { echo "SKIP: $t required in the system dirs"; exit 0; }; done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_HOME="$(mktemp -d "${TMPDIR:-/tmp}/vajra-install-XXXXXX")"
@@ -184,6 +185,16 @@ bash "$SKILL/scripts/install.sh" >/dev/null 2>&1; rc=$?
 echo '{ not json' > "$SETTINGS"
 bash "$SKILL/scripts/install.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(cat "$SETTINGS")" = '{ not json' ]; check "invalid settings.json: abort, untouched" $?
+
+# --- #113 review: install looks for its tools where the hooks and scripts do, never on the caller's PATH ---
+PLANT="$(mktemp -d "${TMPDIR:-/tmp}/vajra-install-plant-XXXXXX")"
+for t in jq openssl; do
+  printf '#!/bin/sh\ntouch "%s/%s-ran"\nexit 1\n' "$PLANT" "$t" > "$PLANT/$t"; chmod +x "$PLANT/$t"
+done
+echo '{}' > "$SETTINGS"
+PATH="$PLANT:$PATH" bash "$SKILL/scripts/install.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ ! -e "$PLANT/jq-ran" ] && [ ! -e "$PLANT/openssl-ran" ]; check "install never runs a jq or openssl planted ahead on PATH" $?
+rm -rf "$PLANT"
 
 # --- bash 3.2 (macOS system bash) ---
 if [ -x /bin/bash ] && /bin/bash --version | head -1 | grep -q 'version 3\.'; then

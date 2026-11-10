@@ -77,7 +77,12 @@ impl From<Option<u64>> for Gen {
 
 impl Hub {
     pub(super) fn open(data: &Path) -> std::io::Result<Self> {
-        let now = now_ms();
+        Self::open_at(data, now_ms())
+    }
+
+    /// `open` with the clock as a parameter, so a test can reopen in the same millisecond (or with a clock that went
+    /// back) and check that the durable high-water mark alone keeps every revision a client saw behind the new base.
+    pub(super) fn open_at(data: &Path, now: u64) -> std::io::Result<Self> {
         let store = Store::open(&data.join("control/ledger.jsonl"), now)?;
         // Recovered state: the highest revision any receipt carries, and each project's run generation (a done
         // start run records its new generation in `current_generation`).
@@ -441,9 +446,11 @@ impl App {
         let mut moved: Vec<Value> = Vec::new();
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
-            let seen = h.revs.contains_key(project_id);
+            // Only a value that moved since a previous read bumps. A first sighting has nothing a client could hold
+            // as stale (every body this process served recorded its value here first), and bumping it would push a
+            // revision past the durable high-water mark, so a reopen in the same millisecond reused it.
             let now = (orch_gen, active_runs, shown_fp);
-            if h.quiet.insert(project_id.to_string(), now) != Some(now) && seen {
+            if h.quiet.insert(project_id.to_string(), now).is_some_and(|prev| prev != now) {
                 moved.push(json!({"project_id": project_id, "rev": h.bump(project_id)}));
             }
             let rev = h.rev(project_id);

@@ -16,6 +16,11 @@ const PLAIN = new Set(["lead_guard_missing", "turns_full", "not_a_project", "pro
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
+  // A refused projects folder (#77 follow-up): what is wrong, then what to do (the fix names the path).
+  if (isIpcError(e) && e.error === "projects_unavailable" && e.detail) {
+    const fix = (e as { fix?: unknown }).fix;
+    return typeof fix === "string" && fix ? `${e.detail} ${fix}` : e.detail;
+  }
   // The Director-General's guard preconditions, its turn cap and the project-store refusals (FG-02c) already carry a
   // one-line "why and what to do" (for example the sandbox one), so they are shown as they are, without the code.
   if (isIpcError(e) && PLAIN.has(e.error) && e.detail) return e.detail;

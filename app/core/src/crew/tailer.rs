@@ -112,11 +112,13 @@ pub struct Transcript {
     prompt_first_line: Option<String>,
     git_branch: Option<String>,
     cwd: Option<String>,
+    /// The model of the first assistant record: what the Claude worker reports it ran on.
+    model: Option<String>,
 }
 
 impl Transcript {
     pub fn new(tailer: Tailer, redactor: Redactor) -> Self {
-        Self { tailer, redactor, unrecognized: false, prompt_first_line: None, git_branch: None, cwd: None }
+        Self { tailer, redactor, unrecognized: false, prompt_first_line: None, git_branch: None, cwd: None, model: None }
     }
 
     /// The steer nonce rotates on resume: later lines redact the new one too.
@@ -184,7 +186,18 @@ impl Transcript {
         self.cwd.as_deref()
     }
 
+    /// The model the worker reported on its first assistant record, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
     fn note_identity(&mut self, v: &Value) {
+        if self.model.is_none() && v["type"] == "assistant" {
+            self.model = v["message"]["model"]
+                .as_str()
+                .filter(|m| (1..=100).contains(&m.len()) && m.bytes().all(|b| b.is_ascii_graphic()))
+                .map(str::to_string);
+        }
         if self.cwd.is_none() {
             self.cwd = v.get("cwd").and_then(Value::as_str).filter(|s| s.starts_with('/')).map(str::to_string);
         }

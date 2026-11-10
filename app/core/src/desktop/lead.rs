@@ -24,6 +24,7 @@ use crate::control::lead_run::{self, Done, Handle, InitInfo, Limits, Sink, Tag};
 use crate::control::lead_settings;
 use crate::control::service::{AskRecord, AskState};
 use crate::control::{fsx, nonce, sha256};
+use crate::projects::store::StoreError;
 use crate::crew::record::{self, LineKind};
 use crate::crew::redact::Redactor;
 use crate::ids;
@@ -379,6 +380,11 @@ impl App {
         if !ids::valid_run_id(run_id) {
             return Err(LeadError::Invalid("run_id: must be YYYYMMDD-HHMM".into()));
         }
+        // The Director-General's project comes from the store: a refused projects folder says so, with what to do, before
+        // any other precondition (#106 review).
+        if let Some(u) = self.projects.unavailable() {
+            return Err(orchestrator::projects_unavailable(u));
+        }
         self.data_dir_guarded()?;
         let target = self.lead_target(run_id)?;
         let orch = self.orchestrator_for_run(&target.run_id, &target.cwd)?;
@@ -593,6 +599,9 @@ impl App {
     ///   than `MAX_OTHER_ROOTS` folders.
     pub(super) fn isolation(&self, own_run: &str, repo: &Path) -> Result<Isolation, LeadError> {
         let guard = |m: &str| LeadError::GuardMissing(m.into());
+        if let Some(u) = self.projects.unavailable() {
+            return Err(orchestrator::projects_unavailable(u));
+        }
         // This run's project: its guarded store identity (`store_identity`: a store id pin, or a stand-in pin that validates to
         // one, #103 review). A pin that does not validate is refused.
         let own = match self.store_identity(own_run) {
@@ -604,7 +613,10 @@ impl App {
         if self.read_run_cwd_real(own_run).is_none() || self.read_run_loc(own_run).is_none() {
             return Err(guard("this run was recorded by an older build and its folder cannot be checked; start a new run"));
         }
-        let listing = self.projects.list(true).map_err(|_| guard("the project list could not be read for the deny rules"))?;
+        let listing = self.projects.list(true).map_err(|e| match e {
+            StoreError::Unavailable(u) => orchestrator::projects_unavailable(&u),
+            _ => guard("the project list could not be read for the deny rules"),
+        })?;
         if listing.truncated {
             return Err(guard("the project list is too large to build the deny rules"));
         }
@@ -876,6 +888,11 @@ impl App {
     /// store project once, from its guarded location (`migrate_old_pin`). The pinned project must still be active.
     pub(super) fn launch_project(&self, cwd: &Path) -> Result<(PathBuf, crate::projects::contract::Project), Value> {
         let unreadable = || super::fail("project_membership_inconsistent", "an earlier run's launch record cannot be read, so this folder's project cannot be confirmed");
+        // A refused projects folder (#106 review) refuses every start and resume with what is wrong and what to do, never a
+        // misleading record or I/O error from the store calls below.
+        if let Some(u) = self.projects.unavailable() {
+            return Err(orchestrator::projects_unavailable(u).to_json());
+        }
         // The directory of runs must list: an unlistable one reads as "no run here" and would pin the folder afresh.
         let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
         let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -928,7 +945,10 @@ impl App {
         // A pin of a project rooted outside the location (a worktree's repository, a plain folder above) always applies, so
         // records that disagree still refuse below. A pinned root that was replaced keeps the pin here and refuses at the end.
         if !ids.is_empty() {
-            let listing = self.projects.list(true).map_err(|_| unreadable())?;
+            let listing = self.projects.list(true).map_err(|e| match e {
+                StoreError::Unavailable(u) => orchestrator::projects_unavailable(&u).to_json(),
+                _ => unreadable(),
+            })?;
             if listing.truncated {
                 return Err(unreadable());
             }
@@ -1022,7 +1042,10 @@ impl App {
     /// subfolder of the nested checkout is its own, #104 review), else the one recorded with `identity` as its common dir,
     /// compared by canonical path.
     fn project_with_identity(&self, want: &Path, identity: &Path, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
-        let listing = self.projects.list(true).map_err(|e| super::fail("io", e))?;
+        let listing = self.projects.list(true).map_err(|e| match e {
+            StoreError::Unavailable(u) => orchestrator::projects_unavailable(&u).to_json(),
+            e => super::fail("io", e),
+        })?;
         if listing.truncated {
             return Err(super::fail("io", "the project store could not be read whole"));
         }

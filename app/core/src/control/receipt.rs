@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ledger::Ledger;
+use crate::providers::effective::{label_of, Effective, ProviderTag, Requested, TagRequested, UNKNOWN};
 
 pub const SCHEMA: &str = "vajra.receipt/1";
 /// Dedupe window: an `action_id` older than this may be reused.
@@ -332,6 +333,62 @@ impl Store {
     /// Every receipt in the index (recovery of counters at startup).
     pub fn all(&self) -> impl Iterator<Item = &Receipt> {
         self.by_id.values()
+    }
+}
+
+/// One slot's launch receipt (H3): what the slot asked for next to what the harness reported it ran on. Not an action
+/// receipt: it is built from the harness's own report once a worker starts, and carries no secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LaunchReceipt {
+    pub slot: String,
+    pub session_id: String,
+    /// Where the choice came from: `role_default`, `default` or `user`.
+    pub source: String,
+    pub requested: Requested,
+    pub effective: Effective,
+}
+
+impl LaunchReceipt {
+    /// The fields whose reported value differs from the request. A value the harness did not report is not a mismatch (it
+    /// reads "Not reported"), and a request with no effort asks for the harness's default.
+    pub fn mismatches(&self) -> Vec<&'static str> {
+        let (req, eff) = (&self.requested, &self.effective);
+        let mut out = Vec::new();
+        if eff.model != UNKNOWN && eff.model != req.model {
+            out.push("model");
+        }
+        if let (Some(want), Some(got)) = (&req.effort, &eff.effort) {
+            if got != UNKNOWN && got != want {
+                out.push("effort");
+            }
+        }
+        if eff.account != UNKNOWN && eff.account != req.account {
+            out.push("account");
+        }
+        out
+    }
+
+    /// The provider object every surface draws for this worker: what ran, with what was asked for beside it (the same
+    /// when nothing differs). `None` while nothing is read.
+    pub fn provider(&self) -> Option<ProviderTag> {
+        let asked = TagRequested { model: Some(self.requested.model.clone()), model_name: None, label: label_of(&self.requested.account) };
+        self.effective.tag(Some(asked))
+    }
+
+    /// The `launch_mismatch` event for the Director-General, or `None` when the run matches what was asked for. Vajra never
+    /// falls back by itself: this only tells.
+    pub fn mismatch_event(&self) -> Option<Value> {
+        let fields = self.mismatches();
+        (!fields.is_empty()).then(|| {
+            json!({
+                "type": "launch_mismatch",
+                "slot": self.slot,
+                "session_id": self.session_id,
+                "fields": fields,
+                "requested": self.requested,
+                "effective": self.effective,
+            })
+        })
     }
 }
 

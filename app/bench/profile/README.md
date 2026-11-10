@@ -85,3 +85,35 @@ What it says:
 - A real `claude` run and real workers (needs an account and a model), a terminal inside the real webview (the dock is
   not mounted yet), a quiet machine, a visible and an occluded window, and 30 minute growth. Rerun with the same commands.
 - Windows and Linux: macOS only.
+
+
+## Native process ledgers (macOS)
+
+For an already attributed PID, read RSS and physical footprint separately:
+
+```sh
+clang -Wall -Wextra -Werror -O2 app/bench/profile/macos_usage.c -o /tmp/graphite-usage
+/tmp/graphite-usage PID [PID ...]
+python3 -m unittest discover -s app/bench/profile
+```
+
+The helper returns one JSON object per PID: `rssBytes`, `footprintBytes` and `startAbs`, from `proc_pid_rusage`
+(`RUSAGE_INFO_V4`). Values are bytes; divide by 1,048,576 for MiB. `startAbs` is an opaque kernel start identity, not
+an epoch timestamp or a duration. An unreadable or missing PID has an `error` errno instead of zero memory; the batch
+still produces complete JSON and exits `1`. Invalid PID arguments exit `2` before any JSON is written. Success exits `0`.
+
+Use the profile harness's ownership and identity checks to select PIDs. This utility only reads ledgers: it discovers
+no owners, sends no signals and uses no coalition query. RSS and physical footprint are different accounting views;
+keep the columns separate and label any sums by their process scope. The helper does not alter the RSS CI gate or
+its baselines. Its allocation test touches 32 MiB in a temporary child and verifies that both native ledgers increase,
+while the process start identity stays the same. No desktop window is opened.
+
+A hidden-window result does not verify the foreground idle target or a foreground 1h soak. Those remain separate
+measurements requiring a reserved desktop window; reject a foreground trial if renderer visibility changes or its
+UI progress becomes stale. Likewise, never add a new helper by launch timing alone: require attributed ownership.
+
+
+The macOS CI job runs the full profiling unit suite. Worker sandboxes can deny `ps` and `pgrep`; those process-inspection
+checks require CI and must not be reported as locally passed. A regression test injects an inspection denial without
+running either command and verifies that the temporary HOME is still removed. M5 foreground curves, the 190 MiB idle
+target and a flat foreground 1h soak remain **UNVERIFIED** by this utility or its unit tests.

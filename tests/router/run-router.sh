@@ -2,6 +2,9 @@
 # Tests for scripts/vajra_route.py (UserPromptSubmit router). Temp HOME only.
 # Run: bash tests/router/run-router.sh
 set -uo pipefail
+# `grep -q` exits at the first match; under pipefail a producer still writing then dies of SIGPIPE and the pipeline reads
+# as failed, now and then. `has` reads all of its input first, so the producer always finishes. Use it as `cmd | has -q PAT`.
+has() { local t; t="$(cat)"; grep "$@" <<<"$t"; }
 command -v python3 >/dev/null || { echo "SKIP: python3 required"; exit 0; }
 command -v jq >/dev/null || { echo "SKIP: jq required"; exit 0; }
 
@@ -34,21 +37,21 @@ o="$(route "/vajra build a login page")"
 
 # 3. Bare ask launches deliver, with suggestions.
 c="$(ctx "/vajra build a login page")"
-echo "$c" | grep -q 'vajra-deliver'; check "bare ask -> vajra-deliver" $?
-echo "$c" | grep -q 'nakula'; check "frontend ask suggests nakula" $?
-echo "$c" | grep -q 'frontend-design'; check "frontend ask suggests frontend-design" $?
+echo "$c" | has -q 'vajra-deliver'; check "bare ask -> vajra-deliver" $?
+echo "$c" | has -q 'nakula'; check "frontend ask suggests nakula" $?
+echo "$c" | has -q 'frontend-design'; check "frontend ask suggests frontend-design" $?
 
 # 4. Case-insensitive prefix and patterns.
 c="$(ctx "/VAJRA Run A BACKTEST on the momentum strategy")"
-echo "$c" | grep -q 'vajra-deliver'; check "/VAJRA prefix case-insensitive" $?
-echo "$c" | grep -q 'karna'; check "backtest -> karna (case-insensitive)" $?
-! echo "$c" | grep -q 'sahadeva'; check "backtest not routed to sahadeva" $?
+echo "$c" | has -q 'vajra-deliver'; check "/VAJRA prefix case-insensitive" $?
+echo "$c" | has -q 'karna'; check "backtest -> karna (case-insensitive)" $?
+! echo "$c" | has -q 'sahadeva'; check "backtest not routed to sahadeva" $?
 
 # 5. Specificity: first logged route is the most specific pattern.
 : > "$LOG"
 route "/vajra run a security audit of the payments service" >/dev/null
 [ "$(tail -1 "$LOG" | jq -r '.route.pattern')" = "security-audit" ]; check "security audit beats generic security" $?
-ctx "/vajra run a security audit of the payments service" | grep -q 'vajra-security-audit'; check "security audit suggests crew workflow" $?
+ctx "/vajra run a security audit of the payments service" | has -q 'vajra-security-audit'; check "security audit suggests crew workflow" $?
 route "/vajra pre-mortem the database migration" >/dev/null
 [ "$(tail -1 "$LOG" | jq -r '.route.agent')" = "duryodhana" ]; check "pre-mortem -> duryodhana" $?
 route "/vajra check for xss vulnerabilities" >/dev/null
@@ -86,7 +89,7 @@ echo "$L" | jq -e '.words | all(. == ascii_downcase)' >/dev/null; check "words l
 p="/vajra Build A REST API endpoint for orders and add tests please one two three four five six seven eight nine ten eleven twelve"
 exp="$(printf '%s' "$p" | shasum -a 256 2>/dev/null | cut -d' ' -f1)"
 [ "$(echo "$L" | jq -r '.prompt_sha256')" = "$exp" ]; check "prompt_sha256 is sha256 of prompt" $?
-! echo "$L" | grep -q '"prompt"'; check "raw prompt not stored" $?
+! echo "$L" | has -q '"prompt"'; check "raw prompt not stored" $?
 [ "$(echo "$L" | jq -r '.session_id')" = "s1" ]; check "session_id recorded" $?
 perm="$(stat -c %a "$LOG" 2>/dev/null || stat -f %Lp "$LOG" 2>/dev/null)"
 [ "$perm" = "600" ]; check "routing log mode 600" $?
@@ -102,12 +105,12 @@ route "/vajra fleet security-audit" >/dev/null
 
 # 8. Subcommands.
 c="$(ctx "/vajra fleet security-audit")"
-echo "$c" | grep -q 'docs/commands/fleet.md'; check "fleet subcommand -> docs/commands/fleet.md" $?
-! echo "$c" | grep -q 'vajra-deliver'; check "subcommand does not launch deliver" $?
+echo "$c" | has -q 'docs/commands/fleet.md'; check "fleet subcommand -> docs/commands/fleet.md" $?
+! echo "$c" | has -q 'vajra-deliver'; check "subcommand does not launch deliver" $?
 [ "$(tail -1 "$LOG" | jq -r '.route.tier')" = "0" ]; check "subcommand logged as tier 0" $?
-ctx "/vajra" | grep -q 'docs/commands/help.md'; check "bare /vajra -> help" $?
-ctx "/vajra Verify-Work x \"npm test\"" | grep -q 'verify-work.md'; check "subcommand case-insensitive" $?
-ctx "/vajra checkpoint" | grep -q 'campaign.md'; check "legacy checkpoint -> campaign doc" $?
+ctx "/vajra" | has -q 'docs/commands/help.md'; check "bare /vajra -> help" $?
+ctx "/vajra Verify-Work x \"npm test\"" | has -q 'verify-work.md'; check "subcommand case-insensitive" $?
+ctx "/vajra checkpoint" | has -q 'campaign.md'; check "legacy checkpoint -> campaign doc" $?
 for s in help deliver plan fleet campaign verify-work ralph review cost replay repomap redteam atman doctor; do
   [ -f "$REPO/docs/commands/$s.md" ]; check "docs/commands/$s.md exists" $?
 done
@@ -120,11 +123,11 @@ for a in "help me add dark mode" "verify the checkout flow" "memory leak in the 
          "explore caching options for the api" "act on the open bug reports" "checkpoint and restore support for the editor"; do
   : > "$LOG"
   c="$(ctx "/vajra $a")"
-  echo "$c" | grep -q 'vajra-deliver' && ! echo "$c" | grep -q 'docs/commands/[a-z-]*\.md\. *$' \
+  echo "$c" | has -q 'vajra-deliver' && ! echo "$c" | has -q 'docs/commands/[a-z-]*\.md\. *$' \
     && [ "$(tail -1 "$LOG" | jq -r '.route.tier')" != "0" ]; check "natural ask '$a' -> deliver" $?
 done
 # ... and true subcommands still route to their docs.
-sub() { : > "$LOG"; c="$(ctx "/vajra $1")"; echo "$c" | grep -q "docs/commands/$2.md" && ! echo "$c" | grep -q 'vajra-deliver' \
+sub() { : > "$LOG"; c="$(ctx "/vajra $1")"; echo "$c" | has -q "docs/commands/$2.md" && ! echo "$c" | has -q 'vajra-deliver' \
           && [ "$(tail -1 "$LOG" | jq -r '.route.tier')" = "0" ]; check "subcommand '/vajra $1' -> $2" $?; }
 sub "help" help;            sub "HELP" help;          sub "help fleet" help;      sub "help?" help
 sub "status" campaign;      sub "continue" campaign;  sub "doctor" doctor;        sub "verify" doctor
@@ -139,13 +142,13 @@ sub "atman status" atman
 
 # 8c. Bare-ask line asks for run_id alongside ask/hints/campaign.
 c="$(ctx "/vajra build a login page")"
-echo "$c" | grep -q '"run_id"' && echo "$c" | grep -q 'YYYYMMDD-HHMM' && echo "$c" | grep -q 'UTC'; check "bare ask line asks for run_id (UTC YYYYMMDD-HHMM)" $?
-echo "$c" | grep -q '"hints"' && echo "$c" | grep -q '"campaign"'; check "bare ask line mentions hints and campaign" $?
-! ctx "/vajra help" | grep -q 'run_id'; check "subcommand line has no run_id" $?
+echo "$c" | has -q '"run_id"' && echo "$c" | has -q 'YYYYMMDD-HHMM' && echo "$c" | has -q 'UTC'; check "bare ask line asks for run_id (UTC YYYYMMDD-HHMM)" $?
+echo "$c" | has -q '"hints"' && echo "$c" | has -q '"campaign"'; check "bare ask line mentions hints and campaign" $?
+! ctx "/vajra help" | has -q 'run_id'; check "subcommand line has no run_id" $?
 
 # 9. No match -> tier 3, still deliver.
 : > "$LOG"
-ctx "/vajra make me something nice" | grep -q 'vajra-deliver'; check "no-match ask still delivers" $?
+ctx "/vajra make me something nice" | has -q 'vajra-deliver'; check "no-match ask still delivers" $?
 [ "$(tail -1 "$LOG" | jq -r '.route.tier')" = "3" ]; check "no-match logged as tier 3" $?
 
 # 10. Learned routes (atman.sh approve output) come first; junk names are dropped.
@@ -163,10 +166,10 @@ route "/vajra draw a gantt chart" >/dev/null
 route "/vajra draw a gantt" >/dev/null
 [ "$(tail -1 "$LOG" | jq -r '.route.pattern')" != "lr-2" ]; check "multi-word route needs all words" $?
 c="$(ctx "/vajra evil plan")"
-! echo "$c" | grep -qi 'ignore previous'; check "unsafe learned skill name not echoed" $?
-! echo "$c" | grep -q 'krishna'; check "learned route cannot target krishna" $?
+! echo "$c" | has -qi 'ignore previous'; check "unsafe learned skill name not echoed" $?
+! echo "$c" | has -q 'krishna'; check "learned route cannot target krishna" $?
 echo '{not json' > "$HOME/.claude/vajra/learned-routes.json"
-ctx "/vajra build a kanban board" | grep -q 'vajra-deliver'; check "corrupt learned-routes tolerated" $?
+ctx "/vajra build a kanban board" | has -q 'vajra-deliver'; check "corrupt learned-routes tolerated" $?
 rm -f "$HOME/.claude/vajra/learned-routes.json"
 
 # 11. Active campaign line (stub of B's vajra-campaign.sh).
@@ -175,8 +178,8 @@ cat > "$SK/scripts/vajra-campaign.sh" <<'S'
 [ "$1 $2" = "active --brief" ] && printf 'auth-rewrite: 3/7 features passing\n'
 S
 c="$(ctx "/vajra keep going on the auth rewrite")"
-echo "$c" | grep -q 'auth-rewrite: 3/7'; check "active campaign line included" $?
-echo "$c" | grep -q 'Vajra campaign: auth-rewrite: 3/7'; check "router adds the Vajra campaign: prefix" $?
+echo "$c" | has -q 'auth-rewrite: 3/7'; check "active campaign line included" $?
+echo "$c" | has -q 'Vajra campaign: auth-rewrite: 3/7'; check "router adds the Vajra campaign: prefix" $?
 cat > "$SK/scripts/vajra-campaign.sh" <<'S'
 #!/usr/bin/env bash
 [ "$1 $2" = "active --brief" ] && printf 'Vajra campaign auth-rewrite: 3/7 features passing\n'
@@ -185,16 +188,16 @@ c="$(ctx "/vajra keep going on the auth rewrite")"
 [ "$(echo "$c" | grep -o 'Vajra campaign' | wc -l | tr -d ' ')" = "1" ]; check "already-prefixed campaign line not double-prefixed" $?
 # The pointer is per repo, so the brief runs in the prompt's cwd (the payload's /tmp), not the hook's.
 printf '#!/usr/bin/env bash\n[ "$1 $2" = "active --brief" ] && echo "camp-in-$(pwd -P): 1/2 features passing"\n' > "$SK/scripts/vajra-campaign.sh"
-ctx "/vajra keep going on the auth rewrite" | grep -qF "camp-in-$(cd /tmp && pwd -P): 1/2"; check "campaign brief runs in the payload cwd" $?
+ctx "/vajra keep going on the auth rewrite" | has -qF "camp-in-$(cd /tmp && pwd -P): 1/2"; check "campaign brief runs in the payload cwd" $?
 printf '#!/usr/bin/env bash\nexit 1\n' > "$SK/scripts/vajra-campaign.sh"
-ctx "/vajra keep going" | grep -q 'vajra-deliver'; check "failing campaign script tolerated" $?
+ctx "/vajra keep going" | has -q 'vajra-deliver'; check "failing campaign script tolerated" $?
 rm -f "$SK/scripts/vajra-campaign.sh"
 
 # 12. suggestOnAllPrompts.
 jq '.routing.suggestOnAllPrompts = true' "$REPO/config/default.json" > "$SK/config/default.json"
 c="$(ctx "can you threat model the upload flow")"
-echo "$c" | grep -q 'threat-modeling'; check "suggestOnAllPrompts suggests on plain prompt" $?
-! echo "$c" | grep -q 'vajra-deliver'; check "plain prompt never launches deliver" $?
+echo "$c" | has -q 'threat-modeling'; check "suggestOnAllPrompts suggests on plain prompt" $?
+! echo "$c" | has -q 'vajra-deliver'; check "plain prompt never launches deliver" $?
 [ -z "$(route "hello there")" ]; check "plain prompt without match prints nothing" $?
 cp "$REPO/config/default.json" "$SK/config/default.json"
 

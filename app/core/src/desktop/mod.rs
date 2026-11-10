@@ -66,10 +66,9 @@ const PROOF_TEXT_MAX: usize = 2000;
 /// How long the HEAD and cleanliness of a repo are reused between `evidence_list` calls (kept apart from the verdict cache,
 /// so an edit turns a pass stale on the next call). Git gets at most this much of one call's budget.
 const WORKTREE_STATE_TTL: Duration = Duration::from_secs(5);
-/// What the run itself writes into its repo, so it is not an edit to the verified tree: `vajra-verify-work.sh` excludes the
-/// walkthrough dir (evidence, `cmd-N.log`, `diff.patch`, `untracked.txt`) from its own tree-stability check, and crew
-/// worktrees live under `.claude/worktrees/`. Keep in step with `EXCL` in `scripts/vajra-verify-work.sh`.
-const RUN_OWN_OUTPUT: [&str; 2] = ["data/walkthroughs", ".claude/worktrees"];
+/// What `vajra-verify-work.sh` leaves out of the tree id it records (its own walkthrough output: evidence, `cmd-N.log`,
+/// `diff.patch`, `untracked.txt`). Keep in step with `EXCL` there, or the two tree ids stop matching.
+const VERIFY_EXCLUDES: [&str; 1] = ["data/walkthroughs"];
 /// A repo whose state could not be read (git failed or was slow) is not asked again for this long.
 const WORKTREE_STATE_UNKNOWN_TTL: Duration = Duration::from_secs(30);
 const WORKTREE_STATE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -174,10 +173,58 @@ enum Outcome {
     Failed(&'static str),
 }
 
-/// `(HEAD, dirty)` of a repo.
-type RepoState = (String, bool);
-/// Per repo: when `RepoState` was read and what it was (`None`: the read failed).
-type WorktreeCache = HashMap<PathBuf, (std::time::Instant, Option<RepoState>)>;
+/// The `git.worktreeTree` recorded in an evidence file (regular file, at most 16 KiB), if there is one.
+/// What the evidence file says about the tree it was verified on. Reading failures are not "no tree": a file that cannot be
+/// read (too large, unreadable, not JSON) says nothing about its tree, so freshness is unknown, never assumed.
+enum RecordedTree {
+    /// `git.worktreeTree`.
+    Id(String),
+    /// A readable evidence file with no recorded tree (older evidence): the commit decides.
+    None,
+    /// The file could not be read within the bound.
+    Unreadable,
+}
+
+/// `check-evidence` itself reads at most this much of an evidence file (vajra_tasks.py / vajra_kb.py: 5,000,000 bytes).
+const EVIDENCE_READ_MAX: u64 = 5_000_000;
+
+/// Open `path` for reading only if it is a regular file, deciding on the OPENED handle: never following a symlink at the last
+/// component (`O_NOFOLLOW`) and never blocking on a FIFO or device (`O_NONBLOCK`; a FIFO opened this way is refused by the
+/// type check). A separate check of the path followed by an open of the path would let a swap in between redirect the read to
+/// another file or block it for good.
+fn open_regular(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}
+
+/// The evidence file's bytes (a regular file, at most `EVIDENCE_READ_MAX`), or `None` when it cannot be read within that bound.
+fn evidence_snapshot(path: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(open_regular(path)?, EVIDENCE_READ_MAX + 1), &mut bytes).ok()?;
+    (bytes.len() as u64 <= EVIDENCE_READ_MAX).then_some(bytes)
+}
+
+/// The tree an evidence file's bytes record. Parsed from bytes the caller has already bound to a check's verdict, never from the path.
+fn evidence_tree(bytes: Option<&[u8]>) -> RecordedTree {
+    let read = || -> Option<RecordedTree> {
+        let doc: Value = serde_json::from_slice(bytes?).ok()?;
+        Some(match doc.get("git").and_then(|g| g.get("worktreeTree")).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            Some(t) => RecordedTree::Id(t.to_string()),
+            None => RecordedTree::None,
+        })
+    };
+    read().unwrap_or(RecordedTree::Unreadable)
+}
+
+/// What one read of a run repo learned: HEAD, the working tree's id, and whether the repo's own config defines a filter
+/// (then the tree is not computed).
+type RepoState = (String, Option<String>, bool);
+
+/// A run repo and the walkthrough base directory its evidence sits under (what is left out of the tree).
+type StateKey = (PathBuf, Option<PathBuf>);
+/// Per repo and walkthrough base: when `RepoState` was read and what it was (`None`: the read failed).
+type WorktreeCache = HashMap<StateKey, (std::time::Instant, Option<RepoState>)>;
 type EvKey = (PathBuf, Vec<u8>, Option<String>, Option<String>, Option<PathBuf>);
 
 pub struct App {
@@ -272,6 +319,8 @@ impl App {
     /// Open everything under `data` (the app data dir) for the user whose
     /// home is `home`. Nothing under `home` is written.
     pub fn open(data: &Path, home: &Path) -> std::io::Result<Self> {
+        // A test build never reaches the real Keychain: its default `security` path does not exist.
+        let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
@@ -279,6 +328,8 @@ impl App {
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
         let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
+        // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
         {
             // FG-02c: every Director-General call is refused while its project is archived or gone from the store.
@@ -312,14 +363,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
-            // A test build never reaches the real Keychain: its default `security` path does not exist.
-            keys: crate::providers::keychain::Keys::cli(
-                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
-                home,
-            ),
+            keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
-            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
-            usage_source: Box::new(crate::providers::usage::NoSource),
+            // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
+            // stdout pipe. With no key stored there is nothing to meter and no outbound call.
+            usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -396,10 +444,7 @@ impl App {
     pub fn preflight(&self) -> Res {
         let allow = self.allow()?;
         let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
-        let ok = preflight::start_enabled(&rows);
-        let rows: Vec<Value> =
-            rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
-        Ok(json!({"rows": rows, "start_enabled": ok}))
+        Ok(preflight_json(&rows, self.projects_row()))
     }
 
     pub fn list_campaigns(&self) -> Res {
@@ -705,18 +750,51 @@ impl App {
     /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
     pub fn provider_key_save(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_replace`: overwrite the stored key (or store the first one).
     pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
     pub fn provider_key_remove(&self, account: &str) -> Res {
-        key_state(account, self.keys.remove(account).map(|()| false))
+        let r = self.keys.remove(account).map(|()| false);
+        self.key_changed(account, r.is_ok());
+        key_state(account, r)
+    }
+
+    /// A key was saved, replaced or removed (`ok`: the operation succeeded). The account's old figures are forgotten only
+    /// when it did, since a refused or failed one left the key as it was. The metered accounts are looked up again either
+    /// way (a failed Replace has already deleted the old key), and if what is shown changed the revisions advance and the
+    /// UI is told, so a subscriber does not keep a removed key's usage. What was shown is taken BEFORE the figures are
+    /// forgotten: replacing a key keeps the account list, and only the dropped figures differ.
+    fn key_changed(&self, account: &str, ok: bool) {
+        self.rediscover(ok.then_some(account));
+    }
+
+    /// Look the metered accounts up again, forgetting `forget`'s figures in between, and publish a change in what the usage
+    /// view shows. The "before" is read first, so dropped figures count as a change even when the account list is the same.
+    fn rediscover(&self, forget: Option<&str>) {
+        let before = self.provider_usage_cached().fingerprint();
+        if let Some(account) = forget {
+            self.usage.forget(account);
+        }
+        self.usage_source.refresh(true);
+        if self.provider_usage_cached().fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+    }
+
+    /// Look up which accounts have a stored key (this runs `security`, so never on a cache read) and publish a change in
+    /// what the usage view shows. The app calls it once on a background thread at start, so the row appears shortly after
+    /// launch without opening the Providers page.
+    pub fn discover_usage_accounts(&self) {
+        self.rediscover(None);
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
@@ -725,7 +803,12 @@ impl App {
     pub fn provider_usage(&self, page_open: bool) -> Res {
         // What `project_state` serves now, against what this read leaves in the cache.
         let before = self.provider_usage_cached().fingerprint();
-        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        let active = page_open || self.active_run_count() > 0;
+        if active {
+            // Account discovery runs here, after `before` was taken from the cache, so a changed account list is a change.
+            self.usage_source.refresh(false);
+        }
+        let now = self.usage_snapshot(active);
         // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
         // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
         if now.fingerprint() != before {
@@ -770,6 +853,8 @@ impl App {
     }
 
     pub fn start_run(&self, mut input: RunInput, cwd: &str) -> Res {
+        // Every start reads the project store (the run's project): a refused projects folder says so first (#106 review).
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
@@ -814,6 +899,7 @@ impl App {
     }
 
     pub fn resume_run(&self, session_id: &str, campaign: &str, cwd: &str, provider: Option<&str>) -> Res {
+        self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         if !ids::valid_session_id(session_id) {
             return Err(invalid("session_id", "must be a canonical uuid"));
@@ -1121,7 +1207,7 @@ impl App {
         // unchanged while changing what the check sees. A file too large or unreadable is never cached.
         let key = |req: &Request| -> Option<EvKey> {
             let Request::CheckEvidence { path, head, archived, repo } = req else { return None };
-            let f = std::fs::File::open(path).ok()?;
+            let f = open_regular(path)?;
             if f.metadata().ok()?.len() > EVIDENCE_KEY_MAX {
                 return None;
             }
@@ -1133,6 +1219,10 @@ impl App {
         let mut why: HashMap<usize, Value> = HashMap::new();
         let mut repo_of: HashMap<usize, PathBuf> = HashMap::new();
         let mut jobs: Vec<(usize, Request, Option<EvKey>)> = Vec::new();
+        // The evidence bytes each green verdict is bound to: read once per task before its check, and used for the recorded
+        // tree only if the file is shown unchanged around the check (the verdict is about those bytes, not about the path).
+        let mut snaps: HashMap<usize, Vec<u8>> = HashMap::new();
+        let mut bound: HashMap<usize, bool> = HashMap::new();
         {
             let cache = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner());
             let cached_why = self.evidence_why.lock().unwrap_or_else(|e| e.into_inner());
@@ -1148,10 +1238,24 @@ impl App {
                 if let Request::CheckEvidence { repo: Some(r), .. } = &req {
                     repo_of.insert(i, r.clone());
                 }
+                // A FIFO or device standing in for the evidence file would only block the check until its timeout: it is not evidence.
+                if let Request::CheckEvidence { path, .. } = &req {
+                    use std::os::unix::fs::FileTypeExt;
+                    if std::fs::symlink_metadata(path).is_ok_and(|m| { let ft = m.file_type(); ft.is_fifo() || ft.is_socket() || ft.is_char_device() || ft.is_block_device() }) {
+                        verdict.insert(i, false);
+                        why.insert(i, reason("io_error", None, None));
+                        continue;
+                    }
+                }
                 let k = key(&req);
+                if let Request::CheckEvidence { path, .. } = &req {
+                    if let Some(s) = evidence_snapshot(path) { snaps.insert(i, s); }
+                }
                 let hit = k.as_ref().and_then(|k| cache.get(k)).filter(|(_, until)| until.is_none_or(|u| u > std::time::Instant::now()));
                 match hit {
                     Some((v, _)) => {
+                        // A cached verdict belongs to the key's bytes: the tree may be read only from a snapshot equal to them.
+                        bound.insert(i, k.as_ref().is_some_and(|k| snaps.get(&i).is_some_and(|s| *s == k.1)));
                         verdict.insert(i, *v);
                         if !*v {
                             if let Some(w) = k.as_ref().and_then(|k| cached_why.get(k)) {
@@ -1227,6 +1331,16 @@ impl App {
                 if let Some(w) = w.clone() {
                     why.insert(i, w);
                 }
+                // The script opened the file after the snapshot: the verdict covers the snapshot's bytes only if the file is
+                // the same now (a small file by its key, a large one by a second read).
+                if let Some((_, req, k)) = jobs.iter().find(|j| j.0 == i) {
+                    let same = match (k, snaps.get(&i)) {
+                        (Some(k), Some(s)) => key(req).as_ref() == Some(k) && *s == k.1,
+                        (None, Some(s)) => matches!(req, Request::CheckEvidence { path, .. } if evidence_snapshot(path).as_ref() == Some(s)),
+                        _ => false,
+                    };
+                    bound.insert(i, same);
+                }
                 // Remember it only if the file still holds the bytes the key was made from: the script opened it after the
                 // key was read, so a swapped file would otherwise store this verdict under the wrong content.
                 let Some(k) = jobs.iter().find(|j| j.0 == i).and_then(|j| j.2.clone()) else { continue };
@@ -1250,19 +1364,26 @@ impl App {
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
-        let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
-        let mut unknown: std::collections::HashSet<PathBuf> = Default::default();
+        // The walkthrough base directory an evidence file sits under: `<base>/<slug>/evidence.json`.
+        let base_of = |i: usize| -> Option<PathBuf> {
+            let p = tasks.get(i)?.get("evidence")?.get("path")?.as_str()?;
+            Path::new(p).parent()?.parent().map(Path::to_path_buf)
+        };
+        let mut repos: HashMap<StateKey, Option<RepoState>> = HashMap::new();
+        let mut unknown: std::collections::HashSet<StateKey> = Default::default();
         for (i, r) in &repo_of {
-            if verdict.get(i) == Some(&true) && !repos.contains_key(r) && !unknown.contains(r) {
+            let k = (r.clone(), base_of(*i));
+            if verdict.get(i) == Some(&true) && !repos.contains_key(&k) && !unknown.contains(&k) {
                 if checks {
-                    repos.insert(r.clone(), self.worktree_state(r, deadline));
+                    let st = self.worktree_state(r, k.1.as_deref(), deadline);
+                    repos.insert(k, st);
                 } else {
                     // Cache-only (the board): only a known state counts. A cached failed read (`Some(None)`) is as unknown as
                     // no entry, so a green live verdict reads `checking`, never a pass the repo state could not confirm (#107
                     // review). A full `evidence_list` call keeps its rule: a check's verdict stands when git cannot be read.
-                    match self.worktree_state_cached(r) {
-                        Some(Some(st)) => { repos.insert(r.clone(), Some(st)); }
-                        _ => { unknown.insert(r.clone()); }
+                    match self.worktree_state_cached(&k) {
+                        Some(Some(st)) => { repos.insert(k, Some(st)); }
+                        _ => { unknown.insert(k); }
                     }
                 }
             }
@@ -1279,16 +1400,40 @@ impl App {
             } else if has_evidence {
                 match verdict.get(&i) {
                     // Cache-only and the repo's state is not known: not yet a pass.
-                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(r)) => { pending += 1; "checking" }
+                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(&(r.clone(), base_of(i)))) => { pending += 1; "checking" }
                     Some(true) => {
-                        // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
-                        // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
-                        let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
-                        let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
-                            .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
-                        // Cache-only (the board): live evidence with no head cannot be held against the repo, so it is not a
-                        // pass there (#107 review sweep).
-                        if stale { "stale" } else if !checks && want.is_none() && repo_of.contains_key(&i) { pending += 1; "checking" } else { "pass" }
+                        // Green evidence is current while the working tree is the tree it was verified on (POS-1.3): a tracked
+                        // edit, an untracked file or a moved branch that changes the tree makes it stale; a different commit with
+                        // the same tree does not. Evidence without a recorded tree falls back to its commit. If git could not be
+                        // read the check's verdict stands.
+                        let ev = t.get("evidence");
+                        let want_head = ev.and_then(|e| e.get("head")).and_then(Value::as_str);
+                        // Read from the bytes the verdict is bound to, never from the path again: a file swapped after the check cannot supply the tree.
+                        let recorded = if ev.and_then(|e| e.get("path")).is_none() { RecordedTree::None }
+                            else if bound.get(&i) == Some(&true) { evidence_tree(snaps.get(&i).map(Vec::as_slice)) }
+                            else { RecordedTree::Unreadable };
+                        let unreadable = matches!(recorded, RecordedTree::Unreadable);
+                        let want_tree = match recorded { RecordedTree::Id(t) => Some(t), _ => None };
+                        let state = repo_of.get(&i).and_then(|r| repos.get(&(r.clone(), base_of(i)))).and_then(Option::as_ref);
+                        let stale = !unreadable && state.is_some_and(|(head, tree, _)| match (&want_tree, tree) {
+                            (Some(w), Some(c)) => w != c,
+                            (Some(_), None) => false,
+                            (None, _) => want_head.is_some_and(|w| w != head),
+                        });
+                        // With a recorded tree, `pass` means the trees were compared and match. A repo with its own executable
+                        // filter cannot be compared without running it, and a current tree that could not be computed (a timeout
+                        // or an I/O failure) has not been compared at all: HEAD alone does not show the working tree is the one
+                        // verified. Neither is `pass`, and neither is claimed stale.
+                        let filtered = want_tree.is_some() && state.is_some_and(|(_, _, f)| *f);
+                        let tree_unavailable = want_tree.is_some() && state.is_some_and(|(_, tree, _)| tree.is_none());
+                        // Cache-only (the board): live evidence with neither a recorded tree nor a head cannot be held against the
+                        // repo, so it is not a pass there (#107 review sweep).
+                        let nothing_to_compare = !checks && want_tree.is_none() && want_head.is_none() && !unreadable && repo_of.contains_key(&i);
+                        // Evidence whose tree cannot be read is never assumed current either (a green check proves the file, not the tree).
+                        if stale { "stale" }
+                        else if filtered || tree_unavailable || (unreadable && state.is_some()) { "unverified" }
+                        else if nothing_to_compare { pending += 1; "checking" }
+                        else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -1347,24 +1492,27 @@ impl App {
         let mut out = json!({"task": task_id, "commands": [], "notes": notes, "truncated": false});
         // The same path rules as the check (no `..`, an archived bundle or the run repo); anything else shows no commands.
         let Some(Request::CheckEvidence { path, .. }) = self.evidence_request(slug, &task) else { return Ok(out) };
-        let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-        if !regular(&path) {
-            return Ok(out);
-        }
+        // Each file is opened once, as a regular file, and read from that handle.
+        let Some(evf) = open_regular(&path) else { return Ok(out) };
         let read_tail = |p: &Path, max: u64| -> Option<String> {
             use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(p).ok()?;
+            let mut f = open_regular(p)?;
             let len = f.metadata().ok()?.len();
             f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
             let mut b = Vec::new();
             f.take(max).read_to_end(&mut b).ok()?;
             Some(String::from_utf8_lossy(&b).into_owned())
         };
-        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
+        if evf.metadata().map(|m| m.len()).unwrap_or(0) > PROOF_FILE_MAX {
             out["truncated"] = json!(true);
             return Ok(out);
         }
-        let Some(doc) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return Ok(out) };
+        let mut raw = Vec::new();
+        if std::io::Read::read_to_end(&mut std::io::Read::take(evf, PROOF_FILE_MAX + 1), &mut raw).is_err() || raw.len() as u64 > PROOF_FILE_MAX {
+            out["truncated"] = json!(true);
+            return Ok(out);
+        }
+        let Some(doc) = serde_json::from_slice::<Value>(&raw).ok() else { return Ok(out) };
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let cmds: Vec<Value> = doc
             .get("commands")
@@ -1378,7 +1526,7 @@ impl App {
                         let log = c.get("log").and_then(Value::as_str).filter(|n| {
                             !n.is_empty() && n.len() <= 64 && !n.contains(['/', '\\']) && *n != "." && *n != ".."
                         });
-                        let tail = if passed { None } else { log.map(|n| dir.join(n)).filter(|p| regular(p)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
+                        let tail = if passed { None } else { log.map(|n| dir.join(n)).and_then(|p| read_tail(&p, PROOF_LOG_TAIL)).map(|t| text(&t, PROOF_LOG_TAIL as usize)) };
                         json!({
                             "cmd": c.get("cmd").and_then(Value::as_str).map(|s| text(s, PROOF_TEXT_MAX)),
                             "exit_code": exit,
@@ -1393,22 +1541,22 @@ impl App {
         Ok(out)
     }
 
-    /// An archived bundle (under the campaign's evidence dir) is checked
-    /// without a repo; live evidence is checked in the repo of the run that
-    /// made it. `None` when the task has no evidence path or no repo is known.
-    /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
-    /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
-    /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
-    /// The cached repo state, if it is still fresh: `None` when nothing is cached (never runs git).
-    fn worktree_state_cached(&self, repo: &Path) -> Option<Option<(String, bool)>> {
+    /// The cached repo state for `key`, if it is still fresh: `None` when nothing is cached (never runs git).
+    fn worktree_state_cached(&self, key: &StateKey) -> Option<Option<RepoState>> {
         let g = lock(&self.worktree_state);
-        let (at, st) = g.get(repo)?;
+        let (at, st) = g.get(key)?;
         let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
         (at.elapsed() < ttl).then(|| st.clone())
     }
 
-    fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
-        if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
+    /// `(HEAD, tree id)` of `repo`: the commit, and the whole-tree id of its working tree (tracked edits and untracked
+    /// files, the run's own `data/walkthroughs` output left out) computed as `vajra-verify-work.sh` records
+    /// `git.worktreeTree`. The tree is `None` when it cannot be computed in time. `None` overall when git fails or times
+    /// out: the caller then shows the check's own verdict, never `stale`, and nothing is remembered. Both reads count
+    /// against the call's `deadline`.
+    fn worktree_state(&self, repo: &Path, base: Option<&Path>, deadline: std::time::Instant) -> Option<RepoState> {
+        let key = (repo.to_path_buf(), base.map(Path::to_path_buf));
+        if let Some((at, st)) = lock(&self.worktree_state).get(&key) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
             if at.elapsed() < ttl {
                 return st.clone();
@@ -1418,31 +1566,37 @@ impl App {
         if budget.is_zero() {
             return None; // no time to ask: nothing learned, nothing remembered
         }
-        // Both git calls count against the call's deadline: each gets at most 2 s and never more than what is left.
-        let git = |args: &[&str]| {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
+        let read = || {
+            let mut bridge = self.bridge.clone();
+            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(deadline.saturating_duration_since(std::time::Instant::now()));
+            if bridge.timeout.is_zero() {
                 return None;
             }
-            let mut bridge = self.bridge.clone();
-            bridge.timeout = WORKTREE_STATE_TIMEOUT.min(left);
-            bridge
-                .run(&Request::Git { cwd: repo.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() })
+            let head = bridge
+                .run(&Request::Git { cwd: repo.to_path_buf(), args: vec!["rev-parse".into(), "HEAD".into()] })
                 .ok()
-                .filter(|o| o.exit() == Some(0))
-        };
-        let read = || {
-            let head = git(&["rev-parse", "HEAD"])?.stdout.trim().to_string();
-            let mut status = vec!["status".to_string(), "--porcelain".into(), "-unormal".into(), "--".into(), ".".into()];
-            status.extend(RUN_OWN_OUTPUT.iter().map(|d| format!(":(exclude){d}")));
-            let status: Vec<&str> = status.iter().map(String::as_str).collect();
-            let dirty = !git(&status)?.stdout.trim().is_empty();
-            Some((head, dirty))
+                .filter(|o| o.exit() == Some(0))?
+                .stdout
+                .trim()
+                .to_string();
+            // The tree id gets what is left of the call's budget (it is one total timeout inside `tree_id`).
+            bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            // A repo whose own config defines a filter is never asked for its tree (`add` would run the filter).
+            let filtered = bridge.repo_filters(repo, bridge.timeout);
+            // Left out of the tree: the walkthrough base directory the evidence was written under (the verifier excludes
+            // whatever `VAJRA_WALKTHROUGH_DIR` pointed at), else the default.
+            let base_str = base.map(|b| b.to_string_lossy().into_owned());
+            let excludes: Vec<&str> = match &base_str { Some(b) => vec![b.as_str()], None => VERIFY_EXCLUDES.to_vec() };
+            // One deadline for the probe and the tree: what the config read used comes out of the tree's time, so a slow
+            // probe cannot hand `tree_id` a fresh budget (#134 review). No time left: the tree is not computed (`unverified`).
+            bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            let tree = if filtered || bridge.timeout.is_zero() { None } else { bridge.tree_id(repo, &excludes) };
+            Some((head, tree, filtered))
         };
         let st = read();
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
-            lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+            lock(&self.worktree_state).insert(key, (std::time::Instant::now(), st.clone()));
             self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         st
@@ -1460,6 +1614,9 @@ impl App {
         }
     }
 
+    /// An archived bundle (under the campaign's evidence dir) is checked
+    /// without a repo; live evidence is checked in the repo of the run that
+    /// made it. `None` when the task has no evidence path or no repo is known.
     fn evidence_request(&self, slug: &str, task: &Value) -> Option<Request> {
         let ev = task.get("evidence")?;
         let path = PathBuf::from(ev.get("path")?.as_str()?);
@@ -2038,6 +2195,7 @@ fn node_json(n: &Node) -> Value {
         "role": n.engine_id.as_deref().map(crate::crew::names::ui_name),
         "status": n.status.as_str(),
         "overlays": n.overlays,
+        "provider": n.provider,
         "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
     })
 }
@@ -2084,6 +2242,19 @@ pub use state::Envelope;
 mod tests;
 #[cfg(test)]
 mod state_tests;
+
+/// The preflight answer: the checks' rows, then a refused projects folder's row. A refused projects folder is shown
+/// (what, where, what to do) and holds up starting a run: every start reads the project store to find the run's project
+/// (FG-02c), so it would only be refused (#106 review).
+fn preflight_json(rows: &[preflight::Row], projects_row: Option<Value>) -> Value {
+    let mut ok = preflight::start_enabled(rows);
+    let mut out: Vec<Value> = rows.iter().map(|r| json!({"name": r.name, "ok": r.ok, "detail": r.detail, "fix": r.fix})).collect();
+    if let Some(row) = projects_row {
+        out.push(row);
+        ok = false;
+    }
+    json!({"rows": out, "start_enabled": ok})
+}
 
 /// Tests: make `dir` (created if needed) a project in the store under `data`, as the window's "Add project" does.
 /// Returns its `p_` id. Idempotent: the same folder again is the same project.
