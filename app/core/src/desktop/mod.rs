@@ -190,6 +190,8 @@ pub struct App {
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
+    keys: crate::providers::keychain::Keys,
     /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
     usage: crate::providers::usage::Meter,
     usage_source: Box<dyn crate::providers::usage::UsageSource>,
@@ -222,6 +224,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Workers closed once finished (see `closeout`); persisted.
+    closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -305,6 +309,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
+            // A test build never reaches the real Keychain: its default `security` path does not exist.
+            keys: crate::providers::keychain::Keys::cli(
+                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
+                home,
+            ),
             usage: Default::default(),
             // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
             usage_source: Box::new(crate::providers::usage::NoSource),
@@ -325,6 +334,7 @@ impl App {
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -601,7 +611,7 @@ impl App {
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
         let spawned = argv(&nonce).and_then(|argv| {
-            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone() };
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), codex_home: None };
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
@@ -671,6 +681,28 @@ impl App {
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
         serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
+    pub fn provider_key_saved(&self, account: &str) -> Res {
+        key_state(account, self.keys.saved(account))
+    }
+
+    /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
+    pub fn provider_key_save(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_replace`: overwrite the stored key (or store the first one).
+    pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
+    pub fn provider_key_remove(&self, account: &str) -> Res {
+        key_state(account, self.keys.remove(account).map(|()| false))
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
@@ -947,6 +979,10 @@ impl App {
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
+        // A closed worker is no longer tailed: no file reads, no new stream lines. Its record stays for the history view.
+        if self.worker_closed(id) {
+            return tree::worker_from(id, meta, j, map.get(id));
+        }
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
@@ -1420,12 +1456,8 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
-    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
-    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
-    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
-    /// the run repo's HEAD.
-    pub fn worktree_info(&self, worker: &str) -> Res {
+    /// `(worktree, run repo)` of a worker, both resolved; refused for anything that is not a crew worktree.
+    pub(super) fn crew_worktree(&self, worker: &str) -> Result<(PathBuf, PathBuf), Value> {
         if !bus::valid_stream_id(&worker_stream(worker)) {
             return Err(invalid("worker", "not a worker id"));
         }
@@ -1445,6 +1477,16 @@ impl App {
         if !wt.is_dir() {
             return Err(refuse());
         }
+        Ok((wt, repo))
+    }
+
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        let (wt, repo) = self.crew_worktree(worker)?;
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
             (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
@@ -1932,6 +1974,14 @@ fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
     }
 }
 
+/// The answer of every `provider_key_*` command: a `KeyState` or a fixed error. Never echoes input.
+fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) -> Res {
+    match r {
+        Ok(saved) => serde_json::to_value(crate::providers::contract::KeyState { account: account.into(), saved }).map_err(|e| fail("internal", e)),
+        Err(e) => Err(fail(e.code(), e.detail())),
+    }
+}
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -1993,6 +2043,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod closeout;
+pub use closeout::WorktreeTerminals;
 mod orchestrator;
 mod proposals;
 mod inbox;

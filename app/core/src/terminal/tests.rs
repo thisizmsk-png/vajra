@@ -649,3 +649,33 @@ fn bench_memory_and_idle_cpu() {
     println!("BENCH core RSS before {base} KB, after 8 terminals {after} KB => {} KB per terminal (core side)", after.saturating_sub(base) / 8);
     println!("BENCH shell RSS per terminal: avg {} KB", shells.iter().sum::<u64>() / shells.len() as u64);
 }
+
+#[test]
+fn ids_under_finds_the_terminals_in_a_worktree_and_not_the_ones_in_the_project_folder() {
+    let f = Fixture::new("ids-under");
+    let t = f.terminals();
+    let (root_term, _o1) = open_root(&t, &f);
+    let (wt_term, _o2) = open_at(&t, &f, &f.worktree);
+    assert_eq!(t.ids_under(&f.worktree), vec![wt_term.id]);
+    assert!(!t.ids_under(&f.worktree).contains(&root_term.id));
+    assert_eq!(t.ids_under(&f.root).len(), 2, "the folder contains its worktrees");
+    t.close(wt_term.id).unwrap();
+    assert!(t.ids_under(&f.worktree).is_empty());
+}
+
+#[test]
+fn a_terminal_running_something_is_busy_and_an_idle_or_ended_one_is_not() {
+    let f = Fixture::new("busy");
+    let t = f.terminals();
+    let (info, out) = open_root(&t, &f);
+    assert!(!t.is_busy(info.id), "an idle shell");
+    t.write(info.id, b"sleep 30\n").unwrap();
+    let start = Instant::now();
+    while !t.is_busy(info.id) && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(t.is_busy(info.id), "a shell running a command");
+    drop(out);
+    t.close(info.id).unwrap();
+    assert!(!t.is_busy(info.id), "a closed terminal is not busy");
+}
