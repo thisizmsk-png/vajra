@@ -152,6 +152,8 @@ impl Store {
 /// A worker found in a known run, with what the control service says about it.
 struct Cand {
     worker: Worker,
+    /// The effective `auto_close_finished` of the run's project (its override, else the global value).
+    auto: bool,
     stopped: bool,
     pending: bool,
 }
@@ -170,19 +172,29 @@ impl App {
         self.closeout.is_closed(id)
     }
 
+    /// The run's project's effective `auto_close_finished`: its own override if it has one, else the global value. A
+    /// folder no project holds reads the global value. If the preferences cannot be read the answer is "off": a doubt
+    /// never closes a worker on its own.
+    fn auto_close_on(&self, cwd: &Path) -> bool {
+        let project = self.projects.find_by_path(cwd).ok().flatten().map(|p| p.id);
+        let view = self.preferences_read(project.as_deref()).or_else(|_| self.preferences_read(None));
+        view.ok().and_then(|v| v["effective"]["auto_close_finished"].as_bool()).unwrap_or(false)
+    }
+
     fn closeout_candidates(&self) -> Vec<Cand> {
         let runs: Vec<super::Run> = lock(&self.runs).values().cloned().collect();
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for run in runs {
             let Ok(workers) = self.discover_workers(&run) else { continue };
+            let auto = self.auto_close_on(&run.cwd);
             let sig = lock(&self.control).signals(&run.session_id);
             for w in workers {
                 if self.closeout.is_closed(&w.agent_id) || !seen.insert(w.agent_id.clone()) {
                     continue;
                 }
                 let (stopped, pending) = (sig.stopped.contains(&w.agent_id), sig.message_pending.contains(&w.agent_id));
-                out.push(Cand { worker: w, stopped, pending });
+                out.push(Cand { worker: w, auto, stopped, pending });
             }
         }
         out
@@ -257,9 +269,10 @@ impl App {
     }
 
     /// Close every worker that loses nothing; say what was kept and why.
-    pub(super) fn close_finished(&self, terms: &dyn WorktreeTerminals) -> Res {
+    /// `auto_only` is the automatic pass: it leaves out workers whose project has the setting off. The button ignores it.
+    pub(super) fn close_finished(&self, terms: &dyn WorktreeTerminals, auto_only: bool) -> Res {
         let (mut closed, mut skipped) = (Vec::new(), Vec::new());
-        for c in self.closeout_candidates() {
+        for c in self.closeout_candidates().into_iter().filter(|c| c.auto || !auto_only) {
             let (id, label) = (c.worker.agent_id.as_str(), c.worker.label.as_str());
             match self.closeout_assess(&c, false, terms) {
                 Ok(wt) => match self.closeout_release(id, &wt, terms) {
@@ -285,7 +298,7 @@ impl App {
                 if self.closeout.is_closed(&w.agent_id) {
                     return json!({"worker": w.agent_id, "state": "closed"});
                 }
-                let c = Cand { stopped: sig.stopped.contains(&w.agent_id), pending: sig.message_pending.contains(&w.agent_id), worker: w };
+                let c = Cand { auto: true, stopped: sig.stopped.contains(&w.agent_id), pending: sig.message_pending.contains(&w.agent_id), worker: w };
                 let id = c.worker.agent_id.clone();
                 match self.closeout_assess(&c, true, terms) {
                     Ok(_) => json!({"worker": id, "state": "closable"}),
@@ -323,8 +336,8 @@ impl App {
             }
         }
         let _free = Free(&self.closeout.busy);
-        let on = self.preferences_read(None).ok().and_then(|v| v["effective"]["auto_close_finished"].as_bool()).unwrap_or(true);
-        if on { self.close_finished(terms).ok().and_then(|r| r["closed"].as_array().map(Vec::len)).unwrap_or(0) } else { 0 }
+        // The setting is read per run, for that run's project, inside `close_finished`.
+        self.close_finished(terms, true).ok().and_then(|r| r["closed"].as_array().map(Vec::len)).unwrap_or(0)
     }
 
     pub fn act_close_worker(&self, env: &super::Envelope, worker: &str, anyway: Option<(u32, u32, u32)>, terms: &dyn WorktreeTerminals) -> Value {
@@ -332,7 +345,7 @@ impl App {
     }
 
     pub fn act_close_finished(&self, env: &super::Envelope, terms: &dyn WorktreeTerminals) -> Value {
-        self.act(env, crate::control::receipt::Caller::Ui, true, "close_finished", &env.project_id, None::<u64>, || self.close_finished(terms))
+        self.act(env, crate::control::receipt::Caller::Ui, true, "close_finished", &env.project_id, None::<u64>, || self.close_finished(terms, false))
     }
 }
 

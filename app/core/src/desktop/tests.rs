@@ -4326,13 +4326,13 @@ fn a_failed_release_leaves_the_worker_open() {
 fn close_finished_closes_what_is_safe_and_lists_what_it_kept_and_why() {
     let t = Tmp::new();
     let (app, _wt) = closeout_fixture(&t, true, true);
-    let r = app.close_finished(&FakeTerms::idle()).unwrap();
+    let r = app.close_finished(&FakeTerms::idle(), false).unwrap();
     assert_eq!(r["closed"].as_array().unwrap().len(), 0, "{r}");
     let s = &r["skipped"][0];
     assert_eq!((s["worker"].as_str(), s["reason"].as_str(), s["changed_files"].as_u64()), (Some(CLOSE_W), Some("unsaved_work"), Some(2)), "{r}");
     let t2 = Tmp::new();
     let (app2, _) = closeout_fixture(&t2, true, false);
-    let r2 = app2.close_finished(&FakeTerms::idle()).unwrap();
+    let r2 = app2.close_finished(&FakeTerms::idle(), false).unwrap();
     assert_eq!((r2["closed"].as_array().unwrap().len(), r2["skipped"].as_array().unwrap().len()), (1, 0), "{r2}");
 }
 
@@ -4358,7 +4358,7 @@ fn a_worktree_with_a_busy_terminal_keeps_its_worker_open_until_close_anyway_conf
     let two = FakeTerms::busy(2);
     let e = app.close_worker(CLOSE_W, None, &two).unwrap_err();
     assert_eq!((code(&e), e["busy_terminals"].as_u64(), e["changed_files"].as_u64()), ("terminal_busy", Some(2), Some(0)), "{e}");
-    let r = app.close_finished(&two).unwrap();
+    let r = app.close_finished(&two, false).unwrap();
     assert_eq!((r["closed"].as_array().unwrap().len(), r["skipped"][0]["reason"].as_str(), r["skipped"][0]["busy_terminals"].as_u64()), (0, Some("terminal_busy"), Some(2)), "{r}");
     let st = app.closeout_status("c", "20261105-1230", &two).unwrap();
     assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["busy_terminals"].as_u64()), (Some("terminal_busy"), Some(2)), "{st}");
@@ -4374,6 +4374,49 @@ fn a_worktree_with_a_busy_terminal_keeps_its_worker_open_until_close_anyway_conf
 fn an_idle_terminal_does_not_keep_a_clean_pushed_worker_open() {
     let t = Tmp::new();
     let (app, _wt) = closeout_fixture(&t, true, false);
-    let r = app.close_finished(&FakeTerms::idle()).unwrap();
+    let r = app.close_finished(&FakeTerms::idle(), false).unwrap();
     assert_eq!((r["closed"].as_array().unwrap().len(), r["skipped"].as_array().unwrap().len()), (1, 0), "{r}");
+}
+
+/// The fixture repo registered as a project, and its `auto_close_finished` override set (the global value stays default ON).
+fn project_with_auto_close(app: &App, repo: &Path, value: bool) {
+    let id = app.projects.add(repo, true).unwrap().project().id.clone();
+    let patch = serde_json::from_value(json!({"auto_close_finished": value})).unwrap();
+    let rev = app.preferences_read(None).unwrap()["rev"].as_u64().unwrap();
+    lock(&app.preferences).update(Some(&id), rev, patch, false).unwrap();
+}
+
+#[test]
+fn the_automatic_pass_follows_the_run_projects_own_setting_and_the_button_ignores_it() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    project_with_auto_close(&app, &t.0.join("repo"), false);
+    // The global value is ON, but this project turned it off: the automatic pass leaves its finished worker alone.
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 0);
+    assert!(!app.worker_closed(CLOSE_W));
+    // The button is the human's own choice and still closes it.
+    assert_eq!(app.close_finished(&FakeTerms::idle(), false).unwrap()["closed"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_project_that_keeps_the_setting_on_is_closed_by_the_automatic_pass_even_when_global_is_off() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    let off = serde_json::from_value(json!({"auto_close_finished": false})).unwrap();
+    lock(&app.preferences).update(None, 0, off, false).unwrap();
+    project_with_auto_close(&app, &t.0.join("repo"), true);
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 1, "the project's opt-in beats the global off");
+    assert!(app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn a_folder_no_project_holds_follows_the_global_setting() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 1, "global default ON");
+    let t2 = Tmp::new();
+    let (app2, _wt2) = closeout_fixture(&t2, true, false);
+    let off = serde_json::from_value(json!({"auto_close_finished": false})).unwrap();
+    lock(&app2.preferences).update(None, 0, off, false).unwrap();
+    assert_eq!(app2.closeout_auto(&FakeTerms::idle()), 0, "global off");
 }
