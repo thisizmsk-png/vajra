@@ -78,7 +78,7 @@ none "read my instagram"
 
 # Every catalog skill and tool is findable from the skill-catalog table.
 for n in $(jq -r '(.skills+.tools)|keys[]' "$REPO/config/skills.json"); do
-  if [ "$n" = sentry-skill-scanner ] || has -q -- "$n" "$REPO/bundled-skills/skill-catalog/SKILL.md"; then PASS=$((PASS+1));
+  if [ "$n" = sentry-skill-scanner ] || grep -q -- "$n" "$REPO/bundled-skills/skill-catalog/SKILL.md"; then PASS=$((PASS+1));
   else FAIL=$((FAIL+1)); echo "FAIL :: skill-catalog does not name $n"; fi
 done
 
