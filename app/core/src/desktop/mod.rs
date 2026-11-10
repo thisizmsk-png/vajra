@@ -451,6 +451,10 @@ impl App {
     /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
     /// start. The caps compare the ids as opaque keys.
     fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
+        // A worker count no start may ask for is a bad request, never a full ceiling (#80 review).
+        if !(1..=16).contains(&workers) {
+            return Err(invalid("maxInFlight", "must be 1 to 16"));
+        }
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
@@ -464,11 +468,6 @@ impl App {
             }
             v
         };
-        // Forget the worker counts of runs that ended.
-        {
-            let runs = lock(&self.runs);
-            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
-        }
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -527,6 +526,11 @@ impl App {
                 svc.end_session(&id);
             }
         }
+        drop(svc);
+        // Forget the worker counts of runs that ended, here and not only on the next start (#80 review), so the map is
+        // bounded by the runs still going. The run itself stays in `runs` for its crew view.
+        let runs = lock(&self.runs);
+        lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
     }
 
     /// Take the control session, build the argv with its nonce, spawn. A
