@@ -106,6 +106,8 @@ impl Tmp {
         std::fs::create_dir_all(d.join("bin")).unwrap();
         // A canonical root: the macOS temp dir is a /var → /private/var symlink, and these tests compare paths.
         let d = std::fs::canonicalize(&d).unwrap();
+        // FG-02c: the Director-General serves a project; `repo` is this test's project.
+        super::super::test_project(&d.join("home/Library/Application Support/VajraDesktop"), &d.join("home"), &d.join("repo"));
         std::fs::write(d.join("home/.claude/skills/vajra/hooks/pre-tool-use.sh"), "#!/bin/bash\nexit 0\n").unwrap();
         let doctor = d.join("home/.claude/skills/vajra/scripts/vajra-doctor.sh");
         std::fs::write(&doctor, DOCTOR_OK).unwrap();
@@ -194,14 +196,14 @@ impl Drop for Tmp {
     }
 }
 
-/// The project id (stand-in) of the test repo.
+/// The store project id of the test repo.
 fn pid(t: &Tmp) -> String {
-    super::orchestrator::project_ref(&t.repo()).0
+    super::super::test_project(&t.data(), &t.home(), &t.repo())
 }
 
 /// The Director-General's guarded dir for the project of `repo`.
 fn orch_dir_of(t: &Tmp, repo: &Path) -> PathBuf {
-    t.data().join("control/projects").join(super::orchestrator::project_ref(repo).0).join("orchestrator")
+    t.data().join("control/projects").join(super::super::test_project(&t.data(), &t.home(), repo)).join("orchestrator")
 }
 
 fn orch_dir(t: &Tmp) -> PathBuf {
@@ -573,6 +575,7 @@ fn lead_startup_selftest_failclosed() {
     let other = t.0.join("other-repo");
     std::fs::create_dir_all(&other).unwrap();
     let (sid_o, run_o) = ("6f8fad5b-d9cb-469f-a165-70867728950e", "20261106-0930");
+    super::super::test_project(&t.data(), &t.home(), &other);
     app.record_run(run_o, &other, sid_o, "deliver-o", true, 1).unwrap();
     lock(&app.runs).insert(format!("run-{sid_o}"), Run { session_id: sid_o.into(), run_id: run_o.into(), campaign: "deliver-o".into(), cwd: other.clone(), nonces: Redactor::default() });
     app.ask_lead(run_o, "again").unwrap();
@@ -661,7 +664,7 @@ fn two_projects_asking_at_once_each_get_their_own_settings() {
     let app = t.app();
     let (sid_b, run_b) = ("2b8fad5b-d9cb-469f-a165-70867728950e", "20261106-0912");
     let repo_b = t.0.join("repo-b");
-    std::fs::create_dir_all(&repo_b).unwrap();
+    super::super::test_project(&t.data(), &t.home(), &repo_b);
     lock(&app.runs).insert(
         format!("run-{sid_b}"),
         Run { session_id: sid_b.into(), run_id: run_b.into(), campaign: "deliver-y".into(), cwd: repo_b.clone(), nonces: Redactor::default() },
@@ -694,7 +697,7 @@ fn two_projects_asking_at_once_each_get_their_own_settings() {
         let dir = orch_dir_of(&t, &repo);
         assert!(dir.join("settings.json").is_file());
         let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
-        let want = super::orchestrator::project_ref(&repo).0;
+        let want = super::super::test_project(&t.data(), &t.home(), &repo);
         assert_eq!(mcp["mcpServers"]["vajra-desktop"]["env"]["VAJRA_LEAD_PROJECT"], want.as_str(), "each Director-General is bound to its own project");
     }
     for h in lock(&app.lead.active).values() {
@@ -869,6 +872,7 @@ fn a_data_dir_override_outside_the_guarded_location_is_refused() {
     let t = Tmp::new();
     let other = t.0.join("elsewhere");
     std::fs::create_dir_all(&other).unwrap();
+    super::super::test_project(&other, &t.home(), &t.repo());
     let app = App::open(&other, &t.home()).unwrap();
     app.lead.set_bin(Some(t.bin("claude")));
     app.lead.set_env(vec![("HOME", t.home().into()), ("PATH", format!("{}:/usr/bin:/bin", t.0.join("bin").display()).into())]);
@@ -1205,7 +1209,7 @@ fn the_app_runs_at_most_two_director_general_turns() {
     let mut runs = vec![RUN_ID.to_string()];
     for (i, sid) in ["4d8fad5b-d9cb-469f-a165-70867728950e", "5e8fad5b-d9cb-469f-a165-70867728950e"].iter().enumerate() {
         let repo = t.0.join(format!("repo-{i}"));
-        std::fs::create_dir_all(&repo).unwrap();
+        super::super::test_project(&t.data(), &t.home(), &repo);
         let run = format!("20261106-092{i}");
         app.record_run(&run, &repo, sid, &format!("c{i}"), true, 1).unwrap();
         lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: (*sid).into(), run_id: run.clone(), campaign: format!("c{i}"), cwd: repo, nonces: Redactor::default() });
@@ -1322,10 +1326,9 @@ fn a_runs_project_is_pinned_at_launch_and_a_bad_record_fails_closed() {
     app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
     let rec = t.data().join("control/lead").join(RUN_ID).join("project");
     assert_eq!(std::fs::read_to_string(&rec).unwrap(), pid(&t));
-    // The folder later looks like another project (a `.git` appears): the run stays with the project it was pinned to.
+    // The folder later looks like another repo (a `.git` appears): the run stays with the project it was pinned to.
     let pinned = pid(&t);
     std::fs::create_dir_all(t.repo().join(".git")).unwrap();
-    assert_ne!(pid(&t), pinned);
     let r = app.ask_lead(RUN_ID, "hi").unwrap();
     assert_eq!(r["project_id"], pinned.as_str());
     wait_until("the ask", || idle(&app));
@@ -1349,7 +1352,9 @@ fn a_lead_is_denied_the_main_folder_of_a_project_run_only_from_a_subfolder_or_an
     app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
     std::fs::write(main.join(".git/worktrees/harbor-wt/commondir"), "../..\n").unwrap();
     std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/harbor-wt").display())).unwrap();
+    std::fs::write(main.join(".git/worktrees/harbor-wt/gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
     assert_eq!(super::super::caps::project_key(&wt), super::super::caps::project_key(&main), "the fixture is one project");
+    super::super::test_project(&t.data(), &t.home(), &main);
     // The worktree run is the newest: before the fix it was the only folder of this project denied.
     for (run, cwd) in [("20261108-1100", sub.clone()), ("20261108-1101", wt.clone())] {
         app.record_run(run, &cwd, SID, "c", true, 1).unwrap();
@@ -1599,7 +1604,10 @@ fn an_outer_subfolder_redirected_into_a_recorded_nested_project_fails_closed() {
         std::fs::create_dir_all(d).unwrap();
     }
     app.record_run(RUN_ID, &src, SID, "deliver-x", true, 1).unwrap();
+    // The nested project is its own store project (an unregistered nested `.git` is part of the outer store project).
+    let pi = super::super::test_project(&t.data(), &t.home(), &inner);
     app.record_run("20261108-1100", &inner, SID, "c", true, 1).unwrap();
+    assert_eq!(app.pinned_project("20261108-1100").as_deref(), Some(pi.as_str()));
     assert_ne!(super::super::caps::project_key(&inner), super::super::caps::project_key(&src), "the fixture nests two projects");
     assert!(app.other_project_roots(RUN_ID, &src).unwrap().contains(&inner), "healthy: the nested project is denied");
     std::fs::rename(&src, t.repo().join("src-moved")).unwrap();
@@ -1685,6 +1693,9 @@ fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
     assert!(app.isolation("20261108-1100", &src).is_err(), "the location is recorded under two keys");
 }
 
+#[path = "lead_store_tests.rs"]
+mod store;
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.
@@ -1749,7 +1760,8 @@ fn more_other_project_folders_than_the_rules_hold_refuses_the_ask() {
 fn a_worktree_redirected_after_launch_keeps_its_projects_root() {
     let t = Tmp::new();
     let app = t.app();
-    let (wt, other) = (t.0.join("repo-wt"), t.0.join("other"));
+    // The worktree sits inside the project's folder (a store project is its folder and what is inside it).
+    let (wt, other) = (t.repo().join("wt"), t.0.join("other"));
     for d in [t.repo().join(".git/worktrees/repo-wt"), wt.clone(), other.join(".git")] {
         std::fs::create_dir_all(d).unwrap();
     }
@@ -1831,8 +1843,11 @@ fn a_location_recorded_under_two_different_keys_refuses_the_ask() {
     let t = Tmp::new();
     let app = t.app();
     std::fs::create_dir_all(t.repo().join(".git")).unwrap();
-    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`).
+    // The fixture's own run was pinned before the repo had a `.git` (key: the folder); this one is pinned with it (key: the `.git`),
+    // and to another store project: one location claimed by two projects refuses.
+    let other = super::super::test_project(&t.data(), &t.home(), &t.0.join("elsewhere"));
     app.record_run("20261108-1100", &t.repo(), SID, "c", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261108-1100"), "project", other.as_bytes()).unwrap();
     let e = app.other_project_roots(RUN_ID, &t.repo());
-    assert!(e.is_err(), "two keys at one location refuse: {e:?}");
+    assert!(e.is_err(), "two projects at one location refuse: {e:?}");
 }

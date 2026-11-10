@@ -57,6 +57,9 @@ struct Session {
     project: Option<String>,
 }
 
+/// See `Service::set_project_gate`.
+pub type ProjectGate = Box<dyn Fn(&str) -> std::result::Result<(), ControlError> + Send>;
+
 pub struct Service {
     control_root: PathBuf,
     audit_log: PathBuf,
@@ -69,6 +72,9 @@ pub struct Service {
     scope: Option<Vec<String>>,
     /// The current conversation generation of each project's Director-General. A tool call with another one is refused.
     generations: HashMap<String, u32>,
+    /// Asked on every Director-General call, before anything else: does the project still exist, and is it active?
+    /// The app installs it with its project store; with none installed, nothing is gated (the service's own tests).
+    project_gate: Option<ProjectGate>,
     /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
     bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
@@ -100,6 +106,7 @@ impl Service {
             sessions: HashMap::new(),
             scope: None,
             generations: HashMap::new(),
+            project_gate: None,
             bound_project: None,
             pending: HashMap::new(),
             last_stop: HashMap::new(),

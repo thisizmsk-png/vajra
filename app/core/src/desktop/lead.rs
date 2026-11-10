@@ -28,6 +28,7 @@ use crate::crew::record::{self, LineKind};
 use crate::crew::redact::Redactor;
 use crate::ids;
 use crate::lock;
+use crate::projects::contract::{SessionKind, SessionStatus};
 use crate::sessions::argv::{LeadArgv, build_lead_argv};
 use crate::sessions::user_env;
 use crate::vajra::bridge::Request;
@@ -348,7 +349,8 @@ impl App {
         // #82 review: the generation and session are read again now that this ask holds the project's entry.
         // `new_conversation` bumps them only while no entry is held, so this copy is the current conversation; the one
         // read before the lock may predate a "New conversation" and must never be resumed or re-published.
-        let orch = match self.orchestrator(&orch.id, &orch.root) {
+        // The project is checked again here, not only when the request came in: one archived meanwhile gets nothing.
+        let orch = match self.active_project(&orch.id).and_then(|_| self.orchestrator(&orch.id, &orch.root)) {
             Ok(o) => o,
             Err(e) => {
                 lock(&self.lead.active).remove(&orch.id);
@@ -433,15 +435,16 @@ impl App {
         if !workflow {
             fsx::write_atomic(&dir, APPROVAL_ONLY_FILE, b"1")?;
         }
-        // The project, its folder and its key, all from the one look at the repo the launch took before it spawned
-        // anything (ADR-15 2.3; #80, #82 review).
-        let (pid, root) = orchestrator::project_ref_of(key, loc);
+        // The project is pinned now, before anything is spawned, while the app itself has just chosen the directory
+        // (ADR-15 2.3). A folder that is no project gets no pin (the launch refuses one; a record made otherwise is refused
+        // when asked about). The key and location are the exact pair the launch checked (#80 review).
+        if let Ok(Some(p)) = self.projects.find_by_path(cwd) {
+            fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, p.id.as_bytes())?;
+        }
         fsx::write_atomic(&dir, KEY_FILE, key.to_string_lossy().as_bytes())?;
         fsx::write_atomic(&dir, LOC_FILE, loc.to_string_lossy().as_bytes())?;
         let main = main_checkout(loc, key);
         fsx::write_atomic(&dir, MAIN_FILE, main.as_ref().map_or("-".into(), |m| m.to_string_lossy()).as_bytes())?;
-        fsx::write_atomic(&dir, orchestrator::PROJECT_ROOT_FILE, root.to_string_lossy().as_bytes())?;
-        fsx::write_atomic(&dir, orchestrator::PROJECT_FILE, pid.as_bytes())?;
         let real = std::fs::canonicalize(cwd)?;
         fsx::write_atomic(&dir, CWD_REAL_FILE, real.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
@@ -500,9 +503,26 @@ impl App {
         }
         let unreadable = || guard("a launch record cannot be read, so the Lead cannot tell which folders are other projects'");
         let runs = self.try_recorded_runs().map_err(|_| unreadable())?;
+        // Which records are this project's (#103 review): decided by the guarded store identity of every record (`store_identity`:
+        // a store id pin, or a stand-in pin that validates to one), never by the recorded key text. Two runs of the same store
+        // project are one project whatever folders they started in (a root and a subfolder record different keys), and two of
+        // different store projects are not, even under one key. A pin that does not validate belongs to no project: this
+        // run's own is refused, another record's is another project's. The key decides only for a record with no pin.
+        let own_pin = self.store_identity(own_run).map_err(|_| guard("this run's project record does not match its folder; start a new run"))?;
         let mut own_folders: Vec<PathBuf> = Vec::new();
-        let mut other_recorded: Vec<PathBuf> = Vec::new();
-        let mut candidates: Vec<(Vec<PathBuf>, bool)> = Vec::new();
+        // Each other record's folders to deny: (owned, bookkeeping, legacy record).
+        let mut candidates: Vec<(Vec<PathBuf>, Vec<PathBuf>, bool)> = Vec::new();
+        // Ownership versus bookkeeping (#103 review), the same for every record with a validated store identity: what a project
+        // OWNS is its store root and the folders its runs really ran in (`cwd_real`). A record's checkout location, main checkout
+        // and key folder are Git bookkeeping, which projects registered in one checkout (siblings, or a checkout and a project
+        // nested in it) share: they are never an ownership claim, they still count for this run's identity check, and another
+        // project's are still denied (secret files only when they hold this run's folder). A record without a store identity
+        // has only its key and recorded folders to tell its project by, so all of them count as owned. Ambiguity is one folder
+        // OWNED by two projects.
+        let root_of = |pid: &str| self.projects.get(pid).ok().map(|p| PathBuf::from(p.root));
+        let own_root: Option<PathBuf> = own_pin.as_deref().and_then(root_of);
+        let mut own_owned: Vec<PathBuf> = own_root.iter().cloned().collect();
+        let mut other_owned: Vec<PathBuf> = Vec::new();
         for run in runs {
             let present = |f: &str| std::fs::symlink_metadata(self.lead_sid_dir(&run).join(f)).is_ok();
             let Some(cwd) = self.read_run_cwd(&run) else {
@@ -513,6 +533,13 @@ impl App {
                 continue;
             };
             let key = self.read_run_key(&run);
+            let identity = self.store_identity(&run);
+            let same_project = match (&own_pin, identity.clone()) {
+                (_, Err(())) => false,
+                (Some(a), Ok(Some(b))) => *a == b,
+                (None, Ok(Some(_))) => false,
+                (_, Ok(None)) => key.as_ref() == Some(&own),
+            };
             let (cwd_real, loc) = (self.read_run_cwd_real(&run), self.read_run_loc(&run));
             if (present(CWD_REAL_FILE) && cwd_real.is_none()) || (present(LOC_FILE) && loc.is_none()) {
                 return Err(unreadable());
@@ -521,36 +548,67 @@ impl App {
             // unresolved one). Recorded unresolved by every record of the key: the checkout cannot be protected, so the ask is refused.
             let main = match self.project_main_of(&run, key.as_ref()) {
                 Some(Some(m)) => Some(m),
-                Some(None) if key.as_ref() == Some(&own) => None,
+                Some(None) if same_project => None,
                 Some(None) => return Err(guard("another project's main checkout could not be resolved, so the Lead cannot deny it; start that project once from its main folder (the folder that holds its .git), then ask again")),
                 None => None,
             };
-            if key.as_ref() == Some(&own) {
-                own_folders.extend(cwd_real.into_iter().chain(loc).chain(main));
+            let identified = matches!(identity, Ok(Some(_)));
+            if same_project {
+                own_owned.extend(cwd_real.iter().cloned());
+                if own_pin.is_none() || !identified {
+                    own_owned.extend(loc.iter().chain(&main).cloned());
+                }
+                // The store root is admitted only by the exact path and device/inode check below, never by a record holding it by
+                // path: a root moved away and replaced at the same path must refuse.
+                own_folders.extend(cwd_real.into_iter().chain(loc).chain(main).filter(|f| own_root.as_ref() != Some(f)));
                 continue;
             }
-            // The run folder, the project's main tree (from a `.git` key), the recorded location, canonical folder and resolved main.
+            // The run folder, its canonical folder and its validated store root (a run in a subfolder of a project inside a shared
+            // checkout would otherwise leave the rest of that root to the checkout's secret-file rules); and the bookkeeping: the
+            // project's main tree (from a `.git` key), the recorded location and the resolved main.
+            let store_root = identity.ok().flatten().as_deref().and_then(root_of);
             let from_key = key.filter(|k| k.file_name() == Some(std::ffi::OsStr::new(".git"))).and_then(|k| k.parent().map(Path::to_path_buf));
-            let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(from_key).chain(loc.clone()).chain(cwd_real.clone()).chain(main.clone()).collect();
-            let loc_missing = !present(LOC_FILE);
-            other_recorded.extend(cwd_real.into_iter().chain(loc).chain(main));
+            let mut owned: Vec<PathBuf> = std::iter::once(cwd).chain(cwd_real.clone()).chain(store_root).collect();
+            let mut bookkeeping: Vec<PathBuf> = from_key.into_iter().chain(loc).chain(main).collect();
+            if !identified {
+                owned.append(&mut bookkeeping);
+            }
+            other_owned.extend(owned.iter().skip(1).cloned());
             // A record from the shipped build (no location) is skipped for identity but its folder is still denied like any other
             // project's, unless it resolves to the Lead's own folder: the same folder, launched again, is the same project.
-            candidates.push((dirs, loc_missing));
+            candidates.push((owned, bookkeeping, !present(LOC_FILE)));
         }
-        // The identity check: the asking folder is exactly one of its own project's recorded folders.
+        // The registered project root (#103 review): a run launched in a SUBFOLDER of a plain project, or below a project registered
+        // inside a Git checkout, records that subfolder or the checkout, while its Director-General runs in the store's root. That root
+        // is its own only as the store recorded it: compared without resolving it again (the store keeps it canonical) and by device
+        // and inode, so a root moved away, or replaced by a link or another folder, still refuses.
+        if let Some(p) = own_pin.as_ref().and_then(|p| self.projects.get(p).ok()) {
+            use std::os::unix::fs::MetadataExt;
+            let root = PathBuf::from(&p.root);
+            let same_inode = std::fs::metadata(&own_real).is_ok_and(|m| (m.dev(), m.ino()) == (p.root_key.dev, p.root_key.ino));
+            if root == own_real && same_inode {
+                own_folders.push(root);
+            }
+        }
+        // The identity check: the asking folder is exactly one of its own project's recorded folders, or its registered root.
         if !own_folders.contains(&own_real) {
             return Err(guard("this run's folder no longer resolves to a folder recorded for its project (it or a parent was moved or replaced), so the Lead is not started"));
         }
-        // Ambiguity: one recorded folder claimed by two projects.
-        if other_recorded.iter().any(|f| own_folders.contains(f)) {
+        // Ambiguity: one folder owned by two projects.
+        if other_owned.iter().any(|f| own_owned.contains(f)) {
             return Err(guard("a folder is recorded under two different projects, so the Lead cannot tell which one owns it"));
         }
         let mut iso = Isolation::default();
-        for (dirs, legacy) in candidates {
-            for dir in dirs {
+        for (owned, bookkeeping, legacy) in candidates {
+            let n = owned.len();
+            for (i, dir) in owned.into_iter().chain(bookkeeping).enumerate() {
                 let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
                 if real == own_real && legacy {
+                    continue;
+                }
+                // Another project's bookkeeping that is this project's own folder (the checkout a nested project records) is not
+                // denied: it is this project's, and no claim of the other's.
+                if i >= n && (real == own_real || own_owned.contains(&dir) || own_owned.contains(&real)) {
                     continue;
                 }
                 if real == own_real {
@@ -585,6 +643,9 @@ impl App {
     /// already listed is covered by its `**` rules and left out. More than `MAX_OTHER_ROOTS` refuses the ask.
     pub(super) fn own_project_folders(&self, own_run: &str, root: &Path) -> Result<Vec<PathBuf>, LeadError> {
         let own = self.read_run_key(own_run).ok_or_else(|| LeadError::GuardMissing("this run's project was not recorded when it was launched; start a new run".into()))?;
+        // The project's runs, told apart as `isolation` tells them (#103 review): by validated store identity, the key only for
+        // a record with no pin.
+        let own_pin = self.store_identity(own_run).map_err(|_| LeadError::GuardMissing("this run's project record does not match its folder; start a new run".into()))?;
         let mut out: Vec<PathBuf> = vec![root.to_path_buf()];
         let unreadable = || LeadError::GuardMissing("a record of this project's runs cannot be read, so the Lead cannot guard all of its folders".into());
         for run in self.try_recorded_runs().map_err(|_| unreadable())? {
@@ -595,7 +656,13 @@ impl App {
                 }
                 continue;
             };
-            if self.read_run_key(&run).as_ref() != Some(&own) {
+            let same_project = match (&own_pin, self.store_identity(&run)) {
+                (_, Err(())) => false,
+                (Some(a), Ok(Some(b))) => *a == b,
+                (None, Ok(Some(_))) => false,
+                (_, Ok(None)) => self.read_run_key(&run).as_ref() == Some(&own),
+            };
+            if !same_project {
                 continue;
             }
             // The run's checkout root (its guarded `project_loc`: a worktree started in a subfolder still guards its whole root) and the
@@ -854,7 +921,7 @@ impl App {
     fn project_redactor(&self, t: &Target, orch: &Orchestrator) -> Redactor {
         let mut red = t.nonces.clone();
         for run in self.recorded_runs() {
-            if self.pinned_project(&run).as_deref() != Some(orch.id.as_str()) {
+            if !self.run_in_project(&run, &orch.id) {
                 continue;
             }
             let sid = fsx::read_nofollow(&self.lead_sid_dir(&run).join(SESSION_FILE)).ok().and_then(|b| String::from_utf8(b).ok());
@@ -863,13 +930,23 @@ impl App {
             }
         }
         for r in lock(&self.runs).values() {
-            if self.pinned_project(&r.run_id).as_deref() == Some(orch.id.as_str()) {
+            if self.run_in_project(&r.run_id, &orch.id) {
                 red.absorb(&r.nonces);
                 self.add_disk_nonce(&mut red, &r.session_id);
             }
         }
         red.absorb(&lock(&self.control).redactor());
         red
+    }
+
+    /// Whether a recorded run is one of project `pid`'s, for redaction: its pinned store id decides; a run with no store
+    /// id pinned yet (recorded before its folder was a project, or a stand-in pin from before the store) counts when its
+    /// guarded folder is that project's, as `run_project` would resolve it. Widening only ever redacts more.
+    fn run_in_project(&self, run_id: &str, pid: &str) -> bool {
+        match self.pinned_project(run_id) {
+            Some(p) if crate::projects::contract::valid_project_id(&p) => p == pid,
+            _ => self.read_run_cwd(run_id).and_then(|cwd| self.projects.find_by_path(&cwd).ok().flatten()).is_some_and(|p| p.id == pid),
+        }
     }
 
     /// Add the session's persisted control nonce (read under the hook's rules), if there is a valid one.
@@ -907,6 +984,10 @@ impl App {
             let rec = self.lead_sid_dir(&t.run_id);
             fsx::private_dir(&rec).map_err(io)?;
             fsx::write_atomic(&rec, CWD_FILE, t.cwd.to_string_lossy().as_bytes()).map_err(io)?;
+            // And its project, as a launch pins it: later asks follow this record, not a new look at the folder.
+            if self.pinned_project(&t.run_id).is_none() {
+                fsx::write_atomic(&rec, orchestrator::PROJECT_FILE, orch.id.as_bytes()).map_err(io)?;
+            }
         }
         // Per-project files (one ask per Director-General at a time), under `control/`, which the worker guard keeps
         // workers from writing (on the default data dir). Two projects' asks can overlap; each has its own files.
@@ -952,6 +1033,8 @@ impl App {
                     .map_err(|e| LeadError::Io(e.code().to_string()))
             }
         };
+        // The last check before the process: the self-test can take minutes, and the project may be archived meanwhile.
+        self.active_project(&orch.id)?;
         // Record first, spawn second: if the ledger cannot take the line, the Lead is never started.
         ledger(AskState::Queued, Some(framed.text()), None)?;
         let child = match lead_run::spawn(&argv, &orch.root, &env, framed, handle) {
@@ -962,6 +1045,9 @@ impl App {
             }
         };
         let _ = self.bus.push(&stream, &format!("you\t{}", red.clean(framed.text())));
+        // The window's record of the conversation (FG-01 sessions.jsonl); `--resume` never reads it.
+        let record = self.note_orchestrator(orch, Some(&lead_sid), SessionStatus::Running);
+        let (projects, rec_project, rec_gen) = (self.projects.clone(), orch.id.clone(), orch.generation);
 
         let limits = *lock(&self.lead.limits);
         let project = orch.id.clone();
@@ -972,6 +1058,7 @@ impl App {
         let first = !resume;
         let sid_dir = orch.dir.clone();
         let sid_text = lead_sid.clone();
+        let sid_text_end = lead_sid.clone();
         let ledger_init = ledger.clone();
         std::thread::spawn(move || {
             let on_init: Box<dyn FnMut(&InitInfo) + Send> = Box::new(move |_| {
@@ -997,6 +1084,12 @@ impl App {
                     let _ = ledger(AskState::Failed, None, Some(e.code()));
                     sink.push("error", e.code());
                 }
+            }
+            // The turn is over: the orchestrator is idle again (or its turn failed), still on this conversation.
+            if let Some(id) = record {
+                let status = if matches!(&end, Ok(Done { is_error: false, .. })) { SessionStatus::Stopped } else { SessionStatus::Failed };
+                let line = orchestrator::session_line(id, &rec_project, SessionKind::Orchestrator, None, Some(&sid_text_end), None, "claude", rec_gen, status);
+                let _ = projects.append_session(&line);
             }
             lock(&active).remove(&project);
         });

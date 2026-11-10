@@ -13,6 +13,8 @@ impl Tmp {
             .join(format!("vajra-main-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("home/.claude/vajra/campaigns")).unwrap();
+        // FG-02c: a run starts only in a project's folder; `repo` is this test's project.
+        test_project(&d.join("data"), &d.join("home"), &d.join("repo"));
         Self(d)
     }
     fn home(&self) -> PathBuf {
@@ -96,11 +98,11 @@ fn one_active_run_per_project() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() })
         .unwrap();
-    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
-    app.record_run("20261105-1230", &t.0, sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
-    let cwd = t.0.to_string_lossy().to_string();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
+    let cwd = t.0.join("repo").to_string_lossy().to_string();
     let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
     let held = app.start_run(input, &cwd).unwrap_err();
     assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("project_busy")), "{held}");
@@ -162,7 +164,7 @@ fn start_run_rejects_bad_input_before_creating_a_session() {
         campaign: None,
         provider: None,
     };
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     assert_eq!(code(&app.start_run(input("   "), &cwd).unwrap_err()), "invalid_args");
     assert_eq!(code(&app.start_run(input("do it"), "relative/dir").unwrap_err()), "invalid_args");
     assert!(!t.0.join("data/control/sessions").exists() || fs::read_dir(t.0.join("data/control/sessions")).unwrap().next().is_none());
@@ -173,7 +175,7 @@ fn start_run_rejects_bad_input_before_creating_a_session() {
 fn resume_run_validates_ids() {
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     let e = app.resume_run("bad id;rm", "deliver-x", &cwd, None).unwrap_err();
     assert_eq!(code(&e), "invalid_args");
     let e = app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "../x", &cwd, None).unwrap_err();
@@ -317,7 +319,7 @@ fn a_spawn_failure_rolls_the_control_session_back() {
     // B4: start_session ran, then the PTY spawn failed; no session may stay live.
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     let argv = vec!["/nonexistent/vajra-no-such-binary".to_string()];
     let e = app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(argv.clone()), false).unwrap_err();
@@ -331,7 +333,7 @@ fn an_exited_run_ends_its_control_session() {
     // B4: once the run's PTY exits, steering must not target its workers.
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
     assert!(lock(&app.control).nonce(sid).is_some());
@@ -427,7 +429,7 @@ fn a_reap_during_a_resume_keeps_the_new_session() {
     let t = Tmp::new();
     let app = t.app();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| {
@@ -444,7 +446,7 @@ fn a_resumed_pty_redacts_the_launch_nonce_too() {
     let t = Tmp::new();
     let app = t.app();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
     let old = lock(&app.control).nonce(sid).unwrap().to_string();
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
@@ -590,7 +592,7 @@ fn a_reap_in_progress_blocks_a_launch_until_it_finishes() {
     let t = Tmp::new();
     let app = t.app();
     let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     app.launch(sid, "20261105-1230", "c", Path::new(&cwd), |_| Ok(vec!["true".into()]), false).unwrap();
     app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
     let held = lock(&app.control);
@@ -2704,7 +2706,7 @@ fn code_of_err(v: &Value) -> &str {
 fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.clone();
+    let cwd = t.0.join("repo");
     let (a, b) = ("1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e");
     for (sid, run, argv) in [(a, "20261108-0900", vec!["true".to_string()]), (b, "20261108-0901", vec!["sleep".into(), "5".into()])] {
         let stream = format!("run-{sid}");
@@ -2729,6 +2731,7 @@ fn repos(t: &Tmp, names: &[&str]) -> Vec<PathBuf> {
     names.iter().map(|n| {
         let d = t.0.join(n);
         fs::create_dir_all(d.join(".git")).unwrap();
+        test_project(&t.0.join("data"), &t.home(), &d);
         d
     }).collect()
 }
@@ -2800,18 +2803,22 @@ fn a_launched_run_belongs_to_its_projects_director_general() {
     let r = repos(&t, &["alpha", "beta"]);
     app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], sleeper, false, true, Engine::Claude, 2).unwrap();
     app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, Engine::Claude, 2).unwrap();
-    let (pa, pb) = (orchestrator::project_ref(&r[0]).0, orchestrator::project_ref(&r[1]).0);
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &r[0]), test_project(&t.0.join("data"), &t.home(), &r[1]));
     assert_ne!(pa, pb);
     assert_eq!(std::fs::read_to_string(t.0.join("data/control/lead").join(RUNS[0]).join("project")).unwrap(), pa, "pinned in the guarded record");
     {
         let mut svc = lock(&app.control);
         svc.set_generation(&pa, 1).unwrap();
+        let idle = test_project(&t.0.join("data"), &t.home(), &t.0.join("gamma"));
+        svc.set_generation(&idle, 1).unwrap();
         svc.set_generation("k_00000000000000000000000000000000", 1).unwrap();
         // Alpha's Director-General has a live session in scope (an unknown worker is "not found"); a project with no
         // live run has none at all (control is off for it), so nothing falls back to every session.
         let msg = json!({"worker": "nobody", "text": "x"});
         assert!(matches!(svc.call_tool_for_project(&pa, 1, "message_worker", &msg), Err(crate::control::service::ControlError::WorkerNotFound)));
-        assert!(matches!(svc.call_tool_for_project("k_00000000000000000000000000000000", 1, "message_worker", &msg), Err(crate::control::service::ControlError::ControlDisabled)));
+        assert!(matches!(svc.call_tool_for_project(&idle, 1, "message_worker", &msg), Err(crate::control::service::ControlError::ControlDisabled)));
+        // FG-02c: a stand-in id is no store project, so its calls are refused outright.
+        assert!(matches!(svc.call_tool_for_project("k_00000000000000000000000000000000", 1, "message_worker", &msg), Err(crate::control::service::ControlError::ProjectMissing)));
     }
     for s in &SIDS[..2] {
         app.sup.kill(&format!("run-{s}")).unwrap();
@@ -2833,6 +2840,35 @@ fn terminal_roots_are_the_run_dirs_of_runs_this_app_started_not_the_worker_writa
     assert!(!app.terminal_roots().iter().any(|r| r.ends_with("elsewhere")));
 }
 
+/// FG-02c (decision Q1, 3.1 test 3 and 3.4 test 18): a run starts only in a project's folder. Elsewhere it is refused
+/// with the add action and the folder, and leaves no control session, no stream and no record; an archived project
+/// is refused too. A run that starts gets a `kind: run` line in its project's sessions, parented to the orchestrator.
+#[test]
+fn a_run_starts_only_in_an_active_project_and_is_recorded_under_its_orchestrator() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let loose = t.0.join("loose");
+    fs::create_dir_all(&loose).unwrap();
+    let e = app.launch(sid, "20261105-1230", "c", &loose, |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!((code(&e), e["action"].as_str(), e["path"].as_str()), ("not_a_project", Some("add_project"), loose.to_str()), "{e}");
+    assert!(!lock(&app.control).has_session(sid) && lock(&app.runs).is_empty(), "nothing started");
+    assert!(!t.0.join("data/control/lead/20261105-1230").exists(), "no run record");
+    let archived = test_project(&t.0.join("data"), &t.home(), &loose);
+    app.projects.archive(&archived, None).unwrap();
+    assert_eq!(code(&app.launch(sid, "20261105-1230", "c", &loose, |_| Ok(vec!["true".into()]), false).unwrap_err()), "project_archived");
+    // In the project: pinned, and recorded as a run of its orchestrator.
+    let repo = t.0.join("repo");
+    let pid = test_project(&t.0.join("data"), &t.home(), &repo);
+    app.launch(sid, "20261105-1230", "deliver-x", &repo, |_| Ok(vec!["true".into()]), false).unwrap();
+    assert_eq!(fs::read_to_string(t.0.join("data/control/lead/20261105-1230/project")).unwrap(), pid);
+    let log = app.projects.sessions(&pid).unwrap().sessions;
+    let run = log.iter().find(|s| s.kind == crate::projects::contract::SessionKind::Run).expect("a run line");
+    let orch = fs::read_to_string(t.0.join("data/control/projects").join(&pid).join("orchestrator/record")).unwrap();
+    assert_eq!((run.run_id.as_deref(), run.campaign.as_deref(), run.parent.as_deref()), (Some("20261105-1230"), Some("deliver-x"), Some(orch.as_str())));
+    assert_eq!(run.provider, "claude", "a Claude launch is recorded as claude");
+    let _ = app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5));
+}
 
 // ---- FG-09: the provider a run starts and resumes on
 
@@ -2847,7 +2883,7 @@ fn g12_a_provider_that_is_not_installed_is_refused_and_no_other_one_is_tried() {
     let t = Tmp::new();
     let mut app = t.app();
     app.provider_dirs = Some(vec![t.fake_clis(&["claude"])]); // claude is there, codex is not
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     let e = app.start_run(input_for(Some("codex")), &cwd).unwrap_err();
     assert_eq!(code(&e), "provider_not_installed", "{e}");
     let e = app.resume_run(PSID, "deliver-x", &cwd, Some("codex")).unwrap_err();
@@ -2860,7 +2896,7 @@ fn g12_a_provider_that_is_not_installed_is_refused_and_no_other_one_is_tried() {
 fn an_unknown_provider_is_invalid_not_defaulted() {
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     for bad in ["gemini", "", "Claude", "claude "] {
         let e = app.start_run(input_for(Some(bad)), &cwd).unwrap_err();
         assert_eq!(code(&e), "invalid_args", "{bad:?}: {e}");
@@ -2871,7 +2907,7 @@ fn an_unknown_provider_is_invalid_not_defaulted() {
 fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     let t = Tmp::new();
     let app = t.app();
-    let cwd = t.0.to_string_lossy().into_owned();
+    let cwd = t.0.join("repo").to_string_lossy().into_owned();
     assert_eq!(app.chosen_engine(None).unwrap(), Engine::Claude, "no preference means claude");
     assert_eq!(app.chosen_engine(Some("codex")).unwrap(), Engine::Codex);
     app.launch_engine(Engine::Claude, PSID, "20261108-1200", "deliver-claude", Path::new(&cwd), |_| Ok(vec!["true".into()]), false, caps::DEFAULT_RUN_WORKERS).unwrap();
@@ -2886,6 +2922,12 @@ fn a_claude_run_is_recorded_and_offered_for_resume_but_a_codex_run_is_not() {
     app.launch_engine(Engine::Codex, other, "20261108-1201", "deliver-codex", Path::new(&cwd), |_| Ok(vec!["true".into()]), false, caps::DEFAULT_RUN_WORKERS).unwrap();
     let idx = fs::read_to_string(t.0.join("data/runs.jsonl")).unwrap();
     assert!(idx.contains("\"provider\":\"codex\""), "the run is still recorded with its provider");
+    // The project's session log records each run on the provider it actually launched on (#103 review), not a fixed claude.
+    let pid = app.projects.find_by_path(Path::new(&cwd)).unwrap().expect("the run's project").id;
+    let log = app.projects.sessions(&pid).unwrap().sessions;
+    let run_line = |run: &str| log.iter().find(|s| s.kind == crate::projects::contract::SessionKind::Run && s.run_id.as_deref() == Some(run)).map(|s| s.provider.clone());
+    assert_eq!(run_line("20261108-1201").as_deref(), Some("codex"), "the Codex run's session line: {log:?}");
+    assert_eq!(run_line("20261108-1200").as_deref(), Some("claude"), "the Claude run's session line: {log:?}");
     let targets = app.resume_targets().unwrap();
     assert_eq!(targets["targets"]["deliver-claude"]["provider"], "claude");
     assert!(targets["targets"].get("deliver-codex").is_none(), "the app-made id means nothing to codex resume: {targets}");
@@ -3362,12 +3404,13 @@ fn a_worktree_run_started_in_a_subfolder_guards_the_whole_checkout_root() {
 fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_reaper() {
     let t = Tmp::new();
     let app = t.app();
+    let p = test_project(&t.0.join("data"), &t.home(), &t.0.join("repo"));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
-    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
-    app.record_run("20261105-1230", &t.0, sid, "c", true, 1).unwrap();
-    assert!(app.running_in_project(&orchestrator::project_ref(&t.0).0));
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
+    app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap();
+    assert!(app.running_in_project(&p));
     app.sup.kill(&stream).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while app.sup.is_running(&stream).unwrap_or(false) && std::time::Instant::now() < deadline {
@@ -3375,11 +3418,11 @@ fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_re
     }
     app.reap_runs();
     assert!(lock(&app.runs).contains_key(&stream), "the entry stays for the crew view");
-    assert!(!app.running_in_project(&orchestrator::project_ref(&t.0).0), "but the project is no longer running");
+    assert!(!app.running_in_project(&p), "but the project is no longer running");
 }
 
-/// #82 review (P2): the project root is the checkout root from the launch-time location, so a submodule first launched from a
-/// subfolder and then from its root pins the same root, never the subfolder.
+/// #82 review (P2), on the store id: a submodule first launched from a subfolder and then from its root pins the same
+/// project, whose root is the checkout root the store recorded, never the subfolder.
 #[test]
 fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
     let t = Tmp::new();
@@ -3387,13 +3430,15 @@ fn a_submodule_first_launched_from_a_subfolder_pins_its_checkout_root() {
     let (parent, child) = (t.0.join("parent"), t.0.join("parent/child"));
     fs::create_dir_all(parent.join(".git/modules/child")).unwrap();
     fs::create_dir_all(child.join("src")).unwrap();
+    let pc = test_project(&t.0.join("data"), &t.home(), &child);
     let key = fs::canonicalize(parent.join(".git/modules/child")).unwrap();
     let loc = fs::canonicalize(&child).unwrap();
-    let root_of = |run: &str| fs::read_to_string(app.data.join("control/lead").join(run).join(orchestrator::PROJECT_ROOT_FILE)).unwrap();
     app.record_run_pinned("20261105-1230", &child.join("src"), &loc, &key, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
     app.record_run_pinned("20261105-1231", &child, &loc, &key, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
-    assert_eq!(root_of("20261105-1230"), loc.to_string_lossy());
-    assert_eq!(root_of("20261105-1231"), loc.to_string_lossy());
+    for run in ["20261105-1230", "20261105-1231"] {
+        assert_eq!(app.pinned_project(run).as_deref(), Some(pc.as_str()), "{run}");
+    }
+    assert_eq!(fs::canonicalize(app.projects.get(&pc).unwrap().root).unwrap(), loc, "the root is the checkout, not the subfolder");
 }
 
 /// #80 round 6: a pinned common dir that was replaced by a symlink is no longer the project it was pinned as; it cannot admit a
@@ -3494,6 +3539,7 @@ fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_c
     let (a, b) = (t.0.join("a"), t.0.join("b"));
     fs::create_dir_all(a.join(".git")).unwrap();
     fs::create_dir_all(b.join(".git")).unwrap();
+    test_project(&t.0.join("data"), &t.home(), &b);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
@@ -3599,6 +3645,7 @@ fn a_record_that_cannot_be_written_refuses_a_resume_before_the_nonce_rotates() {
     let app = t.app();
     let a = t.0.join("a");
     fs::create_dir_all(a.join(".git")).unwrap();
+    test_project(&t.0.join("data"), &t.home(), &a);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     let nonce = lock(&app.control).nonce(sid).map(str::to_string);
