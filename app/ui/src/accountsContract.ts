@@ -189,6 +189,21 @@ export function pct(w: UsageWindow): number | null {
 /** True when an allowance for the whole account (`model: null`) covers this entry. The core reads `{account, model: null}` as every model on that account. */
 export const coveredByAccount = (allowed: Allowed[], account: string): boolean => allowed.some((x) => x.account === account && x.model === null);
 
+/**
+ * What one tick in the allowed list does. Under an account-wide allowance (`model: null`) ANY row on that account (a model, or a CLI
+ * login's default, which is that entry) turns it into explicit entries for every model except the one switched off, so one click never
+ * flips another row. Otherwise it adds or removes just that entry; adding an account-wide entry drops that account's now-redundant model entries.
+ */
+export function toggleAllowed(allowed: Allowed[], e: Allowed, models: string[]): Allowed[] {
+  const same = (a: Allowed, b: Allowed) => a.account === b.account && a.model === b.model;
+  if (coveredByAccount(allowed, e.account)) {
+    const rest = models.filter((id) => id !== e.model).map((id) => ({ account: e.account, model: id }));
+    return [...allowed.filter((x) => !(x.account === e.account && x.model === null)), ...rest.filter((r) => !allowed.some((x) => same(x, r)))];
+  }
+  if (allowed.some((x) => same(x, e))) return allowed.filter((x) => !same(x, e));
+  return e.model === null ? [...allowed.filter((x) => x.account !== e.account), e] : [...allowed, e];
+}
+
 /** Every choice a project may use, in the accounts' order. An account allowed at `null` offers its own default (a CLI login only) and all of its models; a concrete allowance offers just that model. */
 export function allowedChoices(accounts: Account[], allowed: Allowed[]): Array<{ account: Account; model: string | null }> {
   const out: Array<{ account: Account; model: string | null }> = [];

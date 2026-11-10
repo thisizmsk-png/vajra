@@ -597,6 +597,7 @@ export const S = {
     noEffort: "No effort setting",
     allowed: "Allowed for workers",
     inUse: "In use as a default. Choose another default first.",
+    coveredByDefault: "Allowed with the default model. Turn the default off to choose models one by one.",
     save: "Save agents",
     discard: "Discard",
     saved: "Saved.",

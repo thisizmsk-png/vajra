@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ACCOUNTS as FIXTURE_ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
-import { allowedChoices, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
+import { allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
 import type { Account } from "../src/accountsContract";
 import { setTransport } from "../src/ipc";
 import { PreferencesProvider } from "../src/preferences";
@@ -283,6 +283,34 @@ describe("advanced: base URL", () => {
   });
 });
 
+describe("toggleAllowed: row kind x covered/uncovered x checked/unchecked", () => {
+  const M = ["m1", "m2"];
+  const e = (model: string | null) => ({ account: "a", model });
+  const other = { account: "z", model: null };
+  const out = (allowed: Array<{ account: string; model: string | null }>, model: string | null) => toggleAllowed(allowed, e(model), M);
+  it("covered: the default row (null) off keeps every model, as explicit entries", () => {
+    expect(out([e(null), other], null)).toEqual([other, e("m1"), e("m2")]);
+  });
+  it("covered: a model row off keeps the other models and drops the account-wide entry", () => {
+    expect(out([e(null), other], "m1")).toEqual([other, e("m2")]);
+  });
+  it("covered with some explicit entries already: no duplicates", () => {
+    expect(out([e(null), e("m2")], "m1")).toEqual([e("m2")]);
+  });
+  it("uncovered, checked: only that entry goes", () => {
+    expect(out([e("m1"), e("m2"), other], "m1")).toEqual([e("m2"), other]);
+  });
+  it("uncovered, unchecked model row: only that entry is added", () => {
+    expect(out([e("m1")], "m2")).toEqual([e("m1"), e("m2")]);
+  });
+  it("uncovered, unchecked default row: adds the account-wide entry and drops the redundant model entries", () => {
+    expect(out([e("m1"), other], null)).toEqual([other, e(null)]);
+  });
+  it("never touches another account", () => {
+    for (const m of [null, "m1"]) expect(out([e(null), other], m)).toContainEqual(other);
+  });
+});
+
 describe("Project scope: the default, role defaults and the allowed set", () => {
   it("an account allowed at null offers every model on it; a concrete allowance offers only that model", () => {
     const r = parseAccounts(FIXTURE_ACCOUNTS);
@@ -390,7 +418,9 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     const s = await section();
     const box = (name: string) => within(s).getByText(name, { selector: "[data-model-line]" }).closest("label")!.querySelector("input") as HTMLInputElement;
     expect(box("GPT X · Codex CLI").checked).toBe(true);
+    expect(box("GPT X · Codex CLI").disabled).toBe(true); // under the default row: turn the default off first
     fireEvent.click(box(`${C.defaultModel} · Codex CLI`));
+    expect(box("GPT X · Codex CLI").disabled).toBe(false);
     expect(box(`${C.defaultModel} · Codex CLI`).checked).toBe(false);
     expect(box("GPT X · Codex CLI").checked).toBe(true);
     expect(box("GPT Y · Codex CLI").checked).toBe(true);
