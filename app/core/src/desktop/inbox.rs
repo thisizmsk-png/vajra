@@ -136,7 +136,7 @@ impl App {
     }
 
     /// The `workflows/` directory of a run's session (the run is one `plan_origins` returned).
-    fn workflows_dir(&self, e: &runindex::Entry) -> PathBuf {
+    pub(super) fn workflows_dir(&self, e: &runindex::Entry) -> PathBuf {
         self.claude.join("projects").join(project_slug(&e.cwd)).join(&e.session_id).join("workflows")
     }
 

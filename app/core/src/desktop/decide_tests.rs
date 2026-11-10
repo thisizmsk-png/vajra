@@ -96,7 +96,7 @@ impl Tmp {
     fn live(&self, app: &App) -> PathBuf {
         let out = self.0.join("typed");
         app.sup
-            .spawn(&format!("run-{SID}"), SpawnSpec { argv: vec!["sh".into(), "-c".into(), format!("head -n1 > '{}'; sleep 5", out.display())], cwd: self.cwd(), rows: 24, cols: 80, redact: Redactor::default() })
+            .spawn(&format!("run-{SID}"), SpawnSpec { argv: vec!["sh".into(), "-c".into(), format!("head -n1 > '{}'; sleep 5", out.display())], cwd: self.cwd(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
             .unwrap();
         out
     }
@@ -415,7 +415,7 @@ fn an_ended_session_that_cannot_be_resumed_fails_closed_and_the_plan_stays() {
     let app = t.app();
     let sha = ready(&t, &app);
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(format!("run-{other}"), Run { session_id: other.into(), run_id: "20261106-1000".into(), campaign: "c".into(), cwd: t.cwd(), nonces: Redactor::default() });
     app.record_run("20261106-1000", &t.cwd(), other, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let held = app.approve_plan(PLAN, &sha).unwrap_err();

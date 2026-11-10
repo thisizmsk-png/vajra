@@ -174,3 +174,57 @@ fn a_newly_cached_verdict_moves_the_revision_so_the_board_is_never_stale() {
     assert_eq!(card(&after["board"], "t1")["lane"], "done", "{after}");
     assert_eq!(app.project_state(&pid, after["rev"].as_u64()).unwrap()["unchanged"], true, "steady again");
 }
+
+fn builds(app: &App) -> u64 {
+    app.board_builds.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// #107 review (cost): with nothing the board reads moving, steady polls answer from the cached board (no rebuild) and
+/// stay `unchanged`.
+#[test]
+fn a_steady_poll_does_not_rebuild_the_board() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green"), ev_task(&d, "t2", "pending", &["ac-2"], "")]);
+    fs::write(t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green.json"), b"{}").unwrap();
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    app.evidence_list(&slug).unwrap();
+    let mut rev = app.project_state(&pid, None).unwrap()["rev"].as_u64();
+    for _ in 0..3 {
+        rev = app.project_state(&pid, rev).unwrap()["rev"].as_u64().or(rev);
+    }
+    let before = builds(&app);
+    for _ in 0..20 {
+        assert_eq!(app.project_state(&pid, rev).unwrap()["unchanged"], true);
+    }
+    assert_eq!(builds(&app), before, "a steady poll rebuilt the board");
+    assert_eq!(card(&app.project_state(&pid, None).unwrap()["board"], "t1")["lane"], "done", "the cached board is the right one");
+}
+
+/// #107 review (cost): an input that moved (the engine rewrote tasks.json) rebuilds the board, moves the revision and
+/// shows the new lane; a cached verdict written by evidence_list does the same.
+#[test]
+fn a_moved_board_input_rebuilds_and_moves_the_revision() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "pending", &["ac-1"], "")]);
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    let mut rev = app.project_state(&pid, None).unwrap()["rev"].as_u64();
+    for _ in 0..3 {
+        rev = app.project_state(&pid, rev).unwrap()["rev"].as_u64().or(rev);
+    }
+    let before = builds(&app);
+    assert_eq!(app.project_state(&pid, rev).unwrap()["unchanged"], true);
+    campaign(&t, &slug, vec![ev_task(&d, "t1", "in_progress", &["ac-1"], "")]);
+    let after = app.project_state(&pid, rev).unwrap();
+    assert_eq!(after["unchanged"], false, "{after}");
+    assert!(builds(&app) > before, "the board was not rebuilt");
+    assert_eq!(card(&after["board"], "t1")["lane"], "running", "{after}");
+    // A write to the verdict cache is an input too.
+    let rev2 = after["rev"].as_u64();
+    let rev2 = app.project_state(&pid, rev2).unwrap()["rev"].as_u64().or(rev2);
+    let mid = builds(&app);
+    app.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    app.project_state(&pid, rev2).unwrap();
+    assert!(builds(&app) > mid, "a cache write did not rebuild the board");
+}

@@ -116,7 +116,7 @@ fn a_run_that_ends_quietly_moves_the_project_revision() {
     let app = t.app();
     let p = pid(&t);
     let stream = format!("run-{SID}");
-    app.sup.spawn(&stream, crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default() }).unwrap();
+    app.sup.spawn(&stream, crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default(), codex_home: None }).unwrap();
     let live = app.project_state(&p, None).unwrap();
     assert_eq!(live["active_runs"], 1, "{live}");
     let rev = live["rev"].as_u64().unwrap();
@@ -231,7 +231,7 @@ fn lead_status_by_project_needs_no_run_and_refuses_an_archived_project() {
     let t = Tmp::new();
     let app = t.app();
     // The fixture's run is alive: its process is up, not just its entry kept for the crew view (#82 review).
-    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default() }).unwrap();
+    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default(), codex_home: None }).unwrap();
     let p = pid(&t);
     assert!(app.project_state(&p, None).unwrap()["generations"]["orchestrator"].is_null(), "no Director-General yet");
     let quiet = crate::desktop::test_project(&t.data(), &t.home(), &t.0.join("quiet"));

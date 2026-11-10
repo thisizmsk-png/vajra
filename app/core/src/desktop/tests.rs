@@ -66,7 +66,7 @@ fn crew_tails_worker_transcripts_into_streams_and_inspect() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -98,7 +98,7 @@ fn one_active_run_per_project() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
@@ -363,7 +363,7 @@ fn worker_transcripts_redact_the_rotated_nonce() {
     let first_line = first.lines().next().unwrap().to_string();
     fs::write(sub.join("agent-aa870dd40540481f0.jsonl"), format!("{first_line}\n")).unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     app.crew("c", "20261105-1230").unwrap();
@@ -501,7 +501,7 @@ fn oversized_worker_meta_and_journal_are_skipped_not_loaded() {
     fs::File::create(&big).unwrap().set_len(1024 * 1024).unwrap();
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     let run = lock(&app.runs).get(&stream).map(|r| (r.session_id.clone(), r.run_id.clone(), r.campaign.clone(), r.cwd.clone())).unwrap();
@@ -553,7 +553,7 @@ fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -624,7 +624,7 @@ fn the_core_refreshes_workers_and_transcripts_without_a_crew_view() {
     fs::create_dir_all(&cwd).unwrap();
     let (path, first) = seed_worker(&t, &cwd, sid);
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_err(), "unknown before any refresh");
@@ -657,7 +657,7 @@ fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
     fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
     fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r2\",\"phase\":\"Execute\"}\n").unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1810").unwrap();
     app.refresh_workers();
@@ -1816,7 +1816,7 @@ fn the_crew_tree_shows_message_pending_and_stopped_by_the_human_from_the_control
     fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
     fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r1\",\"phase\":\"Execute\"}\n").unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     let overlays = |tree: &Value| -> Vec<String> {
@@ -2710,7 +2710,7 @@ fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
     let (a, b) = ("1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e");
     for (sid, run, argv) in [(a, "20261108-0900", vec!["true".to_string()]), (b, "20261108-0901", vec!["sleep".into(), "5".into()])] {
         let stream = format!("run-{sid}");
-        app.sup.spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+        app.sup.spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
         lock(&app.runs).insert(stream, Run { session_id: sid.into(), run_id: run.into(), campaign: format!("c-{run}"), cwd: cwd.clone(), nonces: Redactor::default() });
         lock(&app.control).start_session(sid, run).unwrap();
     }
@@ -3022,7 +3022,7 @@ fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another()
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap(); // pinned to A at launch
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
@@ -3057,7 +3057,7 @@ fn store_projects_sharing_one_git_location_launch_as_themselves() {
     app.within_caps(&p.id, 1).unwrap();
     app.record_run_pinned("20261105-1230", &a, &la, Some(&p.id), sa, "c", true, 1).unwrap();
     let stream = format!("run-{sa}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sa.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
     // A launch in B is B's, and B is not busy with A's run.
     let (lb, p) = app.launch_project(&b).unwrap();
@@ -3150,7 +3150,7 @@ fn an_active_run_with_no_recorded_project_holds_every_start() {
     let elsewhere = test_project(&t.0.join("data"), &t.home(), &t.0.join("elsewhere"));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let e = app.within_caps(&elsewhere, 1).unwrap_err();
     assert_eq!(code(&e), "project_not_recorded", "{e}");
@@ -3206,7 +3206,7 @@ fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite()
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap();
     app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
@@ -3405,7 +3405,7 @@ fn a_run_first_pinned_in_a_subfolder_keeps_the_whole_project_after_a_git_rewrite
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.join("src"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.join("src"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.join("src"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt.join("src"), sid, "c", true, 1).unwrap(); // A, first started in a-wt/src
     app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap(); // B, finished
@@ -3440,7 +3440,7 @@ fn nested_repos_with_their_own_git_stay_separate_projects() {
     let pi = test_project(&t.0.join("data"), &t.home(), &inner);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: outer.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &outer, sid, "c", true, 1).unwrap();
     let p = app.launch_project(&inner).unwrap().1;
@@ -3714,7 +3714,7 @@ fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_re
     let p = test_project(&t.0.join("data"), &t.home(), &t.0.join("repo"));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap();
     assert!(app.running_in_project(&p));
@@ -3851,7 +3851,7 @@ fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_c
     test_project(&t.0.join("data"), &t.home(), &b);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -4124,6 +4124,72 @@ fn an_unreadable_guarded_record_refuses_a_launch_instead_of_re_pinning_the_folde
     }
 }
 
+/// D3: a pasted key goes into the store once and never comes back out. A sentinel is fed through every key command; it
+/// must not appear in a reply, an error, the fake `security`'s argv or environment, or any file the app writes.
+#[test]
+fn provider_keys_never_echo_the_key() {
+    use crate::providers::keychain::tests::{FakeBin, SENTINEL};
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = FakeBin::new();
+    app.keys = bin.keys();
+    let mut out = Vec::new();
+    let mut seen = |r: &Res| out.push(format!("{r:?} {}", serde_json::to_string(r.as_ref().unwrap_or_else(|e| e)).unwrap()));
+
+    let r = app.provider_key_saved("openrouter");
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": false})));
+    seen(&r);
+    let r = app.provider_key_save("openrouter", SENTINEL.into());
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": true})));
+    seen(&r);
+    let r = app.provider_key_save("openrouter", SENTINEL.into());
+    assert_eq!(r.as_ref().unwrap_err()["error"], "already_saved");
+    seen(&r);
+    let r = app.provider_key_replace("openrouter", SENTINEL.into());
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": true})));
+    seen(&r);
+    for (account, key) in [("openrouter", format!("{SENTINEL}\n")), ("claude", SENTINEL.to_string()), (SENTINEL, SENTINEL.to_string())] {
+        let r = app.provider_key_save(account, key.clone());
+        assert_eq!(r.as_ref().unwrap_err()["error"], "invalid_args");
+        seen(&r);
+        seen(&app.provider_key_replace(account, key));
+        seen(&app.provider_key_remove(account));
+        seen(&app.provider_key_saved(account));
+    }
+    let r = app.provider_key_remove("openrouter");
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": false})));
+    seen(&r);
+
+    for o in &out {
+        assert!(!o.contains("SENTINEL"), "{o}");
+    }
+    assert!(!bin.log("argv.log").contains("SENTINEL"));
+    assert!(!bin.log("env.log").contains("SENTINEL"));
+    assert!(bin.log("stdin.log").contains(SENTINEL), "the key went in through stdin");
+    // Nothing the app wrote (logs, receipts, state) holds it.
+    fn walk(d: &Path, hits: &mut Vec<PathBuf>) {
+        for e in fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, hits);
+            } else if fs::read(&p).is_ok_and(|b| b.windows(SENTINEL.len()).any(|w| w == SENTINEL.as_bytes())) {
+                hits.push(p);
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&t.0, &mut hits);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// A test build's default store points at a `security` that does not exist, so no test can reach the real Keychain.
+#[test]
+fn a_test_app_never_reaches_the_real_keychain() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.provider_key_saved("openrouter").unwrap_err()["error"], "keychain_unavailable");
+}
+
 struct CountingUsage(std::sync::Arc<AtomicUsize>);
 impl crate::providers::usage::UsageSource for CountingUsage {
     fn accounts(&self) -> Vec<String> {
@@ -4191,6 +4257,249 @@ fn a_changed_usage_advances_the_project_revision_and_says_so_and_an_unchanged_on
     app.provider_usage(true).unwrap();
     assert_eq!(app.project_state("p_usage", Some(rev1)).unwrap()["unchanged"], true);
     assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------- closing finished workers (closeout)
+
+const CLOSE_W: &str = "aa870dd40540481f0";
+
+/// The fixture worker, marked finished in the run's journal (the way the crew view learns a worker is done).
+fn finish_worker(t: &Tmp) {
+    let sub = fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join("subagents");
+    fs::write(sub.join("journal.jsonl"), format!("{{\"type\":\"started\",\"agentId\":\"{CLOSE_W}\",\"label\":\"task.t1.r1\"}}\n{{\"type\":\"result\",\"agentId\":\"{CLOSE_W}\"}}\n")).unwrap();
+}
+
+/// A finished worker whose branch is pushed to a bare remote with the tree clean, then `dirty` edits on top.
+fn closeout_fixture(t: &Tmp, pushed: bool, dirty: bool) -> (App, PathBuf) {
+    let (app, _repo, wt) = crew_fixture(t, &|r| r.join(".claude/worktrees/w1"));
+    finish_worker(t);
+    if pushed {
+        let remote = t.0.join("remote.git");
+        git(&t.0, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "work"]);
+        git(&wt, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&wt, &["push", "-q", "-u", "origin", "worker-1"]);
+    } else if !dirty {
+        git(&wt, &["checkout", "-q", "--", "f.txt"]);
+    }
+    if pushed && dirty {
+        fs::write(wt.join("f.txt"), "edited again\n").unwrap();
+        fs::write(wt.join("new.txt"), "n\n").unwrap();
+    }
+    (app, wt)
+}
+
+/// The user terminals of a worktree, faked: how many are busy, whether releasing fails, and what was released.
+struct FakeTerms {
+    busy: u32,
+    fail: bool,
+    released: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeTerms {
+    fn idle() -> Self {
+        Self { busy: 0, fail: false, released: Mutex::new(Vec::new()) }
+    }
+    fn busy(n: u32) -> Self {
+        Self { busy: n, ..Self::idle() }
+    }
+}
+
+impl closeout::WorktreeTerminals for FakeTerms {
+    fn busy(&self, _: &Path) -> u32 {
+        self.busy
+    }
+    fn release(&self, wt: &Path) -> Result<(), String> {
+        if self.fail {
+            return Err("terminal would not close".into());
+        }
+        lock(&self.released).push(wt.to_path_buf());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_finished_clean_pushed_worker_is_closed_released_and_remembered() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, true, false);
+    let terms = FakeTerms::idle();
+    let r = app.close_worker(CLOSE_W, None, &terms).unwrap();
+    assert_eq!(r["closed"], true, "{r}");
+    assert_eq!(*lock(&terms.released), vec![wt.canonicalize().unwrap()], "its worktree's terminals are released");
+    assert!(app.worker_closed(CLOSE_W));
+    assert_eq!(app.close_worker(CLOSE_W, None, &terms).unwrap()["already"], true);
+    assert_eq!(lock(&terms.released).len(), 1, "closing twice releases once");
+    assert!(closeout::Store::open(&app.data).is_closed(CLOSE_W), "the closed set survives a restart");
+    assert_eq!(app.closeout_status("c", "20261105-1230", &FakeTerms::idle()).unwrap()["workers"][0]["state"], "closed");
+}
+
+#[test]
+fn a_worker_with_unsaved_work_is_kept_with_exact_counts_until_the_human_confirms_those_counts() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, true, true);
+    let terms = FakeTerms::idle();
+    let e = app.close_worker(CLOSE_W, None, &terms).unwrap_err();
+    assert_eq!((code(&e), e["changed_files"].as_u64(), e["unpushed_commits"].as_u64(), e["no_upstream"].as_bool()), ("unsaved_work", Some(2), Some(0), Some(false)), "{e}");
+    assert!(lock(&terms.released).is_empty() && !app.worker_closed(CLOSE_W));
+    let st = app.closeout_status("c", "20261105-1230", &FakeTerms::idle()).unwrap();
+    assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["changed_files"].as_u64()), (Some("unsaved_work"), Some(2)), "{st}");
+    // Counts that no longer match what the human saw: nothing is closed, the fresh counts come back.
+    let stale = app.close_worker(CLOSE_W, Some((9, 9, 0, false)), &terms).unwrap_err();
+    assert_eq!((code(&stale), stale["changed_files"].as_u64()), ("unsaved_work_changed", Some(2)));
+    assert!(!app.worker_closed(CLOSE_W));
+    app.close_worker(CLOSE_W, Some((2, 0, 0, false)), &terms).unwrap();
+    assert!(app.worker_closed(CLOSE_W));
+    assert!(wt.join("new.txt").exists(), "closing deletes nothing on disk");
+}
+
+#[test]
+fn no_upstream_counts_as_unpushed_and_a_commit_ahead_of_upstream_is_counted() {
+    let t = Tmp::new();
+    let (app, wt) = closeout_fixture(&t, false, false);
+    let e = app.close_worker(CLOSE_W, None, &FakeTerms::idle()).unwrap_err();
+    assert_eq!((code(&e), e["no_upstream"].as_bool(), e["changed_files"].as_u64()), ("unsaved_work", Some(true), Some(0)), "{e}");
+    let t2 = Tmp::new();
+    let (app2, wt2) = closeout_fixture(&t2, true, false);
+    fs::write(wt2.join("g.txt"), "g\n").unwrap();
+    git(&wt2, &["add", "."]);
+    git(&wt2, &["commit", "-q", "-m", "ahead"]);
+    let e2 = app2.close_worker(CLOSE_W, None, &FakeTerms::idle()).unwrap_err();
+    assert_eq!((e2["unpushed_commits"].as_u64(), e2["changed_files"].as_u64(), e2["no_upstream"].as_bool()), (Some(1), Some(0), Some(false)), "{e2}");
+    drop((wt, app));
+}
+
+#[test]
+fn a_worker_that_is_not_finished_is_never_closed_even_when_forced() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    fs::remove_file(fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join("subagents/journal.jsonl")).unwrap();
+    let e = app.close_worker(CLOSE_W, Some((0, 0, 0, false)), &FakeTerms::idle()).unwrap_err();
+    assert_eq!(code(&e), "working", "{e}");
+    assert!(!app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn a_failed_release_leaves_the_worker_open() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    let e = app.close_worker(CLOSE_W, None, &FakeTerms { fail: true, ..FakeTerms::idle() }).unwrap_err();
+    assert_eq!(code(&e), "release_failed", "{e}");
+    assert!(!app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn close_finished_closes_what_is_safe_and_lists_what_it_kept_and_why() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, true);
+    let r = app.close_finished(&FakeTerms::idle(), false).unwrap();
+    assert_eq!(r["closed"].as_array().unwrap().len(), 0, "{r}");
+    let s = &r["skipped"][0];
+    assert_eq!((s["worker"].as_str(), s["reason"].as_str(), s["changed_files"].as_u64()), (Some(CLOSE_W), Some("unsaved_work"), Some(2)), "{r}");
+    let t2 = Tmp::new();
+    let (app2, _) = closeout_fixture(&t2, true, false);
+    let r2 = app2.close_finished(&FakeTerms::idle(), false).unwrap();
+    assert_eq!((r2["closed"].as_array().unwrap().len(), r2["skipped"].as_array().unwrap().len()), (1, 0), "{r2}");
+}
+
+#[test]
+fn a_closed_worker_is_not_tailed_any_more() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    app.close_worker(CLOSE_W, None, &FakeTerms::idle()).unwrap();
+    let stream = worker_stream(CLOSE_W);
+    let before = app.bus.tail(&stream, 0, MAX_PAGE).head_seq;
+    let path = fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join(format!("subagents/agent-{CLOSE_W}.jsonl"));
+    let first = fs::read_to_string(&path).unwrap().lines().next().unwrap().to_string();
+    append_echo(&path, &first, "n");
+    app.crew("c", "20261105-1230").unwrap();
+    assert_eq!(app.bus.tail(&stream, 0, MAX_PAGE).head_seq, before);
+}
+
+#[test]
+fn a_worktree_with_a_busy_terminal_keeps_its_worker_open_until_close_anyway_confirms_the_count() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    // Git is clean and pushed, but two terminals there are running something: kept, with the count and its own reason.
+    let two = FakeTerms::busy(2);
+    let e = app.close_worker(CLOSE_W, None, &two).unwrap_err();
+    assert_eq!((code(&e), e["busy_terminals"].as_u64(), e["changed_files"].as_u64()), ("terminal_busy", Some(2), Some(0)), "{e}");
+    let r = app.close_finished(&two, false).unwrap();
+    assert_eq!((r["closed"].as_array().unwrap().len(), r["skipped"][0]["reason"].as_str(), r["skipped"][0]["busy_terminals"].as_u64()), (0, Some("terminal_busy"), Some(2)), "{r}");
+    let st = app.closeout_status("c", "20261105-1230", &two).unwrap();
+    assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["busy_terminals"].as_u64()), (Some("terminal_busy"), Some(2)), "{st}");
+    assert!(lock(&two.released).is_empty() && !app.worker_closed(CLOSE_W), "nothing was hung up");
+    // Close anyway with a stale busy count refuses and returns the fresh one; the confirmed count closes it.
+    let stale = app.close_worker(CLOSE_W, Some((0, 0, 1, false)), &two).unwrap_err();
+    assert_eq!((code(&stale), stale["busy_terminals"].as_u64()), ("unsaved_work_changed", Some(2)), "{stale}");
+    app.close_worker(CLOSE_W, Some((0, 0, 2, false)), &two).unwrap();
+    assert!(app.worker_closed(CLOSE_W) && lock(&two.released).len() == 1);
+}
+
+#[test]
+fn an_idle_terminal_does_not_keep_a_clean_pushed_worker_open() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    let r = app.close_finished(&FakeTerms::idle(), false).unwrap();
+    assert_eq!((r["closed"].as_array().unwrap().len(), r["skipped"].as_array().unwrap().len()), (1, 0), "{r}");
+}
+
+/// The fixture repo registered as a project, and its `auto_close_finished` override set (the global value stays default ON).
+fn project_with_auto_close(app: &App, repo: &Path, value: bool) {
+    let id = app.projects.add(repo, true).unwrap().project().id.clone();
+    let patch = serde_json::from_value(json!({"auto_close_finished": value})).unwrap();
+    let rev = app.preferences_read(None).unwrap()["rev"].as_u64().unwrap();
+    lock(&app.preferences).update(Some(&id), rev, patch, false).unwrap();
+}
+
+#[test]
+fn the_automatic_pass_follows_the_run_projects_own_setting_and_the_button_ignores_it() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    project_with_auto_close(&app, &t.0.join("repo"), false);
+    // The global value is ON, but this project turned it off: the automatic pass leaves its finished worker alone.
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 0);
+    assert!(!app.worker_closed(CLOSE_W));
+    // The button is the human's own choice and still closes it.
+    assert_eq!(app.close_finished(&FakeTerms::idle(), false).unwrap()["closed"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_project_that_keeps_the_setting_on_is_closed_by_the_automatic_pass_even_when_global_is_off() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    let off = serde_json::from_value(json!({"auto_close_finished": false})).unwrap();
+    lock(&app.preferences).update(None, 0, off, false).unwrap();
+    project_with_auto_close(&app, &t.0.join("repo"), true);
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 1, "the project's opt-in beats the global off");
+    assert!(app.worker_closed(CLOSE_W));
+}
+
+#[test]
+fn a_folder_no_project_holds_follows_the_global_setting() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, false);
+    assert_eq!(app.closeout_auto(&FakeTerms::idle()), 1, "global default ON");
+    let t2 = Tmp::new();
+    let (app2, _wt2) = closeout_fixture(&t2, true, false);
+    let off = serde_json::from_value(json!({"auto_close_finished": false})).unwrap();
+    lock(&app2.preferences).update(None, 0, off, false).unwrap();
+    assert_eq!(app2.closeout_auto(&FakeTerms::idle()), 0, "global off");
+}
+
+#[test]
+fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, true);
+    // Confirmed: 2 changed files, 0 unpushed, 0 busy, and the branch HAS an upstream. Then it loses it.
+    git(&_wt, &["branch", "--unset-upstream"]);
+    let terms = FakeTerms::idle();
+    let e = app.close_worker(CLOSE_W, Some((2, 0, 0, false)), &terms).unwrap_err();
+    // The unchanged counts alone would have matched; the changed upstream state must not.
+    let now = app.close_worker(CLOSE_W, None, &terms).unwrap_err();
+    assert_eq!(now["no_upstream"], true, "{now}");
+    assert!(code(&e) == "unsaved_work_changed" && e["no_upstream"] == true && !app.worker_closed(CLOSE_W), "{e}");
+    assert!(lock(&terms.released).is_empty());
 }
 
 #[path = "board_tests.rs"]

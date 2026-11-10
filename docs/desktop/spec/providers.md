@@ -9,6 +9,9 @@ Source: `artifacts/vajra-18/spec-open-p0s.md` S9.1 to S9.4.
 
 - The CLI owns the login. Vajra never reads, stores, forwards or refreshes a token, keychain item or config secret, and has
   no OAuth flow. Billing is always the CLI's own login (`billing.source` is the literal `"login"`).
+- **One narrow exception (D3): a pasted API key.** Vajra may write an API key the user pastes into the macOS Keychain, once,
+  and never reads it back. It's API keys only, never a CLI's OAuth token or login (H1). The harness reads the key at start
+  through its own key command; the core can only tell whether one is saved. See "Stored API keys" below.
 - `ENV_ALLOW` (`sessions::ENV_ALLOW`) is unchanged. `billing.key_in_app_env` is an environment variable NAME (for example
   `OPENAI_API_KEY`) that the app saw and did not pass on. It is never a value. A value-shaped string is refused.
 - No silent switch. If the chosen provider cannot start, Vajra says so and stops. It never falls back to another provider,
@@ -135,6 +138,48 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
   picks the icon. Empty for a CLI login.
 - **One account per provider (D6).** There is no rotation field and none will be added (H7). No field is named `key`,
   `token` or `secret`.
+
+### Stored API keys (D3)
+
+Multi-provider, PR 2. `app/core/src/providers/keychain.rs`. Tauri commands, each with `account` (and `key` for the two
+writes):
+
+| Command | Does | Answer |
+|---|---|---|
+| `provider_key_saved` | Checks whether an item exists (no password data is asked for) | `{account, saved}` |
+| `provider_key_save` | Stores a key the first time; refused with `already_saved` if one is there | `{account, saved: true}` |
+| `provider_key_replace` | Deletes the item, then stores the new key | `{account, saved: true}` |
+| `provider_key_remove` | Deletes the item; nothing there is not an error | `{account, saved: false}` |
+
+- **The item.** A generic password, service `vajra.provider.<account>`, account `<account>`, access list
+  `-T /usr/bin/security` only (never "any app"), so the harness's key command can read it without a prompt.
+- **The write.** `/usr/bin/security -i` with a cleared environment; the `add-generic-password` line, key included, goes to its
+  **stdin**, never argv. Success is decided by a check afterwards, not by the `-i` exit code.
+- **No read-back.** There is no command, method or trait function that returns a stored key. Every answer is the
+  `KeyState` `{account, saved}` and nothing else; errors are fixed codes with fixed words that never echo input or
+  `security`'s output: `invalid_args`, `already_saved`, `keychain_unavailable` (not run, 30 s timeout, unexpected answer),
+  `keychain_write_failed`.
+- **Accounts.** Only the fixed list `KEY_ACCOUNTS` (today `openrouter`) takes a key; any other is `invalid_args`.
+- **Key shape.** 16 to 256 characters of letters, digits and `. _ ~ + / = -`, not starting with `-`. Anything else
+  (whitespace, quotes, backslash, `#`) is refused before any process runs.
+- **In memory.** The core wraps the key at once (no `Clone`, no `Display`, a redacting `Debug`) and zeroes its copies after
+  the write. Copies the IPC layer makes are out of its reach.
+
+### Gateway launch (not yet wired into start_run)
+
+The building blocks for a Codex-harness run on the `gateway` or `api_key` route (code id `vajra-openrouter`) exist, but `start_run` does not call them yet: no run uses them until a later PR wires them in with account and model selection. When wired, a run starts like this:
+
+- **Own `CODEX_HOME`.** `<data dir>/codex-home/<account>` (0700), holding a generated `config.toml` (0600) that is rewritten
+  at every launch. The user's `~/.codex` is never read or written. The file names the provider, a non-secret `https://`
+  `base_url`, `wire_api = "responses"` and `[model_providers.vajra-openrouter.auth]` with
+  `command = "/usr/bin/security"`, `args = [find-generic-password, -s, vajra.provider.<account>, -a, <account>, -w]`. There is
+  no `env_key` and nothing secret in the file: Codex runs that command itself each time it needs the key.
+- **argv.** `codex exec --json --sandbox workspace-write -m <model>`, then `-c` overrides: `model_reasoning_effort` (only when
+  set), `request_max_retries=0` and `stream_max_retries=0` on the provider (the core owns the retry policy), and
+  `sandbox_workspace_write.exclude_slash_tmp=true` / `exclude_tmpdir_env_var=true`. The ask is the last element, after `--`.
+  The command line is wrapped in a fixed `/bin/sh -c 'exec "$@" </dev/null'` so stdin is `/dev/null`; the wrapper never
+  parses the ask or the model.
+- **Environment.** `ENV_ALLOW` plus `CODEX_HOME`, nothing else, and no key in the argv or the environment.
 
 ### `preferences.agents` (replaces the `agent` preference)
 
