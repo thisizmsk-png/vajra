@@ -42,6 +42,9 @@ pub enum LeadError {
     ProjectArchived,
     /// The run's project record is gone from the store.
     ProjectMissing,
+    /// A receipt-wrapped action aimed at an older conversation (FG-02c, decision Q2): the Director-General is at this
+    /// generation now.
+    StaleGeneration(u32),
     Io(String),
 }
 
@@ -63,6 +66,7 @@ impl LeadError {
             Self::NotAProject(_) => "not_a_project",
             Self::ProjectArchived => "project_archived",
             Self::ProjectMissing => "project_missing",
+            Self::StaleGeneration(_) => "stale_generation",
             Self::Io(_) => "io_error",
         }
     }
@@ -76,6 +80,7 @@ impl LeadError {
             Self::NotAProject(_) => Some(NOT_A_PROJECT.into()),
             Self::ProjectArchived => Some(PROJECT_ARCHIVED.into()),
             Self::ProjectMissing => Some(PROJECT_MISSING.into()),
+            Self::StaleGeneration(_) => Some(STALE_CONVERSATION.into()),
             _ => None,
         }
     }
@@ -83,6 +88,9 @@ impl LeadError {
     pub fn to_json(&self) -> serde_json::Value {
         if let Self::NotAProject(path) = self {
             return not_a_project_json(path);
+        }
+        if let Self::StaleGeneration(g) = self {
+            return serde_json::json!({"error": self.code(), "detail": STALE_CONVERSATION, "current_generation": g});
         }
         match self.detail() {
             Some(d) => serde_json::json!({"error": self.code(), "detail": d}),
@@ -94,6 +102,7 @@ impl LeadError {
 pub const NOT_A_PROJECT: &str = "This folder is not a project. Add it as a project first.";
 pub const PROJECT_ARCHIVED: &str = "This project is archived. Restore it to use it again.";
 pub const PROJECT_MISSING: &str = "This project is no longer in the app's project list.";
+pub const STALE_CONVERSATION: &str = "The Director-General started a new conversation since you looked. Refresh and try again.";
 
 /// `not_a_project` with the one-click action the UI offers (decision Q1, a UX default the owner can flip).
 pub fn not_a_project_json(path: &str) -> serde_json::Value {

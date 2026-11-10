@@ -87,6 +87,7 @@ fn main() {
                     let _ = core.ack(id2.load(Ordering::SeqCst), d.len());
                 }
             }
+            true
         });
         match terms_core.open(&cwd, &roots, 24, 80, sink) {
             Ok(info) => {
