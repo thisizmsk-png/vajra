@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::names::{title_case, ui_name};
 use super::record::{JournalEntry, Meta};
 use super::tailer::Transcript;
+use crate::providers::effective::ProviderTag;
 use crate::vajra::state::Reader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,12 +79,14 @@ pub struct Node {
     pub engine_id: Option<String>,
     pub status: Status,
     pub overlays: Vec<&'static str>,
+    /// What the worker ran on, once it reported it (`None` while not reported).
+    pub provider: Option<ProviderTag>,
     pub children: Vec<Node>,
 }
 
 impl Node {
     fn group(id: String, kind: NodeKind, title: String) -> Self {
-        Self { id, kind, title, engine_id: None, status: Status::Unknown, overlays: Vec::new(), children: Vec::new() }
+        Self { id, kind, title, engine_id: None, status: Status::Unknown, overlays: Vec::new(), provider: None, children: Vec::new() }
     }
 }
 
@@ -97,6 +100,8 @@ pub struct Worker {
     pub prompt_first_line: Option<String>,
     pub branch: Option<String>,
     pub status: Status,
+    /// From the transcript's own model field; `None` until the worker reports one.
+    pub provider: Option<ProviderTag>,
 }
 
 /// Overlay signals keyed by agent id.
@@ -131,6 +136,12 @@ pub fn worker_from(agent_id: &str, meta: &Meta, journal: Option<&JournalEntry>, 
             Some(_) => Status::InProgress,
             None => Status::Unknown,
         },
+        provider: tr.and_then(|t| t.model()).map(|model| ProviderTag {
+            account: "claude".into(),
+            family: "claude".into(),
+            model: model.into(),
+            billing: "subscription".into(),
+        }),
     }
 }
 
@@ -195,6 +206,7 @@ fn worker_node(w: &Worker, title: String, kind: NodeKind, signals: &Signals) -> 
         engine_id: Some(w.engine_id.clone()),
         status: w.status,
         overlays,
+        provider: w.provider.clone(),
         children: Vec::new(),
     }
 }

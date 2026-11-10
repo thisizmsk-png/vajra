@@ -5,5 +5,6 @@
 pub mod codex_home;
 pub mod contract;
 pub mod detect;
+pub mod effective;
 pub mod keychain;
 pub mod usage;
