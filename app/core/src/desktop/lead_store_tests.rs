@@ -478,10 +478,11 @@ fn two_store_projects_inside_one_git_checkout_each_answer_with_both_records_kept
     assert!(app.isolation(rb, &b).is_err(), "b's Director-General refuses");
 }
 
-/// #103 review: a project's validated store root is what it owns, whatever runs it has: another project's run whose
-/// recorded checkout location is this project's root refuses (the redirection protection kept).
+/// #103 review: another project's record naming this project's root only as its checkout location (bookkeeping, as a
+/// project nested in this checkout records it) is no claim on the root: the ask goes on, the other record's run folder is
+/// denied, and this project's root is not.
 #[test]
-fn a_store_root_claimed_by_another_projects_record_refuses() {
+fn another_projects_bookkeeping_at_this_root_is_no_claim_and_its_run_folder_is_denied() {
     let t = Tmp::new();
     let app = t.app();
     std::fs::create_dir_all(t.repo().join(".git/objects")).unwrap();
@@ -489,15 +490,170 @@ fn a_store_root_claimed_by_another_projects_record_refuses() {
     let (lib, sub) = (t.repo().join("lib"), t.repo().join("sub"));
     std::fs::create_dir_all(&lib).unwrap();
     std::fs::create_dir_all(&sub).unwrap();
-    // This project's only run is in a subfolder: its root is owned through the store alone.
     live_run(&app, SID, RUN_ID, sub.clone());
     app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
-    assert!(app.isolation(RUN_ID, &t.repo()).is_ok(), "healthy");
     let other = project_of(&t, &t.0.join("elsewhere"));
     app.record_run("20261109-1700", &lib, "3c8fad5b-d9cb-469f-a165-70867728950e", "deliver-o", true, 1).unwrap();
     crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1700"), "project", other.as_bytes()).unwrap();
     assert_eq!(app.read_run_loc("20261109-1700"), Some(t.repo()), "the other record's location is this project's root");
-    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "this project's root claimed by another project refuses");
+    let iso = app.isolation(RUN_ID, &t.repo()).unwrap();
+    assert!(iso.deny.contains(&lib), "the other record's run folder is denied: {iso:?}");
+    assert!(!iso.deny.contains(&t.repo()) && !iso.secrets.contains(&t.repo()), "this project's root is not: {iso:?}");
+}
+
+/// #103 review, the topology matrix: one row per way projects can share folders, every run record kept, an actual ask
+/// from every run answered, and from every run another project's root and run folders denied (secret files only when they
+/// hold the asking project's root), its own never.
+mod topology {
+    use super::*;
+
+    fn git(dir: &Path) {
+        std::fs::create_dir_all(dir.join(".git/objects")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    }
+
+    /// A row: folders made Git checkouts, projects registered (outer first), runs as (project index, folder).
+    struct Row {
+        name: &'static str,
+        gits: &'static [&'static str],
+        plain: &'static [&'static str],
+        projects: &'static [&'static str],
+        runs: &'static [(usize, &'static str)],
+    }
+
+    const ROWS: &[Row] = &[
+        Row { name: "a: one plain project, root and subfolder runs", gits: &[], plain: &["a/sub"], projects: &["a"], runs: &[(0, "a"), (0, "a/sub")] },
+        Row { name: "b: sibling projects in one checkout", gits: &["c"], plain: &["c/a", "c/b/sub"], projects: &["c/a", "c/b"], runs: &[(0, "c/a"), (1, "c/b/sub"), (1, "c/b")] },
+        Row { name: "c: an enclosing checkout and a registered nested subfolder", gits: &["r"], plain: &["r/component", "r/sub"], projects: &["r", "r/component"], runs: &[(0, "r"), (0, "r/sub"), (1, "r/component")] },
+        Row { name: "d: three nested levels", gits: &["n"], plain: &["n/m/l"], projects: &["n", "n/m", "n/m/l"], runs: &[(0, "n"), (1, "n/m"), (2, "n/m/l")] },
+        Row { name: "f: an unregistered nested .git", gits: &["u/vendor"], plain: &["u"], projects: &["u"], runs: &[(0, "u"), (0, "u/vendor")] },
+    ];
+
+    struct Built {
+        t: Tmp,
+        app: App,
+        roots: Vec<PathBuf>,
+        pids: Vec<String>,
+        runs: Vec<(String, usize, PathBuf)>,
+    }
+
+    fn build(row: &Row, legacy: bool) -> Built {
+        let t = Tmp::new();
+        let app = t.app();
+        let w = t.0.join("w");
+        for g in row.gits {
+            git(&w.join(g));
+        }
+        for d in row.plain {
+            std::fs::create_dir_all(w.join(d)).unwrap();
+        }
+        let roots: Vec<PathBuf> = row.projects.iter().map(|p| w.join(p)).collect();
+        let pids: Vec<String> = roots.iter().map(|r| project_of(&t, r)).collect();
+        let mut runs = Vec::new();
+        for (i, (p, dir)) in row.runs.iter().enumerate() {
+            let (sid, run) = (format!("{:08x}-d9cb-469f-a165-70867728950e", 0x3c8f_0000 + i), format!("20261109-19{i:02}"));
+            let cwd = w.join(dir);
+            live_run(&app, &sid, &run, cwd.clone());
+            app.record_run(&run, &cwd, &sid, "deliver-t", true, 1).unwrap();
+            assert_eq!(app.pinned_project(&run).as_deref(), Some(pids[*p].as_str()), "{}: {run} in {dir} is pinned to its project", row.name);
+            if legacy {
+                let k = super::super::super::orchestrator::project_ref(&cwd).0;
+                crate::control::fsx::write_atomic(&t.data().join("control/lead").join(&run), "project", k.as_bytes()).unwrap();
+                assert_eq!(app.store_identity(&run), Ok(Some(pids[*p].clone())), "{}: {run}'s stand-in pin validates", row.name);
+            }
+            runs.push((run, *p, cwd));
+        }
+        Built { t, app, roots, pids, runs }
+    }
+
+    fn check(row: &Row, legacy: bool) {
+        let b = build(row, legacy);
+        let name = format!("{}{}", row.name, if legacy { " (stand-in pins)" } else { "" });
+        let _ = &b.pids;
+        for (run, p, _) in &b.runs {
+            let own_root = &b.roots[*p];
+            let iso = b.app.isolation(run, own_root).unwrap_or_else(|e| panic!("{name}: {run} is refused: {e:?}"));
+            // Its own folders: never denied wholesale.
+            for (_, q, cwd) in b.runs.iter().filter(|(_, q, _)| q == p) {
+                assert!(!iso.deny.contains(cwd) && !iso.deny.contains(&b.roots[*q]), "{name}: {run} is denied its own {cwd:?}: {iso:?}");
+            }
+            // Its secret-rule folders are its own project's, never another project's run folders (one that holds this project's
+            // root, its checkout, gets secret-file rules either way).
+            let mine = b.app.own_project_folders(run, own_root).unwrap();
+            for (_, _, c) in b.runs.iter().filter(|(_, q, c)| q != p && !own_root.starts_with(c)) {
+                assert!(!mine.contains(c), "{name}: {run}'s own folders include another project's {c:?}: {mine:?}");
+            }
+            // Every other project's root and run folders, and the fixture's own project: denied (secret files only when they
+            // hold this project's root, so the Director-General is not denied itself).
+            let others = b.roots.iter().enumerate().filter(|(q, _)| q != p).map(|(_, r)| r.clone())
+                .chain(b.runs.iter().filter(|(_, q, _)| q != p).map(|(_, _, c)| c.clone()))
+                .chain(std::iter::once(b.t.repo()));
+            for f in others {
+                if own_root.starts_with(&f) {
+                    assert!(iso.secrets.contains(&f) && !iso.deny.contains(&f), "{name}: {run}: {f:?} holds its root, secret files only: {iso:?}");
+                } else {
+                    assert!(iso.deny.contains(&f) || iso.deny.iter().any(|d| f.starts_with(d) && !own_root.starts_with(d)), "{name}: {run}: {f:?} is denied: {iso:?}");
+                }
+            }
+        }
+        // An actual ask from every run, all answered.
+        for (i, (run, _, _)) in b.runs.iter().enumerate() {
+            b.app.ask_lead(run, "hi").unwrap_or_else(|e| panic!("{name}: the ask from {run} is refused: {e}"));
+            wait_until(&format!("{name}: {run}'s ask"), || idle(&b.app) && b.t.ask_states().len() == 3 * (i + 1));
+        }
+        assert!(b.t.ask_states().chunks(3).all(|c| c == ["queued:", "delivered:", "done:"]), "{name}: {:?}", b.t.ask_states());
+    }
+
+    #[test]
+    fn every_topology_answers_each_project_and_denies_the_others() {
+        for row in ROWS {
+            check(row, false);
+        }
+    }
+
+    /// (e): the same rows with every run recorded before the store (a stand-in pin that validates).
+    #[test]
+    fn every_topology_with_stand_in_pins_answers_each_project_and_denies_the_others() {
+        for row in ROWS.iter().filter(|r| !r.name.starts_with("f")) {
+            check(row, true);
+        }
+    }
+
+    /// (h): what must still refuse, on the rows above: a root moved and replaced by another folder or by a link, a stand-in
+    /// pin that does not validate, and a folder one project owns recorded by a run pinned to another.
+    #[test]
+    fn redirected_forged_and_cross_claimed_folders_refuse_in_every_topology() {
+        for row in &ROWS[1..4] {
+            // A record pinned to project 0 but recorded in project 1's root: one folder owned by two projects refuses both.
+            let b = build(row, false);
+            let claimed = b.roots[1].clone();
+            b.app.record_run("20261109-1999", &claimed, "9c8fad5b-d9cb-469f-a165-70867728950e", "deliver-f", true, 1).unwrap();
+            crate::control::fsx::write_atomic(&b.t.data().join("control/lead/20261109-1999"), "project", b.pids[0].as_bytes()).unwrap();
+            for (run, p, _) in b.runs.iter().filter(|(_, p, _)| *p <= 1) {
+                assert!(b.app.isolation(run, &b.roots[*p]).is_err(), "{}: {run} refuses the cross-claim", row.name);
+            }
+            // A stand-in pin that does not validate: refused for that run.
+            let b = build(row, false);
+            let (run, p, _) = b.runs[0].clone();
+            let k = super::super::super::orchestrator::project_ref(&b.t.0.join("elsewhere")).0;
+            crate::control::fsx::write_atomic(&b.t.data().join("control/lead").join(&run), "project", k.as_bytes()).unwrap();
+            assert!(b.app.isolation(&run, &b.roots[p]).is_err(), "{}: a forged stand-in pin refuses", row.name);
+            // The innermost project's root moved away and replaced by another folder, or by a link to it.
+            for link in [false, true] {
+                let b = build(row, false);
+                let last = b.roots.len() - 1;
+                let (run, _, _) = b.runs.iter().find(|(_, p, _)| *p == last).unwrap().clone();
+                let moved = b.t.0.join("moved");
+                std::fs::rename(&b.roots[last], &moved).unwrap();
+                if link {
+                    std::os::unix::fs::symlink(&moved, &b.roots[last]).unwrap();
+                } else {
+                    std::fs::create_dir_all(&b.roots[last]).unwrap();
+                }
+                assert!(b.app.isolation(&run, &b.roots[last]).is_err(), "{}: a replaced root (link={link}) refuses", row.name);
+            }
+        }
+    }
 }
 
 /// #103 review (wire): every store root is listed, so another project's root is owned by it even with no run of its own;
@@ -514,11 +670,11 @@ fn another_projects_root_without_runs_is_still_owned_and_denied() {
     assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "a folder another project owns, recorded as this project's, refuses");
 }
 
-/// #103 review (wire): shared Git bookkeeping is no ownership claim only between records whose store identity validates.
-/// A record whose pin does not validate, recorded in the same checkout, has nothing to vouch for whose checkout it names,
-/// so its location still counts as its own and the shared checkout refuses.
+/// #103 review (wire): a record whose pin does not validate belongs to no project, and all its folders count as owned by it.
+/// Recorded in a checkout shared with this project, it owns nothing this project owns, so the ask goes on: its run folder is
+/// denied, and the shared checkout (which holds this project's root) gets the secret-file rules only.
 #[test]
-fn a_record_without_a_validated_identity_sharing_the_checkout_still_refuses() {
+fn a_record_without_a_validated_identity_sharing_the_checkout_is_denied_but_claims_nothing_of_ours() {
     let t = Tmp::new();
     let app = t.app();
     let c = t.0.join("checkout");
@@ -535,5 +691,32 @@ fn a_record_without_a_validated_identity_sharing_the_checkout_still_refuses() {
     let k = super::super::orchestrator::project_ref(&t.0.join("elsewhere")).0;
     crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1801"), "project", k.as_bytes()).unwrap();
     assert_eq!(app.read_run_loc("20261109-1801"), Some(c.clone()), "it records the shared checkout");
-    assert!(app.isolation(ra, &a).is_err(), "an unidentified record naming the shared checkout refuses");
+    let iso = app.isolation(ra, &a).unwrap();
+    assert!(iso.deny.contains(&x), "its run folder is denied: {iso:?}");
+    assert!(iso.secrets.contains(&c) && !iso.deny.contains(&c), "the shared checkout gets secret files only: {iso:?}");
+    // The same record recorded in this project's own root claims a folder this project owns, and refuses.
+    app.record_run("20261109-1802", &a, "5c8fad5b-d9cb-469f-a165-70867728950e", "deliver-y", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1802"), "project", k.as_bytes()).unwrap();
+    assert!(app.isolation(ra, &a).is_err(), "an unidentified record in this project's root refuses");
+}
+
+/// #103 review: a record whose pin does not validate has nothing to vouch for whose checkout it names, so its location
+/// counts as owned by it. Its location at this project's root claims that root, and the ask refuses.
+#[test]
+fn an_unidentified_record_whose_location_is_this_root_refuses() {
+    let t = Tmp::new();
+    let app = t.app();
+    std::fs::create_dir_all(t.repo().join(".git/objects")).unwrap();
+    std::fs::write(t.repo().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (lib, sub) = (t.repo().join("lib"), t.repo().join("sub"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    live_run(&app, SID, RUN_ID, sub.clone());
+    app.record_run(RUN_ID, &sub, SID, "deliver-x", true, 1).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_ok(), "healthy");
+    app.record_run("20261109-1710", &lib, "3c8fad5b-d9cb-469f-a165-70867728950e", "deliver-o", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&t.0.join("elsewhere")).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1710"), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.read_run_loc("20261109-1710"), Some(t.repo()));
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "an unidentified record's location at this root claims it");
 }
