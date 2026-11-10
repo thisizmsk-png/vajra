@@ -38,7 +38,7 @@ describe("provider icon files", () => {
     expect(MARKS.codex.fill).toBeLessThan(MARKS.grok.fill); // the Blossom file keeps a wide margin around the flower
   });
   it("only providers whose terms are cleared have a mark", () => {
-    expect(Object.keys(MARKS).sort()).toEqual(["codex", "grok", "openrouter"]); // Claude Code and DeepSeek keep their monograms
+    expect(Object.keys(MARKS).sort()).toEqual(["claude", "codex", "grok", "openrouter"]); // DeepSeek keeps its monogram (its only file is a wide lockup)
   });
   it("the app code never reaches the network for an icon", () => {
     const code = readFileSync(join(__dirname, "../src/screens/ProviderIcon.tsx"), "utf8") + readFileSync(join(DIR, "marks.ts"), "utf8");
@@ -65,8 +65,8 @@ describe("ProviderIcon", () => {
     fireEvent.error(b.querySelector(".v-pt__via img")!);
     expect(b.querySelector(".v-pt__via")?.textContent).toBe("OR");
   });
-  it("a provider without a cleared mark keeps its monogram; an unknown one gets the fallback icon", () => {
-    expect(tile(<ProviderIcon family="claude" />).textContent).toBe("CC");
+  it("a provider without a cleared mark (DeepSeek) keeps its monogram; an unknown one gets the fallback icon", () => {
+    expect(tile(<ProviderIcon family="claude" />).querySelectorAll("img")).toHaveLength(2);
     expect(tile(<ProviderIcon family="deepseek" />).textContent).toBe("DS");
     expect(tile(<ProviderIcon family="codex" />).querySelectorAll("img")).toHaveLength(2);
     expect(tile(<ProviderIcon family="grok" />).querySelectorAll("img")).toHaveLength(2);
@@ -80,7 +80,7 @@ describe("ProviderIcon", () => {
     expect(t.querySelectorAll(".v-pt__via img")).toHaveLength(2);
   });
   it("with a name beside it the tile is hidden from assistive tech; alone it is an image named for the provider", () => {
-    const beside = tile(<ProviderIcon family="claude" />);
+    const beside = tile(<ProviderIcon family="deepseek" />);
     expect(beside.getAttribute("aria-hidden")).toBe("true");
     expect(beside.getAttribute("role")).toBeNull();
     const alone = tile(<ProviderIcon family="deepseek" via="openrouter" named />);

@@ -475,7 +475,7 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
 describe("provider icons", () => {
   it("a known provider shows its monogram, a gateway model its own tile with the gateway badge, and an unknown family the fallback icon", () => {
     const { container, rerender } = render(<ProviderIcon family="claude" />);
-    expect(container.textContent).toBe("CC");
+    expect(container.querySelectorAll(".v-pt img")).toHaveLength(2); // the Claude spark
     rerender(<ProviderIcon family="deepseek" via="openrouter" />);
     expect(container.textContent).toBe("DS"); expect(container.querySelectorAll(".v-pt__via img")).toHaveLength(2); // the gateway badge is its mark
     rerender(<ProviderIcon family="some-new-family" />);

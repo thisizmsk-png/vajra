@@ -88,7 +88,7 @@ describe("workers on every surface", () => {
     const { container } = render(<CrewTree label="Crew" nodes={[{ id: "a", label: "Backend", status: "done", icon: iconOf(parseWorkerProvider(claude)!) }]} selected="a" onSelect={() => {}} />);
     expect(screen.getByRole("treeitem", { name: /Backend/ })).toBeTruthy();
     expect(container.querySelector(".v-pt")?.getAttribute("aria-hidden")).toBe("true");
-    expect(container.querySelector(".v-pt")?.textContent).toBe("CC");
+    expect(container.querySelectorAll(".v-pt img")).toHaveLength(2);
   });
 });
 
