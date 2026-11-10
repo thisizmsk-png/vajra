@@ -1146,7 +1146,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Setting | Worker / verifier | Lead / Director-General | Class |
 |---|---|---|---|
 | Mode | `codex exec --json`, stdin `/dev/null` | the same | always |
-| Sandbox | `--sandbox workspace-write`; `-c sandbox_workspace_write.network_access=<seat.network>`; `writable_roots=["<ticket tmp>"]` (a per-ticket temp dir, also passed as `TMPDIR`); `exclude_slash_tmp=true`; `exclude_tmpdir_env_var=true`; and `-c tools.web_search=false` unless `network` is on | `--sandbox read-only` | always |
+| Sandbox | `--sandbox workspace-write`; `-c sandbox_workspace_write.network_access=<seat.network>`; `writable_roots=["<ticket tmp>"]` (a per-ticket temp dir under `<work>`, 16.6, also passed as `TMPDIR`); `exclude_slash_tmp=true`; `exclude_tmpdir_env_var=true`; and `-c tools.web_search=false` unless `network` is on | `--sandbox read-only` | always |
 | Approval | `-c approval_policy="never"` (headless; nothing can be approved mid-run) | the same | always |
 | Working dir | the core's worktree (16.6) | the run's read-only lead dir, or the project root read-only | always |
 | Model and effort | `-m <model>` and `-c model_reasoning_effort=…` when the seat names them | the same | always, when set |
@@ -1472,11 +1472,18 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo has no `user.email`, it passes `-c user.name=Vajra -c user.email=vajra@localhost`, and the commit trailer names the account that did the work.
 
+**Where worktrees live (`<work>`, not `<data>`).** The shipped sandbox policy (`config/sandbox.json`) denies all agent writes to the app data dir, `~/Library/Application Support/VajraDesktop` (`<data>`), with no unsandboxed retries. Section 5.4 keeps that boundary, and `desktop/lead.rs` `doctor_ok` requires it for the Director-General. A Claude seat loads the user's settings, so under that policy it could not build, run setup or write evidence in a worktree under `<data>`. So:
+- **Agent-writable paths go under `<work>`**, a separate root: `~/Library/Application Support/VajraWorktrees/`. These are every worker, verifier and evidence worktree (`<work>/<project>/<run>/<task>-r<n>`, `<work>/<project>/<run>/evidence-r<n>`), the core's integration worktree, and the per-ticket temp dir (`<work>/<project>/<run>/tmp/<task>-r<n>`).
+- **Core-only state stays under `<data>`**, where the shipped deny protects it: the ticket's private dir (its private index, frozen global config and recorded hashes), `seats.json`, run records, profiles and the control queue. A worker can't reach its own tamper baseline.
+- **The policy doesn't change.** There is no migration, the `<data>` deny stays exactly as shipped, and `doctor_ok` is unchanged.
+- **The two roots never overlap.** At startup the core compares their canonical paths. If either contains the other, worker launch is refused with `worktree_root_invalid`. `<work>` is a sibling of `<data>`, never a prefix match of it.
+- **A seat stays in its own worktree** through its own sandbox: Codex's `workspace-write` plus `writable_roots`, or the user's Claude sandbox, which allows writes only under the working directory. The guard is the fallback for a Claude seat with no sandbox, as today.
+
 **What it can do.** It has exactly these operations and takes no free-form arguments:
 
 | Operation | Command | Bound |
 |---|---|---|
-| `worktree_add(run, task, round, from)` | `git worktree add --detach <data>/worktrees/<project>/<run>/<task>-r<n> <from>` | Under the app data dir, never inside the repo. The copied dependencies come next (below). |
+| `worktree_add(run, task, round, from)` | `git worktree add --detach <work>/<project>/<run>/<task>-r<n> <from>` | Under `<work>` (above), never inside the repo or the app data dir. The copied dependencies come next (below). |
 | `merge_deps(wt, commits[])` | `git -C <wt> merge --no-ff --no-edit --no-verify <sha>…` | On a conflict: `merge --abort`, then `deps_conflict`. |
 | `snapshot(wt, task_files, message)` | **Plumbing only; it never writes through the worker's HEAD.** With `GIT_INDEX_FILE=<ticket dir>/index`, a **fresh** private index the worker can't reach (deleted and recreated for each snapshot, so anything the worker staged in the worktree's own index is ignored): <br>1. `read-tree <dispatch_head>`. <br>2. Build the list of paths the core will stage. It is the changed paths (tracked diff against `dispatch_head`, plus untracked files) that match the task globs, **minus** every agent config file (16.4 rule 6) and every `.gitattributes`/`.gitmodules` (a tamper signal). <br>3. `add -A --pathspec-from-file=<list> --pathspec-file-nul` stages exactly that list, with nothing else. <br>4. `write-tree`. <br>5. **Check the tree before committing.** `diff-tree -r --name-only -z <dispatch_head> <tree>` must list only paths from that list. Any other path makes the ticket `tampered`, and nothing is committed. <br>6. `commit-tree <tree> -p <dispatch_head> -m <code-built>` with the trailer `Vajra-Worker: <account> <model>`. Then `update-ref refs/heads/vajra/<run>/task-<id>-r<n> <new> <zero-oid>`, which only creates the ref, and fails if it already exists | Refs only under `refs/heads/vajra/`. Changed paths outside the task files, and every agent config file (16.4), become `leftovers` and are never committed. |
 | `integrate(run, round, commits[])` | In its own worktree, which no worker is given: `checkout -B vajra/<run>/integration[-r<n>] <base>`, then `merge --no-ff --no-edit --no-verify` each commit. Before each merge the core checks that `symbolic-ref HEAD` is exactly `refs/heads/vajra/<run>/integration[-r<n>]` | Same as `snapshot`. |
@@ -1504,7 +1511,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 
 **If any check fails,** the ticket is `tampered`, nothing is committed, and the run card shows which file changed. The check matters even under a Claude worker. Without it, a planted `gpg.program`, `filter.*.clean` or `merge.*.driver` would run inside the core's own `add`, `commit` or `merge`.
 
-**A frozen copy of the global config.** At `worktree_add` the core writes a flattened copy of the user's global config, with its includes resolved, into the ticket's private dir. Every later `gitw` and bridge git call for that ticket runs with `GIT_CONFIG_GLOBAL=<that copy>` and `GIT_CONFIG_NOSYSTEM=1`.
+**A frozen copy of the global config.** At `worktree_add` the core writes a flattened copy of the user's global config, with its includes resolved, into the ticket's private dir under `<data>`, which agents can't write. Every later `gitw` and bridge git call for that ticket runs with `GIT_CONFIG_GLOBAL=<that copy>` and `GIT_CONFIG_NOSYSTEM=1`.
 - So a later change to `~/.gitconfig` can't reach the core's git: not from a worker, a test suite that runs `git config --global`, a credential helper, or `git maintenance register`.
 - The global hashes then only feed a card note ("Your git settings changed during this run"), and **are not a tamper signal**. This avoids false `tampered` results that would use up all 3 tries.
 - The repo's own config files stay tamper signals, because the core's git must read them live.
@@ -1636,7 +1643,7 @@ This section is unchanged from revision 1, except that the base is `dispatch_hea
 | S4 | **Claude worker:** <br>• Does a `-p` worker run with the guard hooks from the flag file? <br>• Does `--tools` hold against a user `Bash(*)` allow? <br>• Is `disableAllHooks: false` in the flag file honoured? <br>• Does the worktree's `.claude/settings.json` load? | 6b | Each gap becomes a refusal for that profile. |
 | S5 | **MCP timeout:** does each harness's MCP tool-call timeout allow a 110 s `await_any`? | 6d2 | Lower `wait_s`. |
 | S6 | **Diff counter parity:** does the 16.10 counter match git numstat on the fixtures? Record the git version. | 6c-0 | Fix the counter. |
-| S7 | **APFS clones:** does `clonefile` of `node_modules` into a worktree under the app data dir work across volumes? | 6c | Fall back to no copy, and say so on the card. |
+| S7 | **APFS clones:** does `clonefile` of `node_modules` into a worktree under `<work>` work across volumes? | 6c | Fall back to no copy, and say so on the card. |
 | S8 | **Engine scripts with no Claude:** <br>• Does the install command install the scripts on a Mac without `claude`? <br>• Do `vajra-campaign.sh create/pass/close/report`, `vajra_tasks.py add/claim/report/close` and `vajra_kb.py add` run from the bridge with the scrubbed env, with no Claude session? <br>• Does `create` change the global active campaign? <br>• Does a SIGTERM leave the lock free? | 6h | A script that needs Claude-only state becomes a named engine change for the owner (16.11). |
 | S9 | **Evidence under Codex:** does `vajra-verify-work.sh` run inside a Codex `workspace-write` session in a core worktree, where `<repo>/.git` is read-only? Is `git.worktreeTree` null? Can servers bind to loopback (also for S1)? | 6i (Codex seats may run the evidence step, N17) | A null tree or a failed run makes the bundle not count. Record the reason, and give the evidence ticket the worktree's gitdir as a writable root if that fixes it. |
 | S12 | **Evidence runtime on Claude:** can a Claude evidence session run a long suite (more than 10 minutes) through Bash without hitting a tool time limit? | 6i | Split the suite command, or say on the card that long suites may time out. |
@@ -1702,6 +1709,8 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - A changed `<common>/config` (`gpg.program`) gives `tampered`.
     - A rewritten `.git` file gives `tampered`.
     - So do a worker commit and a nested `.git`.
+    - **With the shipped sandbox settings on** (`config/sandbox.json` merged into a temp HOME): a Claude worker and a Claude verifier can run setup, build and tests in their worktrees under `<work>`. A write to `<data>` from the same session is still denied, and `doctor_ok` still passes.
+    - A `<work>` inside `<data>`, or a `<data>` inside `<work>`, refuses worker launch with `worktree_root_invalid`.
     - **A worker redirects `<gitdir>/commondir`** to a directory with the original objects and its own `config`, where a `filter.x.clean` writes a marker, plus an `info/attributes` line that applies it. HEAD still resolves to `dispatch_head`, and no `.gitattributes` changes. The result is `tampered` before any `add`, and the marker never appears. With the check disabled in the test, the pinned `GIT_COMMON_DIR` still keeps the filter from running.
     - **A worker runs `git symbolic-ref HEAD refs/heads/main` while `main` is at `dispatch_head`:** the result is `tampered`, `main` doesn't move, and no commit is made on it. With the detached check disabled in the test, `snapshot`'s plumbing path still leaves `main` untouched.
     - `update-ref` refuses to overwrite an existing `vajra/` task ref.
@@ -1781,6 +1790,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - Decline gives `not_verified`;
     - Approve gives plain `verified`, with "check commands approved by you" plus the audit line and the signed progress line.
   - A run with a Claude verifier ends plain `verified`.
+  - **The same run with the shipped sandbox settings on** (`config/sandbox.json` merged into a temp HOME) still ends `verified`. The evidence session writes its setup output and bundle in the evidence worktree under `<work>`, and `<data>` stays write-denied.
   - **A Codex verifier whose setup command writes outside the worktree:** the evidence runs on that Codex seat inside its sandbox, and the write is denied. It never runs in a Claude session. The run is `evidence_unguarded`, or `not_verified`.
   - A green round finalizes as `verified` with no `finish_run`, and a Stop after that changes nothing.
   - A bundle for another head is refused.
