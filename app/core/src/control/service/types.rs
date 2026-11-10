@@ -64,6 +64,9 @@ pub enum ControlError {
     ActionNotFound,
     /// A stop that named the attempt it saw (`expect_generation`) found a different one at the moment of the stop.
     StaleGeneration(u64),
+    /// The Director-General's project is archived, or gone from the store (FG-02c): it may not see or steer anything.
+    ProjectArchived,
+    ProjectMissing,
     UnknownTool,
     InvalidArgs(String),
     Io(io::Error),
@@ -82,6 +85,8 @@ impl ControlError {
             Self::StaleLeadGeneration => "stale_generation",
             Self::ActionNotFound => "action_not_found",
             Self::StaleGeneration(_) => "stale_generation",
+            Self::ProjectArchived => "project_archived",
+            Self::ProjectMissing => "project_missing",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) => "invalid_args",
             Self::Io(_) => "io_error",
@@ -282,6 +287,8 @@ pub struct AskRecord<'a> {
     pub state: AskState,
     pub text: Option<&'a str>,
     pub reason: Option<&'a str>,
+    /// The Director-General's project and conversation the ask went to (FG-02c); `None` only in the service's tests.
+    pub project: Option<(&'a str, u32)>,
 }
 
 /// A human decision on a plan item (ADR-14).
