@@ -662,7 +662,15 @@ impl App {
     /// `page_open` is true while Settings > Providers is open. A key endpoint is called only when that is true or a run is
     /// active, and at most once a minute per account; otherwise the last answer is returned and no call is made.
     pub fn provider_usage(&self, page_open: bool) -> Res {
-        serde_json::to_value(self.usage_snapshot(page_open || self.active_run_count() > 0)).map_err(|e| fail("internal", e))
+        // What `project_state` serves now, against what this read leaves in the cache.
+        let before = self.provider_usage_cached().fingerprint();
+        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
+        // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
+        if now.fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+        serde_json::to_value(now).map_err(|e| fail("internal", e))
     }
 
     /// The last usage answers, for `project_state`. Never calls out.

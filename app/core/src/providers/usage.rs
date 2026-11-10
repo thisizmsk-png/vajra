@@ -81,6 +81,15 @@ pub struct UsageList {
     pub usage: Vec<Usage>,
 }
 
+impl UsageList {
+    /// What the figures say, without when they were read: two lists with the same fingerprint show the user the same
+    /// thing, so a re-read that only moves `read_at` is not a change.
+    pub fn fingerprint(&self) -> String {
+        let figures: Vec<_> = self.usage.iter().map(|u| Usage { read_at: None, ..u.clone() }).collect();
+        serde_json::to_string(&figures).unwrap_or_default()
+    }
+}
+
 impl Usage {
     pub fn not_reported(account: &str) -> Usage {
         Usage { account: account.into(), read_at: None, source: "none".into(), windows: Vec::new(), amounts: None }

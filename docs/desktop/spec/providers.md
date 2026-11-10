@@ -184,7 +184,7 @@ as a cache read. One entry per account:
   left of the current cap. So the `credit` window is `(limit - limit_remaining) / limit` and exists only when both are reported
   and `limit` is above zero; otherwise there is no percentage (the figures in `amounts` are still shown as reported).
 - **When it calls out.** Only while Settings > Providers is open (`page_open`) or a run is active, and at most once a minute per
-  account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. A failed read keeps the
+  account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. When a read changes what is shown (the figures, not `read_at`), the project revisions advance and a `changed` event names them, so the next `project_state` read is a full answer carrying the new `usage`; a read that changes nothing moves nothing. A failed read keeps the
   previous answer (its `read_at` shows its age) and still counts as the minute's attempt.
 - **The key never enters the core.** The call is curl with `--proto =https`, a cleared environment and the header read from
   stdin (`-H @-`). A key command (the Keychain read, from the Keychain store) is the producer of that stdin: it prints the key

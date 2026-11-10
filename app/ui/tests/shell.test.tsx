@@ -325,6 +325,17 @@ describe("The usage chip comes from the project state (#120 review)", () => {
     await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
   });
 
+  it("Given the usage changes later, Then the chip follows when the core announces a newer revision", async () => {
+    const at = (pct: number) => ({ ...usage, usage: [{ ...usage.usage[0], windows: [{ kind: "weekly", used_pct: pct, resets_at: null, warn: true }] }] });
+    let answer: unknown = state(at(84));
+    boot(`#/p/${T}/orch`, { ...registered, project_state: () => answer });
+    const bar = await screen.findByLabelText(S.frame.status);
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
+    answer = { ...state(at(91)), rev: 8 };
+    act(() => ipc.emit("changed", { streams: [], snapshot_needed: false, projects: [{ project_id: T, rev: 8 }] }));
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 91% used this week."), { timeout: 3000 });
+  });
+
   it("Given nothing is near its limit, Then there is no chip", async () => {
     boot(`#/p/${T}/orch`, { ...registered, project_state: state({ ...usage, usage: [{ ...usage.usage[0], windows: [{ kind: "weekly", used_pct: 10, resets_at: null, warn: false }] }] }) });
     await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_state")).toBe(true));

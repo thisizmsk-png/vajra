@@ -181,3 +181,14 @@ fn a_call_that_hangs_is_killed_at_the_deadline_and_reads_as_nothing() {
     assert!(start.elapsed() < Duration::from_secs(10), "killed at the deadline, not left to run");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_fingerprint_ignores_when_it_was_read_and_notices_what_it_says() {
+    let a = parse_key_response("openrouter", FIXTURE.as_bytes(), "2026-11-09T12:00:00Z").unwrap();
+    let later = Usage { read_at: Some("2026-11-09T12:05:00Z".into()), ..a.clone() };
+    let list = |u: Usage| UsageList { schema: USAGE_SCHEMA.into(), usage: vec![u] };
+    assert_eq!(list(a.clone()).fingerprint(), list(later).fingerprint(), "a re-read of the same figures is not a change");
+    let moved = parse_key_response("openrouter", br#"{"data":{"usage":9.0,"limit":10.0,"limit_remaining":1.0}}"#, AT).unwrap();
+    assert_ne!(list(a.clone()).fingerprint(), list(moved).fingerprint());
+    assert_ne!(list(a).fingerprint(), list(Usage::not_reported("openrouter")).fingerprint());
+}

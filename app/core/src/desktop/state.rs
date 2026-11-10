@@ -238,7 +238,7 @@ impl App {
 
     /// Send a `changed` payload naming the projects whose revision moved. The sink is installed by the shell;
     /// without one (tests, the socket server) nothing is sent.
-    fn emit_projects(&self, projects: Vec<Value>) {
+    pub(super) fn emit_projects(&self, projects: Vec<Value>) {
         if let Some(sink) = lock(&self.sink).as_ref() {
             sink(json!({"streams": [], "snapshot_needed": false, "projects": projects}));
         }

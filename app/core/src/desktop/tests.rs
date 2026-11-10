@@ -3812,3 +3812,35 @@ fn provider_usage_calls_out_only_while_the_page_is_open_and_at_most_once_a_minut
     assert_eq!(app.provider_usage_cached().usage[2].source, "gateway_key");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_changed_usage_advances_the_project_revision_and_says_so_and_an_unchanged_one_does_not() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    let events = std::sync::Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = events.clone();
+    app.set_change_sink(Box::new(move |p| sink.lock().unwrap().push(p)));
+    app.usage_source = Box::new(CountingUsage(std::sync::Arc::new(AtomicUsize::new(0))));
+    let rev0 = app.project_state("p_usage", None).unwrap()["rev"].as_u64().unwrap();
+
+    // The page is closed: nothing is read, nothing changes, the short answer stays short.
+    app.provider_usage(false).unwrap();
+    assert_eq!(app.project_state("p_usage", Some(rev0)).unwrap()["unchanged"], true);
+    assert!(events.lock().unwrap().is_empty());
+
+    // The first real read changes what is shown: the revision moves, the UI is told, and the next read is a full answer
+    // that carries the new usage.
+    app.provider_usage(true).unwrap();
+    let full = app.project_state("p_usage", Some(rev0)).unwrap();
+    assert_eq!(full["unchanged"], false);
+    let rev1 = full["rev"].as_u64().unwrap();
+    assert!(rev1 > rev0);
+    assert_eq!(full["usage"]["usage"][2]["windows"][0]["used_pct"], 84);
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap()[0]["projects"][0], json!({"project_id": "p_usage", "rev": rev1}));
+
+    // The same figures again (inside the minute, so the cache): no new revision, no event, the short answer.
+    app.provider_usage(true).unwrap();
+    assert_eq!(app.project_state("p_usage", Some(rev1)).unwrap()["unchanged"], true);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
