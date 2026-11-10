@@ -109,13 +109,19 @@ impl App {
                 None => Inputs::default(),
             }
         };
+        // Deadlines are taken from before the build: one that passes while the board is built is kept (and the build is not
+        // cached), so a verdict read as live during the build can never be served after it expired (#107 review).
+        let since = Instant::now();
         let pre = self.board_stamp(project_id, rev, &old);
         let mut inputs = Inputs::default();
+        #[cfg(test)]
+        std::thread::sleep(*lock(&self.board_build_pause));
         let board = self.board_build(project_id, &mut inputs);
         self.board_builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let expires = self.next_input_expiry();
+        let expires = self.next_input_expiry(since);
         let post = self.board_stamp(project_id, rev, &inputs);
-        let stamp = post.filter(|_| pre.is_some() && inputs == old && pre == post);
+        let crossed = expires.is_some_and(|e| Instant::now() >= e);
+        let stamp = post.filter(|_| pre.is_some() && inputs == old && pre == post && !crossed);
         let fp = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             board.to_string().hash(&mut h);
@@ -160,14 +166,14 @@ impl App {
         Some(h.finish())
     }
 
-    /// The earliest future moment a cached verdict or repo state stops counting (an expired one is already a miss).
-    fn next_input_expiry(&self) -> Option<Instant> {
-        let now = Instant::now();
-        let ev = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(|(_, until)| *until).filter(|u| *u > now).min();
+    /// The earliest moment after `since` that a cached verdict or repo state stops counting. One that expired before
+    /// `since` was already a miss when the build read it; one that expired after it may have been read as live.
+    pub(super) fn next_input_expiry(&self, since: Instant) -> Option<Instant> {
+        let ev = self.evidence_cache.lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(|(_, until)| *until).filter(|u| *u > since).min();
         let wt = lock(&self.worktree_state)
             .values()
             .map(|(at, st)| *at + if st.is_some() { super::WORKTREE_STATE_TTL } else { super::WORKTREE_STATE_UNKNOWN_TTL })
-            .filter(|u| *u > now)
+            .filter(|u| *u > since)
             .min();
         [ev, wt].into_iter().flatten().min()
     }

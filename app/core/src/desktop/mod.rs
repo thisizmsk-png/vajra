@@ -251,6 +251,9 @@ pub struct App {
     board_cache: Mutex<HashMap<String, board::Cached>>,
     /// How many boards were built (tests count rebuilds).
     board_builds: std::sync::atomic::AtomicU64,
+    /// Tests: how long a board build takes (to put a cache deadline inside one).
+    #[cfg(test)]
+    board_build_pause: Mutex<Duration>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
@@ -328,6 +331,8 @@ impl App {
             board_inputs_gen: std::sync::atomic::AtomicU64::new(0),
             board_cache: Mutex::new(HashMap::new()),
             board_builds: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            board_build_pause: Mutex::new(Duration::ZERO),
             worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
