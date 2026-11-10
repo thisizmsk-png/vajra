@@ -1426,7 +1426,12 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
   - **One campaign per run.** `CampaignCreate` is idempotent: when `<campaign_slug>` exists with the same goal and features hash, it is reused. A lead restart and a resume bind to the original run's `campaign_slug`, copied from its `seats.json`, never recomputed, so a resumed `outside_guard` run reuses its `-og` campaign and can never create an unmarked one. S8 records whether `create` changes the global active campaign. If it does, the core restores the previous active campaign afterwards with the existing `active` subcommand.
   - **Kills and locks.** Campaign writes get SIGTERM and a 5 s grace period before SIGKILL, so `vajra-campaign.sh`'s `trap EXIT` frees its `mkdir` lock. **A SIGKILL, or a crash, can still leave the lock behind.** Today's script has no unlock subcommand, and its lock records no owner (`vajra-campaign.sh:127–135`). Its own error says "remove it if no other run is active".
     - **Until the engine change below is installed,** a run that hits a held lock shows the lock's path on its card. The card also shows whether any `vajra-campaign.sh` process is running now; the core reads its own process table, and checks no pid file. It then asks the human to remove the lock themselves: "Make sure no Vajra run or terminal command is using this campaign, then delete this folder." The core never removes it.
-    - **The engine change (PR 6h-e).** `lock()` writes `owner.json` (`pid`, the process start time, `created`) inside the lock directory. A new subcommand, `vajra-campaign.sh unlock <slug> --if-stale`, removes the lock only when that pid is gone, or alive with a different start time. A new bridge variant, `CampaignUnlockStale`, backs the card's **Repair** button. This is an engine change: the owner installs it and regenerates the manifest. Repair appears only when the installed engine version has it (16.2 check 6).
+    - **The engine change (PR 6h-e).** `lock()` writes `owner.json` (`pid`, the process start time, `created`) inside the lock directory. A new subcommand, `vajra-campaign.sh unlock <slug> --if-stale`, removes the lock only when that pid is gone, or alive with a different start time.
+      - **The release changes too.** Today's `trap 'rmdir "$LOCK"' EXIT` (`vajra-campaign.sh:135`) would fail on a non-empty directory, and its error is hidden, so every normal exit would leave the lock in place. The new trap removes `owner.json` first and then runs `rmdir`, in that order, so a crash between the two still leaves an owner file for `--if-stale` to judge.
+      - `unlock --if-stale` does the same: it removes `owner.json`, then the directory.
+      - A lock directory with no `owner.json` (from today's engine, or a crash during `lock()` before the file was written) is shown with the manual card text. `--if-stale` never removes it.
+
+      A new bridge variant, `CampaignUnlockStale`, backs the card's **Repair** button. This is an engine change: the owner installs it and regenerates the manifest. Repair appears only when the installed engine version has it (16.2 check 6).
   - **When a bridge call fails:**
 
     | Calls | On failure |
@@ -1747,6 +1752,11 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - The fake scripts receive exactly the expected argv for each variant, in the workflow's order.
   - No variant accepts a free-form argument.
   - The app process never opens the HMAC key file (checked with a temp HOME and a file-access trace, or a key file the test makes unreadable to the app).
+- **6h-e**
+  - A normal `pass` leaves no lock directory behind.
+  - A campaign write killed with SIGKILL leaves the lock with its `owner.json`, and `unlock --if-stale` removes both.
+  - `unlock --if-stale` keeps a lock whose owner pid is alive with the same start time.
+  - `unlock --if-stale` keeps a lock directory that has no `owner.json`.
 - **6i**
   - A green bundle plus a record that verifies gives **Verified**.
   - The evidence session reports exit 0 while `check-evidence` says not green: **Not verified**, the tasks stay open, and the knowledge is proposed.
