@@ -4,7 +4,7 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ProviderList } from "./providerContract";
+import type { ProviderList, UsageList } from "./providerContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -193,6 +193,8 @@ export type ProjectState =
       inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
       /** This project's pending run proposals, newest first, picked before any inbox cut (at most 50; `more` were left out). */
       proposals?: { ok: true; count: number; more: number; items: InboxItem[] } | { ok: false; error?: string };
+      /** The last usage answers (`vajra.provider_usage/1`), a cache read on the core side. Parse with `parseUsage`. */
+      usage?: UsageList;
     };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };

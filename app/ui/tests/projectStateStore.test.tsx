@@ -10,7 +10,7 @@ const full = (rev: number, id = "p_1") => ({ schema: "vajra.project_state/1", pr
 const same = (rev: number, id = "p_1") => ({ schema: "vajra.project_state/1", project_id: id, rev, unchanged: true });
 const changed = (rev: number, id = "p_1") => ({ streams: ["workers"], snapshot_needed: false, projects: [{ project_id: id, rev }] });
 
-let renders: Array<{ rev: number | null; failed: boolean }> = [];
+let renders: Array<{ rev: number | null; failed: boolean; usage?: unknown }> = [];
 function Probe({ id }: { id: string | null }) {
   const s = useProjectState(id);
   renders.push(s);
@@ -29,7 +29,7 @@ describe("useProjectState", () => {
     setTransport(f.transport);
     render(<Probe id="p_1" />);
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 10, failed: false, proposals: null });
+    expect(renders.at(-1)).toEqual({ rev: 10, failed: false, proposals: null, usage: null });
     expect(stateCalls(f.calls)).toHaveLength(1);
   });
 
@@ -102,12 +102,12 @@ describe("useProjectState", () => {
     setTransport(f.transport);
     render(<Probe id="p_1" />);
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: null, failed: true, proposals: null });
+    expect(renders.at(-1)).toEqual({ rev: null, failed: true, proposals: null, usage: null });
     await tick(600);
     bad = false;
     f.emit("changed", { streams: ["workers"], snapshot_needed: false });
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 20, failed: false, proposals: null });
+    expect(renders.at(-1)).toEqual({ rev: 20, failed: false, proposals: null, usage: null });
   });
 
   it("keeps the proposals it has through a failed refresh, so recovery at the same revision still shows them (#90 review)", async () => {
@@ -120,17 +120,17 @@ describe("useProjectState", () => {
     setTransport(f.transport);
     render(<Probe id="p_1" />);
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item] });
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item], usage: null });
     await tick(600);
     mode = "bad";
     f.emit("changed", { streams: ["workers"], snapshot_needed: false });
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 30, failed: true, proposals: [item] });
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: true, proposals: [item], usage: null });
     await tick(600);
     mode = "same";
     f.emit("changed", { streams: ["workers"], snapshot_needed: false });
     await flush();
-    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item] });
+    expect(renders.at(-1)).toEqual({ rev: 30, failed: false, proposals: [item], usage: null });
   });
 
   it("lets go of the subscription when the last user unmounts", async () => {
@@ -148,6 +148,26 @@ describe("useProjectState", () => {
     render(<Probe id={null} />);
     await flush();
     expect(f.calls).toHaveLength(0);
-    expect(renders.at(-1)).toEqual({ rev: null, failed: false, proposals: null });
+    expect(renders.at(-1)).toEqual({ rev: null, failed: false, proposals: null, usage: null });
+  });
+
+  it("carries the usage answers across an unchanged revision and drops one that is not the contract's shape", async () => {
+    const usage = { schema: "vajra.provider_usage/1", usage: [{ account: "claude", read_at: null, source: "none", windows: [{ kind: "weekly", used_pct: 84, resets_at: null, warn: true }], amounts: null }] };
+    let answer: unknown = { ...full(10), usage };
+    const f = fakeIpc({ project_state: () => answer });
+    setTransport(f.transport);
+    render(<Probe id="p_1" />);
+    await flush();
+    expect((renders.at(-1)?.usage as { usage: { account: string }[] }).usage[0].account).toBe("claude");
+    await tick(600);
+    answer = same(10);
+    f.emit("changed", { streams: [], snapshot_needed: true });
+    await flush();
+    expect(renders.at(-1)?.usage).not.toBeNull();
+    await tick(600);
+    answer = { ...full(11), usage: { schema: "vajra.provider_usage/9", usage: [] } };
+    f.emit("changed", changed(11));
+    await flush();
+    expect(renders.at(-1)?.usage).toBeNull();
   });
 });
