@@ -1717,9 +1717,10 @@ fn a_run_folder_replaced_by_a_link_to_an_unrecorded_folder_of_its_own_project_re
     assert!(app.isolation("20261108-1100", &src).is_err(), "equal to a recorded folder, not merely inside the project");
 }
 
-/// #80 identity model: one recorded location claimed by two keys via DIFFERENT runs (so no single folder collides) is ambiguous and refuses.
+/// #80 identity model, under the #103 ownership rule: one recorded LOCATION shared by runs of two store projects (so no folder
+/// either OWNS collides) is Git bookkeeping, not a claim. The ask goes on and the other project's run folder is denied.
 #[test]
-fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
+fn one_recorded_location_shared_by_two_projects_through_different_runs_is_bookkeeping_not_a_claim() {
     let t = Tmp::new();
     let app = t.app();
     let proj = t.0.join("proj");
@@ -1731,7 +1732,9 @@ fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
     app.record_run_as("20261108-1100", &src, Some(&pp), SID, "x", true, 1).unwrap();
     assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
     app.record_run_as("20261108-1101", &lib, Some(&po), SID, "y", true, 1).unwrap();
-    assert!(app.isolation("20261108-1100", &src).is_err(), "the location is recorded under two projects");
+    let iso = app.isolation("20261108-1100", &src).unwrap();
+    assert!(iso.deny.contains(&lib), "the other project's run folder is denied: {iso:?}");
+    assert!(!iso.deny.contains(&proj), "the shared location is no claim on this project's root: {iso:?}");
 }
 
 #[path = "lead_store_tests.rs"]
