@@ -8,6 +8,11 @@
 # Vajra's own audit and routing logs. Never prints the HMAC key.
 
 set -uo pipefail
+# NFR-SEC-2: this script reads the HMAC key file (the bridge and agents run it). A same-uid worker
+# can write user dirs (for example ~/.local/bin, or the Homebrew prefix), so every tool comes only from the root-owned system dirs
+# and python3 only from its absolute path, whatever PATH the caller (a Claude Code session, the app) had.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+PYTHON3="/usr/bin/python3"
 
 SKILL="${HOME}/.claude/skills/vajra"
 VS="${HOME}/.claude/vajra"
@@ -44,9 +49,9 @@ warn() { printf 'WARN  %s\n' "$1"; WARNS=$((WARNS + 1)); }
 
 # --- Dependencies -------------------------------------------------------------
 for dep in bash git jq openssl; do
-  if command -v "$dep" >/dev/null 2>&1; then pass "dependency: $dep"; else fail "dependency: $dep not found"; fi
+  if command -v "$dep" >/dev/null 2>&1; then pass "dependency: $dep"; else fail "dependency: $dep not found. Vajra's hooks use only the root-owned /usr/bin, /bin, /usr/sbin and /sbin: a $dep in /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.nix-profile/bin or an asdf/mise shim is never run, because a same-uid worker can replace it (macOS 15+ ships /usr/bin/jq)"; fi
 done
-if command -v python3 >/dev/null 2>&1; then pass "dependency: python3"; else warn "dependency: python3 not found (router disabled)"; fi
+if [ -x "$PYTHON3" ]; then pass "dependency: python3"; else warn "dependency: python3 not found at $PYTHON3: the router, atman and the knowledge prime are off. Vajra uses only /usr/bin/python3 (xcode-select --install provides it); a python3 elsewhere is not used"; fi
 HAVE_JQ=0; command -v jq >/dev/null 2>&1 && HAVE_JQ=1
 
 # --- Skill files --------------------------------------------------------------
@@ -136,7 +141,7 @@ if [ -f "$SKILL/hooks/user-prompt-submit.sh" ]; then
   fi
   [ -f "$SKILL/scripts/vajra_route.py" ] || warn "scripts/vajra_route.py missing (router does nothing)"
   if [ -f "$SKILL/config/skills.json" ] && [ -f "$SKILL/scripts/vajra_skills.py" ]; then
-    if out="$(python3 -I "$SKILL/scripts/vajra_skills.py" verify 2>&1)"; then pass "catalog skills match their pins"
+    if out="$("$PYTHON3" -I "$SKILL/scripts/vajra_skills.py" verify 2>&1)"; then pass "catalog skills match their pins"
     else warn "catalog skills differ from their pins: $(echo "$out" | grep -c DIFFERS). Review with vajra_skills.py verify"; fi
   else
     warn "skill catalog missing (config/skills.json or scripts/vajra_skills.py)"

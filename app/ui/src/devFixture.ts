@@ -150,11 +150,15 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
       ];
       return { lines: dg.map((t, i) => ({ seq: i + 1, text: t })), head_seq: dg.length, first_seq: 1, at_start: true, at_end: true, gap: false };
     }
-    const text = [
-      "Reading src/middleware/index.ts", "Adding TokenBucket with capacity and refill per key", "Wrote src/middleware/rateLimit.ts (84 lines)",
-      "Running npm test -- rateLimit", "PASS tests/rateLimit.test.ts (6 tests)", "Next: wire the limiter into the router",
-    ];
-    return { lines: text.map((t, i) => ({ seq: i + 1, text: t })), head_seq: text.length, first_seq: 1, at_start: true, at_end: true, gap: false };
+    // The real StreamWindow shape: up to `maxLines` rows starting at `from` (the newest rows when `from` is null). One worker
+    // (`w-sepoy-backend-1`) lost line 5, so any window covering it reports `gap` and leaves that row out.
+    const lost = String(args?.stream) === "w-sepoy-backend-1" ? 5 : 0;
+    const head = stream.length;
+    const max = Math.max(1, Number(args?.maxLines ?? 220));
+    const from = args?.from === null || args?.from === undefined ? null : Number(args.from);
+    const start = from === null ? Math.max(1, head - max + 1) : Math.max(1, from);
+    const end = Math.min(head, start + max - 1);
+    return { lines: stream.filter((l) => l.seq >= start && l.seq <= end && l.seq !== lost), head_seq: head, first_seq: 1, at_start: start <= 1, at_end: end >= head, gap: lost >= start && lost <= end };
   },
   lead_status: () => ({ available: true, busy: false, name: "Director-General", state: "running", reason: "a run of this project is going", project_id: "p_01JC3H0000000000000000000A", generation: 3, stream: "orchestrator-p_01JC3H0000000000000000000A-g3" }),
   ask_lead: () => ({ ask_id: "01JC3H0000000000000000ASK1", state: "running", stream: "orchestrator-p_01JC3H0000000000000000000A-g3", lead_session_id: "s", project_id: "p_01JC3H0000000000000000000A", generation: 3, name: "Director-General" }),
@@ -208,10 +212,6 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   act_close_finished: () => ({ receipt: { action_id: "a_fixture3", state: "done" }, result: { closed: [], skipped: [{ worker: "architect", label: "t1", reason: "unsaved_work", changed_files: 3, unpushed_commits: 2, no_upstream: false, busy_terminals: 0 }, { worker: "verifier", label: "t5", reason: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] } }),
   worktree_info: (a) => ({ worker: String(a?.worker), worktree: `.claude/worktrees/${String(a?.worker)}`, branch: `vajra/${RUN}/t2`, base: "4e1c9a2" }),
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),
-  tail: (a) => {
-    const after = Number(a?.afterSeq ?? 0);
-    return { lines: stream.filter((l) => l.seq > after), gap: false, head_seq: stream.length, spill_start: null, spill_end: null };
-  },
   start_run: () => ({ stream: "s-new", session_id: "u-new", run_id: RUN, campaign: SLUG }),
   read_report: (a) => ({ slug: String(a?.slug), integrity: "ok", text: REPORT }),
   verify_campaign: (a) => ({ slug: String(a?.slug), ok: true, restore: null }),
@@ -219,7 +219,6 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     { id: "k1", kind: "decision", title: "Rate limits are per API key, not per IP, so shared NATs are not throttled together" },
     { id: "k2", kind: "lesson", title: "Redis MULTI in tests needs the ioredis-mock pipeline shim" },
   ] }),
-  read_spill_before: () => ({ lines: [], at_start: true, gap: false }),
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 

@@ -49,12 +49,12 @@ TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 have_jq=0; command -v jq >/dev/null 2>&1 && have_jq=1
 
 IN_GIT=0; HEAD_SHA=""; TREE=""; TREE_AFTER=""; DIRTY="false"; TOP=""
-EXCL=""   # pathspec excluding the walkthrough base dir when it lies inside the repo
+EXCL=""   # pathspec excluding the walkthrough base dir when it lies inside the repo (literal: no glob in its name matches a neighbour)
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   IN_GIT=1
   TOP="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
   BASE_ABS="$(cd "$BASE" && pwd -P)"
-  case "$BASE_ABS/" in "$TOP"/*) EXCL=":(exclude)${BASE_ABS#"$TOP"/}" ;; esac
+  case "$BASE_ABS/" in "$TOP"/*) EXCL=":(exclude,literal)${BASE_ABS#"$TOP"/}" ;; esac
   HEAD_SHA="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
 fi
 
@@ -125,8 +125,11 @@ fi
 # sort_keys, separators (',', ':'), UTF-8). Without a key the file stays unsigned,
 # and vajra_kb.py / vajra_tasks.py do not count it as green.
 KEY_FILE="${HOME}/.claude/vajra/.hmac-key"
-if [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && command -v python3 >/dev/null 2>&1; then
-  python3 -I -c '
+# NFR-SEC-2: the python that reads the key is /usr/bin/python3 on the system PATH, never the caller's (a planted
+# ~/.local/bin/python3 would get the key). The test commands above keep the caller's PATH.
+PYTHON3="/usr/bin/python3"
+if [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && [ -x "$PYTHON3" ]; then
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
 import hashlib, hmac, json, os, re, sys
 path, keyf = sys.argv[1], sys.argv[2]
 k = open(keyf, encoding="utf-8").read().strip()

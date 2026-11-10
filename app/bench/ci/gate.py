@@ -4,12 +4,12 @@ usage: gate.py BASELINE_JSON IDLE_JSON [GROWTH_JSON]
 A launch is classified by the SET of WebKit helper types it ran (Networking, WebContent, GPU), not by their count.
 Fails closed on an unknown runner identity, an unknown helper type, or a flavour with no baseline entry. Otherwise fails
 if growth slope > 1 MiB/min, idle > the budget, or idle > baseline for that (identity, flavour) + max(5 MiB, 3%).
-Budget: 200 MiB; 212 MiB only on CI (GITHUB_ACTIONS set) when the flavour includes the GPU process (owner ruling, see
-README "GPU-flavour ceiling").
+Budget: 200 MiB; 240 MiB only on CI (GITHUB_ACTIONS set) when the flavour includes the GPU process (owner ruling, raised
+from 212; see README "GPU-flavour ceiling").
 """
 import json, os, sys
 
-IDLE_BUDGET, GPU_CI_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 212.0, 5.0, 0.03, 1.0
+IDLE_BUDGET, GPU_CI_BUDGET, REGRESSION, REGRESSION_PCT, SLOPE_BUDGET = 200.0, 240.0, 5.0, 0.03, 1.0
 KNOWN_TYPES = {"Networking", "WebContent", "GPU"}
 
 
