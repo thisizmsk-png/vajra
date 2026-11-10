@@ -1542,12 +1542,12 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 **Retention.**
 - **When the tree is removed.** Never at `snapshot`. A ticket's worktree is kept until its task commit has been merged into the integration branch (`integrate` succeeded). Then the core runs the capture check:
   1. the tamper checks (16.6) pass again;
-  2. the change set is listed: the tracked diff against `dispatch_head` plus untracked files, not counting ignored files, read with the baseline config;
-  3. **every path in it is in the task commit**, and each file matches the committed blob **the same way `snapshot` staged it.** The core compares `git hash-object --path=<path> <file>` with the blob id from `ls-tree`. It runs with the same environment as `snapshot`: the baseline config, `GIT_ATTR_SOURCE=<dispatch_head>` where supported, and attributes the `.gitattributes` tamper rule already pins.
-     - So a path with a trusted filter (LFS `clean`, for example) or a `text`/`eol` conversion hashes to the converted content, as it did at `add`. No filter runs that `snapshot` didn't already run.
-     - A path with no `filter`, `text` or `eol` attribute is hashed with `--no-filters`.
-     - A file edited after `snapshot` still shows up as different;
-  4. there are no leftovers, and the task commit is an ancestor of the integration branch.
+  2. **A full-tree comparison, not a per-path one** (PR #135 review). Checking only the paths that differ from `dispatch_head` now would miss a snapshotted file the worker later restored to its dispatch version, which drops out of that list. A blob hash would also miss a mode change. So the core rebuilds the worktree's whole state the same way `snapshot` staged it, and compares trees:
+     - with a fresh private index (`GIT_INDEX_FILE=<ticket dir>/capture-index`), `read-tree <dispatch_head>`, then `add -A -- .`. This stages every path that isn't ignored, including deletions. It uses the same environment as `snapshot`: the baseline config, `GIT_ATTR_SOURCE=<dispatch_head>` where supported, and the pinned attributes. So trusted filters (LFS `clean`) and `text`/`eol` conversions apply exactly as at `add`, and no filter runs that `snapshot` didn't already run;
+     - `write-tree`, then require that tree id to **equal the task commit's tree id**.
+  3. Equal trees prove the same paths are present, with the same type, mode and filtered content, and nothing extra. A restored file, a deleted file, a mode-only change, a symlink swap and a leftover each make the trees differ. Then the core lists the paths from `diff-tree -r <task commit tree> <capture tree>` on the card.
+     - Mode follows the repo's own `core.fileMode`, as it did at `snapshot`. Where that is `false`, git records no mode, so there is none to lose.
+  4. The task commit is an ancestor of the integration branch.
 - **If the capture check passes,** `worktree_remove` runs `git worktree remove --force`. That also removes its `<repo>/.git/worktrees/<name>` entry. Ignored files are discarded with the tree, such as dependency clones and build output. The card says so in the retention note.
 - **If it fails,** the tree is kept and shown with its leftovers, or with the file that differs from the commit, until the human discards it (with a confirm) or applies it. Nothing is removed on a guess.
 - **A ticket that never integrates** (failed, rejected, or its run stopped) keeps its tree until the human discards it, or the run is discarded.
@@ -1773,6 +1773,9 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - A leftover outside the task globs keeps the tree. An ignored build file doesn't block removal.
   - A filter planted in `~/.gitconfig` after app start never runs during the capture check, because the check uses the baseline config.
   - **An LFS-tracked file and a `text=auto` file with CRLF endings,** both unchanged after `snapshot`: after `integrate` the capture check passes, and the worktree is removed.
+  - **A snapshotted file restored to its dispatch version** before cleanup keeps the worktree, and the card names it, even though it no longer differs from `dispatch_head`.
+  - **A snapshotted file whose mode alone changed** (for example `chmod +x`, with `core.fileMode=true`) keeps the worktree.
+  - A snapshotted file deleted after `snapshot` keeps the worktree.
 - **6d1**
   - Parity of `validatePlan`, `topo` and `waves`.
   - Each dispatch refusal.
