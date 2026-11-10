@@ -756,15 +756,44 @@ fn run_seats_are_recorded_read_back_and_copied_as_they_were() {
     let t = Tmp::new();
     let app = t.app();
     let seats = serde_json::json!({"lead": {"account": "codex"}, "evidence_trust": "outside_guard", "campaign_slug": "deliver-20261106-0930-og"});
-    assert_eq!(app.read_run_seats(RUN_ID), None);
+    assert_eq!(app.read_run_seats(RUN_ID).unwrap(), None);
     let sha = app.record_run_seats(RUN_ID, &seats).unwrap();
     let file = t.data().join("control/lead").join(RUN_ID).join("seats.json");
     assert_eq!(sha, crate::control::sha256::hex_digest(&std::fs::read(&file).unwrap()));
-    assert_eq!(app.read_run_seats(RUN_ID), Some(seats.clone()));
+    assert_eq!(app.read_run_seats(RUN_ID).unwrap(), Some(seats.clone()));
     let next = "20261106-0945";
     assert_eq!(app.copy_run_seats(RUN_ID, next).unwrap(), Some(sha.clone()));
     assert_eq!(std::fs::read(&file).unwrap(), std::fs::read(t.data().join("control/lead").join(next).join("seats.json")).unwrap());
     assert_eq!(app.copy_run_seats("20261106-0001", "20261106-0002").unwrap(), None, "a run with no seats copies nothing");
+}
+
+/// A source that exists but cannot be read is an error, not "no seats", and nothing is written for the new run.
+#[test]
+fn copying_seats_from_a_malformed_or_refused_source_fails_and_writes_nothing() {
+    let t = Tmp::new();
+    let app = t.app();
+    let lead = t.data().join("control/lead");
+    let (from, to) = ("20261106-0930", "20261106-0945");
+    std::fs::create_dir_all(lead.join(from)).unwrap();
+    let src = lead.join(from).join("seats.json");
+    for case in ["truncated", "symlink", "unreadable"] {
+        let _ = std::fs::remove_file(&src);
+        match case {
+            "truncated" => std::fs::write(&src, b"{\"lead\": ").unwrap(),
+            "symlink" => {
+                std::fs::write(t.0.join("elsewhere"), b"{}").unwrap();
+                std::os::unix::fs::symlink(t.0.join("elsewhere"), &src).unwrap();
+            }
+            _ => {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::write(&src, b"{}").unwrap();
+                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0)).unwrap();
+            }
+        }
+        assert!(app.read_run_seats(from).is_err(), "{case}");
+        assert!(app.copy_run_seats(from, to).is_err(), "{case}");
+        assert!(!lead.join(to).join("seats.json").exists(), "{case}: nothing written");
+    }
 }
 
 #[test]

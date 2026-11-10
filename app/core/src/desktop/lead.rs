@@ -578,16 +578,22 @@ impl App {
     }
 
     #[allow(dead_code)] // 6d reads it at resume
-    /// The guarded seats of a run, or `None` for a run with none (a v1 run) or an unreadable record.
-    pub(super) fn read_run_seats(&self, run_id: &str) -> Option<Value> {
-        serde_json::from_slice(&fsx::read_nofollow(&self.lead_sid_dir(run_id).join(SEATS_FILE)).ok()?).ok()
+    /// The guarded seats of a run: `Ok(None)` only when the record does not exist (a v1 run). Any other failure (a refused
+    /// link, a permissions error, truncated or malformed JSON) is an error, so a caller can fail closed.
+    #[allow(dead_code)] // 6d reads it at resume
+    pub(super) fn read_run_seats(&self, run_id: &str) -> std::io::Result<Option<Value>> {
+        match fsx::read_nofollow(&self.lead_sid_dir(run_id).join(SEATS_FILE)) {
+            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// A resume starts a new run that keeps the seats, the evidence trust and the campaign slug of the one it continues:
-    /// copied, never recomputed. `Ok(None)` when `from` has no seats.
+    /// copied, never recomputed. `Ok(None)` when `from` has no seats; an unreadable source is an error and writes nothing.
     #[allow(dead_code)] // 6d is its first caller (resume)
     pub(super) fn copy_run_seats(&self, from: &str, to: &str) -> std::io::Result<Option<String>> {
-        match self.read_run_seats(from) {
+        match self.read_run_seats(from)? {
             Some(v) => self.record_run_seats(to, &v).map(Some),
             None => Ok(None),
         }
