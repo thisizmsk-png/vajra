@@ -4124,6 +4124,72 @@ fn an_unreadable_guarded_record_refuses_a_launch_instead_of_re_pinning_the_folde
     }
 }
 
+/// D3: a pasted key goes into the store once and never comes back out. A sentinel is fed through every key command; it
+/// must not appear in a reply, an error, the fake `security`'s argv or environment, or any file the app writes.
+#[test]
+fn provider_keys_never_echo_the_key() {
+    use crate::providers::keychain::tests::{FakeBin, SENTINEL};
+    let t = Tmp::new();
+    let mut app = t.app();
+    let bin = FakeBin::new();
+    app.keys = bin.keys();
+    let mut out = Vec::new();
+    let mut seen = |r: &Res| out.push(format!("{r:?} {}", serde_json::to_string(r.as_ref().unwrap_or_else(|e| e)).unwrap()));
+
+    let r = app.provider_key_saved("openrouter");
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": false})));
+    seen(&r);
+    let r = app.provider_key_save("openrouter", SENTINEL.into());
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": true})));
+    seen(&r);
+    let r = app.provider_key_save("openrouter", SENTINEL.into());
+    assert_eq!(r.as_ref().unwrap_err()["error"], "already_saved");
+    seen(&r);
+    let r = app.provider_key_replace("openrouter", SENTINEL.into());
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": true})));
+    seen(&r);
+    for (account, key) in [("openrouter", format!("{SENTINEL}\n")), ("claude", SENTINEL.to_string()), (SENTINEL, SENTINEL.to_string())] {
+        let r = app.provider_key_save(account, key.clone());
+        assert_eq!(r.as_ref().unwrap_err()["error"], "invalid_args");
+        seen(&r);
+        seen(&app.provider_key_replace(account, key));
+        seen(&app.provider_key_remove(account));
+        seen(&app.provider_key_saved(account));
+    }
+    let r = app.provider_key_remove("openrouter");
+    assert_eq!(r, Ok(json!({"account": "openrouter", "saved": false})));
+    seen(&r);
+
+    for o in &out {
+        assert!(!o.contains("SENTINEL"), "{o}");
+    }
+    assert!(!bin.log("argv.log").contains("SENTINEL"));
+    assert!(!bin.log("env.log").contains("SENTINEL"));
+    assert!(bin.log("stdin.log").contains(SENTINEL), "the key went in through stdin");
+    // Nothing the app wrote (logs, receipts, state) holds it.
+    fn walk(d: &Path, hits: &mut Vec<PathBuf>) {
+        for e in fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, hits);
+            } else if fs::read(&p).is_ok_and(|b| b.windows(SENTINEL.len()).any(|w| w == SENTINEL.as_bytes())) {
+                hits.push(p);
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&t.0, &mut hits);
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+/// A test build's default store points at a `security` that does not exist, so no test can reach the real Keychain.
+#[test]
+fn a_test_app_never_reaches_the_real_keychain() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.provider_key_saved("openrouter").unwrap_err()["error"], "keychain_unavailable");
+}
+
 struct CountingUsage(std::sync::Arc<AtomicUsize>);
 impl crate::providers::usage::UsageSource for CountingUsage {
     fn accounts(&self) -> Vec<String> {
