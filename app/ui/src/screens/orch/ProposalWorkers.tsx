@@ -20,7 +20,7 @@ const same = (a: AgentPick, b: AgentPick) => sameEntry(a, b) && a.effort === b.e
 function billingLine(a: Account | undefined): string {
   if (!a) return P.billingUnknown;
   const base = a.billing.kind === "unknown" ? P.billingUnknown : a.billing.account_label ?? S.workerProvider.billing[a.billing.kind];
-  return a.billing.override_warning ? `${base} · ${a.billing.override_warning}` : base;
+  return a.billing.override_warning ? `${base} · ${S.accounts.overrideShort(a.billing.override_warning)}` : base;
 }
 
 function warnLine(a: Account | undefined, u: Usage | undefined): string | null {

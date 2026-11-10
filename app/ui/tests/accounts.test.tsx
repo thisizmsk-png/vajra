@@ -119,7 +119,7 @@ describe("Settings > Providers > Accounts", () => {
   it("the override warning says the key bills instead of the plan", async () => {
     settings();
     const codex = await account("Codex CLI");
-    expect(within(codex).getByText(C.overrideWarning("OPENAI_API_KEY in your Codex config"))).toBeTruthy();
+    expect(within(codex).getByText(C.overrideWarning({ name: "OPENAI_API_KEY", found_in: "cli_config" }))).toBeTruthy();
     expect(within(await account("Claude Code")).queryByText(/bills instead/)).toBeNull();
   });
 

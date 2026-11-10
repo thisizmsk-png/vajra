@@ -373,3 +373,15 @@ fn a_stored_key_account_is_a_valid_account_record_that_says_only_whether_a_key_i
     // `accounts` alone is still just the CLIs.
     assert_eq!(accounts(&both()).accounts.len(), 2);
 }
+
+#[test]
+fn the_accounts_answer_is_the_golden_json_the_ui_parser_reads() {
+    // The exact bytes of `provider_accounts` for: Claude signed in, Codex with an API key in its config (an override
+    // warning), and OpenRouter with a key saved. `app/ui/tests/accountsGolden.test.ts` parses the same file, so a field
+    // the core renames or reshapes (the UI once read `override_warning` as a string) fails a test on one side.
+    let mut f = both();
+    f.files.insert(".codex/config.toml", "OPENAI_API_KEY = \"x\"\n");
+    let got = serde_json::to_value(accounts_with_keys(&f, &|_| Some(true))).unwrap();
+    let golden: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/ipc/accounts.json")).unwrap();
+    assert_eq!(got, golden);
+}
