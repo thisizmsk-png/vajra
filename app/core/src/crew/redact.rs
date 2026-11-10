@@ -69,9 +69,9 @@ const SECRET: &str = "<redacted>";
 
 /// Fields whose value is a token (a run of token characters). An auth scheme word before it (`Bearer`, `Basic`, ...) is
 /// skipped, so the credential after it is what goes.
-const FIELDS: [&str; 19] = [
+const FIELDS: [&str; 20] = [
     "user_id", "cf-ray", "x-api-key", "api-key", "api_key", "apikey", "password", "passwd", "secret", "client_secret",
-    "access_token", "refresh_token", "id_token", "token", "bearer", "proxy-authorization", "authorization", "set-cookie", "cookie",
+    "access_token", "refresh_token", "id_token", "token", "key", "bearer", "proxy-authorization", "authorization", "set-cookie", "cookie",
 ];
 /// Header names whose whole value is redacted, to the closing quote if it sat in quotes (JSON) and else to the end of
 /// the line, whatever the scheme (Basic, Token, Digest, a cookie list, ...). `set-cookie` and `proxy-authorization`
@@ -398,6 +398,9 @@ mod tests {
             ("client_secret=SENTINELPW", "SENTINELPW"),
             ("access_token: Bearer SENTINELTOK", "SENTINELTOK"),
             ("refresh_token=SENTINELTOK", "SENTINELTOK"),
+            ("{\"key\":\"SENTINELKEY\"}", "SENTINELKEY"),
+            ("body key=SENTINELKEY&x=1", "SENTINELKEY"),
+            ("GET https://h.test/p?api_key=SENTINELKEY&key=SENTINELKEY&token=SENTINELKEY", "SENTINELKEY"),
         ] {
             let out = redact_provider_text(raw);
             assert!(!out.contains(secret), "{raw} -> {out}");
