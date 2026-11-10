@@ -1,5 +1,7 @@
 # Read-only mobile M0 spike
 
+> SPIKE: do not merge; custom handshake must not ship
+
 Throwaway prototype, not a production pairing protocol. No provider login, core command proxy, execution, approval or terminal input. Do not deploy this loopback relay or host publicly.
 
 ## Run
