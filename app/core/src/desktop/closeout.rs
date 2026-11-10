@@ -9,7 +9,7 @@
 //! Never closed: the Director-General (it is not a subagent, so it is never a candidate), a worker that is mid-turn
 //! (working), one waiting on the human (blocked, a question, a queued message) or one whose git state cannot be read.
 //! A worker with unsaved work or a busy terminal is kept and reported with exact counts; only the human's "Close anyway"
-//! closes it, and only if the counts they confirmed (files, commits, busy terminals) still hold.
+//! closes it, and only if what they confirmed (files, commits, busy terminals, no upstream) still holds.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -47,9 +47,10 @@ impl Unsaved {
     fn is_clean(&self) -> bool {
         self.git_clean() && self.busy_terminals == 0
     }
-    /// The counts "Close anyway" asks the human to confirm: changed files, unpushed commits, busy terminals.
-    fn confirm_key(&self) -> (u32, u32, u32) {
-        (self.changed_files, self.unpushed_commits, self.busy_terminals)
+    /// What "Close anyway" asks the human to confirm: every condition shown to them (changed files, unpushed commits,
+    /// busy terminals, and whether the branch has no upstream). All of it must still hold.
+    fn confirm_key(&self) -> (u32, u32, u32, bool) {
+        (self.changed_files, self.unpushed_commits, self.busy_terminals, self.no_upstream)
     }
     fn put(&self, v: &mut Value) {
         v["changed_files"] = json!(self.changed_files);
@@ -257,7 +258,7 @@ impl App {
     /// human confirmed: changed files, unpushed commits) a worker with unsaved work is closed too, but only if those
     /// are still the counts; otherwise nothing is closed and the fresh counts come back to be confirmed again.
     /// A working, waiting or unreadable worker is never closed, forced or not.
-    pub(super) fn close_worker(&self, id: &str, anyway: Option<(u32, u32, u32)>, terms: &dyn WorktreeTerminals) -> Res {
+    pub(super) fn close_worker(&self, id: &str, anyway: Option<(u32, u32, u32, bool)>, terms: &dyn WorktreeTerminals) -> Res {
         if self.closeout.is_closed(id) {
             return Ok(json!({"ok": true, "worker": id, "closed": true, "already": true}));
         }
@@ -350,7 +351,7 @@ impl App {
         self.close_finished(terms, true).ok().and_then(|r| r["closed"].as_array().map(Vec::len)).unwrap_or(0)
     }
 
-    pub fn act_close_worker(&self, env: &super::Envelope, worker: &str, anyway: Option<(u32, u32, u32)>, terms: &dyn WorktreeTerminals) -> Value {
+    pub fn act_close_worker(&self, env: &super::Envelope, worker: &str, anyway: Option<(u32, u32, u32, bool)>, terms: &dyn WorktreeTerminals) -> Value {
         self.act(env, crate::control::receipt::Caller::Ui, true, "close_worker", worker, None::<u64>, || self.close_worker(worker, anyway, terms))
     }
 

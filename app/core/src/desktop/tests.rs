@@ -4279,10 +4279,10 @@ fn a_worker_with_unsaved_work_is_kept_with_exact_counts_until_the_human_confirms
     let st = app.closeout_status("c", "20261105-1230", &FakeTerms::idle()).unwrap();
     assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["changed_files"].as_u64()), (Some("unsaved_work"), Some(2)), "{st}");
     // Counts that no longer match what the human saw: nothing is closed, the fresh counts come back.
-    let stale = app.close_worker(CLOSE_W, Some((9, 9, 0)), &terms).unwrap_err();
+    let stale = app.close_worker(CLOSE_W, Some((9, 9, 0, false)), &terms).unwrap_err();
     assert_eq!((code(&stale), stale["changed_files"].as_u64()), ("unsaved_work_changed", Some(2)));
     assert!(!app.worker_closed(CLOSE_W));
-    app.close_worker(CLOSE_W, Some((2, 0, 0)), &terms).unwrap();
+    app.close_worker(CLOSE_W, Some((2, 0, 0, false)), &terms).unwrap();
     assert!(app.worker_closed(CLOSE_W));
     assert!(wt.join("new.txt").exists(), "closing deletes nothing on disk");
 }
@@ -4308,7 +4308,7 @@ fn a_worker_that_is_not_finished_is_never_closed_even_when_forced() {
     let t = Tmp::new();
     let (app, _wt) = closeout_fixture(&t, true, false);
     fs::remove_file(fs::read_dir(t.home().join(".claude/projects")).unwrap().flatten().flat_map(|p| fs::read_dir(p.path()).unwrap().flatten()).next().unwrap().path().join("subagents/journal.jsonl")).unwrap();
-    let e = app.close_worker(CLOSE_W, Some((0, 0, 0)), &FakeTerms::idle()).unwrap_err();
+    let e = app.close_worker(CLOSE_W, Some((0, 0, 0, false)), &FakeTerms::idle()).unwrap_err();
     assert_eq!(code(&e), "working", "{e}");
     assert!(!app.worker_closed(CLOSE_W));
 }
@@ -4364,9 +4364,9 @@ fn a_worktree_with_a_busy_terminal_keeps_its_worker_open_until_close_anyway_conf
     assert_eq!((st["workers"][0]["state"].as_str(), st["workers"][0]["busy_terminals"].as_u64()), (Some("terminal_busy"), Some(2)), "{st}");
     assert!(lock(&two.released).is_empty() && !app.worker_closed(CLOSE_W), "nothing was hung up");
     // Close anyway with a stale busy count refuses and returns the fresh one; the confirmed count closes it.
-    let stale = app.close_worker(CLOSE_W, Some((0, 0, 1)), &two).unwrap_err();
+    let stale = app.close_worker(CLOSE_W, Some((0, 0, 1, false)), &two).unwrap_err();
     assert_eq!((code(&stale), stale["busy_terminals"].as_u64()), ("unsaved_work_changed", Some(2)), "{stale}");
-    app.close_worker(CLOSE_W, Some((0, 0, 2)), &two).unwrap();
+    app.close_worker(CLOSE_W, Some((0, 0, 2, false)), &two).unwrap();
     assert!(app.worker_closed(CLOSE_W) && lock(&two.released).len() == 1);
 }
 
@@ -4419,4 +4419,19 @@ fn a_folder_no_project_holds_follows_the_global_setting() {
     let off = serde_json::from_value(json!({"auto_close_finished": false})).unwrap();
     lock(&app2.preferences).update(None, 0, off, false).unwrap();
     assert_eq!(app2.closeout_auto(&FakeTerms::idle()), 0, "global off");
+}
+
+#[test]
+fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() {
+    let t = Tmp::new();
+    let (app, _wt) = closeout_fixture(&t, true, true);
+    // Confirmed: 2 changed files, 0 unpushed, 0 busy, and the branch HAS an upstream. Then it loses it.
+    git(&_wt, &["branch", "--unset-upstream"]);
+    let terms = FakeTerms::idle();
+    let e = app.close_worker(CLOSE_W, Some((2, 0, 0, false)), &terms).unwrap_err();
+    // The unchanged counts alone would have matched; the changed upstream state must not.
+    let now = app.close_worker(CLOSE_W, None, &terms).unwrap_err();
+    assert_eq!(now["no_upstream"], true, "{now}");
+    assert!(code(&e) == "unsaved_work_changed" && e["no_upstream"] == true && !app.worker_closed(CLOSE_W), "{e}");
+    assert!(lock(&terms.released).is_empty());
 }

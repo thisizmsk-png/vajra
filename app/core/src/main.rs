@@ -97,9 +97,9 @@ impl WorktreeTerminals for WorktreeTerms<'_> {
 
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
-fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>, busy_terminals: Option<u32>) -> Value {
-    // "Close anyway" sends the counts the human confirmed; all three or none.
-    let anyway = changed_files.zip(unpushed_commits).zip(busy_terminals).map(|((f, c), b)| (f, c, b));
+fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope, worker: String, changed_files: Option<u32>, unpushed_commits: Option<u32>, busy_terminals: Option<u32>, no_upstream: Option<bool>) -> Value {
+    // "Close anyway" sends everything the human confirmed; all four or none.
+    let anyway = changed_files.zip(unpushed_commits).zip(busy_terminals).zip(no_upstream).map(|(((f, c), b), n)| (f, c, b, n));
     app.act_close_worker(&envelope, &worker, anyway, &WorktreeTerms(&terms, &own))
 }
 

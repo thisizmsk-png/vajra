@@ -137,7 +137,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
   const closeAnyway = () => {
     setConfirming(false);
     if (!co || !project) return;
-    const confirmed = { changedFiles: co.changed_files ?? 0, unpushedCommits: co.unpushed_commits ?? 0, busyTerminals: co.busy_terminals ?? 0 };
+    const confirmed = { changedFiles: co.changed_files ?? 0, unpushedCommits: co.unpushed_commits ?? 0, busyTerminals: co.busy_terminals ?? 0, noUpstream: co.no_upstream ?? false };
     void api.actCloseWorker({ action_id: newActionId(), project_id: project.id, expect_generation: null }, agent, confirmed).then(
       (r) => {
         const e = r.error as { error?: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number } | undefined;

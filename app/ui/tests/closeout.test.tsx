@@ -104,7 +104,7 @@ describe("closing finished workers: Close anyway", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: S.closeout.confirm }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_close_worker")).toBe(true));
     const args = f.calls.find((c) => c.cmd === "act_close_worker")?.args;
-    expect([args?.worker, args?.changedFiles, args?.unpushedCommits, args?.busyTerminals]).toEqual(["w-unsaved", 3, 2, 0]);
+    expect([args?.worker, args?.changedFiles, args?.unpushedCommits, args?.busyTerminals, args?.noUpstream]).toEqual(["w-unsaved", 3, 2, 0, false]);
   });
 
   it("Close anyway on a busy-terminal worker lists the busy terminals and sends the confirmed count", async () => {
@@ -117,7 +117,7 @@ describe("closing finished workers: Close anyway", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: S.closeout.confirm }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_close_worker")).toBe(true));
     const args = f.calls.find((c) => c.cmd === "act_close_worker")?.args;
-    expect([args?.changedFiles, args?.unpushedCommits, args?.busyTerminals]).toEqual([0, 0, 2]);
+    expect([args?.changedFiles, args?.unpushedCommits, args?.busyTerminals, args?.noUpstream]).toEqual([0, 0, 2, false]);
   });
 
   it("cancelling sends nothing, and a stale count is shown fresh to confirm again", async () => {
