@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-10T07:18:30Z",
+  "generated": "2026-11-10T19:13:06Z",
   "version": "0.6.2",
   "files": {
     ".github/workflows/ci.yml": "920c485cc7085a77ca0397d2c14027707d1a94119c015e7c02102f6701562683",
@@ -256,7 +256,7 @@
     "scripts/vajra-doctor.sh": "ec1c98ba85ab616c2c82b539d346edfc3761cafca20cca9a184375b3d5792bcd",
     "scripts/vajra-ralph.sh": "7a9202f282d7a2e7abbc68efaba20c2069c5676d54b16b411d873a63c7d52450",
     "scripts/vajra-replay.sh": "890845ff99c08869a8e8ce217c889cbe04320d305cd904c6478a1d0e9ef8c649",
-    "scripts/vajra-verify-work.sh": "c78474890ae9a04e356fbb7f1bb11c2bb9ebf1b8e40a433c36cd83555b0bc096",
+    "scripts/vajra-verify-work.sh": "89fc7466532b1f0cd8114aeec58951f9abbe49b1039b9239220479cac3f911aa",
     "scripts/vajra-worktree-clean.sh": "3b5a2a66c85a39353523bfd70b350f17ee9f1dba9cc780911e0912107ee72110",
     "scripts/vajra_kb.py": "0be24bbc90b16ea8fbcc3f29ed32d7542f76a4a08ae8f7dcb8ef6a805a059a2a",
     "scripts/vajra_repomap.py": "6f8ba78a7e508e73f2c3bee84ce12af19745fd9cdf40ceb3192fc7554cc737c9",
