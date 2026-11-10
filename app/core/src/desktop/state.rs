@@ -55,8 +55,10 @@ pub(super) struct Hub {
     /// project_id -> the fields `project_state` shows that change without a bump of their own, as it last saw them: the
     /// Director-General generation (a conversation created or renewed by any path: plain `new_conversation`,
     /// `lead_status`) and the count of active runs (a PTY that closes with nothing on the bus). One that moved bumps the
-    /// revision before the `since_rev` check (#105 review).
-    quiet: HashMap<String, (Option<u32>, usize)>,
+    /// revision before the `since_rev` check (#105 review). And a fingerprint of what the full answer shows that can change
+    /// with no bump of its own: the board's cards (cached verdicts, task files, waiting plans) and the worker list (#107
+    /// review).
+    quiet: HashMap<String, (Option<u32>, usize, u64)>,
 }
 
 /// Where `act` gets the target's current generation.
@@ -424,13 +426,30 @@ impl App {
         // so `since_rev` never answers `unchanged` across a new or renewed conversation or a run that ended quietly.
         let orch_gen = self.orchestrator_generation(project_id);
         let active_runs = self.active_run_count();
+        // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`). The board and the worker list are read
+        // before the revision and fingerprinted into the quiet fields, so a change to either that no path bumped (a verdict
+        // cached by `evidence_list`, a task file rewritten, a worker list changed by `end_session`) is never answered
+        // `unchanged` (#107 review). Receipts and the run generation only change under a bump; the inbox has its own
+        // fingerprint above; the usage cache changes only in `provider_usage`, which bumps every project itself (so it is
+        // not in the fingerprint: that would move the revision a second time and send a second `changed`).
+        let cur_rev = lock(&self.acts).revs.get(project_id).copied();
+        let (board, board_fp) = self.board_for_state(project_id, cur_rev);
+        let workers = lock(&self.control).workers_view();
+        let usage = self.provider_usage_cached();
+        let shown_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            board_fp.hash(&mut h);
+            Value::from(workers.clone()).to_string().hash(&mut h);
+            h.finish()
+        };
         let mut moved: Vec<Value> = Vec::new();
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
             // Only a value that moved since a previous read bumps. A first sighting has nothing a client could hold
             // as stale (every body this process served recorded its value here first), and bumping it would push a
             // revision past the durable high-water mark, so a reopen in the same millisecond reused it.
-            let now = (orch_gen, active_runs);
+            let now = (orch_gen, active_runs, shown_fp);
             if h.quiet.insert(project_id.to_string(), now).is_some_and(|prev| prev != now) {
                 moved.push(json!({"project_id": project_id, "rev": h.bump(project_id)}));
             }
@@ -445,7 +464,6 @@ impl App {
         if since_rev == Some(rev) {
             return Ok(json!({"schema": "vajra.project_state/1", "project_id": project_id, "rev": rev, "unchanged": true}));
         }
-        let workers = lock(&self.control).workers_view();
         Ok(json!({
             "schema": "vajra.project_state/1",
             "project_id": project_id,
@@ -455,10 +473,11 @@ impl App {
             "generations": {"project": run_gen, "orchestrator": orch_gen},
             "workers": workers,
             "receipts": recent,
+            "board": board,
             "inbox": inbox,
             "proposals": proposals,
             // The last usage answers (a cache read: this never calls out).
-            "usage": self.provider_usage_cached(),
+            "usage": usage,
         }))
     }
 }

@@ -154,8 +154,10 @@ describe("Settings > Providers (FG-09)", () => {
 });
 
 describe("Start and Resume use the chosen provider (FG-09)", () => {
+  // Home starts through an action receipt (FG-11); the provider rides in the same input a direct start sends.
+  const started = { receipt: { schema: "vajra.receipt/1", action_id: "act-x", project_id: "p_x", action: "start_run", target: "p_x", expect_generation: null, current_generation: null, state: "done", reason: null, detail: null, retry: "no", rev: 1, ts_ms: 1 }, result: { stream: "s", session_id: "u", run_id: "r1", campaign: "c1" } };
   const home = (agent: "claude" | "codex", replies: Record<string, unknown> = {}) => {
-    const f = fakeIpc({ preflight, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, provider_list: LIST, preferences_read: view(null, agent), start_run: { stream: "s", session_id: "u", run_id: "r1", campaign: "c1" }, ...replies });
+    const f = fakeIpc({ preflight, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, provider_list: LIST, preferences_read: view(null, agent), act_start_run: started, ...replies });
     setTransport(f.transport);
     render(<PreferencesProvider projectId={null}><Home /></PreferencesProvider>);
     return f;
@@ -170,8 +172,8 @@ describe("Start and Resume use the chosen provider (FG-09)", () => {
   it("passes claude, and never runs the provider check for it (no idle subprocesses)", async () => {
     const f = home("claude");
     await go();
-    await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_run")).toBe(true));
-    expect(f.calls.find((c) => c.cmd === "start_run")!.args).toMatchObject({ provider: "claude", cwd: "/r" });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    expect(f.calls.find((c) => c.cmd === "act_start_run")!.args).toMatchObject({ provider: "claude", cwd: "/r" });
     expect(f.calls.some((c) => c.cmd === "provider_list")).toBe(false);
   });
 
@@ -181,8 +183,8 @@ describe("Start and Resume use the chosen provider (FG-09)", () => {
     const off = screen.getByRole("button", { name: C.capability.message });
     expect(off.getAttribute("aria-disabled")).toBe("true");
     await go();
-    await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_run")).toBe(true));
-    expect(f.calls.find((c) => c.cmd === "start_run")!.args).toMatchObject({ provider: "codex" });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    expect(f.calls.find((c) => c.cmd === "act_start_run")!.args).toMatchObject({ provider: "codex" });
   });
 
   it("does not start a provider that is not installed, says why, and never swaps to another", async () => {
@@ -190,7 +192,7 @@ describe("Start and Resume use the chosen provider (FG-09)", () => {
     expect((await screen.findByText(C.startBlocked("Codex CLI"))).closest("[role=alert]")).toBeTruthy();
     await go();
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).toBe("true");
-    expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
   });
 
   it("turns Resume off with its reason when the run's provider is not installed", async () => {

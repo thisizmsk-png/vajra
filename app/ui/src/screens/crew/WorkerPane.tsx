@@ -8,6 +8,8 @@ import { unsavedText, useCloseout } from "../../projects/closeout";
 import { useCurrentProject } from "../../projects/current";
 import type { CrewNodeDto, Json, WorktreeInfo } from "../../ipc";
 import { StreamTab } from "./StreamTab";
+import { ProviderLine } from "../ProviderLine";
+import { parseWorkerProvider } from "../../workerProvider";
 
 type TabId = "stream" | "diff" | "task" | "worktree";
 
@@ -93,6 +95,7 @@ const TASK_POLL_MS = 2000;
 /** One worker: header (task, worktree, branch) and the Stream / Diff / Task / Worktree tabs. */
 export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: CrewNodeDto; slug: string; runId: string; taskLocalId: string | null; status: string }) {
   const agent = node.id.slice("agent:".length);
+  const wp = parseWorkerProvider(node.provider);
   const [tab, setTab] = useState<TabId>("stream");
   const [info, setInfo] = useState<WorktreeInfo | null | undefined>(undefined);
   const [task, setTask] = useState<TaskState>(null);
@@ -156,6 +159,7 @@ export function WorkerPane({ node, slug, runId, taskLocalId, status }: { node: C
         <div className="v-crew__panehead">
           <Text as="h2" variant="headline-md">{node.role ?? node.title}</Text>
           <StatusDot status={shape} label={status} />
+          {wp && <ProviderLine p={wp} live />}
           <span className="v-crew__task">{taskId ? `${taskId}${taskObj?.title ? ` ${String(taskObj.title)}` : ""}` : S.crew.noTask}</span>
         </div>
         {co?.state === "closed" && <p className="v-closeout" role="status">{S.closeout.closedHint}</p>}

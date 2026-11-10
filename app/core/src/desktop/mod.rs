@@ -245,6 +245,15 @@ pub struct App {
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
+    /// Moves on every write to `evidence_cache` or `worktree_state`: the board's cards read both (#107 review).
+    board_inputs_gen: std::sync::atomic::AtomicU64,
+    /// project_id -> the last board `project_state` built and the stamp of what it read (see `board::Cached`).
+    board_cache: Mutex<HashMap<String, board::Cached>>,
+    /// How many boards were built (tests count rebuilds).
+    board_builds: std::sync::atomic::AtomicU64,
+    /// Tests: how long a board build takes (to put a cache deadline inside one).
+    #[cfg(test)]
+    board_build_pause: Mutex<Duration>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
@@ -319,6 +328,11 @@ impl App {
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
             evidence_why: Mutex::new(HashMap::new()),
+            board_inputs_gen: std::sync::atomic::AtomicU64::new(0),
+            board_cache: Mutex::new(HashMap::new()),
+            board_builds: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            board_build_pause: Mutex::new(Duration::ZERO),
             worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
@@ -437,6 +451,10 @@ impl App {
     /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
     /// start. The caps compare the ids as opaque keys.
     fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
+        // A worker count no start may ask for is a bad request, never a full ceiling (#80 review).
+        if !(1..=16).contains(&workers) {
+            return Err(invalid("maxInFlight", "must be 1 to 16"));
+        }
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
@@ -450,11 +468,6 @@ impl App {
             }
             v
         };
-        // Forget the worker counts of runs that ended.
-        {
-            let runs = lock(&self.runs);
-            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
-        }
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -513,6 +526,11 @@ impl App {
                 svc.end_session(&id);
             }
         }
+        drop(svc);
+        // Forget the worker counts of runs that ended, here and not only on the next start (#80 review), so the map is
+        // bounded by the runs still going. The run itself stays in `runs` for its crew view.
+        let runs = lock(&self.runs);
+        lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
     }
 
     /// Take the control session, build the argv with its nonce, spawn. A
@@ -580,6 +598,11 @@ impl App {
         }
         if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
+        }
+        // A resume of this campaign counts at the same maxInFlight (#80 review). Written before anything spawns and refused
+        // on failure: without it a resume would count at the default and could pass the worker ceiling (#109 review).
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            return Err(fail("io", "could not record the run's worker count"));
         }
         let nonce = {
             let mut svc = lock(&self.control);
@@ -824,9 +847,11 @@ impl App {
         if !adapter.capabilities().resume {
             return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
         }
+        // Counted at the maxInFlight the campaign's run was started with, not the default (#80 review).
+        let workers = self.original_workers(session_id, campaign);
         let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
             adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true, caps::DEFAULT_RUN_WORKERS)?;
+        }, true, workers)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }
@@ -1077,6 +1102,12 @@ impl App {
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
     pub fn evidence_list(&self, slug: &str) -> Res {
+        self.evidence_list_with(slug, true)
+    }
+
+    /// `evidence_list`, or with `checks` false the same rows from what is already known: no check is started and no
+    /// git is run, so a criterion not checked yet (or whose repo state is not cached) reads `checking`, never pass.
+    pub(super) fn evidence_list_with(&self, slug: &str, checks: bool) -> Res {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
@@ -1133,7 +1164,7 @@ impl App {
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
-        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        let claimed = checks && self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
         struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
@@ -1214,14 +1245,26 @@ impl App {
                 }
                 cache.insert(k, (green, until));
             }
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
         let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        let mut unknown: std::collections::HashSet<PathBuf> = Default::default();
         for (i, r) in &repo_of {
-            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r, deadline));
+            if verdict.get(i) == Some(&true) && !repos.contains_key(r) && !unknown.contains(r) {
+                if checks {
+                    repos.insert(r.clone(), self.worktree_state(r, deadline));
+                } else {
+                    // Cache-only (the board): only a known state counts. A cached failed read (`Some(None)`) is as unknown as
+                    // no entry, so a green live verdict reads `checking`, never a pass the repo state could not confirm (#107
+                    // review). A full `evidence_list` call keeps its rule: a check's verdict stands when git cannot be read.
+                    match self.worktree_state_cached(r) {
+                        Some(Some(st)) => { repos.insert(r.clone(), Some(st)); }
+                        _ => { unknown.insert(r.clone()); }
+                    }
+                }
             }
         }
         let mut pending = 0usize;
@@ -1235,13 +1278,17 @@ impl App {
                 "fail"
             } else if has_evidence {
                 match verdict.get(&i) {
+                    // Cache-only and the repo's state is not known: not yet a pass.
+                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(r)) => { pending += 1; "checking" }
                     Some(true) => {
                         // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
                         // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
                         let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
                         let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
                             .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
-                        if stale { "stale" } else { "pass" }
+                        // Cache-only (the board): live evidence with no head cannot be held against the repo, so it is not a
+                        // pass there (#107 review sweep).
+                        if stale { "stale" } else if !checks && want.is_none() && repo_of.contains_key(&i) { pending += 1; "checking" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -1352,6 +1399,14 @@ impl App {
     /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
     /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
     /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
+    /// The cached repo state, if it is still fresh: `None` when nothing is cached (never runs git).
+    fn worktree_state_cached(&self, repo: &Path) -> Option<Option<(String, bool)>> {
+        let g = lock(&self.worktree_state);
+        let (at, st) = g.get(repo)?;
+        let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+        (at.elapsed() < ttl).then(|| st.clone())
+    }
+
     fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
@@ -1388,6 +1443,7 @@ impl App {
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
             lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         st
     }
@@ -2017,6 +2073,7 @@ mod projects;
 mod wfresult;
 mod decide;
 mod lead;
+mod board;
 mod lead_acts;
 mod runindex;
 mod runview;

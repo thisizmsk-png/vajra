@@ -3,6 +3,8 @@ import { Button, Section, StatusDot, Text } from "../../../components/ui/base";
 import { ActionBar, CrewTree } from "../../../components/ui/desktop";
 import type { CrewNode } from "../../../components/ui/desktop";
 import { RunProvider } from "../ProviderControls";
+import { iconOf } from "../ProviderLine";
+import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import type { StatusKey } from "../../../strings";
 import { api, onChanged } from "../../ipc";
@@ -30,7 +32,8 @@ function statusLabel(n: CrewNodeDto): string {
 }
 
 function toNode(n: CrewNodeDto): CrewNode {
-  return { id: n.id, label: n.title, status: statusOf(n.status), statusLabel: statusLabel(n), children: n.children.map(toNode) };
+  const p = parseWorkerProvider(n.provider);
+  return { id: n.id, label: n.title, status: statusOf(n.status), statusLabel: statusLabel(n), icon: p ? iconOf(p) : undefined, children: n.children.map(toNode) };
 }
 
 const find = (n: CrewNodeDto, id: string): CrewNodeDto | null => {
