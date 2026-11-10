@@ -153,3 +153,24 @@ fn both_levels_say_when_they_were_cut() {
     let c = &b["campaigns"][0];
     assert_eq!((c["cards"].as_array().unwrap().len(), c["truncated"].as_bool(), b["truncated"].as_bool()), (200, Some(true), Some(false)), "{c}");
 }
+
+/// #107 review: a verdict `evidence_list` caches moves the project revision, so a client polling with `since_rev` sees
+/// the card reach Done (it never keeps a stale review card); a read with nothing changed is still `unchanged`.
+#[test]
+fn a_newly_cached_verdict_moves_the_revision_so_the_board_is_never_stale() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    fs::write(t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence/green.json"), b"{}").unwrap();
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    let first = app.project_state(&pid, None).unwrap();
+    assert_eq!(card(&first["board"], "t1")["lane"], "review", "cold cache");
+    let rev0 = first["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&pid, Some(rev0)).unwrap()["unchanged"], true, "nothing changed yet");
+    app.evidence_list(&slug).unwrap();
+    let after = app.project_state(&pid, Some(rev0)).unwrap();
+    assert_eq!(after["unchanged"], false, "{after}");
+    assert!(after["rev"].as_u64().unwrap() > rev0);
+    assert_eq!(card(&after["board"], "t1")["lane"], "done", "{after}");
+    assert_eq!(app.project_state(&pid, after["rev"].as_u64()).unwrap()["unchanged"], true, "steady again");
+}

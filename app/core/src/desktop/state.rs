@@ -55,8 +55,9 @@ pub(super) struct Hub {
     /// project_id -> the fields `project_state` shows that change without a bump of their own, as it last saw them: the
     /// Director-General generation (a conversation created or renewed by any path: plain `new_conversation`,
     /// `lead_status`) and the count of active runs (a PTY that closes with nothing on the bus). One that moved bumps the
-    /// revision before the `since_rev` check (#105 review).
-    quiet: HashMap<String, (Option<u32>, usize)>,
+    /// revision before the `since_rev` check (#105 review). And a fingerprint of the board's cards, whose inputs (cached
+    /// evidence verdicts, task files, waiting plans) change with no bump of their own (#107 review).
+    quiet: HashMap<String, (Option<u32>, usize, u64)>,
 }
 
 /// Where `act` gets the target's current generation.
@@ -419,11 +420,20 @@ impl App {
         // so `since_rev` never answers `unchanged` across a new or renewed conversation or a run that ended quietly.
         let orch_gen = self.orchestrator_generation(project_id);
         let active_runs = self.active_run_count();
+        // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`). Computed before the revision, so a card
+        // that moved (a verdict cached by `evidence_list`, a task that changed) is never answered `unchanged`.
+        let board = self.board(project_id);
+        let board_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            board.to_string().hash(&mut h);
+            h.finish()
+        };
         let mut moved: Vec<Value> = Vec::new();
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
             let seen = h.revs.contains_key(project_id);
-            let now = (orch_gen, active_runs);
+            let now = (orch_gen, active_runs, board_fp);
             if h.quiet.insert(project_id.to_string(), now) != Some(now) && seen {
                 moved.push(json!({"project_id": project_id, "rev": h.bump(project_id)}));
             }
@@ -446,8 +456,7 @@ impl App {
             "generations": {"project": run_gen, "orchestrator": orch_gen},
             "workers": workers,
             "receipts": recent,
-            // ADR-15 4.2: the board's cards, from cached verdicts only (see `board`).
-            "board": self.board(project_id),
+            "board": board,
             "inbox": inbox,
             "proposals": proposals,
             // The last usage answers (a cache read: this never calls out).
