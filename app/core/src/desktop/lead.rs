@@ -909,7 +909,9 @@ impl App {
             }
             let pid = match self.pinned_project(r) {
                 Some(p) if crate::projects::contract::valid_project_id(&p) => p,
-                _ => match self.migrate_old_pin(r, l)? {
+                // Migrated from the old run's OWN guarded folder, as `store_identity` and `run_project` resolve it: never the
+                // location, which several store projects can share (#104 review). The first loop checked the folder reads.
+                _ => match self.migrate_old_pin(r, &self.read_run_cwd(r).ok_or_else(unreadable)?)? {
                     Some(p) => p,
                     // A well-formed old record whose folder is no project now: it names no project to keep.
                     None => continue,
@@ -1015,17 +1017,18 @@ impl App {
         self.project_with_identity(want, &identity, cwd)
     }
 
-    /// The store project rooted at `want` (by device and inode) or recorded with `identity` as its common dir, compared by
-    /// canonical path: the project an admitted nested location names, found without reading its `.git` again.
+    /// The project an admitted nested location names, found without reading its `.git` again: the store project whose root
+    /// is the deepest folder from the canonical `cwd` up to `want` (by device and inode, so a project registered at a
+    /// subfolder of the nested checkout is its own, #104 review), else the one recorded with `identity` as its common dir,
+    /// compared by canonical path.
     fn project_with_identity(&self, want: &Path, identity: &Path, cwd: &Path) -> Result<crate::projects::contract::Project, Value> {
-        use std::os::unix::fs::MetadataExt;
         let listing = self.projects.list(true).map_err(|e| super::fail("io", e))?;
         if listing.truncated {
             return Err(super::fail("io", "the project store could not be read whole"));
         }
-        let at = std::fs::metadata(want).ok().map(|m| (m.dev(), m.ino()));
-        let hit = listing.projects.into_iter().find(|p| {
-            at == Some((p.root_key.dev, p.root_key.ino)) || p.root_key.git_common_dir.as_ref().and_then(|c| exact_self(Path::new(c))).as_deref() == Some(identity)
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let hit = store_root_holding(&listing.projects, &real, want).cloned().or_else(|| {
+            listing.projects.into_iter().find(|p| p.root_key.git_common_dir.as_ref().and_then(|c| exact_self(Path::new(c))).as_deref() == Some(identity))
         });
         match hit {
             Some(p) if p.archived.is_some() => Err(LeadError::ProjectArchived.to_json()),
@@ -1050,7 +1053,8 @@ impl App {
 
     /// The one-time migration of the old record formats to a store pin, for `launch_project`. A well-formed record (guarded
     /// cwd, session and campaign) with no pin, or with a pre-store `k_` stand-in pin that its guarded cwd still gives, gets
-    /// the store project of its guarded cwd now, written back under the guard: `Ok(Some(id))`. `Ok(None)` when that folder
+    /// the store project of its guarded cwd now, written back under the guard (`cwd` is that guarded cwd, never
+    /// the run's location): `Ok(Some(id))`. `Ok(None)` when that folder
     /// is no project (nothing is written). Anything else (a pin file that is not a valid id or stand-in, a stand-in its
     /// folder no longer gives, a record missing its session or campaign, a write that fails) refuses.
     fn migrate_old_pin(&self, run_id: &str, cwd: &Path) -> Result<Option<String>, Value> {
