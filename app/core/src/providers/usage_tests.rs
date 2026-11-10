@@ -318,11 +318,31 @@ fn reading_the_list_never_waits_for_a_slow_lookup_and_a_second_refresh_does_not_
     std::thread::sleep(Duration::from_millis(300));
     let start = Instant::now();
     assert!(keys.accounts().is_empty(), "the lookup is still running: the last list (empty) is served");
-    keys.refresh(true);
+    keys.refresh(false); // a forced one goes round again instead: see the test below
     assert!(start.elapsed() < Duration::from_millis(500), "neither a read nor a second refresh waited for security: {:?}", start.elapsed());
     worker.join().unwrap();
     assert_eq!(keys.accounts(), ["openrouter"], "the finished lookup is what is served next");
     let lookups = std::fs::read_to_string(d.join("slow.log")).unwrap().lines().count();
     assert_eq!(lookups, 1, "one security call, not two");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_key_saved_while_a_slow_lookup_is_running_still_appears() {
+    let d = wiring_dir("dirty");
+    // The answer is decided when the lookup starts, then it is slow: like a lookup that checked before the key was saved.
+    let sec = script(&d, "security", &format!("if [ -f '{0}/saved' ]; then r=0; else r=44; fi\n/bin/sleep 1\nexit $r", d.display()));
+    let keys = Arc::new(KeychainKeys::new(&sec, &d));
+    let first = {
+        let keys = keys.clone();
+        std::thread::spawn(move || keys.refresh(false))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(d.join("saved"), "").unwrap();
+    let start = Instant::now();
+    keys.refresh(true); // what key_changed does: it finds the lookup running and must not be lost
+    assert!(start.elapsed() < Duration::from_millis(500), "the forced refresh did not wait");
+    first.join().unwrap();
+    assert_eq!(keys.accounts(), ["openrouter"], "the running lookup went round again and saw the saved key");
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -187,6 +187,8 @@ pub struct KeychainKeys {
     listed: Mutex<(Option<Instant>, Vec<String>)>,
     /// A lookup is running: another `refresh` returns at once instead of queueing a second `security`.
     refreshing: AtomicBool,
+    /// A forced refresh found a lookup running: that lookup may have checked before the key changed, so it runs once more.
+    dirty: AtomicBool,
 }
 
 /// How long a lookup is reused by a refresh that is not forced. Short, so the Providers page notices a key quickly.
@@ -200,6 +202,7 @@ impl KeychainKeys {
             home: home.to_path_buf(),
             listed: Mutex::new((None, Vec::new())),
             refreshing: AtomicBool::new(false),
+            dirty: AtomicBool::new(false),
         }
     }
     fn listed(&self) -> std::sync::MutexGuard<'_, (Option<Instant>, Vec<String>)> {
@@ -213,17 +216,32 @@ impl KeyCommands for KeychainKeys {
         self.listed().1.clone()
     }
     /// Ask `security` which accounts have a stored key (no `-w`, so it never prints a key). Runs without any lock held;
-    /// a refresh that finds one already running returns at once.
+    /// a refresh that finds one already running returns at once, but a forced one makes the running
+    /// lookup go round again, so a key saved mid-lookup is not missed.
     fn refresh(&self, force: bool) {
         if !force && self.listed().0.is_some_and(|at| at.elapsed() < LIST_TTL) {
             return;
         }
-        if self.refreshing.swap(true, Ordering::AcqRel) {
+        // Marked before the claim: a lookup that is just finishing sees the mark when it re-checks after letting go.
+        if force {
+            self.dirty.store(true, Ordering::SeqCst);
+        }
+        if self.refreshing.swap(true, Ordering::SeqCst) {
             return;
         }
-        let accounts: Vec<String> = KEY_ACCOUNTS.iter().filter(|a| self.keys.saved(a) == Ok(true)).map(|a| a.to_string()).collect();
-        *self.listed() = (Some(Instant::now()), accounts);
-        self.refreshing.store(false, Ordering::Release);
+        loop {
+            self.dirty.store(false, Ordering::SeqCst);
+            let accounts: Vec<String> = KEY_ACCOUNTS.iter().filter(|a| self.keys.saved(a) == Ok(true)).map(|a| a.to_string()).collect();
+            *self.listed() = (Some(Instant::now()), accounts);
+            if self.dirty.load(Ordering::SeqCst) {
+                continue;
+            }
+            self.refreshing.store(false, Ordering::SeqCst);
+            // A forced refresh may have marked the list between the check and the release; if so, take the lookup again.
+            if !(self.dirty.load(Ordering::SeqCst) && !self.refreshing.swap(true, Ordering::SeqCst)) {
+                return;
+            }
+        }
     }
     /// `[security, find-generic-password, -s, vajra.provider.<a>, -a, <a>, -w]`: the account must be a key account.
     fn argv(&self, account: &str) -> Option<Vec<String>> {
