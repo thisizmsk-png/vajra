@@ -46,10 +46,14 @@ fn a_run_is_pinned_to_its_store_project_and_its_subfolders_share_it() {
     std::os::unix::fs::symlink(t.repo(), &link).unwrap();
     live_run(&app, "3c8fad5b-d9cb-469f-a165-70867728950e", "20261106-0930", t.repo().join("src"));
     live_run(&app, "4c8fad5b-d9cb-469f-a165-70867728950e", "20261106-0931", link.join("src"));
+    app.projects.rename(&pinned, "Harbor", None).unwrap();
     for run in [RUN_ID, "20261106-0930", "20261106-0931"] {
         let s = app.lead_status(run).unwrap();
-        assert_eq!((s["available"].as_bool(), s["project_id"].as_str()), (Some(true), Some(pinned.as_str())), "{run}: {s}");
+        assert_eq!((s["available"].as_bool(), s["project_id"].as_str(), s["project_name"].as_str()), (Some(true), Some(pinned.as_str()), Some("Harbor")), "{run}: {s}");
     }
+    let r = app.ask_lead(RUN_ID, "hi").unwrap();
+    assert_eq!((r["project_id"].as_str(), r["project_name"].as_str()), (Some(pinned.as_str()), Some("Harbor")));
+    wait_until("the ask", || idle(&app));
 }
 
 /// 3.1 test 3 (decision Q1): a run in a folder that is not a project gets `not_a_project` with the add action and the
@@ -64,7 +68,8 @@ fn a_run_in_a_folder_that_is_not_a_project_is_refused_and_nothing_runs() {
     let e = app.ask_lead("20261106-0930", "hi").unwrap_err();
     assert_eq!((code(&e), e["action"].as_str(), e["path"].as_str()), ("not_a_project", Some("add_project"), loose.to_str()), "{e}");
     assert!(!e["detail"].as_str().unwrap().contains(loose.to_str().unwrap()), "the folder is not in the detail text");
-    assert_eq!(app.lead_status("20261106-0930").unwrap()["available"], false);
+    let s = app.lead_status("20261106-0930").unwrap();
+    assert_eq!((s["available"].as_bool(), s["error"].as_str(), s["action"].as_str(), s["path"].as_str()), (Some(false), Some("not_a_project"), Some("add_project"), loose.to_str()), "{s}");
     assert!(t.count("ask.count") == 0 && t.ask_states().is_empty(), "nothing was spawned or recorded");
 }
 
@@ -224,6 +229,24 @@ fn another_projects_director_general_cannot_name_this_projects_worker() {
     svc.end_session(SID);
 }
 
+/// Plan item 7: every ask line in the ledger (queued, delivered, done, and a new conversation's) names the project and
+/// the conversation it went to.
+#[test]
+fn every_ask_line_names_the_project_and_its_conversation() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    app.ask_lead(RUN_ID, "one").unwrap();
+    wait_until("the ask", || idle(&app) && t.ask_states().len() == 3);
+    app.new_conversation(RUN_ID).unwrap();
+    app.ask_lead(RUN_ID, "two").unwrap();
+    wait_until("the second ask", || idle(&app) && t.ask_states().len() == 6);
+    let asks: Vec<Value> = t.ledger().into_iter().filter(|r| r["kind"] == "ask").collect();
+    assert!(asks.iter().all(|r| r["project_id"] == p.as_str()), "{asks:?}");
+    let gens: Vec<u64> = asks.iter().map(|r| r["generation"].as_u64().unwrap()).collect();
+    assert_eq!(gens, [1, 1, 1, 2, 2, 2]);
+}
+
 /// #103 review: a run launched from a SUBFOLDER of a plain project records that subfolder, while its Director-General runs in
 /// the store's root; an actual ask from it is delivered and answered.
 #[test]
@@ -286,6 +309,34 @@ fn an_ask_from_below_a_project_registered_inside_a_git_checkout_is_answered() {
 }
 
 /// #103 review: accepting the registered root opens nothing else. Another project's folder is still denied to this
+/// #104 review [P1]: a project the store cannot read (its `project.json` unreadable or malformed) is skipped by the listing, so
+/// its root would be missing from the deny rules. With no runs nothing else names it: the ask refuses, and runs nothing.
+#[test]
+fn an_unreadable_project_record_with_no_runs_refuses_the_ask() {
+    for broken in ["malformed", "unreadable"] {
+        let t = Tmp::new();
+        let app = t.app();
+        live_run(&app, SID, RUN_ID, t.repo());
+        app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+        let other = t.0.join("other");
+        let pid = project_of(&t, &other);
+        app.isolation(RUN_ID, &t.repo()).expect("healthy");
+        let file = t.data().join("projects").join(&pid).join("project.json");
+        if broken == "malformed" {
+            std::fs::write(&file, b"{not json").unwrap();
+        } else {
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(t.0.join("nowhere"), &file).unwrap();
+        }
+        assert_eq!(app.projects.list(true).unwrap().skipped, 1, "{broken}: the store skips it without an error");
+        let e = app.isolation(RUN_ID, &t.repo()).unwrap_err();
+        assert!(matches!(e, LeadError::GuardMissing(_)), "{broken}: {e:?}");
+        let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+        assert_eq!(e["error"], "lead_guard_missing", "{broken}: {e}");
+        assert_eq!(t.count("ask.count"), 0, "{broken}: no Lead ran");
+    }
+}
+
 /// Director-General, and asking as if from that folder, or from this project's subfolder rather than its root, is refused.
 #[test]
 fn with_a_subfolder_run_another_projects_folder_is_still_denied() {
@@ -631,6 +682,50 @@ mod topology {
             }
         }
     }
+}
+
+/// #103 review (wire): every store root is listed, so another project's root is owned by it even with no run of its own;
+/// a record pinned to this project but recorded in that root refuses, and the root is denied.
+#[test]
+fn another_projects_root_without_runs_is_still_owned_and_denied() {
+    let t = Tmp::new();
+    let app = t.app();
+    let sib = t.0.join("sibling");
+    project_of(&t, &sib);
+    assert!(app.isolation(RUN_ID, &t.repo()).unwrap().deny.contains(&sib), "denied with no run of its own");
+    app.record_run("20261109-1701", &sib, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1701"), "project", pid(&t).as_bytes()).unwrap();
+    assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "a folder another project owns, recorded as this project's, refuses");
+}
+
+/// #103 review (wire): a record whose pin does not validate belongs to no project, and all its folders count as owned by it.
+/// Recorded in a checkout shared with this project, it owns nothing this project owns, so the ask goes on: its run folder is
+/// denied, and the shared checkout (which holds this project's root) gets the secret-file rules only.
+#[test]
+fn a_record_without_a_validated_identity_sharing_the_checkout_is_denied_but_claims_nothing_of_ours() {
+    let t = Tmp::new();
+    let app = t.app();
+    let c = t.0.join("checkout");
+    std::fs::create_dir_all(c.join(".git/objects")).unwrap();
+    std::fs::write(c.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (a, x) = (c.join("a"), c.join("x"));
+    std::fs::create_dir_all(&x).unwrap();
+    project_of(&t, &a);
+    let (sa, ra) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1800");
+    live_run(&app, sa, ra, a.clone());
+    app.record_run(ra, &a, sa, "deliver-a", true, 1).unwrap();
+    assert!(app.isolation(ra, &a).is_ok(), "healthy");
+    app.record_run("20261109-1801", &x, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-x", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&t.0.join("elsewhere")).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1801"), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.read_run_loc("20261109-1801"), Some(c.clone()), "it records the shared checkout");
+    let iso = app.isolation(ra, &a).unwrap();
+    assert!(iso.deny.contains(&x), "its run folder is denied: {iso:?}");
+    assert!(iso.secrets.contains(&c) && !iso.deny.contains(&c), "the shared checkout gets secret files only: {iso:?}");
+    // The same record recorded in this project's own root claims a folder this project owns, and refuses.
+    app.record_run("20261109-1802", &a, "5c8fad5b-d9cb-469f-a165-70867728950e", "deliver-y", true, 1).unwrap();
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1802"), "project", k.as_bytes()).unwrap();
+    assert!(app.isolation(ra, &a).is_err(), "an unidentified record in this project's root refuses");
 }
 
 /// #103 review: a record whose pin does not validate has nothing to vouch for whose checkout it names, so its location

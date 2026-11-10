@@ -422,17 +422,18 @@ impl App {
     /// The control service keeps each session apart (per-session nonce, dirs, workers), which is what makes a second
     /// concurrent run safe; the caps bound what runs at once.
     ///
-    /// Projects are the keys pinned when each run was launched (`launch_key` for the requested folder, the guarded record
-    /// for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git` cannot
-    /// make its project look free or make another one look busy. A live run with no pinned key refuses the start.
-    fn within_caps(&self, key: &Path, workers: u32) -> Result<(), Value> {
+    /// Projects are the store ids pinned when each run was launched (`launch_project` for the requested start, the guarded
+    /// record for every live run), never re-read from the worker-writable `.git`: rewriting an active worktree's `.git`
+    /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
+    /// start. The caps compare the ids as opaque keys.
+    fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
             let per = lock(&self.run_workers);
             let mut v = Vec::new();
             for (s, r) in runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)) {
-                let Some(project) = self.read_run_key(&r.run_id) else {
+                let Some(project) = self.pinned_project(&r.run_id).filter(|p| crate::projects::contract::valid_project_id(p)).map(PathBuf::from) else {
                     return Err(fail("project_not_recorded", "a run in progress has no recorded project, so a new start cannot be checked against it"));
                 };
                 v.push(caps::Active { project, workers: per.get(s).copied().unwrap_or(caps::DEFAULT_RUN_WORKERS) });
@@ -445,7 +446,7 @@ impl App {
             lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
         }
         let limits = *lock(&self.limits);
-        caps::check(limits, &active, key, workers).map_err(|h| h.to_json())
+        caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
 
     /// The run caps and their bounds.
@@ -552,25 +553,22 @@ impl App {
         let _one = lock(&self.launching);
         // A session whose process is already running is never launched again: `start_session` would replace its live control
         // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
-        // its control session. Checked under the launching lock, before anything is read or changed.
+        // its control session. Checked under the launching lock, before anything is read or changed (#80 review).
         if self.sup.is_running(&format!("run-{session_id}")).unwrap_or(false) {
             return Err(fail("session_running", "this session is already running; stop it before starting it again"));
         }
-        // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently.
-        let project = self.project_of_folder(cwd).map_err(|e| e.to_json())?;
-        // The run's project, pinned before any worker of it can touch the repo's `.git` (#80 review), and the one the caps
-        // are checked against.
-        let (loc, key) = self.launch_identity(cwd)?;
-        self.within_caps(&key, workers)?;
-        // Before anything starts: which adapter this run is on, in the guarded dir. If it cannot be written the launch is
-        // refused, so a resume never has to guess the provider from the worker-writable index.
+        // FG-02c (decision Q1): a run starts only in a project's folder; nothing makes one silently. The run's project: pinned
+        // before any worker of it can touch the repo's `.git` (#80 review), and the one the caps are checked against.
+        let (loc, project) = self.launch_project(cwd)?;
+        self.within_caps(&project.id, workers)?;
+        // Before any control state changes: which adapter this run is on, and the guarded record with the exact (location,
+        // project) checked above. If either cannot be written the launch is refused with the session's control state and
+        // nonce untouched: a resume never guesses the provider from the worker-writable index, and a run without its pin
+        // could never be held to its project (#80 review).
         if self.record_run_provider(run_id, engine).is_err() {
             return Err(fail("io", "could not record the run's provider"));
         }
-        // The guarded record of the run (the index appended below is worker-writable), with the exact project location and key
-        // checked above, written before anything starts. If it cannot be written the launch is refused: a run without its
-        // pin could never be held to its project (#80 review).
-        if self.record_run_pinned(run_id, cwd, &loc, &key, session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
+        if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
         }
         let nonce = {

@@ -135,6 +135,18 @@ describe("typed ipc", () => {
     expect(errorText({ error: "lead_busy" })).toBe("lead_busy");
   });
 
+  it("says the project-store refusals in plain words (FG-02c)", () => {
+    const texts: Record<string, string> = {
+      not_a_project: "This folder is not a project. Add it as a project first.",
+      project_archived: "This project is archived. Restore it to use it again.",
+      project_missing: "This project is no longer in the app's project list.",
+    };
+    for (const [error, detail] of Object.entries(texts)) {
+      expect(errorText({ error, detail, action: "add_project", path: "/Users/me/src/a" })).toBe(detail);
+    }
+    expect(errorText({ error: "not_a_project" })).toBe("not_a_project");
+  });
+
   it("rejects with the core's {error, detail} and errorText reads it", async () => {
     setTransport(fakeIpc({ preflight: () => { throw { error: "no_claude", detail: "not on PATH" }; } }).transport);
     const e = await api.preflight().catch((x) => x);
