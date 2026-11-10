@@ -267,9 +267,24 @@ per worker slot, built from what the harness reports about itself once it starts
 - **Diff.** A worker's diff is read from git in its worktree (`git diff --numstat -z <base>` plus `git ls-files --others -z`, through the
   read-only git bridge), never from events: a shell-only edit leaves no edit event. `-z` gives real, unquoted paths; a
   rename or copy is two records and the new path is kept.
-- **Provider tag.** Crew-tree nodes and the `workers` of `project_state` carry `provider: {account, family, model, billing}`
-  (or `null` while the model is not reported). Claude workers take the model from their transcript's first assistant record;
-  their billing is `unknown`, since a transcript does not say how the CLI was signed in.
+- **Provider tag.** Crew-tree nodes and the `workers` of `project_state` carry a `provider` object, or `null` while the
+  model is not reported. It is the shape `parseWorkerProvider` (`app/ui/src/workerProvider.ts`) requires;
+  `app/core/tests/fixtures/launch/worker-provider.json` pins it, and the core and UI tests both check that file. Nothing in
+  it is a credential. Fields:
+  - `account`: the account that ran the worker (`claude`, `codex`, `openrouter`), or `unknown`.
+  - `label`: the provider's name for display ("Claude Code", "Codex", "OpenRouter"); an account Vajra has no name for shows
+    as its own id.
+  - `family`: the model family that picks the icon. The vendor part of a `vendor/model` id, `claude` for a `claude*` id,
+    otherwise the account.
+  - `model`: the model id the harness reported, or `"unknown"` when it did not.
+  - `model_name`: a display name for the model. None is known yet, so it is `null`.
+  - `billing`: `subscription`, `api_key`, `gateway` or `unknown`. Claude workers read `unknown`, since a transcript does not
+    say how the CLI was signed in.
+  - `requested`: `{model, model_name, label}` of what was asked for, or `null` where that is not known. A card shows "Ran on X
+    (asked for Y)" only when it differs.
+  - `error`: the worker's current provider error, `{kind, action, attempt, retry_at}`, or `null` when there is none (always
+    `null` until the provider-errors work attaches one).
+  Claude workers take the model from their transcript's first assistant record.
 - **Not yet wired.** These readers and the receipt exist; nothing yet builds a receipt at worker start, since core-launched
   non-Claude workers arrive with the later launch PRs.
 
