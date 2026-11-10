@@ -194,6 +194,9 @@ export type Receipt = {
 /** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
 export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
 /** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type CloseoutState = "closed" | "closable" | "working" | "waiting_on_you" | "unsaved_work" | "terminal_busy" | "no_worktree" | "git_unreadable";
+export type CloseoutRow = { worker: string; state: CloseoutState; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number };
+export type CloseFinishedResult = { closed: { worker: string; label: string }[]; skipped: { worker: string; label: string; reason: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }[] };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
@@ -237,6 +240,12 @@ export const api = {
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  /** Per worker of a run: whether it is closed, could be closed now, or why it is kept (with the exact counts of unsaved work). */
+  closeoutStatus: (slug: string, runId: string) => call<{ workers: CloseoutRow[] }>("closeout_status", { slug, runId }),
+  /** Close one finished worker. Without `confirmed` only a worker that loses nothing closes; "Close anyway" sends the counts the human saw (files, commits, busy terminals, no upstream), and anything that changed refuses. */
+  actCloseWorker: (envelope: Envelope, worker: string, confirmed?: { changedFiles: number; unpushedCommits: number; busyTerminals: number; noUpstream: boolean }) => call<ActResult>("act_close_worker", { envelope, worker, changedFiles: confirmed?.changedFiles ?? null, unpushedCommits: confirmed?.unpushedCommits ?? null, busyTerminals: confirmed?.busyTerminals ?? null, noUpstream: confirmed?.noUpstream ?? null }),
+  /** Close every finished worker that loses nothing; the result lists what was kept and why. */
+  actCloseFinished: (envelope: Envelope) => call<ActResult<CloseFinishedResult>>("act_close_finished", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
   actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256 }),
