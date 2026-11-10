@@ -363,6 +363,23 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     expect(within(s).getByLabelText(A.effortLabel(A.role.tests))).toBeTruthy();
   });
 
+  it("unchecking one model under an account-wide allowance narrows it to the other models; a model a default uses stays locked", async () => {
+    const allowed = [...AGENTS.allowed.filter((a) => a.account !== "openrouter"), { account: "openrouter", model: null }];
+    const f = settings({ provider_agents: { ...clone(AGENTS), allowed } });
+    const s = await section();
+    const box = (name: string) => within(s).getByText(name, { selector: "[data-model-line]" }).closest("label")!.querySelector("input") as HTMLInputElement;
+    expect(box("DeepSeek V3.2 · OpenRouter").disabled).toBe(true); // the Docs role uses it
+    expect(box("Grok 4 · OpenRouter").checked).toBe(true);
+    expect(box("Grok 4 · OpenRouter").disabled).toBe(false);
+    fireEvent.click(box("Grok 4 · OpenRouter"));
+    expect(box("Grok 4 · OpenRouter").checked).toBe(false);
+    fireEvent.click(within(s).getByRole("button", { name: A.save }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "provider_agents_save")).toBe(true));
+    const sent = f.calls.find((c) => c.cmd === "provider_agents_save")?.args as { agents: { allowed: Array<{ account: string; model: string | null }> } };
+    expect(sent.agents.allowed.filter((a) => a.account === "openrouter")).toEqual([{ account: "openrouter", model: "deepseek/deepseek-v3.2" }]);
+    expect(sent.agents.allowed.filter((a) => a.account !== "openrouter")).toEqual(AGENTS.allowed.filter((a) => a.account !== "openrouter"));
+  });
+
   it("Save sends the edited defaults and the allowed set; nothing is sent before", async () => {
     const f = settings();
     const s = await section();
