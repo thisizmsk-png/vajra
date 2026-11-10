@@ -4,6 +4,7 @@ pub mod adapter;
 pub mod ids;
 pub mod lifecycle_report;
 pub mod logging;
+pub mod mobile_m0;
 pub mod nap;
 pub mod owned;
 pub mod paths;
