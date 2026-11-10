@@ -234,7 +234,10 @@ as a cache read. One entry per account:
 - **The key never enters the core.** The call is curl with `--proto =https`, a cleared environment and the header read from
   stdin (`-H @-`). A key command (the Keychain read, from the Keychain store) is the producer of that stdin: it prints the key
   straight into curl's pipe, so the key is never in argv, the environment, a file, a log or this process's memory. There is no
-  getter for a key. Until the Keychain store lands there is no key command, so no account is metered and no call is made.
+  getter for a key. The key command is `[/usr/bin/security, find-generic-password, -s, vajra.provider.<a>, -a, <a>, -w]`, run with
+  a cleared environment plus the user's `HOME`, and only for an account in the Keychain store's fixed list. An account is
+  metered only while its key is stored (checked without `-w`, and reused for 5 seconds so a burst of `project_state` reads
+  runs `security` once); with no key stored there is no metered account and no call.
 
 ## Versioning
 

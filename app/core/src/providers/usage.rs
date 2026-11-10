@@ -13,12 +13,14 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+use super::keychain::{self, Keys, KEY_ACCOUNTS};
 
 pub const USAGE_SCHEMA: &str = "vajra.provider_usage/1";
 /// At this percentage used a window carries `warn`.
@@ -136,8 +138,8 @@ pub fn parse_key_response(account: &str, bytes: &[u8], read_at: &str) -> Option<
     })
 }
 
-/// Where metered accounts and their key-endpoint answers come from. PR 2 (the Keychain store) supplies the real source
-/// through `CurlSource`; until then `NoSource` reports nothing.
+/// Where metered accounts and their key-endpoint answers come from. The real source is `CurlSource` over `KeychainKeys`
+/// (the Keychain store); `NoSource` reports nothing.
 pub trait UsageSource: Send + Sync {
     /// Accounts that have a key to meter.
     fn accounts(&self) -> Vec<String>;
@@ -162,6 +164,51 @@ impl UsageSource for NoSource {
 pub trait KeyCommands: Send + Sync {
     fn accounts(&self) -> Vec<String>;
     fn argv(&self, account: &str) -> Option<Vec<String>>;
+    /// The `HOME` the key command runs with (the Keychain lookup needs the user's home), when it needs one.
+    fn home(&self) -> Option<&Path> {
+        None
+    }
+}
+
+/// The accounts whose key is stored in the Keychain (PR 2), and the `security` command that prints one on stdout. The
+/// core never reads the key: this only names the command, which `CurlSource` runs as the producer of curl's stdin.
+pub struct KeychainKeys {
+    keys: Keys,
+    security: PathBuf,
+    home: PathBuf,
+    /// The last answer of `accounts`, so a burst of `project_state` reads runs `security` once, not once each.
+    listed: Mutex<Option<(Instant, Vec<String>)>>,
+}
+
+/// How long a list of stored-key accounts is reused. Short, so a key saved on the Providers page shows up at once.
+const LIST_TTL: Duration = Duration::from_secs(5);
+
+impl KeychainKeys {
+    pub fn new(security: &Path, home: &Path) -> Self {
+        Self { keys: Keys::cli(security, home), security: security.to_path_buf(), home: home.to_path_buf(), listed: Mutex::new(None) }
+    }
+}
+
+impl KeyCommands for KeychainKeys {
+    /// Accounts with a stored key. `saved` asks `security` for the item without `-w`, so this never prints a key.
+    fn accounts(&self) -> Vec<String> {
+        let mut listed = self.listed.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, accounts)) = listed.as_ref().filter(|(at, _)| at.elapsed() < LIST_TTL) {
+            return accounts.clone();
+        }
+        let accounts: Vec<String> = KEY_ACCOUNTS.iter().filter(|a| self.keys.saved(a) == Ok(true)).map(|a| a.to_string()).collect();
+        *listed = Some((Instant::now(), accounts.clone()));
+        accounts
+    }
+    /// `[security, find-generic-password, -s, vajra.provider.<a>, -a, <a>, -w]`: the account must be a key account.
+    fn argv(&self, account: &str) -> Option<Vec<String>> {
+        let service = keychain::service(account).ok()?;
+        let security = self.security.to_str()?;
+        Some([security, "find-generic-password", "-s", &service, "-a", account, "-w"].map(String::from).into())
+    }
+    fn home(&self) -> Option<&Path> {
+        Some(&self.home)
+    }
 }
 
 /// `GET /api/v1/key` through curl, with the key piped from its key command into curl's stdin as a header file (`-H @-`).
@@ -198,11 +245,16 @@ impl UsageSource for CurlSource {
     fn key_info(&self, account: &str) -> Option<Vec<u8>> {
         let key_cmd = self.keys.argv(account)?;
         // sh prints the header name, then becomes the key command: its stdout continues the same pipe into curl.
-        let mut producer = Command::new("/bin/sh")
+        let mut producer = Command::new("/bin/sh");
+        producer
             .args(["-c", "printf 'Authorization: Bearer '; exec \"$@\"", "sh"])
             .args(&key_cmd)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+        if let Some(home) = self.keys.home() {
+            producer.env("HOME", home);
+        }
+        let mut producer = producer
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

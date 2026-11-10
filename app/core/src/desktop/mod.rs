@@ -263,6 +263,8 @@ impl App {
     /// Open everything under `data` (the app data dir) for the user whose
     /// home is `home`. Nothing under `home` is written.
     pub fn open(data: &Path, home: &Path) -> std::io::Result<Self> {
+        // A test build never reaches the real Keychain: its default `security` path does not exist.
+        let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
@@ -303,14 +305,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
-            // A test build never reaches the real Keychain: its default `security` path does not exist.
-            keys: crate::providers::keychain::Keys::cli(
-                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
-                home,
-            ),
+            keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
-            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
-            usage_source: Box::new(crate::providers::usage::NoSource),
+            // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
+            // stdout pipe. With no key stored there is nothing to meter and no outbound call.
+            usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
