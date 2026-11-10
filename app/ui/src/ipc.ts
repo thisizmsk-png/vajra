@@ -211,6 +211,8 @@ export type ProjectState =
       generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
+      /** ADR-15 4.2 board cards, computed by the core from cached verdicts (null for a non-store id). */
+      board: CoreBoard | null;
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
       inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
       /** This project's pending run proposals, newest first, picked before any inbox cut (at most 50; `more` were left out). */
@@ -218,6 +220,14 @@ export type ProjectState =
       /** The last usage answers (`vajra.provider_usage/1`), a cache read on the core side. Parse with `parseUsage`. */
       usage?: UsageList;
     };
+/** One board card as the core serves it (contract (b) of the board PR). Lanes: (c); Done only when verified. */
+export type CoreCard = {
+  key: string; kind: "task" | "plan" | "question"; local: string; title: string; owner: string | null; status: string;
+  lane: "backlog" | "running" | "review" | "done"; needs_you: boolean; criteria: { pass: number; total: number } | null;
+  project_id: string; campaign: string; task_id: string | null; attempt: number | null;
+};
+/** The project's newest campaigns (at most 5) and their cards (at most 200 in all); `truncated` says a level was cut. */
+export type CoreBoard = { campaigns: { campaign: string; run_id: string; cards: CoreCard[]; truncated: boolean }[]; truncated: boolean; error?: string };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
 

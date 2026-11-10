@@ -4501,3 +4501,6 @@ fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() 
     assert!(code(&e) == "unsaved_work_changed" && e["no_upstream"] == true && !app.worker_closed(CLOSE_W), "{e}");
     assert!(lock(&terms.released).is_empty());
 }
+
+#[path = "board_tests.rs"]
+mod board_cards;
