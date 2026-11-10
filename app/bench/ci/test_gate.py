@@ -38,16 +38,19 @@ class Gate(unittest.TestCase):
 
 
 class Budget(unittest.TestCase):
-    """Owner ruling: about 212 MiB on CI only when the GPU process is present; real machines stay at 200."""
+    """Owner ruling: 240 MiB on CI only when the GPU process is present (raised from 212, owner fine with idle above 220); real machines and the no-GPU flavour stay at 200."""
     gpu = bl(204.0, GPU)
 
     def test_gpu_on_ci_at_205_passes(self):
         self.assertEqual(check(self.gpu, run(205, GPU), None, ci=True), [])
 
-    def test_gpu_on_ci_over_212_fails(self):
-        f = check(self.gpu, run(212.1, GPU), None, ci=True)
-        self.assertTrue(any("212" in x for x in f), f)
-        self.assertEqual(check(bl(210.0, GPU), run(212.0, GPU), None, ci=True), [])
+    def test_gpu_on_ci_over_240_fails(self):
+        f = check(bl(238.0, GPU), run(240.1, GPU), None, ci=True)
+        self.assertTrue(any("240" in x for x in f), f)
+        self.assertEqual(check(bl(238.0, GPU), run(240.0, GPU), None, ci=True), [])
+
+    def test_gpu_on_ci_at_the_old_212_ceiling_and_the_212_6_reading_now_pass(self):
+        self.assertEqual(check(bl(212.0, GPU), run(212.6, GPU), None, ci=True), [])
 
     def test_gpu_not_on_ci_at_205_fails(self):
         f = check(self.gpu, run(205, GPU), None, ci=False)
@@ -71,7 +74,7 @@ class Budget(unittest.TestCase):
 
     def test_a_provisional_entry_still_fails_the_budget_not_just_warns(self):
         t = bl(150.0, GPU, provisional=True)
-        self.assertEqual(len(evaluate(t, run(213, GPU), None, ci=True)[0]), 1)
+        self.assertEqual(len(evaluate(t, run(241, GPU), None, ci=True)[0]), 1)
 
 
 class Flavours(unittest.TestCase):

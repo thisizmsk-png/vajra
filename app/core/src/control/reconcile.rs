@@ -7,7 +7,8 @@
 //!   `approve id=` / `reject id=` line; a `requested` or `failed` one has none;
 //! - an `ask` ledger action (ADR-13) has no audit line and is skipped;
 //! - every guard `ALLOW mcp__vajra-desktop__<tool>` line has a ledger
-//!   `via:"mcp"` action of that kind within 5 s, and the reverse.
+//!   `via:"mcp"` action of that kind within 5 s, and the reverse. A `via:"mcp"` action with no guard line is
+//!   reported as `guard_absent`, apart from `ledger_without_audit`.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -24,15 +25,19 @@ const MCP_PREFIX: &str = "mcp__vajra-desktop__";
 #[derive(Debug, Default)]
 pub struct Report {
     pub checked: usize,
-    /// Ledger action ids with no matching audit line.
+    /// Ledger action ids with no matching app audit line (`deliver`, `stop`, `resume`, `mcp`, `approve`, `reject`).
     pub ledger_without_audit: Vec<String>,
+    /// Ledger `via:"mcp"` action ids (a Lead call) with no guard `ALLOW mcp__vajra-desktop__<tool>` line within
+    /// `MCP_WINDOW_SECS`: the Lead ran unguarded, or the guard's log was lost. Kept apart from `ledger_without_audit`
+    /// so a missing app line and a missing guard line are told apart.
+    pub guard_absent: Vec<String>,
     /// Audit action ids (or guard tool names) with no ledger action.
     pub audit_without_ledger: Vec<String>,
 }
 
 impl Report {
     pub fn is_clean(&self) -> bool {
-        self.ledger_without_audit.is_empty() && self.audit_without_ledger.is_empty()
+        self.ledger_without_audit.is_empty() && self.guard_absent.is_empty() && self.audit_without_ledger.is_empty()
     }
 }
 
@@ -144,8 +149,11 @@ pub fn run(ledger_path: &Path, audit_log: &Path) -> io::Result<Report> {
             || (a.kind == "reject" && a.last_state == "done");
         let missing_control = needs_control && !control_ids.contains(id);
         let missing_guard = a.mcp && !used.contains(id);
-        if missing_control || missing_guard {
+        if missing_control {
             rep.ledger_without_audit.push(id.clone());
+        }
+        if missing_guard {
+            rep.guard_absent.push(id.clone());
         }
     }
     Ok(rep)

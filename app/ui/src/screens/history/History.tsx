@@ -8,6 +8,7 @@ import { Empty, LoadingRows, Problem, problemDetail } from "../states";
 import { useCampaignIntegrity } from "../campaignIntegrity";
 import type { Campaign, Report } from "../../ipc";
 import { useRoute } from "../../router";
+import { ago } from "../when";
 
 type Hit = { id: string; kind: string; title: string };
 type Result = { state: "idle" } | { state: "busy" } | { state: "ok"; hits: Hit[] } | { state: "unavailable"; code: number | null } | { state: "error"; text: string };
@@ -39,12 +40,23 @@ const REPORT_MESSAGE: Record<string, string> = {
 };
 
 const text = (a?: string, b?: string) => (a ?? "").localeCompare(b ?? "");
+const TONE = { active: "info", done: "success", stopped: "warning", failed: "danger", abandoned: undefined } as Record<string, "success" | "warning" | "danger" | "info" | undefined>;
 const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, verify: (c: Campaign) => void): Column<Campaign>[] => [
-  { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => <Button size="sm" variant="ghost" className="v-history__slug" onClick={() => open(c)}>{c.slug}</Button> },
-  { key: "goal", header: S.history.colGoal, sort: (a, b) => text(a.goal, b.goal), cell: (c) => c.error ? <Badge status="danger">{S.history.unreadable}: {c.error}</Badge> : <span className="v-history__goal" title={c.goal}>{c.goal ?? ""}</span> },
-  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => <span className="v-history__muted">{c.status ?? ""}</span> },
-  { key: "passing", header: S.history.colPassing, numeric: true, sort: (a, b) => (a.passing ?? 0) - (b.passing ?? 0), cell: (c) => (c.total != null ? `${c.passing ?? 0}/${c.total}` : "") },
-  { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => <span className="v-history__muted v-num">{c.updated ?? ""}</span> },
+  // The goal leads; the slug under it opens the run and names the button (the slug is what the terminal shows).
+  { key: "slug", header: S.history.colSlug, sort: (a, b) => text(a.slug, b.slug), cell: (c) => (
+    <div className="v-history__camp">
+      {c.error ? <Badge status="danger">{S.history.unreadable}: {c.error}</Badge> : <span className="v-history__goal" title={c.goal}>{c.goal ?? ""}</span>}
+      <button type="button" className="v-history__slug" onClick={() => open(c)}>{c.slug}</button>
+    </div>
+  ) },
+  { key: "status", header: S.history.colStatus, sort: (a, b) => text(a.status, b.status), cell: (c) => (c.status ? <Badge status={TONE[c.status]}>{S.history.state[c.status] ?? c.status}</Badge> : null) },
+  { key: "passing", header: S.history.colPassing, sort: (a, b) => (a.passing ?? 0) / (a.total || 1) - (b.passing ?? 0) / (b.total || 1), cell: (c) => (c.total != null ? (
+    <span className="v-history__pass">
+      <span className="v-history__meter" aria-hidden="true"><span style={{ width: `${c.total ? Math.round(((c.passing ?? 0) / c.total) * 100) : 0}%` }} /></span>
+      <span className="v-num" aria-label={S.history.of(c.passing ?? 0, c.total)}>{`${c.passing ?? 0}/${c.total}`}</span>
+    </span>
+  ) : "") },
+  { key: "updated", header: S.history.colUpdated, sort: (a, b) => text(a.updated, b.updated), cell: (c) => <span className="v-history__muted" title={c.updated}>{ago(c.updated)}</span> },
   { key: "integrity", header: S.history.colIntegrity, sort: (a, b) => text(a.integrity, b.integrity), cell: (c) => (
     c.integrity === "checking" ? <Badge>{S.history.integrityChecking}</Badge>
       : c.integrity === "failed" ? <Badge status="danger">{S.history.integrityFailed}</Badge>
@@ -54,7 +66,7 @@ const COLUMNS = (open: (c: Campaign) => void, report: (c: Campaign) => void, ver
   { key: "actions", header: S.history.colActions, cell: (c) => c.error ? null : (
     // The visible word starts the accessible name, which adds the campaign (WCAG 2.5.3).
     <span className="v-history__acts">
-      <Button size="sm" variant="ghost" aria-label={S.history.report(c.slug)} onClick={() => report(c)}>{S.history.reportShort}</Button>
+      <Button size="sm" variant="secondary" aria-label={S.history.report(c.slug)} onClick={() => report(c)}>{S.history.reportShort}</Button>
       <Button size="sm" variant="ghost" aria-label={S.history.verify(c.slug)} onClick={() => verify(c)}>{S.history.verifyShort}</Button>
     </span>
   ) },
@@ -93,6 +105,8 @@ export function History() {
     load();
     if (mine === req.current) setView(next);
   };
+  // Closing the pane ends the current request's claim on it: its reply still reloads the table (see `run`) but cannot reopen the pane.
+  const closeView = () => { req.current++; setView(null); };
   const showReport = (c: Campaign) => run(c, async () => ({ slug: c.slug, state: "done", report: await api.readReport(c.slug) }));
   const verifyNow = (c: Campaign) => run(c, async () => {
     const v = await api.verifyCampaign(c.slug);
@@ -113,25 +127,32 @@ export function History() {
 
   return (
     <div className="v-screen v-history">
-      <header className="v-screen__head">
+      <header className="v-screen__head" data-tauri-drag-region>
         <Text as="h1" variant="label">{S.history.title}</Text>
         {camps && <span className="v-screen__meta">{S.history.count(camps.length)}</span>}
       </header>
       <div className={view ? "v-history__body v-history__body--open" : "v-history__body"}>
         <div className="v-screen__body v-history__main">
-          <section aria-labelledby="v-history-camps">
-            <h2 id="v-history-camps" className="v-text v-text--headline-md v-history__h">{S.history.campaigns}</h2>
-            {loadErr && <Problem title={S.history.failed} detail={loadErr} retry={load} />}
-            {!camps && !loadErr && <LoadingRows label={S.states.loading} />}
-            {camps && camps.length === 0 && (
-              <Empty title={S.history.empty} action={<Button onClick={() => go("home")}>{S.states.goHome}</Button>}>{S.history.emptyHint}</Empty>
+          <section aria-labelledby="v-history-camps" className="v-panel">
+            <div className="v-panel__bar">
+              <h2 id="v-history-camps" className="v-panel__title">{S.history.campaigns}</h2>
+            </div>
+            {(loadErr || !camps || camps.length === 0) && (
+              <div className="v-panel__body">
+                {loadErr && <Problem title={S.history.failed} detail={loadErr} retry={load} />}
+                {!camps && !loadErr && <LoadingRows label={S.states.loading} />}
+                {camps && camps.length === 0 && (
+                  <Empty title={S.history.empty} action={<Button onClick={() => go("home")}>{S.states.goHome}</Button>}>{S.history.emptyHint}</Empty>
+                )}
+              </div>
             )}
             {camps && camps.length > 0 && (
               <Table caption={S.history.campaigns} columns={COLUMNS((c) => go("run", { slug: c.slug }), (c) => void showReport(c), (c) => void verifyNow(c))} rows={camps} rowKey={(c) => c.slug} />
             )}
           </section>
-          <section aria-labelledby="v-history-search" className="v-history__search">
-            <h2 id="v-history-search" className="v-text v-text--headline-md v-history__h">{S.history.search}</h2>
+          <section aria-labelledby="v-history-search" className="v-panel v-history__search">
+            <div className="v-panel__bar"><h2 id="v-history-search" className="v-panel__title">{S.history.search}</h2></div>
+            <div className="v-panel__body">
             <form className="v-history__form" onSubmit={(e) => { e.preventDefault(); void search(); }} noValidate>
               <div className="v-history__q"><Input label={S.history.query} hint={S.history.queryHint} value={q} onChange={setQ} error={shown && !q.trim() ? S.history.errQuery : undefined} /></div>
               <div className="v-history__repo"><Input label={S.history.repo} value={repo} onChange={setRepo} error={shown && !repo.trim() ? S.history.errRepo : undefined} /></div>
@@ -147,6 +168,7 @@ export function History() {
             )}
             {res.state === "unavailable" && <div role="alert"><Text variant="body-sm">{S.history.unavailable(res.code)}</Text></div>}
             {res.state === "error" && <div role="alert"><Text variant="body-sm">{res.text}</Text></div>}
+            </div>
           </section>
         </div>
         {view && (
@@ -154,7 +176,7 @@ export function History() {
             <div className="v-history__panehead">
               <Text as="h2" variant="label">{S.history.panel}</Text>
               <span className="v-history__paneslug">{view.slug}</span>
-              <Button size="sm" variant="ghost" aria-label={S.history.closeReport} onClick={() => setView(null)}><Icon name="close" /></Button>
+              <Button size="sm" variant="ghost" aria-label={S.history.closeReport} onClick={closeView}><Icon name="close" /></Button>
             </div>
             <div className="v-history__panebody" aria-live="polite">
               {view.state === "busy" && <Text variant="body-sm" muted>{S.history.reportLoading}</Text>}
@@ -170,7 +192,7 @@ export function History() {
           </aside>
         )}
       </div>
-      <ActionBar label={S.history.barLabel} context={view ? <span>{S.history.reportTitle(view.slug)}</span> : undefined} />
+      {view && <ActionBar label={S.history.barLabel} context={<span>{S.history.reportTitle(view.slug)}</span>} />}
     </div>
   );
 }

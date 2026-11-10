@@ -1162,6 +1162,7 @@ fn fake_tasks_script(t: &Tmp) {
         if 'slow' in p:\n    import time; time.sleep(30)\n\
         if 'boom' in p:\n    print(json.dumps({'ok': False, 'error': 'unreadable'})); sys.exit(1)\n\
         if 'swap' in p:\n    open(p, 'w').write('{\"a\":\"BBB\"}')\n\
+        import os\nif os.path.exists(p + '.swap-to'):\n    open(p, 'w').write(open(p + '.swap-to').read())\n\
         green = 'green' in p\n\
         try:\n    green = green and 'RED' not in open(p).read()\nexcept OSError:\n    pass\n\
         print(json.dumps({'ok': True, 'green': green, 'reasons': [] if green else ['a check failed']}))\n";
@@ -1397,34 +1398,122 @@ fn status_of(app: &App, slug: &str) -> String {
     app.evidence_list(slug).unwrap()["rows"][0]["status"].as_str().unwrap().to_string()
 }
 
-#[test]
-fn green_evidence_is_pass_only_while_the_repo_is_at_its_head_and_clean() {
-    let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
-    assert_eq!(status_of(&app, &slug), "pass");
-    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
-    let git = |args: &[&str]| { std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap(); };
-    git(&["checkout", "--", "f.txt"]);
-    assert_eq!(status_of(&app, &slug), "pass", "clean again");
-    fs::write(repo.join("new.txt"), b"x").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
-    fs::remove_file(repo.join("new.txt")).unwrap();
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "two"]);
-    assert_eq!(status_of(&app, &slug), "stale", "the branch moved past the evidence's head");
+fn have_jq() -> bool {
+    ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().any(|p| Path::new(p).is_file())
+}
+
+fn git_in(repo: &Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git").current_dir(repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+/// Run the REAL `vajra-verify-work.sh` in `repo` (so `git.worktreeTree` is what production records) under slug `green-run`.
+fn verify_work(repo: &Path) {
+    verify_work_cmd(repo, "true");
+}
+
+fn verify_work_cmd(repo: &Path, cmd: &str) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-verify-work.sh");
+    let o = std::process::Command::new("bash").current_dir(repo).arg(&script).args(["green-run", cmd]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A repo with one commit, verified by the real script: its evidence is at `<repo>/data/walkthroughs/green-run/evidence.json`
+/// (untracked, as in production), and a task points at it.
+fn verified_repo(t: &Tmp) -> (App, String, std::path::PathBuf) {
+    let (app, slug, repo, _head) = live_evidence_repo(t, true, false);
+    verify_work(&repo);
+    let ev = repo.join("data/walkthroughs/green-run/evidence.json");
+    set_evidence_path(t, &slug, &ev);
+    (app, slug, repo)
+}
+
+/// Point the campaign's only task at `path` (rewrites tasks.json).
+fn set_evidence_path(t: &Tmp, slug: &str, path: &Path) {
+    let f = t.home().join(".claude/vajra/campaigns").join(slug).join("tasks.json");
+    let mut doc: Value = serde_json::from_slice(&fs::read(&f).unwrap()).unwrap();
+    doc["tasks"][0]["evidence"]["path"] = json!(path.to_string_lossy());
+    fs::write(&f, serde_json::to_vec(&doc).unwrap()).unwrap();
 }
 
 #[test]
-fn the_runs_own_untracked_output_does_not_make_its_evidence_stale() {
+fn evidence_is_stale_when_the_working_tree_differs_from_the_tree_it_was_verified_on() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
-    // The real layout: <repo>/data/walkthroughs/<slug>/evidence.json, untracked, with its logs beside it.
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
-    fs::write(repo.join("data/walkthroughs/deliver-20261105-1810/cmd-1.log"), b"ok").unwrap();
-    fs::create_dir_all(repo.join(".claude/worktrees/w1")).unwrap();
-    fs::write(repo.join(".claude/worktrees/w1/x"), b"crew worktree").unwrap();
-    assert_eq!(status_of(&app, &slug), "pass", "the run's own output is not an edit");
-    fs::write(repo.join("unrelated.txt"), b"x").unwrap();
-    assert_eq!(status_of(&app, &slug), "stale", "an unrelated untracked file still counts");
+    let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass", "unchanged since verification");
+    fs::write(repo.join("f.txt"), b"edited, not committed").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit, even uncommitted");
+    git_in(&repo, &["checkout", "--", "f.txt"]);
+    assert_eq!(status_of(&app, &slug), "pass", "back to the verified tree");
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file");
+    fs::remove_file(repo.join("new.txt")).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    // The run's own output and crew worktrees under the walkthrough dir are not edits.
+    fs::write(repo.join("data/walkthroughs/green-run/extra.log"), b"ok").unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+}
+
+/// A `git` that behaves like the real one except that it fails `write-tree`: the repo is readable, HEAD is known, but the
+/// current working tree's id cannot be computed (a timeout or an I/O failure in the real world).
+fn git_without_write_tree(t: &Tmp) -> std::path::PathBuf {
+    let real = String::from_utf8(std::process::Command::new("which").arg("git").output().unwrap().stdout).unwrap().trim().to_string();
+    let p = t.home().join("no-write-tree-git.sh");
+    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = write-tree ] && exit 1; done\nexec {real} \"$@\"\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+// Review on #53: with a recorded tree, `pass` means the trees were compared and match. A repo whose HEAD reads but whose
+// current tree cannot be computed has not been compared, so the row is `unverified`, never `pass` on the commit alone.
+#[test]
+fn recorded_tree_with_an_uncomputable_current_tree_is_unverified_not_pass() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (mut app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass", "baseline: the trees match");
+    app.bridge.git = git_without_write_tree(&t);
+    assert_eq!(status_of(&app, &slug), "unverified", "HEAD matches but the tree could not be compared");
+    // A different commit with the tree uncomputable is not claimed stale either (nothing was compared).
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "unverified");
+}
+
+// And evidence with no recorded tree still falls back to its commit when the tree cannot be computed (nothing to compare).
+#[test]
+fn evidence_without_a_recorded_tree_still_passes_on_its_commit_when_the_tree_cannot_be_computed() {
+    let t = Tmp::new();
+    let (mut app, slug, _repo, _head) = live_evidence_repo(&t, true, false);
+    app.bridge.git = git_without_write_tree(&t);
+    assert_eq!(status_of(&app, &slug), "pass");
+}
+
+#[test]
+fn evidence_verified_on_an_uncommitted_tree_is_pass_and_survives_committing_that_same_tree() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo) = verified_repo(&t);
+    // Typical: the agent edits, verifies, then commits. Evidence is for the dirty tree T1.
+    fs::write(repo.join("f.txt"), b"work in progress").unwrap();
+    verify_work(&repo);
+    assert_eq!(status_of(&app, &slug), "pass", "verified on this dirty tree: current, not stale");
+    git_in(&repo, &["commit", "-qam", "same tree, new commit"]);
+    assert_eq!(status_of(&app, &slug), "pass", "HEAD moved but the tree is the verified one: still current");
+    // The branch moves on to different content with the evidence bytes unchanged: stale.
+    fs::write(repo.join("f.txt"), b"later change").unwrap();
+    git_in(&repo, &["commit", "-qam", "different tree"]);
+    assert_eq!(status_of(&app, &slug), "stale", "a different tree under unchanged evidence");
+}
+
+#[test]
+fn evidence_with_no_recorded_tree_falls_back_to_its_commit() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    assert_eq!(status_of(&app, &slug), "pass");
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+    assert_eq!(status_of(&app, &slug), "stale", "no worktreeTree in the file: the commit decides");
 }
 
 #[test]
@@ -1432,11 +1521,115 @@ fn the_repo_state_reads_stop_at_the_calls_deadline() {
     let t = Tmp::new();
     let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
     // Deadline already passed: git is not even started, nothing is remembered.
-    assert!(app.worktree_state(&repo, std::time::Instant::now()).is_none());
+    assert!(app.worktree_state(&repo, None, std::time::Instant::now()).is_none());
     assert!(lock(&app.worktree_state).is_empty());
-    let (head, dirty) = app.worktree_state(&repo, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
+    let (head, tree, filtered) = app.worktree_state(&repo, None, std::time::Instant::now() + Duration::from_secs(10)).unwrap();
     assert_eq!(head.len(), 40);
-    assert!(!dirty);
+    assert_eq!(tree.map(|t| t.len()), Some(40));
+    assert!(!filtered);
+}
+
+#[test]
+fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // A modified tracked file and an untracked one: `add -A` hashes both.
+    fs::write(repo.join("f.txt"), b"changed").unwrap();
+    fs::write(repo.join("new.txt"), vec![b'x'; 200_000]).unwrap();
+    let before = git_in(&repo, &["count-objects", "-v"]);
+    let tree = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree id");
+    assert_eq!(tree.len(), 40);
+    assert_eq!(git_in(&repo, &["count-objects", "-v"]), before, "loose objects or packs changed in the user's repo");
+    // The id is real: the same content, written for real by `git add` into a temp index, gives the same tree.
+    let idx = t.home().join("probe-index");
+    let run = |args: &[&str]| {
+        let o = std::process::Command::new("git").current_dir(&repo).env("GIT_INDEX_FILE", &idx).args(args).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    run(&["read-tree", "HEAD"]);
+    run(&["add", "-A", "--", ".", ":(exclude)data/walkthroughs"]);
+    assert_eq!(run(&["write-tree"]), tree);
+}
+
+#[test]
+fn the_tree_id_leaves_out_the_walkthrough_directory_the_evidence_was_written_under_like_the_verifier() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let custom = repo.join("out/proofs");
+    fs::create_dir_all(&custom).unwrap();
+    let custom_s = custom.to_string_lossy().into_owned();
+    let tree = |ex: &[&str]| app.bridge.tree_id(&repo, ex).expect("tree id");
+    let base_custom = tree(&[&custom_s]);
+    // The custom directory is inside the repo: the verifier leaves it out, so writing evidence there changes nothing.
+    fs::write(custom.join("evidence.json"), b"{}").unwrap();
+    assert_eq!(tree(&[&custom_s]), base_custom, "the custom output dir must be excluded like the verifier excludes it");
+    // And it is the custom dir that is left out, not the default one: a file under data/walkthroughs now counts.
+    fs::create_dir_all(repo.join("data/walkthroughs/x")).unwrap();
+    fs::write(repo.join("data/walkthroughs/x/note.txt"), b"real change").unwrap();
+    assert_ne!(tree(&[&custom_s]), base_custom, "data/walkthroughs is not the excluded dir for this evidence");
+    // Left out by default when no base is known.
+    assert_eq!(tree(&VERIFY_EXCLUDES), tree(&["data/walkthroughs"]));
+    // A base outside the repo leaves nothing out (the verifier only excludes a directory inside the repository).
+    let outside = t.home().join("elsewhere-walkthroughs");
+    fs::create_dir_all(&outside).unwrap();
+    let outside_s = outside.to_string_lossy().into_owned();
+    assert_eq!(tree(&[&outside_s]), tree(&[]));
+}
+
+#[test]
+fn a_tree_recorded_by_evidence_swapped_in_after_the_green_check_is_never_trusted() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    let rec = |tree: &str| serde_json::to_vec(&json!({"git": {"worktreeTree": tree}})).unwrap();
+    // Evidence that honestly records the tree it was verified on: current.
+    let a = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree A");
+    fs::write(&ev, rec(&a)).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    // A tracked edit makes tree B; the green check ran on evidence for A, and during that check the file is replaced with
+    // unsigned JSON that records B. The verdict is about the bytes read before the check, so B must not be taken from the path.
+    fs::write(repo.join("f.txt"), b"edited").unwrap();
+    let b = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree B");
+    assert_ne!(a, b);
+    fs::write(format!("{}.swap-to", ev.display()), rec(&b)).unwrap();
+    app.evidence_cache.lock().unwrap().clear();
+    let got = status_of(&app, &slug);
+    assert_ne!(got, "pass", "a tree read from a file swapped in after the check must not make the evidence current");
+    assert_eq!(got, "unverified");
+}
+
+#[test]
+fn large_evidence_is_bound_by_a_second_read_and_still_reads_current() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    let a = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree A");
+    // Over the 16 KiB cache-key limit: no key, so the bytes are bound by reading the file again after the check.
+    fs::write(&ev, serde_json::to_vec(&json!({"git": {"worktreeTree": a}, "pad": "x".repeat(40_000)})).unwrap()).unwrap();
+    assert_eq!(status_of(&app, &slug), "pass");
+    fs::write(repo.join("f.txt"), b"edited").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
+}
+
+#[test]
+fn evidence_replaced_by_a_fifo_never_blocks_the_list_and_reads_unverified() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, true);
+    let ev = repo.join("data/walkthroughs/deliver-20261105-1810/green.json");
+    fs::remove_file(&ev).unwrap();
+    let c = CString::new(ev.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app = std::sync::Arc::new(app);
+    let a2 = app.clone();
+    std::thread::spawn(move || { let _ = tx.send(a2.evidence_list(&slug).map(|v| v["rows"][0]["status"].as_str().unwrap_or("").to_string())); });
+    let got = rx.recv_timeout(Duration::from_secs(5));
+    // Release a reader stuck in open() so a failing run does not leave the thread behind.
+    { use std::os::unix::fs::OpenOptionsExt; let _ = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&ev); }
+    let got = got.expect("evidence_list blocked on a FIFO standing in for the evidence file");
+    assert_eq!(got.unwrap(), "unverified");
 }
 
 /// A "git" that never answers, to stand in for a slow repo.
@@ -1497,8 +1690,9 @@ fn a_repo_git_cannot_read_keeps_the_checks_own_verdict_and_nothing_is_remembered
 
 #[test]
 fn a_big_untracked_tree_does_not_blow_the_budget() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
     let t = Tmp::new();
-    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let (app, slug, repo) = verified_repo(&t);
     let big = repo.join("node_modules_like");
     fs::create_dir_all(&big).unwrap();
     for i in 0..3000 {
@@ -2004,6 +2198,123 @@ fn a_listing_during_the_report_check_cannot_see_a_partial_success() {
     }
 }
 
+/// A filter the repo's own config defines, attached to every `.txt` file, that leaves a marker file if it ever runs.
+fn plant_filter(repo: &Path, marker: &Path) {
+    git_in(repo, &["config", "filter.evil.clean", &format!("sh -c 'touch {}; cat'", marker.display())]);
+    fs::write(repo.join(".gitattributes"), b"*.txt filter=evil\n").unwrap();
+}
+
+#[test]
+fn a_filter_in_the_repos_own_config_never_runs_while_listing_evidence() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo) = verified_repo(&t);
+    assert_eq!(status_of(&app, &slug), "pass");
+    let marker = t.home().join("filter-ran");
+    plant_filter(&repo, &marker);
+    fs::write(repo.join("f.txt"), b"modified so the clean filter would be applied").unwrap();
+    // Listing (twice, with the state cache cleared each time) must not execute the filter...
+    let first = status_of(&app, &slug);
+    let second = status_of(&app, &slug);
+    assert!(!marker.exists(), "the repo-configured clean filter ran during evidence_list");
+    // ...and evidence that cannot be compared by tree is not shown as a pass.
+    assert_eq!((first.as_str(), second.as_str()), ("unverified", "unverified"));
+}
+
+#[test]
+fn tree_id_refuses_a_repo_that_configures_a_filter_and_still_serves_one_that_does_not() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"changed").unwrap();
+    assert!(!app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    let marker = t.home().join("filter-ran");
+    plant_filter(&repo, &marker);
+    assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_none());
+    assert!(!marker.exists(), "tree_id ran the filter");
+    // smudge and process are filters too.
+    git_in(&repo, &["config", "--unset", "filter.evil.clean"]);
+    assert!(!app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+    git_in(&repo, &["config", "filter.evil.process", "sh -c true"]);
+    assert!(app.bridge.repo_filters(&repo, Duration::from_secs(10)));
+}
+
+/// #113 review [P1]: the config is checked once, then `git add` must not read it again. A worker that adds a filter (and
+/// the attribute selecting it) after the check and before the add must not get it run by the desktop.
+#[test]
+fn a_filter_added_between_the_config_check_and_the_add_never_runs() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"changed, so add would clean it").unwrap();
+    let marker = t.home().join("filter-ran");
+    let (r, m) = (repo.clone(), marker.clone());
+    crate::vajra::bridge::BEFORE_ADD.with(|h| *h.borrow_mut() = Some(Box::new(move || plant_filter(&r, &m))));
+    let tree = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES);
+    crate::vajra::bridge::BEFORE_ADD.with(|h| *h.borrow_mut() = None);
+    assert!(!marker.exists(), "tree_id ran a filter added after its config check");
+    // The snapshot is of the config as checked: the late filter is not defined in it, so the add stores the raw bytes.
+    let want = {
+        git_in(&repo, &["config", "--unset", "filter.evil.clean"]);
+        app.bridge.tree_id(&repo, &VERIFY_EXCLUDES)
+    };
+    assert_eq!(tree, want, "the tree is the one of the checked config");
+}
+
+/// The private git dir keeps the repo's own `info/exclude` (copied): a file ignored there stays out of the tree, as for
+/// verify-work in the repo itself.
+#[test]
+fn the_repos_info_exclude_still_decides_what_the_tree_leaves_out() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let before = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree");
+    fs::write(repo.join("scratch.log"), b"local only").unwrap();
+    assert_ne!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree"), before, "an untracked file is in the tree");
+    let exclude = repo.join(git_in(&repo, &["rev-parse", "--git-path", "info/exclude"]));
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, b"*.log\n").unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree"), before, "ignored by info/exclude, as git add -A does");
+}
+
+#[test]
+fn big_signed_evidence_is_still_compared_by_tree() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    // verify-work records the full command string, so a valid signed file can be far over the 16 KiB cache limit.
+    verify_work_cmd(&repo, &format!("true # {}", "x".repeat(40_000)));
+    let ev = repo.join("data/walkthroughs/green-run/evidence.json");
+    assert!(fs::metadata(&ev).unwrap().len() > 16 * 1024, "the fixture must exceed the cache limit");
+    set_evidence_path(&t, &slug, &ev);
+    assert_eq!(status_of(&app, &slug), "pass", "unchanged since verification");
+    // HEAD does not move: only the working tree differs.
+    fs::write(repo.join("f.txt"), b"edited, HEAD unchanged").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "a tracked edit must not hide behind a large evidence file");
+    git_in(&repo, &["checkout", "--", "f.txt"]);
+    fs::write(repo.join("new.txt"), b"x").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale", "an untracked file too");
+}
+
+#[test]
+fn the_tree_is_computed_from_the_top_level_when_the_run_started_in_a_subdirectory() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.txt"), b"a").unwrap();
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "src"]);
+    // Evidence is captured from src (the run's cwd), on a tree with an uncommitted edit OUTSIDE src.
+    fs::write(repo.join("f.txt"), b"uncommitted root edit").unwrap();
+    verify_work(&repo.join("src"));
+    set_evidence_path(&t, &slug, &repo.join("src/data/walkthroughs/green-run/evidence.json"));
+    for r in lock(&app.runs).values_mut() { r.cwd = repo.join("src"); }
+    assert_eq!(status_of(&app, &slug), "pass", "the same tree, compared from a subdirectory, is not stale");
+    // An edit in a sibling/root file is seen from the subdirectory too.
+    fs::write(repo.join("f.txt"), b"another root edit").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
+}
+
 // ---- #28: the list returns at once; each badge fills in from its own campaign_integrity call --------------------
 
 /// The list as the UI sees it once every badge has filled in: the summaries, then one `campaign_integrity` per slug.
@@ -2309,6 +2620,67 @@ fn an_exhausted_run_id_search_never_falls_back_to_a_guarded_id() {
     assert!(!lock(&app.issued).contains(run));
     let rec = std::fs::read_to_string(t.0.join("data/control/lead").join(run).join("campaign")).unwrap();
     assert_eq!(rec.trim(), "deliver-x");
+}
+
+#[test]
+fn a_run_started_in_a_subdirectory_is_current_against_evidence_the_real_verify_work_wrote_there() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let sub = repo.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("a.txt"), b"a").unwrap();
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-q", "-m", "sub"]);
+    // The REAL verify-work, run from the subdirectory: its walkthrough dir is sub/data/walkthroughs and is the one excluded.
+    verify_work(&sub);
+    let ev = sub.join("data/walkthroughs/green-run/evidence.json");
+    assert!(ev.is_file());
+    set_evidence_path(&t, &slug, &ev);
+    for r in lock(&app.runs).values_mut() { r.cwd = sub.clone(); }
+    assert_eq!(status_of(&app, &slug), "pass", "the run's own output under sub/data/walkthroughs is not an edit");
+    fs::write(sub.join("data/walkthroughs/green-run/extra.log"), b"more output").unwrap();
+    assert_eq!(status_of(&app, &slug), "pass", "nor is later output there");
+    // Real edits are still seen, inside the subdirectory and outside it.
+    fs::write(sub.join("a.txt"), b"edited").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
+    git_in(&repo, &["checkout", "--", "sub/a.txt"]);
+    fs::write(repo.join("f.txt"), b"root edit").unwrap();
+    assert_eq!(status_of(&app, &slug), "stale");
+}
+
+#[test]
+fn no_git_hook_runs_while_the_tree_is_computed_not_even_through_a_repo_configured_hooks_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    fs::write(repo.join("f.txt"), b"modified so the index is rewritten").unwrap();
+    let marker = t.home().join("hook-ran");
+    let hook = |dir: &Path| {
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join("post-index-change");
+        fs::write(&p, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // 1. The repo's own hooks dir.
+    hook(&repo.join(".git/hooks"));
+    // Sanity: git itself does run this hook when it writes an index, so the check below can fail.
+    git_in(&repo, &["add", "-A"]);
+    assert!(marker.exists(), "fixture: the post-index-change hook must fire for a plain git add");
+    fs::remove_file(&marker).unwrap();
+    fs::write(repo.join("f.txt"), b"modified again").unwrap();
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    assert!(!marker.exists(), "a hook in .git/hooks ran while computing the tree id");
+    // 2. A hooks dir selected by the repo's own config (core.hooksPath), as an agent could set it.
+    let dir = t.home().join("evil-hooks");
+    hook(&dir);
+    git_in(&repo, &["config", "core.hooksPath", &dir.to_string_lossy()]);
+    fs::write(repo.join("f.txt"), b"modified a third time").unwrap();
+    assert!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).is_some());
+    assert!(!marker.exists(), "a core.hooksPath hook ran while computing the tree id");
+    // And through the Run view's own call.
+    let _ = status_of(&app, "deliver-20261105-1810");
+    assert!(!marker.exists(), "a hook ran during evidence_list");
 }
 
 /// #13 item 3: `evidence_request` decides between an archived bundle and a repo path with a lexical `starts_with`, so a
@@ -2646,7 +3018,7 @@ fn a_cut_git_answer_is_not_a_base_a_head_or_a_worktree_fact() {
     cut_exe(&app.bridge.git, "#!/bin/sh", &sha, 0);
     assert!(app.resolve_base(&t.home(), "main").is_err());
     // worktree_state (evidence staleness) learns nothing from a cut head or status.
-    assert_eq!(app.worktree_state(&t.home(), std::time::Instant::now() + Duration::from_secs(10)), None);
+    assert_eq!(app.worktree_state(&t.home(), None, std::time::Instant::now() + Duration::from_secs(10)), None);
     // worktree_info: no branch and no base from a cut run.
     let t2 = Tmp::new();
     let (mut app2, _repo, _wt) = crew_fixture(&t2, &|r| r.join(".claude/worktrees/w1"));

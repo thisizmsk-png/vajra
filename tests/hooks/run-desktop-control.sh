@@ -78,9 +78,14 @@ for raw in '{not json' '[]' '"str"' '' '{"session_id":5}' '{"session_id":"sess-1
   run "$raw"; silent && [ "$(nq)" = 1 ]; ok "malformed payload '$raw': silent, entry kept" $?
 done
 EMPTYBIN="$TEST_HOME/emptybin"; mkdir -p "$EMPTYBIN"
-printf '%s' "$(payload PostToolUse Bash AG1 "" "$TEST_HOME/other")" | PATH="$EMPTYBIN" "$SH" "$HOOK" >"$OUT" 2>"$ERR"; RC=$?
+# The hook pins its own PATH to the system dirs (NFR-SEC-2), so the caller's PATH cannot hide jq any more. A copy whose
+# pinned PATH is the empty dir stands in for a machine without jq.
+NOJQ_HOOK="$TEST_HOME/desktop-control-nojq.sh"
+sed "s#^PATH=\"/usr/bin[^\"]*\"; export PATH\$#PATH=\"$EMPTYBIN\"; export PATH#" "$HOOK" > "$NOJQ_HOOK"
+grep -qxF "PATH=\"$EMPTYBIN\"; export PATH" "$NOJQ_HOOK"; ok "jq-absent copy has the empty PATH" $?
+printf '%s' "$(payload PostToolUse Bash AG1 "" "$TEST_HOME/other")" | PATH="$EMPTYBIN" "$SH" "$NOJQ_HOOK" >"$OUT" 2>"$ERR"; RC=$?
 silent && [ "$(nq)" = 1 ]; ok "jq absent: silent, entry kept" $?
-printf '%s' "$(payload PreToolUse Bash AG1 "" "$TEST_HOME/other")" | PATH="$EMPTYBIN" "$SH" "$HOOK" >"$OUT" 2>"$ERR"; RC=$?
+printf '%s' "$(payload PreToolUse Bash AG1 "" "$TEST_HOME/other")" | PATH="$EMPTYBIN" "$SH" "$NOJQ_HOOK" >"$OUT" 2>"$ERR"; RC=$?
 silent; ok "jq absent PreToolUse: silent" $?
 
 # --- Delivery (ac-4) ---------------------------------------------------------

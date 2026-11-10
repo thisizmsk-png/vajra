@@ -17,7 +17,7 @@ const notBuilt = (screen: Screen): ComponentType => function NotBuilt() {
   const run = screen === "run" && route.params.slug && route.params.id ? { slug: route.params.slug, id: route.params.id } : null;
   return (
     <section aria-label={S.nav[screen]} className="v-screen">
-      <header className="v-screen__head"><Text as="h1" variant="label">{S.nav[screen]}</Text></header>
+      <header className="v-screen__head" data-tauri-drag-region><Text as="h1" variant="label">{S.nav[screen]}</Text></header>
       <div className="v-screen__body v-crew__state">
         <Empty title={S.shell.notBuilt}
           action={run ? <Button variant="primary" onClick={() => go("crew", run)}>{S.states.openCrew}</Button>
