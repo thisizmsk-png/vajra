@@ -4,6 +4,7 @@ import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
 import { CurrentProject } from "../src/projects/current";
 import { validate } from "../src/screens/home/validate";
+import { projectId } from "../src/projects/adapter";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -15,6 +16,9 @@ const rows = (ok: boolean) => ({
   start_enabled: ok,
 });
 const handle = { stream: "s1", session_id: "u", run_id: "20261106-1500", campaign: "deliver-20261106-1500" };
+/** What `act_start_run` answers: a receipt, with the run handle when it started. */
+const receipt = (state: string, o: Record<string, unknown> = {}) => ({ schema: "vajra.receipt/1", action_id: "act-x", project_id: "p_x", action: "start_run", target: "p_x", expect_generation: null, current_generation: null, state, reason: null, detail: null, retry: "no", rev: 1, ts_ms: 1, ...o });
+const started = { receipt: receipt("done"), result: handle };
 const camp = (o = {}) => ({ slug: "c1", goal: "ship it", status: "active", passing: 2, total: 5, ...o });
 
 afterEach(() => {
@@ -55,11 +59,11 @@ describe("Home", () => {
     fill(S.home.repo, "/r");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     expect(await screen.findByText(S.home.errAsk)).toBeTruthy();
-    expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false);
   });
 
   it("starts a run with the entered values and opens the Run view", async () => {
-    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, start_run: handle });
+    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: started });
     await screen.findByText("registered");
     fill(S.home.repo, " /r ");
     fill(S.home.ask, "fix the bug");
@@ -67,30 +71,46 @@ describe("Home", () => {
     fireEvent.click(screen.getByLabelText("2"));
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     await waitFor(() => expect(window.location.hash).toContain("#/review?"));
-    const call = f.calls.find((c) => c.cmd === "start_run")!;
+    const call = f.calls.find((c) => c.cmd === "act_start_run")!;
     expect(call.args).toMatchObject({ ask: "fix the bug", maxRounds: 2, base: "main", maxInFlight: 4, campaign: null, cwd: "/r" });
+    const env = (call.args as { envelope: { action_id: string; project_id: string; expect_generation: number | null } }).envelope;
+    expect(env.action_id).toMatch(/^act-[0-9a-f-]{36}$/);
+    expect(env).toMatchObject({ project_id: projectId("/r"), expect_generation: null });
     expect(window.location.hash).toContain("slug=deliver-20261106-1500");
     expect(window.location.hash).toContain("id=20261106-1500");
   });
 
   it("starts once from Cmd+Return, however often it is pressed while the start is in flight", async () => {
-    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, start_run: () => new Promise(() => {}) });
+    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: () => new Promise(() => {}) });
     await screen.findByText("registered");
     fill(S.home.repo, "/r"); fill(S.home.ask, "x");
     const ask = screen.getByLabelText(S.home.ask);
     fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
     fireEvent.keyDown(ask, { key: "Enter", metaKey: true });
     fireEvent.keyDown(ask, { key: "Enter", metaKey: true, repeat: true });
-    await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_run")).toBe(true));
-    expect(f.calls.filter((c) => c.cmd === "start_run")).toHaveLength(1);
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    expect(f.calls.filter((c) => c.cmd === "act_start_run")).toHaveLength(1);
   });
 
   it("shows the core's refusal and stays on Home", async () => {
-    await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, start_run: () => { throw { error: "invalid_input", detail: "base: is not a branch or commit in this repository" }; } });
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: { receipt: receipt("rejected", { reason: "invalid_args", detail: "base: is not a branch or commit in this repository" }), error: { error: "invalid_args", detail: "base: is not a branch or commit in this repository" } } });
     await screen.findByText("registered");
     fill(S.home.repo, "/r"); fill(S.home.ask, "x");
     fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
     expect((await screen.findByRole("alert")).textContent).toContain("is not a branch or commit");
+    expect(window.location.hash).toBe("");
+  });
+
+  it("shows a receipt's own refusal when the core sent no error, and a new click gets a new action id", async () => {
+    const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] }, act_start_run: { receipt: receipt("rejected", { reason: "too_many_actions", detail: "too many recent actions; try again later" }) } });
+    await screen.findByText("registered");
+    fill(S.home.repo, "/r"); fill(S.home.ask, "x");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    expect((await screen.findByRole("alert")).textContent).toContain("too many recent actions");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "act_start_run")).toHaveLength(2));
+    const ids = f.calls.filter((c) => c.cmd === "act_start_run").map((c) => (c.args as { envelope: { action_id: string } }).envelope.action_id);
+    expect(ids[0]).not.toBe(ids[1]);
     expect(window.location.hash).toBe("");
   });
 
@@ -109,7 +129,7 @@ describe("Home", () => {
     fireEvent.click(await screen.findByRole("button", { name: S.home.resume }));
     await waitFor(() => expect(window.location.hash).toContain("#/review?"));
     expect(f.calls.find((c) => c.cmd === "resume_run")!.args).toEqual({ sessionId: SID, campaign: "c1", cwd: "/work/repo" });
-    expect(f.calls.some((c) => c.cmd === "start_run")).toBe(false); // never a fresh session
+    expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(false); // never a fresh session
   });
 
   it("resumes on the provider that ran the campaign, never silently on another", async () => {

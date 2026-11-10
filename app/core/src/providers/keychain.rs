@@ -193,7 +193,7 @@ pub struct Keys {
 }
 
 /// The `security` service name for an account that takes a stored key.
-fn service(account: &str) -> Result<String, Error> {
+pub(crate) fn service(account: &str) -> Result<String, Error> {
     if KEY_ACCOUNTS.contains(&account) { Ok(format!("vajra.provider.{account}")) } else { Err(Error::UnknownAccount) }
 }
 

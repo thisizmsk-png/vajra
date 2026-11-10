@@ -66,7 +66,7 @@ fn crew_tails_worker_transcripts_into_streams_and_inspect() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -98,7 +98,7 @@ fn one_active_run_per_project() {
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap(); // a launched run is always recorded with its project
@@ -363,7 +363,7 @@ fn worker_transcripts_redact_the_rotated_nonce() {
     let first_line = first.lines().next().unwrap().to_string();
     fs::write(sub.join("agent-aa870dd40540481f0.jsonl"), format!("{first_line}\n")).unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     app.crew("c", "20261105-1230").unwrap();
@@ -501,7 +501,7 @@ fn oversized_worker_meta_and_journal_are_skipped_not_loaded() {
     fs::File::create(&big).unwrap().set_len(1024 * 1024).unwrap();
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     let run = lock(&app.runs).get(&stream).map(|r| (r.session_id.clone(), r.run_id.clone(), r.campaign.clone(), r.cwd.clone())).unwrap();
@@ -553,7 +553,7 @@ fn inspect_returns_the_newest_output_once_more_than_16_kib_is_retained() {
     }
     let stream = format!("run-{sid}");
     app.sup
-        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() })
+        .spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
         .unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -624,7 +624,7 @@ fn the_core_refreshes_workers_and_transcripts_without_a_crew_view() {
     fs::create_dir_all(&cwd).unwrap();
     let (path, first) = seed_worker(&t, &cwd, sid);
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     assert!(lock(&app.control).inspect_worker(Actor::Lead, "aa870dd40540481f0", 50).is_err(), "unknown before any refresh");
@@ -657,7 +657,7 @@ fn task_metadata_is_derived_from_the_journal_label_and_resolves_task_calls() {
     fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
     fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r2\",\"phase\":\"Execute\"}\n").unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1810".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1810").unwrap();
     app.refresh_workers();
@@ -1816,7 +1816,7 @@ fn the_crew_tree_shows_message_pending_and_stopped_by_the_human_from_the_control
     fs::write(sub.join("workflows/wf_1/agent-a2.meta.json"), r#"{"agentType":"vajra:arjuna","description":"d"}"#).unwrap();
     fs::write(sub.join("workflows/wf_1/journal.jsonl"), "{\"type\":\"started\",\"agentId\":\"a2\",\"label\":\"task.t1.r1\",\"phase\":\"Execute\"}\n").unwrap();
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: cwd.clone(), nonces: Redactor::default() });
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
     let overlays = |tree: &Value| -> Vec<String> {
@@ -2710,7 +2710,7 @@ fn two_live_runs_keep_their_own_control_sessions_and_reap_independently() {
     let (a, b) = ("1b4e28ba-2fa1-41d2-883f-0016d3cca427", "0f8fad5b-d9cb-469f-a165-70867728950e");
     for (sid, run, argv) in [(a, "20261108-0900", vec!["true".to_string()]), (b, "20261108-0901", vec!["sleep".into(), "5".into()])] {
         let stream = format!("run-{sid}");
-        app.sup.spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+        app.sup.spawn(&stream, SpawnSpec { argv, cwd: cwd.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
         lock(&app.runs).insert(stream, Run { session_id: sid.into(), run_id: run.into(), campaign: format!("c-{run}"), cwd: cwd.clone(), nonces: Redactor::default() });
         lock(&app.control).start_session(sid, run).unwrap();
     }
@@ -3022,7 +3022,7 @@ fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another()
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap(); // pinned to A at launch
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
@@ -3057,7 +3057,7 @@ fn store_projects_sharing_one_git_location_launch_as_themselves() {
     app.within_caps(&p.id, 1).unwrap();
     app.record_run_pinned("20261105-1230", &a, &la, Some(&p.id), sa, "c", true, 1).unwrap();
     let stream = format!("run-{sa}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sa.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
     // A launch in B is B's, and B is not busy with A's run.
     let (lb, p) = app.launch_project(&b).unwrap();
@@ -3150,7 +3150,7 @@ fn an_active_run_with_no_recorded_project_holds_every_start() {
     let elsewhere = test_project(&t.0.join("data"), &t.home(), &t.0.join("elsewhere"));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.clone(), nonces: Redactor::default() });
     let e = app.within_caps(&elsewhere, 1).unwrap_err();
     assert_eq!(code(&e), "project_not_recorded", "{e}");
@@ -3206,7 +3206,7 @@ fn a_subfolder_of_a_pinned_folder_keeps_its_pinned_project_after_a_git_rewrite()
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt, sid, "c", true, 1).unwrap();
     app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap();
@@ -3405,7 +3405,7 @@ fn a_run_first_pinned_in_a_subfolder_keeps_the_whole_project_after_a_git_rewrite
     let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.join("src"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: wt.join("src"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: wt.join("src"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &wt.join("src"), sid, "c", true, 1).unwrap(); // A, first started in a-wt/src
     app.record_run("20261105-1229", &b, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "d", true, 1).unwrap(); // B, finished
@@ -3440,7 +3440,7 @@ fn nested_repos_with_their_own_git_stay_separate_projects() {
     let pi = test_project(&t.0.join("data"), &t.home(), &inner);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: outer.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: outer.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &outer, sid, "c", true, 1).unwrap();
     let p = app.launch_project(&inner).unwrap().1;
@@ -3714,7 +3714,7 @@ fn a_finished_run_stops_the_director_general_reading_running_after_the_normal_re
     let p = test_project(&t.0.join("data"), &t.home(), &t.0.join("repo"));
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.join("repo"), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: t.0.join("repo"), nonces: Redactor::default() });
     app.record_run("20261105-1230", &t.0.join("repo"), sid, "c", true, 1).unwrap();
     assert!(app.running_in_project(&p));
@@ -3851,7 +3851,7 @@ fn resuming_a_live_session_into_another_project_is_refused_before_touching_its_c
     test_project(&t.0.join("data"), &t.home(), &b);
     let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let stream = format!("run-{sid}");
-    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(stream.clone(), Run { session_id: sid.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
     app.record_run("20261105-1230", &a, sid, "c", true, 1).unwrap();
     lock(&app.control).start_session(sid, "20261105-1230").unwrap();
@@ -4500,4 +4500,84 @@ fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() 
     assert_eq!(now["no_upstream"], true, "{now}");
     assert!(code(&e) == "unsaved_work_changed" && e["no_upstream"] == true && !app.worker_closed(CLOSE_W), "{e}");
     assert!(lock(&terms.released).is_empty());
+}
+
+#[path = "board_tests.rs"]
+mod board_cards;
+
+/// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
+/// session of runs that start and finish keeps the map bounded by the runs still going.
+#[test]
+fn reaping_forgets_finished_runs_worker_counts() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    for i in 0..6u32 {
+        let sid = format!("1b4e28ba-2fa1-41d2-883f-0016d3cca4{i:02}");
+        app.launch(&sid, &format!("20261105-12{i:02}"), "c", &cwd, |_| Ok(vec!["true".into()]), false).unwrap();
+        app.sup.wait(&format!("run-{sid}"), Duration::from_secs(5)).unwrap();
+        app.reap_runs();
+        assert!(lock(&app.run_workers).is_empty(), "after run {i}: {:?}", lock(&app.run_workers));
+    }
+}
+
+/// #80 optional: a bad maxInFlight is `invalid_args` even next to a running run (never `workers_full`), from
+/// `start_run` and at the caps door itself.
+#[test]
+fn a_bad_max_in_flight_is_invalid_args_before_any_cap() {
+    let t = Tmp::new();
+    let app = t.app();
+    let cwd = t.0.join("repo");
+    let sid = "1b4e28ba-2fa1-41d2-883f-0016d3cca499";
+    app.launch_kind(sid, "20261105-1259", "c", &cwd, |_| Ok(vec!["sleep".into(), "5".into()]), false, true, Engine::Claude, 16).unwrap();
+    for bad in [0u32, 17, 99] {
+        let input = RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: bad, campaign: None, provider: None };
+        assert_eq!(code(&app.start_run(input, cwd.to_str().unwrap()).unwrap_err()), "invalid_args", "{bad}");
+        let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca498";
+        assert_eq!(code(&app.launch_kind(other, "20261105-1258", "c", &cwd, |_| Ok(vec!["true".into()]), false, true, Engine::Claude, bad).unwrap_err()), "invalid_args", "caps door: {bad}");
+    }
+    let _ = app.sup.kill(&format!("run-{sid}"));
+}
+
+/// #80 optional: a resumed run is counted at the maxInFlight it was started with (read from its guarded record), not
+/// at the default, so a resume cannot push the app past the worker ceiling.
+#[test]
+fn a_resumed_run_counts_its_original_max_in_flight() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], |_| Ok(vec!["true".into()]), false, true, Engine::Claude, 6).unwrap();
+    app.sup.wait(&format!("run-{}", SIDS[0]), Duration::from_secs(5)).unwrap();
+    app.reap_runs();
+    assert_eq!(app.original_workers(SIDS[0], "c0"), 6);
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, Engine::Claude, 4).unwrap();
+    // 6 (the resumed run as started) + 4 is over the ceiling of 8; counted at the default 4 it would not be.
+    let held = app.resume_run(SIDS[0], "c0", r[0].to_str().unwrap(), None).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("workers_full")), "{held}");
+    // A run recorded before this record existed, or one the guarded record does not vouch for, counts at the default.
+    assert_eq!(app.original_workers(SIDS[2], "c0"), caps::DEFAULT_RUN_WORKERS);
+    assert_eq!(app.original_workers(SIDS[0], "c-other"), caps::DEFAULT_RUN_WORKERS);
+    app.sup.kill(&format!("run-{}", SIDS[1])).unwrap();
+}
+
+/// #109 review: the run's maxInFlight is recorded before anything spawns; if that guarded write fails the launch is
+/// refused, nothing runs and no control session is left behind (a resume can never fall back to the default count).
+#[test]
+fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    // A directory where the record goes: the atomic write cannot replace it.
+    let dir = app.data.join("control/lead").join(RUNS[0]);
+    fs::create_dir_all(dir.join("workers")).unwrap();
+    let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s2 = spawned.clone();
+    let e = app
+        .launch_kind(SIDS[0], RUNS[0], "c0", &r[0], move |_| { s2.store(true, Ordering::SeqCst); Ok(vec!["sleep".into(), "5".into()]) }, false, true, Engine::Claude, 6)
+        .unwrap_err();
+    assert_eq!(code(&e), "io", "{e}");
+    assert!(!spawned.load(Ordering::SeqCst), "argv was built, so the spawn was reached");
+    assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false));
+    assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
+    assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
 }
