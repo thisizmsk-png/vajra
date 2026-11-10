@@ -37,7 +37,12 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const edit = (next: Agents) => { setDraft(next); setMessage(""); };
   const inUse = (e: { account: string; model: string | null }) => sameEntry(draft.default, e) || Object.values(draft.roles).some((r) => sameEntry(r, e));
-  const toggle = (e: { account: string; model: string | null }) => {
+  const toggle = (e: { account: string; model: string | null }, accountModels: string[]) => {
+    // Narrowing under an account-wide allowance: the account-wide entry becomes explicit entries for every other model.
+    if (e.model !== null && coveredByAccount(draft.allowed, e.account)) {
+      const rest = accountModels.filter((id) => id !== e.model).map((id) => ({ account: e.account, model: id }));
+      return edit({ ...draft, allowed: [...draft.allowed.filter((x) => x.account !== e.account || x.model !== null), ...rest.filter((r) => !draft.allowed.some((x) => sameEntry(x, r)))] });
+    }
     const on = draft.allowed.some((x) => sameEntry(x, e));
     edit({ ...draft, allowed: on ? draft.allowed.filter((x) => !sameEntry(x, e)) : [...draft.allowed, e] });
   };
@@ -76,15 +81,16 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
             const key = choiceKey(e.account.id, e.model);
             const covered = e.model !== null && coveredByAccount(draft.allowed, e.account.id);
             const on = covered || draft.allowed.some((x) => sameEntry(x, { account: e.account.id, model: e.model }));
-            const locked = covered || (on && inUse({ account: e.account.id, model: e.model }));
+            // Narrowing a CLI login's account-wide allowance would drop its own default, so that stays locked while a default uses it.
+            const locked = on && (inUse({ account: e.account.id, model: e.model }) || (covered && e.account.credential.source === "cli_login" && inUse({ account: e.account.id, model: null })));
             return (
               <li key={key}>
                 <label>
-                  <input type="checkbox" checked={on} disabled={locked} aria-describedby={locked ? `${heading}-${key}` : undefined} onChange={() => toggle({ account: e.account.id, model: e.model })} />
+                  <input type="checkbox" checked={on} disabled={locked} aria-describedby={locked ? `${heading}-${key}` : undefined} onChange={() => toggle({ account: e.account.id, model: e.model }, e.account.models.map((m) => m.id))} />
                   <ProviderIcon family={e.account.models.find((m) => m.id === e.model)?.family ?? e.account.provider} via={e.model && e.account.provider === "openrouter" ? "openrouter" : undefined} />
                   <span data-model-line>{modelLine(e.account, e.model, WORD)}</span>
                 </label>
-                {locked && <span id={`${heading}-${key}`} className="v-text v-text--body-sm v-text--muted">{covered ? C.coveredByAccount : C.inUse}</span>}
+                {locked && <span id={`${heading}-${key}`} className="v-text v-text--body-sm v-text--muted">{C.inUse}</span>}
               </li>
             );
           })}
