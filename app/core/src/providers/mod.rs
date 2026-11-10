@@ -5,3 +5,4 @@
 pub mod contract;
 pub mod detect;
 pub mod keychain;
+pub mod usage;

@@ -204,6 +204,11 @@ fn provider_key_remove(app: State<'_, App>, account: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn provider_usage(app: State<'_, App>, page_open: bool) -> Res {
+    app.provider_usage(page_open)
+}
+
+#[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
 }
@@ -606,6 +611,7 @@ fn main() {
             provider_key_save,
             provider_key_replace,
             provider_key_remove,
+            provider_usage,
             verify_campaign,
             read_report,
             resume_targets,
