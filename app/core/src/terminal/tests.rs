@@ -492,7 +492,7 @@ fn a_reader_still_blocked_after_close_reaped_the_shell_stops_at_its_next_read_an
     // What `stop` leaves behind when the real reader is still blocked: the shell reaped, so `exited` is set.
     term.exited.store(true, Ordering::SeqCst);
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window, Limits::default().max_rate);
+    read_loop(Box::new(Endless(reads.clone())), &term, Limits::default().window, Limits::default().max_rate, 0);
     assert!(reads.load(Ordering::SeqCst) <= 1, "the reader kept consuming after the shell was reaped: {} reads", reads.load(Ordering::SeqCst));
     assert!(lock(&term.pending.0).buf.len() <= 1000, "output was buffered with no flusher to drain it");
     t.close(info.id).unwrap();
@@ -514,7 +514,7 @@ fn a_reader_blocked_with_the_slave_held_open_is_woken_without_a_signal_and_ends(
     let wake = wake.expect("a wake pipe");
     let th = {
         let term = term.clone();
-        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window, Limits::default().max_rate))
+        std::thread::spawn(move || read_loop(reader, &term, Limits::default().window, Limits::default().max_rate, 0))
     };
     std::thread::sleep(Duration::from_millis(200)); // let it block in select
     assert!(!th.is_finished(), "the reader should be blocked");
