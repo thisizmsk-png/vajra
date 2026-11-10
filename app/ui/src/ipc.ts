@@ -267,6 +267,15 @@ export const api = {
   resumeRun: (sessionId: string, campaign: string, cwd: string, provider?: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd, ...(provider ? { provider } : {}) }),
   /** `vajra.providers/1`: each adapter with install state, version, capabilities (and `limits` reasons) and the CLI's own login check. Parse with `parseProviderList`. */
   providerList: () => call<ProviderList>("provider_list"),
+  // Multi-provider accounts. Fixture-backed until the core commands land; answers are parsed with `parseAccounts`, `parseUsage` and `parseAgents`.
+  providerAccounts: () => call<unknown>("provider_accounts"),
+  providerUsage: () => call<unknown>("provider_usage"),
+  /** Hands the pasted key to the core, which writes it to the Keychain. Nothing answers with it, and nothing here keeps it. */
+  providerKeySave: (accountId: string, key: string) => call<void>("provider_key_save", { accountId, key }),
+  providerKeyRemove: (accountId: string) => call<void>("provider_key_remove", { accountId }),
+  providerBaseUrlSave: (accountId: string, baseUrl: string) => call<void>("provider_base_url_save", { accountId, baseUrl }),
+  providerAgents: (projectId: string) => call<unknown>("provider_agents", { projectId }),
+  providerAgentsSave: (projectId: string, agents: unknown) => call<unknown>("provider_agents_save", { projectId, agents }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
