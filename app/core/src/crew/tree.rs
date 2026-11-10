@@ -136,12 +136,7 @@ pub fn worker_from(agent_id: &str, meta: &Meta, journal: Option<&JournalEntry>, 
             Some(_) => Status::InProgress,
             None => Status::Unknown,
         },
-        provider: tr.and_then(|t| t.model()).map(|model| ProviderTag {
-            account: "claude".into(),
-            family: "claude".into(),
-            model: model.into(),
-            billing: "subscription".into(),
-        }),
+        provider: tr.and_then(|t| t.model()).map(|model| ProviderTag::new("claude", model, "subscription", None)),
     }
 }
 

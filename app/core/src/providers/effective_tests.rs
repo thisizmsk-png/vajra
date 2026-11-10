@@ -46,7 +46,19 @@ fn a_matched_receipt_reads_the_session_file_and_raises_nothing() {
     let r = receipt(requested("vendor/model-a", Some("high")), eff);
     assert!(r.mismatches().is_empty());
     assert!(r.mismatch_event().is_none());
-    assert_eq!(r.effective.tag().map(|t| (t.account, t.family, t.model, t.billing)), Some(("openrouter".into(), "codex".into(), "vendor/model-a".into(), "gateway".into())));
+    let p = r.provider().expect("a read receipt has a provider");
+    assert_eq!((p.account.as_str(), p.label.as_str(), p.family.as_str(), p.model.as_str(), p.billing.as_str()), ("openrouter", "OpenRouter", "vendor", "vendor/model-a", "gateway"));
+    assert_eq!(p.requested.map(|q| (q.model, q.label)), Some((Some("vendor/model-a".into()), "OpenRouter".into())), "no mismatch: requested equals effective");
+    assert_eq!((p.model_name, p.error), (None, None));
+}
+
+/// The same bytes `app/ui/tests/launchProviderGolden.test.ts` feeds to `parseWorkerProvider`: the two sides cannot drift apart.
+#[test]
+fn the_provider_object_is_the_golden_json_the_ui_parser_reads() {
+    let eff = read_codex(EVENTS, &codex_home(ROLLOUT));
+    let p = receipt(requested("vendor/model-a", Some("high")), eff).provider().unwrap();
+    let golden: Value = serde_json::from_str(include_str!("../../tests/fixtures/launch/worker-provider.json")).unwrap();
+    assert_eq!(serde_json::to_value(&p).unwrap(), golden);
 }
 
 #[test]
@@ -56,7 +68,7 @@ fn with_no_session_file_everything_is_unknown_and_nothing_is_copied_from_the_req
         let eff = read_codex(events, home);
         assert_eq!((eff.model.as_str(), eff.account.as_str(), eff.billing.as_str(), eff.sandbox.as_str()), ("unknown", "unknown", "unknown", "unknown"));
         assert_eq!((eff.effort.as_deref(), eff.read_from.as_deref()), (Some("unknown"), None));
-        assert!(eff.tag().is_none(), "Not reported: no chip data");
+        assert!(eff.tag(None).is_none(), "nothing read: no chip data");
         let r = receipt(requested("vendor/model-a", Some("high")), eff);
         assert_ne!(r.effective.model, r.requested.model);
         assert!(r.mismatches().is_empty() && r.mismatch_event().is_none(), "an unreported value is not a mismatch");

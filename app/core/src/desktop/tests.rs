@@ -319,9 +319,9 @@ fn node_json_is_recursive() {
 #[test]
 fn a_node_carries_the_provider_the_worker_reported() {
     use crate::providers::effective::ProviderTag;
-    let tag = ProviderTag { account: "openrouter".into(), family: "codex".into(), model: "vendor/model-a".into(), billing: "gateway".into() };
+    let tag = ProviderTag::new("openrouter", "vendor/model-a", "gateway", None);
     let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), children: vec![] };
-    assert_eq!(node_json(&leaf)["provider"], json!({"account": "openrouter", "family": "codex", "model": "vendor/model-a", "billing": "gateway"}));
+    assert_eq!(node_json(&leaf)["provider"], json!({"account": "openrouter", "label": "OpenRouter", "family": "vendor", "model": "vendor/model-a", "model_name": null, "billing": "gateway", "requested": null, "error": null}));
 }
 
 #[test]

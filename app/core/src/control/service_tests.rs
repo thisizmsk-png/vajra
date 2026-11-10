@@ -772,8 +772,8 @@ fn a_worker_in_the_state_view_carries_its_provider_or_null() {
     let view = s.workers_view();
     assert_eq!(view[0]["provider"], Value::Null, "not reported: null, not a guess");
     let mut w = s.in_scope().next().unwrap().workers[0].clone();
-    w.worker.provider = Some(crate::providers::effective::ProviderTag { account: "claude".into(), family: "claude".into(), model: "claude-model-x".into(), billing: "subscription".into() });
+    w.worker.provider = Some(crate::providers::effective::ProviderTag::new("claude", "claude-model-x", "subscription", None));
     s.set_workers(SID, vec![w]);
-    assert_eq!(s.workers_view()[0]["provider"], json!({"account": "claude", "family": "claude", "model": "claude-model-x", "billing": "subscription"}));
+    assert_eq!(s.workers_view()[0]["provider"], json!({"account": "claude", "label": "Claude Code", "family": "claude", "model": "claude-model-x", "model_name": null, "billing": "subscription", "requested": null, "error": null}));
     let _ = fs::remove_dir_all(dir);
 }

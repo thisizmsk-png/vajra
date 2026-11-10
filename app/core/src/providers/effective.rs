@@ -65,25 +65,74 @@ impl Effective {
         }
     }
 
-    /// `{account, family, model, billing}` for a crew node or a `project_state` worker, or `None` while the model is
-    /// not reported (a surface shows "Not reported", never a guess).
-    pub fn tag(&self) -> Option<ProviderTag> {
-        (self.model != UNKNOWN).then(|| ProviderTag {
-            account: self.account.clone(),
-            family: self.harness.clone(),
-            model: self.model.clone(),
-            billing: self.billing.clone(),
-        })
+    /// The provider chip data for what ran, or `None` when nothing was read at all. A model the harness did not report is
+    /// `"unknown"` ("Not reported"), not a guess. `requested` is set by the caller that knows what was asked for.
+    pub fn tag(&self, requested: Option<TagRequested>) -> Option<ProviderTag> {
+        self.read_from.is_some().then(|| ProviderTag::new(&self.account, &self.model, &self.billing, requested))
     }
 }
 
-/// The provider chip data every surface draws from.
+/// What a surface draws beside a worker: the `provider` object of the UI contract (`app/ui/src/workerProvider.ts`,
+/// `parseWorkerProvider`). Every field the UI requires is here, under the UI's own names.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProviderTag {
     pub account: String,
+    /// The provider's name as people know it ("Claude Code", "OpenRouter"): shown beside every model.
+    pub label: String,
+    /// The model family that picks the icon (`claude`, `deepseek`); the account when the model names none.
     pub family: String,
+    /// The model id that ran; `"unknown"` when the harness did not report it.
     pub model: String,
+    /// A display name for the model. None is known yet, so `null`.
+    pub model_name: Option<String>,
     pub billing: String,
+    /// What was asked for; the same as the effective side when nothing differs. `None` where it is not known.
+    pub requested: Option<TagRequested>,
+    /// The worker's current provider error (PR 5); `null` until there is one.
+    pub error: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TagRequested {
+    pub model: Option<String>,
+    pub model_name: Option<String>,
+    pub label: String,
+}
+
+impl ProviderTag {
+    pub fn new(account: &str, model: &str, billing: &str, requested: Option<TagRequested>) -> Self {
+        Self {
+            account: account.into(),
+            label: label_of(account),
+            family: family_of(model, account),
+            model: model.into(),
+            model_name: None,
+            billing: billing.into(),
+            requested,
+            error: None,
+        }
+    }
+}
+
+/// The name people know an account by. An account Vajra has no name for shows as its own id.
+pub fn label_of(account: &str) -> String {
+    match account {
+        "claude" => "Claude Code".into(),
+        "codex" => "Codex".into(),
+        "openrouter" => "OpenRouter".into(),
+        other => other.into(),
+    }
+}
+
+/// The model family that picks the icon: the vendor prefix of a gateway id (`deepseek/deepseek-v4-flash` is `deepseek`), or
+/// `claude` for a Claude model; otherwise the account's own provider.
+fn family_of(model: &str, account: &str) -> String {
+    let vendor = model.split_once('/').map(|(v, _)| v).filter(|v| !v.is_empty() && v.len() <= 32 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    match vendor {
+        Some(v) => v.to_ascii_lowercase(),
+        None if model.starts_with("claude") => "claude".into(),
+        None => account.into(),
+    }
 }
 
 /// The account and billing a Codex `model_provider` id stands for. An id Vajra did not write is unknown, never guessed.

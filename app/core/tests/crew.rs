@@ -344,7 +344,7 @@ mod crew {
         assert_eq!(tr.model(), Some("claude-model-x"));
 
         let mut w = worker("a1", "bhima", "task.t1.r1", Status::InProgress);
-        w.provider = Some(ProviderTag { account: "claude".into(), family: "claude".into(), model: "claude-model-x".into(), billing: "subscription".into() });
+        w.provider = Some(ProviderTag::new("claude", "claude-model-x", "subscription", None));
         let tasks = json!({"tasks": [{"id": "t1", "owner_agent": "bhima", "status": "in_progress"}]});
         let workers = vec![w, worker("a2", "bhima", "task.t1.r2", Status::InProgress)];
         let signals = Signals::default();
@@ -357,6 +357,7 @@ mod crew {
         nodes(&root, &mut all);
         let with = all.iter().find(|n| n.id == "agent:a1").expect("worker node");
         assert_eq!(with.provider.as_ref().map(|p| (p.account.as_str(), p.model.as_str(), p.billing.as_str())), Some(("claude", "claude-model-x", "subscription")));
+        assert_eq!(with.provider.as_ref().map(|p| (p.label.as_str(), p.family.as_str())), Some(("Claude Code", "claude")));
         assert_eq!(all.iter().find(|n| n.id == "agent:a2").unwrap().provider, None, "not reported: no tag, never a guess");
     }
 

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ledger::Ledger;
-use crate::providers::effective::{Effective, Requested, UNKNOWN};
+use crate::providers::effective::{label_of, Effective, ProviderTag, Requested, TagRequested, UNKNOWN};
 
 pub const SCHEMA: &str = "vajra.receipt/1";
 /// Dedupe window: an `action_id` older than this may be reused.
@@ -366,6 +366,13 @@ impl LaunchReceipt {
             out.push("account");
         }
         out
+    }
+
+    /// The provider object every surface draws for this worker: what ran, with what was asked for beside it (the same
+    /// when nothing differs). `None` while nothing is read.
+    pub fn provider(&self) -> Option<ProviderTag> {
+        let asked = TagRequested { model: Some(self.requested.model.clone()), model_name: None, label: label_of(&self.requested.account) };
+        self.effective.tag(Some(asked))
     }
 
     /// The `launch_mismatch` event for the Director-General, or `None` when the run matches what was asked for. Vajra never
