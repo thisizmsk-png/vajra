@@ -159,6 +159,38 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
 - `model` is an opaque id (letters, digits and `-._/:`, at most 80); `effort` is a lowercase level word (at most 16) or `null`
   for the CLI's default. The core checks that an account exists, is installed and has its key when a worker starts, not here.
 
+## `provider_usage` (`vajra.provider_usage/1`)
+
+Multi-provider, PR 7 (usage meters, H5). Tauri command `provider_usage(page_open)`; the same answers ride in `project_state.usage`
+as a cache read. One entry per account:
+
+```json
+{"schema": "vajra.provider_usage/1", "usage": [
+  {"account": "claude", "read_at": null, "source": "none", "windows": [], "amounts": null},
+  {"account": "openrouter", "read_at": "2026-11-09T12:00:00Z", "source": "gateway_key",
+   "windows": [{"kind": "credit", "used_pct": 84, "resets_at": null, "warn": true}],
+   "amounts": {"usage": 8.4, "usage_daily": 1.25, "limit": 10.0, "limit_remaining": 1.6}}]}
+```
+
+- **Nothing is estimated.** A window exists only if the account's own source reported it. `windows: []` with `source: "none"`
+  is "Not reported". There is no price table, and Claude Code's `total_cost_usd` is ignored. Today the CLI logins report no
+  windows, so they read "Not reported"; a CLI that reports windows later fills `kind` (`5h`, `daily`, `weekly`), `used_pct` and
+  `resets_at` through the same shape.
+- **Warning.** `warn` is true at 80% used or more. The status bar chip shows the most used warned window, with its reset time
+  only if the source gave one.
+- **OpenRouter** (`source: "gateway_key"`): `GET /api/v1/key`. Only `usage`, `usage_daily`, `limit` and `limit_remaining` are
+  kept (`amounts`, in the key's own currency). The answer also carries the key's label; it is never deserialized, so it cannot
+  reach any reply. `usage` is all-time spend, while `limit` can reset daily, weekly or monthly and `limit_remaining` is what is
+  left of the current cap. So the `credit` window is `(limit - limit_remaining) / limit` and exists only when both are reported
+  and `limit` is above zero; otherwise there is no percentage (the figures in `amounts` are still shown as reported).
+- **When it calls out.** Only while Settings > Providers is open (`page_open`) or a run is active, and at most once a minute per
+  account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. When a read changes what is shown (the figures, not `read_at`), the project revisions advance and a `changed` event names them, so the next `project_state` read is a full answer carrying the new `usage`; a read that changes nothing moves nothing. A failed read keeps the
+  previous answer (its `read_at` shows its age) and still counts as the minute's attempt.
+- **The key never enters the core.** The call is curl with `--proto =https`, a cleared environment and the header read from
+  stdin (`-H @-`). A key command (the Keychain read, from the Keychain store) is the producer of that stdin: it prints the key
+  straight into curl's pipe, so the key is never in argv, the environment, a file, a log or this process's memory. There is no
+  getter for a key. Until the Keychain store lands there is no key command, so no account is metered and no call is made.
+
 ## Versioning
 
 A `provider_list` whose schema is another major is reported as "update needed" and not read further. Adding fields is not a

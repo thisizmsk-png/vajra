@@ -3,12 +3,14 @@
 import { useEffect, useState } from "react";
 import { api, onChanged } from "../ipc";
 import type { Changed, InboxItem } from "../ipc";
+import { parseUsage, type UsageList } from "../providerContract";
 
 export const STATE_MIN_GAP_MS = 500;
 
-/** `proposals`: this project's pending run proposals from the last full answer; null until a core sends them. */
-export type ProjectStateView = { rev: number | null; failed: boolean; proposals: InboxItem[] | null };
-const NONE: ProjectStateView = { rev: null, failed: false, proposals: null };
+/** `proposals`: this project's pending run proposals from the last full answer; null until a core sends them.
+ *  `usage`: the last usage answers from the last full answer (a cache on the core side); null until a core sends them. */
+export type ProjectStateView = { rev: number | null; failed: boolean; proposals: InboxItem[] | null; usage: UsageList | null };
+const NONE: ProjectStateView = { rev: null, failed: false, proposals: null, usage: null };
 
 type Entry = {
   view: ProjectStateView;
@@ -24,7 +26,7 @@ type Entry = {
 const entries = new Map<string, Entry>();
 
 function publish(e: Entry, view: ProjectStateView) {
-  if (view.rev === e.view.rev && view.failed === e.view.failed && view.proposals === e.view.proposals) return;
+  if (view.rev === e.view.rev && view.failed === e.view.failed && view.proposals === e.view.proposals && view.usage === e.view.usage) return;
   e.view = view;
   e.users.forEach((u) => u(view));
 }
@@ -39,7 +41,8 @@ function refresh(id: string, e: Entry) {
       if (e.dead) return;
       // `unchanged` repeats our revision, so publish() sees no difference and nobody re-renders.
       const proposals = s.unchanged ? e.view.proposals : s.proposals?.ok ? s.proposals.items : null;
-      publish(e, { rev: s.rev, failed: false, proposals });
+      const usage = s.unchanged ? e.view.usage : parseUsage(s.usage);
+      publish(e, { rev: s.rev, failed: false, proposals, usage });
     },
     // Keep what we had: an `unchanged` answer at this revision after recovery would never send the proposals again
     // (#90 review). Start is checked by the core against the proposal's hash, so a held one is never run stale.

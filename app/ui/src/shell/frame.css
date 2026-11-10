@@ -122,6 +122,8 @@
 .v-sbar__runs { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .v-sbar__runs i { width: 6px; height: 6px; border-radius: 50%; background: var(--c-border-strong); }
 .v-sbar__runs--live i { background: var(--c-primary); }
+.v-sbar__usage { color: var(--c-text); }
+.v-sbar__usage i { background: var(--c-primary); }
 .v-sbar__end { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 .v-sb-btn { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--c-text-muted); font: inherit; white-space: nowrap; }
 .v-sb-btn:hover, .v-sb-btn[aria-pressed="true"] { background: var(--c-accent); color: var(--c-text); }

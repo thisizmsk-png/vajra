@@ -312,3 +312,34 @@ describe("Run proposals of a registered project come from its own projection (#9
     expect(within(region).getByText("Ship the new limits")).toBeTruthy();
   });
 });
+
+describe("The usage chip comes from the project state (#120 review)", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const registered = { project_list: { projects: [{ schema: "vajra.project/1", id: T, name: "Harbor API", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 2 }], skipped: 0, truncated: false } };
+  const state = (usage: unknown) => ({ schema: "vajra.project_state/1", project_id: T, rev: 7, unchanged: false, active_runs: 0, generations: { project: 1 }, workers: [], receipts: [], inbox: { ok: true, count: 0, items: [] }, proposals: { ok: true, count: 0, more: 0, items: [] }, usage });
+  const usage = { schema: "vajra.provider_usage/1", usage: [{ account: "claude", read_at: "2026-11-09T12:00:00Z", source: "cli", windows: [{ kind: "weekly", used_pct: 84, resets_at: null, warn: true }], amounts: null }] };
+
+  it("Given the project state reports a warned window, Then the status bar shows the chip", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, project_state: state(usage) });
+    const bar = await screen.findByLabelText(S.frame.status);
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
+  });
+
+  it("Given the usage changes later, Then the chip follows when the core announces a newer revision", async () => {
+    const at = (pct: number) => ({ ...usage, usage: [{ ...usage.usage[0], windows: [{ kind: "weekly", used_pct: pct, resets_at: null, warn: true }] }] });
+    let answer: unknown = state(at(84));
+    boot(`#/p/${T}/orch`, { ...registered, project_state: () => answer });
+    const bar = await screen.findByLabelText(S.frame.status);
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 84% used this week."));
+    answer = { ...state(at(91)), rev: 8 };
+    act(() => ipc.emit("changed", { streams: [], snapshot_needed: false, projects: [{ project_id: T, rev: 8 }] }));
+    await waitFor(() => expect(within(bar).getByRole("status").textContent).toBe("Claude 91% used this week."), { timeout: 3000 });
+  });
+
+  it("Given nothing is near its limit, Then there is no chip", async () => {
+    boot(`#/p/${T}/orch`, { ...registered, project_state: state({ ...usage, usage: [{ ...usage.usage[0], windows: [{ kind: "weekly", used_pct: 10, resets_at: null, warn: false }] }] }) });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_state")).toBe(true));
+    expect(within(screen.getByLabelText(S.frame.status)).queryByRole("status")).toBeNull();
+  });
+});
+

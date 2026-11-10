@@ -62,7 +62,8 @@ function Frame() {
     : P.projects[0]?.id ?? null;
   const project = P.projects.find((p) => p.id === pid) ?? null;
   useEffect(() => { if (pid) rememberProject(pid); }, [pid]);
-  const projected = useProjectState(project?.registered ? project.id : null).proposals;
+  const projectState = useProjectState(project?.registered ? project.id : null);
+  const projected = projectState.proposals;
 
   const current: Current = useMemo(() => {
     const campaigns = project ? P.campaigns.filter((c) => P.byCampaign[c.slug] === project.id)
@@ -190,7 +191,7 @@ function Frame() {
               <TerminalDock defaultPlace={project?.root ? { cwd: project.root, label: project.name } : undefined} />
             </div>
           </div>
-          <StatusBar runs={P.runs} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
+          <StatusBar runs={P.runs} usage={projectState.usage} compact={project ? compact : null} onColumn={() => setCompact((c) => !c)}
             onPhone={() => openSettings({ section: "mobile" })} onSettings={() => openSettings()} />
         </div>
       </CurrentProject.Provider>
