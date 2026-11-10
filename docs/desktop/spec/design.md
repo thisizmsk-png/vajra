@@ -1463,8 +1463,8 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 |---|---|---|
 | `worktree_add(run, task, round, from)` | `git worktree add --detach <data>/worktrees/<project>/<run>/<task>-r<n> <from>` | Under the app data dir, never inside the repo. The copied dependencies come next (below). |
 | `merge_deps(wt, commits[])` | `git -C <wt> merge --no-ff --no-edit --no-verify <sha>…` | On a conflict: `merge --abort`, then `deps_conflict`. |
-| `snapshot(wt, task_files, message)` | `git -C <wt> add -A -- <task file globs>`, then `commit --no-verify -m <code-built>` with the trailer `Vajra-Worker: <account> <model>`, then `update-ref refs/heads/vajra/<run>/task-<id>-r<n> HEAD` | Refs only under `refs/heads/vajra/`. Changed paths outside the task files, and every agent config file (16.4), become `leftovers` and are never committed. |
-| `integrate(run, round, commits[])` | In its own worktree: `checkout -B vajra/<run>/integration[-r<n>] <base>`, then `merge --no-ff --no-edit --no-verify` each commit | Same as `snapshot`. |
+| `snapshot(wt, task_files, message)` | **Plumbing only; it never writes through the worker's HEAD.** With `GIT_INDEX_FILE=<ticket dir>/index`, a private index the worker can't reach: `read-tree <dispatch_head>`, `add -A -- <task file globs>`, `write-tree`, then `commit-tree <tree> -p <dispatch_head> -m <code-built>` with the trailer `Vajra-Worker: <account> <model>`. Then `update-ref refs/heads/vajra/<run>/task-<id>-r<n> <new> <zero-oid>`, which only creates the ref, and fails if it already exists | Refs only under `refs/heads/vajra/`. Changed paths outside the task files, and every agent config file (16.4), become `leftovers` and are never committed. |
+| `integrate(run, round, commits[])` | In its own worktree, which no worker is given: `checkout -B vajra/<run>/integration[-r<n>] <base>`, then `merge --no-ff --no-edit --no-verify` each commit. Before each merge the core checks that `symbolic-ref HEAD` is exactly `refs/heads/vajra/<run>/integration[-r<n>]` | Same as `snapshot`. |
 | `worktree_remove(wt)` and `branch_delete(vajra/<run>/task-…)` | `git worktree remove`, `git branch -D` | Only for a clean tree whose commit was integrated, or one the human discards. |
 
 **Tamper checks.** At `worktree_add` the core hashes every git config file that the core's later git calls will read:
@@ -1478,6 +1478,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 **After the worker's process group is gone, and before every later git call on that repo,** the core checks all of these:
 - the `.git` file and repo config hashes are unchanged. The global ones only feed a card note, because the core reads a frozen copy (below);
 - HEAD equals `dispatch_head` (16.5): the HEAD after `merge_deps` and the clones, recorded before the worker started;
+- **HEAD is still detached.** `git symbolic-ref -q HEAD` must fail (exit 1), and `<gitdir>/HEAD` must hold exactly the `dispatch_head` sha. A worker that runs `git symbolic-ref HEAD refs/heads/main` while `main` sits at `dispatch_head` leaves the sha unchanged, so the sha check alone can't see it. With this check, the ticket is `tampered`. Even without it, `snapshot` never writes through HEAD (above), so the user's branch can't move. The retry rule's "unchanged tree" test also requires a detached HEAD;
 - there is no nested `.git` and no new or changed `.gitmodules`;
 - **no `.gitattributes` was created or changed, at any depth.** The core reads this before any `add`, from the tracked diff against `dispatch_head` plus the untracked list. It matches the path name only, never the content: a basename equal to `.gitattributes`.
 
@@ -1682,6 +1683,8 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - A changed `<common>/config` (`gpg.program`) gives `tampered`.
     - A rewritten `.git` file gives `tampered`.
     - So do a worker commit and a nested `.git`.
+    - **A worker runs `git symbolic-ref HEAD refs/heads/main` while `main` is at `dispatch_head`:** the result is `tampered`, `main` doesn't move, and no commit is made on it. With the detached check disabled in the test, `snapshot`'s plumbing path still leaves `main` untouched.
+    - `update-ref` refuses to overwrite an existing `vajra/` task ref.
     - **A `filter.x.clean` added to the temp HOME's `~/.gitconfig`, or to a file it includes, never runs in the core's git (the frozen copy). The card shows the settings-changed note, and the ticket is not `tampered`.**
     - **A new `sub/dir/.gitattributes`, or an edit to the root one, gives `tampered` before `add`, and the filter never runs.**
     - **The repo's `<common>/config` gaining `filter.x.clean` still gives `tampered`.**
