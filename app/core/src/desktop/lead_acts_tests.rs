@@ -52,6 +52,81 @@ fn a_click_aimed_at_an_older_conversation_is_stale_and_two_new_conversation_clic
     wait_until("the ask", || idle(&app));
 }
 
+/// #105 review [P2]: an `action_id` past the dedupe window is not a replay, so it does not skip the project binding. Used
+/// first for project A's run, then reused after expiry with project B's envelope against the same run: refused as
+/// `project_mismatch` with nothing stored and nothing run, never a fresh action against A filed under B. Inside the
+/// window the same reuse still answers from the stored receipt (`action_id_reuse`), and a true retry replays.
+#[test]
+fn an_expired_action_id_reused_for_another_project_is_bound_like_a_new_one() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = pid(&t);
+    let b = crate::desktop::test_project(&t.data(), &t.home(), &t.0.join("other"));
+    app.lead_status(RUN_ID).unwrap();
+    let first = app.act_new_conversation(&env("a_expire_0001", &a, Some(1)), RUN_ID);
+    assert_eq!(first["receipt"]["state"], "done", "{first}");
+    // Inside the window: a retry replays, and a reuse naming B answers from the receipt, running nothing.
+    assert_eq!(app.act_new_conversation(&env("a_expire_0001", &a, Some(1)), RUN_ID)["replayed"], true);
+    let reuse = app.act_new_conversation(&env("a_expire_0001", &b, Some(2)), RUN_ID);
+    assert_eq!(reuse["receipt"]["reason"], "action_id_reuse", "{reuse}");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["generation"], 2);
+    // Past the window the receipt is gone for `begin`, so the same reuse is a new action, and binding applies.
+    super::super::lock(&app.acts).store.backdate("a_expire_0001", crate::control::receipt::DEDUPE_MS + 60_000);
+    let late = app.act_new_conversation(&env("a_expire_0001", &b, Some(2)), RUN_ID);
+    assert!(late["receipt"].is_null(), "nothing is stored: {late}");
+    assert_eq!(late["error"]["error"], "project_mismatch", "{late}");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["generation"], 2, "nothing ran against A");
+    assert!(!receipt_ids(&app, &b).contains(&"a_expire_0001".to_string()), "no receipt under B");
+    // The same expired id used rightly (A's envelope) is a fresh action again.
+    let again = app.act_new_conversation(&env("a_expire_0001", &a, Some(2)), RUN_ID);
+    assert_eq!((again["receipt"]["state"].as_str(), again["replayed"].as_bool()), (Some("done"), None), "{again}");
+    assert_eq!(app.lead_status(RUN_ID).unwrap()["generation"], 3);
+}
+
+/// #105 review [P2]: a client following the revision contract never keeps a stale conversation. With an idle project, a
+/// Director-General created by `lead_status` (no generation, then 1) and a plain `new_conversation` (1, then 2) each move
+/// the revision, so a read with the saved `since_rev` is a full one carrying the new generation. A read with nothing
+/// changed is still `unchanged`.
+#[test]
+fn a_new_or_renewed_conversation_moves_the_project_revision() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    let first = app.project_state(&p, None).unwrap();
+    assert!(first["generations"]["orchestrator"].is_null(), "{first}");
+    let rev = first["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&p, Some(rev)).unwrap()["unchanged"], true, "nothing changed yet");
+    app.lead_status(RUN_ID).unwrap();
+    let created = app.project_state(&p, Some(rev)).unwrap();
+    assert_eq!((created["unchanged"].as_bool(), created["generations"]["orchestrator"].as_u64()), (Some(false), Some(1)), "created: {created}");
+    let rev = created["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&p, Some(rev)).unwrap()["unchanged"], true);
+    app.new_conversation(RUN_ID).unwrap();
+    let renewed = app.project_state(&p, Some(rev)).unwrap();
+    assert_eq!((renewed["unchanged"].as_bool(), renewed["generations"]["orchestrator"].as_u64()), (Some(false), Some(2)), "renewed: {renewed}");
+    assert!(renewed["rev"].as_u64().unwrap() > rev);
+    assert_eq!(app.project_state(&p, renewed["rev"].as_u64()).unwrap()["unchanged"], true, "and steady after");
+}
+
+/// The same class (#105 review sweep): a run whose PTY closes with nothing on the bus changes `active_runs`, so a read
+/// with the saved `since_rev` is a full one, not `unchanged`.
+#[test]
+fn a_run_that_ends_quietly_moves_the_project_revision() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    let stream = format!("run-{SID}");
+    app.sup.spawn(&stream, crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Default::default() }).unwrap();
+    let live = app.project_state(&p, None).unwrap();
+    assert_eq!(live["active_runs"], 1, "{live}");
+    let rev = live["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&p, Some(rev)).unwrap()["unchanged"], true);
+    app.sup.kill(&stream).unwrap();
+    wait_until("the run ends", || !app.sup.is_running(&stream).unwrap_or(false));
+    let ended = app.project_state(&p, Some(rev)).unwrap();
+    assert_eq!((ended["unchanged"].as_bool(), ended["active_runs"].as_u64()), (Some(false), Some(0)), "{ended}");
+}
+
 /// A "New conversation" landing between the receipt's check and the ask lock: the ask is still stale, never a turn of
 /// the new conversation it was not aimed at.
 #[test]
