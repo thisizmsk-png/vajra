@@ -2,11 +2,15 @@
 // shares one `changed` subscription and one `project_state` fetch per 500 ms gap, and only hears about a newer revision.
 import { useEffect, useState } from "react";
 import { api, onChanged } from "../ipc";
-import type { Changed } from "../ipc";
+import type { Changed, InboxItem } from "../ipc";
+import { parseUsage, type UsageList } from "../providerContract";
 
 export const STATE_MIN_GAP_MS = 500;
 
-export type ProjectStateView = { rev: number | null; failed: boolean };
+/** `proposals`: this project's pending run proposals from the last full answer; null until a core sends them.
+ *  `usage`: the last usage answers from the last full answer (a cache on the core side); null until a core sends them. */
+export type ProjectStateView = { rev: number | null; failed: boolean; proposals: InboxItem[] | null; usage: UsageList | null };
+const NONE: ProjectStateView = { rev: null, failed: false, proposals: null, usage: null };
 
 type Entry = {
   view: ProjectStateView;
@@ -22,7 +26,7 @@ type Entry = {
 const entries = new Map<string, Entry>();
 
 function publish(e: Entry, view: ProjectStateView) {
-  if (view.rev === e.view.rev && view.failed === e.view.failed) return;
+  if (view.rev === e.view.rev && view.failed === e.view.failed && view.proposals === e.view.proposals && view.usage === e.view.usage) return;
   e.view = view;
   e.users.forEach((u) => u(view));
 }
@@ -36,9 +40,13 @@ function refresh(id: string, e: Entry) {
     (s) => {
       if (e.dead) return;
       // `unchanged` repeats our revision, so publish() sees no difference and nobody re-renders.
-      publish(e, { rev: s.rev, failed: false });
+      const proposals = s.unchanged ? e.view.proposals : s.proposals?.ok ? s.proposals.items : null;
+      const usage = s.unchanged ? e.view.usage : parseUsage(s.usage);
+      publish(e, { rev: s.rev, failed: false, proposals, usage });
     },
-    () => { if (!e.dead) publish(e, { rev: e.view.rev, failed: true }); },
+    // Keep what we had: an `unchanged` answer at this revision after recovery would never send the proposals again
+    // (#90 review). Start is checked by the core against the proposal's hash, so a held one is never run stale.
+    () => { if (!e.dead) publish(e, { ...e.view, failed: true }); },
   ).finally(() => {
     e.busy = false;
     if (e.again && !e.dead) { e.again = false; schedule(id, e); }
@@ -52,7 +60,7 @@ function schedule(id: string, e: Entry) {
 }
 
 function open(id: string): Entry {
-  const e: Entry = { view: { rev: null, failed: false }, users: new Set(), off: () => {}, timer: undefined, last: 0, busy: false, again: false, dead: false };
+  const e: Entry = { view: NONE, users: new Set(), off: () => {}, timer: undefined, last: 0, busy: false, again: false, dead: false };
   e.off = onChanged((payload) => {
     const mine = (payload as Changed | null)?.projects?.find((p) => p.project_id === id);
     // An event that names our project with a revision we already hold is old news. One without a list: look once.
@@ -66,9 +74,9 @@ function open(id: string): Entry {
 
 /** The project's revision, or `failed` when the core could not answer (the caller then falls back to raw events). */
 export function useProjectState(projectId: string | null): ProjectStateView {
-  const [view, setView] = useState<ProjectStateView>({ rev: null, failed: false });
+  const [view, setView] = useState<ProjectStateView>(NONE);
   useEffect(() => {
-    if (!projectId) { setView({ rev: null, failed: false }); return; }
+    if (!projectId) { setView(NONE); return; }
     let e = entries.get(projectId);
     if (!e) { e = open(projectId); entries.set(projectId, e); }
     const entry = e;
@@ -84,5 +92,5 @@ export function useProjectState(projectId: string | null): ProjectStateView {
       }
     };
   }, [projectId]);
-  return projectId ? view : { rev: null, failed: false };
+  return projectId ? view : NONE;
 }

@@ -322,6 +322,11 @@ paragraph into. Hierarchy is size and weight first, then text-secondary and text
   only mounts while open.
 - Board: Backlog, Running, Review, Done, read-only (cards move when work and checks do); a card that
   needs you carries a "Needs you" pill and an inset warning edge, and "Only what needs you" filters.
+- Director-General view (FG-02): a reading column (760 px) rather than chat bubbles. Who speaks is a 12 px label
+  over plain text; your turns sit on a quiet panel at the right; tool use folds into "Tools used". The header gives its
+  state in words, the conversation number and New conversation. Run proposals are the one loud thing (a panel with a
+  warning edge and "Needs you"): the exact ask in full, base and rounds, Start run and Dismiss, then the outcome in
+  words. The composer is docked at the foot (⌘↵ sends). The launcher is its own view, "Start a run yourself".
 - Routes are `#/p/<project id>/<view>`; the old `#/<view>` links still work.
 - Projects come from one adapter (`src/projects/`) shaped like the core's project contract, so the
   core's project list replaces it without touching a screen.

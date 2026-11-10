@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseProjectProvider, parseProviderList } from "../src/providerContract";
+import { parseProjectProvider, parseProviderList, parseUsage } from "../src/providerContract";
 
 // The same fixtures the core parses (app/core/src/providers/contract_tests.rs).
 const fx = (name: string) => readFileSync(resolve(__dirname, "../../core/tests/contract", name), "utf8");
@@ -80,3 +80,17 @@ describe("shared invalid fixtures", () => {
     }
   });
 });
+
+describe("usage answers (vajra.provider_usage/1)", () => {
+  const ok = { schema: "vajra.provider_usage/1", usage: [{ account: "openrouter", read_at: "2026-11-09T12:00:00Z", source: "gateway_key", windows: [{ kind: "credit", used_pct: 84, resets_at: null, warn: true }], amounts: null }] };
+  it("accepts the documented shape and fills a missing reset time with null", () => {
+    expect(parseUsage(ok)?.usage[0].windows[0].resets_at).toBeNull();
+    expect(parseUsage({ ...ok, usage: [{ ...ok.usage[0], windows: [{ kind: "weekly", used_pct: 90, warn: true }] }] })?.usage[0].windows[0].resets_at).toBeNull();
+  });
+  it("reads anything else as not reported", () => {
+    for (const bad of [null, undefined, "x", { ...ok, schema: "vajra.provider_usage/2" }, { ...ok, usage: "no" }, { ...ok, usage: [{ ...ok.usage[0], account: "Bad Id" }] }, { ...ok, usage: [{ ...ok.usage[0], windows: [{ kind: "x", used_pct: "84", warn: true }] }] }]) {
+      expect(parseUsage(bad)).toBeNull();
+    }
+  });
+});
+

@@ -203,6 +203,16 @@ fn provider_list(app: State<'_, App>) -> Res {
 }
 
 #[tauri::command(async)]
+fn provider_accounts(app: State<'_, App>) -> Res {
+    app.provider_accounts()
+}
+
+#[tauri::command(async)]
+fn provider_usage(app: State<'_, App>, page_open: bool) -> Res {
+    app.provider_usage(page_open)
+}
+
+#[tauri::command(async)]
 fn read_report(app: State<'_, App>, slug: String) -> Res {
     app.read_report(&slug)
 }
@@ -280,10 +290,13 @@ fn diff(app: State<'_, App>, cwd: String, base: String) -> Res {
 fn term_sink(ch: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> TermSink {
     use tauri::ipc::InvokeResponseBody as Body;
     std::sync::Arc::new(move |e| {
-        let _ = match e {
+        let sent = match e {
             TermEvent::Data(d) => ch.send(Body::Raw(d)),
             TermEvent::Exit(c) => ch.send(Body::Json(format!("{{\"exit\":{}}}", c.map_or("null".into(), |c| c.to_string())))),
+            TermEvent::Skipped { bytes, alt } => ch.send(Body::Json(format!("{{\"skipped\":{bytes},\"alt\":{}}}", alt.map_or("null".into(), |a| a.to_string())))),
+            TermEvent::Activity => ch.send(Body::Json("{\"activity\":true}".into())),
         };
+        sent.is_ok() // false once the webview is gone: the core then keeps the newest output for the view that attaches
     })
 }
 
@@ -326,6 +339,12 @@ fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Chann
 #[tauri::command]
 fn term_write(terms: State<'_, Terminals>, id: u32, data: String) -> Res {
     terms.write(id, data.as_bytes()).map(|()| serde_json::json!({})).map_err(term_err)
+}
+
+/// The view shows or hides a pane (the dock hidden, another tab selected). `alt`: it was on the alternate screen when it hid.
+#[tauri::command]
+fn term_visible(terms: State<'_, Terminals>, id: u32, visible: bool, alt: Option<bool>) -> Res {
+    terms.set_visible(id, visible, alt.unwrap_or(false)).map(|()| serde_json::json!({})).map_err(term_err)
 }
 
 #[tauri::command]
@@ -605,6 +624,8 @@ fn main() {
             start_run,
             resume_run,
             provider_list,
+            provider_accounts,
+            provider_usage,
             verify_campaign,
             read_report,
             resume_targets,
@@ -667,6 +688,7 @@ fn main() {
             diagnostics_preview,
             term_write,
             term_resize,
+            term_visible,
             term_ack,
             term_close,
         ])

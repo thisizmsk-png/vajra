@@ -3,3 +3,4 @@
 
 pub mod contract;
 pub mod detect;
+pub mod usage;

@@ -6,7 +6,7 @@ import { toHash } from "../router";
 import type { Screen } from "../router";
 
 /** Views that make sense in any project; a worker or a campaign-specific view lands on the Director-General. */
-const KEEP: ReadonlySet<Screen> = new Set(["orch", "board", "history"]);
+const KEEP: ReadonlySet<Screen> = new Set(["orch", "launch", "board", "history"]);
 const MAX_PIPS = 6;
 
 export function stateText(s: ProjectSummary | undefined): string {
