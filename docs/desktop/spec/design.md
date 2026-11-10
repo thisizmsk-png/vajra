@@ -1094,7 +1094,7 @@ Status: proposed 2026-11-10, design only. This is revision 5. It applies the own
 | # | Check | Refusal code and detail |
 |---|---|---|
 | 1 | `agents.permits(choice)` | `outside_allowed` |
-| 2 | The harness binary is on the user's PATH | `harness_missing`, with a link to Settings > Providers > Set up (ADR-17) |
+| 2 | The harness binary is on the user's PATH, and detection doesn't mark it Broken | `harness_missing`, or `harness_broken` with the reason, each with a link to Settings > Providers > Set up (ADR-17) |
 | 3 | For an `api_key` or `gateway` account, the key is saved | `key_missing`; on a store error `key_unreadable`. The key is never read. |
 | 4 | The harness has an adapter and a profile for the role (N5), and its installed version falls in that profile's **tested range** (N11). Today that is Claude Code and Codex for every role. The range is the one `detect.rs` already keeps for Codex. | `harness_unsupported`: "Gemini CLI can be set up, but Vajra can't run it as a worker yet." or "Codex 0.170 hasn't been tested with Vajra yet (tested: 0.166–0.167)." |
 | 5 | This build has the run protocol | `core_route_unavailable` (6a ships with this off). |
@@ -1446,7 +1446,7 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
     | `KbAdd`, `CampaignArchiveEvidence` | A note (N14). |
   - **Orphans.** At app start, the core lists any `deliver-*` campaign from a run that no longer exists, and offers to close it as "abandoned".
   - **This is a core change, not an engine change,** with two exceptions. Every script subcommand it calls exists today, except stale-lock recovery (`unlock --if-stale`, PR 6h-e above) and the evidence `--run-only` and `--sign` modes (PR 6i-e, "The evidence ticket" above). Both are engine changes.
-  - If spike S8 or S9 shows that a script needs a new flag, that becomes an engine change: the owner installs it and regenerates the manifest. It is reported, not done by a worker.
+  - If spike S8 shows that a script needs a new flag, that becomes an engine change: the owner installs it and regenerates the manifest. It is reported, not done by a worker.
 - **Parity tests.** The JS↔Rust fixtures (16.5) also cover:
   - `resultsByCriterion`, `commandProblem`, `verificationProblems` and `setupOf`;
   - the gate rule and the `SECURITY` rule;
@@ -1649,7 +1649,7 @@ This section is unchanged from revision 1, except that the base is `dispatch_hea
 | S6 | **Diff counter parity:** does the 16.10 counter match git numstat on the fixtures? Record the git version. | 6c-0 | Fix the counter. |
 | S7 | **APFS clones:** does `clonefile` of `node_modules` into a worktree under `<work>` work across volumes? | 6c | Fall back to no copy, and say so on the card. |
 | S8 | **Engine scripts with no Claude:** <br>• Does the install command install the scripts on a Mac without `claude`? <br>• Do `vajra-campaign.sh create/pass/close/report`, `vajra_tasks.py add/claim/report/close` and `vajra_kb.py add` run from the bridge with the scrubbed env, with no Claude session? <br>• Does `create` change the global active campaign? <br>• Does a SIGTERM leave the lock free? | 6h | A script that needs Claude-only state becomes a named engine change for the owner (16.11). |
-| S9 | **Evidence under Codex:** does `vajra-verify-work.sh` run inside a Codex `workspace-write` session in a core worktree, where `<repo>/.git` is read-only? Is `git.worktreeTree` null? Can servers bind to loopback (also for S1)? | 6i (Codex seats may run the evidence step, N17) | A null tree or a failed run makes the bundle not count. Record the reason, and give the evidence ticket the worktree's gitdir as a writable root if that fixes it. |
+| S9 | **Git inside the evidence runner:** when `vajra-verify-work.sh --run-only` runs `write-tree` inside the runner profile, is `git.worktreeTree` non-null, given that the evidence worktree's gitdir is under `<repo>/.git/worktrees/` and outside the runner's writable roots? Can servers bind to loopback there (also for S1)? | 6i-e, 6i | A null tree makes the bundle not count. If `write-tree` needs a writable object store, the runner sets `GIT_INDEX_FILE=<ticket tmp>/index`, `GIT_OBJECT_DIRECTORY=<ticket tmp>/objects` and `GIT_ALTERNATE_OBJECT_DIRECTORIES=<common>/objects`, so git writes only under the temp dir. `<common>` and the gitdir never become writable: their files are tamper signals. If loopback binding fails, the runner allows loopback only, never other network. |
 | S12 | **The evidence runner:** does a core-built Seatbelt profile (`sandbox-exec`) run typical setup, build and test commands (npm, cargo, pytest, go) with the Vajra state dir and the shipped `denyRead` paths denied, writes only to the evidence worktree and its temp dir, and the network setting applied? Does the key probe fail inside it? | 6i-e, 6i | A tool that needs a denied path fails its check, so the run ends `not_verified` with the path named. Nothing runs outside the runner. |
 | S11 | **Keeping the key from Codex:** can an extra Seatbelt layer around a Codex session, or a per-launch config, deny reads of `~/.claude/vajra/**` while still allowing `~/.claude/skills/vajra/scripts`, without breaking Codex's own sandbox? | 6k | Codex seats stay allowed with the card warning (N23 a). Codex evidence stays `outside_guard`, unless approved under N20. 6k's engine part still lets the core run the checks itself, but it doesn't stop a Codex worker reading the key. |
 | S10 | **`GIT_ATTR_SOURCE`:** which `/usr/bin/git` versions ship on supported macOS releases, and do they honour `GIT_ATTR_SOURCE` for `add` and `status`? | 6b | Keep only the name check (16.6), which is the rule anyway. |
@@ -1676,7 +1676,7 @@ Fourteen PRs. 6h-e and 6i-e are engine changes. **6e is dropped** (N2 = No). **6
 | **6f** | **The Director-General conversation on any supported harness:** ADR-13's checks expressed per profile (for Codex: read back `sandbox_policy` and the MCP list, or kill the session). | 600 lines |
 
 **Order.**
-0. **Spikes S1, S3, S4, S8, S9, S11 and S12 run before 6b merges.** S12 (the evidence runner) also gates 6i-e. Their fallbacks change the 6a and 6b profiles. S11 runs now, so 6k doesn't slip on it.
+0. **Spikes S1, S3, S4, S8, S11 and S12 run before 6b merges.** S9 and S12 (git and tools inside the evidence runner) gate 6i-e. Their fallbacks change the 6a and 6b profiles. S11 runs now, so 6k doesn't slip on it.
 1. 6a, 6b and 6c-0, in parallel.
 2. 6c.
 3. 6d1.
@@ -1854,11 +1854,15 @@ Status: proposed 2026-11-10, design only. The owner asked for it. **Bhishma revi
      - The core runs `npm pack <pkg>@<ver>` into an empty temp dir and checks the tarball's sha512 against the catalog. `dist.integrity` metadata alone is not enough.
      - It installs **that `.tgz` file** with `npm install -g --ignore-scripts --registry=https://registry.npmjs.org/ <file>`, run from an empty directory, so a project `.npmrc` can't apply.
       - **The whole dependency closure must be pinned, not only the tarball** (PR #135 review). `--ignore-scripts` stops install scripts, but not the code of a dependency, which runs when the CLI starts. A tarball whose `package.json` says `dep: ^1.0.0` would otherwise pull whatever `dep` version is newest at install time. So one-click npm is offered only when one of these holds, checked by the core from the verified tarball before `npm install` runs:
-        - **No outside dependencies.** The tarball's `package.json` has no `dependencies` beyond what it bundles inside itself (`bundleDependencies`). Bundled code is covered by the tarball's sha512.
-        - **A complete shrinkwrap.** The tarball contains an `npm-shrinkwrap.json` that lists every package in the closure, each with an exact `version`, a `resolved` URL on `registry.npmjs.org` and an `integrity` hash. npm then installs exactly those versions, and refuses any whose bytes don't match. The core refuses a shrinkwrap with a range, a missing `integrity`, a git or file or other-host `resolved`, or a dependency it doesn't list.
+        - **No outside dependencies.** The tarball's `package.json` has no `dependencies`, `peerDependencies` or `optionalDependencies` beyond what it bundles inside itself (`bundleDependencies`). npm 7 and later install peer and optional dependencies on their own, so all three count. Bundled code is covered by the tarball's sha512.
+        - **A complete shrinkwrap.** The tarball contains an `npm-shrinkwrap.json` that lists every package in the closure, each with an exact `version`, a `resolved` URL on `registry.npmjs.org` and an `integrity` hash. npm then installs exactly those versions, and refuses any whose bytes don't match. Every entry in `dependencies`, `peerDependencies` and `optionalDependencies` must be in it. The core refuses a shrinkwrap with a range, a missing `integrity`, a git or file or other-host `resolved`, or a dependency of any of those three kinds that it doesn't list.
         - Otherwise the entry is **"Install it yourself"**, with the vendor's command, whatever the catalog says.
-      - **After install, the core checks the installed tree.** It reads `npm ls -g <pkg> --all --json` and compares every installed package's name and version with the closure it approved. Any extra or different package means the install is rolled back with `npm uninstall -g <pkg>`, which only happens when the package wasn't installed before, and the sheet shows "Install it yourself" with the reason.
-     - **A package that needs its install script** (for example to fetch a platform binary) gets "Install it yourself" with the vendor's command. So does a package whose platform optional dependencies aren't each pinned in the catalog with their own integrity.
+      - **After install, the core checks the installed tree.** It reads `npm ls -g <pkg> --all --json` and compares every installed package's name and version with the closure it approved. Any extra or different package fails the check.
+        - **Before every install**, including an upgrade and a **Repair**, the core records what is there now: the installed version and its closure, from `npm ls -g <pkg> --all --json`, or "not installed".
+        - **On a failed check, a fresh install** is removed with `npm uninstall -g <pkg>`.
+        - **On a failed check, an upgrade or Repair** reinstalls the recorded version, through the same rules (verified tarball, pinned closure, the same check afterwards). That only works when the catalog still pins that version.
+        - **If that also fails,** or the old version isn't pinned, detection marks the harness **Broken** with the reason. `launchable` refuses it (`harness_broken`, 16.2 check 2) until it passes detection again, and the sheet says why and links the vendor's own install steps.
+     - **A package that needs its install script** (for example to fetch a platform binary) gets "Install it yourself" with the vendor's command. So does a package with an optional or peer dependency that is neither bundled nor pinned in a complete shrinkwrap.
      - The user's own `~/.npmrc` (mirror, auth) still applies. The sheet says so.
    - **Homebrew.**
      - Homebrew installs the current version and checks its own checksums; it can't pin one (N12).
@@ -1930,6 +1934,8 @@ Status: proposed 2026-11-10, design only. The owner asked for it. **Bhishma revi
   - With a complete shrinkwrap pinning `dep@1.0.0`, `dep@1.0.0` is installed. If the registry serves different bytes for `dep@1.0.0`, the integrity check fails and nothing is installed.
 - A shrinkwrap with a range, a missing `integrity`, or a git or other-host `resolved` is refused before install.
 - A post-install tree with an extra or different package is rolled back, and the sheet says why.
+- A tarball with an unpinned `peerDependencies` entry and no shrinkwrap is "Install it yourself", and `npm install` never runs. So is one with an unpinned `optionalDependencies` entry.
+- **An upgrade whose post-install tree doesn't match** reinstalls the recorded earlier version, and the check passes on it. If the earlier version isn't pinned, or its reinstall fails too, the harness shows **Broken**, and `launchable` refuses it with `harness_broken`.
 - A package that needs install scripts is refused.
 - A `:no_check` cask is refused.
 - A root-owned prefix, or a root-owned folder under it, shows the manual command, and nothing runs.
