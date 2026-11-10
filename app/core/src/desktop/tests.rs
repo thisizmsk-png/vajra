@@ -3036,6 +3036,79 @@ fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another()
     app.sup.kill(&stream).unwrap();
 }
 
+/// #104 review [P1]: two store projects registered as folders of one checkout (neither has its own `.git`) share the
+/// checkout's location. Through the launch path (`launch_project`, then the record it writes), a run in A neither holds B
+/// nor gives B's launches A's pin, and once both have runs each still launches as itself. A replaced root keeps its pin.
+#[test]
+fn store_projects_sharing_one_git_location_launch_as_themselves() {
+    let t = Tmp::new();
+    let app = t.app();
+    let c = t.0.join("checkout");
+    store_git(&c);
+    let (a, b) = (c.join("a"), c.join("b"));
+    fs::create_dir_all(b.join("sub")).unwrap();
+    fs::create_dir_all(&a).unwrap();
+    let (pa, pb) = (test_project(&t.0.join("data"), &t.home(), &a), test_project(&t.0.join("data"), &t.home(), &b));
+    let loc = fs::canonicalize(&c).unwrap();
+    let (sa, sb) = ("0f8fad5b-d9cb-469f-a165-70867728950e", "1b4e28ba-2fa1-41d2-883f-0016d3cca427");
+    // A run of A, launched and running.
+    let (la, p) = app.launch_project(&a).unwrap();
+    assert_eq!((la.clone(), p.id.clone()), (loc.clone(), pa.clone()));
+    app.within_caps(&p.id, 1).unwrap();
+    app.record_run_pinned("20261105-1230", &a, &la, Some(&p.id), sa, "c", true, 1).unwrap();
+    let stream = format!("run-{sa}");
+    app.sup.spawn(&stream, SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: a.clone(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    lock(&app.runs).insert(stream.clone(), Run { session_id: sa.into(), run_id: "20261105-1230".into(), campaign: "c".into(), cwd: a.clone(), nonces: Redactor::default() });
+    // A launch in B is B's, and B is not busy with A's run.
+    let (lb, p) = app.launch_project(&b).unwrap();
+    assert_eq!((lb.clone(), p.id.clone()), (loc.clone(), pb.clone()), "B's launch is B's, not A's pin at the shared location");
+    app.within_caps(&p.id, 1).expect("A's run does not hold B");
+    assert_eq!(app.within_caps(&pa, 1).unwrap_err()["reason"], "project_busy", "A is busy");
+    app.record_run_pinned("20261105-1231", &b, &lb, Some(&p.id), sb, "d", true, 1).unwrap();
+    assert_eq!(app.pinned_project("20261105-1231").as_deref(), Some(pb.as_str()), "B's run is pinned to B");
+    // Both have runs at the location: neither refuses as inconsistent, and each launches as itself.
+    assert_eq!(app.launch_project(&a).unwrap().1.id, pa);
+    assert_eq!(app.launch_project(&b).unwrap().1.id, pb);
+    assert_eq!(app.launch_project(&b.join("sub")).unwrap().1.id, pb, "a subfolder of B is B's");
+    assert_eq!(code(&app.launch_project(&c).unwrap_err()), "not_a_project", "the checkout itself is neither project");
+    app.sup.kill(&stream).unwrap();
+    // B's folder replaced: its pin still holds it (nothing shallower is a project).
+    fs::rename(&b, c.join("b-old")).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    assert_eq!(app.launch_project(&b).unwrap().1.id, pb, "a replaced root keeps its pin");
+    // With the checkout a project too, the replaced root still keeps its pin rather than becoming the checkout's, and A is A.
+    test_project(&t.0.join("data"), &t.home(), &c);
+    assert_eq!(app.launch_project(&b).unwrap().1.id, pb, "a replaced root keeps its pin under a checkout project");
+    assert_eq!(app.launch_project(&a).unwrap().1.id, pa, "A still launches as A under a checkout project");
+    // A pin of a project rooted elsewhere that disagrees with B's still refuses.
+    let other = test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
+    app.record_run_pinned("20261105-1232", &b, &loc, Some(&other), "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
+    assert_eq!(code(&app.launch_project(&b).unwrap_err()), "project_membership_inconsistent");
+    // It claims the whole location (as a worktree's repository would), so A's launches refuse too: fail closed.
+    assert_eq!(code(&app.launch_project(&a).unwrap_err()), "project_membership_inconsistent");
+}
+
+/// #104 review [P1], nested: a project registered at a folder inside a pinned checkout project is its own once registered.
+/// The checkout's pin does not take the inner project's launches, and the checkout's own folders keep the checkout's pin.
+#[test]
+fn a_store_project_inside_a_pinned_checkout_project_launches_as_itself() {
+    let t = Tmp::new();
+    let app = t.app();
+    let c = t.0.join("checkout");
+    store_git(&c);
+    let inner = c.join("inner");
+    fs::create_dir_all(inner.join("src")).unwrap();
+    fs::create_dir_all(c.join("lib")).unwrap();
+    let pc = test_project(&t.0.join("data"), &t.home(), &c);
+    let (loc, p) = app.launch_project(&inner).unwrap();
+    assert_eq!(p.id, pc, "before it is registered, the inner folder is the checkout's");
+    app.record_run_pinned("20261105-1230", &inner, &loc, Some(&p.id), "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+    let pi = test_project(&t.0.join("data"), &t.home(), &inner);
+    assert_eq!(app.launch_project(&inner.join("src")).unwrap().1.id, pi, "registered, the inner folder is its own project");
+    assert_eq!(app.launch_project(&c.join("lib")).unwrap().1.id, pc, "the checkout's other folders keep its pin");
+    assert_eq!(app.launch_project(&c).unwrap().1.id, pc);
+}
+
 #[test]
 fn an_active_run_with_no_recorded_project_holds_every_start() {
     let t = Tmp::new();

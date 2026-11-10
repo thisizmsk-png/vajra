@@ -780,7 +780,12 @@ impl App {
     /// Every later launch at the same location reuses that pin, whatever `.git` now contains: the root, a subfolder and a
     /// sibling resolve alike, and a worker that rewrites `.git` cannot move any of them to another project. A nested
     /// repository has its own `.git` at another location, so it is its own project, but a NEW location inside a pinned Git
-    /// project's tree is admitted only as a nested repo or a submodule (`project_of_new_location`).
+    /// project's tree is admitted only as a nested repo or a submodule (`project_of_new_location`). A location can hold
+    /// several store projects (folders registered inside one checkout with no `.git` of their own): there the store project
+    /// whose root holds the folder (the deepest root from the folder up to the location, by device and inode, never by
+    /// `.git`) is the launch's, and another project's pin at the location is that project's alone (#104 review). A pin whose
+    /// recorded root holds the folder but no longer matches it (the root was replaced) still holds, and a pin of a project
+    /// rooted outside the location always applies, so records that disagree still refuse.
     ///
     /// Records of one location that disagree on its project refuse rather than guess, and so does a record that exists but
     /// cannot be read. A record with no `project_loc` (the shipped build's format) pins nothing and is skipped: nothing is
@@ -830,6 +835,24 @@ impl App {
             if !ids.contains(&pid) {
                 ids.push(pid);
             }
+        }
+        // One location can hold several store projects (folders registered inside one checkout without a `.git` of their own),
+        // so a pin at it is this folder's only when its project holds the folder (#104 review). A pin of a project rooted
+        // INSIDE the location applies only if that root holds the folder and no deeper store root (by device and inode) does;
+        // the others are other projects sharing the location, and a launch with none left is a new one (the store decides).
+        // A pin of a project rooted outside the location (a worktree's repository, a plain folder above) always applies, so
+        // records that disagree still refuse below, and a pinned root that was replaced keeps its pin.
+        if !ids.is_empty() {
+            let listing = self.projects.list(true).map_err(|_| unreadable())?;
+            if listing.truncated {
+                return Err(unreadable());
+            }
+            let depth = |r: &Path| r.components().count();
+            let owner = store_root_holding(&listing.projects, &real, &want).map(|p| depth(Path::new(&p.root)));
+            ids.retain(|pid| match listing.projects.iter().find(|p| p.id == *pid).map(|p| PathBuf::from(&p.root)) {
+                Some(r) if r.starts_with(&want) => real.starts_with(&r) && owner.is_none_or(|d| depth(&r) >= d),
+                _ => true,
+            });
         }
         let project = match ids.len() {
             0 => self.project_of_new_location(&want, cwd)?,
@@ -1463,6 +1486,17 @@ fn nested_identity(real: &Path, common: &Path) -> Option<PathBuf> {
         },
         Err(_) => None,
     }
+}
+
+/// The store project whose root is the deepest folder from `real` up to `loc` (both included), matched by device and inode
+/// as the store matches roots, without reading any `.git`: the project that holds a folder at a location several projects
+/// share. `None` when no store root lies in that range.
+fn store_root_holding<'a>(projects: &'a [crate::projects::contract::Project], real: &Path, loc: &Path) -> Option<&'a crate::projects::contract::Project> {
+    use std::os::unix::fs::MetadataExt;
+    real.ancestors().take_while(|d| d.starts_with(loc)).find_map(|d| {
+        let m = std::fs::metadata(d).ok()?;
+        projects.iter().find(|p| (p.root_key.dev, p.root_key.ino) == (m.dev(), m.ino()))
+    })
 }
 
 pub(super) fn git_location(cwd: &Path) -> PathBuf {
