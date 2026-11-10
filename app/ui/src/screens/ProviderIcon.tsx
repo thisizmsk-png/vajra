@@ -1,6 +1,7 @@
 // A provider's tile: its official mark where one is cleared to ship (assets/providers/marks.ts), a two-letter monogram where not, the
 // plain fallback icon for anything unknown. The tile keeps its size either way. With the provider's name written beside it the tile is
 // decorative (aria-hidden); with no name beside it, pass `named` and the tile becomes an image named for the provider.
+import { useState } from "react";
 import fallback from "../assets/providers/fallback.svg?raw";
 import { MARKS } from "../assets/providers/marks";
 import { cn } from "../../components/ui/cn";
@@ -9,13 +10,15 @@ const MONOGRAM: Record<string, string> = { claude: "CC", codex: "CX", grok: "GK"
 /** The provider's name, for the accessible label when no text name sits beside the tile. */
 export const PROVIDER_NAME: Record<string, string> = { claude: "Claude Code", codex: "Codex CLI", grok: "Grok", deepseek: "DeepSeek", openrouter: "OpenRouter" };
 
+/** The mark, or the monogram when there is none or an image fails to load (blocked, missing): a tile is never left empty. */
 function Mark({ id, className }: { id: string; className: string }) {
+  const [failed, setFailed] = useState(false);
   const m = MARKS[id];
-  if (!m) return <>{MONOGRAM[id]}</>;
+  if (!m || failed) return <>{MONOGRAM[id]}</>;
   return (
     <>
-      <img className={cn(className, "v-pt__mk--light")} src={m.light} alt="" draggable={false} />
-      <img className={cn(className, "v-pt__mk--dark")} src={m.dark} alt="" draggable={false} />
+      <img className={cn(className, "v-pt__mk--light")} src={m.light} alt="" draggable={false} onError={() => setFailed(true)} />
+      <img className={cn(className, "v-pt__mk--dark")} src={m.dark} alt="" draggable={false} onError={() => setFailed(true)} />
     </>
   );
 }

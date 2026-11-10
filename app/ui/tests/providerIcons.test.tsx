@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { MARKS } from "../src/assets/providers/marks";
 import { ProviderIcon } from "../src/screens/ProviderIcon";
@@ -43,6 +43,15 @@ describe("ProviderIcon", () => {
     expect(imgs.map((i) => i.getAttribute("src"))).toEqual([MARKS.openrouter.light, MARKS.openrouter.dark]);
     expect(imgs.every((i) => i.getAttribute("alt") === "")).toBe(true);
     expect(t.textContent).toBe("");
+  });
+  it("an image that fails to load falls back to the monogram, never an empty tile", () => {
+    const t = tile(<ProviderIcon family="openrouter" />);
+    fireEvent.error(t.querySelector("img")!);
+    expect(t.querySelector("img")).toBeNull();
+    expect(t.textContent).toBe("OR");
+    const b = tile(<ProviderIcon family="deepseek" via="openrouter" />);
+    fireEvent.error(b.querySelector(".v-pt__via img")!);
+    expect(b.querySelector(".v-pt__via")?.textContent).toBe("OR");
   });
   it("a provider without a cleared mark keeps its monogram; an unknown one gets the fallback icon", () => {
     expect(tile(<ProviderIcon family="claude" />).textContent).toBe("CC");
