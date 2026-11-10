@@ -574,7 +574,7 @@ fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
         Err(Error("preferences_busy"))
     }
 }
-fn open_at(
+pub(crate) fn open_at(
     dir: &File,
     name: &std::ffi::CStr,
     flags: i32,

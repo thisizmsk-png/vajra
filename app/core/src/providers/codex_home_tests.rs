@@ -87,3 +87,77 @@ fn write_makes_a_private_home_and_never_touches_the_users_codex_folder() {
     names.sort();
     assert_eq!(names, ["auth.json", "config.toml"]);
 }
+
+/// A temp HOME with a user `.codex` folder and a data dir, plus a snapshot of the user's file (bytes and mode).
+fn fixture() -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tmp();
+    let theirs = home.join(".codex");
+    std::fs::create_dir_all(&theirs).unwrap();
+    let cfg = theirs.join("config.toml");
+    std::fs::write(&cfg, "[model_providers.openrouter]\nenv_key = \"THEIRS\"\n").unwrap();
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
+    (home.clone(), theirs, home.join("data"))
+}
+
+fn snapshot(theirs: &Path) -> (Vec<u8>, u32, u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let m = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    (std::fs::read(theirs.join("config.toml")).unwrap(), m(&theirs.join("config.toml")), m(theirs))
+}
+
+#[test]
+fn a_linked_config_file_is_replaced_not_followed() {
+    let (_home, theirs, data) = fixture();
+    let before = snapshot(&theirs);
+    let h = write(&data, "openrouter", DEFAULT_BASE_URL).unwrap();
+    std::fs::remove_file(h.join("config.toml")).unwrap();
+    std::os::unix::fs::symlink(theirs.join("config.toml"), h.join("config.toml")).unwrap();
+
+    write(&data, "openrouter", "https://other.example/v1").unwrap();
+
+    assert_eq!(snapshot(&theirs), before, "the user's file was not touched");
+    let mine = h.join("config.toml");
+    assert!(!std::fs::symlink_metadata(&mine).unwrap().file_type().is_symlink(), "the link was replaced by a plain file");
+    assert!(std::fs::read_to_string(&mine).unwrap().contains("other.example"));
+    let leftovers: Vec<_> = std::fs::read_dir(&h).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(leftovers, ["config.toml"], "no temp file is left behind");
+}
+
+#[test]
+fn a_linked_account_dir_is_refused() {
+    let (_home, theirs, data) = fixture();
+    let before = snapshot(&theirs);
+    std::fs::create_dir_all(data.join("codex-home")).unwrap();
+    std::os::unix::fs::symlink(&theirs, data.join("codex-home/openrouter")).unwrap();
+
+    assert!(matches!(write(&data, "openrouter", DEFAULT_BASE_URL), Err(Error::Io(_))));
+
+    assert_eq!(snapshot(&theirs), before);
+    assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 1, "nothing was created in their folder");
+}
+
+#[test]
+fn a_linked_codex_home_dir_is_refused() {
+    let (_home, theirs, data) = fixture();
+    let before = snapshot(&theirs);
+    std::fs::create_dir_all(&data).unwrap();
+    std::os::unix::fs::symlink(&theirs, data.join("codex-home")).unwrap();
+
+    assert!(matches!(write(&data, "openrouter", DEFAULT_BASE_URL), Err(Error::Io(_))));
+
+    assert_eq!(snapshot(&theirs), before);
+    assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 1, "nothing was created in their folder");
+}
+
+#[test]
+fn a_linked_data_dir_is_refused() {
+    let (home, theirs, _data) = fixture();
+    let before = snapshot(&theirs);
+    let data = home.join("linked-data");
+    std::os::unix::fs::symlink(&theirs, &data).unwrap();
+
+    assert!(matches!(write(&data, "openrouter", DEFAULT_BASE_URL), Err(Error::Io(_))));
+    assert_eq!(snapshot(&theirs), before);
+    assert_eq!(std::fs::read_dir(&theirs).unwrap().count(), 1);
+}

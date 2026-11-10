@@ -5,11 +5,16 @@
 //! it by running `/usr/bin/security` (`auth.command`) each time it needs it. There is no `env_key`, so no key is ever in
 //! the child's environment.
 
+use std::ffi::{CStr, CString};
 use std::fmt::Write as _;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write as _};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::keychain::{self, SECURITY};
+use crate::preferences::open_at;
 
 /// The provider id in the generated config. Never the user's own `openrouter` entry.
 pub const PROVIDER_ID: &str = "vajra-openrouter";
@@ -74,17 +79,63 @@ pub fn home_for(data_dir: &Path, account: &str) -> Result<PathBuf, Error> {
     Ok(data_dir.join(HOMES_DIR).join(account))
 }
 
-/// Create (mode 0700) the account's `CODEX_HOME` and write its `config.toml`; returns the folder. Rewritten at every
-/// launch so a stale file never outlives a changed base URL.
+/// Open (creating at 0700 if missing) the directory `name` under `parent`, never following a link: an `O_NOFOLLOW` open
+/// of a symlink fails, so a link planted at an account or `codex-home` folder cannot redirect what is written. The
+/// folder must be ours and is set to 0700 through its descriptor.
+fn child_dir(parent: &File, name: &CStr) -> io::Result<File> {
+    // SAFETY: valid held directory fd and a NUL-terminated name that lives for the call.
+    let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if made != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = open_at(parent, name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW, 0)?;
+    // SAFETY: geteuid has no preconditions.
+    if dir.metadata()?.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    // SAFETY: an owned directory descriptor, not a path that could be swapped for a link.
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(dir)
+}
+
+/// Stage `text` in a private temp file inside `dir` (`O_EXCL|O_NOFOLLOW`, 0600) and rename it over `config.toml`. The
+/// rename replaces a link at that name instead of following it, so a planted `config.toml` link never reaches its target.
+fn replace_config(dir: &File, text: &str) -> io::Result<()> {
+    let id = crate::ids::uuid_v4().map_err(|_| io::Error::other("no randomness available"))?;
+    let tmp = CString::new(format!(".config-{id}.tmp")).map_err(io::Error::other)?;
+    let staged = (|| {
+        let mut f = open_at(dir, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o600)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        // SAFETY: both names are a generated and a fixed relative name; the directory fd stays held.
+        if unsafe { libc::renameat(dir.as_raw_fd(), tmp.as_ptr(), dir.as_raw_fd(), c"config.toml".as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+    if staged.is_err() {
+        // SAFETY: as above; nothing was replaced, so only the temp file is dropped.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+    }
+    staged
+}
+
+/// Create (mode 0700) the account's `CODEX_HOME` and write its `config.toml` (0600); returns the folder. Rewritten at
+/// every launch so a stale file never outlives a changed base URL. Each folder below `data_dir` is opened without
+/// following links and the file is replaced atomically through the held descriptor, so a symlink at `codex-home`, the
+/// account folder or `config.toml` cannot make this touch anything outside them.
 pub fn write(data_dir: &Path, account: &str, base_url: &str) -> Result<PathBuf, Error> {
-    use std::os::unix::fs::PermissionsExt;
     let text = render(account, base_url)?;
     let home = home_for(data_dir, account)?;
     let io_err = |e: io::Error| Error::Io(e.kind().to_string());
-    crate::paths::ensure_private_dir(&home).map_err(io_err)?;
-    let file = home.join("config.toml");
-    std::fs::write(&file, text).map_err(io_err)?;
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).map_err(io_err)?;
+    let name = CString::new(account).map_err(|_| Error::UnknownAccount)?;
+    std::fs::create_dir_all(data_dir).map_err(io_err)?;
+    let base = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(data_dir).map_err(io_err)?;
+    let homes = child_dir(&base, c"codex-home").map_err(io_err)?;
+    let dir = child_dir(&homes, &name).map_err(io_err)?;
+    replace_config(&dir, &text).map_err(io_err)?;
     Ok(home)
 }
 
