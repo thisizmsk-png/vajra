@@ -186,6 +186,9 @@ fi
 cmd=$1; shift
 svc=; pw=
 while [ $# -gt 0 ]; do
+  # A flag that takes a value but has none (a trailing `-w`) is refused: `shift 2` with one word left does not shift, and
+  # the loop would never end.
+  case $1 in -s|-w|-a|-T) if [ $# -lt 2 ]; then echo "security: missing value for $1" >&2; exit 64; fi;; esac
   case $1 in -s) svc=$2; shift 2;; -w) pw=$2; shift 2;; -a|-T) shift 2;; *) shift;; esac
 done
 case $cmd in
@@ -214,6 +217,30 @@ impl Drop for FakeBin {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn the_fake_security_ends_on_a_flag_with_no_value_instead_of_looping() {
+    // A trailing `-w` (or any value flag with nothing after it) used to loop forever in the fake's argument loop.
+    let b = FakeBin::new();
+    for argv in [vec!["find-generic-password", "-s", SVC, "-w"], vec!["find-generic-password", "-s"], vec!["add-generic-password", "-a"]] {
+        let mut child = std::process::Command::new(b.0.join("security")).args(&argv).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the fake security hung on {argv:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(64), "{argv:?} is refused");
+    }
+    // A flag with its value still works.
+    assert!(std::process::Command::new(b.0.join("security")).args(["find-generic-password", "-s", SVC]).status().unwrap().code() == Some(44));
 }
 
 #[test]
