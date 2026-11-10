@@ -8,6 +8,7 @@ import codexLight from "./OAI_OpenAI-Blossom_Black.svg?url";
 import codexDark from "./OAI_OpenAI-Blossom_White.svg?url";
 import grokLight from "./Grok_Logomark_Dark.svg?url";
 import grokDark from "./Grok_Logomark_Light.svg?url";
+import deepseekIcon from "./deepseek-favicon.ico?url";
 import claudeSpark from "./Claude Spark - Clay.svg?url";
 
 /** `fill` is the share of the file's canvas the mark itself covers (the Blossom file keeps a wide margin around the flower), so the tile can scale the
@@ -16,5 +17,6 @@ export const MARKS: Record<string, { light: string; dark: string; fill: number }
   openrouter: { light: gatewayLight, dark: gatewayDark, fill: 1 },
   codex: { light: codexLight, dark: codexDark, fill: 0.52 },
   grok: { light: grokLight, dark: grokDark, fill: 1 },
+  deepseek: { light: deepseekIcon, dark: deepseekIcon, fill: 1 }, // raster whale icon, one file for both themes; chip and tile sizes only
   claude: { light: claudeSpark, dark: claudeSpark, fill: 1 }, // one clay-orange file reads on both themes
 };

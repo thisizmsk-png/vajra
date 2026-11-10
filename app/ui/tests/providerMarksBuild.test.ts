@@ -15,5 +15,6 @@ describe("built marks", () => {
     const files = items.filter((i) => i.type === "asset").map((i) => i.fileName);
     expect(code).not.toMatch(/data:image/);
     expect(files.filter((f) => f.endsWith(".svg"))).toHaveLength(7); // a file per theme for each of three providers, plus the one Claude spark
+    expect(files.filter((f) => f.endsWith(".ico"))).toHaveLength(1); // the DeepSeek icon, shipped as the file it is
   }, 30000);
 });

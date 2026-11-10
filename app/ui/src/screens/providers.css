@@ -46,3 +46,8 @@
 .v-tree .v-pt__via { display: none; }
 
 /* The proposal card's workers: one row each, the pick as a chip with its billing, limits and reason beside it. */
+
+/* A tile before a provider's name in a heading, a label or the status bar. */
+.v-prov__title, .v-prov__runon { display: flex; align-items: center; gap: var(--space-sm); }
+.v-sbar__usage { display: inline-flex; align-items: center; gap: 6px; }
+.v-pref__row .v-pt { flex: none; margin-inline-start: auto; margin-inline-end: 8px; }

@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button, Switch } from "../../../components/ui/base";
 import { usePreferenceScope } from "../../preferences";
 import { SHORTCUT_CHOICES, shortcutKeys } from "../../preferenceContract";
 import type { PreferenceKey, PreferencePatch, Preferences } from "../../preferenceContract";
 import { S } from "../../../strings";
+import { ProviderIcon } from "../ProviderIcon";
 import "./preferences.css";
 const C = S.preferences;
 
@@ -33,9 +34,9 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
   // intent, and an edit made after it would be cleared when the retry lands (PR 100 review).
   const locked = prefs.busy || prefs.uncertain || prefs.needsReview;
   const source = (key: PreferenceKey) => key in patch || patch.inherit?.includes(key) ? C.unsaved : view.sources[key] === "project" ? C.projectSource : C.globalSource;
-  const select = <K extends PreferenceKey>(key: K, label: string, choices: readonly (readonly [string, string, boolean?])[]) => (
+  const select = <K extends PreferenceKey>(key: K, label: string, choices: readonly (readonly [string, string, boolean?])[], lead?: ReactNode) => (
     <div className="v-pref__row" key={key}>
-      <label><span>{label}<small>{source(key)}</small></span><select aria-label={label} value={String(value(key))} disabled={locked} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
+      <label><span>{label}<small>{source(key)}</small></span>{lead}<select aria-label={label} value={String(value(key))} disabled={locked} onChange={e => change(key, (typeof view.effective[key] === "number" ? Number(e.target.value) : e.target.value) as Preferences[K])}>
         {choices.map(([v, text, disabled]) => <option key={v} value={v} disabled={disabled}>{text}</option>)}
       </select></label>
       {projectId && <Button size="sm" variant="ghost" disabled={locked} onClick={() => inherit(key)}>{C.inherit(label)}</Button>}
@@ -58,7 +59,7 @@ export function PreferenceForm({ projectId, projectName, section, onDirty, agent
     </>}
     {section === "providers" && <>
       {/* A saved value this list does not offer (an older choice, or a check that has not answered) stays visible, never silently swapped. */}
-      {select("agent", S.providers.agent, agents.some(([v]) => v === value("agent")) ? agents : [...agents, [value("agent"), value("agent"), true]])}
+      {select("agent", S.providers.agent, agents.some(([v]) => v === value("agent")) ? agents : [...agents, [value("agent"), value("agent"), true]], <ProviderIcon family={String(value("agent"))} />)}
       <p>{S.providers.agentHint}</p>
     </>}
     {section === "models" && <>

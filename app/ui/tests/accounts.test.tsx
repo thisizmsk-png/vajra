@@ -477,7 +477,7 @@ describe("provider icons", () => {
     const { container, rerender } = render(<ProviderIcon family="claude" />);
     expect(container.querySelectorAll(".v-pt img")).toHaveLength(2); // the Claude spark
     rerender(<ProviderIcon family="deepseek" via="openrouter" />);
-    expect(container.textContent).toBe("DS"); expect(container.querySelectorAll(".v-pt__via img")).toHaveLength(2); // the gateway badge is its mark
+    expect(container.querySelectorAll(".v-pt > img")).toHaveLength(2); expect(container.querySelectorAll(".v-pt__via img")).toHaveLength(2); // the gateway badge is its mark
     rerender(<ProviderIcon family="some-new-family" />);
     expect(container.textContent?.trim()).toBe("");
     expect(container.querySelector("svg")).toBeTruthy();

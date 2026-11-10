@@ -15,13 +15,12 @@ a test (`tests/providerIcons.test.tsx`) fails if a file's sha256 stops matching 
 | `Grok_Logomark_Dark.svg` | https://x.ai/legal/brand-guidelines ("Download Logos", SpaceXAI_Grok_Assets), the Grok logomark in dark (#0A0A0A), for light backgrounds | 2026-11-10 | `a127a7cd42b0450f7d3827a331b0730aab49fd99c3fe920d172475b9ffc83992` | https://x.ai/legal/brand-guidelines ("only use our logos exactly as provided at the download link below, without any alteration or adjustment") | Owner downloaded the kit and accepted the usage terms and the clearance risk 2026-11-10; used only to identify the provider; byte for byte as downloaded, owner-supplied. Grok. |
 | `Grok_Logomark_Light.svg` | same kit, the Grok logomark in white, for dark backgrounds | 2026-11-10 | `b20648e2f111d7fbc91f58b22d1e76e9885b68a163cb5a1010f7f11bf5840491` | same page, same terms | Owner downloaded the kit and accepted the usage terms and the clearance risk 2026-11-10; used only to identify the provider; byte for byte as downloaded, owner-supplied. Grok. |
 | `Claude Spark - Clay.svg` | https://www.anthropic.com/press-kit (redirects to the anthropic.com CDN zip "Anthropic media resources.zip", sha256 `c68ac92df86c825f95177e24016fcc9a8863a3fd4ca344fe6f0700b2c1e07151`), the Spark mark alone in Clay orange, one file for both themes | 2026-11-10 | `6d53db4be375e899c937c26cf16684a80d6e869b1928d72b37748bef2560e219` | Anthropic press kit | Owner downloaded from Anthropic's press kit and accepted the clearance risk 2026-11-10; used only to identify the provider; byte for byte as downloaded, owner-supplied. Claude Code. |
+| `deepseek-favicon.ico` | https://www.deepseek.com/favicon.ico (the whale icon, 225x225, 32-bit ICO; the only square official mark; raster, so used only at chip and tile sizes) | 2026-11-10 | `30a4420e6e4dcb17fd7de560c5004346c2bc8cd971d2d5f5ee15326603e51321` | Served by deepseek.com; no brand kit published | Owner accepted the clearance risk 2026-11-10; used only to identify the provider; byte for byte as served, owner-supplied; one file for both themes. DeepSeek. |
 
 The fallback is the plan's `icons/fallback.svg` without its fixed `width`, `height` and `role="img"`: the icon is
 decorative (`aria-hidden`), sized by the tile, and the provider's name is the accessible name.
 
-Monogram only (no mark shipped), and why:
-
-- DeepSeek: its only official file is a 195x41 horizontal lockup, unreadable in the square tile and not to be cropped. Stays "DS" unless an official square mark exists.
+Every provider now has a mark. A monogram (two letters) shows only if a mark's file fails to load. The wide DeepSeek lockup (github deepseek-ai/DeepSeek-LLM, images/logo.svg) is not used: it is not square and is not to be cropped.
 
 To add a cleared mark: put the downloaded file here untouched, add its row above, and add its `light` and `dark` files to
 `marks.ts`. Nothing else changes.

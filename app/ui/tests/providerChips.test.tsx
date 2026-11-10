@@ -62,7 +62,7 @@ describe("a worker's provider (effective)", () => {
     expect(screen.getByText(W.billing.gateway)).toBeTruthy();
     expect(screen.getByText(W.ranOn("DeepSeek V3.2 · OpenRouter", "Grok 4 · OpenRouter"))).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("Upstream timeout. Retrying, attempt 1 of 2 at 14:05.");
-    expect(container.querySelector("[aria-hidden='true']")?.textContent).toBe("DS"); // the tile is decorative; the name is written beside it
+    expect(container.querySelector("[aria-hidden='true']")?.querySelectorAll(":scope > img")).toHaveLength(2); // the tile is decorative; the name is written beside it
     rerender(<ProviderLine p={p} compact />);
     expect(screen.queryByText(W.billing.gateway)).toBeNull();
   });

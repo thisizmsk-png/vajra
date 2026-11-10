@@ -32,6 +32,11 @@ describe("usage warning chip", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("puts the account's mark before the warning", () => {
+    bar(list(acct("codex", [win("daily", 90)])));
+    expect(screen.getByRole("status").querySelector(".v-pt[data-family='codex'] img")).not.toBeNull();
+  });
+
   it("says which account, how much, and when it resets", () => {
     bar(list(acct("claude", [win("weekly", 84, "2026-11-12T09:00:00Z")])));
     const chip = screen.getByRole("status");

@@ -17,6 +17,8 @@ const agent = (id: string, role: string, engine: string, status: string, overlay
 // What each worker ran on (the launch receipt's `effective`), for the run cards, the crew list, the Board and the Crew pane.
 const onClaude = { account: "claude", label: "Claude Code", family: "claude", model: null, model_name: null, billing: "subscription", requested: null, error: null };
 const onGateway = { account: "openrouter", label: "OpenRouter", family: "deepseek", model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", billing: "gateway", requested: null, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } };
+const onGrok = { account: "openrouter", label: "OpenRouter", family: "grok", model: "x-ai/grok-4", model_name: "Grok 4", billing: "gateway", requested: null, error: null };
+const onRouter = { account: "openrouter", label: "OpenRouter", family: "openrouter", model: null, model_name: null, billing: "gateway", requested: null, error: null };
 const onHarnessB = { account: "codex", label: "Codex CLI", family: "codex", model: null, model_name: null, billing: "unknown",
   requested: { model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", label: "OpenRouter" }, error: null };
 
@@ -26,8 +28,8 @@ const crew = n("lead", "lead", "Lead", "in_progress", [
     n("task:t2", "task", "t2 Token bucket middleware", "in_progress", [agent("backend", "Backend", "bhima", "in_progress", ["activity"], onClaude)]),
     n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress", [], onGateway)]),
     n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question", [], onHarnessB)]),
-    n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready", [], onClaude)]),
-    n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done", [], onClaude)]),
+    n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready", [], onGrok)]),
+    n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done", [], onRouter)]),
   ]),
 ]);
 

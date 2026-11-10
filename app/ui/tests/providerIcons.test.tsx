@@ -10,11 +10,11 @@ import { ProviderIcon } from "../src/screens/ProviderIcon";
 
 const DIR = join(__dirname, "../src/assets/providers");
 const sources = readFileSync(join(DIR, "SOURCES.md"), "utf8");
-const rows = [...sources.matchAll(/^\| `([^`]+\.svg)` \|.*?\| `([0-9a-f]{64})` \|/gm)].map((m) => ({ file: m[1], sha: m[2] }));
+const rows = [...sources.matchAll(/^\| `([^`]+\.(?:svg|ico))` \|.*?\| `([0-9a-f]{64})` \|/gm)].map((m) => ({ file: m[1], sha: m[2] }));
 
 describe("provider icon files", () => {
   it("every svg in the folder has a row in SOURCES.md, and its sha256 matches", () => {
-    const files = readdirSync(DIR).filter((f) => f.endsWith(".svg")).sort();
+    const files = readdirSync(DIR).filter((f) => /\.(svg|ico)$/.test(f)).sort();
     expect(rows.map((r) => r.file).sort()).toEqual(files);
     for (const r of rows) expect(createHash("sha256").update(readFileSync(join(DIR, r.file))).digest("hex"), r.file).toBe(r.sha);
   });
@@ -38,7 +38,7 @@ describe("provider icon files", () => {
     expect(MARKS.codex.fill).toBeLessThan(MARKS.grok.fill); // the Blossom file keeps a wide margin around the flower
   });
   it("only providers whose terms are cleared have a mark", () => {
-    expect(Object.keys(MARKS).sort()).toEqual(["claude", "codex", "grok", "openrouter"]); // DeepSeek keeps its monogram (its only file is a wide lockup)
+    expect(Object.keys(MARKS).sort()).toEqual(["claude", "codex", "deepseek", "grok", "openrouter"]);
   });
   it("the app code never reaches the network for an icon", () => {
     const code = readFileSync(join(__dirname, "../src/screens/ProviderIcon.tsx"), "utf8") + readFileSync(join(DIR, "marks.ts"), "utf8");
@@ -65,9 +65,9 @@ describe("ProviderIcon", () => {
     fireEvent.error(b.querySelector(".v-pt__via img")!);
     expect(b.querySelector(".v-pt__via")?.textContent).toBe("OR");
   });
-  it("a provider without a cleared mark (DeepSeek) keeps its monogram; an unknown one gets the fallback icon", () => {
+  it("every provider shows its mark; an unknown one gets the fallback icon", () => {
     expect(tile(<ProviderIcon family="claude" />).querySelectorAll("img")).toHaveLength(2);
-    expect(tile(<ProviderIcon family="deepseek" />).textContent).toBe("DS");
+    expect(tile(<ProviderIcon family="deepseek" />).querySelectorAll("img")).toHaveLength(2);
     expect(tile(<ProviderIcon family="codex" />).querySelectorAll("img")).toHaveLength(2);
     expect(tile(<ProviderIcon family="grok" />).querySelectorAll("img")).toHaveLength(2);
     const u = tile(<ProviderIcon family="mystery" />);
@@ -76,7 +76,7 @@ describe("ProviderIcon", () => {
   });
   it("a gateway model keeps its own tile with the gateway mark as the badge", () => {
     const t = tile(<ProviderIcon family="deepseek" via="openrouter" />);
-    expect(t.textContent).toBe("DS");
+    expect(t.querySelectorAll(":scope > img")).toHaveLength(2);
     expect(t.querySelectorAll(".v-pt__via img")).toHaveLength(2);
   });
   it("with a name beside it the tile is hidden from assistive tech; alone it is an image named for the provider", () => {
