@@ -61,13 +61,23 @@ impl Redactor {
 pub fn redact_provider_text(text: &str) -> String {
     let cleaned = Redactor::default().clean(text);
     let urls = redact_urls(&cleaned);
-    let fields = ["user_id", "cf-ray", "authorization", "x-api-key", "api_key", "apikey", "bearer"]
-        .iter()
-        .fold(urls, |s, f| redact_field(&s, f));
+    let fields = FIELDS.iter().fold(urls, |s, f| redact_field(&s, f));
     redact_key_like(&fields)
 }
 
 const SECRET: &str = "<redacted>";
+
+/// Fields whose value is a token (a run of token characters). An auth scheme word before it (`Bearer`, `Basic`, ...) is
+/// skipped, so the credential after it is what goes.
+const FIELDS: [&str; 19] = [
+    "user_id", "cf-ray", "x-api-key", "api-key", "api_key", "apikey", "password", "passwd", "secret", "client_secret",
+    "access_token", "refresh_token", "id_token", "token", "bearer", "proxy-authorization", "authorization", "set-cookie", "cookie",
+];
+/// Header names whose whole value is redacted, to the closing quote if it sat in quotes (JSON) and else to the end of
+/// the line, whatever the scheme (Basic, Token, Digest, a cookie list, ...). `set-cookie` and `proxy-authorization`
+/// contain the shorter names, but are listed so their value is cut the same way.
+const LINE_FIELDS: [&str; 4] = ["proxy-authorization", "authorization", "set-cookie", "cookie"];
+const SCHEMES: [&str; 6] = ["bearer", "basic", "token", "digest", "negotiate", "apikey"];
 
 fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+' | '=')
@@ -105,11 +115,12 @@ fn redact_urls(s: &str) -> String {
 }
 
 /// Replace the value after every case-insensitive `name` that is followed by `:` or `=` (after any closing quote), as in
-/// `name: v`, `name=v`, `"name":"v"` and `authorization: Bearer v`; and, for `bearer`, the token after a space.
-/// A value is a run of token characters.
+/// `name: v`, `name=v` and `"name":"v"`; for `bearer`, the token after a space. A line field (`LINE_FIELDS`) loses its
+/// whole value; any other loses one token, after an auth scheme word if there is one.
 fn redact_field(s: &str, name: &str) -> String {
     let lc = s.to_ascii_lowercase();
     let quote = |c: char| c == '"' || c == '\'';
+    let whole = LINE_FIELDS.contains(&name);
     let mut out = String::with_capacity(s.len());
     let mut at = 0;
     while let Some(j) = lc[at..].find(name) {
@@ -122,15 +133,18 @@ fn redact_field(s: &str, name: &str) -> String {
         if !ok {
             continue;
         }
-        let mut value = rest[1..].trim_start_matches(|c: char| c == ' ' || quote(c));
-        // An auth scheme word (Bearer, Basic, Token, Digest, ...) stays; the credential after it goes.
-        if name == "authorization" {
+        let before_value = rest[1..].trim_start_matches(' ');
+        let opener = before_value.chars().next().filter(|c| quote(*c));
+        let mut value = before_value.trim_start_matches(quote);
+        let len = if whole {
+            value.find(|c: char| c == '\n' || c == '\r' || Some(c) == opener).unwrap_or(value.len())
+        } else {
             let word = value.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(0);
-            if word > 0 && value[word..].starts_with(' ') {
+            if word > 0 && value[word..].starts_with(' ') && SCHEMES.contains(&value[..word].to_ascii_lowercase().as_str()) {
                 value = value[word..].trim_start_matches(' ');
             }
-        }
-        let len = value.find(|c: char| !is_token_char(c)).unwrap_or(value.len());
+            value.find(|c: char| !is_token_char(c)).unwrap_or(value.len())
+        };
         if len == 0 {
             continue;
         }
@@ -357,13 +371,37 @@ mod tests {
             assert!(!out.contains(secret) && out.contains("bad key") && out.contains(", retry"), "{out}");
         }
         let out = redact_provider_text("authorization: Bearer FAKEtoken123 failed");
-        assert!(!out.contains("FAKEtoken123") && out.ends_with(" failed"), "{out}");
-        for scheme in ["Basic dXNlcjpwYXNzd29yZA==", "Token abc", "Digest username=x"] {
-            let out = redact_provider_text(&format!("Authorization: {scheme} end"));
-            assert!(!out.contains("dXNlcj") && !out.contains("abc") && !out.contains("username=x"), "{out}");
+        assert!(!out.contains("FAKEtoken123"), "{out}");
+        for scheme in ["Basic dXNlcjpwYXNzd29yZA==", "Token abc", "Digest username=x, realm=y", "Negotiate YIIB"] {
+            for header in ["Authorization", "authorization", "Proxy-Authorization", "AUTHORIZATION"] {
+                let out = redact_provider_text(&format!("{header}: {scheme}\nnext line"));
+                assert!(!out.contains("dXNlcj") && !out.contains("abc") && !out.contains("username=x") && !out.contains("realm") && !out.contains("YIIB"), "{out}");
+                // Newlines are stripped first, so the whole rest of the text goes: safe, if more than needed.
+                assert!(out.starts_with(header) && out.contains(SECRET), "{out}");
+            }
         }
+        // In JSON the value ends at its closing quote.
+        let out = redact_provider_text(r#"{"authorization":"Basic dXNlcjpwYXNzd29yZA==","code":401}"#);
+        assert!(!out.contains("dXNlcj") && out.contains(r#""code":401"#), "{out}");
         let out = redact_provider_text("sent Bearer FAKEtoken123");
         assert!(!out.contains("FAKEtoken123"), "{out}");
+    }
+
+    #[test]
+    fn provider_text_loses_cookies_and_other_secret_fields() {
+        for (raw, secret) in [
+            ("Cookie: session=SENTINELCOOKIE; other=1\nx", "SENTINELCOOKIE"),
+            ("set-cookie: sid=SENTINELCOOKIE; HttpOnly", "SENTINELCOOKIE"),
+            ("x-api-key: SENTINELKEY", "SENTINELKEY"),
+            ("body api_key=SENTINELKEY&x=1", "SENTINELKEY"),
+            ("{\"password\":\"SENTINELPW\"}", "SENTINELPW"),
+            ("client_secret=SENTINELPW", "SENTINELPW"),
+            ("access_token: Bearer SENTINELTOK", "SENTINELTOK"),
+            ("refresh_token=SENTINELTOK", "SENTINELTOK"),
+        ] {
+            let out = redact_provider_text(raw);
+            assert!(!out.contains(secret), "{raw} -> {out}");
+        }
     }
 
     #[test]
