@@ -56,7 +56,12 @@ impl App {
     }
 
     pub fn act_start_proposal(&self, env: &Envelope, id: &str, proposal_sha256: &str) -> Value {
-        self.act_bound(env, Some(self.proposal_project(id)), Caller::Ui, true, "start_proposal", id, None, || self.start_proposal(id, proposal_sha256))
+        self.act_start_proposal_opts(env, id, proposal_sha256, super::StartOptions::default())
+    }
+
+    /// `act_start_proposal` with the user's seat overrides and start choice (ADR-16 16.3).
+    pub fn act_start_proposal_opts(&self, env: &Envelope, id: &str, proposal_sha256: &str, opts: super::StartOptions) -> Value {
+        self.act_bound(env, Some(self.proposal_project(id)), Caller::Ui, true, "start_proposal", id, None, || self.start_proposal_opts(id, proposal_sha256, opts))
     }
 
     pub fn act_dismiss_proposal(&self, env: &Envelope, id: &str) -> Value {

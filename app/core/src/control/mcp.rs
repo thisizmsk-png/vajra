@@ -113,10 +113,29 @@ pub fn tools() -> Value {
         {"name": "propose_run",
          "description": "Propose a new Vajra run for this project. Nothing runs until the human reads the exact ask and starts it in the app.",
          "inputSchema": {"type": "object", "additionalProperties": false, "required": ["ask"],
-            "properties": {"ask": text_prop(),
-                           "base": {"type": "string", "maxLength": 255, "default": "HEAD"},
-                           "rounds": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2}}}}
+            "properties": propose_properties(crate::providers::launch::CORE_ROUTE_AVAILABLE)}}
     ])
+}
+
+/// `propose_run`'s properties. The seat fields (ADR-16 16.1) are advertised only once the core route is on: until then a
+/// proposal with seats cannot start, so the Director-General is not told it can send one.
+fn propose_properties(seats: bool) -> Value {
+    let mut p = json!({"ask": text_prop(),
+                       "base": {"type": "string", "maxLength": 255, "default": "HEAD"},
+                       "rounds": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2}});
+    if seats {
+        let seat = json!({"type": "object", "additionalProperties": false, "required": ["account"],
+            "properties": {"account": {"type": "string", "maxLength": 64}, "model": {"type": ["string", "null"], "maxLength": 128}, "effort": {"type": ["string", "null"], "maxLength": 16}}});
+        p["max_in_flight"] = json!({"type": "integer", "minimum": 1, "maximum": 16, "default": 4});
+        p["lead"] = seat;
+        p["workers"] = json!({"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "additionalProperties": false,
+            "required": ["slot", "role", "task", "account"],
+            "properties": {"slot": {"type": "string", "pattern": "^w([1-9]|1[0-6])$"}, "role": {"type": "string", "maxLength": 32},
+                           "task": {"type": "string", "minLength": 1, "maxLength": 200}, "account": {"type": "string", "maxLength": 64},
+                           "model": {"type": ["string", "null"], "maxLength": 128}, "effort": {"type": ["string", "null"], "maxLength": 16},
+                           "security": {"type": "boolean"}, "network": {"type": "boolean"}, "why": {"type": "string", "maxLength": 300}}}});
+    }
+    p
 }
 
 fn ok(id: &Value, result: Value) -> Value {
@@ -228,4 +247,19 @@ pub fn run_stdio(socket_path: &Path) -> io::Result<()> {
     // refusal to start, not "unbound".
     let mut client = SocketClient::from_env(socket_path, |k| std::env::var_os(k))?;
     serve(stdin.lock(), io::stdout().lock(), &mut client)
+}
+
+#[cfg(test)]
+mod seat_schema_tests {
+    use super::*;
+
+    #[test]
+    fn the_seat_fields_are_advertised_only_when_the_route_is_on() {
+        let off = propose_properties(false);
+        let on = propose_properties(true);
+        for k in ["lead", "workers", "max_in_flight"] {
+            assert!(off.get(k).is_none() && on.get(k).is_some(), "{k}");
+        }
+        assert!(on["workers"]["items"]["properties"].get("source").is_none(), "the core derives source; the schema never offers it");
+    }
 }

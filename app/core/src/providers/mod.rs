@@ -7,5 +7,6 @@ pub mod contract;
 pub mod detect;
 pub mod effective;
 pub mod errors;
+pub mod launch;
 pub mod keychain;
 pub mod usage;

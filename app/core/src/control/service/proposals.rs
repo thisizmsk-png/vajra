@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::seats::SeatArgs;
 use super::*;
 use crate::control::lead::sanitise;
 
@@ -33,6 +34,10 @@ pub struct Proposal {
     pub base: String,
     pub rounds: u32,
     pub proposal_sha256: String,
+    /// The seats of a proposal with worker picks (`vajra.run_proposal/2`); `None` for a v1 proposal.
+    pub seats: Option<Seats>,
+    /// The warning the card shows when the ask or a seat's task names security work and no seat is marked.
+    pub security_warning: Option<String>,
     /// The ledger time (ISO, ms).
     pub ts: String,
 }
@@ -47,6 +52,8 @@ pub struct ProposalDecision<'a> {
     /// The run a start launched (final line only).
     pub started_run: Option<&'a str>,
     pub reason: Option<&'a str>,
+    /// The seats a start was checked and recorded with (`seats.json`) and the sha256 of that file; on the `requested` line.
+    pub seats: Option<(&'a Value, &'a str)>,
 }
 
 /// The hash a start must name: everything that decides what runs, and where.
@@ -66,7 +73,7 @@ fn valid_base(s: &str) -> bool {
 }
 
 impl Service {
-    pub(super) fn propose_run(&mut self, ask: &str, base: Option<&str>, rounds: Option<u64>) -> Result<Value> {
+    pub(super) fn propose_run(&mut self, ask: &str, base: Option<&str>, rounds: Option<u64>, seat_args: &SeatArgs<'_>) -> Result<Value> {
         let Some((project, generation)) = self.bound_project.clone() else {
             return Err(ControlError::NotPermitted);
         };
@@ -86,14 +93,21 @@ impl Service {
             return Err(ControlError::InvalidArgs("rounds must be 1 to 3".into()));
         }
         let rounds = rounds as u32;
+        let seats = if seat_args.any() { Some(self.build_seats(&project, &ask, seat_args)?) } else { None };
         if self.open_proposals(Some(&project))?.len() >= MAX_OPEN_PROPOSALS {
             return Err(ControlError::InvalidArgs(format!("{MAX_OPEN_PROPOSALS} proposals are already waiting for the human; wait for them to be started or dismissed")));
         }
         let now = SystemTime::now();
         let a = self.new_action(Kind::Propose, Actor::Lead, None, now)?;
         let item = format!("{ITEM_PREFIX}{}", a.id);
-        let sha = proposal_sha(&project, &ask, base, rounds);
-        let extra = json!({"item": item, "project": project, "generation": generation, "ask": ask, "base": base, "rounds": rounds, "proposal_sha256": sha});
+        let (sha, seats) = match &seats {
+            Some(s) => (proposal_sha_v2(&project, &ask, base, rounds, s), Some(s)),
+            None => (proposal_sha(&project, &ask, base, rounds), None),
+        };
+        let mut extra = json!({"item": item, "project": project, "generation": generation, "ask": ask, "base": base, "rounds": rounds, "proposal_sha256": sha});
+        if let Some(s) = seats {
+            extra["seats"] = serde_json::to_value(s).unwrap_or_default();
+        }
         self.record(&a, State::AwaitingHumanConfirm, extra, now)?;
         Ok(json!({"action_id": a.id, "item": item, "state": "awaiting_human", "detail": "Proposed. Nothing runs until the human starts it in the app."}))
     }
@@ -120,6 +134,14 @@ impl Service {
             }
             let num = |k: &str| r.get(k).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
             let (Some(generation), Some(rounds)) = (num("generation"), num("rounds")) else { continue };
+            // A proposal line with `seats` that cannot be read back is skipped: it can be neither shown nor started.
+            let seats = match r.get("seats") {
+                None => None,
+                Some(v) => match serde_json::from_value::<Seats>(v.clone()) {
+                    Ok(s) => Some(s),
+                    Err(_) => continue,
+                },
+            };
             out.push(Proposal {
                 item: item.to_string(),
                 action_id: str_field(r, "action_id").to_string(),
@@ -129,6 +151,8 @@ impl Service {
                 base: str_field(r, "base").to_string(),
                 rounds,
                 proposal_sha256: str_field(r, "proposal_sha256").to_string(),
+                seats: seats.clone(),
+                security_warning: seats.as_ref().and_then(|s| security_warning(str_field(r, "ask"), s)).map(str::to_string),
                 ts: str_field(r, "ts").to_string(),
             });
         }
@@ -153,6 +177,10 @@ impl Service {
         let mut extra = json!({"item": d.item, "proposal_sha256": d.proposal_sha256});
         if let Some(run) = d.started_run {
             extra["started_run_id"] = json!(run);
+        }
+        if let Some((seats, sha)) = d.seats {
+            extra["seats"] = seats.clone();
+            extra["seats_sha256"] = json!(sha);
         }
         let (state, verb) = match (d.state, d.decision) {
             (DecisionState::Requested, _) => (State::Requested, ""),

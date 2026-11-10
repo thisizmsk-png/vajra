@@ -307,6 +307,8 @@ pub struct App {
     sweeping: Mutex<std::collections::HashSet<String>>,
     /// ADR-15: the project records under `<data>/projects`.
     projects: Arc<crate::projects::store::Store>,
+    /// Role defaults and the launch checks for proposal seats; the service holds the same one.
+    seat_env: Arc<seat_env::SeatEnv>,
     /// Action receipts and per-project revisions (see `state`).
     acts: Mutex<state::Hub>,
     /// Where receipt-driven `changed` events go (see `state::set_change_sink`).
@@ -336,8 +338,12 @@ impl App {
             let store = projects.clone();
             svc.set_project_gate(Box::new(move |pid: &str| orchestrator::project_gate(&store, pid)));
         }
+        let seat_env = Arc::new(seat_env::SeatEnv::new(data, home, crate::providers::keychain::Keys::cli(security, home)));
+        svc.set_seat_policy(seat_env.clone());
+        svc.set_seats_enabled(seat_env.route());
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            seat_env,
             projects,
             preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
             acts,
@@ -852,13 +858,22 @@ impl App {
         }
     }
 
-    pub fn start_run(&self, mut input: RunInput, cwd: &str) -> Res {
+    pub fn start_run(&self, input: RunInput, cwd: &str) -> Res {
+        self.start_run_as(input, cwd, None)
+    }
+
+    /// `start_run`, optionally under a run id (and its minute) the caller already took with `fresh_run_id`, so the
+    /// guarded `seats.json` written before the start names the run that starts.
+    pub(super) fn start_run_as(&self, mut input: RunInput, cwd: &str, taken: Option<(u64, String)>) -> Res {
         // Every start reads the project store (the run's project): a refused projects folder says so first (#106 review).
         self.projects_usable()?;
         let cwd = repo_dir(cwd)?;
         argv::validate(&input).map_err(invalid_input)?;
         input.base = self.resolve_base(&cwd, &input.base)?;
-        let (now, run_id) = self.fresh_run_id(ids::unix_now())?;
+        let (now, run_id) = match taken {
+            Some(t) => t,
+            None => self.fresh_run_id(ids::unix_now())?,
+        };
         let session_id = ids::uuid_v4().map_err(|e| fail("io_error", e))?;
         let campaign = input.campaign.clone().unwrap_or_else(|| format!("deliver-{run_id}"));
         let workers = input.max_in_flight;
@@ -2224,8 +2239,11 @@ mod arrivals;
 mod caps;
 mod closeout;
 pub use closeout::WorktreeTerminals;
+pub use proposals::StartOptions;
 mod orchestrator;
 mod proposals;
+mod seat_env;
+mod seat_start;
 mod inbox;
 mod projects;
 mod wfresult;

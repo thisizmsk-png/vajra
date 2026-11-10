@@ -234,7 +234,7 @@ export function baseUrlProblem(raw: string): "empty" | "scheme" | "insecure" | "
 /** One worker of a run proposal (spec section 3). `source` says where the pick came from; `why` is the Director-General's own words (plain text, untrusted). */
 export interface ProposalWorker { slot: string; role: string; task: string; why: string; source: "role_default" | "dg" | "user"; pick: AgentPick }
 /** What Start carries for a pick the user changed: validated again by the core, and recorded there as source "user". */
-export interface ProposalOverride { slot: string; account: string; model: string | null; effort: string | null }
+export interface ProposalOverride { seat: string; account?: string; model?: string | null; effort?: string | null; network?: boolean }
 
 export function parseProposalWorkers(v: unknown): ProposalWorker[] {
   if (!Array.isArray(v)) return [];

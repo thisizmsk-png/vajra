@@ -156,7 +156,7 @@ describe("the proposal card's workers", () => {
     fireEvent.click(within(card()).getByRole("button", { name: S.dg.start }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(true));
     expect(f.calls.find((c) => c.cmd === "start_proposal")?.args).toEqual({
-      id: "proposal:a1", proposalSha256: "ab".repeat(32), overrides: [{ slot: "w3", account: "codex", model: null, effort: null }],
+      id: "proposal:a1", proposalSha256: "ab".repeat(32), overrides: [{ seat: "w3", account: "codex", model: null, effort: null }],
     });
   });
 
@@ -177,7 +177,7 @@ describe("the proposal card's workers", () => {
     fireEvent.change(await (await workers()).findByLabelText(A.effortLabel("Backend: Token bucket middleware")), { target: { value: "low" } });
     fireEvent.click(within(card()).getByRole("button", { name: S.dg.start }));
     await waitFor(() => expect(f.calls.some((c) => c.cmd === "start_proposal")).toBe(true));
-    expect((f.calls.find((c) => c.cmd === "start_proposal")?.args as { overrides: unknown[] }).overrides).toEqual([{ slot: "w1", account: "claude", model: null, effort: "low" }]);
+    expect((f.calls.find((c) => c.cmd === "start_proposal")?.args as { overrides: unknown[] }).overrides).toEqual([{ seat: "w1", account: "claude", model: null, effort: "low" }]);
   });
 
   it("a hash mismatch (the workers changed after they were shown) is refused with the reason, with the picks still on screen", async () => {

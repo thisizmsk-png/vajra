@@ -16,7 +16,9 @@
 use serde_json::{Value, json};
 
 use super::{App, Res, caps, ctl, fail, invalid, lock};
-use crate::control::service::{Decision, DecisionState, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
+pub use super::seat_start::StartOptions;
+use super::seat_start::{card, receipt_seats};
+use crate::control::service::{SeatPolicy, Decision, DecisionState, Proposal, ProposalDecision, proposal_sha, proposal_sha_v2, valid_proposal_item};
 use crate::ids;
 use crate::sessions::argv::RunInput;
 
@@ -41,7 +43,12 @@ impl App {
     }
 
     fn proposal_line(&self, d: Decision, action: Option<&str>, p: &Proposal, state: DecisionState, run: Option<&str>, reason: Option<&str>) -> Result<String, Value> {
-        let r = ProposalDecision { decision: d, action_id: action, item: &p.item, proposal_sha256: &p.proposal_sha256, state, started_run: run, reason };
+        self.proposal_line_with(d, action, p, state, run, reason, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn proposal_line_with(&self, d: Decision, action: Option<&str>, p: &Proposal, state: DecisionState, run: Option<&str>, reason: Option<&str>, seats: Option<(&Value, &str)>) -> Result<String, Value> {
+        let r = ProposalDecision { decision: d, action_id: action, item: &p.item, proposal_sha256: &p.proposal_sha256, state, started_run: run, reason, seats };
         ctl(lock(&self.control).record_proposal_decision(&r))
     }
 
@@ -59,15 +66,29 @@ impl App {
 
     /// Start proposal `id` as the human saw it (`proposal_sha256` is the hash the inbox returned).
     pub fn start_proposal(&self, id: &str, proposal_sha256: &str) -> Res {
-        self.start_proposal_with(id, proposal_sha256, |input, cwd| self.start_run(input, cwd))
+        self.start_proposal_opts(id, proposal_sha256, StartOptions::default())
+    }
+
+    /// `start_proposal` with the user's overrides and start choice (ADR-16 16.3).
+    pub fn start_proposal_opts(&self, id: &str, proposal_sha256: &str, opts: StartOptions) -> Res {
+        self.start_proposal_inner(id, proposal_sha256, opts, |input, cwd, taken| self.start_run_as(input, cwd, taken))
     }
 
     /// `start_proposal` with the run starter given, so a test can see exactly what would start without a real CLI.
+    #[cfg(test)]
     pub(super) fn start_proposal_with(&self, id: &str, proposal_sha256: &str, start: impl FnOnce(RunInput, &str) -> Res) -> Res {
+        self.start_proposal_inner(id, proposal_sha256, StartOptions::default(), |input, cwd, _| start(input, cwd))
+    }
+
+    pub(super) fn start_proposal_inner(&self, id: &str, proposal_sha256: &str, opts: StartOptions, start: impl FnOnce(RunInput, &str, Option<(u64, String)>) -> Res) -> Res {
         let _one = self.begin_decision(id)?;
         let p = self.open_proposal(id)?;
         let changed = || json!({"error": "proposal_changed", "detail": "this proposal is not what was shown; review it again"});
-        if proposal_sha(&p.project, &p.ask, &p.base, p.rounds) != p.proposal_sha256 || p.proposal_sha256 != proposal_sha256 || !crate::projects::contract::valid_project_id(&p.project) {
+        let recomputed = match &p.seats {
+            Some(s) => proposal_sha_v2(&p.project, &p.ask, &p.base, p.rounds, s),
+            None => proposal_sha(&p.project, &p.ask, &p.base, p.rounds),
+        };
+        if recomputed != p.proposal_sha256 || p.proposal_sha256 != proposal_sha256 || !crate::projects::contract::valid_project_id(&p.project) {
             return Err(changed());
         }
         // Before anything is written: an archived or missing project starts nothing and the proposal stays open.
@@ -77,14 +98,38 @@ impl App {
             return Err(fail("not_found", "the project's folder is gone"));
         }
         let root = root.to_str().ok_or_else(|| fail("not_found", "the project's folder is not a plain path"))?.to_string();
+        // A run with no worker picks is one Claude run session. A project whose default is another harness can't run it.
+        if p.seats.is_none() && !opts.overrides.is_empty() {
+            return Err(json!({"error": "override_invalid", "detail": "this proposal has no seats to override"}));
+        }
+        if p.seats.is_none() {
+            let default = self.seat_env.agents(&p.project).map(|a| a.default.account);
+            if default.is_some_and(|a| crate::providers::launch::harness_of(&a) != Some(crate::adapter::Engine::Claude)) {
+                return Err(fail("harness_missing", "this project's default is not Claude Code, so a run without worker picks cannot start; ask for one with worker picks"));
+            }
+        }
+        // Seats: overrides applied, every seat checked again, and `seats.json` written, all before the `requested` line.
+        let prepared = if p.seats.is_some() { Some(self.prepare_seats(&p, &opts)?) } else { None };
         // Written before anything starts: a crash after this line leaves the proposal decided, never started twice.
-        let action = self.proposal_line(Decision::Approve, None, &p, DecisionState::Requested, None, None)?;
-        let input = RunInput { ask: p.ask.clone(), max_rounds: p.rounds, base: p.base.clone(), max_in_flight: caps::DEFAULT_RUN_WORKERS, campaign: None, provider: None };
-        match start(input, &root) {
+        let action = self.proposal_line_with(Decision::Approve, None, &p, DecisionState::Requested, None, None, prepared.as_ref().map(|(_, _, doc, sha)| (doc, sha.as_str())))?;
+        let max_in_flight = p.seats.as_ref().map_or(caps::DEFAULT_RUN_WORKERS, |s| s.max_in_flight);
+        let input = RunInput { ask: p.ask.clone(), max_rounds: p.rounds, base: p.base.clone(), max_in_flight, campaign: None, provider: None };
+        let (taken, doc) = match prepared {
+            Some((run, now, doc, _)) => (Some((now, run)), Some(doc)),
+            None => (None, None),
+        };
+        match start(input, &root, taken) {
             Ok(run) => {
                 self.proposal_line(Decision::Approve, Some(&action), &p, DecisionState::Final, run["run_id"].as_str(), None)?;
                 self.note("proposal_started", &[]);
-                Ok(json!({"action_id": action, "state": "started", "run": run}))
+                let mut out = json!({"action_id": action, "state": "started", "run": run});
+                if let Some(doc) = doc {
+                    out["seats"] = json!(receipt_seats(&doc));
+                    for k in ["evidence_seat", "evidence_trust", "campaign_slug"] {
+                        out[k] = doc[k].clone();
+                    }
+                }
+                Ok(out)
             }
             Err(err) => {
                 let why = err["error"].as_str().unwrap_or("failed").to_string();
@@ -144,6 +189,9 @@ impl App {
                     "proposal_sha256": p.proposal_sha256, "actions": actions,
                 });
                 let mut v = v;
+                if let Some(c) = card(&p) {
+                    v["seats_card"] = c;
+                }
                 if standin {
                     v["pre_store"] = json!(true);
                     v["note"] = json!(PRE_STORE);

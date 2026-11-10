@@ -52,6 +52,12 @@ pub struct Agents {
     #[serde(default)]
     pub roles: BTreeMap<String, Choice>,
     pub allowed: Vec<Allowed>,
+    /// The Director-General's lead seat; `None` reads as `default` (see `Agents::lead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<Choice>,
+    /// Most seats one account may hold at once, by account id. Empty means no cap.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_caps: BTreeMap<String, u32>,
 }
 impl Agents {
     /// An old `agent: "codex"` reads as `{default: codex, allowed: [codex]}`. No data is migrated.
@@ -71,12 +77,18 @@ impl Agents {
                 account: account.into(),
                 model: None,
             }],
+            lead: None,
+            account_caps: BTreeMap::new(),
         }
     }
     /// The choice for a role; a role with no entry (or no role) gets the default.
     pub fn choice_for(&self, role: Option<&str>) -> &Choice {
         role.and_then(|r| self.roles.get(r))
             .unwrap_or(&self.default)
+    }
+    /// The lead seat's choice: its own, else the default.
+    pub fn lead(&self) -> &Choice {
+        self.lead.as_ref().unwrap_or(&self.default)
     }
     /// Whether the ceiling lets this choice through.
     pub fn permits(&self, c: &Choice) -> bool {
@@ -100,14 +112,20 @@ impl Agents {
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 })
         };
+        if self.roles.keys().any(|r| !crate::crew::roles::is_role(r)) {
+            return Err(Error("unknown_role"));
+        }
         if self.roles.len() > 16
+            || self.account_caps.len() > 32
+            || self.account_caps.iter().any(|(a, n)| !valid_provider(a) || !(1..=64).contains(n))
+            || self.lead.as_ref().is_some_and(|c| !choice_ok(c))
             || self.allowed.is_empty()
             || self.allowed.len() > 32
             || !choice_ok(&self.default)
             || self
                 .roles
                 .iter()
-                .any(|(r, c)| !valid_provider(r) || !choice_ok(c))
+                .any(|(_, c)| !choice_ok(c))
             || self
                 .allowed
                 .iter()
@@ -116,7 +134,7 @@ impl Agents {
             return Err(bad());
         }
         // The ceiling is enforced on write: nothing chosen may sit outside it.
-        if !self.permits(&self.default) || self.roles.values().any(|c| !self.permits(c)) {
+        if !self.permits(&self.default) || self.roles.values().any(|c| !self.permits(c)) || self.lead.as_ref().is_some_and(|c| !self.permits(c)) {
             return Err(Error("outside_allowed"));
         }
         Ok(())

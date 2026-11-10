@@ -72,6 +72,8 @@ pub enum ControlError {
     ProjectsUnavailable(String),
     UnknownTool,
     InvalidArgs(String),
+    /// Seats the launch checks refused: one `{seat, code, detail}` for each, all in one `invalid_args` answer.
+    Refusals(Vec<Value>),
     Io(io::Error),
 }
 
@@ -92,7 +94,7 @@ impl ControlError {
             Self::ProjectMissing => "project_missing",
             Self::ProjectsUnavailable(_) => "projects_unavailable",
             Self::UnknownTool => "unknown_tool",
-            Self::InvalidArgs(_) => "invalid_args",
+            Self::InvalidArgs(_) | Self::Refusals(_) => "invalid_args",
             Self::Io(_) => "io_error",
         }
     }
@@ -100,6 +102,7 @@ impl ControlError {
     pub fn to_json(&self) -> Value {
         match self {
             Self::InvalidArgs(m) | Self::ProjectsUnavailable(m) => json!({"error": self.code(), "detail": m}),
+            Self::Refusals(r) => json!({"error": self.code(), "detail": "some seats cannot be launched", "refusals": r}),
             Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
             _ => json!({"error": self.code()}),
         }

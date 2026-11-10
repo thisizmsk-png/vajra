@@ -295,7 +295,7 @@ fn a_decision_closes_a_proposal_unless_it_failed() {
     }
     let open = s.open_proposals(None).unwrap();
     let line = |s: &mut Service, p: &Proposal, d: Decision, st: DecisionState, action: Option<&str>| {
-        s.record_proposal_decision(&ProposalDecision { decision: d, action_id: action, item: &p.item, proposal_sha256: &p.proposal_sha256, state: st, started_run: None, reason: None }).unwrap()
+        s.record_proposal_decision(&ProposalDecision { decision: d, action_id: action, item: &p.item, proposal_sha256: &p.proposal_sha256, state: st, started_run: None, reason: None, seats: None }).unwrap()
     };
     // A start that failed leaves the proposal open.
     let a = line(&mut s, &open[0], Decision::Approve, DecisionState::Requested, None);
@@ -308,7 +308,7 @@ fn a_decision_closes_a_proposal_unless_it_failed() {
     assert!(s.open_proposals(None).unwrap().is_empty());
     assert!(s.decided(&open[1].item).unwrap().is_some());
     assert!(matches!(
-        s.record_proposal_decision(&ProposalDecision { decision: Decision::Reject, action_id: None, item: "plan:20261108-0900.0", proposal_sha256: "x", state: DecisionState::Final, started_run: None, reason: None }),
+        s.record_proposal_decision(&ProposalDecision { decision: Decision::Reject, action_id: None, item: "plan:20261108-0900.0", proposal_sha256: "x", state: DecisionState::Final, started_run: None, reason: None, seats: None }),
         Err(ControlError::InvalidArgs(_))
     ));
     let _ = fs::remove_dir_all(&dir);

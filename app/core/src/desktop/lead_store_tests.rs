@@ -748,3 +748,32 @@ fn an_unidentified_record_whose_location_is_this_root_refuses() {
     assert_eq!(app.read_run_loc("20261109-1710"), Some(t.repo()));
     assert!(app.isolation(RUN_ID, &t.repo()).is_err(), "an unidentified record's location at this root claims it");
 }
+
+/// ADR-16 16.3: `seats.json` is written atomically under the run's guarded dir, read back as written, and a resume's
+/// copy is byte-identical (so the evidence trust and the campaign slug are never recomputed).
+#[test]
+fn run_seats_are_recorded_read_back_and_copied_as_they_were() {
+    let t = Tmp::new();
+    let app = t.app();
+    let seats = serde_json::json!({"lead": {"account": "codex"}, "evidence_trust": "outside_guard", "campaign_slug": "deliver-20261106-0930-og"});
+    assert_eq!(app.read_run_seats(RUN_ID), None);
+    let sha = app.record_run_seats(RUN_ID, &seats).unwrap();
+    let file = t.data().join("control/lead").join(RUN_ID).join("seats.json");
+    assert_eq!(sha, crate::control::sha256::hex_digest(&std::fs::read(&file).unwrap()));
+    assert_eq!(app.read_run_seats(RUN_ID), Some(seats.clone()));
+    let next = "20261106-0945";
+    assert_eq!(app.copy_run_seats(RUN_ID, next).unwrap(), Some(sha.clone()));
+    assert_eq!(std::fs::read(&file).unwrap(), std::fs::read(t.data().join("control/lead").join(next).join("seats.json")).unwrap());
+    assert_eq!(app.copy_run_seats("20261106-0001", "20261106-0002").unwrap(), None, "a run with no seats copies nothing");
+}
+
+#[test]
+fn a_seats_write_that_cannot_happen_is_an_error() {
+    let t = Tmp::new();
+    let app = t.app();
+    // The run's guarded dir is a file: nothing can be written under it.
+    std::fs::create_dir_all(t.data().join("control/lead")).unwrap();
+    let _ = std::fs::remove_dir_all(t.data().join("control/lead").join(RUN_ID));
+    std::fs::write(t.data().join("control/lead").join(RUN_ID), b"x").unwrap();
+    assert!(app.record_run_seats(RUN_ID, &serde_json::json!({})).is_err());
+}
