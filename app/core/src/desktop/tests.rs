@@ -1516,6 +1516,31 @@ fn evidence_with_no_recorded_tree_falls_back_to_its_commit() {
     assert_eq!(status_of(&app, &slug), "stale", "no worktreeTree in the file: the commit decides");
 }
 
+/// #134 review: the filter probe and the tree share the call's one deadline. With every config read slow, a probe that
+/// used most of the budget leaves the tree only the rest, so the repo state never runs past the deadline.
+#[test]
+fn a_slow_filter_probe_does_not_give_the_tree_a_fresh_budget() {
+    let t = Tmp::new();
+    let (mut app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let real = String::from_utf8(std::process::Command::new("which").arg("git").output().unwrap().stdout).unwrap().trim().to_string();
+    let p = t.home().join("slow-config-git.sh");
+    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = config ] && sleep 2; done\nexec {real} \"$@\"\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    app.bridge.git = p;
+    let budget = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    let st = app.worktree_state(&repo, None, start + budget);
+    let took = start.elapsed();
+    assert!(took < budget + Duration::from_secs(1), "the repo state ran {took:?} against a {budget:?} deadline");
+    let (head, tree, filtered) = st.expect("HEAD still reads");
+    assert_eq!(head.len(), 40);
+    // `filtered` is not pinned: on a loaded machine the 2 s probe itself can outlast the budget, and a probe that runs out of
+    // time fails closed as `filtered` (`repo_filters`). Either way the tree is not computed and the deadline holds.
+    let _ = filtered;
+    assert_eq!(tree, None, "the probe left too little time for the tree: not computed, never a guess");
+}
+
 #[test]
 fn the_repo_state_reads_stop_at_the_calls_deadline() {
     let t = Tmp::new();
@@ -1549,6 +1574,71 @@ fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
     run(&["read-tree", "HEAD"]);
     run(&["add", "-A", "--", ".", ":(exclude)data/walkthroughs"]);
     assert_eq!(run(&["write-tree"]), tree);
+}
+
+/// #134 review: the walkthrough base is left out of the tree LITERALLY, by the verifier and here alike. A base named with a
+/// glob character (`out/w*`) must not also leave out a neighbour it would match (`out/wx/`): that neighbour's edits count,
+/// and the desktop's tree is still exactly the one `vajra-verify-work.sh` records.
+#[test]
+fn a_walkthrough_base_with_glob_characters_leaves_out_only_itself() {
+    if !have_jq() { eprintln!("skipped: no jq"); return; }
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let base = repo.join("out/w*");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(repo.join("out/wx")).unwrap();
+    fs::write(repo.join("out/wx/n.txt"), b"one").unwrap();
+    let verify = || {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/vajra-verify-work.sh");
+        let o = std::process::Command::new("bash").current_dir(&repo).env("VAJRA_WALKTHROUGH_DIR", &base).arg(&script).args(["green-run", "true"]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let doc: Value = serde_json::from_slice(&fs::read(base.join("green-run/evidence.json")).unwrap()).unwrap();
+        doc["git"]["worktreeTree"].as_str().unwrap().to_string()
+    };
+    let base_s = base.to_string_lossy().into_owned();
+    let recorded = verify();
+    assert_eq!(app.bridge.tree_id(&repo, &[&base_s]).as_deref(), Some(recorded.as_str()), "the desktop's tree is the verifier's");
+    fs::write(repo.join("out/wx/n.txt"), b"edited").unwrap();
+    assert_ne!(app.bridge.tree_id(&repo, &[&base_s]).as_deref(), Some(recorded.as_str()), "a neighbour the glob would match still counts");
+    assert_ne!(verify(), recorded, "and the verifier records it too");
+    assert_eq!(app.bridge.tree_id(&repo, &[&base_s]), Some(verify()), "the two still agree after the edit");
+}
+
+/// #134 review: the repository's `info/exclude` and `info/attributes` are read by this process, so they cannot make the
+/// tree id hang (a FIFO with no writer) or read without bound (a link to `/dev/zero`, an oversized file). Each is refused
+/// quickly and the tree is not computed (the evidence then reads `unverified`); an ordinary info file is still honored.
+#[test]
+fn a_hostile_repo_info_file_never_hangs_or_floods_the_tree_id() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let info = repo.join(".git/info");
+    fs::create_dir_all(&info).unwrap();
+    // An ordinary exclude is honored: an excluded untracked file does not change the tree.
+    let base = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree id");
+    fs::write(info.join("exclude"), b"ignored.txt\n").unwrap();
+    fs::write(repo.join("ignored.txt"), b"x").unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).as_deref(), Some(base.as_str()), "info/exclude is still read");
+    fs::remove_file(repo.join("ignored.txt")).unwrap();
+    fs::remove_file(info.join("exclude")).unwrap();
+    // Each hostile file, in a thread with a deadline: a hang fails the test instead of blocking the suite.
+    let within = |what: &str| -> Option<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (b, r) = (app.bridge.clone(), repo.clone());
+        std::thread::spawn(move || { let _ = tx.send(b.tree_id(&r, &VERIFY_EXCLUDES)); });
+        rx.recv_timeout(Duration::from_secs(20)).unwrap_or_else(|_| panic!("tree_id hung on {what}"))
+    };
+    let attrs = info.join("attributes");
+    let c = std::ffi::CString::new(attrs.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    assert_eq!(within("a FIFO with no writer"), None);
+    fs::remove_file(&attrs).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &attrs).unwrap();
+    assert_eq!(within("a link to /dev/zero"), None);
+    fs::remove_file(&attrs).unwrap();
+    fs::write(info.join("exclude"), vec![b'#'; 2 << 20]).unwrap();
+    assert_eq!(within("an oversized info/exclude"), None);
+    fs::remove_file(info.join("exclude")).unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).as_deref(), Some(base.as_str()), "and the tree is computed again");
 }
 
 #[test]

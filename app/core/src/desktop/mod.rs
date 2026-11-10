@@ -1193,7 +1193,10 @@ impl App {
             // whatever `VAJRA_WALKTHROUGH_DIR` pointed at), else the default.
             let base_str = base.map(|b| b.to_string_lossy().into_owned());
             let excludes: Vec<&str> = match &base_str { Some(b) => vec![b.as_str()], None => VERIFY_EXCLUDES.to_vec() };
-            let tree = if filtered { None } else { bridge.tree_id(repo, &excludes) };
+            // One deadline for the probe and the tree: what the config read used comes out of the tree's time, so a slow
+            // probe cannot hand `tree_id` a fresh budget (#134 review). No time left: the tree is not computed (`unverified`).
+            bridge.timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            let tree = if filtered || bridge.timeout.is_zero() { None } else { bridge.tree_id(repo, &excludes) };
             Some((head, tree, filtered))
         };
         let st = read();
