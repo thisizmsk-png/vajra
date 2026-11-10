@@ -63,8 +63,7 @@ export const S = {
     show: (view: string) => `Show ${view}`,
     openSettings: "Open Settings",
     status: "Status",
-    usageWarn: (account: string, kind: string, pct: number, resets: string | null) => {
-      const name = ({ claude: "Claude", codex: "Codex" } as Record<string, string>)[account] ?? account;
+    usageWarn: (name: string, kind: string, pct: number, resets: string | null) => {
       const what = ({ "5h": " this 5-hour window", daily: " today", weekly: " this week", credit: " of its credit limit" } as Record<string, string>)[kind] ?? "";
       const when = resets ? new Date(resets) : null;
       const reset = when && !Number.isNaN(when.getTime()) ? ` Resets ${when.toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}.` : "";
@@ -622,7 +621,7 @@ export const S = {
     baseUrlSave: "Save base URL",
     baseUrlProblem: { empty: "Enter a web address.", scheme: "Use an https address (http only for this machine: localhost, 127.0.0.1 or ::1).", insecure: "Plain http would send your key unencrypted. Use https, or a localhost address.", credentials: "Remove the user name and password from the address. Keys are only saved in the Keychain." } as Record<string, string>,
     baseUrlFailed: "The base URL was not saved.",
-    tileLegend: "Two-letter tiles mark where each provider's official mark goes once its terms are cleared. The plain icon is the fallback for anything else.",
+    tileLegend: "A provider's own mark is shown only to say which provider runs a worker. A two-letter tile stands in until its mark is cleared. The plain icon is the fallback for anything else.",
   },
   /** Project scope: the default agent, per-role defaults and the allowed set. */
   agents: {

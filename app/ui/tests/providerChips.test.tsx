@@ -62,7 +62,7 @@ describe("a worker's provider (effective)", () => {
     expect(screen.getByText(W.billing.gateway)).toBeTruthy();
     expect(screen.getByText(W.ranOn("DeepSeek V3.2 · OpenRouter", "Grok 4 · OpenRouter"))).toBeTruthy();
     expect(screen.getByRole("status").textContent).toBe("Upstream timeout. Retrying, attempt 1 of 2 at 14:05.");
-    expect(container.querySelector("[aria-hidden='true']")?.textContent).toBe("DSOR"); // the tile is decorative; the name is written beside it
+    expect(container.querySelector("[aria-hidden='true']")?.querySelectorAll(":scope > img")).toHaveLength(2); // the tile is decorative; the name is written beside it
     rerender(<ProviderLine p={p} compact />);
     expect(screen.queryByText(W.billing.gateway)).toBeNull();
   });
@@ -88,7 +88,7 @@ describe("workers on every surface", () => {
     const { container } = render(<CrewTree label="Crew" nodes={[{ id: "a", label: "Backend", status: "done", icon: iconOf(parseWorkerProvider(claude)!) }]} selected="a" onSelect={() => {}} />);
     expect(screen.getByRole("treeitem", { name: /Backend/ })).toBeTruthy();
     expect(container.querySelector(".v-pt")?.getAttribute("aria-hidden")).toBe("true");
-    expect(container.querySelector(".v-pt")?.textContent).toBe("CC");
+    expect(container.querySelectorAll(".v-pt img")).toHaveLength(2);
   });
 });
 

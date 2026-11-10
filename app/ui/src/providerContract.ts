@@ -344,6 +344,11 @@ export function parseUsage(v: unknown): UsageList | null {
   return { schema: USAGE_SCHEMA, usage: v.usage.map((u) => ({ ...u, windows: u.windows.map((w) => ({ ...w, resets_at: w.resets_at ?? null })) })) };
 }
 
+/** Account ids the app ships with, by the label the rest of the UI shows for them. The usage answer carries only the id and the idle shell must not load the accounts list just to name one. */
+const ACCOUNT_LABELS: Record<string, string> = { claude: "Claude Code", codex: "Codex CLI", openrouter: "OpenRouter" };
+/** What to call an account in a warning: its label, or the id when no label is known. */
+export const accountLabel = (id: string): string => ACCOUNT_LABELS[id] ?? id;
+
 /** The window the status bar chip is about: the most used one that is at or over the warning level. */
 export function usageWarning(list: UsageList | null | undefined): { account: string; window: UsageWindow } | null {
   let worst: { account: string; window: UsageWindow } | null = null;
