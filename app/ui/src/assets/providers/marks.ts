@@ -45,7 +45,7 @@ Object.assign(MARKS, {
   moonshotai: one("moonshotai", "favicon.ico"),
   nousresearch: one("nousresearch", "favicon.png"),
   perceptron: { light: vf("perceptron", "favicon-dark.svg"), dark: vf("perceptron", "favicon-light.svg"), fill: 1 },
-  perplexity: one("perplexity", "favicon.svg"),
+  perplexity: one("perplexity", "favicon.svg", { plate: true }),
   reflection: one("reflection", "icon.svg"),
   relace: one("relace", "FFActUeE4daoS9F9mpqmKv4y3ZI.svg", { plate: true }),
   stepfun: one("stepfun", "step_favicon.svg"),

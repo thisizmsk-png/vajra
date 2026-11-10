@@ -78,6 +78,7 @@ describe("provider icon files", () => {
   });
   it("a glyph that is dark on a transparent ground sits on a plate", () => {
     expect(tile(<ProviderIcon family="liquid" model="liquid/lfm" />).className).toContain("v-pt--plate");
+    expect(tile(<ProviderIcon family="perplexity" model="perplexity/sonar" />).className).toContain("v-pt--plate");
     expect(tile(<ProviderIcon family="google" model="google/gemini" />).className).not.toContain("v-pt--plate");
   });
   it("only providers with a documented mark have one", () => {
