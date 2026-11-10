@@ -29,6 +29,24 @@ fn the_spikes_seven_failure_texts_classify() {
 }
 
 #[test]
+fn an_http_status_beats_transport_wording() {
+    for (text, kind, ra) in [
+        ("stream disconnected before completion: unexpected status 401 Unauthorized", Kind::Auth, None),
+        ("stream disconnected before completion: unexpected status 402 Payment Required", Kind::Quota, None),
+        ("stream disconnected before completion: last status: 429, retry-after: 7", Kind::RateLimit, Some(7)),
+        ("idle timeout waiting for SSE: unexpected status 400 Bad Request", Kind::BadRequest, None),
+        ("request timed out: last status: 502", Kind::Upstream, None),
+        ("stream disconnected before completion", Kind::Timeout, None),
+    ] {
+        let c = classify(text);
+        assert_eq!((c.kind, c.retry_after_s), (kind, ra), "{text}");
+    }
+    // Wrapped, a 401 is asked about at once: no retry, no wait.
+    let (out, _, slept, calls) = drive(&["stream disconnected before completion: unexpected status 401 Unauthorized"; 3]);
+    assert!(matches!(out, Outcome::Blocked(_)) && slept.is_empty() && calls == 1);
+}
+
+#[test]
 fn a_429_carries_its_retry_after() {
     assert_eq!(classify("last status: 429, retry-after: 7").retry_after_s, Some(7));
     assert_eq!(classify("last status: 429").retry_after_s, None);

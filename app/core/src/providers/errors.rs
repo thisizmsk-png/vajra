@@ -161,18 +161,21 @@ pub fn classify(text: &str) -> Classified {
     let lc = text.to_ascii_lowercase();
     let http_status = status_in(&lc);
     let has = |needles: &[&str]| needles.iter().any(|n| lc.contains(n));
-    let kind = if has(&["idle timeout", "stream disconnected", "timed out"]) {
+    // An explicit HTTP failure is the cause; transport wording ("stream disconnected", "idle timeout") only fills in when
+    // no status says more, so `stream disconnected: unexpected status 401` is an auth failure, not a timeout to retry.
+    let by_status = http_status.and_then(|s| match s {
+        401 | 403 => Some(Kind::Auth),
+        402 => Some(Kind::Quota),
+        429 => Some(Kind::RateLimit),
+        408 | 504 => Some(Kind::Timeout),
+        500..=599 => Some(Kind::Upstream),
+        400 | 404 | 413 | 422 => Some(Kind::BadRequest),
+        _ => None,
+    });
+    let kind = if let Some(k) = by_status {
+        k
+    } else if has(&["idle timeout", "stream disconnected", "timed out"]) {
         Kind::Timeout
-    } else if let Some(s) = http_status {
-        match s {
-            401 | 403 => Kind::Auth,
-            402 => Kind::Quota,
-            429 => Kind::RateLimit,
-            408 | 504 => Kind::Timeout,
-            500..=599 => Kind::Upstream,
-            400 | 404 | 413 | 422 => Kind::BadRequest,
-            _ => Kind::UnexplainedExit,
-        }
     } else if has(&["authentication_error", "invalid api key", "not logged in", "please run /login", "signed out", "unauthorized"]) {
         Kind::Auth
     } else if has(&["insufficient credit", "credit balance", "payment required"]) {
