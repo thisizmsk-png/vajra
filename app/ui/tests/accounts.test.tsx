@@ -380,6 +380,26 @@ describe("Project scope: the default, role defaults and the allowed set", () => 
     expect(sent.agents.allowed.filter((a) => a.account !== "openrouter")).toEqual(AGENTS.allowed.filter((a) => a.account !== "openrouter"));
   });
 
+  it("unchecking a CLI login's default under an account-wide allowance keeps its models allowed", async () => {
+    const accounts = clone(FIXTURE_ACCOUNTS) as any;
+    const codex = accounts.accounts.find((a: any) => a.id === "codex");
+    codex.models = [{ id: "gpt-x", family: "gpt", name: "GPT X", tool_check: "passed" }, { id: "gpt-y", family: "gpt", name: "GPT Y", tool_check: "passed" }];
+    const agents = clone(AGENTS);
+    agents.roles = {}; agents.default = { account: "claude", model: null, effort: null }; // nothing uses Codex
+    const f = settings({ provider_accounts: accounts, provider_agents: agents });
+    const s = await section();
+    const box = (name: string) => within(s).getByText(name, { selector: "[data-model-line]" }).closest("label")!.querySelector("input") as HTMLInputElement;
+    expect(box("GPT X · Codex CLI").checked).toBe(true);
+    fireEvent.click(box(`${C.defaultModel} · Codex CLI`));
+    expect(box(`${C.defaultModel} · Codex CLI`).checked).toBe(false);
+    expect(box("GPT X · Codex CLI").checked).toBe(true);
+    expect(box("GPT Y · Codex CLI").checked).toBe(true);
+    fireEvent.click(within(s).getByRole("button", { name: A.save }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "provider_agents_save")).toBe(true));
+    const sent = f.calls.find((c) => c.cmd === "provider_agents_save")?.args as { agents: { allowed: Array<{ account: string; model: string | null }> } };
+    expect(sent.agents.allowed.filter((a) => a.account === "codex")).toEqual([{ account: "codex", model: "gpt-x" }, { account: "codex", model: "gpt-y" }]);
+  });
+
   it("Save sends the edited defaults and the allowed set; nothing is sent before", async () => {
     const f = settings();
     const s = await section();

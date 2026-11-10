@@ -79,8 +79,9 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
   const edit = (next: Agents) => { setDraft(next); setMessage(""); };
   const inUse = (e: { account: string; model: string | null }) => sameEntry(draft.default, e) || Object.values(draft.roles).some((r) => sameEntry(r, e));
   const toggle = (e: { account: string; model: string | null }, accountModels: string[]) => {
-    // Narrowing under an account-wide allowance: the account-wide entry becomes explicit entries for every other model.
-    if (e.model !== null && coveredByAccount(draft.allowed, e.account)) {
+    // Narrowing under an account-wide allowance (a model row, or a CLI login's default row, which is that entry): it becomes explicit
+    // entries for every model except the one turned off, so unchecking one row never flips the others.
+    if (coveredByAccount(draft.allowed, e.account)) {
       const rest = accountModels.filter((id) => id !== e.model).map((id) => ({ account: e.account, model: id }));
       return edit({ ...draft, allowed: [...draft.allowed.filter((x) => x.account !== e.account || x.model !== null), ...rest.filter((r) => !draft.allowed.some((x) => sameEntry(x, r)))] });
     }
