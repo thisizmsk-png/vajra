@@ -1406,6 +1406,37 @@ fn an_external_worktree_of_the_leads_own_project_keeps_its_secret_file_rules() {
     assert!(!got.contains(&format!("Read(/{}/**)", wt.display())), "its own worktree is never denied wholesale: {got}");
 }
 
+/// #103 review: the same with the worktree run from before the store, pinned to a stand-in. Once that pin validates (the
+/// worktree still gives the stand-in and resolves to the store project) it is the project's run, so the worktree keeps
+/// its secret-file rules and is never denied wholesale.
+#[test]
+fn an_external_worktree_stand_in_run_of_the_leads_own_project_keeps_its_secret_file_rules() {
+    let t = Tmp::new();
+    let app = t.app();
+    let (main, wt) = (t.0.join("main"), t.0.join("main-wt"));
+    let gd = main.join(".git/worktrees/main-wt");
+    for d in [gd.clone(), main.join(".git/objects"), wt.clone()] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(gd.join("commondir"), "../..\n").unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+    std::fs::write(gd.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    let pm = super::super::test_project(&t.data(), &t.home(), &main);
+    let (sid, run) = ("3c8fad5b-d9cb-469f-a165-70867728950e", "20261109-1500");
+    lock(&app.runs).insert(format!("run-{sid}"), Run { session_id: sid.into(), run_id: run.into(), campaign: "deliver-m".into(), cwd: main.clone(), nonces: Redactor::default() });
+    app.record_run(run, &main, sid, "deliver-m", true, 1).unwrap();
+    assert_eq!(app.pinned_project(run).as_deref(), Some(pm.as_str()));
+    app.record_run("20261109-1501", &wt, "4c8fad5b-d9cb-469f-a165-70867728950e", "deliver-w", true, 1).unwrap();
+    let k = super::super::orchestrator::project_ref(&wt).0;
+    crate::control::fsx::write_atomic(&t.data().join("control/lead/20261109-1501"), "project", k.as_bytes()).unwrap();
+    assert_eq!(app.store_identity("20261109-1501"), Ok(Some(pm.clone())), "the stand-in validates to the project");
+    let folders = app.own_project_folders(run, &main).unwrap();
+    assert!(folders.contains(&wt), "the worktree is the project's own folder: {folders:?}");
+    let iso = app.isolation(run, &main).unwrap();
+    assert!(!iso.deny.contains(&wt), "its own worktree is never denied wholesale: {:?}", iso.deny);
+}
+
 /// #82 sweep: a guarded record of the Lead's own project that exists but cannot be read (its cwd, or the directory of runs) refuses
 /// the ask. Skipping it would leave that folder's secret files without deny rules.
 #[test]
@@ -1686,9 +1717,10 @@ fn a_run_folder_replaced_by_a_link_to_an_unrecorded_folder_of_its_own_project_re
     assert!(app.isolation("20261108-1100", &src).is_err(), "equal to a recorded folder, not merely inside the project");
 }
 
-/// #80 identity model: one recorded location claimed by two keys via DIFFERENT runs (so no single folder collides) is ambiguous and refuses.
+/// #80 identity model, under the #103 ownership rule: one recorded LOCATION shared by runs of two store projects (so no folder
+/// either OWNS collides) is Git bookkeeping, not a claim. The ask goes on and the other project's run folder is denied.
 #[test]
-fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
+fn one_recorded_location_shared_by_two_projects_through_different_runs_is_bookkeeping_not_a_claim() {
     let t = Tmp::new();
     let app = t.app();
     let proj = t.0.join("proj");
@@ -1700,7 +1732,9 @@ fn one_recorded_location_claimed_by_two_keys_through_different_runs_refuses() {
     app.record_run_as("20261108-1100", &src, Some(&pp), SID, "x", true, 1).unwrap();
     assert!(app.isolation("20261108-1100", &src).is_ok(), "healthy");
     app.record_run_as("20261108-1101", &lib, Some(&po), SID, "y", true, 1).unwrap();
-    assert!(app.isolation("20261108-1100", &src).is_err(), "the location is recorded under two projects");
+    let iso = app.isolation("20261108-1100", &src).unwrap();
+    assert!(iso.deny.contains(&lib), "the other project's run folder is denied: {iso:?}");
+    assert!(!iso.deny.contains(&proj), "the shared location is no claim on this project's root: {iso:?}");
 }
 
 #[path = "lead_store_tests.rs"]
