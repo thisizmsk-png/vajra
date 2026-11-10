@@ -52,6 +52,31 @@ fn a_click_aimed_at_an_older_conversation_is_stale_and_two_new_conversation_clic
     wait_until("the ask", || idle(&app));
 }
 
+/// #105 review [P2]: a client following the revision contract never keeps a stale conversation. With an idle project, a
+/// Director-General created by `lead_status` (no generation, then 1) and a plain `new_conversation` (1, then 2) each move
+/// the revision, so a read with the saved `since_rev` is a full one carrying the new generation. A read with nothing
+/// changed is still `unchanged`.
+#[test]
+fn a_new_or_renewed_conversation_moves_the_project_revision() {
+    let t = Tmp::new();
+    let app = t.app();
+    let p = pid(&t);
+    let first = app.project_state(&p, None).unwrap();
+    assert!(first["generations"]["orchestrator"].is_null(), "{first}");
+    let rev = first["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&p, Some(rev)).unwrap()["unchanged"], true, "nothing changed yet");
+    app.lead_status(RUN_ID).unwrap();
+    let created = app.project_state(&p, Some(rev)).unwrap();
+    assert_eq!((created["unchanged"].as_bool(), created["generations"]["orchestrator"].as_u64()), (Some(false), Some(1)), "created: {created}");
+    let rev = created["rev"].as_u64().unwrap();
+    assert_eq!(app.project_state(&p, Some(rev)).unwrap()["unchanged"], true);
+    app.new_conversation(RUN_ID).unwrap();
+    let renewed = app.project_state(&p, Some(rev)).unwrap();
+    assert_eq!((renewed["unchanged"].as_bool(), renewed["generations"]["orchestrator"].as_u64()), (Some(false), Some(2)), "renewed: {renewed}");
+    assert!(renewed["rev"].as_u64().unwrap() > rev);
+    assert_eq!(app.project_state(&p, renewed["rev"].as_u64()).unwrap()["unchanged"], true, "and steady after");
+}
+
 /// A "New conversation" landing between the receipt's check and the ask lock: the ask is still stale, never a turn of
 /// the new conversation it was not aimed at.
 #[test]

@@ -42,6 +42,9 @@ pub(super) struct Hub {
     inbox_fp: HashMap<String, u64>,
     /// Whether the last inbox read worked (it starts true).
     inbox_ok: bool,
+    /// project_id -> the Director-General generation `project_state` last saw, so a conversation that is created or
+    /// renewed by any path (plain `new_conversation`, `lead_status`) moves the revision (#105 review).
+    orch_gen: HashMap<String, Option<u32>>,
 }
 
 /// Where `act` gets the target's current generation.
@@ -73,7 +76,7 @@ impl Hub {
                 *g = (*g).max(r.current_generation.unwrap_or(0));
             }
         }
-        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new(), inbox_ok: true })
+        Ok(Self { store, base, revs: HashMap::new(), run_gen, start_gate: Default::default(), workers_fp: 0, inbox_fp: HashMap::new(), inbox_ok: true, orch_gen: HashMap::new() })
     }
 
     pub(super) fn rev(&mut self, project: &str) -> u64 {
@@ -380,13 +383,22 @@ impl App {
             // Never "nothing waiting" on a failed read.
             Err(e) => json!({"ok": false, "error": e["error"]}),
         };
+        // Read before the revision: a generation that moved since the last read bumps it, so `since_rev` never answers
+        // `unchanged` across a new or renewed conversation, whichever path changed it.
+        let orch_gen = self.orchestrator_generation(project_id);
+        let mut moved: Vec<Value> = Vec::new();
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
+            let seen = h.revs.contains_key(project_id);
+            if h.orch_gen.insert(project_id.to_string(), orch_gen) != Some(orch_gen) && seen {
+                moved.push(json!({"project_id": project_id, "rev": h.bump(project_id)}));
+            }
             let rev = h.rev(project_id);
             let rg = h.run_gen.get(project_id).copied().unwrap_or(0);
             let recent: Vec<Receipt> = h.store.recent(project_id, RECENT).into_iter().cloned().collect();
             (rev, rg, recent)
         };
+        self.emit_projects(moved);
         if since_rev == Some(rev) {
             return Ok(json!({"schema": "vajra.project_state/1", "project_id": project_id, "rev": rev, "unchanged": true}));
         }
@@ -397,7 +409,7 @@ impl App {
             "rev": rev,
             "unchanged": false,
             "active_runs": self.active_run_count(),
-            "generations": {"project": run_gen, "orchestrator": self.orchestrator_generation(project_id)},
+            "generations": {"project": run_gen, "orchestrator": orch_gen},
             "workers": workers,
             "receipts": recent,
             "inbox": inbox,
