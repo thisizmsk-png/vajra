@@ -272,6 +272,8 @@ impl App {
     /// Open everything under `data` (the app data dir) for the user whose
     /// home is `home`. Nothing under `home` is written.
     pub fn open(data: &Path, home: &Path) -> std::io::Result<Self> {
+        // A test build never reaches the real Keychain: its default `security` path does not exist.
+        let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
@@ -312,14 +314,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
-            // A test build never reaches the real Keychain: its default `security` path does not exist.
-            keys: crate::providers::keychain::Keys::cli(
-                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
-                home,
-            ),
+            keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
-            // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
-            usage_source: Box::new(crate::providers::usage::NoSource),
+            // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
+            // stdout pipe. With no key stored there is nothing to meter and no outbound call.
+            usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
@@ -705,18 +704,51 @@ impl App {
     /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
     pub fn provider_key_save(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_replace`: overwrite the stored key (or store the first one).
     pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
         let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        self.key_changed(account, r.is_ok());
         key_state(account, r.map(|()| true))
     }
 
     /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
     pub fn provider_key_remove(&self, account: &str) -> Res {
-        key_state(account, self.keys.remove(account).map(|()| false))
+        let r = self.keys.remove(account).map(|()| false);
+        self.key_changed(account, r.is_ok());
+        key_state(account, r)
+    }
+
+    /// A key was saved, replaced or removed (`ok`: the operation succeeded). The account's old figures are forgotten only
+    /// when it did, since a refused or failed one left the key as it was. The metered accounts are looked up again either
+    /// way (a failed Replace has already deleted the old key), and if what is shown changed the revisions advance and the
+    /// UI is told, so a subscriber does not keep a removed key's usage. What was shown is taken BEFORE the figures are
+    /// forgotten: replacing a key keeps the account list, and only the dropped figures differ.
+    fn key_changed(&self, account: &str, ok: bool) {
+        self.rediscover(ok.then_some(account));
+    }
+
+    /// Look the metered accounts up again, forgetting `forget`'s figures in between, and publish a change in what the usage
+    /// view shows. The "before" is read first, so dropped figures count as a change even when the account list is the same.
+    fn rediscover(&self, forget: Option<&str>) {
+        let before = self.provider_usage_cached().fingerprint();
+        if let Some(account) = forget {
+            self.usage.forget(account);
+        }
+        self.usage_source.refresh(true);
+        if self.provider_usage_cached().fingerprint() != before {
+            self.emit_projects(self.bump_all_projects());
+        }
+    }
+
+    /// Look up which accounts have a stored key (this runs `security`, so never on a cache read) and publish a change in
+    /// what the usage view shows. The app calls it once on a background thread at start, so the row appears shortly after
+    /// launch without opening the Providers page.
+    pub fn discover_usage_accounts(&self) {
+        self.rediscover(None);
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
@@ -725,7 +757,12 @@ impl App {
     pub fn provider_usage(&self, page_open: bool) -> Res {
         // What `project_state` serves now, against what this read leaves in the cache.
         let before = self.provider_usage_cached().fingerprint();
-        let now = self.usage_snapshot(page_open || self.active_run_count() > 0);
+        let active = page_open || self.active_run_count() > 0;
+        if active {
+            // Account discovery runs here, after `before` was taken from the cache, so a changed account list is a change.
+            self.usage_source.refresh(false);
+        }
+        let now = self.usage_snapshot(active);
         // Only a real change advances the revisions: `project_state` then answers in full with the new usage, and the UI is
         // told through the usual `changed` event. A read that changes nothing (a cache hit, the same figures) moves nothing.
         if now.fingerprint() != before {

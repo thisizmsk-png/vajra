@@ -645,6 +645,10 @@ fn main() {
             handle.state::<App>().set_event_sink(Box::new(move |name, p| {
                 let _ = event_handle.emit(name, p);
             }));
+            // Which accounts have a stored key is looked up once here, off every request path, so the usage row shows up
+            // shortly after launch without opening the Providers page (a slow Keychain delays nothing else).
+            let discover = handle.clone();
+            std::thread::spawn(move || discover.state::<App>().discover_usage_accounts());
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 let mut nap = vajra_desktop::nap::NapGuard::new(vajra_desktop::nap::macos::ProcessInfo);
