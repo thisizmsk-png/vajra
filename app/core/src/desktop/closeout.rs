@@ -112,6 +112,17 @@ pub(super) fn judge(status: Status, stopped: bool, message_pending: bool) -> Res
     Err(Skip::Working)
 }
 
+/// The effective setting for a run: `project` is the lookup of the run's project (`Err` if it could not be done),
+/// `read` the preference read for a scope (`None` = could not be read). The global value is used only when no project
+/// holds the folder; a project whose own read fails stays off even if the global value is on.
+fn auto_setting(project: Result<Option<String>, ()>, read: impl Fn(Option<&str>) -> Option<bool>) -> bool {
+    match project {
+        Err(()) => false,
+        Ok(Some(id)) => read(Some(&id)).unwrap_or(false),
+        Ok(None) => read(None).unwrap_or(false),
+    }
+}
+
 /// The persisted set of closed workers (id -> unix seconds), plus the automatic pass's pacing.
 pub(super) struct Store {
     path: PathBuf,
@@ -172,13 +183,12 @@ impl App {
         self.closeout.is_closed(id)
     }
 
-    /// The run's project's effective `auto_close_finished`: its own override if it has one, else the global value. A
-    /// folder no project holds reads the global value. If the preferences cannot be read the answer is "off": a doubt
-    /// never closes a worker on its own.
+    /// The run's project's effective `auto_close_finished`: its own override if it has one, else the global value. The
+    /// global value is used only when no project holds the folder. If the project cannot be looked up, or its own
+    /// preference cannot be read, the answer is "off": a doubt never closes a worker on its own.
     fn auto_close_on(&self, cwd: &Path) -> bool {
-        let project = self.projects.find_by_path(cwd).ok().flatten().map(|p| p.id);
-        let view = self.preferences_read(project.as_deref()).or_else(|_| self.preferences_read(None));
-        view.ok().and_then(|v| v["effective"]["auto_close_finished"].as_bool()).unwrap_or(false)
+        let project = self.projects.find_by_path(cwd).map(|p| p.map(|p| p.id)).map_err(|_| ());
+        auto_setting(project, |p| self.preferences_read(p).ok().and_then(|v| v["effective"]["auto_close_finished"].as_bool()))
     }
 
     fn closeout_candidates(&self) -> Vec<Cand> {
@@ -366,6 +376,16 @@ mod tests {
         assert_eq!(judge(Status::Done, false, true), Err(Skip::WaitingOnYou), "a queued message keeps a finished worker open");
         assert_eq!(judge(Status::Failed, true, true), Err(Skip::WaitingOnYou));
         assert_eq!(judge(Status::Done, true, true), Err(Skip::WaitingOnYou));
+    }
+
+    #[test]
+    fn a_project_whose_own_setting_cannot_be_read_stays_off_even_when_global_is_on() {
+        let read = |p: Option<&str>| if p.is_some() { None } else { Some(true) };
+        assert!(!auto_setting(Ok(Some("p_1".into())), read), "the project read failed: off, not global");
+        assert!(auto_setting(Ok(None), read), "no project holds the folder: the global value");
+        assert!(!auto_setting(Err(()), read), "the project lookup failed: off");
+        assert!(!auto_setting(Ok(None), |_| None), "the global read failed: off");
+        assert!(auto_setting(Ok(Some("p_1".into())), |_| Some(true)));
     }
 
     #[test]
