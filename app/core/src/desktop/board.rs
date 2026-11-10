@@ -1,9 +1,9 @@
 //! Board cards in `project_state` (ADR-15 4.2, FG-06): the core computes the cards the UI adapter used to.
 //!
 //! Contract (agreed with vajra-1, recorded in the PR so the wave-3 board switch has one source):
-//! - (a) Scope: `project_state(p_).board = {campaigns: [{campaign, run_id, cards, truncated}], truncated}`. The project's
+//! - (a) Scope: `project_state(p_).board = {campaigns: [{campaign, run_id, cards, truncated, stale}], truncated}`. The project's
 //!   campaigns come from its `sessions.jsonl` run lines (`kind: run`, `campaign`), newest first, at most
-//!   `MAX_CAMPAIGNS`; at most `MAX_CARDS` cards across them. `truncated` says a level was cut.
+//!   `MAX_CAMPAIGNS`; at most `MAX_CARDS` cards across them. `truncated` says a level was cut; `stale` says tasks.json could not be read now (its cards are the last good snapshot and none is Done).
 //! - (b) Card: `{key, kind: task|plan|question, local, title, owner, status, lane, needs_you, criteria: {pass, total} |
 //!   null, project_id, campaign, task_id, attempt}`. A task's key is `<campaign>/<task_id>/<attempt>`, an inbox card's
 //!   `inbox:<id>` (its `task_id` and `attempt` are null). Text from tasks and the inbox goes through the inbox's clean().
@@ -233,7 +233,9 @@ impl App {
             }
         };
         let read = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default()))).ok();
-        let (value, progress) = read.map(|(s, p)| (s.value, p)).unwrap_or((None, String::new()));
+        // A tasks.json that cannot be read now answers with its last good snapshot (`stale`): its cards are shown, but none
+        // reaches Done from it (#107 review sweep).
+        let (value, progress, stale) = read.map(|(s, p)| (s.value, p, s.stale)).unwrap_or((None, String::new(), false));
         let tasks: Option<&[Value]> = value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
         let (run_id, scoped) = runview::scope(&progress, tasks);
         // Per task: (verified passes, criteria), from the cached verdicts only.
@@ -258,7 +260,7 @@ impl App {
             let raw = t.get("status").and_then(Value::as_str).unwrap_or("");
             let status = if STATUSES.contains(&raw) { raw } else { "unknown" };
             let criteria = crit.get(id).copied().filter(|(_, total)| *total > 0);
-            let (lane, needs_you) = lane(status, criteria);
+            let (lane, needs_you) = lane(status, criteria.filter(|_| !stale));
             let attempt = t.get("attempts").and_then(Value::as_u64).unwrap_or(0);
             let local = id.strip_prefix(&prefix).unwrap_or(id);
             let title = t.get("title").and_then(Value::as_str).unwrap_or(local);
@@ -285,12 +287,13 @@ impl App {
             }
             for p in &w.plans {
                 let id = format!("plan:{}.{}", e.run_id, p.index);
-                if !matches!(lock(&self.control).decided(&id), Ok(None)) {
+                // Decided plans are no card; a decision log that cannot be read shows the plan (needs you), never hides it.
+                if matches!(lock(&self.control).decided(&id), Ok(Some(_))) {
                     continue;
                 }
                 push(&mut cards, inbox_card(id, "plan", format!("Approve: {}", p.action.replace('_', " "))), left);
             }
         }
-        json!({"campaign": slug, "run_id": run_id, "cards": cards, "truncated": cut})
+        json!({"campaign": slug, "run_id": run_id, "cards": cards, "truncated": cut, "stale": stale})
     }
 }
