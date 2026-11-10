@@ -25,9 +25,15 @@ describe("provider icon files", () => {
       expect(row).toMatch(/\d{4}-\d{2}-\d{2}/);
       expect(row).toMatch(/don't stretch, recolor, or remix/);
     }
+    for (const f of ["OAI_OpenAI-Blossom_Black.svg", "OAI_OpenAI-Blossom_White.svg", "Grok_Logomark_Dark.svg", "Grok_Logomark_Light.svg"]) {
+      const row = sources.split("\n").find((l) => l.startsWith(`| \`${f}\``))!;
+      expect(row, f).toMatch(/https:\/\/(openai\.com\/brand|x\.ai\/legal\/brand-guidelines)|same (kit|page)/);
+      expect(row, f).toMatch(/2026-11-10/);
+      expect(row, f).toMatch(/accepted the usage terms and the clearance risk 2026-11-10/);
+    }
   });
   it("only providers whose terms are cleared have a mark", () => {
-    expect(Object.keys(MARKS)).toEqual(["openrouter"]);
+    expect(Object.keys(MARKS).sort()).toEqual(["codex", "grok", "openrouter"]); // Claude Code and DeepSeek keep their monograms
   });
   it("the app code never reaches the network for an icon", () => {
     const code = readFileSync(join(__dirname, "../src/screens/ProviderIcon.tsx"), "utf8") + readFileSync(join(DIR, "marks.ts"), "utf8");
@@ -56,6 +62,8 @@ describe("ProviderIcon", () => {
   it("a provider without a cleared mark keeps its monogram; an unknown one gets the fallback icon", () => {
     expect(tile(<ProviderIcon family="claude" />).textContent).toBe("CC");
     expect(tile(<ProviderIcon family="deepseek" />).textContent).toBe("DS");
+    expect(tile(<ProviderIcon family="codex" />).querySelectorAll("img")).toHaveLength(2);
+    expect(tile(<ProviderIcon family="grok" />).querySelectorAll("img")).toHaveLength(2);
     const u = tile(<ProviderIcon family="mystery" />);
     expect(u.querySelector("svg")).not.toBeNull();
     expect(u.getAttribute("data-family")).toBe("unknown");

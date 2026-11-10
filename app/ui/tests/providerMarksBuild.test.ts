@@ -14,6 +14,6 @@ describe("built marks", () => {
     const code = items.filter((i) => i.type === "chunk").map((i) => (i as { code: string }).code).join("\n");
     const files = items.filter((i) => i.type === "asset").map((i) => i.fileName);
     expect(code).not.toMatch(/data:image/);
-    expect(files.filter((f) => f.endsWith(".svg"))).toHaveLength(2);
+    expect(files.filter((f) => f.endsWith(".svg"))).toHaveLength(6); // two per cleared provider, each a file of its own
   }, 30000);
 });
