@@ -1157,7 +1157,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Tool | What the core does |
 |---|---|
 | `plan_tasks{round, criteria[{id, criterion, check}]?, tasks[{id, title, owner_role, files[], deps[], criteria[], brief, touches_security}]}` | A **straight port of the workflow's `validatePlan`, `topo` and `waves`** (`vajra-deliver.js:255-290`), checked by a parity test on shared fixtures, for both JS and Rust. CI fails if the JS rules change without the fixtures. The rules: 1 to 8 tasks; ids `t<k>`; `SAFE_PATH` globs; **files disjoint across all tasks**; deps acyclic; **every criterion covered**; every `owner_role` has a seat. `criteria` is required in round 1 and fixed after that. Later rounds may only re-plan the failed tasks. A task is a security task when the lead's `touches_security` is true **or** the core's per-task `SEC_RE` test matches its title, brief or files (16.1). The lead cannot clear either. |
-| `dispatch_worker{task_id}` | Refused (`not_ready`) when: the task's deps are not `done`; a running ticket has overlapping files; the task already has a live ticket; its round is already integrated; or it has used its `max_tries` (N8, default 3). Otherwise the core picks the seat: the task's role, a security task only on a `security: true` seat, then the first free seat or the shortest queue. It creates the worktree (16.6) at `from`, which is the base or the task's last commit, merges the deps' commits (a conflict is `deps_conflict`), and links the copied dependencies (N7). It spawns the worker with the task's brief plus one fixed sentence: "Leave your changes in the working tree; Vajra commits them." It returns a ticket. A busy seat or cap **queues** the ticket. A security task with no marked seat is **held** (`needs_user`): the human picks a seat, recorded as `source: "user"`. |
+| `dispatch_worker{task_id}` | Refused (`not_ready`) when: the task's deps are not `done`; a running ticket has overlapping files; the task already has a live ticket; its round is already integrated; or it has used its `max_tries` (N8, default 3). Otherwise the core picks the seat: the task's role, a security task only on a `security: true` seat, then the first free seat or the shortest queue. It creates the worktree (16.6) at `from`, which is the base or the task's last commit, merges the deps' commits (a conflict is `deps_conflict`), and links the copied dependencies (N7). It then records **`dispatch_head`** on the ticket (defined below). It spawns the worker with the task's brief plus one fixed sentence: "Leave your changes in the working tree; Vajra commits them." It returns a ticket. A busy seat or cap **queues** the ticket. A security task with no marked seat is **held** (`needs_user`): the human picks a seat, recorded as `source: "user"`. |
 | `verify{round}` | A **verify ticket** on the `verifier` seat. Its worktree is at the round's **integration commit**. Its brief is the criteria with their `check` commands. It must answer with a fixed result, `results[{criterion_id, status: pass\|fail\|not_run, command, exit_code, evidence}]`, which the core parses from its last message (bounded, validated). It never commits. |
 | `review{round}` | Optional. A **review ticket** on a `reviewer` seat, read-only, at the integration commit. It answers `{verdict: approve\|revise\|reject, blocking_issues[], risks[]}`, the same shape as the workflow's `Review`. |
 | `await_any{tickets[], wait_s ≤ 110}` and `await_worker{ticket, wait_s}` | The call parks without holding the Service mutex. It returns the first ticket that ends, or `{state, attempt, elapsed_s, queue_position}` for each running ticket. **Any `vajra-run` call by the lead renews the lease of every ticket in the run.** |
@@ -1165,6 +1165,21 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | `integrate{round}` | Merges the round's `done` commits, in plan order, into `vajra/<run>/integration[-r<n>]` in the core's own worktree (16.6). A conflict aborts that merge and is reported. |
 | `finish_run{report}` | Ends the run. Its status is **`checks_passed`** only when the latest `verify` result has every criterion `pass` on the latest integration commit, and any review is `approve`. Otherwise it is `checks_failed` or `unchecked`. A Basic run never says "Verified" (N4). The report is plain text, at most 8 KiB, redacted, and shown on the run card as the lead's own words. |
 | `list_workers`, `inspect_worker` | Read-only, limited to this run. |
+
+**`dispatch_head`.** This is the commit a worker starts from. The core records it on the ticket (and in `tickets.jsonl`) at this point:
+- after `worktree_add`;
+- after `merge_deps` has finished;
+- after the dependency clones;
+- just before the worker is spawned.
+
+**How it is recorded.** It is the worktree's `HEAD` sha at that moment, read through the bridge. The core checks that the tree is clean then: `git status --porcelain=v1 -z --ignore-submodules=all` gives no output. The cloned dependency folders are git-ignored, so they don't count as changes.
+
+**What it is used for.** It is the only "before" point for these three checks:
+- the tamper check that HEAD did not move (16.6);
+- the retry rule's "unchanged tree" test: HEAD still equals `dispatch_head`, and the status is still empty;
+- the base of the worker's diff (16.10), so lines from merged deps are never counted as the worker's.
+
+**What it is not.** `from` (the commit at `worktree_add`) is never used for any of them. If it were, every ticket with deps would read as `tampered`.
 
 **Outcomes of a writer ticket.** The core sets the outcome after the worker exits.
 
@@ -1182,7 +1197,7 @@ Verify and review tickets end `done` with their typed result, or `failed` when t
 - **Lease.** If no lead call reaches the run for `2 × 110 + 30` s, the core kills every worker in the run (`abandoned`).
 - **Per worker.** `worker_timeout_s`, 30 minutes.
 - **Per run.** `run_timeout_s`, 2 hours (N8). Past it, the run stops and tells the human.
-- **Retries.** The core retries (PR 5) only while the worktree is unchanged since dispatch; after a change the outcome is `progress`. `ProviderTag` gains `attempt`.
+- **Retries.** The core retries (PR 5) only while the worktree is unchanged since `dispatch_head`: HEAD still equals it, and the status is empty. After a change, the outcome is `progress`. `ProviderTag` gains `attempt`.
 - **On the run card.** The lead's turns and the tickets per task are shown, so a looping lead is visible.
 
 **The lead's lifetime (N9).**
@@ -1244,7 +1259,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 
 After the worker's process group is gone, and before every later git call on that repo, the core checks:
 - those hashes are unchanged;
-- HEAD equals `dispatch_head`;
+- HEAD equals `dispatch_head` (16.5): the HEAD after `merge_deps` and the clones, recorded before the worker started;
 - there is no nested `.git` and no new `.gitmodules`.
 
 If any check fails, the ticket is `tampered`, nothing is committed, and the run card shows which file changed. The check matters even under a Claude worker, which has no OS sandbox: the guard has no rule for `.git/config`. Without it, a planted `gpg.program`, `filter.*.clean` or `merge.*.driver` would run inside the core's own `add`, `commit` or `merge`.
@@ -1330,7 +1345,7 @@ There are **two different queues**, and the cards use different words for them:
 
 ### 16.10 The worker diff without one git process per new file (follow-up to #128)
 
-This section is unchanged from revision 1, except that the base is `dispatch_head` in the core's worktree.
+This section is unchanged from revision 1, except that the base is `dispatch_head` (16.5) in the core's worktree.
 
 **The problem.** `diff_from_git` spawns one `git diff --no-index` per untracked file, at about 19 ms each. At the 2 s budget that is about 107 files, so 500 new files leave most lines uncounted (`partial`).
 
@@ -1434,6 +1449,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - Lease and timeout behave as specified.
   - Retries happen on an unchanged tree only, and `progress` after an edit.
   - The diff is against `dispatch_head`.
+  - A ticket with two deps merged at dispatch is not `tampered`, and its diff holds only the worker's own lines.
   - Dependencies are cloned.
   - A clean worktree is removed at snapshot.
 - **6d1**
