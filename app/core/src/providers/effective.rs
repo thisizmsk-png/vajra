@@ -9,13 +9,17 @@
 //! - Diff: `git diff --numstat` in the worker's worktree, plus untracked files. A worker that edits through a shell
 //!   leaves no edit events, so events never decide what changed.
 
-use std::fs;
+use std::ffi::{CStr, CString};
+use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::preferences::open_at;
 use crate::vajra::bridge::{Bridge, Request};
 
 /// A value the harness did not report.
@@ -139,7 +143,8 @@ fn family_of(model: &str, account: &str) -> String {
 fn account_of(model_provider: &str) -> (&'static str, &'static str) {
     match model_provider {
         "vajra-openrouter" => ("openrouter", "gateway"),
-        "openai" => ("codex", "subscription"),
+        // Signed in with a plan or with an API key looks the same here, and the session file does not say which.
+        "openai" => ("codex", UNKNOWN),
         _ => (UNKNOWN, UNKNOWN),
     }
 }
@@ -163,24 +168,73 @@ pub fn codex_thread_id(events: &str) -> Option<String> {
     })
 }
 
-/// Find `rollout-*-<thread_id>.jsonl` under `<codex_home>/sessions/<y>/<m>/<d>/`. Links are skipped, so a planted link
-/// cannot point the reader outside the Vajra-owned home.
-fn rollout_file(codex_home: &Path, thread_id: &str) -> Option<PathBuf> {
+/// Entries listed from one directory at most.
+const MAX_ENTRIES: usize = 4096;
+
+/// Open `name` under the held directory `parent` as a directory. A link there is refused (`O_NOFOLLOW`), so nothing
+/// planted in the tree can lead the walk outside it.
+fn sub_dir(parent: &File, name: &str) -> Option<File> {
+    let name = CString::new(name).ok()?;
+    open_at(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW, 0).ok()
+}
+
+/// The entry names of a held directory, read through its descriptor (not its path), at most `MAX_ENTRIES`.
+fn entry_names(dir: &File) -> Vec<String> {
+    // SAFETY: dup of a valid descriptor; on success `fdopendir` owns the copy and `closedir` closes it.
+    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
+    if fd < 0 {
+        return Vec::new();
+    }
+    // SAFETY: `fd` is a directory descriptor we own.
+    let handle = unsafe { libc::fdopendir(fd) };
+    if handle.is_null() {
+        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    while names.len() < MAX_ENTRIES {
+        // SAFETY: `handle` is an open DIR; the entry is read before the next call.
+        let ent = unsafe { libc::readdir(handle) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry.
+        let name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        if let Ok(n) = name.to_str() {
+            if n != "." && n != ".." {
+                names.push(n.to_owned());
+            }
+        }
+    }
+    // SAFETY: closes the DIR and the duplicated descriptor with it.
+    unsafe { libc::closedir(handle) };
+    names
+}
+
+/// Open `rollout-*-<thread_id>.jsonl` under `<codex_home>/sessions/<y>/<m>/<d>/`. The walk starts from the held home and
+/// every step is a no-follow open relative to the step before, so a link at the home, at `sessions`, at a date folder or
+/// at the file itself is refused and cannot lead the read outside the Vajra-owned home. The file is returned open and
+/// checked to be a regular file, so a name swapped for a link after the lookup is not followed either.
+fn rollout_file(codex_home: &Path, thread_id: &str) -> Option<File> {
     let suffix = format!("-{thread_id}.jsonl");
-    let dirs = |p: &Path| -> Vec<PathBuf> {
-        fs::read_dir(p)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-            .map(|e| e.path())
-            .collect()
-    };
-    let days = dirs(&codex_home.join("sessions")).iter().flat_map(|y| dirs(y)).flat_map(|m| dirs(&m)).collect::<Vec<_>>();
-    days.iter().flat_map(|d| fs::read_dir(d).into_iter().flatten().flatten()).find_map(|e| {
-        let name = e.file_name();
-        let name = name.to_str()?;
-        (name.starts_with("rollout-") && name.ends_with(&suffix) && e.file_type().ok()?.is_file()).then(|| e.path())
+    let home = fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(codex_home).ok()?;
+    let mut level = vec![sub_dir(&home, "sessions")?];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for dir in &level {
+            for name in entry_names(dir) {
+                next.extend(sub_dir(dir, &name));
+            }
+        }
+        level = next;
+    }
+    level.iter().find_map(|day| {
+        entry_names(day).into_iter().filter(|n| n.starts_with("rollout-") && n.ends_with(&suffix)).find_map(|n| {
+            let name = CString::new(n).ok()?;
+            let file = open_at(day, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0).ok()?;
+            file.metadata().ok()?.is_file().then_some(file)
+        })
     })
 }
 
@@ -190,7 +244,7 @@ pub fn read_codex(events: &str, codex_home: &Path) -> Effective {
     let mut eff = Effective::unknown("codex", true);
     let Some(file) = codex_thread_id(events).and_then(|t| rollout_file(codex_home, &t)) else { return eff };
     let mut text = String::new();
-    if fs::File::open(&file).and_then(|f| f.take(MAX_READ).read_to_string(&mut text)).is_err() {
+    if file.take(MAX_READ).read_to_string(&mut text).is_err() {
         return eff;
     }
     for rec in text.lines().take(MAX_RECORDS).filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
@@ -217,14 +271,14 @@ pub fn read_codex(events: &str, codex_home: &Path) -> Effective {
 }
 
 /// What a Claude worker ran on, from the `system`/`init` event of its stream. Claude has no effort setting here, so the
-/// effective effort is `None`; its account and billing are those of the CLI login.
+/// effective effort is `None`. The stream does not say how the CLI was signed in (plan or API key), so billing stays
+/// unknown.
 pub fn read_claude(events: &str) -> Effective {
     let mut eff = Effective::unknown("claude", false);
     let init = events.lines().take(MAX_RECORDS).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
     if let Some(model) = init.as_ref().and_then(|e| clean(e.get("model"))) {
         eff.model = model;
         eff.account = "claude".into();
-        eff.billing = "subscription".into();
         eff.read_from = Some(FROM_EVENT.into());
     }
     eff
@@ -246,18 +300,27 @@ pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
         let out = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
         (out.code == Some(0) && out.whole()).then_some(out.stdout)
     };
-    let tracked = git(&["diff", "--numstat", base, "--"])?;
-    let untracked = git(&["ls-files", "--others", "--exclude-standard"])?;
+    // `-z` for both: paths come back NUL-terminated and unquoted, so a name with a space, quote, newline, tab or non-ASCII
+    // character is its real path, and a rename is two plain records instead of `old => new` display text.
+    let tracked = git(&["diff", "--numstat", "-z", base, "--"])?;
+    let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
     let mut diff = Diff::default();
-    for line in tracked.lines() {
-        let mut f = line.splitn(3, '\t');
-        let (a, r, name) = (f.next()?, f.next()?, f.next()?);
+    let mut records = tracked.split('\0').filter(|r| !r.is_empty());
+    while let Some(rec) = records.next() {
+        // `added<TAB>removed<TAB>path`; a rename or copy has an empty path there, followed by the old and new paths.
+        let mut f = rec.splitn(3, '\t');
+        let (a, r, path) = (f.next()?, f.next()?, f.next()?);
         // A binary file reports `-` for both counts: it changed, with no line counts.
         diff.added += a.parse::<u64>().unwrap_or(0);
         diff.removed += r.parse::<u64>().unwrap_or(0);
-        diff.files.push(name.into());
+        if path.is_empty() {
+            let (_old, new) = (records.next()?, records.next()?);
+            diff.files.push(new.into());
+        } else {
+            diff.files.push(path.into());
+        }
     }
-    diff.files.extend(untracked.lines().filter(|l| !l.is_empty()).map(String::from));
+    diff.files.extend(untracked.split('\0').filter(|l| !l.is_empty()).map(String::from));
     Some(diff)
 }
 

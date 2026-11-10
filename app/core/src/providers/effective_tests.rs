@@ -106,9 +106,23 @@ fn a_provider_id_vajra_did_not_write_is_an_unknown_account() {
 }
 
 #[test]
+fn a_codex_worker_on_the_openai_provider_does_not_get_a_billing_kind_from_its_provider_id() {
+    // `openai` is used both signed in with a plan and with an API key, so the session file cannot tell which.
+    let eff = read_codex(EVENTS, &codex_home(&ROLLOUT.replace("vajra-openrouter", "openai")));
+    assert_eq!((eff.account.as_str(), eff.billing.as_str(), eff.model.as_str()), ("codex", "unknown", "vendor/model-a"));
+    // The id Vajra wrote for its own gateway account is the one thing that does name a route.
+    assert_eq!(read_codex(EVENTS, &codex_home(ROLLOUT)).billing, "gateway");
+}
+
+#[test]
 fn a_claude_worker_is_read_from_its_init_event() {
     let eff = read_claude(CLAUDE);
     assert_eq!((eff.model.as_str(), eff.effort.as_deref(), eff.read_from.as_deref(), eff.account.as_str()), ("claude-model-x", None, Some("harness_event"), "claude"));
+    // An init event naming a model is not proof of how the CLI was signed in: billing stays unknown, key or no key.
+    assert_eq!(eff.billing, "unknown");
+    for init in [r#"{"type":"system","subtype":"init","model":"m","apiKeySource":"none"}"#, r#"{"type":"system","subtype":"init","model":"m","apiKeySource":"ANTHROPIC_API_KEY"}"#] {
+        assert_eq!(read_claude(init).billing, "unknown", "{init}");
+    }
     let none = read_claude("{\"type\":\"result\"}\n");
     assert_eq!((none.model.as_str(), none.read_from.as_deref(), none.effort.as_deref()), ("unknown", None, None));
     let r = receipt(Requested { account: "claude".into(), harness: "claude".into(), model: "claude-model-y".into(), effort: None }, eff);
@@ -129,6 +143,27 @@ fn a_hostile_session_file_or_thread_id_is_not_followed_or_trusted() {
     std::fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink(&outside, dir.join(format!("rollout-2026-01-01T00-00-00-{THREAD}.jsonl"))).unwrap();
     assert_eq!(read_codex(EVENTS, &home).model, "unknown");
+    // A link at `sessions`, at a date folder, or at the home itself is not walked, even with a matching rollout behind it.
+    let name = format!("rollout-2026-01-01T00-00-00-{THREAD}.jsonl");
+    let outside_tree = tmp();
+    std::fs::create_dir_all(outside_tree.join("2026/01/01")).unwrap();
+    std::fs::write(outside_tree.join("2026/01/01").join(&name), ROLLOUT).unwrap();
+    assert_eq!(read_codex(EVENTS, &codex_home(ROLLOUT)).model, "vendor/model-a", "the plain layout still reads");
+    let linked_sessions = tmp();
+    std::os::unix::fs::symlink(&outside_tree, linked_sessions.join("sessions")).unwrap();
+    assert_eq!(read_codex(EVENTS, &linked_sessions).model, "unknown");
+    let linked_year = tmp();
+    std::fs::create_dir_all(linked_year.join("sessions")).unwrap();
+    std::os::unix::fs::symlink(outside_tree.join("2026"), linked_year.join("sessions/2026")).unwrap();
+    assert_eq!(read_codex(EVENTS, &linked_year).model, "unknown");
+    let linked_day = tmp();
+    std::fs::create_dir_all(linked_day.join("sessions/2026/01")).unwrap();
+    std::os::unix::fs::symlink(outside_tree.join("2026/01/01"), linked_day.join("sessions/2026/01/01")).unwrap();
+    assert_eq!(read_codex(EVENTS, &linked_day).model, "unknown");
+    let real_home = codex_home(ROLLOUT);
+    let linked_home = tmp().join("home-link");
+    std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
+    assert_eq!(read_codex(EVENTS, &linked_home).model, "unknown");
     // A model id with control characters or a huge one is dropped, not shown.
     for bad in ["vendor/model\\u001b[31m-a", &"m".repeat(300)] {
         let rollout = ROLLOUT.replace("vendor/model-a", bad);
@@ -162,4 +197,37 @@ fn the_diff_comes_from_git_for_a_run_that_only_edited_through_a_shell() {
     git(&repo, &["commit", "-q", "-m", "w"]);
     assert_eq!(diff_from_git(&bridge, &repo, "HEAD"), Some(Diff::default()));
     assert_eq!(diff_from_git(&bridge, &repo, "no-such-ref"), None);
+}
+
+#[test]
+fn git_paths_are_real_paths_even_with_odd_characters_or_a_staged_rename() {
+    let repo = tmp();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.invalid"]);
+    git(&repo, &["config", "user.name", "t"]);
+    let body = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n";
+    for f in ["old name.txt", "keep.txt"] {
+        std::fs::write(repo.join(f), body).unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    // A staged rename (with a space), one edit, and untracked files whose names git would quote without -z.
+    git(&repo, &["mv", "old name.txt", "new \"quoted\" name.txt"]);
+    std::fs::write(repo.join("keep.txt"), format!("{body}nine\n")).unwrap();
+    let odd = ["caf\u{e9} \u{2603}.txt", "tab\there.txt", "line\nbreak.txt", "it's \\ here.txt"];
+    for f in odd {
+        std::fs::write(repo.join(f), "x\n").unwrap();
+    }
+    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
+    let mut want: Vec<String> = vec!["keep.txt".into(), "new \"quoted\" name.txt".into()];
+    want.extend(odd.iter().map(|s| s.to_string()));
+    let mut got = d.files.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!((d.added, d.removed), (1, 0), "the rename itself adds and removes no lines");
+    for f in &d.files {
+        assert!(repo.join(f).is_file(), "{f:?} is a real path");
+    }
 }

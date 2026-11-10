@@ -252,18 +252,24 @@ per worker slot, built from what the harness reports about itself once it starts
   from `<CODEX_HOME>/sessions/**/rollout-*-<thread_id>.jsonl` (`session_meta.model_provider`, `turn_context.model`, `.effort`,
   `.sandbox_policy.type`); `read_from` is `harness_session_file`. That is what Codex sent, not proof of what a gateway served.
   A `model_provider` id Vajra did not write gives an `unknown` account.
+  Only the id Vajra wrote for its own gateway account names a billing route (`gateway`); `openai` is used with a plan and
+  with an API key alike, so its billing is `unknown`.
 - **Claude.** The `system`/`init` event of its stream (`read_from: harness_event`). It has no effort setting here, so the
-  effective `effort` is `null`.
+  effective `effort` is `null`, and billing is `unknown`: the stream does not report how the CLI was signed in.
 - **Unknown, never copied.** A value the harness does not report is `"unknown"` ("Not reported"); with no session file or
   event every field is `unknown` and `read_from` is `null`. Reported strings are kept only if short printable ASCII.
-  Session files are read from the Vajra-owned home only, links are skipped, and at most 1 MiB is read.
+  Session files are read from the Vajra-owned home only: the walk starts from the held home and each step
+  (`sessions`, year, month, day, the file) is a no-follow open relative to the one before, so a link at any of them,
+  including the home, is refused; the file must be a regular file; at most 1 MiB is read.
 - **Mismatch.** The core never falls back. If `model`, `effort` (when one was asked for) or `account` is reported and differs
   from the request, `launch_mismatch` goes to the Director-General: `{"type": "launch_mismatch", "slot", "session_id",
   "fields": ["model"], "requested", "effective"}`. An `unknown` value is not a mismatch.
-- **Diff.** A worker's diff is read from git in its worktree (`git diff --numstat <base>` plus untracked files, through the
-  read-only git bridge), never from events: a shell-only edit leaves no edit event.
+- **Diff.** A worker's diff is read from git in its worktree (`git diff --numstat -z <base>` plus `git ls-files --others -z`, through the
+  read-only git bridge), never from events: a shell-only edit leaves no edit event. `-z` gives real, unquoted paths; a
+  rename or copy is two records and the new path is kept.
 - **Provider tag.** Crew-tree nodes and the `workers` of `project_state` carry `provider: {account, family, model, billing}`
-  (or `null` while the model is not reported). Claude workers take the model from their transcript's first assistant record.
+  (or `null` while the model is not reported). Claude workers take the model from their transcript's first assistant record;
+  their billing is `unknown`, since a transcript does not say how the CLI was signed in.
 - **Not yet wired.** These readers and the receipt exist; nothing yet builds a receipt at worker start, since core-launched
   non-Claude workers arrive with the later launch PRs.
 
