@@ -1,4 +1,5 @@
-// The brand marks that are cleared to ship, as the files supplied (SOURCES.md says which and why). `light` is the file made for light
+// The brand marks that ship, as the files supplied. Each file's row in SOURCES.md says on what ground: "Cleared" by its terms, or a dated
+// "Owner exception" (the owner accepted the clearance risk); a test fails for a file with neither. `light` is the file made for light
 // backgrounds, `dark` the one made for dark backgrounds; the unaltered file is used in both themes and nothing is ever recoloured.
 // A provider with no entry here shows its monogram tile. Nothing is fetched at run time: the build ships each file as a same-origin
 // asset (assetsInlineLimit 0), because the app's CSP blocks data: images.

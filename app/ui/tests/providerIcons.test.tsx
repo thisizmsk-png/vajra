@@ -37,7 +37,18 @@ describe("provider icon files", () => {
     for (const [id, m] of Object.entries(MARKS)) expect(m.fill, id).toBeLessThanOrEqual(1);
     expect(MARKS.codex.fill).toBeLessThan(MARKS.grok.fill); // the Blossom file keeps a wide margin around the flower
   });
-  it("only providers whose terms are cleared have a mark", () => {
+  it("every shipped file is either cleared by its terms or a documented, dated owner exception", () => {
+    for (const r of rows) {
+      const row = sources.split("\n").find((l) => l.startsWith(`| \`${r.file}\``))!;
+      const status = row.split(" | ").pop()!;
+      if (r.file.startsWith("fallback")) { expect(status, r.file).toMatch(/^Ours: /); continue; }
+      const cleared = /^Cleared: /.test(status) && /don't stretch, recolor, or remix/.test(row); // terms quoted in the row
+      const exception = /^Owner exception: .*accepted the (usage terms and the )?clearance risk 2026-11-10/.test(status);
+      expect(cleared || exception, `${r.file} needs "Cleared" with its terms quoted, or a dated "Owner exception"`).toBe(true);
+    }
+    expect(sources).toMatch(/"Owner exception"/); // the rule names the exception
+  });
+  it("only providers with a documented mark have one", () => {
     expect(Object.keys(MARKS).sort()).toEqual(["claude", "codex", "deepseek", "grok", "openrouter"]);
   });
   it("the app code never reaches the network for an icon", () => {
