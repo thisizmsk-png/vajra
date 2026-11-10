@@ -255,3 +255,19 @@ fn a_verdict_expiring_during_a_rebuild_is_never_served_after_it() {
     app.project_state(&pid, rev).unwrap();
     assert!(builds(&app) > before, "the board built across the deadline was served from the cache");
 }
+
+/// #107 review: in the cache-only path the board reads, a cached failed git read is unknown, not a known state: a green
+/// live verdict reads `checking` and its card stays in review. A good cached state still lets it reach Done.
+#[test]
+fn a_cached_failed_git_read_keeps_a_live_pass_out_of_done() {
+    let t = Tmp::new();
+    let (app, slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    assert_eq!(app.evidence_list(&slug).unwrap()["rows"][0]["status"], "pass", "a full check caches a green verdict and the repo state");
+    assert_eq!(card(&app.board(&pid), "t1")["lane"], "done", "with a known, matching repo state");
+    // The repo state read failed and that failure is cached (as `worktree_state` does for 30 s).
+    lock(&app.worktree_state).insert(repo.clone(), (std::time::Instant::now(), None));
+    assert_eq!(app.evidence_list_with(&slug, false).unwrap()["rows"][0]["status"], "checking");
+    let c = card(&app.board(&pid), "t1").clone();
+    assert_eq!((c["lane"].as_str(), c["criteria"]["pass"].as_u64()), (Some("review"), Some(0)), "{c}");
+}
