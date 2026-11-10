@@ -645,7 +645,14 @@ fn claude_is_resolved_to_an_absolute_path_once() {
         std::fs::copy(t.bin("claude"), d.join("claude")).unwrap();
         std::fs::set_permissions(d.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    assert_eq!(resolve_claude(&t.home(), &[]).unwrap(), nvm_new.join("claude"));
+    // The nvm order is deterministic whatever else is installed: newest node first, and a lookup over exactly those dirs picks it.
+    let nvm = crate::userpath::nvm_bins(&t.home());
+    assert_eq!(nvm, vec![nvm_new.clone(), nvm_old.clone()], "newest nvm node first");
+    assert_eq!(resolve_claude(&t.home(), &nvm).unwrap(), nvm_new.join("claude"));
+    // With no PATH the resolver also searches the fixed system install dirs, which come BEFORE nvm and are not injectable: a machine
+    // with a Homebrew or /usr/local claude resolves to that one. So the expectation follows what this machine has, never a fixed answer.
+    let system = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].map(PathBuf::from).into_iter().find(|p| p.is_file());
+    assert_eq!(resolve_claude(&t.home(), &[]).unwrap(), system.unwrap_or_else(|| nvm_new.join("claude")));
     assert!(resolve_claude(&t.0.join("empty-home"), &[]).is_none() || Path::new("/opt/homebrew/bin/claude").exists() || Path::new("/usr/local/bin/claude").exists());
     // No binary: the ask says so instead of searching the PATH at ask time.
     let app = t.app();
