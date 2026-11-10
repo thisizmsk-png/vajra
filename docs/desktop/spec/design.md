@@ -1393,9 +1393,9 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 | Status | When | Card |
 |---|---|---|
-| `verified` | All of these hold: <br>• a round passed the gate; <br>• the evidence is green for that integration commit; <br>• the tasks were closed on it; <br>• every criterion's `pass` was recorded; <br>• the campaign closed `done` and the report was written; <br>• `CampaignVerify` passes on the closed, signed record, as the last check. <br>The memory write-back and the evidence archive are reported, but don't block (N14). <br>The evidence trust is `guarded`. | **Verified** |
+| `verified` | All of these hold: <br>• a round passed the gate; <br>• the evidence is green for that integration commit; <br>• the tasks were closed on it; <br>• every criterion's `pass` was recorded; <br>• the campaign closed `done` and the report was written; <br>• `CampaignVerify` passes on the closed, signed record, as the last check. <br>The memory write-back and the evidence archive are reported, but don't block (N14). <br>The evidence trust is `guarded`, **or** `guarded_by_approval` where this evidence ticket consumed the run's matching single-use approval (same run, round, integration commit, evidence seat and command-list sha, 16.5a). | **Verified**. A `guarded_by_approval` run adds "check commands approved by you" |
 | `evidence_unguarded` | The same as `verified`, but the evidence trust is `outside_guard` (N17). | **Verified (evidence ran outside the guard)**, with the "Why?" text from the evidence ticket's step 2. Never shown as plain "Verified", and never merged with `verified` in counts or filters. Its criterion rows show "verified (evidence ran outside the guard)" |
-| `not_verified` | Any of these: <br>• the rounds ran out; <br>• the evidence is not green (the tasks stay open and the knowledge is proposed, as today); <br>• the signed record doesn't verify. | **Not verified**, with the reason |
+| `not_verified` | Any of these: <br>• the rounds ran out; <br>• the evidence is not green (the tasks stay open and the knowledge is proposed, as today); <br>• the signed record doesn't verify; <br>• a `guarded_by_approval` run whose approval was declined, timed out (`evidence_hold_max_s`), voided by a redo, round, resume or command change, or not consumed by this evidence ticket. | **Not verified**, with the reason |
 | `rejected` | A review rejected the approach. | **Rejected by review** |
 | `needs_user`, `stopped`, `lead_lost`, `timed_out` | 16.5 | Their existing words |
 
@@ -1491,7 +1491,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 | `merge_deps(wt, commits[])` | `git -C <wt> merge --no-ff --no-edit --no-verify <sha>…` | On a conflict: `merge --abort`, then `deps_conflict`. |
 | `snapshot(wt, task_files, message)` | **Plumbing only; it never writes through the worker's HEAD.** With `GIT_INDEX_FILE=<ticket dir>/index`, a **fresh** private index the worker can't reach (deleted and recreated for each snapshot, so anything the worker staged in the worktree's own index is ignored): <br>1. `read-tree <dispatch_head>`. <br>2. Build the list of paths the core will stage. It is the changed paths (tracked diff against `dispatch_head`, plus untracked files) that match the task globs, **minus** every agent config file (16.4 rule 6) and every `.gitattributes`/`.gitmodules` (a tamper signal). <br>3. `add -A --pathspec-from-file=<list> --pathspec-file-nul` stages exactly that list, with nothing else. <br>4. `write-tree`. <br>5. **Check the tree before committing.** `diff-tree -r --name-only -z <dispatch_head> <tree>` must list only paths from that list. Any other path makes the ticket `tampered`, and nothing is committed. <br>6. `commit-tree <tree> -p <dispatch_head> -m <code-built>` with the trailer `Vajra-Worker: <account> <model>`. Then `update-ref refs/heads/vajra/<run>/task-<id>-r<n> <new> <zero-oid>`, which only creates the ref, and fails if it already exists | Refs only under `refs/heads/vajra/`. Changed paths outside the task files, and every agent config file (16.4), become `leftovers` and are never committed. |
 | `integrate(run, round, commits[])` | In its own worktree, which no worker is given: `checkout -B vajra/<run>/integration[-r<n>] <base>`, then `merge --no-ff --no-edit --no-verify` each commit. Before each merge the core checks that `symbolic-ref HEAD` is exactly `refs/heads/vajra/<run>/integration[-r<n>]` | Same as `snapshot`. |
-| `worktree_remove(wt)` and `branch_delete(vajra/<run>/task-…)` | `git worktree remove`, `git branch -D` | Only for a clean tree whose commit was integrated, or one the human discards. |
+| `worktree_remove(wt)` and `branch_delete(vajra/<run>/task-…)` | `git worktree remove --force <wt>`, `git branch -D` | Only after the **capture check** (Retention, below) passes on a ticket whose commit was integrated, or when the human discards it. `--force` is needed because `snapshot` never moves the worker's HEAD or index, so git always sees the tree as dirty. The capture check is what makes it safe. |
 
 **The trusted git baseline (PR #135 review).** The config files the core's git reads are recorded **before any agent session can have touched them**, and never refreshed from agent-writable files without a human. A baseline taken fresh at each `worktree_add` would not do: task A could change `filter.x.clean` in `~/.gitconfig`, and a later task B would copy that as trusted. If the base commit already gives B's files `filter=x`, the core's `add` would then run A's command, and a smudge filter could even run during B's checkout ([gitattributes, filter](https://git-scm.com/docs/gitattributes#_filter)).
 - **The global baseline.** At app start, before the Director-General or any other agent session is launched, the core writes one flattened copy of the user's global config, with its includes resolved, to `<data>/git-baseline/`. Agents can't write there. Every ticket of every run and project uses this one copy (see "A frozen copy" below).
@@ -1540,7 +1540,14 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 - If cloning fails, the worker starts without them and its card says so.
 
 **Retention.**
-- **When the tree is removed.** At `snapshot`, a worktree with no leftovers is removed. One with leftovers is kept until the human discards it or applies it.
+- **When the tree is removed.** Never at `snapshot`. A ticket's worktree is kept until its task commit has been merged into the integration branch (`integrate` succeeded). Then the core runs the capture check:
+  1. the tamper checks (16.6) pass again;
+  2. the change set is listed: the tracked diff against `dispatch_head` plus untracked files, not counting ignored files, read with the baseline config;
+  3. **every path in it is in the task commit**, and each file's bytes match the committed blob. The core compares `git hash-object --no-filters` of the file with the blob id from `ls-tree`. With `--no-filters`, no filter runs, and a file edited after `snapshot` shows up as different;
+  4. there are no leftovers, and the task commit is an ancestor of the integration branch.
+- **If the capture check passes,** `worktree_remove` runs `git worktree remove --force`. That also removes its `<repo>/.git/worktrees/<name>` entry. Ignored files are discarded with the tree, such as dependency clones and build output. The card says so in the retention note.
+- **If it fails,** the tree is kept and shown with its leftovers, or with the file that differs from the commit, until the human discards it (with a confirm) or applies it. Nothing is removed on a guess.
+- **A ticket that never integrates** (failed, rejected, or its run stopped) keeps its tree until the human discards it, or the run is discarded.
 - **Branches.** Task branches are deleted once their commit is integrated. The final integration branch stays until the human deletes it.
 - **Disk.** Settings shows the total disk used by the copies, with a "Clean up" button.
 
@@ -1755,7 +1762,13 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - The diff is against `dispatch_head`.
   - A ticket with two deps merged at dispatch is not `tampered`, and its diff holds only the worker's own lines.
   - Dependencies are cloned.
-  - A clean worktree is removed at snapshot.
+  - **End to end: a normal edit is snapshotted, integrated and cleaned up.**
+    - `snapshot` leaves the worker's HEAD and index at `dispatch_head`, so `git status` is dirty.
+    - After `integrate`, the capture check passes, the worktree dir and its `.git/worktrees/<name>` entry are gone, and the task branch is deleted.
+    - The worktree is not removed before `integrate`.
+  - An edit made after `snapshot` makes the capture check fail. The tree is kept, and the card names the file.
+  - A leftover outside the task globs keeps the tree. An ignored build file doesn't block removal.
+  - A planted clean filter never runs during the capture check (`--no-filters`, baseline config).
 - **6d1**
   - Parity of `validatePlan`, `topo` and `waves`.
   - Each dispatch refusal.
@@ -1811,7 +1824,8 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - it can't be reused by another run, and leaves no allow rule anywhere;
     - no MCP or socket call can approve;
     - Decline gives `not_verified`;
-    - Approve gives plain `verified`, with "check commands approved by you" plus the audit line and the signed progress line.
+    - Approve gives plain `verified`, with "check commands approved by you" plus the audit line and the signed progress line. The status is `verified` only when this evidence ticket consumed the matching approval.
+    - An approval voided by a redo, then an evidence run on the new list without a new approval, gives `not_verified`. So do an approval for another run or round, and a timed-out one.
   - A run with a Claude verifier ends plain `verified`.
   - **The same run with the shipped sandbox settings on** (`config/sandbox.json` merged into a temp HOME) still ends `verified`, and so does a `guarded_by_approval` run after Approve. The runner writes the setup output and the unsigned bundle in the evidence worktree under `<work>`, `EvidenceSign` signs it, and `<data>` stays write-denied.
   - **The runner:**
