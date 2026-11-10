@@ -24,6 +24,11 @@
 .v-pt--lg { width: 28px; height: 28px; font-size: 11px; }
 .v-pt__fb { display: inline-flex; width: 14px; height: 14px; }
 .v-pt__fb svg { width: 100%; height: 100%; }
+/* A supplied mark keeps its own colours: one file per theme, the other hidden. Never recoloured, never stretched. */
+.v-pt__mk { width: 14px; height: 14px; object-fit: contain; }
+.v-pt--lg .v-pt__mk { width: 20px; height: 20px; }
+.v-pt__mk--sm { width: 8px; height: 8px; }
+:root[data-theme="dark"] .v-pt__mk--light, :root:not([data-theme="dark"]) .v-pt__mk--dark { display: none; }
 .v-pt__via { position: absolute; right: -5px; bottom: -5px; display: inline-flex; align-items: center; justify-content: center; min-width: 12px; height: 12px; padding: 0 2px; border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font: 600 7px/1 var(--font-ui); }
 /* A gateway model: its own tile, with the gateway badge in the lower corner and the letters kept clear of it. */
 .v-pt:has(> .v-pt__via) { align-items: flex-start; justify-content: flex-start; padding: 2px 0 0 2px; margin-right: var(--space-xs); }
@@ -34,6 +39,7 @@
 .v-wp__line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-wp--compact .v-pt { width: 16px; height: 16px; font-size: 8px; padding: 0; align-items: center; justify-content: center; margin-right: 0; }
 .v-wp--compact .v-pt__via { display: none; }
+.v-wp--compact .v-pt__mk, .v-tree .v-pt__mk { width: 12px; height: 12px; }
 .v-wp__ran { color: var(--c-warning); }
 .v-wp__err { color: var(--c-text-secondary); overflow-wrap: anywhere; }
 .v-wp__err--you { color: var(--c-warning); }

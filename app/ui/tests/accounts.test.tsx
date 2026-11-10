@@ -477,7 +477,7 @@ describe("provider icons", () => {
     const { container, rerender } = render(<ProviderIcon family="claude" />);
     expect(container.textContent).toBe("CC");
     rerender(<ProviderIcon family="deepseek" via="openrouter" />);
-    expect(container.textContent).toBe("DSOR");
+    expect(container.textContent).toBe("DS"); expect(container.querySelectorAll(".v-pt__via img")).toHaveLength(2); // the gateway badge is its mark
     rerender(<ProviderIcon family="some-new-family" />);
     expect(container.textContent?.trim()).toBe("");
     expect(container.querySelector("svg")).toBeTruthy();
