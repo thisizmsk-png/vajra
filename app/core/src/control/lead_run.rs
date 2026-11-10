@@ -120,7 +120,7 @@ pub struct Done {
     /// The model called some tool.
     pub tool_attempted: bool,
     /// An erroring `result` that names a typed provider failure (an auth, rate-limit, overloaded or bad-request error in
-    /// Claude's stream). Its text is not kept here: the sink already got it, redacted.
+    /// Claude's stream). Its text is not kept here: the sink gets it through `redact_provider_text`, before it is cut to length.
     pub provider_error: Option<crate::providers::errors::Classified>,
     /// The `file_path` of every Read that a permission rule refused (matched through the call's id, or taken from the
     /// result's `permission_denials`). The self-test accepts a denial only if it names the canary.
@@ -345,7 +345,7 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
                                 done.denied_paths.push(p);
                             }
                         }
-                        sink.event(Tag::Error, &format!("tool error: {}", short(&msg, 200)));
+                        sink.event(Tag::Error, &format!("tool error: {}", short(&crate::crew::redact::redact_provider_text(&msg), 200)));
                     } else {
                         sink.event(Tag::Tool, "result ok");
                     }
@@ -367,7 +367,7 @@ fn dispatch(ev: &Value, sink: &mut dyn Sink, done: &mut Done, said: &mut bool) -
             let res = ev.get("result").and_then(Value::as_str).unwrap_or("");
             if done.is_error {
                 done.provider_error = Some(crate::providers::errors::classify(res)).filter(|c| c.kind != crate::providers::errors::Kind::UnexplainedExit);
-                sink.event(Tag::Error, &short(res, 300));
+                sink.event(Tag::Error, &short(&crate::crew::redact::redact_provider_text(res), 300));
             } else if !*said && !res.is_empty() {
                 // A turn the CLI handled without a model call (a slash command) still shows its reply.
                 for l in res.lines() {
