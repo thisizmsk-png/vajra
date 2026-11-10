@@ -1566,7 +1566,9 @@ fn a_slow_filter_probe_does_not_give_the_tree_a_fresh_budget() {
     assert!(took < budget + Duration::from_secs(1), "the repo state ran {took:?} against a {budget:?} deadline");
     let (head, tree, filtered) = st.expect("HEAD still reads");
     assert_eq!(head.len(), 40);
-    assert!(!filtered);
+    // `filtered` is not pinned: on a loaded machine the 2 s probe itself can outlast the budget, and a probe that runs out of
+    // time fails closed as `filtered` (`repo_filters`). Either way the tree is not computed and the deadline holds.
+    let _ = filtered;
     assert_eq!(tree, None, "the probe left too little time for the tree: not computed, never a guess");
 }
 
