@@ -27,6 +27,31 @@ export type Envelope = { action_id: string; project_id: string | null; expect_ge
 export type Outcome = { kind: "pending" | "done" | "refused" | "unknown"; text: string };
 export type Result<T> = { ok: true; value: T } | { ok: false; outcome: Outcome; code: string | null };
 
+/** `provider_error` (H9): a worker's failure, typed by the core, which also owns the retry policy. The message arrives
+ *  already redacted. Nothing here switches an account or a provider; moving a worker is a new pick the user confirms. */
+export type ProviderErrorKind = "auth" | "quota" | "rate_limit" | "timeout" | "upstream" | "bad_request" | "unexplained_exit";
+export type ProviderErrorEvent = {
+  type: "provider_error";
+  slot: string;
+  session_id: string;
+  account: string;
+  kind: ProviderErrorKind;
+  http_status: number | null;
+  retry_after_s: number | null;
+  attempt: number;
+  message: string;
+  /** `retrying`: the core runs the same worker again on the same account. `asking_user`: the task is blocked. */
+  action: "retrying" | "asking_user";
+};
+const PROVIDER_ERROR_KINDS: readonly string[] = ["auth", "quota", "rate_limit", "timeout", "upstream", "bad_request", "unexplained_exit"];
+/** Narrow an unknown event; anything with an unknown kind or action is not one. */
+export function isProviderError(v: unknown): v is ProviderErrorEvent {
+  const e = v as Partial<ProviderErrorEvent> | null;
+  return !!e && e.type === "provider_error" && typeof e.slot === "string" && typeof e.session_id === "string" && typeof e.account === "string" &&
+    typeof e.kind === "string" && PROVIDER_ERROR_KINDS.includes(e.kind) && (e.action === "retrying" || e.action === "asking_user") &&
+    typeof e.attempt === "number" && typeof e.message === "string";
+}
+
 /** A fresh action id for one click. A retry after an unknown outcome reuses it, so the core can answer it once. */
 export function actionId(): string {
   const b = new Uint8Array(12);

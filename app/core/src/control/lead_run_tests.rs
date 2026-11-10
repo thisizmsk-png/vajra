@@ -318,6 +318,38 @@ fn tool_use_results_and_errors_are_tagged() {
 }
 
 #[test]
+fn an_erroring_result_names_a_typed_provider_failure() {
+    use crate::providers::errors::Kind;
+    for (text, kind) in [("API Error: 429 rate_limit_error", Some(Kind::RateLimit)), ("API Error: 401 authentication_error", Some(Kind::Auth)), ("it went wrong somehow", None)] {
+        let d = tmp("provider-err");
+        let lines = format!("{}\n{}", good_init(), json!({"type": "result", "subtype": "error", "is_error": true, "result": text}));
+        let done = run(&fake_printing(&d, &lines), quick()).0.unwrap();
+        assert!(done.is_error);
+        assert_eq!(done.provider_error.map(|c| c.kind), kind, "{text}");
+    }
+}
+
+#[test]
+fn provider_identifiers_in_an_erroring_result_or_tool_error_never_reach_the_sink() {
+    let d = tmp("provider-redact");
+    let leaky = "API Error: 401 {\"user_id\":\"user_SENTINEL0000TESTONLY\"} cf-ray: 0000deadbeef0000-XXX see https://openrouter.test/k?token=SENTINELQUERY";
+    let lines = format!(
+        "{}\n{}\n{}",
+        good_init(),
+        json!({"type": "user", "message": {"content": [{"type": "tool_result", "is_error": true, "content": leaky}]}}),
+        json!({"type": "result", "subtype": "error", "is_error": true, "result": leaky}),
+    );
+    let (r, sink, _) = run(&fake_printing(&d, &lines), quick());
+    assert!(r.unwrap().is_error);
+    assert!(sink.events.iter().filter(|e| e.0 == Tag::Error).count() == 2, "{:?}", sink.events);
+    for (_, text) in &sink.events {
+        for leak in ["SENTINEL0000", "0000deadbeef", "SENTINELQUERY"] {
+            assert!(!text.contains(leak), "{leak} reached the sink: {text}");
+        }
+    }
+}
+
+#[test]
 fn a_slash_command_reply_with_no_model_call_is_shown() {
     let d = tmp("slash");
     let lines = format!("{}\n{}", good_init(), r#"{"type":"result","subtype":"success","is_error":false,"result":"/help isn't available","num_turns":0}"#);
