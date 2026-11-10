@@ -433,3 +433,59 @@ fn sessions_without_a_codex_home_never_set_one() {
     let l = wait_lines(&bus, "s-nh", |l| l.iter().any(|x| x.starts_with("TERM=")));
     assert!(!l.iter().any(|x| x.starts_with("CODEX_HOME=")));
 }
+
+fn error_sink() -> (ErrorSink, Arc<Mutex<Vec<ProviderError>>>) {
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let g = got.clone();
+    (Arc::new(move |e: &ProviderError| lock(&g).push(e.clone())), got)
+}
+
+fn tag() -> ProviderTag {
+    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into() }
+}
+
+fn wait_events(got: &Arc<Mutex<Vec<ProviderError>>>, n: usize) -> Vec<ProviderError> {
+    let start = Instant::now();
+    while lock(got).len() < n && start.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    lock(got).clone()
+}
+
+#[test]
+fn a_worker_that_dies_with_no_error_is_reported_as_unexplained() {
+    let (sup, _bus, dir) = setup("unexplained");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-dead", spec(&["sh", "-c", "echo crashed hard; exit 3"], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!(ev.len(), 1);
+    assert_eq!((ev[0].kind, ev[0].action, ev[0].account.as_str()), (errors::Kind::UnexplainedExit, errors::Action::AskingUser, "gateway-fixture"));
+    assert!(ev[0].message.contains("exit code 3") && ev[0].message.contains("crashed hard"), "{}", ev[0].message);
+}
+
+#[test]
+fn a_typed_error_in_the_last_lines_beats_unexplained() {
+    let (sup, _bus, dir) = setup("typed");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-401", spec(&["sh", "-c", "echo 'unexpected status 401 Unauthorized'; exit 1"], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].kind, ev[0].http_status), (errors::Kind::Auth, Some(401)));
+}
+
+#[test]
+fn a_clean_exit_an_untagged_worker_and_our_own_kill_report_nothing() {
+    let (sup, _bus, dir) = setup("quiet");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    sup.spawn_tagged("s-ok", spec(&["sh", "-c", "exit 0"], &dir), Some(tag())).unwrap();
+    sup.spawn("s-untagged", spec(&["sh", "-c", "exit 4"], &dir)).unwrap();
+    sup.spawn_tagged("s-killed", spec(&["sleep", "30"], &dir), Some(tag())).unwrap();
+    sup.kill("s-killed").unwrap();
+    for id in ["s-ok", "s-untagged", "s-killed"] {
+        assert!(sup.wait(id, WAIT).unwrap().is_some());
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(lock(&got).is_empty(), "{:?}", lock(&got));
+}

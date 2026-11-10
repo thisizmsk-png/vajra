@@ -9,7 +9,7 @@ import { setTransport } from "../src/ipc";
 import type { InboxItem } from "../src/ipc";
 import { CurrentProject } from "../src/projects/current";
 import { DirectorGeneral } from "../src/screens/orch/DirectorGeneral";
-import { actionId, dg, envelope, failure, proposalsFor, useDgReload } from "../src/screens/orch/dgApi";
+import { actionId, dg, envelope, failure, isProviderError, proposalsFor, useDgReload } from "../src/screens/orch/dgApi";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -106,5 +106,16 @@ describe("Start after an unknown outcome", () => {
     expect(spy.mock.calls.length).toBe(minted); // no new id for the retry
     expect(f.calls.filter((c) => c.cmd === "start_proposal")).toHaveLength(2);
     spy.mockRestore();
+  });
+});
+
+describe("provider_error event", () => {
+  const ev = { type: "provider_error", slot: "w1", session_id: "s_x", account: "gateway", kind: "timeout", http_status: 504, retry_after_s: null, attempt: 1, message: "Upstream idle timeout", action: "retrying" };
+  it("accepts the core's shape and rejects an unknown kind, action or type", () => {
+    expect(isProviderError(ev)).toBe(true);
+    expect(isProviderError({ ...ev, kind: "switch_account" })).toBe(false);
+    expect(isProviderError({ ...ev, action: "switch_account" })).toBe(false);
+    expect(isProviderError({ ...ev, type: "other" })).toBe(false);
+    expect(isProviderError(null)).toBe(false);
   });
 });
