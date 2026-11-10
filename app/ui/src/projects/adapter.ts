@@ -81,6 +81,24 @@ const SESSION: Record<string, SessionStatus> = { active: "running", running: "ru
 export const sessionStatus = (c: Campaign): SessionStatus => SESSION[c.status ?? ""] ?? "unknown";
 const DOT: Record<SessionStatus, StatusKey> = { running: "in_progress", done: "done", stopped: "blocked", failed: "failed", unknown: "unknown" };
 
+type Owned = { campaign?: string | null; project_id?: string };
+
+/**
+ * The tab a campaign item is filed under: the project the core names (its store id), else the project of the item's
+ * campaign. `p_unsorted` from the core means "no registered project owns the folder", and a campaign whose folder is
+ * known still has its own tab, so that case falls back too. Nothing is dropped: no tab at all means Unsorted.
+ */
+export function itemProject(index: ProjectIndex, item: Owned): ProjectId | undefined {
+  const core = item.project_id;
+  if (typeof core === "string" && core !== UNSORTED_ID && index.projects.some((p) => p.id === core)) return core;
+  return item.campaign ? index.byCampaign[item.campaign] : undefined;
+}
+
+/** The project id an action on this item names: exactly the core's (it checks the item against it), else its campaign's tab. */
+export function actionProject(index: ProjectIndex, item: Owned): ProjectId | undefined {
+  return typeof item.project_id === "string" && (item.project_id === UNSORTED_ID || validId("p", item.project_id)) ? item.project_id : item.campaign ? index.byCampaign[item.campaign] : undefined;
+}
+
 /** The tab of each project: needs-you count, the urgent state, and worker pips for the project that owns the live run. */
 export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: InboxItem[], crew: ActiveCrew | null): Map<ProjectId, ProjectSummary> {
   const out = new Map<ProjectId, ProjectSummary>();
@@ -90,7 +108,7 @@ export function summarize(index: ProjectIndex, campaigns: Campaign[], inbox: Inb
   const byRoot = new Map<string, ProjectId>();
   for (const p of index.projects) if (p.root) byRoot.set(normRoot(p.root), p.id);
   for (const item of inbox) {
-    const pid = item.campaign ? index.byCampaign[item.campaign]
+    const pid = item.campaign ? itemProject(index, item)
       : typeof item.project_id === "string" && out.has(item.project_id) ? item.project_id
       : typeof item.project === "string" ? byRoot.get(normRoot(item.project)) : undefined;
     const s = pid ? out.get(pid) : undefined;

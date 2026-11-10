@@ -4,7 +4,8 @@ import { setTransport } from "../src/ipc";
 import { Home } from "../src/screens/home/Home";
 import { CurrentProject } from "../src/projects/current";
 import { validate } from "../src/screens/home/validate";
-import { projectId } from "../src/projects/adapter";
+import { ProjectsProvider } from "../src/projects/store";
+import { UNSORTED_ID } from "../src/projects/adapter";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -46,6 +47,26 @@ describe("validate", () => {
   });
 });
 
+describe("Home start envelope", () => {
+  const T = "p_01JC3H0000000000000000000A";
+  const stored = { schema: "vajra.project/1", id: T, name: "Harbor", root: "/src/api", root_key: {}, created: "2026-11-01T09:00:00Z", archived: null, rev: 1 };
+  it("names the store's project id when the folder is a registered project, trailing slash and all", async () => {
+    const f = fakeIpc({ preflight: rows(true), list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_list: { projects: [stored], skipped: 0, truncated: false }, act_start_run: started });
+    setTransport(f.transport);
+    render(<ProjectsProvider><Home /></ProjectsProvider>);
+    await screen.findByText("registered");
+    await waitFor(() => expect(f.calls.map((c) => c.cmd)).toContain("project_list"));
+    await new Promise((r) => setTimeout(r, 20));
+    fill(S.home.repo, "/src/api/");
+    fill(S.home.ask, "fix the bug");
+    fill(S.home.base, "main");
+    fireEvent.click(screen.getByRole("button", { name: S.home.startButton }));
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "act_start_run")).toBe(true));
+    const env = (f.calls.find((c) => c.cmd === "act_start_run")!.args as { envelope: { project_id: string } }).envelope;
+    expect(env.project_id).toBe(T);
+  });
+});
+
 describe("Home", () => {
   it("shows every check, and a failing one with its fix command; Start is disabled (AC-1.3.2)", async () => {
     await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
@@ -75,7 +96,7 @@ describe("Home", () => {
     expect(call.args).toMatchObject({ ask: "fix the bug", maxRounds: 2, base: "main", maxInFlight: 4, campaign: null, cwd: "/r" });
     const env = (call.args as { envelope: { action_id: string; project_id: string; expect_generation: number | null } }).envelope;
     expect(env.action_id).toMatch(/^act-[0-9a-f-]{36}$/);
-    expect(env).toMatchObject({ project_id: projectId("/r"), expect_generation: null });
+    expect(env).toMatchObject({ project_id: UNSORTED_ID, expect_generation: null }); // /r is no registered project: the core's bucket, never a made-up id
     expect(window.location.hash).toContain("slug=deliver-20261106-1500");
     expect(window.location.hash).toContain("id=20261106-1500");
   });
