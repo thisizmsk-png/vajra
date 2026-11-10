@@ -3038,7 +3038,7 @@ fn a_rewritten_active_worktree_git_neither_frees_its_project_nor_holds_another()
 
 /// #104 review [P1]: two store projects registered as folders of one checkout (neither has its own `.git`) share the
 /// checkout's location. Through the launch path (`launch_project`, then the record it writes), a run in A neither holds B
-/// nor gives B's launches A's pin, and once both have runs each still launches as itself. A replaced root keeps its pin.
+/// nor gives B's launches A's pin, and once both have runs each still launches as itself. A replaced root refuses.
 #[test]
 fn store_projects_sharing_one_git_location_launch_as_themselves() {
     let t = Tmp::new();
@@ -3072,20 +3072,54 @@ fn store_projects_sharing_one_git_location_launch_as_themselves() {
     assert_eq!(app.launch_project(&b.join("sub")).unwrap().1.id, pb, "a subfolder of B is B's");
     assert_eq!(code(&app.launch_project(&c).unwrap_err()), "not_a_project", "the checkout itself is neither project");
     app.sup.kill(&stream).unwrap();
-    // B's folder replaced: its pin still holds it (nothing shallower is a project).
+    // B's folder replaced (moved away, a new directory made in its place): B's pin does not carry to it.
     fs::rename(&b, c.join("b-old")).unwrap();
     fs::create_dir_all(&b).unwrap();
-    assert_eq!(app.launch_project(&b).unwrap().1.id, pb, "a replaced root keeps its pin");
-    // With the checkout a project too, the replaced root still keeps its pin rather than becoming the checkout's, and A is A.
-    test_project(&t.0.join("data"), &t.home(), &c);
-    assert_eq!(app.launch_project(&b).unwrap().1.id, pb, "a replaced root keeps its pin under a checkout project");
-    assert_eq!(app.launch_project(&a).unwrap().1.id, pa, "A still launches as A under a checkout project");
-    // A pin of a project rooted elsewhere that disagrees with B's still refuses.
+    assert_eq!(code(&app.launch_project(&b).unwrap_err()), "project_membership_inconsistent", "a replaced root refuses");
+    assert_eq!(app.launch_project(&a).unwrap().1.id, pa, "A is untouched by it");
+    // A pin of a project rooted elsewhere that disagrees with A's claims the whole location (as a worktree's repository
+    // would), so A's launches refuse too: fail closed.
     let other = test_project(&t.0.join("data"), &t.home(), &t.0.join("other"));
-    app.record_run_pinned("20261105-1232", &b, &loc, Some(&other), "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
-    assert_eq!(code(&app.launch_project(&b).unwrap_err()), "project_membership_inconsistent");
-    // It claims the whole location (as a worktree's repository would), so A's launches refuse too: fail closed.
+    app.record_run_pinned("20261105-1232", &a, &loc, Some(&other), "2c8fad5b-d9cb-469f-a165-70867728950e", "e", true, 1).unwrap();
     assert_eq!(code(&app.launch_project(&a).unwrap_err()), "project_membership_inconsistent");
+}
+
+/// #104 review [P2]: a pin names a project, not a path. Launch once in a plain project, stop, move its folder away and make
+/// a new directory at the same path: neither a start nor a resume there runs under the old project, and nothing of the
+/// session's control state changes. A `.git` rewrite in the real folder still keeps the pin; a symlink in its place refuses.
+#[test]
+fn a_directory_made_where_a_projects_root_was_neither_starts_nor_resumes_under_it() {
+    let t = Tmp::new();
+    let app = t.app();
+    let a = t.0.join("work/a");
+    let pa = test_project(&t.0.join("data"), &t.home(), &a);
+    let sid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let (loc, p) = app.launch_project(&a).unwrap();
+    assert_eq!(p.id, pa);
+    app.record_run_pinned("20261105-1230", &a, &loc, Some(&p.id), sid, "c", true, 1).unwrap();
+    // A `.git` written into the real folder afterwards changes nothing.
+    fs::create_dir_all(a.join(".git")).unwrap();
+    assert_eq!(app.launch_project(&a).unwrap().1.id, pa, "a .git rewrite keeps the pin");
+    fs::remove_dir_all(a.join(".git")).unwrap();
+    // The folder is moved away and a different directory is made at its path.
+    fs::rename(&a, t.0.join("work/a-old")).unwrap();
+    fs::create_dir_all(&a).unwrap();
+    assert_eq!(code(&app.launch_project(&a).unwrap_err()), "project_membership_inconsistent", "the location string alone does not authorize it");
+    let cwd = a.to_string_lossy().to_string();
+    let e = app.resume_run(sid, "c", &cwd, None).unwrap_err();
+    assert_eq!(code(&e), "project_membership_inconsistent", "{e}");
+    let input = RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    assert_eq!(code(&app.start_run(input, &cwd).unwrap_err()), "project_membership_inconsistent");
+    assert!(lock(&app.control).nonce(sid).is_none(), "no control session was started or rotated");
+    assert!(!app.sup.is_running(&format!("run-{sid}")).unwrap_or(false), "nothing was spawned");
+    // A symlink to the original folder in its place is not the recorded root either.
+    fs::remove_dir_all(&a).unwrap();
+    std::os::unix::fs::symlink(t.0.join("work/a-old"), &a).unwrap();
+    assert_eq!(code(&app.launch_project(&a).unwrap_err()), "project_membership_inconsistent", "a symlinked root refuses");
+    // Moved back, it is the project's again.
+    fs::remove_file(&a).unwrap();
+    fs::rename(t.0.join("work/a-old"), &a).unwrap();
+    assert_eq!(app.launch_project(&a).unwrap().1.id, pa, "the original folder back in place launches");
 }
 
 /// #104 review [P1], nested: a project registered at a folder inside a pinned checkout project is its own once registered.

@@ -309,6 +309,34 @@ fn an_ask_from_below_a_project_registered_inside_a_git_checkout_is_answered() {
 }
 
 /// #103 review: accepting the registered root opens nothing else. Another project's folder is still denied to this
+/// #104 review [P1]: a project the store cannot read (its `project.json` unreadable or malformed) is skipped by the listing, so
+/// its root would be missing from the deny rules. With no runs nothing else names it: the ask refuses, and runs nothing.
+#[test]
+fn an_unreadable_project_record_with_no_runs_refuses_the_ask() {
+    for broken in ["malformed", "unreadable"] {
+        let t = Tmp::new();
+        let app = t.app();
+        live_run(&app, SID, RUN_ID, t.repo());
+        app.record_run(RUN_ID, &t.repo(), SID, "deliver-x", true, 1).unwrap();
+        let other = t.0.join("other");
+        let pid = project_of(&t, &other);
+        app.isolation(RUN_ID, &t.repo()).expect("healthy");
+        let file = t.data().join("projects").join(&pid).join("project.json");
+        if broken == "malformed" {
+            std::fs::write(&file, b"{not json").unwrap();
+        } else {
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(t.0.join("nowhere"), &file).unwrap();
+        }
+        assert_eq!(app.projects.list(true).unwrap().skipped, 1, "{broken}: the store skips it without an error");
+        let e = app.isolation(RUN_ID, &t.repo()).unwrap_err();
+        assert!(matches!(e, LeadError::GuardMissing(_)), "{broken}: {e:?}");
+        let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+        assert_eq!(e["error"], "lead_guard_missing", "{broken}: {e}");
+        assert_eq!(t.count("ask.count"), 0, "{broken}: no Lead ran");
+    }
+}
+
 /// Director-General, and asking as if from that folder, or from this project's subfolder rather than its root, is refused.
 #[test]
 fn with_a_subfolder_run_another_projects_folder_is_still_denied() {
