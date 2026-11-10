@@ -964,21 +964,19 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
 
 **ADR-16 Per-worker launch, provider-neutral (multi-provider D1, PR 6)**
 
-Status: proposed 2026-11-10, design only. This is revision 4. It applies the owner's answers to N1–N12, where N4 changed to "do it full", and the PR #135 review fixes. It was re-reviewed by arjuna and duryodhana.
+Status: proposed 2026-11-10, design only. This is revision 5. It applies the owner's answers to N13–N18, where N15 and N17 changed. Revision 4 applied N1–N12 (N4 changed to "do it full") and the PR #135 review fixes. arjuna and duryodhana reviewed revisions 1–5; each round of findings is folded in.
 
 - **Builds on:** PR 3 (gateway adapter, #123), PR 4 (launch receipt, #128), PR 5 (provider errors, #126), FG-02 (Director-General proposals, #90).
 - **Related:** ADR-14 and ADR-15 are recorded with their FG specs. ADR-17 (below) covers setting up harnesses in the app.
 
-**New questions for the owner (revision 4).** Each one is yes/no or pick one. The design assumes the recommended answer. The last column says which PR waits on it.
+**New questions for the owner (revision 5).** Each one is yes/no. The design assumes the recommended answer. The last column says which PR waits on it.
 
 | # | Question, in plain words | Recommended | Waits on it |
 |---|---|---|---|
-| N13 | Some customers have no Claude. They still need Vajra's engine scripts, because those sign the run record, check the evidence and keep the project memory. Today's install command assumes Vajra's Claude skill is already installed, so it can't be used on its own. How do they get the scripts? (a) The app carries a tested copy of the engine and installs it with one click and your consent, the ADR-17 way. It doesn't install Claude, and doesn't change Claude's settings. (b) Only customers who have Claude can use worker picks for now. | **(a).** Without the scripts, a run with worker picks can't start, because it could never say "Verified". | 6h |
-| N14 | Every check passed, but saving what the run learned to the project memory failed. Should the run still say **"Verified"**, with a note saying the memory wasn't saved? | **Yes.** That is what today's workflow does. The memory isn't a check on the code. | 6j |
-| N15 | The security review can run on any tool you pick. Should it go only to a worker you marked **security: true**, the same as security tasks (Q5)? If no worker is marked, the run waits and asks you. | **Yes.** The same rule as Q5. | 6g |
-| N17 | The step that re-runs the checks and makes the signed evidence has to run where the worker can't read Vajra's signing key. Today only a Claude worker, under the Vajra guard, can be kept away from that key. (a) For now, that step runs only on a Claude account; a run with no Claude account can't say "Verified". (b) Also build an engine update (PR 6k, which you install) so that Vajra runs those checks itself, in its own locked-down sandbox, on any machine. | **(a) now, then (b).** (b) is needed before customers with no Claude can get "Verified". | 6i, 6k |
-| N18 | If a run used web content or your own tools (MCP servers), today nothing it learned is saved to project memory. Should Vajra save it as **suggestions you approve** instead of saving nothing? | **Yes, as suggestions only.** Otherwise anyone with their own tools never gets memory from worker runs. | 6j |
-| N16 | A round failed its checks, and the lead has done nothing for 15 minutes. Should Vajra ask you whether to keep waiting or stop the run? It never stops the run on its own for this. A round that passed finishes by itself, without waiting for the lead. | **Yes, after 15 minutes.** You can change the time. | 6d1 |
+| N19 | Some runs are labelled "Verified (evidence ran outside the guard)". Should what those runs learn go into project memory only as **suggestions you approve**? **No** would save it as verified memory, with the label in its text. | **Yes.** Verified memory should mean the same thing as a plain "Verified". | 6j |
+| N20 | Suppose a run has a Claude helper with the same internet setting as the checker. Should Vajra have that helper run the final evidence step, so the run can get plain "Verified"? It runs on that helper's account, and may wait for that helper to be free. The card shows this before you start, and you can switch it off. | **Yes.** | 6a, 6i |
+| N21 | Until 6k, Codex helpers can read Vajra's signing key. When 6k lands, should Vajra replace the key with a new one, so a copied old key is useless? Old records stay readable, marked with the key they were signed with. | **Yes.** | 6k |
+| N22 | Should 6k get a deadline? If it isn't done 4 weeks after the first Verified, worker picking goes back behind Labs until it is. | **Yes, 4 weeks.** | 6k |
 
 **Owner answers already given (2026-11-10).**
 - **Q1, provider-neutral.** Every harness is treated the same. The customer picks which account runs the Director-General and the run lead, and which accounts run the workers. Some customers have no Claude at all.
@@ -1005,13 +1003,19 @@ Status: proposed 2026-11-10, design only. This is revision 4. It applies the own
 | N10 | No commit signing on `vajra/…` refs | **Yes** |
 | N11 | Block untested harness versions | **Yes** |
 | N12 | npm from the checked file with scripts off; Homebrew at its current version; ship detection first | **Yes** |
+| N13 | How customers with no Claude get the engine scripts | **The app installs a tested copy of the engine**, with consent (ADR-17 item 10). It doesn't install Claude, and doesn't change Claude's settings |
+| N14 | Still "Verified" when the memory write fails, with a note | **Yes** |
+| N15 | The security review only on a `security: true` seat | **Changed: any helper may run the security review.** `security: true` is only an optional preference: a marked seat is used when there is one. The run card says which harness and account ran the security review |
+| N16 | Ask after 15 minutes of a silent lead, once a round failed | **Yes** |
+| N17 | Evidence only on a Claude seat for now, then 6k | **Changed: allow it now, with a warning.** Any seat may run the evidence step. A run whose evidence ran outside the Vajra guard is labelled **"Verified (evidence ran outside the guard)"**, never plain "Verified": on the card, in the record and in anything exported. The signed record carries that fact, so it can't be laundered later. **6k (move the key out of reach) is the next priority after the first Verified**, and the risk is stated plainly until it lands |
+| N18 | Save a tainted run's records as suggestions | **Yes** |
 
 **Decision.**
 - **Every crew worker is a core session,** launched through its harness's adapter and its **harness profile** (16.4), whatever the harness. Claude Code included: a core-launched Claude worker still runs Vajra's guard hooks, because they are the user's installed hooks.
 - **Every run with worker picks is led by a lead session on the customer's chosen harness.** It drives the run through the core's **run protocol**: a `vajra-run` MCP server with planning, dispatch and integration tools (16.5).
 - **The core keeps the rules** the deliver workflow keeps in code today: the plan's shape, file ownership, rounds, what counts as done, and merging. So the guarantees come from the core, not from the lead's harness.
-- **The core runs every phase of today's workflow itself, on any harness (N4, 16.5a).** That covers verification, the design review, the security review, the evidence re-run and check, the signed campaign record and the project-memory write-back. The lead can't skip or reorder any of them. A run says **"Verified"** only when the same gate today's workflow uses has passed, the evidence bundle is green for the integration commit, and the signed record checks out.
-- **The engine's scripts stay the only code that signs and the only writers of the stores. The app never reads the key.** The core calls them, unchanged, through the bridge (16.11). A session that can read the key is never trusted to make evidence (T13).
+- **The core runs every phase of today's workflow itself, on any harness (N4, 16.5a).** That covers verification, the design review, the security review, the evidence re-run and check, the signed campaign record and the project-memory write-back. The lead can't skip or reorder any of them. A run says **"Verified"** (or, when its evidence ran outside the guard, **"Verified (evidence ran outside the guard)"**, N17) only when the same gate today's workflow uses has passed, the evidence bundle is green for the integration commit, and the signed record checks out.
+- **The engine's scripts stay the only code that signs and the only writers of the stores. The app never reads the key.** The core calls them, unchanged, through the bridge (16.11). Evidence made by a session that can read the key is labelled "Verified (evidence ran outside the guard)", and that label is signed into the record (N17, T13).
 - **Worktrees and commits belong to the core** (N1, 16.6). A narrow git writer is added beside the read-only bridge.
 - **The human-started proposal is the only authority** (16.1–16.3). It is held as a guarded `seats.json`.
 
@@ -1059,9 +1063,15 @@ Status: proposed 2026-11-10, design only. This is revision 4. It applies the own
 - **Plain text.** Every text field passes the same `sanitise` check as `ask`.
 - **`workers: []` is refused.**
 - **Required seats (N4).** Every proposal with `workers` has at least one `verifier` seat and one `reviewer` seat. Each one is either proposed or added by the core from the role default (`agents.default`, `source: "role_default"`). The card lists both.
-- **The security reviewer.** A `security_reviewer` seat is required when the ask or any criterion matches `SEC_RE`, which is today's workflow rule (`vajra-deliver.js:444`). It is also required at run time when any planned task is a security task. Under N15 it must be a seat marked `security: true`.
-  - **Flagged at proposal** (by the ask or a criterion) **with no marked seat:** Start is refused with `security_reviewer_missing`, so no money is spent first.
-  - **Flagged only by the plan:** the run holds at `plan_tasks` (`needs_user`) until the human picks one.
+- **The security reviewer.** A security review is required when the ask or any criterion matches `SEC_RE`, which is today's workflow rule (`vajra-deliver.js:444`). It is also required at run time when any planned task is a security task.
+  - **Any harness may run it (N15).** It goes to a seat in this order:
+    1. a `security_reviewer` seat marked `security: true`;
+    2. any other `security_reviewer` seat;
+    3. a `security_reviewer` seat the core adds from the role default (`source: "role_default"`), at proposal or when the plan flags the run.
+
+    Within each step, a seat whose harness and model differ from those of the security tasks' writers is preferred. When the reviewer shares the writer's harness and account, the card and the report say so. The run never holds just because no seat is marked. Bhishma signs off on dropping the hold.
+  - **The card** names the harness and account that ran the security review: "Security review by Codex (work account)".
+  - `security: true` on a writer seat still decides where **security tasks** go (Q5, unchanged).
   - `run_timeout_s` is paused while a run waits for the human.
 - **`source`** is derived by the core once at proposal (`role_default` or `dg`), stored, and hashed from the stored value. A DG-sent `source` is refused.
 - **Security seats (Q5).**
@@ -1180,7 +1190,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | `await_any{tickets[], wait_s ≤ 110}` and `await_worker{ticket, wait_s}` | The call parks without holding the Service mutex. It returns the first ticket that ends, or `{state, attempt, elapsed_s, queue_position}` for each running ticket. A **round ticket** (from `integrate`) can be awaited the same way. |
 | `cancel_worker{ticket}` | Stops one of the lead's own workers. |
 | `integrate{round}` | Merges every task's latest `done` commit, in plan order (as `vajra-deliver.js:619–622` does), into `vajra/<run>/integration[-r<n>]` in the core's own worktree (16.6). A conflict aborts that merge and is reported per task, as `merge_conflict_files` feedback, and **uses up the round**. On a clean merge it returns a **round ticket**, and the core starts that round's checks (16.5a). The lead can't call `integrate` again for that round. |
-| `finish_run{report}` | Ends the run. **The lead doesn't choose the status. The core computes it** (16.5a): `verified`, `not_verified`, `rejected`, `needs_user` or `stopped`. A `finish_run` while a round's checks are still running is refused with `not_ready`. The report is plain text, at most 8 KiB, redacted, and shown on the run card under "The lead's notes". The notes never go into the signed record or `CampaignReport`. The core builds the delivery report itself, the way today's workflow does. **A run whose round passed is finalized by the core without waiting for `finish_run`** (16.5a), so `finish_run` then only adds notes. |
+| `finish_run{report}` | Ends the run. **The lead doesn't choose the status. The core computes it** (16.5a): `verified`, `evidence_unguarded`, `not_verified`, `rejected`, `needs_user` or `stopped`. A `finish_run` while a round's checks are still running is refused with `not_ready`. The report is plain text, at most 8 KiB, redacted, and shown on the run card under "The lead's notes". The notes never go into the signed record or `CampaignReport`. The core builds the delivery report itself, the way today's workflow does. **A run whose round passed is finalized by the core without waiting for `finish_run`** (16.5a), so `finish_run` then only adds notes. |
 | `list_workers`, `inspect_worker` | Read-only, limited to this run. |
 
 **`dispatch_head`.** This is the commit a worker starts from. The core records it on the ticket (and in `tickets.jsonl`) at this point:
@@ -1222,7 +1232,7 @@ Verify and review tickets end `done` with their typed result, or `failed` when t
 - **Exit with live workers.** If the lead exits without `finish_run` while workers are still live, the core keeps those workers running and **restarts the lead once**. The restart uses the resume charter, built from the guarded `plan.json` and `tickets.jsonl`.
 - **A second early exit** makes the run **`lead_lost`**: the workers are killed and the human is asked.
 - **Exit after `finish_run`, or after the core has finalized the run,** ends the run.
-- **Exit with no live workers and no `finish_run`.** The core finalizes the run with the status it computes. A round that passed stays `verified`, and anything else is `not_verified`. No restart is spent.
+- **Exit with no live workers and no `finish_run`.** The core finalizes the run with the status it computes. A round that passed stays `verified` (or `evidence_unguarded`), and anything else is `not_verified`. No restart is spent.
 - **A retryable typed error on the lead** (PR 5: a 429 or a 5xx) restarts the lead with backoff, at most 3 times. These restarts don't use up N9's one restart.
 - **Stop.** A human Stop of the run kills everything.
 
@@ -1249,7 +1259,7 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 | Today's workflow | Core path | Runs on |
 |---|---|---|
-| Create the campaign and register the tasks (`:448`, `:508`) | At round 1's `plan_tasks`: `CampaignCreate{slug: deliver-<run>, goal, features = the criteria}`, then `TasksAdd` and `TasksDep` for each task. Later rounds register only their new tasks. | the engine scripts, through the bridge |
+| Create the campaign and register the tasks (`:448`, `:508`) | At round 1's `plan_tasks`: `CampaignCreate{slug: deliver-<run>, goal, features = the criteria}`, with the evidence-trust marker on an `outside_guard` run, then `TasksAdd` and `TasksDep` for each task. Later rounds register only their new tasks. | the engine scripts, through the bridge |
 | Each worker claims and reports its own task (`:562`, `:573`) | The core claims at dispatch (`TasksClaim` with the worktree) and reports at the outcome (`TasksReport`). The task owner is the role's agent name in `crew::roles`. Workers never run Vajra scripts. | the bridge |
 | Merge (`:618`) | `integrate` (`gitw`) | the core |
 | Verify, plus the arjuna review, plus bhishma when `SECURITY` is set; all three in parallel (`:642–690`) | On a clean `integrate`, the core starts three tickets in parallel, each at the integration commit in its own fresh worktree: <br>• a **verify** ticket on the `verifier` seat; <br>• a **design review** ticket on the `reviewer` seat; <br>• a **security review** ticket on the `security_reviewer` seat, when the run is security-flagged. <br>Each one is a fresh session, never a writer's session. | any harness |
@@ -1288,14 +1298,30 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
   - the lead's plan sets `touches_security`;
   - any planned task is a security task (16.5).
 - Once set, the flag stays set for the whole run.
-- **No marked seat (N15).** If the run is flagged and has no `security_reviewer` seat marked `security: true`, the round ticket becomes `needs_user`: "Pick a worker for the security review." The human's pick is recorded with `source: "user"`.
+- **Seat choice (N15).** The security review ticket goes to the seat chosen by the 16.1 order. A marked seat is preferred; otherwise any `security_reviewer` seat is used. The review result, the card and the report all record the harness and account that ran it.
 
 **The evidence ticket.** It runs only after the gate passes, and it belongs to the round ticket (see "The round ticket" below).
 1. **The worktree.** The core creates a fresh worktree at the integration commit through `gitw`, with the N7 dependency clones. The worktree is kept until `CampaignArchiveEvidence` succeeds.
-2. **The seat: one that can't read the Vajra key (T13).** `vajra-verify-work.sh` signs the bundle itself, with `~/.claude/vajra/.hmac-key`, inside whatever session runs it (`vajra-verify-work.sh:123–144`). A session that can read that key could write a green, signed bundle by hand. The guard denies that path to Claude sessions. Seatbelt doesn't deny it to Codex.
-   - So the evidence ticket runs only on a **Claude seat, under the guard**. That is the verifier seat if it is Claude; otherwise any Claude seat in the run, or a Claude account the human picks (`needs_user`).
-   - **If the run has no Claude account, it can't say "Verified" until N17 (b) lands.** The card says: "Vajra can't check the evidence without a guarded worker yet."
-   - S11 checks whether a Codex sandbox can be made to deny reads of `~/.claude/vajra/**`. If it can, Codex seats become eligible too.
+2. **The seat, and whether the result can be trusted (N17, T13).** `vajra-verify-work.sh` signs the bundle itself, with `~/.claude/vajra/.hmac-key`, inside whatever session runs it (`vajra-verify-work.sh:123–144`). A session that can read that key could write a green, signed bundle by hand, or send the key to its provider. The guard denies that path to Claude sessions. Seatbelt doesn't deny it to Codex.
+   - **Any seat may run the evidence step** (owner, N17: "allow it now with a warning").
+   - **The seat is fixed at Start, after overrides,** from the harness actually in effect. The core records it in `seats.json` and the start receipt as `evidence_seat`:
+     - a Claude seat under the guard, when the run has one (N20): the verifier seat if it is Claude; otherwise the first Claude `w<n>` seat in seat order, never the lead. It is used only when its `network` setting matches the verifier's;
+     - otherwise the verifier seat.
+
+     Whatever that seat's role, the evidence session uses an **evidence profile** that can write to the evidence worktree. The proposal card shows the choice, and the label the run will get, before Start. The human can switch it to the verifier seat.
+   - **That choice fixes the run's evidence trust, also at Start:** `guarded` (the evidence session can't read the key) or **`outside_guard`** (it can).
+     - **The trust never changes during the run.** Resume copies `evidence_seat` and the trust from the original `seats.json`, and never recomputes them.
+     - **If a guarded evidence seat becomes unavailable** (its cap is hit, or it's signed out), the human is asked (`needs_user`) to pick one of three:
+       - wait until it frees up (the PR 5 reset time is shown);
+       - pick another guarded seat;
+       - end the run `not_verified`, with "Run again to get evidence outside the guard".
+
+       A hold that lasts `evidence_hold_max_s` (default 24 h) ends the run `not_verified`.
+     - **It never moves to a seat of the other kind,** because the guarded record was signed with no marker.
+     - At Start, the card warns when the evidence seat's account is already at its cap.
+     - Until 6k lands, every Codex seat is `outside_guard`. After 6k, a session counts as `guarded` only when a **launch-time check** proves it can't read the key, whatever its harness.
+   - **The label.** A run whose evidence trust is `outside_guard` can never say plain "Verified". It says **"Verified (evidence ran outside the guard)"**. That goes on the run card, in the signed record, in the report and in anything exported from them. "The evidence trust in the signed record" (below) says how the record carries this.
+   - **The risk, stated plainly** (in the card's "Why?" text and in T13): "A helper outside the Vajra guard ran the final check. It could read Vajra's signing key, so it could have faked this result or copied the key. Vajra will close this gap in a coming update."
 3. **The brief** is exactly the commands the core built:
    - the verifier's setup commands, each one passed to `bash -c`, minus any the redo still marks as using outside paths;
    - then `VAJRA_WALKTHROUGH_DIR=data/walkthroughs <scripts>/vajra-verify-work.sh deliver-<run> <the passing check commands and the suite command>`.
@@ -1304,12 +1330,32 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 4. **The core doesn't trust the session's account of how it went.** It runs `CheckEvidence{path: data/walkthroughs/deliver-<run>/evidence.json, head: <integration commit>, repo: <the evidence worktree>}` through the bridge. Only a green answer counts. `check-evidence` judges the whole bundle, so either every criterion passes or none does. The core also requires two more things before it counts the bundle:
    - `git.worktreeTree` is not null. A sandbox that blocked `write-tree` would otherwise read as a stable tree;
    - the evidence worktree is clean against the integration commit, apart from `data/walkthroughs/`. The core checks this itself, with the read-only bridge.
-5. **The core never runs those commands itself in this design.** They are written by a model, and the core would run them as the user with no sandbox or guard.
-   - **N17 (b)** is the named engine change that would let it do so safely. `vajra-verify-work.sh` would gain a "run only" mode and a separate sign step:
-     - the core runs the commands in a Seatbelt profile it builds itself, which denies `~/.claude/vajra/**`, writes only the worktree, and follows the seat's network setting;
-     - the bridge then asks the script to sign the bundle.
-   - That removes the need for a Claude seat. The owner installs it and regenerates the manifest. It is PR 6k.
+5. **The core never runs those commands itself, before 6k.** They are written by a model, and the core would run them as the user with no sandbox or guard.
+   - **PR 6k, "move the key out of reach",** is the next priority after the first Verified (6i). It has two parts:
+     - **A core change.** Every session that isn't guarded runs inside an extra Seatbelt layer that the core builds, denying `~/.claude/vajra/**` while still allowing the engine scripts directory. S11 checks that this layer works with Codex's own sandbox.
+     - **An engine change.** `vajra-verify-work.sh` gains a "run only" mode and a separate sign step. The core runs the check commands in its own Seatbelt profile (key denied, writes only to the worktree, network as the seat says), and the bridge then asks the script to sign the bundle. The owner installs it and regenerates the manifest.
+   - **After 6k,** an evidence session that can't reach the key is `guarded` whatever its harness, and plain "Verified" is available to customers with no Claude.
 6. **The working directory.** `CheckEvidence`, `TasksClose`, `KbAdd --source verified` and `CampaignArchiveEvidence` all run with their working directory set to the evidence worktree. The scripts find the bundle at `<git toplevel>/data/walkthroughs/<slug>/`, and the knowledge store picks the project from that directory.
+
+**The evidence trust in the signed record (N17).** This needs no engine change.
+- **Where the marker goes.** For an `outside_guard` run, the core writes the marker `[evidence ran outside the Vajra guard]` into two parts of the campaign that only `create` sets:
+  - **the slug**, as `deliver-<run>-og`. It is shown by `vajra-campaign.sh list`, which prints no goal;
+  - **the start of the goal.**
+- **Feature descriptions carry no marker.** `/vajra continue` reuses them word for word as criteria (`vajra-deliver.js:433`), and a marker there would break `resultsByCriterion`'s exact match.
+- **It is checked.** After `CampaignCreate`, the core reads the campaign back (`show`). If the slug and goal don't both carry the marker, the run is aborted before dispatch.
+- **Where else it is written.** The marker goes **first** in every `pass --evidence` text, the closing `progress` line (with the evidence seat's harness and account), the checkpoint label and the report's first line. The core cuts each text to the script's limit **in bytes, on a UTF-8 boundary**, from the end, so the marker is never the part that's cut. `clean_line` cuts with `cut -c`, which counts bytes under the scrubbed locale.
+- **What protects it.** No script command changes the slug or the goal of a `done` campaign. `features_def_sha` covers only the features, and is a plain hash.
+  - **What doesn't:** anyone who can write to the stores could rebuild a campaign and sign it with `close --status abandoned`. That command re-signs even a broken state. Sandboxed Codex sessions can't write to the stores, and the guard keeps Claude sessions out of them.
+  - **So the label never rests on the record alone.** The core also keeps the trust in its own guarded `seats.json` and in the start receipt.
+- **Every reader shows the worse of the two sources:**
+  - the signed marker, which counts when the slug ends `-og` or the goal starts with the marker (when unsure, show the label);
+  - the core's own trust record.
+
+  This covers the run card, Desktop campaign and archive views, the criterion and evidence rows (`evidence_state`), task badges, the board, the crew tree and exports. An `abandoned` campaign never shows pass or Verified.
+- **The status id is `evidence_unguarded`.** It doesn't start with "verified", so a prefix match can't take it for plain Verified. Every UI match on status is exhaustive, and a fixture test asserts that no view prints a bare "Verified" for such a run.
+- **A guarded run** writes no marker. The core never moves a run from `outside_guard` to `guarded`.
+- **The CLI.** Suppose the evidence was red: the campaign stays active, and a later CLI `/vajra continue` would write pass lines and a report with no marker. The slug and goal still carry it, and every Desktop reader follows the worse source. The CLI's own wording isn't the label. Making the CLI workflow and `vajra-campaign.sh list/show` print the label is in 6k's engine part.
+- **Idempotent create.** It reuses a campaign only when the slug, goal and feature hash match exactly. The marker text is fixed, so a restart matches. If the slug exists with a different goal, the script dies with "already exists". That is `not_verified`, never a reuse.
 
 **Project memory.**
 - **The records** are built in code from validated values, as `:772–797` does today: the delivery, the plan's decisions, and one lesson for each fix round that turned a failure into a pass.
@@ -1321,7 +1367,7 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
   A seat with `network: true` also taints the run. If any session is tainted, **nothing is saved as verified.** Under N18 = Yes, the records are saved as `proposed`, for the human to approve. They are built in code from validated values only. Under N18 = No, nothing is saved, which is today's rule. The card says which happened.
 - **Otherwise:**
-  - With green evidence: `KbAdd{source: verified, evidence, commit, session: <the lead's session id>}`. A record the knowledge gate refuses (exit 3) goes again as its `proposed` twin.
+  - With green evidence on a `guarded` run: `KbAdd{source: verified, evidence, commit, session: <the lead's session id>}`. On an `outside_guard` run, every record is `proposed`, and its body says the evidence ran outside the guard (N19). A record the knowledge gate refuses (exit 3) goes again as its `proposed` twin.
   - Without green evidence: every record is `proposed`.
   - Proposed records wait in pending/, and the human approves them through the existing approval path (E9 desktop approvals, or `atman.sh review`).
 
@@ -1329,7 +1375,8 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 | Status | When | Card |
 |---|---|---|
-| `verified` | All of these hold: <br>• a round passed the gate; <br>• the evidence is green for that integration commit; <br>• the tasks were closed on it; <br>• every criterion's `pass` was recorded; <br>• the campaign closed `done` and the report was written; <br>• `CampaignVerify` passes on the closed, signed record, as the last check. <br>The memory write-back and the evidence archive are reported, but don't block (N14). | **Verified** |
+| `verified` | All of these hold: <br>• a round passed the gate; <br>• the evidence is green for that integration commit; <br>• the tasks were closed on it; <br>• every criterion's `pass` was recorded; <br>• the campaign closed `done` and the report was written; <br>• `CampaignVerify` passes on the closed, signed record, as the last check. <br>The memory write-back and the evidence archive are reported, but don't block (N14). <br>The evidence trust is `guarded`. | **Verified** |
+| `evidence_unguarded` | The same as `verified`, but the evidence trust is `outside_guard` (N17). | **Verified (evidence ran outside the guard)**, with the "Why?" text from the evidence ticket's step 2. Never shown as plain "Verified", and never merged with `verified` in counts or filters. Its criterion rows show "verified (evidence ran outside the guard)" |
 | `not_verified` | Any of these: <br>• the rounds ran out; <br>• the evidence is not green (the tasks stay open and the knowledge is proposed, as today); <br>• the signed record doesn't verify. | **Not verified**, with the reason |
 | `rejected` | A review rejected the approach. | **Rejected by review** |
 | `needs_user`, `stopped`, `lead_lost`, `timed_out` | 16.5 | Their existing words |
@@ -1495,8 +1542,8 @@ Protection a session gets, by harness:
 | T8 | Weaker run checks on the new path (any lead, N2 = No) | The deliver workflow's coded phases | The core's run protocol, with a lead model that could try to skip a phase | **Full parity (N4, 16.5a):** the core starts the verify, design review and security review tickets itself on every integrated round; the gate is ported with parity tests; the evidence re-run and `check-evidence`, the signed campaign record and the knowledge write-back all go through the engine's own scripts; the lead can't set the status | — (the same phases as today; the reviewers may run on another harness, chosen by the human) |
 | T10 | A user config or harness update quietly defeats an "always" setting | — | A managed config, a renamed `-c` key, a user `disableAllHooks` | The tested version range (N11); the run-time read-back of the effective sandbox, network, approval and tools, killing the session on a mismatch (16.4 rule 4); `--tools`, and the guard hooks always in the Claude flag file (16.4 rule 5) | — |
 | T9 | Key exposure | None in env (`ENV_ALLOW`) | The same; Codex reads its key through `/usr/bin/security` | PR 2 and PR 3 tests; PR 5 redaction | — |
-| T11 | Forged evidence or a forged run record | vidura runs verify-work and reports its exit code; the scripts sign the record | The evidence session can be any harness; a writer can't reach the record | The core never trusts the evidence session's report: it runs `check-evidence` itself through the bridge for the integration commit; the bundle is made in a fresh worktree by a fresh session; the HMAC key stays in the scripts; `CampaignVerify` must pass before "Verified" | The same as today: an evidence session that fakes a bundle `check-evidence` accepts. Worker output never reaches the record text, which is built in code |
-| T13 | Reading Vajra's signing key | The guard denies the key path to Claude sessions | A Codex session can read `~/.claude/vajra/.hmac-key` and the stores, and could send them to its provider. With the key, an evidence session could sign a fake green bundle | The evidence ticket runs only on a guarded Claude seat (N17 a), until the engine's run-only mode lets the core run the checks in its own sandbox (N17 b, 6k). S11 checks whether Codex can be denied that path. The cards say Codex can read your files (Q3). The record names the harness that made the evidence | A Codex seat can still read the key until S11 or 6k lands. It can't write the stores, which its sandbox blocks |
+| T11 | Forged evidence or a forged run record | vidura runs verify-work and reports its exit code; the scripts sign the record | The evidence session can be any harness; a writer can't reach the record | The core never trusts the evidence session's report: it runs `check-evidence` itself through the bridge for the integration commit; the bundle is made in a fresh worktree by a fresh session; the HMAC key stays in the scripts; `CampaignVerify` must pass before "Verified"; evidence from a session that can read the key is labelled `outside_guard` in the signed definition (T13) | The same as today for a `guarded` evidence session: one that fakes a bundle `check-evidence` accepts. For `outside_guard`, see T13. Worker output never reaches the record text, which is built in code |
+| T13 | Reading Vajra's signing key | The guard denies the key path to Claude sessions | A Codex session can read `~/.claude/vajra/.hmac-key` and the stores, and could send them to its provider. With the key, an evidence session could sign a fake green bundle | **Owner's N17: any seat may run the evidence step now, labelled honestly.** <br>• The evidence trust (`guarded` or `outside_guard`) is fixed at Start from the evidence seat, and written into the signed, unchangeable campaign definition. <br>• An `outside_guard` run can only say "Verified (evidence ran outside the guard)", everywhere it appears. <br>• A guarded Claude seat is preferred when the run has one (N20). <br>• **6k** (an extra Seatbelt layer that denies the key, plus run-only checks) is the next priority after the first Verified. <br>• The cards say Codex can read your files (Q3). | **Until 6k lands:** <br>• any Codex seat can read the key and send it to its provider; <br>• an `outside_guard` evidence session could fake a green result, and the label is the only defence; <br>• a copied key could also forge plain-Verified records for guarded runs, until 6k replaces the key (N21). Today no session can read it. <br>Sandboxes stop Codex sessions writing to the stores |
 | T12 | Knowledge taken from web or tool content | `vajra_kb.py` refuses automatic records from a session its practice log shows using web or MCP tools | That log only covers Claude sessions | The core's web and tool rule over every session of the run, plus every `network: true` seat (16.5a) | — |
 
 ### 16.9 Caps and receipts
@@ -1566,40 +1613,42 @@ This section is unchanged from revision 1, except that the base is `dispatch_hea
 | S6 | **Diff counter parity:** does the 16.10 counter match git numstat on the fixtures? Record the git version. | 6c-0 | Fix the counter. |
 | S7 | **APFS clones:** does `clonefile` of `node_modules` into a worktree under the app data dir work across volumes? | 6c | Fall back to no copy, and say so on the card. |
 | S8 | **Engine scripts with no Claude:** <br>• Does the install command install the scripts on a Mac without `claude`? <br>• Do `vajra-campaign.sh create/pass/close/report`, `vajra_tasks.py add/claim/report/close` and `vajra_kb.py add` run from the bridge with the scrubbed env, with no Claude session? <br>• Does `create` change the global active campaign? <br>• Does a SIGTERM leave the lock free? | 6h | A script that needs Claude-only state becomes a named engine change for the owner (16.11). |
-| S9 | **Evidence under Codex:** does `vajra-verify-work.sh` run inside a Codex `workspace-write` session in a core worktree, where `<repo>/.git` is read-only? Is `git.worktreeTree` null? Can servers bind to loopback (also for S1)? | 6i (needed only if S11 passes) | The evidence stays on Claude seats (N17). |
-| S11 | **Denying the key to Codex:** can a Codex sandbox profile, or a per-launch config, deny reads of `~/.claude/vajra/**` while still allowing `~/.claude/skills/vajra/scripts`? | 6b | Keep the evidence on Claude seats (N17 a), and build 6k. |
+| S9 | **Evidence under Codex:** does `vajra-verify-work.sh` run inside a Codex `workspace-write` session in a core worktree, where `<repo>/.git` is read-only? Is `git.worktreeTree` null? Can servers bind to loopback (also for S1)? | 6i (Codex seats may run the evidence step, N17) | A null tree or a failed run makes the bundle not count. Record the reason, and give the evidence ticket the worktree's gitdir as a writable root if that fixes it. |
+| S12 | **Evidence runtime on Claude:** can a Claude evidence session run a long suite (more than 10 minutes) through Bash without hitting a tool time limit, and with `network` off where it's asked? | 6i | Prefer the verifier seat for long suites, and say so on the card (N20). |
+| S11 | **Keeping the key from Codex:** can an extra Seatbelt layer around a Codex session, or a per-launch config, deny reads of `~/.claude/vajra/**` while still allowing `~/.claude/skills/vajra/scripts`, without breaking Codex's own sandbox? | 6k | Codex evidence stays `outside_guard`. 6k's engine part still lets the core run the checks itself. |
 | S10 | **`GIT_ATTR_SOURCE`:** which `/usr/bin/git` versions ship on supported macOS releases, and do they honour `GIT_ATTR_SOURCE` for `add` and `status`? | 6b | Keep only the name check (16.6), which is the rule anyway. |
 
 ### 16.13 Split, order, files and acceptance tests
 
-Eleven PRs, plus 6k (an engine change, under N17 b). **6e is dropped** (N2 = No). **6f is required for a customer with no Claude**, because the Director-General conversation is Claude-only until 6f lands. **Worker picking stays behind Labs until 6g, 6h, 6i and 6j have all landed** (N4). **Labs** is a per-project switch shown **only in developer builds** (a compile-time flag). Release builds have no way to turn it on, so worker picking can't be user-visible before then. The word "Verified" first appears in 6i, the PR that adds the evidence check.
+Twelve PRs. 6k is part engine change. **6e is dropped** (N2 = No). **6f is required for a customer with no Claude**, because the Director-General conversation is Claude-only until 6f lands. **Worker picking stays behind Labs until 6g, 6h, 6i and 6j have all landed** (N4). **Labs** is a per-project switch shown **only in developer builds** (a compile-time flag). Release builds have no way to turn it on, so worker picking can't be user-visible before then. The word "Verified" first appears in 6i, the PR that adds the evidence check.
 
 | PR | Scope | About |
 |---|---|---|
-| **6a** | **Proposal seats:** <br>• `lead`, `workers`, `max_in_flight`, `network` <br>• the required `verifier` and `reviewer` seats, and the `security_reviewer` rule (16.1) <br>• the v2 hash; overrides with `network` (16.3) <br>• `launchable` with the version range, and `engine_missing` <br>• `seats.json`, roles, the security card. <br>The DG's tool schema gains `workers` only where Labs is on. | 800 lines |
+| **6a** | **Proposal seats:** <br>• `lead`, `workers`, `max_in_flight`, `network` <br>• the required `verifier` and `reviewer` seats, and the `security_reviewer` rule (16.1) <br>• the v2 hash; overrides with `network` (16.3) <br>• `launchable` with the version range, and `engine_missing` <br>• `seats.json`, roles, the security card <br>• the security reviewer order (N15), and `evidence_seat` plus the evidence trust, fixed at Start (N17, N20). <br>The DG's tool schema gains `workers` only where Labs is on. | 800 lines |
 | **6b** | **Profiles and git:** <br>• harness profiles (16.4) for Codex and Claude workers, with the run-time read-back <br>• `vajra/gitw.rs` (16.6), with the repo config hashes, the frozen global config (`GIT_CONFIG_GLOBAL`), the `.gitattributes` rule and `GIT_ATTR_SOURCE` <br>• the `extra_env` allowlist (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `TMPDIR`). <br>Bhishma required. | 950 lines |
 | **6c-0** | **The diff counter** (16.10) and its UI line. Small, and independent of the others. | 350 lines |
 | **6c** | **Worker runtime:** <br>• seat queues and tickets <br>• retries on an unchanged tree, receipts, `attempt` <br>• per-worker controls, `core:` crew nodes <br>• caps at dispatch, dependency clones, retention | 900 lines |
 | **6d1** | **`RunProtocol` in process:** <br>• the `validatePlan` / `topo` / `waves` port, with JS↔Rust parity <br>• dispatch rules, `integrate` and round tickets, `finish_run` with a core-computed status <br>• the lead-liveness lease and the stuck-lead question (N16) <br>• run limits <br>• tested with in-process fake leads. <br>The round gate is a stub that always answers `not_verified`. No user-facing status words yet. | 750 lines |
 | **6d2** | **Transport and leads:** <br>• the `vajra-run` server with concurrent calls; the socket routing; the peer-token and pid check <br>• lead profiles, the charter, lead restart and `lead_lost` <br>• resume <br>• end-to-end tests with fake harnesses, ending `not_verified` (the stub gate) | 900 lines |
-| **6g** | **Verify and review phases (16.5a):** <br>• the verify, design review and security review tickets, started by the core on each integrated round <br>• the ported briefs; `Verification` and `Review` parsing <br>• the `verificationProblems` port and its one redo; the gate port; round feedback <br>• the security flag and the N15 holds <br>• `KbSearch` for the planner, `protected_actions` <br>• parity fixtures for every ported block. <br>The gate's pass still answers `not_verified` until 6i. Bhishma required (the security review and flag). | 900 lines |
+| **6g** | **Verify and review phases (16.5a):** <br>• the verify, design review and security review tickets, started by the core on each integrated round <br>• the ported briefs; `Verification` and `Review` parsing <br>• the `verificationProblems` port and its one redo; the gate port; round feedback <br>• the security flag; the review on any harness (N15), recording which harness ran it <br>• `KbSearch` for the planner, `protected_actions` <br>• parity fixtures for every ported block. <br>The gate's pass still answers `not_verified` until 6i. Bhishma required (the security review and flag). | 900 lines |
 | **6h** | **Signed run record:** <br>• the bridge variants `CampaignCreate`, `CampaignPass`, `CampaignCheckpoint`, `CampaignClose`, `CampaignReport`, `TasksAdd`, `TasksDep`, `TasksClaim`, `TasksReport` and `TasksClose` <br>• the campaign and task-graph calls at plan, dispatch, outcome and round time, with the exact arguments and the failure table (16.5a) <br>• idempotent create, kill grace, lock Repair, orphans <br>• `engine_missing` / `engine_unsupported` and the N13 install offer <br>• spike S8. <br>Bhishma required. | 750 lines |
-| **6i** | **Evidence check, and "Verified":** <br>• the evidence ticket on a guarded seat (N17 a); `CheckEvidence` by the core, plus the tree and clean checks <br>• `TasksClose` on the evidence, `pass` for each criterion, `close`, `CampaignArchiveEvidence` <br>• the delivery report (`CampaignReport`), then `CampaignVerify` last <br>• the round ticket finalizing the run <br>• **the `verified` and `not_verified` status words** on the run card. <br>Bhishma required. | 700 lines |
+| **6i** | **Evidence check, and "Verified":** <br>• the evidence ticket on `evidence_seat`; `CheckEvidence` by the core, plus the tree and clean checks <br>• the evidence-trust marker in the slug and goal, read back after create; **`evidence_unguarded`** with its label and "Why?" text (N17) <br>• every reader (the run card, campaign and archive views, `evidence_state` rows, task badges, board, crew tree, exports) shows the worse of the marker and the core's trust record <br>• the evidence-seat hold and its three choices <br>• `TasksClose` on the evidence, `pass` for each criterion, `close`, `CampaignArchiveEvidence` <br>• the delivery report (`CampaignReport`), then `CampaignVerify` last <br>• the round ticket finalizing the run <br>• **the `verified` and `not_verified` status words** on the run card. <br>Bhishma required. | 700 lines |
 | **6j** | **Project-memory write-back:** <br>• the `KbAdd` variant; the knowledge record builders (ported, with parity tests) <br>• the web and tool rule over every session <br>• proposed twins on exit 3; pending records through the existing approval path <br>• the N14 note. <br>Bhishma required. | 550 lines |
-| **6k** | **Optional engine change (N17 b):** a run-only mode and a separate sign step for `vajra-verify-work.sh`, plus the core's own Seatbelt profile for check commands. The owner installs it and regenerates the manifest. Needed before a customer with no Claude can get "Verified". Bhishma, duryodhana. | 500 lines |
+| **6k** | **Move the key out of reach. This is the next priority after 6i (N17).** <br>• **Core:** an extra Seatbelt layer around every unguarded session, denying the Vajra state dir (S11). <br>• **Engine:** a run-only mode and a separate sign step for `vajra-verify-work.sh`, with the core running the checks in its own sandbox. The owner installs it and regenerates the manifest. <br>• **A new signing key** (N21), with an epoch number recorded in each record; old records stay checkable. <br>• A launch-time check that a session can't read the key, before it counts as `guarded`. <br>• **Engine:** the CLI workflow and `vajra-campaign.sh list/show` print the label for an `-og` campaign. <br>After 6k, plain "Verified" is open to customers with no Claude. **Deadline (N22):** 4 weeks after the first Verified, or worker picking goes back behind Labs. Bhishma (including the key rotation), duryodhana. | 700 lines |
 | **6f** | **The Director-General conversation on any supported harness:** ADR-13's checks expressed per profile (for Codex: read back `sandbox_policy` and the MCP list, or kill the session). | 600 lines |
 
 **Order.**
-0. **Spikes S1, S3, S4, S8, S9 and S11 run before 6b merges.** Their fallbacks change the 6a and 6b profiles.
+0. **Spikes S1, S3, S4, S8, S9, S11 and S12 run before 6b merges.** Their fallbacks change the 6a and 6b profiles. S11 runs now, so 6k doesn't slip on it.
 1. 6a, 6b and 6c-0, in parallel.
 2. 6c.
 3. 6d1.
 4. 6d2 and 6h, in parallel. 6d2 is behind Labs: first with a Claude lead, then a Codex lead.
 5. 6g.
 6. 6i. This needs 6g and 6h, and it is the first PR that can show "Verified".
-7. 6j. It needs 6i, because verified knowledge needs the evidence.
-8. 6f. It can start any time after 6d2. 6k can start any time after 6i, once the owner answers N17.
-9. Worker picking leaves Labs only once all of these hold: <br>• 6g, 6h, 6i and 6j have landed; <br>• a soak on real crew tasks is clean, with both a Claude lead and a Codex lead reaching **Verified**; <br>• 6f has landed, for customers with no Claude; <br>• a soak on a clean macOS user, with no `claude` and no Vajra skill, installs the engine (N13) and reaches the expected status (Verified only with 6k, or with a Claude seat). <br>Before all of these, worker picking leaves Labs for no one.
+7. **6k, the next priority** after the first Verified (N17).
+8. 6j. It needs 6i, because verified knowledge needs the evidence. It can be built alongside 6k.
+9. 6f. It can start any time after 6d2.
+10. Worker picking leaves Labs only once all of these hold: <br>• 6g, 6h, 6i and 6j have landed (6k is the next priority, but the owner's N17 allows shipping before it, with the label); <br>• a soak on real crew tasks is clean, with a Claude lead and a Codex lead both reaching **Verified** (or the labelled status when the run has no Claude seat); <br>• 6f has landed, for customers with no Claude; <br>• a soak on a clean macOS user, with no `claude` and no Vajra skill, installs the engine (N13) and reaches the expected status ("Verified (evidence ran outside the guard)" before 6k; plain Verified after it). <br>Before all of these, worker picking leaves Labs for no one.
 
 ADR-17 is independent. Its detection and "Install it yourself" ship first; the one-click install comes later.
 
@@ -1614,7 +1663,8 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - **`network` on a `lead` override is refused.**
   - **An override is checked again by `launchable`, and its `network` value appears in `seats.json` and in the receipt.**
   - The verifier and reviewer seats are added when they are missing.
-  - An ask that matches `SEC_RE` requires a `security_reviewer` seat.
+  - An ask that matches `SEC_RE` adds a `security_reviewer` seat when there is none, and prefers a marked one (N15).
+  - `evidence_seat` prefers a guarded Claude seat (N20). The evidence trust is fixed in `seats.json` and in the receipt.
   - The security warning is made per task.
 - **6b**
   - Argv snapshots.
@@ -1669,7 +1719,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - A command with `|| true` gets one redo.
   - A `reject` gives `rejected`.
   - A blocking issue sends feedback to its task.
-  - A flagged run with no marked security seat holds as `needs_user`.
+  - A flagged run with no marked seat runs the security review on an unmarked or added seat, and the card names its harness.
   - A lead that calls `finish_run` early gets `not_ready`.
 - **6h**
   - The fake scripts receive exactly the expected argv for each variant, in the workflow's order.
@@ -1679,7 +1729,13 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - A green bundle plus a record that verifies gives **Verified**.
   - The evidence session reports exit 0 while `check-evidence` says not green: **Not verified**, the tasks stay open, and the knowledge is proposed.
   - A bundle with a null `worktreeTree`, or a worktree a suite left dirty, is not counted.
-  - A run with no Claude seat shows the N17 text, and never says Verified.
+  - A run with only Codex seats ends **`evidence_unguarded`**:
+    - the slug (`-og`) and the goal of the signed campaign carry the marker, and the feature descriptions don't;
+    - no later `pass` or `close` removes it;
+    - the card, the criterion rows, task badges, the board, the report and an export all show the label, never a bare "Verified";
+    - a record edited to drop the marker still shows the label, because the core's trust record wins.
+  - A capped guarded evidence seat offers wait, another seat, or `not_verified`, and ends `not_verified` after `evidence_hold_max_s`.
+  - A run with a Claude seat uses it for the evidence and ends plain `verified`.
   - A green round finalizes as `verified` with no `finish_run`, and a Stop after that changes nothing.
   - A bundle for another head is refused.
   - A record whose signature fails gives `not_verified`.
@@ -1688,6 +1744,10 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
   - A session with an MCP tool call, or a `network: true` seat, saves nothing automatically.
   - Exit 3 writes the proposed twin.
   - A memory write that fails after a Verified run keeps **Verified**, with the note (N14).
+- **6k**
+  - Inside the extra layer, a Codex session can't read the Vajra state dir, but can still run the engine scripts.
+  - A run-only bundle is unsigned until the bridge signs it.
+  - With 6k, a Codex-only run ends plain `verified`.
 - **6f**
   - A Codex Director-General whose read-back shows a writable sandbox or an extra MCP server is killed.
   - The ADR-13 tests are unchanged.
