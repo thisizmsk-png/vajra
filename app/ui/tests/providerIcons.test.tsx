@@ -32,6 +32,11 @@ describe("provider icon files", () => {
       expect(row, f).toMatch(/accepted the usage terms and the clearance risk 2026-11-10/);
     }
   });
+  it("each mark records how much of its canvas it fills, so the tile can size every mark alike", () => {
+    for (const [id, m] of Object.entries(MARKS)) expect(m.fill, id).toBeGreaterThan(0.3);
+    for (const [id, m] of Object.entries(MARKS)) expect(m.fill, id).toBeLessThanOrEqual(1);
+    expect(MARKS.codex.fill).toBeLessThan(MARKS.grok.fill); // the Blossom file keeps a wide margin around the flower
+  });
   it("only providers whose terms are cleared have a mark", () => {
     expect(Object.keys(MARKS).sort()).toEqual(["codex", "grok", "openrouter"]); // Claude Code and DeepSeek keep their monograms
   });
@@ -48,6 +53,7 @@ describe("ProviderIcon", () => {
     const imgs = [...t.querySelectorAll("img")];
     expect(imgs.map((i) => i.getAttribute("src"))).toEqual([MARKS.openrouter.light, MARKS.openrouter.dark]);
     expect(imgs.every((i) => i.getAttribute("alt") === "")).toBe(true);
+    expect(imgs.every((i) => i.style.getPropertyValue("--fill") === String(MARKS.openrouter.fill))).toBe(true);
     expect(t.textContent).toBe("");
   });
   it("an image that fails to load falls back to the monogram, never an empty tile", () => {
