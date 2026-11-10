@@ -1516,6 +1516,29 @@ fn evidence_with_no_recorded_tree_falls_back_to_its_commit() {
     assert_eq!(status_of(&app, &slug), "stale", "no worktreeTree in the file: the commit decides");
 }
 
+/// #134 review: the filter probe and the tree share the call's one deadline. With every config read slow, a probe that
+/// used most of the budget leaves the tree only the rest, so the repo state never runs past the deadline.
+#[test]
+fn a_slow_filter_probe_does_not_give_the_tree_a_fresh_budget() {
+    let t = Tmp::new();
+    let (mut app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let real = String::from_utf8(std::process::Command::new("which").arg("git").output().unwrap().stdout).unwrap().trim().to_string();
+    let p = t.home().join("slow-config-git.sh");
+    fs::write(&p, format!("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = config ] && sleep 2; done\nexec {real} \"$@\"\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    app.bridge.git = p;
+    let budget = Duration::from_secs(3);
+    let start = std::time::Instant::now();
+    let st = app.worktree_state(&repo, None, start + budget);
+    let took = start.elapsed();
+    assert!(took < budget + Duration::from_secs(1), "the repo state ran {took:?} against a {budget:?} deadline");
+    let (head, tree, filtered) = st.expect("HEAD still reads");
+    assert_eq!(head.len(), 40);
+    assert!(!filtered);
+    assert_eq!(tree, None, "the probe left too little time for the tree: not computed, never a guess");
+}
+
 #[test]
 fn the_repo_state_reads_stop_at_the_calls_deadline() {
     let t = Tmp::new();
