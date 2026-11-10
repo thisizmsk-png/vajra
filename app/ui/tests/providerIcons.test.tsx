@@ -74,6 +74,17 @@ describe("ProviderIcon", () => {
     expect(u.querySelector("svg")).not.toBeNull();
     expect(u.getAttribute("data-family")).toBe("unknown");
   });
+  it("a gateway model's mark follows its vendor prefix; a vendor with no mark shows its initials, never the generic icon", () => {
+    const g = tile(<ProviderIcon family="whatever" model="x-ai/grok-4" via="openrouter" />);
+    expect(g.getAttribute("data-family")).toBe("grok");
+    expect([...g.querySelectorAll(":scope > img")].map((i) => i.getAttribute("src"))).toEqual([MARKS.grok.light, MARKS.grok.dark]);
+    expect(g.querySelectorAll(".v-pt__via img")).toHaveLength(2);
+    const q = tile(<ProviderIcon family="qwen" model="qwen/qwen3-coder" via="openrouter" />);
+    expect(q.textContent).toBe("QW");
+    expect(q.getAttribute("data-family")).toBe("qwen");
+    expect(q.querySelector(".v-pt__fb")).toBeNull();
+    expect(tile(<ProviderIcon family="claude" model="claude-sonnet" />).getAttribute("data-family")).toBe("claude"); // no vendor prefix: the family decides
+  });
   it("a gateway model keeps its own tile with the gateway mark as the badge", () => {
     const t = tile(<ProviderIcon family="deepseek" via="openrouter" />);
     expect(t.querySelectorAll(":scope > img")).toHaveLength(2);

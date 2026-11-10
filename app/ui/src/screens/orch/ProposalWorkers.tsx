@@ -79,12 +79,12 @@ export default function ProposalWorkers({ item, onOverrides }: { item: InboxItem
                 <td>
                   {ok ? (
                     <div className="v-pw__pick">
-                      <ProviderIcon family={family} via={a && a.provider === "openrouter" ? "openrouter" : undefined} />
+                      <ProviderIcon family={family} model={pick.model} via={a && a.provider === "openrouter" ? "openrouter" : undefined} />
                       <PickRow label={`${S.agents.role[w.role] ?? w.role}: ${w.task}`} hideLabel pick={pick} agents={ok.allowed} accounts={ok.list}
                         onChange={(p) => p && setPicks((x) => ({ ...x, [w.slot]: p }))} />
                     </div>
                   ) : (
-                    <div className="v-pw__pick"><ProviderIcon family={family} /><span data-model-line>{a ? modelLine(a, pick.model, S.accounts.defaultModel) : pick.account}</span>{pick.effort && <span className="v-num">{pick.effort}</span>}</div>
+                    <div className="v-pw__pick"><ProviderIcon family={family} model={pick.model} /><span data-model-line>{a ? modelLine(a, pick.model, S.accounts.defaultModel) : pick.account}</span>{pick.effort && <span className="v-num">{pick.effort}</span>}</div>
                   )}
                   <p className="v-pw__bill">{billingLine(a)}</p>
                   {a?.harness === "codex" && <p className="v-pw__lim">{P.limits}</p>}

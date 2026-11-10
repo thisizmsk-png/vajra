@@ -8,7 +8,7 @@ import { ProviderIcon } from "./ProviderIcon";
 import "./providers.css";
 
 const W = S.workerProvider;
-export const iconOf = (p: WorkerProvider) => <ProviderIcon family={p.family} via={p.family !== p.account ? p.account : undefined} />;
+export const iconOf = (p: WorkerProvider) => <ProviderIcon family={p.family} model={p.model} via={p.family !== p.account ? p.account : undefined} />;
 
 /** `compact`: one line (icon, model and provider) for a list row; the billing chip and the notes follow when there is room. `live`: the error is announced. */
 export function ProviderLine({ p, compact, live }: { p: WorkerProvider; compact?: boolean; live?: boolean }) {

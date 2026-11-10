@@ -81,7 +81,7 @@ export function ProjectAgents({ projectId, projectName, accounts }: { projectId:
               <li key={key}>
                 <label>
                   <input type="checkbox" checked={on} disabled={locked} aria-describedby={locked ? `${heading}-${key}` : undefined} onChange={() => toggle({ account: e.account.id, model: e.model }, e.account.models.map((m) => m.id))} />
-                  <ProviderIcon family={e.account.models.find((m) => m.id === e.model)?.family ?? e.account.provider} via={e.model && e.account.provider === "openrouter" ? "openrouter" : undefined} />
+                  <ProviderIcon family={e.account.models.find((m) => m.id === e.model)?.family ?? e.account.provider} model={e.model} via={e.model && e.account.provider === "openrouter" ? "openrouter" : undefined} />
                   <span data-model-line>{modelLine(e.account, e.model, WORD)}</span>
                 </label>
                 {locked && <span id={`${heading}-${key}`} className="v-text v-text--body-sm v-text--muted">{used ? C.inUse : C.coveredByDefault}</span>}
