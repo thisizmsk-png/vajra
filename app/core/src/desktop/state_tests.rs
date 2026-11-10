@@ -584,3 +584,22 @@ fn an_answer_to_a_workflow_namespaced_task_reaches_its_worker() {
     let other = app.act_answer_question(&env("ans-5001-bbbb", None), "task:c2.20261105-1810.t1", "x");
     assert_eq!(other["receipt"]["reason"], "not_found");
 }
+
+// Batch-3 repair: a project_state read whose quiet fields did not move sends no `changed` event (an empty one woke every
+// subscriber on every read), and no `changed` payload ever names zero projects.
+#[test]
+fn a_steady_project_state_read_emits_nothing() {
+    let t = Tmp::new();
+    let app = t.app();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let s2 = seen.clone();
+    app.set_change_sink(Box::new(move |p| s2.lock().unwrap().push(p)));
+    let rev = app.project_state("proj-steady", None).unwrap()["rev"].as_u64().unwrap();
+    let after_first = seen.lock().unwrap().len();
+    for _ in 0..3 {
+        assert_eq!(app.project_state("proj-steady", Some(rev)).unwrap()["unchanged"], true);
+    }
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.len(), after_first, "{got:?}");
+    assert!(got.iter().all(|p| !p["projects"].as_array().unwrap().is_empty()), "{got:?}");
+}
