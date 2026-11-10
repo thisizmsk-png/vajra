@@ -1275,7 +1275,9 @@ impl App {
                         let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
                         let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
                             .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
-                        if stale { "stale" } else { "pass" }
+                        // Cache-only (the board): live evidence with no head cannot be held against the repo, so it is not a
+                        // pass there (#107 review sweep).
+                        if stale { "stale" } else if !checks && want.is_none() && repo_of.contains_key(&i) { pending += 1; "checking" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }

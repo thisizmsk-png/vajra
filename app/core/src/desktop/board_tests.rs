@@ -271,3 +271,37 @@ fn a_cached_failed_git_read_keeps_a_live_pass_out_of_done() {
     let c = card(&app.board(&pid), "t1").clone();
     assert_eq!((c["lane"].as_str(), c["criteria"]["pass"].as_u64()), (Some("review"), Some(0)), "{c}");
 }
+
+/// #107 review sweep: a tasks.json that cannot be read now answers with its last good snapshot; the campaign says
+/// `stale` and no card reaches Done from it.
+#[test]
+fn an_unreadable_task_file_never_shows_a_card_as_done() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "done", &["ac-1"], "green")]);
+    let camp = t.home().join(".claude/vajra/campaigns").join(&slug);
+    fs::write(camp.join("evidence/green.json"), b"{}").unwrap();
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    app.evidence_list(&slug).unwrap();
+    let b = app.board(&pid);
+    assert_eq!((card(&b, "t1")["lane"].as_str(), b["campaigns"][0]["stale"].as_bool()), (Some("done"), Some(false)), "{b}");
+    fs::write(camp.join("tasks.json"), b"{ not json").unwrap();
+    let b = app.board(&pid);
+    assert_eq!(b["campaigns"][0]["stale"], true, "{b}");
+    assert_eq!(card(&b, "t1")["lane"], "review", "a stale snapshot reached Done: {b}");
+}
+
+/// #107 review sweep: on the board's cache-only path, live evidence with no head cannot be held against the repo, so a
+/// green verdict for it reads `checking`, not a pass.
+#[test]
+fn a_live_verdict_with_no_head_is_not_a_pass_on_the_board() {
+    let t = Tmp::new();
+    let (app, slug, _repo, _head) = live_evidence_repo(&t, true, false);
+    let path = t.home().join(".claude/vajra/campaigns").join(&slug).join("tasks.json");
+    let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["tasks"][0]["evidence"].as_object_mut().unwrap().remove("head");
+    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+    let full = app.evidence_list(&slug).unwrap();
+    assert_eq!(full["rows"][0]["status"], "pass", "a full check: the verdict stands (its rule is unchanged): {full}");
+    assert_eq!(app.evidence_list_with(&slug, false).unwrap()["rows"][0]["status"], "checking");
+}
