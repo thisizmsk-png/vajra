@@ -1320,3 +1320,27 @@ fn a_bare_task_id_follows_a_campaign_whose_runs_share_a_project() {
     t.campaign("one", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "bare"}]));
     assert_eq!(item(&app.inbox().unwrap(), "task:one.t1")["project_id"], p1);
 }
+
+/// #107 review sweep: a decision log that cannot be read never hides a plan from the board: the plan shows as a
+/// needs-you review card (only a decision actually read removes it).
+#[test]
+fn an_unreadable_decision_log_shows_the_plan_instead_of_hiding_it() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    app.inbox().unwrap();
+    t.campaign_script(0);
+    app.reject_plan(PLAN, "not now").unwrap();
+    let has_plan = |b: &Value| b["campaigns"][0]["cards"].as_array().unwrap().iter().any(|c| c["key"] == format!("inbox:{PLAN}") && c["needs_you"] == true);
+    assert!(!has_plan(&app.board(&pid)), "a decided plan is no card");
+    let ledger = t.0.join("data/control/ledger.jsonl");
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o000)).unwrap();
+    let b = app.board(&pid);
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(has_plan(&b), "an unreadable decision log hid the plan: {b}");
+}
