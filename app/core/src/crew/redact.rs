@@ -119,7 +119,8 @@ fn redact_urls(s: &str) -> String {
 /// whole value; any other loses one token, after an auth scheme word if there is one.
 fn redact_field(s: &str, name: &str) -> String {
     let lc = s.to_ascii_lowercase();
-    let quote = |c: char| c == '"' || c == '\'';
+    // A backslash counts as a quote: in an escaped JSON string the name and value are wrapped in `\"`.
+    let quote = |c: char| matches!(c, '"' | '\'' | '\\');
     let whole = LINE_FIELDS.contains(&name);
     let mut out = String::with_capacity(s.len());
     let mut at = 0;
@@ -385,6 +386,18 @@ mod tests {
         assert!(!out.contains("dXNlcj") && out.contains(r#""code":401"#), "{out}");
         let out = redact_provider_text("sent Bearer FAKEtoken123");
         assert!(!out.contains("FAKEtoken123"), "{out}");
+    }
+
+    #[test]
+    fn provider_text_loses_fields_inside_escaped_json_strings() {
+        let single = format!(r#"{{"type":"error","message":"unexpected status 401: {{\"user_id\":\"{USER}\",\"code\":401}}"}}"#);
+        let double = single.replace('\\', "\\\\");
+        for raw in [single, double] {
+            let out = redact_provider_text(&raw);
+            assert!(!out.contains(USER), "{raw} -> {out}");
+        }
+        let out = redact_provider_text(r#"{"m":"{\"authorization\":\"Basic dXNlcjpwYXNzd29yZA==\",\"code\":401}"}"#);
+        assert!(!out.contains("dXNlcj"), "{out}");
     }
 
     #[test]

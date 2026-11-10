@@ -190,10 +190,19 @@ pub fn classify(text: &str) -> Classified {
     Classified { kind, http_status, retry_after_s }
 }
 
+/// A line that is a JSON event with a text message (`{"type":"error","message":"..."}`, `turn.failed`'s `error.message`)
+/// becomes that message, un-escaped, so the classifier and the redactor read the text and not its JSON encoding. Any
+/// other line is returned as it is. Redaction still runs on the result (and handles escaped text as well).
+fn decode_event_line(line: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return line.to_string() };
+    let msg = v.get("message").or_else(|| v.pointer("/error/message")).and_then(Value::as_str);
+    msg.map_or_else(|| line.to_string(), str::to_string)
+}
+
 /// The event for a process that ended badly: its own typed error if its last lines held one, else `unexplained_exit`
 /// with the exit code and the (redacted) last lines.
 pub fn classify_exit(code: Option<u32>, signal: Option<&str>, tail: &[String]) -> (Classified, String) {
-    let joined = tail.join("\n");
+    let joined = tail.iter().map(|l| decode_event_line(l)).collect::<Vec<_>>().join("\n");
     let typed = classify(&joined);
     if typed.kind != Kind::UnexplainedExit {
         return (typed, joined);

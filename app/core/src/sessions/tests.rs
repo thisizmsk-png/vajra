@@ -489,3 +489,24 @@ fn a_clean_exit_an_untagged_worker_and_our_own_kill_report_nothing() {
     std::thread::sleep(Duration::from_millis(300));
     assert!(lock(&got).is_empty(), "{:?}", lock(&got));
 }
+
+#[test]
+fn a_serialized_codex_error_event_is_decoded_classified_and_redacted_on_exit() {
+    let (sup, _bus, dir) = setup("codex-event");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    let event = serde_json::json!({
+        "type": "turn.failed",
+        "error": {"message": "unexpected status 401 Unauthorized: {\"error\":{\"code\":401,\"user_id\":\"user_SENTINEL0000TESTONLY\"}} cf-ray: 0000deadbeef0000-XXX"}
+    });
+    let script = dir.join("emit.sh");
+    std::fs::write(&script, format!("#!/bin/sh\ncat <<'EOF'\n{event}\nEOF\nexit 1\n")).unwrap();
+    sup.spawn_tagged("s-codex", spec(&["sh", script.to_str().unwrap()], &dir), Some(tag())).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].kind, ev[0].http_status), (errors::Kind::Auth, Some(401)));
+    let wire = ev[0].to_json().to_string();
+    assert!(!wire.contains("SENTINEL0000") && !wire.contains("0000deadbeef"), "{wire}");
+    // The raw escaped line (no decoding) is redacted too.
+    let raw = event.to_string();
+    assert!(!crate::crew::redact::redact_provider_text(&raw).contains("SENTINEL0000"));
+}
