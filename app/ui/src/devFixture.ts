@@ -22,6 +22,7 @@ const crew = n("lead", "lead", "Lead", "in_progress", [
     n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress")]),
     n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question")]),
     n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready")]),
+    n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done")]),
   ]),
 ]);
 
@@ -186,6 +187,14 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   ] }),
   active_runs: () => ({ count: 1, runs: [{ run_id: RUN, campaign: SLUG }] }),
   crew: () => crew,
+  // Closing finished workers: the Architect has work only its worktree holds; the Docs writer was closed on its own.
+  closeout_status: () => ({ workers: [
+    { worker: "architect", state: "unsaved_work", changed_files: 3, unpushed_commits: 2, no_upstream: false },
+    { worker: "docs", state: "closed" },
+    { worker: "verifier", state: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 },
+    { worker: "backend", state: "working" },
+  ] }),
+  act_close_finished: () => ({ receipt: { action_id: "a_fixture3", state: "done" }, result: { closed: [], skipped: [{ worker: "architect", label: "t1", reason: "unsaved_work", changed_files: 3, unpushed_commits: 2, no_upstream: false, busy_terminals: 0 }, { worker: "verifier", label: "t5", reason: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] } }),
   worktree_info: (a) => ({ worker: String(a?.worker), worktree: `.claude/worktrees/${String(a?.worker)}`, branch: `vajra/${RUN}/t2`, base: "4e1c9a2" }),
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),
   tail: (a) => {

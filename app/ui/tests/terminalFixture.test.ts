@@ -9,7 +9,7 @@ describe("the dev fixture shell", () => {
     setTransport(terminalFixture(fakeIpc().transport));
     const got: string[] = [];
     let exit: number | null | undefined;
-    const info = await api.termOpen("/work/app", 24, 80, (m) => ("data" in m ? got.push(new TextDecoder().decode(m.data)) : (exit = m.exit)));
+    const info = await api.termOpen("/work/app", 24, 80, (m) => ("data" in m ? got.push(new TextDecoder().decode(m.data)) : "exit" in m ? (exit = m.exit) : 0));
     expect(info).toMatchObject({ cwd: "/work/app", alive: true });
     await new Promise((r) => setTimeout(r, 5));
     await api.termWrite(info.id, "hi\r");

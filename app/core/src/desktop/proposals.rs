@@ -7,16 +7,23 @@
 //! base checks apply exactly as for a run started from the form. **Dismiss** closes the proposal; nothing runs.
 //!
 //! One decision per proposal, behind the same per-item lock as plan decisions. A failed start (held by a cap, a bad
-//! base) leaves the proposal open, so it can be started later.
+//! base, an archived project) leaves the proposal open, so it can be started later.
+//!
+//! FG-02c: a proposal names a store project (`p_`), and starts in that project's recorded root. One from before the
+//! store (a `k_` stand-in) is listed **dismiss-only** (under its carried-over project if there is one) and can never be
+//! started: its hash binds an id the store does not know.
 
 use serde_json::{Value, json};
 
 use super::{App, Res, caps, ctl, fail, invalid, lock};
 use crate::control::service::{Decision, DecisionState, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
+use crate::ids;
 use crate::sessions::argv::RunInput;
 
 /// What the inbox shows next to a proposal: who wrote it.
 pub(super) const FROM_DIRECTOR_GENERAL: &str = "proposed by the Director-General";
+/// Next to a proposal from before projects: it can only be dismissed.
+pub(super) const PRE_STORE: &str = "from before projects: dismiss only";
 
 impl App {
     /// The open proposal `id`, or why it cannot be decided now.
@@ -38,6 +45,18 @@ impl App {
         ctl(lock(&self.control).record_proposal_decision(&r))
     }
 
+    /// The project an open proposal is listed under in the inbox (the same rule as the listing): its own, or for one from
+    /// before projects the project its conversation was carried over to, else Unsorted. The receipt's `project_id` must
+    /// name it, and a `k_` stand-in id is never one the window can send.
+    pub(super) fn proposal_project(&self, id: &str) -> Result<String, Value> {
+        let p = self.open_proposal(id)?;
+        Ok(if ids::valid_standin_ref(&p.project) {
+            self.standin_mapped_to(&p.project).unwrap_or_else(|| super::inbox::UNSORTED_PROJECT.to_string())
+        } else {
+            p.project
+        })
+    }
+
     /// Start proposal `id` as the human saw it (`proposal_sha256` is the hash the inbox returned).
     pub fn start_proposal(&self, id: &str, proposal_sha256: &str) -> Res {
         self.start_proposal_with(id, proposal_sha256, |input, cwd| self.start_run(input, cwd))
@@ -48,10 +67,15 @@ impl App {
         let _one = self.begin_decision(id)?;
         let p = self.open_proposal(id)?;
         let changed = || json!({"error": "proposal_changed", "detail": "this proposal is not what was shown; review it again"});
-        if proposal_sha(&p.project, &p.ask, &p.base, p.rounds) != p.proposal_sha256 || p.proposal_sha256 != proposal_sha256 {
+        if proposal_sha(&p.project, &p.ask, &p.base, p.rounds) != p.proposal_sha256 || p.proposal_sha256 != proposal_sha256 || !crate::projects::contract::valid_project_id(&p.project) {
             return Err(changed());
         }
-        let root = self.orchestrator_root(&p.project).filter(|r| r.is_dir()).ok_or_else(|| fail("not_found", "the project's folder is gone"))?;
+        // Before anything is written: an archived or missing project starts nothing and the proposal stays open.
+        let project = self.active_project(&p.project).map_err(|e| e.to_json())?;
+        let root = std::path::PathBuf::from(&project.root);
+        if !root.is_dir() {
+            return Err(fail("not_found", "the project's folder is gone"));
+        }
         let root = root.to_str().ok_or_else(|| fail("not_found", "the project's folder is not a plain path"))?.to_string();
         // Written before anything starts: a crash after this line leaves the proposal decided, never started twice.
         let action = self.proposal_line(Decision::Approve, None, &p, DecisionState::Requested, None, None)?;
@@ -93,21 +117,37 @@ impl App {
             .map(|p| {
                 let first = crate::control::time::parse_iso(&p.ts).unwrap_or(now);
                 // `project` is the project's full recorded root, the key the UI matches projects on (#90 review);
-                // `project_name` is only the short label. Neither is a fresh read of the repo.
-                let root = self.orchestrator_root(&p.project);
-                let name = root.as_ref().and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned()));
-                // `project_id` is the project store's id for the folder (what the UI and `inbox_new` key on), `p_unsorted`
-                // when no project owns it; the Director-General's `k_` stand-in travels in `orchestrator_id` (#83 review).
-                let store_id = root.as_ref().and_then(|r| self.projects.find(r).ok().flatten()).map_or_else(|| super::inbox::UNSORTED_PROJECT.to_string(), |p| p.id);
-                let root = root.map(|r| r.to_string_lossy().into_owned());
+                // `project_name` is its name in the store. Neither is a fresh read of the repo. A stand-in proposal is
+                // shown under the project its conversation went to, if any (Unsorted if none), and can only be dismissed.
+                // `project_id` is always a store id (what the UI and `inbox_new` key on); the Director-General's own id
+                // travels in `orchestrator_id` (#83 review).
+                let standin = ids::valid_standin_ref(&p.project);
+                let project_id = if standin {
+                    self.standin_mapped_to(&p.project).unwrap_or_else(|| super::inbox::UNSORTED_PROJECT.to_string())
+                } else {
+                    p.project.clone()
+                };
+                let (root, name) = match self.projects.get(&project_id) {
+                    Ok(sp) => (Some(sp.root), Some(sp.name)),
+                    Err(_) => {
+                        let r = self.orchestrator_root(&p.project);
+                        (r.as_ref().map(|r| r.to_string_lossy().into_owned()), r.and_then(|r| r.file_name().map(|n| n.to_string_lossy().into_owned())))
+                    }
+                };
+                let actions = if standin { json!(["dismiss"]) } else { json!(["start", "dismiss"]) };
                 let created = crate::control::time::iso_secs(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first.max(0) as u64));
                 let v = json!({
                     "id": p.item, "kind": "run_proposal", "origin": "app", "source": FROM_DIRECTOR_GENERAL,
                     "created": created, "age_s": (now - first).max(0),
                     "title": "Start a run?", "body": p.ask, "ask": p.ask, "base": p.base, "rounds": p.rounds,
-                    "project_id": store_id, "orchestrator_id": p.project, "project": root, "project_name": name, "generation": p.generation,
-                    "proposal_sha256": p.proposal_sha256, "actions": ["start", "dismiss"],
+                    "project_id": project_id, "orchestrator_id": p.project, "project": root, "project_name": name, "generation": p.generation,
+                    "proposal_sha256": p.proposal_sha256, "actions": actions,
                 });
+                let mut v = v;
+                if standin {
+                    v["pre_store"] = json!(true);
+                    v["note"] = json!(PRE_STORE);
+                }
                 (first, p.item, v)
             })
             .collect()

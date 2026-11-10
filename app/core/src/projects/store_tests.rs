@@ -553,3 +553,50 @@ fn a_log_longer_than_the_read_window_says_it_was_cut() {
     assert_eq!(log.skipped, 0, "the cut first line is not counted as damage");
     assert!(log.sessions.iter().all(|x| x.id == busy), "the old session is outside the window");
 }
+
+/// FG-02c: a run's folder finds its project the way the owner's "Add" did: the folder itself, any folder inside it, the
+/// same folder through a symlink or in other letter case, and a linked worktree of its repository. The deepest project
+/// wins (the inner of two nested ones); an archived project is still found (the caller refuses it); a folder no project
+/// holds finds nothing.
+#[test]
+fn find_by_path_resolves_a_run_folder_to_its_project() {
+    let t = Tmp::new("find-run");
+    let s = t.store();
+    let main = t.repo("src/vajra");
+    let p = s.add(&main, false).unwrap().project().clone();
+    fs::create_dir_all(main.join("app/core")).unwrap();
+    let found = |d: &Path| s.find_by_path(d).unwrap().map(|p| p.id);
+    assert_eq!(found(&main), Some(p.id.clone()));
+    assert_eq!(found(&main.join("app/core")), Some(p.id.clone()), "a folder inside the project");
+    let link = t.home().join("link");
+    symlink(&main, &link).unwrap();
+    assert_eq!(found(&link.join("app")), Some(p.id.clone()), "through a symlink");
+    let upper = PathBuf::from(main.to_string_lossy().to_uppercase());
+    if upper.is_dir() {
+        assert_eq!(found(&upper), Some(p.id.clone()), "in other letter case on a case-insensitive disk");
+    }
+    // A linked worktree (with git's own back-link) is its repository's project.
+    let wt_git = main.join(".git/worktrees/w1");
+    fs::create_dir_all(&wt_git).unwrap();
+    fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    let wt = t.home().join("work/w1");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    fs::write(wt_git.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+    assert_eq!(found(&wt.join("src")), Some(p.id.clone()), "a linked worktree");
+    // A `.git` file pointing at the repo without the back-link is only a claim.
+    let fake = t.home().join("work/fake");
+    fs::create_dir_all(&fake).unwrap();
+    fs::write(fake.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    assert_eq!(found(&fake), None, "a forged .git file finds nothing");
+    // Nested: the inner project wins for its own folders, the outer one for the rest.
+    let inner = t.repo("src/vajra/vendor/lib");
+    let q = s.add(&inner, true).unwrap().project().clone();
+    assert_eq!(found(&inner.join(".git")), Some(q.id.clone()));
+    assert_eq!(found(&main.join("app")), Some(p.id.clone()));
+    // Archived: still found, so the caller can say "archived" instead of "not a project".
+    s.archive(&q.id, None).unwrap();
+    assert_eq!(s.find_by_path(&inner).unwrap().map(|p| p.archived.is_some()), Some(true));
+    assert_eq!(found(&t.home().join("work")), None, "a folder no project holds");
+    assert_eq!(found(&t.home().join("does-not-exist")), None);
+}

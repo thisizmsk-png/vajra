@@ -9,6 +9,9 @@ Source: `artifacts/vajra-18/spec-open-p0s.md` S9.1 to S9.4.
 
 - The CLI owns the login. Vajra never reads, stores, forwards or refreshes a token, keychain item or config secret, and has
   no OAuth flow. Billing is always the CLI's own login (`billing.source` is the literal `"login"`).
+- **One narrow exception (D3): a pasted API key.** Vajra may write an API key the user pastes into the macOS Keychain, once,
+  and never reads it back. It's API keys only, never a CLI's OAuth token or login (H1). The harness reads the key at start
+  through its own key command; the core can only tell whether one is saved. See "Stored API keys" below.
 - `ENV_ALLOW` (`sessions::ENV_ALLOW`) is unchanged. `billing.key_in_app_env` is an environment variable NAME (for example
   `OPENAI_API_KEY`) that the app saw and did not pass on. It is never a value. A value-shaped string is refused.
 - No silent switch. If the chosen provider cannot start, Vajra says so and stops. It never falls back to another provider,
@@ -136,6 +139,32 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
 - **One account per provider (D6).** There is no rotation field and none will be added (H7). No field is named `key`,
   `token` or `secret`.
 
+### Stored API keys (D3)
+
+Multi-provider, PR 2. `app/core/src/providers/keychain.rs`. Tauri commands, each with `account` (and `key` for the two
+writes):
+
+| Command | Does | Answer |
+|---|---|---|
+| `provider_key_saved` | Checks whether an item exists (no password data is asked for) | `{account, saved}` |
+| `provider_key_save` | Stores a key the first time; refused with `already_saved` if one is there | `{account, saved: true}` |
+| `provider_key_replace` | Deletes the item, then stores the new key | `{account, saved: true}` |
+| `provider_key_remove` | Deletes the item; nothing there is not an error | `{account, saved: false}` |
+
+- **The item.** A generic password, service `vajra.provider.<account>`, account `<account>`, access list
+  `-T /usr/bin/security` only (never "any app"), so the harness's key command can read it without a prompt.
+- **The write.** `/usr/bin/security -i` with a cleared environment; the `add-generic-password` line, key included, goes to its
+  **stdin**, never argv. Success is decided by a check afterwards, not by the `-i` exit code.
+- **No read-back.** There is no command, method or trait function that returns a stored key. Every answer is the
+  `KeyState` `{account, saved}` and nothing else; errors are fixed codes with fixed words that never echo input or
+  `security`'s output: `invalid_args`, `already_saved`, `keychain_unavailable` (not run, 30 s timeout, unexpected answer),
+  `keychain_write_failed`.
+- **Accounts.** Only the fixed list `KEY_ACCOUNTS` (today `openrouter`) takes a key; any other is `invalid_args`.
+- **Key shape.** 16 to 256 characters of letters, digits and `. _ ~ + / = -`, not starting with `-`. Anything else
+  (whitespace, quotes, backslash, `#`) is refused before any process runs.
+- **In memory.** The core wraps the key at once (no `Clone`, no `Display`, a redacting `Debug`) and zeroes its copies after
+  the write. Copies the IPC layer makes are out of its reach.
+
 ### `preferences.agents` (replaces the `agent` preference)
 
 ```json
@@ -158,6 +187,38 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
   override is held to its own ceiling.
 - `model` is an opaque id (letters, digits and `-._/:`, at most 80); `effort` is a lowercase level word (at most 16) or `null`
   for the CLI's default. The core checks that an account exists, is installed and has its key when a worker starts, not here.
+
+## `provider_usage` (`vajra.provider_usage/1`)
+
+Multi-provider, PR 7 (usage meters, H5). Tauri command `provider_usage(page_open)`; the same answers ride in `project_state.usage`
+as a cache read. One entry per account:
+
+```json
+{"schema": "vajra.provider_usage/1", "usage": [
+  {"account": "claude", "read_at": null, "source": "none", "windows": [], "amounts": null},
+  {"account": "openrouter", "read_at": "2026-11-09T12:00:00Z", "source": "gateway_key",
+   "windows": [{"kind": "credit", "used_pct": 84, "resets_at": null, "warn": true}],
+   "amounts": {"usage": 8.4, "usage_daily": 1.25, "limit": 10.0, "limit_remaining": 1.6}}]}
+```
+
+- **Nothing is estimated.** A window exists only if the account's own source reported it. `windows: []` with `source: "none"`
+  is "Not reported". There is no price table, and Claude Code's `total_cost_usd` is ignored. Today the CLI logins report no
+  windows, so they read "Not reported"; a CLI that reports windows later fills `kind` (`5h`, `daily`, `weekly`), `used_pct` and
+  `resets_at` through the same shape.
+- **Warning.** `warn` is true at 80% used or more. The status bar chip shows the most used warned window, with its reset time
+  only if the source gave one.
+- **OpenRouter** (`source: "gateway_key"`): `GET /api/v1/key`. Only `usage`, `usage_daily`, `limit` and `limit_remaining` are
+  kept (`amounts`, in the key's own currency). The answer also carries the key's label; it is never deserialized, so it cannot
+  reach any reply. `usage` is all-time spend, while `limit` can reset daily, weekly or monthly and `limit_remaining` is what is
+  left of the current cap. So the `credit` window is `(limit - limit_remaining) / limit` and exists only when both are reported
+  and `limit` is above zero; otherwise there is no percentage (the figures in `amounts` are still shown as reported).
+- **When it calls out.** Only while Settings > Providers is open (`page_open`) or a run is active, and at most once a minute per
+  account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. When a read changes what is shown (the figures, not `read_at`), the project revisions advance and a `changed` event names them, so the next `project_state` read is a full answer carrying the new `usage`; a read that changes nothing moves nothing. A failed read keeps the
+  previous answer (its `read_at` shows its age) and still counts as the minute's attempt.
+- **The key never enters the core.** The call is curl with `--proto =https`, a cleared environment and the header read from
+  stdin (`-H @-`). A key command (the Keychain read, from the Keychain store) is the producer of that stdin: it prints the key
+  straight into curl's pipe, so the key is never in argv, the environment, a file, a log or this process's memory. There is no
+  getter for a key. Until the Keychain store lands there is no key command, so no account is metered and no call is made.
 
 ## Versioning
 

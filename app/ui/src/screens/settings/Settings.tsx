@@ -71,7 +71,7 @@ export function Settings() {
           <div className="v-settings__col">
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
-            {prefs.connected && ["providers", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
+            {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
             {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
             {section === "providers" && (
@@ -106,7 +106,7 @@ export function Settings() {
                 </ul>
               </section>
             )}
-            {(section === "general" || section === "notifications" || section === "mobile" || section === "diagnostics") && (
+            {(section === "notifications" || section === "mobile" || section === "diagnostics") && (
               <p className="v-settings__later">{S.settings.later}</p>
             )}
           </div>
