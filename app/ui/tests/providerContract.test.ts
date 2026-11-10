@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { launchMismatches, parseProjectProvider, parseProviderList, parseProviderTag, parseUsage } from "../src/providerContract";
+import { launchMismatches, parseProjectProvider, parseProviderList, parseUsage } from "../src/providerContract";
 
 // The same fixtures the core parses (app/core/src/providers/contract_tests.rs).
 const fx = (name: string) => readFileSync(resolve(__dirname, "../../core/tests/contract", name), "utf8");
@@ -98,12 +98,6 @@ describe("usage answers (vajra.provider_usage/1)", () => {
 describe("launch receipt", () => {
   const req = { account: "openrouter", harness: "codex", model: "vendor/model-a", effort: "high" };
   const eff = { ...req, sandbox: "workspace-write", billing: "gateway", read_from: "harness_session_file" };
-  it("reads a provider tag, and anything else as not reported", () => {
-    expect(parseProviderTag({ account: "openrouter", family: "codex", model: "vendor/model-a", billing: "gateway" })?.model).toBe("vendor/model-a");
-    for (const bad of [null, "x", {}, { account: "a", family: "f", model: "unknown", billing: "b" }, { account: "a", family: "f", model: "", billing: "b" }, { account: "a", family: "f", model: "m".repeat(101), billing: "b" }]) {
-      expect(parseProviderTag(bad)).toBeNull();
-    }
-  });
   it("names the fields that differ and never counts an unreported value", () => {
     expect(launchMismatches({ requested: req, effective: eff })).toEqual([]);
     expect(launchMismatches({ requested: req, effective: { ...eff, model: "vendor/model-b", effort: "low" } })).toEqual(["model", "effort"]);

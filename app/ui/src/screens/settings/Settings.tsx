@@ -13,6 +13,9 @@ import { PreflightList } from "../PreflightList";
 import { PreferenceForm } from "./PreferenceForm";
 import type { AgentChoice } from "./PreferenceForm";
 import { ProviderCard, useProviders } from "../ProviderControls";
+import { AccountsPanel } from "../Accounts";
+import { useAccounts } from "../../providerData";
+import { ProjectAgents } from "../ProjectAgents";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
@@ -52,8 +55,9 @@ export function Settings() {
   const section: Section = isSection(route.params.section) ? route.params.section : "providers";
   const meta = S.settings.sections[section];
   const providers = useProviders(section === "providers");
+  const accounts = useAccounts(section === "providers");
   const checks = useChecks(section === "providers", providers.reload);
-  const recheck = () => { checks.run(); providers.reload(); };
+  const recheck = () => { checks.run(); providers.reload(); accounts.reload(); };
   return (
     <div className="v-screen v-settings">
       <div className="v-settings__grid">
@@ -69,6 +73,8 @@ export function Settings() {
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
+            {section === "providers" && <AccountsPanel accounts={accounts} />}
+            {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-agents" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">

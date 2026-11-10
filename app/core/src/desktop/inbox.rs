@@ -35,12 +35,12 @@ const SEEN_FILE: &str = "inbox-seen.json";
 const SINCE: &str = "first seen by the app";
 
 /// Plain text for the UI: controls and invisible characters dropped, one cap.
-fn clean(text: &str, cap: usize) -> String {
+pub(super) fn clean(text: &str, cap: usize) -> String {
     sanitise(text, &Redactor::default()).chars().take(cap).collect()
 }
 
 /// A graph id the engine could have written: letters, digits, `.`, `_`, `-`, at most 64.
-fn valid_task_id(id: &str) -> bool {
+pub(super) fn valid_task_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
@@ -136,7 +136,7 @@ impl App {
     }
 
     /// The `workflows/` directory of a run's session (the run is one `plan_origins` returned).
-    fn workflows_dir(&self, e: &runindex::Entry) -> PathBuf {
+    pub(super) fn workflows_dir(&self, e: &runindex::Entry) -> PathBuf {
         self.claude.join("projects").join(project_slug(&e.cwd)).join(&e.session_id).join("workflows")
     }
 

@@ -360,14 +360,6 @@ export function usageWarning(list: UsageList | null | undefined): { account: str
 
 export const UNKNOWN = "unknown";
 
-/** `{account, family, model, billing}` on a crew node or a `project_state` worker. `null` until the model is reported. */
-export interface ProviderTag {
-  account: string;
-  family: string;
-  model: string;
-  billing: string;
-}
-
 export interface LaunchRequested {
   account: string;
   harness: string;
@@ -388,13 +380,6 @@ export interface LaunchReceipt {
   source: string;
   requested: LaunchRequested;
   effective: LaunchEffective;
-}
-
-/** A provider tag, or `null` ("Not reported") when the value is missing or has another shape. */
-export function parseProviderTag(v: unknown): ProviderTag | null {
-  if (!isObj(v) || !str(v.account) || !str(v.family) || !str(v.model) || !str(v.billing)) return null;
-  if (v.model === "" || v.model === UNKNOWN || v.model.length > 100) return null;
-  return { account: v.account, family: v.family, model: v.model, billing: v.billing };
 }
 
 /** The fields that differ between what was asked for and what ran; a value reported as "unknown" never counts. */

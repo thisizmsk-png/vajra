@@ -4,7 +4,8 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ProviderList, ProviderTag, UsageList } from "./providerContract";
+import type { ProviderList, UsageList } from "./providerContract";
+import type { ProposalOverride } from "./accountsContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -84,7 +85,7 @@ export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_tex
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; provider?: ProviderTag | null; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
@@ -119,7 +120,7 @@ export type EvidenceRow = {
 /** One recorded verification command with its exit code; `output_tail` is the end of its output for a failed one. Plain text. */
 export type ProofCommand = { cmd: string | null; exit_code: number | null; passed: boolean; output_tail: string | null };
 export type TimelinePhase = { name: string; state: "done" | "current" | "pending"; round?: number | null; max_rounds?: number | null };
-export type GraphTask = { id: string; local: string; title: string | null; owner: string | null; status: string; deps: string[]; wave: number };
+export type GraphTask = { id: string; local: string; title: string | null; owner: string | null; status: string; deps: string[]; wave: number; provider?: unknown };
 export type RunOverview = {
   slug: string; run_id: string; stale: boolean;
   timeline: { phases: TimelinePhase[]; current: string; status: "active" | "done" | "need_input" | "rejected" };
@@ -211,6 +212,8 @@ export type ProjectState =
       generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
+      /** ADR-15 4.2 board cards, computed by the core from cached verdicts (null for a non-store id). */
+      board: CoreBoard | null;
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
       inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
       /** This project's pending run proposals, newest first, picked before any inbox cut (at most 50; `more` were left out). */
@@ -218,6 +221,14 @@ export type ProjectState =
       /** The last usage answers (`vajra.provider_usage/1`), a cache read on the core side. Parse with `parseUsage`. */
       usage?: UsageList;
     };
+/** One board card as the core serves it (contract (b) of the board PR). Lanes: (c); Done only when verified. */
+export type CoreCard = {
+  key: string; kind: "task" | "plan" | "question"; local: string; title: string; owner: string | null; status: string;
+  lane: "backlog" | "running" | "review" | "done"; needs_you: boolean; criteria: { pass: number; total: number } | null;
+  project_id: string; campaign: string; task_id: string | null; attempt: number | null;
+};
+/** The project's newest campaigns (at most 5) and their cards (at most 200 in all); `truncated` says a level was cut. */
+export type CoreBoard = { campaigns: { campaign: string; run_id: string; cards: CoreCard[]; truncated: boolean }[]; truncated: boolean; error?: string };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
 
@@ -257,6 +268,15 @@ export const api = {
   resumeRun: (sessionId: string, campaign: string, cwd: string, provider?: string) => call<RunHandle>("resume_run", { sessionId, campaign, cwd, ...(provider ? { provider } : {}) }),
   /** `vajra.providers/1`: each adapter with install state, version, capabilities (and `limits` reasons) and the CLI's own login check. Parse with `parseProviderList`. */
   providerList: () => call<ProviderList>("provider_list"),
+  // Multi-provider accounts. Fixture-backed until the core commands land; answers are parsed with `parseAccounts`, `parseUsage` and `parseAgents`.
+  providerAccounts: () => call<unknown>("provider_accounts"),
+  providerUsage: () => call<unknown>("provider_usage"),
+  /** Hands the pasted key to the core, which writes it to the Keychain. Nothing answers with it, and nothing here keeps it. */
+  providerKeySave: (accountId: string, key: string) => call<void>("provider_key_save", { accountId, key }),
+  providerKeyRemove: (accountId: string) => call<void>("provider_key_remove", { accountId }),
+  providerBaseUrlSave: (accountId: string, baseUrl: string) => call<void>("provider_base_url_save", { accountId, baseUrl }),
+  providerAgents: (projectId: string) => call<unknown>("provider_agents", { projectId }),
+  providerAgentsSave: (projectId: string, agents: unknown) => call<unknown>("provider_agents_save", { projectId, agents }),
   crew: (slug: string, runId: string) => call<CrewNodeDto>("crew", { slug, runId }),
   tail: (stream: string, afterSeq: number, maxBytes = 65536) => call<Tail>("tail", { stream, afterSeq, maxBytes }),
   /** The lines just before `beforeSeq` (at most `maxLines`), for Load earlier; `at_start` when nothing older exists. */
@@ -320,7 +340,7 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
-  startProposal: (id: string, proposalSha256: string) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256 }),
+  startProposal: (id: string, proposalSha256: string, overrides: ProposalOverride[] = []) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256, ...(overrides.length > 0 ? { overrides } : {}) }),
   dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
   inbox: () => call<{ count: number; campaign_count?: number; items: InboxItem[] }>("inbox"),
   /** Which record versions this build reads (`vajra.app_info/1`). */

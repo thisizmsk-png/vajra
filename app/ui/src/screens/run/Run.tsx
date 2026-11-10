@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Section, Text } from "../../../components/ui/base";
 import { VirtualList } from "../../../components/ui/desktop";
 import { RunProvider } from "../ProviderControls";
+import { ProviderLine } from "../ProviderLine";
+import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
@@ -11,6 +13,8 @@ const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
 const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.criterion}`;
 const ROW_H = 36;
+/** One line: the provider the task ran on (icon, "Model · provider", errors), when the core says. */
+const provider = (t: { provider?: unknown }) => { const p = parseWorkerProvider(t.provider); return p ? <ProviderLine p={p} compact /> : null; };
 const GRAPH_H = 288;
 const LIST_H = 360;
 
@@ -133,7 +137,7 @@ export function Run() {
                 <div role="listitem" className="v-run__row" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
                   <span>{t.local} {t.title ?? ""}</span>
-                  <span>{t.owner ?? ""}</span>
+                  <span>{provider(t) ?? t.owner ?? ""}</span>
                   <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{S.run.taskStatus[t.status] ?? t.status}</Badge>
                   {t.deps.length > 0 && <Text as="span" variant="body-sm" muted>{S.run.waitsFor} {t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}</Text>}
                   <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
