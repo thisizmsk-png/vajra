@@ -306,3 +306,38 @@ fn untracked_count_timing() {
         println!("TIMING {n} new files: {:?} (added {}, partial {})", started.elapsed(), d.added, d.partial);
     }
 }
+
+#[test]
+fn a_new_file_git_cannot_count_is_listed_and_makes_the_totals_partial() {
+    let repo = tmp();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.invalid"]);
+    git(&repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    std::fs::write(repo.join("new.txt"), "a\nb\n").unwrap();
+    // Each fake git answers every command like the real one, except the per-file count (`--no-index`) or the tracked
+    // numstat, which it breaks in one way.
+    let broken = |tag: &str, on: &str, then: &str| {
+        let bin = tmp().join(format!("git-{tag}"));
+        std::fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in *'{on}'*) {then};; esac\nexec /usr/bin/git \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut b = Bridge::new(PathBuf::from("/nonexistent"));
+        b.git = bin;
+        diff_from_git(&b, &repo, "HEAD").unwrap_or_else(|| panic!("{tag}: git answered the rest"))
+    };
+    for (tag, on, then) in [
+        ("fails", "--no-index", "exit 2"),
+        ("garbage", "--no-index", "printf 'x\\ty\\t\\0'; exit 1"),
+        ("empty", "--no-index", "exit 1"),
+        ("tracked-garbage", "--numstat -z HEAD", "printf 'x\\ty\\tkeep.txt\\0'; exit 0"),
+    ] {
+        let d = broken(tag, on, then);
+        assert!(d.files.contains(&"new.txt".to_string()) || tag == "tracked-garbage", "{tag}: the file is still listed");
+        assert!(d.partial, "{tag}: an uncounted file means the totals are partial");
+    }
+    // The real git counts it exactly: not partial.
+    let ok = diff_from_git(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD").unwrap();
+    assert_eq!((ok.added, ok.partial), (2, false));
+}

@@ -268,7 +268,8 @@ per worker slot, built from what the harness reports about itself once it starts
   read-only git bridge), never from events: a shell-only edit leaves no edit event. `-z` gives real, unquoted paths; a
   rename or copy is two records and the new path is kept. A new (untracked) file's lines count as added: git counts them
   (`diff --no-index` against `/dev/null`, not following a link); a binary or empty file adds none. Counting is one git call per new file, so it stops
-  after 500 files or 2 s, whichever is first; every file is still listed and `partial: true` says `added` is a lower bound.
+  after 500 files or 2 s, whichever is first; every file is still listed and `partial: true` says `added`/`removed` are a lower bound. `partial` is also set when a
+  count could not be had (git failed, timed out, was cut short, or answered in a shape that is not a numstat record).
   It runs once when a run's receipt is built, never on the `project_state` poll path.
 - **Provider tag.** Crew-tree nodes and the `workers` of `project_state` carry a `provider` object, or `null` while the
   model is not reported. It is the shape `parseWorkerProvider` (`app/ui/src/workerProvider.ts`) requires;

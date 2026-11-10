@@ -325,9 +325,11 @@ fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duratio
         // `added<TAB>removed<TAB>path`; a rename or copy has an empty path there, followed by the old and new paths.
         let mut f = rec.splitn(3, '\t');
         let (a, r, path) = (f.next()?, f.next()?, f.next()?);
-        // A binary file reports `-` for both counts: it changed, with no line counts.
-        diff.added += a.parse::<u64>().unwrap_or(0);
-        diff.removed += r.parse::<u64>().unwrap_or(0);
+        match (numstat_count(a), numstat_count(r)) {
+            (Some(a), Some(r)) => (diff.added, diff.removed) = (diff.added + a, diff.removed + r),
+            // Counts git did not give in a form we know: the file is listed, the totals are a lower bound.
+            _ => diff.partial = true,
+        }
         if path.is_empty() {
             let (_old, new) = (records.next()?, records.next()?);
             diff.files.push(new.into());
@@ -345,18 +347,35 @@ fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duratio
             diff.partial = true;
         } else {
             counted += 1;
-            let args = ["diff", "--numstat", "-z", "--no-index", "--", "/dev/null", path].map(String::from).to_vec();
-            if let Ok(out) = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }) {
-                if matches!(out.code, Some(0 | 1)) && out.whole() {
-                    let mut f = out.stdout.split('\0').next().unwrap_or("").splitn(3, '\t');
-                    diff.added += f.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(0);
-                    diff.removed += f.next().and_then(|r| r.parse::<u64>().ok()).unwrap_or(0);
-                }
+            match count_new_file(bridge, cwd, path) {
+                Some((added, removed)) => (diff.added, diff.removed) = (diff.added + added, diff.removed + removed),
+                // The call failed, timed out, was cut short, or answered in a shape we do not know.
+                None => diff.partial = true,
             }
         }
         diff.files.push(path.into());
     }
     Some(diff)
+}
+
+/// One `--numstat` count: a number, or `-` for a binary file (changed, no line counts). Anything else is unreadable.
+fn numstat_count(field: &str) -> Option<u64> {
+    if field == "-" {
+        return Some(0);
+    }
+    (!field.is_empty() && field.bytes().all(|b| b.is_ascii_digit())).then(|| field.parse().ok()).flatten()
+}
+
+/// The lines a new file adds, read from git, or `None` when git could not say (failed, timed out, cut short, odd exit
+/// status, or output that is not a numstat record).
+fn count_new_file(bridge: &Bridge, cwd: &Path, path: &str) -> Option<(u64, u64)> {
+    let args = ["diff", "--numstat", "-z", "--no-index", "--", "/dev/null", path].map(String::from).to_vec();
+    let out = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).ok()?;
+    if !matches!(out.code, Some(0 | 1)) || !out.whole() {
+        return None;
+    }
+    let mut f = out.stdout.split('\0').next()?.splitn(3, '\t');
+    Some((numstat_count(f.next()?)?, numstat_count(f.next()?)?))
 }
 
 #[cfg(test)]
