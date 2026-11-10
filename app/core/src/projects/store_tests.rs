@@ -676,3 +676,29 @@ fn rename_and_archive_open_the_project_folder_once() {
     assert_eq!(s.child_opens() - before, 1, "archive");
     assert_eq!(s.get(&p.id).unwrap().name, "renamed");
 }
+
+/// #106 review: the copyable `mv` example quotes the path for a POSIX shell. Run as printed on a path full of shell
+/// syntax, it moves the folder aside and nothing in the path runs or expands. A path with a control character gets no
+/// command at all.
+#[test]
+fn the_fix_example_runs_safely_on_a_hostile_path() {
+    let t = Tmp::new("quote");
+    let hostile = t.0.join("d $(touch PWNED) `touch PWNED2` $HOME it's \"q\" \\x");
+    fs::create_dir_all(&hostile).unwrap();
+    let (dir, target) = (hostile.join("projects"), t.0.join("target"));
+    fs::create_dir_all(&target).unwrap();
+    symlink(&target, &dir).unwrap();
+    let u = open_root(&dir).err().expect("refused");
+    let fix = u.fix();
+    let start = fix.find("for example: ").expect("an example") + "for example: ".len();
+    let cmd = &fix[start..fix.rfind("), then restart").expect("end of example")];
+    let out = std::process::Command::new("/bin/sh").arg("-c").arg(cmd).current_dir(&t.0).env("HOME", "/nonexistent-home").output().unwrap();
+    assert!(out.status.success(), "{cmd}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!t.0.join("PWNED").exists() && !t.0.join("PWNED2").exists(), "the path ran a command: {cmd}");
+    assert!(fs::symlink_metadata(&dir).is_err(), "moved aside");
+    assert!(fs::symlink_metadata(hostile.join("projects.old")).unwrap().file_type().is_symlink(), "to the literal .old path");
+
+    let odd = Unavailable { path: t.0.join("line\nbreak/projects"), reason: UnavailableReason::Symlink };
+    assert!(!odd.fix().contains("mv"), "{}", odd.fix());
+    assert!(odd.fix().starts_with("Move "));
+}

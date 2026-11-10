@@ -68,14 +68,27 @@ impl Unavailable {
         format!("The app's projects folder {why}, so projects are unavailable until it is fixed.")
     }
 
-    /// What to do, naming the path.
+    /// What to do, naming the path. The copyable example quotes the path for a POSIX shell, so nothing in it (`$()`,
+    /// backticks, `$VAR`) runs or expands; a path that cannot be shown exactly (not UTF-8, or with a control character)
+    /// gets no command at all, only the instruction (#106 review).
     pub fn fix(&self) -> String {
         let p = self.path.display();
         match self.reason {
-            UnavailableReason::Symlink | UnavailableReason::NotAFolder => format!("Move {p} aside (for example: mv \"{p}\" \"{p}.old\"), then restart the app. A new projects folder is made at that path."),
+            UnavailableReason::Symlink | UnavailableReason::NotAFolder => {
+                let example = self.path.to_str().filter(|s| !s.chars().any(char::is_control)).map(|s| {
+                    let old = format!("{s}.old");
+                    format!(" (for example: mv -- {} {})", sh_quote(s), sh_quote(&old))
+                });
+                format!("Move {p} aside{}, then restart the app. A new projects folder is made at that path.", example.unwrap_or_default())
+            }
             UnavailableReason::CannotOpen => format!("Check that {p} is a folder you own and can write, then restart the app."),
         }
     }
+}
+
+/// `s` as one POSIX shell word: single-quoted, with each `'` written as `'\''`. Nothing inside expands.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 impl std::fmt::Display for StoreError {
