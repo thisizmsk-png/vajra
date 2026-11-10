@@ -1853,6 +1853,11 @@ Status: proposed 2026-11-10, design only. The owner asked for it. **Bhishma revi
    - **npm.**
      - The core runs `npm pack <pkg>@<ver>` into an empty temp dir and checks the tarball's sha512 against the catalog. `dist.integrity` metadata alone is not enough.
      - It installs **that `.tgz` file** with `npm install -g --ignore-scripts --registry=https://registry.npmjs.org/ <file>`, run from an empty directory, so a project `.npmrc` can't apply.
+      - **The whole dependency closure must be pinned, not only the tarball** (PR #135 review). `--ignore-scripts` stops install scripts, but not the code of a dependency, which runs when the CLI starts. A tarball whose `package.json` says `dep: ^1.0.0` would otherwise pull whatever `dep` version is newest at install time. So one-click npm is offered only when one of these holds, checked by the core from the verified tarball before `npm install` runs:
+        - **No outside dependencies.** The tarball's `package.json` has no `dependencies` beyond what it bundles inside itself (`bundleDependencies`). Bundled code is covered by the tarball's sha512.
+        - **A complete shrinkwrap.** The tarball contains an `npm-shrinkwrap.json` that lists every package in the closure, each with an exact `version`, a `resolved` URL on `registry.npmjs.org` and an `integrity` hash. npm then installs exactly those versions, and refuses any whose bytes don't match. The core refuses a shrinkwrap with a range, a missing `integrity`, a git or file or other-host `resolved`, or a dependency it doesn't list.
+        - Otherwise the entry is **"Install it yourself"**, with the vendor's command, whatever the catalog says.
+      - **After install, the core checks the installed tree.** It reads `npm ls -g <pkg> --all --json` and compares every installed package's name and version with the closure it approved. Any extra or different package means the install is rolled back with `npm uninstall -g <pkg>`, which only happens when the package wasn't installed before, and the sheet shows "Install it yourself" with the reason.
      - **A package that needs its install script** (for example to fetch a platform binary) gets "Install it yourself" with the vendor's command. So does a package whose platform optional dependencies aren't each pinned in the catalog with their own integrity.
      - The user's own `~/.npmrc` (mirror, auth) still applies. The sheet says so.
    - **Homebrew.**
@@ -1906,7 +1911,7 @@ Status: proposed 2026-11-10, design only. The owner asked for it. **Bhishma revi
 
 **Evidence against.**
 - Pins go stale as vendors ship releases, so each app release refreshes the catalog. Between releases, "Install" installs a slightly older version, and the CLI's own updater takes over.
-- Many npm agent CLIs need an install script or platform binaries, so they will be "Install it yourself" until their pieces are pinned.
+- Many npm agent CLIs need an install script, platform binaries or unpinned dependencies, so they will be "Install it yourself" until their vendor ships a complete shrinkwrap or bundles its dependencies.
 - Some users have neither Homebrew nor npm. For them the button is also "Install it yourself", which links the vendor's own installer.
 
 **Would change our mind:** a vendor publishes a signed, versioned installer with a stable checksum feed.
@@ -1920,6 +1925,11 @@ Status: proposed 2026-11-10, design only. The owner asked for it. **Bhishma revi
 **Acceptance tests.**
 - The catalog parses, and every entry has a source URL and a pin.
 - A tarball whose sha512 differs from the pin is refused, using a fake `npm pack`.
+- **A transitive dependency changes while the tarball stays the same.** The fake registry publishes `dep@1.0.1` after the catalog pin.
+  - With a `dependencies: {dep: "^1.0.0"}` tarball and no shrinkwrap, the entry is "Install it yourself", and `npm install` never runs.
+  - With a complete shrinkwrap pinning `dep@1.0.0`, `dep@1.0.0` is installed. If the registry serves different bytes for `dep@1.0.0`, the integrity check fails and nothing is installed.
+- A shrinkwrap with a range, a missing `integrity`, or a git or other-host `resolved` is refused before install.
+- A post-install tree with an extra or different package is rolled back, and the sheet says why.
 - A package that needs install scripts is refused.
 - A `:no_check` cask is refused.
 - A root-owned prefix, or a root-owned folder under it, shows the manual command, and nothing runs.
