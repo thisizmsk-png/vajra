@@ -190,6 +190,8 @@ pub struct App {
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
+    /// Stored API keys (D3): write-once, no read-back. Tests replace it with one over a fake `security`.
+    keys: crate::providers::keychain::Keys,
     /// Usage meters: the last answer per account, the rate limit, and where a gateway key's usage is read from.
     usage: crate::providers::usage::Meter,
     usage_source: Box<dyn crate::providers::usage::UsageSource>,
@@ -222,6 +224,8 @@ pub struct App {
     limits: Mutex<caps::RunLimits>,
     /// Each launched run's `maxInFlight`, by stream, for the worker ceiling.
     run_workers: Mutex<HashMap<String, u32>>,
+    /// Workers closed once finished (see `closeout`); persisted.
+    closeout: closeout::Store,
     /// Run ids this process handed out. A resume replaces its run's entry, so `runs` alone would forget one.
     issued: Mutex<std::collections::HashSet<String>>,
     /// ADR-13: the Lead chat (asks, the guard, the claude binary).
@@ -241,6 +245,15 @@ pub struct App {
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
+    /// Moves on every write to `evidence_cache` or `worktree_state`: the board's cards read both (#107 review).
+    board_inputs_gen: std::sync::atomic::AtomicU64,
+    /// project_id -> the last board `project_state` built and the stamp of what it read (see `board::Cached`).
+    board_cache: Mutex<HashMap<String, board::Cached>>,
+    /// How many boards were built (tests count rebuilds).
+    board_builds: std::sync::atomic::AtomicU64,
+    /// Tests: how long a board build takes (to put a cache deadline inside one).
+    #[cfg(test)]
+    board_build_pause: Mutex<Duration>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
@@ -301,6 +314,11 @@ impl App {
             claude,
             provider_dirs: None,
             provider_cache: Mutex::new(None),
+            // A test build never reaches the real Keychain: its default `security` path does not exist.
+            keys: crate::providers::keychain::Keys::cli(
+                Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY }),
+                home,
+            ),
             usage: Default::default(),
             // No key is stored yet (the Keychain store comes with PR 2): nothing to meter, no outbound call.
             usage_source: Box::new(crate::providers::usage::NoSource),
@@ -312,12 +330,18 @@ impl App {
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
             evidence_why: Mutex::new(HashMap::new()),
+            board_inputs_gen: std::sync::atomic::AtomicU64::new(0),
+            board_cache: Mutex::new(HashMap::new()),
+            board_builds: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            board_build_pause: Mutex::new(Duration::ZERO),
             worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
             limits: Mutex::new(caps::RunLimits::default()),
             run_workers: Mutex::new(HashMap::new()),
+            closeout: closeout::Store::open(data),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -426,6 +450,10 @@ impl App {
     /// cannot make its project look free or make another one look busy. A live run with no pinned project refuses the
     /// start. The caps compare the ids as opaque keys.
     fn within_caps(&self, project: &str, workers: u32) -> Result<(), Value> {
+        // A worker count no start may ask for is a bad request, never a full ceiling (#80 review).
+        if !(1..=16).contains(&workers) {
+            return Err(invalid("maxInFlight", "must be 1 to 16"));
+        }
         self.reap_locked();
         let active: Vec<caps::Active> = {
             let runs = lock(&self.runs);
@@ -439,11 +467,6 @@ impl App {
             }
             v
         };
-        // Forget the worker counts of runs that ended.
-        {
-            let runs = lock(&self.runs);
-            lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
-        }
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -502,6 +525,11 @@ impl App {
                 svc.end_session(&id);
             }
         }
+        drop(svc);
+        // Forget the worker counts of runs that ended, here and not only on the next start (#80 review), so the map is
+        // bounded by the runs still going. The run itself stays in `runs` for its crew view.
+        let runs = lock(&self.runs);
+        lock(&self.run_workers).retain(|s, _| runs.contains_key(s) && self.sup.is_running(s).unwrap_or(false));
     }
 
     /// Take the control session, build the argv with its nonce, spawn. A
@@ -570,6 +598,11 @@ impl App {
         if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
         }
+        // A resume of this campaign counts at the same maxInFlight (#80 review). Written before anything spawns and refused
+        // on failure: without it a resume would count at the default and could pass the worker ceiling (#109 review).
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            return Err(fail("io", "could not record the run's worker count"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -591,7 +624,7 @@ impl App {
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
         let spawned = argv(&nonce).and_then(|argv| {
-            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone() };
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), codex_home: None };
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
@@ -661,6 +694,28 @@ impl App {
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
         serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+    }
+
+    /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
+    pub fn provider_key_saved(&self, account: &str) -> Res {
+        key_state(account, self.keys.saved(account))
+    }
+
+    /// `provider_key_save`: store a pasted key once. A second Save is refused (`already_saved`); use Replace.
+    pub fn provider_key_save(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.save(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_replace`: overwrite the stored key (or store the first one).
+    pub fn provider_key_replace(&self, account: &str, key: String) -> Res {
+        let r = crate::providers::keychain::Key::new(key).and_then(|k| self.keys.replace(account, k));
+        key_state(account, r.map(|()| true))
+    }
+
+    /// `provider_key_remove`: delete the stored key; removing one that is not there is fine.
+    pub fn provider_key_remove(&self, account: &str) -> Res {
+        key_state(account, self.keys.remove(account).map(|()| false))
     }
 
     /// `provider_usage` (`vajra.provider_usage/1`): each account's use as its own source reports it, or "Not reported".
@@ -794,9 +849,11 @@ impl App {
         if !adapter.capabilities().resume {
             return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
         }
+        // Counted at the maxInFlight the campaign's run was started with, not the default (#80 review).
+        let workers = self.original_workers(session_id, campaign);
         let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
             adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true, caps::DEFAULT_RUN_WORKERS)?;
+        }, true, workers)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }
@@ -940,6 +997,10 @@ impl App {
     /// Tail one worker transcript into its stream (new bytes only) and build its node.
     fn pump_worker(&self, allow: &Allowlist, red: &Redactor, path: &Path, id: &str, meta: &Meta, j: Option<&JournalEntry>) -> Worker {
         let mut map = lock(&self.transcripts);
+        // A closed worker is no longer tailed: no file reads, no new stream lines. Its record stays for the history view.
+        if self.worker_closed(id) {
+            return tree::worker_from(id, meta, j, map.get(id));
+        }
         let tr = map
             .entry(id.to_string())
             .or_insert_with(|| Transcript::new(Tailer::new(allow.clone(), path.to_path_buf()), Redactor::default()));
@@ -1043,6 +1104,12 @@ impl App {
     /// (a closed task without evidence is also `not_run`, never pass). Checks run at most `EVIDENCE_WORKERS` at a time and the whole call is bounded by `EVIDENCE_BUDGET`.
     /// The recorded commands, exit codes and output come from `evidence_detail`, per task; the list carries only the count.
     pub fn evidence_list(&self, slug: &str) -> Res {
+        self.evidence_list_with(slug, true)
+    }
+
+    /// `evidence_list`, or with `checks` false the same rows from what is already known: no check is started and no
+    /// git is run, so a criterion not checked yet (or whose repo state is not cached) reads `checking`, never pass.
+    pub(super) fn evidence_list_with(&self, slug: &str, checks: bool) -> Res {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
@@ -1099,7 +1166,7 @@ impl App {
             }
         }
         // Only one sweep per campaign at a time: while one runs, another call answers from the cache and leaves the rest `checking`.
-        let claimed = self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
+        let claimed = checks && self.sweeping.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
         struct Release<'a>(&'a Mutex<std::collections::HashSet<String>>, String, bool);
         impl Drop for Release<'_> {
             fn drop(&mut self) {
@@ -1180,14 +1247,26 @@ impl App {
                 }
                 cache.insert(k, (green, until));
             }
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
         // remembered as unknown for 30 s so a slow one is not paid for on every call.
         let mut repos: HashMap<PathBuf, Option<(String, bool)>> = HashMap::new();
+        let mut unknown: std::collections::HashSet<PathBuf> = Default::default();
         for (i, r) in &repo_of {
-            if verdict.get(i) == Some(&true) && !repos.contains_key(r) {
-                repos.insert(r.clone(), self.worktree_state(r, deadline));
+            if verdict.get(i) == Some(&true) && !repos.contains_key(r) && !unknown.contains(r) {
+                if checks {
+                    repos.insert(r.clone(), self.worktree_state(r, deadline));
+                } else {
+                    // Cache-only (the board): only a known state counts. A cached failed read (`Some(None)`) is as unknown as
+                    // no entry, so a green live verdict reads `checking`, never a pass the repo state could not confirm (#107
+                    // review). A full `evidence_list` call keeps its rule: a check's verdict stands when git cannot be read.
+                    match self.worktree_state_cached(r) {
+                        Some(Some(st)) => { repos.insert(r.clone(), Some(st)); }
+                        _ => { unknown.insert(r.clone()); }
+                    }
+                }
             }
         }
         let mut pending = 0usize;
@@ -1201,13 +1280,17 @@ impl App {
                 "fail"
             } else if has_evidence {
                 match verdict.get(&i) {
+                    // Cache-only and the repo's state is not known: not yet a pass.
+                    Some(true) if repo_of.get(&i).is_some_and(|r| unknown.contains(r)) => { pending += 1; "checking" }
                     Some(true) => {
                         // Green evidence is current only while the repo is still at the evidence's head and clean (an edit, even
                         // uncommitted, or a moved branch makes it stale). If git could not be read the check's verdict stands.
                         let want = t.get("evidence").and_then(|e| e.get("head")).and_then(Value::as_str);
                         let stale = repo_of.get(&i).and_then(|r| repos.get(r)).and_then(Option::as_ref)
                             .is_some_and(|(head, dirty)| *dirty || want.is_some_and(|w| w != head));
-                        if stale { "stale" } else { "pass" }
+                        // Cache-only (the board): live evidence with no head cannot be held against the repo, so it is not a
+                        // pass there (#107 review sweep).
+                        if stale { "stale" } else if !checks && want.is_none() && repo_of.contains_key(&i) { pending += 1; "checking" } else { "pass" }
                     }
                     Some(false) => "unverified",
                     None => { pending += 1; "checking" }
@@ -1318,6 +1401,14 @@ impl App {
     /// `(HEAD, dirty)` of `repo`, where dirty means any tracked edit or untracked file (`git status --porcelain -unormal`;
     /// an untracked directory is one line, so a large untracked tree stays cheap). `None` when git fails or times out:
     /// the caller then shows the check's own verdict, never `stale`, and nothing is remembered.
+    /// The cached repo state, if it is still fresh: `None` when nothing is cached (never runs git).
+    fn worktree_state_cached(&self, repo: &Path) -> Option<Option<(String, bool)>> {
+        let g = lock(&self.worktree_state);
+        let (at, st) = g.get(repo)?;
+        let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
+        (at.elapsed() < ttl).then(|| st.clone())
+    }
+
     fn worktree_state(&self, repo: &Path, deadline: std::time::Instant) -> Option<(String, bool)> {
         if let Some((at, st)) = lock(&self.worktree_state).get(repo) {
             let ttl = if st.is_some() { WORKTREE_STATE_TTL } else { WORKTREE_STATE_UNKNOWN_TTL };
@@ -1354,6 +1445,7 @@ impl App {
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
             lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         st
     }
@@ -1387,12 +1479,8 @@ impl App {
         Some(Request::CheckEvidence { path, head, archived: None, repo: Some(repo) })
     }
 
-    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
-    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
-    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
-    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
-    /// the run repo's HEAD.
-    pub fn worktree_info(&self, worker: &str) -> Res {
+    /// `(worktree, run repo)` of a worker, both resolved; refused for anything that is not a crew worktree.
+    pub(super) fn crew_worktree(&self, worker: &str) -> Result<(PathBuf, PathBuf), Value> {
         if !bus::valid_stream_id(&worker_stream(worker)) {
             return Err(invalid("worker", "not a worker id"));
         }
@@ -1412,6 +1500,16 @@ impl App {
         if !wt.is_dir() {
             return Err(refuse());
         }
+        Ok((wt, repo))
+    }
+
+    /// The Worktree and Diff tabs' header for a worker: its worktree path, branch and the base to diff against. Read-only.
+    /// Limited to crew worktrees: the worker's transcript cwd, resolved through links, must be a directory strictly under
+    /// `<repo>/.claude/worktrees/` of a run this app started. Anything else (the repo itself, a link out) is refused,
+    /// so the tab can never be pointed at an arbitrary directory. `base` is the merge-base of the worktree's HEAD and
+    /// the run repo's HEAD.
+    pub fn worktree_info(&self, worker: &str) -> Res {
+        let (wt, repo) = self.crew_worktree(worker)?;
         let git = |dir: &Path, args: &[&str]| -> Option<String> {
             let o = self.bridge.run(&Request::Git { cwd: dir.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
             (o.exit() == Some(0)).then(|| o.stdout.trim().to_string())
@@ -1899,6 +1997,14 @@ fn evidence_outcome(o: &Output, home: &Path) -> Outcome {
     }
 }
 
+/// The answer of every `provider_key_*` command: a `KeyState` or a fixed error. Never echoes input.
+fn key_state(account: &str, r: Result<bool, crate::providers::keychain::Error>) -> Res {
+    match r {
+        Ok(saved) => serde_json::to_value(crate::providers::contract::KeyState { account: account.into(), saved }).map_err(|e| fail("internal", e)),
+        Err(e) => Err(fail(e.code(), e.detail())),
+    }
+}
+
 fn invalid(field: &str, reason: &str) -> Value {
     json!({"error": "invalid_args", "detail": format!("{field}: {reason}")})
 }
@@ -1960,6 +2066,8 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 
 mod arrivals;
 mod caps;
+mod closeout;
+pub use closeout::WorktreeTerminals;
 mod orchestrator;
 mod proposals;
 mod inbox;
@@ -1967,6 +2075,7 @@ mod projects;
 mod wfresult;
 mod decide;
 mod lead;
+mod board;
 mod lead_acts;
 mod runindex;
 mod runview;

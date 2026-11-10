@@ -660,3 +660,19 @@ fn a_symlink_swapped_in_after_the_check_is_refused_and_its_target_untouched() {
     assert!(pin_root(&data.join("projects")).is_ok());
     assert_eq!(fs::metadata(data.join("projects")).unwrap().permissions().mode() & 0o777, 0o700);
 }
+
+/// #77 optional: rename and archive read and write through the one pinned project folder (one open), not by opening
+/// it again for the write.
+#[test]
+fn rename_and_archive_open_the_project_folder_once() {
+    let t = Tmp::new("onefd");
+    let s = t.store();
+    let p = s.add(&t.repo("src/a"), false).unwrap().project().clone();
+    let before = s.child_opens();
+    s.rename(&p.id, "renamed", None).unwrap();
+    assert_eq!(s.child_opens() - before, 1, "rename");
+    let before = s.child_opens();
+    s.archive(&p.id, None).unwrap();
+    assert_eq!(s.child_opens() - before, 1, "archive");
+    assert_eq!(s.get(&p.id).unwrap().name, "renamed");
+}

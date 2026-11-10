@@ -161,6 +161,9 @@ pub struct Store {
     /// Held by a whole migration confirm (see `migrate::confirm`), so two confirms never interleave.
     migrating: Mutex<()>,
     now: Clock,
+    /// Project folders opened (tests: an update opens its folder once).
+    #[cfg(test)]
+    opens: std::sync::atomic::AtomicUsize,
 }
 
 /// Open (creating at 0700) the projects folder, or say why it is refused. A symbolic link or a non-folder is refused
@@ -213,7 +216,7 @@ impl Store {
         let root = open_root(&data.join("projects"));
         // The guard compares against canonical paths; a data dir that is a symlink is compared by its target.
         let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now })
+        Ok(Self { root, limits: (MAX_PROJECTS, MAX_ENTRIES), guard: Guard { home: canon(home), data: canon(data) }, lock: Mutex::new(()), migrating: Mutex::new(()), now, #[cfg(test)] opens: Default::default() })
     }
 
     /// The projects folder refused at open, if it was: the app shows this and every call refuses.
@@ -330,11 +333,25 @@ impl Store {
         if !contract::valid_project_id(id) {
             return Err(StoreError::NotFound);
         }
-        match self.root()?.child(id, false) {
+        match self.child(id, false) {
             Ok(d) => Ok(d),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound),
-            Err(e) => Err(e.into()),
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Err(StoreError::NotFound),
+            Err(e) => Err(e),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn child_opens(&self) -> usize {
+        self.opens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Open project folder `id` under the pinned projects folder (never through a symlink). Refused, with nothing
+    /// opened, when the projects folder itself was refused.
+    fn child(&self, id: &str, create: bool) -> Result<Pinned> {
+        let root = self.root()?;
+        #[cfg(test)]
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(root.child(id, create)?)
     }
 
     fn read_one(&self, id: &str) -> Result<Project> {
@@ -358,7 +375,13 @@ impl Store {
 
     fn write(&self, p: &Project) -> Result<()> {
         p.validate()?;
-        let dir = self.root()?.child(&p.id, true)?;
+        let dir = self.child(&p.id, true)?;
+        self.write_in(&dir, p)
+    }
+
+    /// Write `p` into its already pinned folder.
+    fn write_in(&self, dir: &Pinned, p: &Project) -> Result<()> {
+        p.validate()?;
         let mut bytes = serde_json::to_vec_pretty(p).map_err(|e| StoreError::Io(io::Error::other(e)))?;
         bytes.push(b'\n');
         dir.write_atomic("project.json", &bytes)?;
@@ -416,7 +439,9 @@ impl Store {
 
     pub fn rename(&self, id: &str, name: &str, expect_rev: Option<u64>) -> Result<Project> {
         let _g = self.lock();
-        let mut p = self.read_one(id)?;
+        // Read and written through the one pinned folder.
+        let dir = self.pin(id)?;
+        let mut p = self.read_pinned(&dir, id)?;
         check_rev(&p, expect_rev)?;
         let name = name.trim();
         if name == p.name {
@@ -424,21 +449,22 @@ impl Store {
         }
         p.name = name.to_string();
         p.rev += 1;
-        self.write(&p)?; // validates the name
+        self.write_in(&dir, &p)?; // validates the name
         Ok(p)
     }
 
     /// Hide the project. Nothing it refers to is touched. Archiving an archived project changes nothing.
     pub fn archive(&self, id: &str, expect_rev: Option<u64>) -> Result<Project> {
         let _g = self.lock();
-        let mut p = self.read_one(id)?;
+        let dir = self.pin(id)?;
+        let mut p = self.read_pinned(&dir, id)?;
         check_rev(&p, expect_rev)?;
         if p.archived.is_some() {
             return Ok(p);
         }
         p.archived = Some(self.stamp());
         p.rev += 1;
-        self.write(&p)?;
+        self.write_in(&dir, &p)?;
         Ok(p)
     }
 

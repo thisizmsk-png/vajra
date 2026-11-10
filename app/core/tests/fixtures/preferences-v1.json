@@ -12,6 +12,7 @@
     "model": null,
     "workers": null,
     "rounds": null,
+    "auto_close_finished": null,
     "shortcuts": null,
     "agents": null
   },
@@ -25,6 +26,7 @@
     "model": "",
     "workers": 4,
     "rounds": 2,
+    "auto_close_finished": true,
     "shortcuts": {
       "palette": "Primary+K",
       "settings": "Primary+,"
@@ -40,6 +42,7 @@
     "model": "global",
     "workers": "global",
     "rounds": "global",
+    "auto_close_finished": "global",
     "shortcuts": "global",
     "agents": "global"
   },
@@ -58,6 +61,7 @@
     "model": "",
     "workers": 4,
     "rounds": 2,
+    "auto_close_finished": true,
     "shortcuts": {
       "palette": "Primary+K",
       "settings": "Primary+,"

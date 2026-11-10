@@ -71,6 +71,8 @@ const CAMPAIGN_FILE: &str = "campaign";
 const APPROVAL_ONLY_FILE: &str = "approval_only";
 /// Unix seconds when the app launched the run. The run id is only a uniqueness label (it can name a future minute).
 const STARTED_FILE: &str = "started";
+/// The maxInFlight a workflow run was started with (a resume counts at it, #80 review).
+const WORKERS_FILE: &str = "workers";
 /// `read_only` detail for a run this app did not launch.
 const NOT_OURS: &str = "run not launched by this app";
 /// How long a passing `vajra-doctor.sh` answer is reused.
@@ -524,6 +526,29 @@ impl App {
         fsx::write_atomic(&dir, CWD_REAL_FILE, real.to_string_lossy().as_bytes())?;
         // The cwd goes last: a run with a cwd record has its session and campaign records too.
         fsx::write_atomic(&dir, CWD_FILE, cwd.to_string_lossy().as_bytes()).map(|_| ())
+    }
+
+    /// Record the maxInFlight a workflow run started with, next to its guarded record.
+    pub(super) fn record_run_workers(&self, run_id: &str, workers: u32) -> std::io::Result<()> {
+        fsx::write_atomic(&self.lead_sid_dir(run_id), WORKERS_FILE, workers.to_string().as_bytes()).map(|_| ())
+    }
+
+    /// The maxInFlight to count a resume of (`session_id`, `campaign`) at: the newest of its workflow runs whose guarded
+    /// record vouches for the index line (same folder, session and campaign) and holds a valid count. Otherwise (a run
+    /// from before the record, or one nothing vouches for) the default.
+    pub(super) fn original_workers(&self, session_id: &str, campaign: &str) -> u32 {
+        let entries = super::runindex::entries(&self.data.join("runs.jsonl"));
+        for e in entries.iter().rev().filter(|e| e.session_id == session_id && e.campaign == campaign) {
+            let Some((cwd, sid, camp, workflow)) = self.read_run_record(&e.run_id) else { continue };
+            if !workflow || sid != session_id || camp != campaign || cwd != e.cwd {
+                continue;
+            }
+            let w = fsx::read_nofollow(&self.lead_sid_dir(&e.run_id).join(WORKERS_FILE)).ok().and_then(|b| String::from_utf8(b).ok()).and_then(|s| s.trim().parse::<u32>().ok());
+            if let Some(w) = w.filter(|w| (1..=16).contains(w)) {
+                return w;
+            }
+        }
+        super::caps::DEFAULT_RUN_WORKERS
     }
 
     /// Record, before the run starts, which adapter it runs on. A run launched by this build always has this record, so a

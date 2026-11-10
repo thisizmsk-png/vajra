@@ -199,6 +199,9 @@ export type Receipt = {
 /** What a guarded action returns. `receipt` is null only when the core could not write it (nothing ran). */
 export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean; result?: T; error?: IpcError };
 /** Sent with every guarded action. `expect_generation` is the target's generation when the UI looked. */
+export type CloseoutState = "closed" | "closable" | "working" | "waiting_on_you" | "unsaved_work" | "terminal_busy" | "no_worktree" | "git_unreadable";
+export type CloseoutRow = { worker: string; state: CloseoutState; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number };
+export type CloseFinishedResult = { closed: { worker: string; label: string }[]; skipped: { worker: string; label: string; reason: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }[] };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
@@ -213,6 +216,8 @@ export type ProjectState =
       generations: { project: number; orchestrator?: number | null };
       workers: Json[];
       receipts: Receipt[];
+      /** ADR-15 4.2 board cards, computed by the core from cached verdicts (null for a non-store id). */
+      board: CoreBoard | null;
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
       inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
       /** This project's pending run proposals, newest first, picked before any inbox cut (at most 50; `more` were left out). */
@@ -220,6 +225,14 @@ export type ProjectState =
       /** The last usage answers (`vajra.provider_usage/1`), a cache read on the core side. Parse with `parseUsage`. */
       usage?: UsageList;
     };
+/** One board card as the core serves it (contract (b) of the board PR). Lanes: (c); Done only when verified. */
+export type CoreCard = {
+  key: string; kind: "task" | "plan" | "question"; local: string; title: string; owner: string | null; status: string;
+  lane: "backlog" | "running" | "review" | "done"; needs_you: boolean; criteria: { pass: number; total: number } | null;
+  project_id: string; campaign: string; task_id: string | null; attempt: number | null;
+};
+/** The project's newest campaigns (at most 5) and their cards (at most 200 in all); `truncated` says a level was cut. */
+export type CoreBoard = { campaigns: { campaign: string; run_id: string; cards: CoreCard[]; truncated: boolean }[]; truncated: boolean; error?: string };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };
 
@@ -242,6 +255,12 @@ export const api = {
   startRun: (i: RunInput, cwd: string) => call<RunHandle>("start_run", { ...i, cwd }),
   /** Guarded start run (FG-11): at most once per `action_id`. `envelope.expect_generation` = project run count seen. */
   actStartRun: (envelope: Envelope, i: RunInput, cwd: string) => call<ActResult<RunHandle>>("act_start_run", { envelope, ...i, cwd }),
+  /** Per worker of a run: whether it is closed, could be closed now, or why it is kept (with the exact counts of unsaved work). */
+  closeoutStatus: (slug: string, runId: string) => call<{ workers: CloseoutRow[] }>("closeout_status", { slug, runId }),
+  /** Close one finished worker. Without `confirmed` only a worker that loses nothing closes; "Close anyway" sends the counts the human saw (files, commits, busy terminals, no upstream), and anything that changed refuses. */
+  actCloseWorker: (envelope: Envelope, worker: string, confirmed?: { changedFiles: number; unpushedCommits: number; busyTerminals: number; noUpstream: boolean }) => call<ActResult>("act_close_worker", { envelope, worker, changedFiles: confirmed?.changedFiles ?? null, unpushedCommits: confirmed?.unpushedCommits ?? null, busyTerminals: confirmed?.busyTerminals ?? null, noUpstream: confirmed?.noUpstream ?? null }),
+  /** Close every finished worker that loses nothing; the result lists what was kept and why. */
+  actCloseFinished: (envelope: Envelope) => call<ActResult<CloseFinishedResult>>("act_close_finished", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
   actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256 }),

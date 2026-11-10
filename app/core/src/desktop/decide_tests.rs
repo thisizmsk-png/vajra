@@ -96,7 +96,7 @@ impl Tmp {
     fn live(&self, app: &App) -> PathBuf {
         let out = self.0.join("typed");
         app.sup
-            .spawn(&format!("run-{SID}"), SpawnSpec { argv: vec!["sh".into(), "-c".into(), format!("head -n1 > '{}'; sleep 5", out.display())], cwd: self.cwd(), rows: 24, cols: 80, redact: Redactor::default() })
+            .spawn(&format!("run-{SID}"), SpawnSpec { argv: vec!["sh".into(), "-c".into(), format!("head -n1 > '{}'; sleep 5", out.display())], cwd: self.cwd(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None })
             .unwrap();
         out
     }
@@ -415,7 +415,7 @@ fn an_ended_session_that_cannot_be_resumed_fails_closed_and_the_plan_stays() {
     let app = t.app();
     let sha = ready(&t, &app);
     let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
-    app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default() }).unwrap();
+    app.sup.spawn(&format!("run-{other}"), SpawnSpec { argv: vec!["sleep".into(), "5".into()], cwd: t.cwd(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
     lock(&app.runs).insert(format!("run-{other}"), Run { session_id: other.into(), run_id: "20261106-1000".into(), campaign: "c".into(), cwd: t.cwd(), nonces: Redactor::default() });
     app.record_run("20261106-1000", &t.cwd(), other, "c", true, 1).unwrap(); // a launched run is always recorded with its project
     let held = app.approve_plan(PLAN, &sha).unwrap_err();
@@ -990,6 +990,51 @@ fn lead_reply_lines_drop_the_same_invisible_characters() {
     assert_eq!(Redactor::default().clean(&line), "all good");
 }
 
+/// ADR-15 4.2 (c): a waiting plan is a review card with the needs-you badge on its project's board, keyed by the inbox
+/// id; reading the board marks nothing shown. Once decided it leaves the board.
+#[test]
+fn a_waiting_plan_is_a_review_card_that_needs_you() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    lock(&app.shown).clear();
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    // The board on its own (project_state also reads the inbox, which is what shows items to the human).
+    let b = app.board(&pid);
+    let cards = b["campaigns"][0]["cards"].as_array().unwrap().clone();
+    let plan = cards.iter().find(|c| c["key"] == format!("inbox:{PLAN}")).unwrap_or_else(|| panic!("{b}"));
+    assert_eq!((plan["kind"].as_str(), plan["lane"].as_str(), plan["needs_you"].as_bool(), plan["campaign"].as_str()), (Some("plan"), Some("review"), Some(true), Some(CAMP)), "{plan}");
+    assert!(plan["task_id"].is_null() && plan["criteria"].is_null());
+    assert!(lock(&app.shown).is_empty(), "the board marks nothing shown");
+    // A decision needs what the inbox showed, so the inbox is read (as the window does) before rejecting.
+    app.inbox().unwrap();
+    t.campaign_script(0);
+    app.reject_plan(PLAN, "not now").unwrap();
+    let b = app.project_state(&pid, None).unwrap()["board"].clone();
+    assert!(!b["campaigns"][0]["cards"].as_array().unwrap().iter().any(|c| c["key"] == format!("inbox:{PLAN}")), "{b}");
+}
+
+/// ADR-15 4.2 (c): a waiting question is a review card with the needs-you badge.
+#[test]
+fn a_waiting_question_is_a_review_card_that_needs_you() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    let t = Tmp::new();
+    let app = t.app();
+    t.run(&app);
+    let mut v = done(CAMP, json!([]));
+    v["result"] = json!({"status": "need_input", "node": "plan", "question": "which branch?", "artifacts": {"campaign": CAMP}});
+    t.result("wf_q.json", &v);
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    let b = app.project_state(&pid, None).unwrap()["board"].clone();
+    let q = b["campaigns"][0]["cards"].as_array().unwrap().iter().find(|c| c["key"] == format!("inbox:question:{RUN}")).cloned().unwrap_or_else(|| panic!("{b}"));
+    assert_eq!((q["kind"].as_str(), q["lane"].as_str(), q["needs_you"].as_bool()), (Some("question"), Some("review"), Some(true)), "{q}");
+}
+
 // ---- FG-07 core: ids, receipts, the projection and the arrival event -------------------------------------------------
 
 use crate::control::receipt::Caller;
@@ -1274,4 +1319,28 @@ fn a_bare_task_id_follows_a_campaign_whose_runs_share_a_project() {
     }
     t.campaign("one", "2026-11-01T00:00:00Z", json!([{"id": "t1", "status": "blocked", "title": "bare"}]));
     assert_eq!(item(&app.inbox().unwrap(), "task:one.t1")["project_id"], p1);
+}
+
+/// #107 review sweep: a decision log that cannot be read never hides a plan from the board: the plan shows as a
+/// needs-you review card (only a decision actually read removes it).
+#[test]
+fn an_unreadable_decision_log_shows_the_plan_instead_of_hiding_it() {
+    use crate::projects::contract::{SessionKind, SessionStatus};
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let app = t.app();
+    ready(&t, &app);
+    let pid = super::super::test_project(&t.0.join("data"), &t.home(), &t.cwd());
+    let line = super::super::orchestrator::session_line(crate::projects::contract::fresh_id("s").unwrap(), &pid, SessionKind::Run, None, None, Some((RUN, CAMP)), "claude", 1, SessionStatus::Running);
+    app.projects.append_session(&line).unwrap();
+    app.inbox().unwrap();
+    t.campaign_script(0);
+    app.reject_plan(PLAN, "not now").unwrap();
+    let has_plan = |b: &Value| b["campaigns"][0]["cards"].as_array().unwrap().iter().any(|c| c["key"] == format!("inbox:{PLAN}") && c["needs_you"] == true);
+    assert!(!has_plan(&app.board(&pid)), "a decided plan is no card");
+    let ledger = t.0.join("data/control/ledger.jsonl");
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o000)).unwrap();
+    let b = app.board(&pid);
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(has_plan(&b), "an unreadable decision log hid the plan: {b}");
 }

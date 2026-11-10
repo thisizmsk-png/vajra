@@ -308,6 +308,14 @@ pub struct AccountList {
     pub accounts: Vec<Account>,
 }
 
+/// The whole answer of every stored-key command (`provider_key_*`): which account, and whether a key is saved. There is
+/// no other field, so a reply cannot carry the key or any part of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyState {
+    pub account: String,
+    pub saved: bool,
+}
+
 /// A model id: opaque, bounded, no whitespace or control characters.
 pub(crate) fn valid_model_id(m: &str) -> bool {
     !m.is_empty() && m.len() <= 80 && m.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._/:".contains(&b))

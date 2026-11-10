@@ -30,6 +30,7 @@ fn spec(argv: &[&str], cwd: &std::path::Path) -> SpawnSpec {
         rows: 24,
         cols: 80,
         redact: Redactor::default(),
+        codex_home: None,
     }
 }
 
@@ -387,4 +388,48 @@ fn take_over_changes_are_serialised_with_delivery() {
     let turn = ApprovedPlanTurn::new("20261106-0911", 0, "push").unwrap();
     assert_eq!(sup.submit_fixed_turn("s-cat", &turn), Err(SessionError::TakeOverActive));
     sup.kill("s-cat").unwrap();
+}
+
+/// A gateway launch through the real spawn path with a fake `codex`: the child sees `ENV_ALLOW` plus `CODEX_HOME` and
+/// nothing else, with no key, and its stdin is not the terminal.
+#[test]
+fn sessions_gateway_launch_env_is_allowlist_plus_codex_home_and_stdin_is_null() {
+    use std::os::unix::fs::PermissionsExt;
+    let (sup, bus, dir) = setup("gw");
+    let fake = dir.join("codex");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ -t 0 ]; then echo STDIN=tty; else echo STDIN=notty; fi\nif read x; then echo READ=data; else echo READ=eof; fi\necho ARGC=$#\nexec /usr/bin/env\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dir.join("home-for-codex");
+    let mut argv = crate::sessions::argv::build_gateway_argv("do it", "deepseek/deepseek-v4-flash", Some("low")).unwrap();
+    assert_eq!(argv[4], "codex");
+    argv[4] = fake.display().to_string();
+    let mut s = spec(&["true"], &dir);
+    s.argv = argv;
+    s.codex_home = Some(home.clone());
+    sup.spawn("s-gw", s).unwrap();
+    sup.wait("s-gw", WAIT).unwrap().expect("exited");
+    let l = wait_lines(&bus, "s-gw", |l| l.iter().any(|x| x.starts_with("TERM=")));
+    assert!(l.contains(&"STDIN=notty".to_string()) && l.contains(&"READ=eof".to_string()), "{l:?}");
+    let names: Vec<&str> = l.iter().filter_map(|x| x.split_once('=').map(|kv| kv.0)).filter(|k| !matches!(*k, "STDIN" | "READ" | "ARGC")).collect();
+    // The shell that wraps the fake adds its own bookkeeping variables; nothing else may appear.
+    for k in &names {
+        assert!(ENV_ALLOW.contains(k) || *k == "CODEX_HOME" || ["PWD", "OLDPWD", "SHLVL", "_"].contains(k), "unexpected env var {k}");
+    }
+    assert!(l.contains(&format!("CODEX_HOME={}", home.display())), "{l:?}");
+    for k in crate::adapter::CODEX_KEYS.iter().chain(crate::adapter::CLAUDE_KEYS.iter()) {
+        assert!(!names.contains(k), "{k} leaked");
+    }
+}
+
+#[test]
+fn sessions_without_a_codex_home_never_set_one() {
+    let (sup, bus, dir) = setup("nohome");
+    sup.spawn("s-nh", spec(&["/usr/bin/env"], &dir)).unwrap();
+    sup.wait("s-nh", WAIT).unwrap().expect("exited");
+    let l = wait_lines(&bus, "s-nh", |l| l.iter().any(|x| x.starts_with("TERM=")));
+    assert!(!l.iter().any(|x| x.starts_with("CODEX_HOME=")));
 }
