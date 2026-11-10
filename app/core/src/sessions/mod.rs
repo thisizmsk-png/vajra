@@ -117,6 +117,8 @@ pub struct SpawnSpec {
     /// The steer nonce in the launch prompt (the TUI echoes it): replaced,
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
+    /// A Vajra-owned `CODEX_HOME` (gateway launch). The only variable added to `ENV_ALLOW`; never a key.
+    pub codex_home: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +273,9 @@ impl Supervisor {
         cmd.env_clear();
         for (k, v) in user_env() {
             cmd.env(k, v);
+        }
+        if let Some(home) = &spec.codex_home {
+            cmd.env("CODEX_HOME", home);
         }
         cmd.cwd(&spec.cwd);
 

@@ -322,3 +322,67 @@ fn lead_agents_json_is_one_valid_agent() {
     assert!(a["description"].is_string() && a["prompt"].as_str().unwrap().len() > 100);
     assert_eq!(v.as_object().unwrap().len(), 1);
 }
+
+const KEY: &str = "SENTINEL-sk-or-v1-0123456789";
+
+fn gateway(effort: Option<&str>) -> Vec<String> {
+    build_gateway_argv("add a toggle", "deepseek/deepseek-v4-flash", effort).unwrap()
+}
+
+#[test]
+fn gateway_argv_snapshot() {
+    let a = gateway(Some("high"));
+    assert_eq!(a[..4], ["/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh"]);
+    assert_eq!(
+        a[4..],
+        [
+            "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "deepseek/deepseek-v4-flash",
+            "-c", "model_reasoning_effort=\"high\"",
+            "-c", "model_providers.vajra-openrouter.request_max_retries=0",
+            "-c", "model_providers.vajra-openrouter.stream_max_retries=0",
+            "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+            "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "--", "add a toggle",
+        ]
+    );
+}
+
+#[test]
+fn gateway_argv_without_effort_has_no_effort_override_but_keeps_retry_and_sandbox() {
+    let a = gateway(None);
+    assert!(!a.iter().any(|x| x.contains("model_reasoning_effort")));
+    for want in ["request_max_retries=0", "stream_max_retries=0", "exclude_slash_tmp=true", "exclude_tmpdir_env_var=true"] {
+        assert!(a.iter().any(|x| x.ends_with(want)), "{want}");
+    }
+}
+
+#[test]
+fn gateway_argv_holds_no_key_and_keeps_the_ask_after_the_separator() {
+    // The ask is the one free-text element and it is last, after `--`, so a flag-shaped ask stays a prompt.
+    let a = build_gateway_argv("--dangerously-bypass-approvals-and-sandbox", "m", None).unwrap();
+    assert_eq!(a[a.len() - 2..], ["--", "--dangerously-bypass-approvals-and-sandbox"]);
+    assert!(!a.iter().any(|x| x.contains(KEY) || x.contains("API_KEY") || x.contains("Bearer")));}
+
+#[test]
+fn gateway_argv_refuses_bad_inputs() {
+    let f = |ask: &str, m: &str, e: Option<&str>| build_gateway_argv(ask, m, e).unwrap_err().field;
+    assert_eq!(f("", "m", None), "ask");
+    assert_eq!(f("a\0b", "m", None), "ask");
+    assert_eq!(f("x", "", None), "model");
+    assert_eq!(f("x", "-m", None), "model");
+    assert_eq!(f("x", "a b", None), "model");
+    assert_eq!(f("x", "a;b", None), "model");
+    assert_eq!(f("x", "m", Some("high\"\nx=1")), "effort");
+    assert_eq!(f("x", "m", Some("max")), "effort");
+}
+
+#[test]
+fn only_a_codex_gateway_or_key_account_gets_the_gateway_argv() {
+    use crate::adapter::{gateway_run_argv, Account, Engine, Route};
+    let acct = |engine, route| Account { id: "openrouter".into(), engine, route };
+    for ok in [Route::Gateway, Route::ApiKey] {
+        assert!(gateway_run_argv(&acct(Engine::Codex, ok), "x", "m", None).is_ok());
+    }
+    assert!(gateway_run_argv(&Account::login(Engine::Codex), "x", "m", None).is_err());
+    assert!(gateway_run_argv(&acct(Engine::Claude, Route::Gateway), "x", "m", None).is_err());
+}

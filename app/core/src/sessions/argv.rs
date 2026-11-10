@@ -71,6 +71,48 @@ pub fn check_ask(ask: &str) -> Result<(), InvalidInput> {
     Ok(())
 }
 
+/// Reasoning efforts the Codex harness accepts for `model_reasoning_effort`.
+pub const EFFORTS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+
+/// A gateway model slug such as `deepseek/deepseek-v4-flash`: it goes after `-m`, so it cannot start with `-`.
+fn valid_model(m: &str) -> bool {
+    (1..=100).contains(&m.len())
+        && !m.starts_with('-')
+        && m.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'/' | b'-' | b'+'))
+}
+
+/// The one fixed shell line of a gateway launch. It only redirects stdin from `/dev/null` and then `exec`s its own
+/// positional arguments, so nothing the user or a model typed is ever parsed as shell text.
+const NULL_STDIN: &str = r#"exec "$@" </dev/null"#;
+
+/// The Codex harness on a gateway: `codex exec --json --sandbox workspace-write -m <model>`, the retry and sandbox
+/// overrides, and the ask after `--`. Stdin is `/dev/null` (a gateway run is non-interactive). The core runs the retry
+/// policy itself (H9), so the harness retries nothing; `/tmp` and `$TMPDIR` stay out of the workspace-write sandbox.
+/// There is no key here: Codex gets it from the Keychain through the generated config (`providers::codex_home`).
+pub fn build_gateway_argv(ask: &str, model: &str, effort: Option<&str>) -> Result<Vec<String>, InvalidInput> {
+    check_ask(ask)?;
+    if !valid_model(model) {
+        return Err(bad("model", "must be a model slug"));
+    }
+    if effort.is_some_and(|e| !EFFORTS.contains(&e)) {
+        return Err(bad("effort", "is not a known reasoning effort"));
+    }
+    let id = crate::providers::codex_home::PROVIDER_ID;
+    let mut argv: Vec<String> = ["/bin/sh", "-c", NULL_STDIN, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", model]
+        .map(String::from)
+        .into();
+    let mut over = |kv: String| argv.extend(["-c".to_string(), kv]);
+    if let Some(e) = effort {
+        over(format!("model_reasoning_effort=\"{e}\""));
+    }
+    over(format!("model_providers.{id}.request_max_retries=0"));
+    over(format!("model_providers.{id}.stream_max_retries=0"));
+    over("sandbox_workspace_write.exclude_slash_tmp=true".into());
+    over("sandbox_workspace_write.exclude_tmpdir_env_var=true".into());
+    argv.extend(["--".into(), ask.into()]);
+    Ok(argv)
+}
+
 /// Every Start-run field rule, without a nonce or session: run before a
 /// control session is created for the form.
 pub fn validate(input: &RunInput) -> Result<(), InvalidInput> {

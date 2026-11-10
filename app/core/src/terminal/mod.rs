@@ -470,6 +470,31 @@ impl Terminals {
         v
     }
 
+    /// Ids of the terminals opened in `dir` or inside it (links resolved), for releasing a worker's worktree.
+    pub fn ids_under(&self, dir: &Path) -> Vec<u32> {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.list().into_iter().filter(|t| t.cwd.canonicalize().unwrap_or_else(|_| t.cwd.clone()).starts_with(&dir)).map(|t| t.id).collect()
+    }
+
+    /// Whether the terminal's shell has a child process (a dev server, an editor, a build): closing it would end that.
+    /// Bounded to 2 s; a shell that cannot be asked in time, or at all, counts as busy. An ended shell is never busy.
+    pub fn is_busy(&self, id: u32) -> bool {
+        let Some(t) = self.list().into_iter().find(|t| t.id == id).filter(|t| t.alive) else { return false };
+        let Ok(mut ask) = std::process::Command::new("/usr/bin/pgrep").args(["-P", &t.pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else { return true };
+        let start = std::time::Instant::now();
+        loop {
+            match ask.try_wait() {
+                Ok(Some(s)) => return s.success(),
+                Ok(None) if start.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(5)),
+                _ => {
+                    let _ = ask.kill();
+                    let _ = ask.wait();
+                    return true;
+                }
+            }
+        }
+    }
+
     /// Keystrokes or a paste typed by the human. The caller is the UI's own terminal view; there is no other path in.
     /// Never blocks: the bytes go to a bounded queue a writer thread drains into the PTY, and a full queue (the shell is
     /// not reading) answers `QueueFull` instead of waiting.
