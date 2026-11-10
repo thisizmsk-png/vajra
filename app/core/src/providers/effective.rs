@@ -15,6 +15,7 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -34,6 +35,8 @@ const MAX_READ: u64 = 1024 * 1024;
 const MAX_RECORDS: usize = 400;
 /// New files whose lines are counted into a `Diff`; every one is still listed.
 const MAX_UNTRACKED: usize = 500;
+/// The most time spent counting new files' lines; past it the totals are marked partial.
+const UNTRACKED_BUDGET: Duration = Duration::from_secs(2);
 
 /// What the slot's choice asked for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -292,12 +295,22 @@ pub struct Diff {
     pub files: Vec<String>,
     pub added: u64,
     pub removed: u64,
+    /// The new files' line counts stopped early (the time budget or the file cap ran out): `added` is then a lower bound.
+    /// Every file is still listed.
+    pub partial: bool,
 }
 
 /// The diff of `cwd` (the worker's worktree) against `base`, read through the read-only git bridge: tracked changes
 /// from `git diff --numstat <base>` and new files from `git ls-files --others --exclude-standard` (their lines count as added). `None` when git could
 /// not answer; an empty `Diff` means git saw no change.
+///
+/// This spawns git once per new file (up to `MAX_UNTRACKED`, within `UNTRACKED_BUDGET`), so it is for the one-time receipt
+/// built when a run ends, on a background thread. It must never run on the `project_state` poll path.
 pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
+    diff_from_git_within(bridge, cwd, base, UNTRACKED_BUDGET)
+}
+
+fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duration) -> Option<Diff> {
     let git = |args: &[&str]| {
         let out = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
         (out.code == Some(0) && out.whole()).then_some(out.stdout)
@@ -324,9 +337,14 @@ pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
     }
     // A new file is all added lines. Git counts them (`--no-index` against /dev/null, which exits 1 when the file differs,
     // as it always does here) and does not follow a link: a link counts as one line, its target text. A binary file adds
-    // none. At most `MAX_UNTRACKED` files are counted, so a tree of thousands of new files is not read one by one.
+    // none. Counting stops at `MAX_UNTRACKED` files or `UNTRACKED_BUDGET`, whichever is first (`partial`).
+    let (start, mut counted) = (Instant::now(), 0);
     for path in untracked.split('\0').filter(|l| !l.is_empty()) {
-        if diff.files.len() < MAX_UNTRACKED {
+        if counted >= MAX_UNTRACKED || start.elapsed() >= budget {
+            // Out of budget: keep listing, stop counting, and say the total is a lower bound.
+            diff.partial = true;
+        } else {
+            counted += 1;
             let args = ["diff", "--numstat", "-z", "--no-index", "--", "/dev/null", path].map(String::from).to_vec();
             if let Ok(out) = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }) {
                 if matches!(out.code, Some(0 | 1)) && out.whole() {

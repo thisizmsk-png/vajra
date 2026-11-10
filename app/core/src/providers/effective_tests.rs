@@ -192,7 +192,7 @@ fn the_diff_comes_from_git_for_a_run_that_only_edited_through_a_shell() {
     let bridge = Bridge::new(PathBuf::from("/nonexistent"));
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
     // One line appended to a.txt and one line in the new b.txt.
-    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], added: 2, removed: 0 });
+    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], added: 2, removed: 0, partial: false });
     // A clean tree is an empty diff, not a failure; an unknown base is a failure (None), not an empty diff.
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "w"]);
@@ -255,4 +255,54 @@ fn a_run_that_only_created_files_counts_their_lines_as_added() {
     files.sort();
     assert_eq!(files, ["blob.bin", "empty.txt", "new one.txt", "sub/two.txt"]);
     assert_eq!((d.added, d.removed), (5, 0), "3 + 2 lines; the empty and binary files add none");
+}
+
+#[test]
+fn counting_new_files_stops_at_a_time_budget_keeps_listing_and_says_the_totals_are_partial() {
+    let repo = tmp();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "t@example.invalid"]);
+    git(&repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    for i in 0..20 {
+        std::fs::write(repo.join(format!("n{i:02}.txt")), "a\nb\n").unwrap();
+    }
+    // A git whose per-file count is slow (0.2 s); every other command is the real git.
+    let slow = tmp().join("slow-git");
+    std::fs::write(&slow, "#!/bin/sh\ncase \"$*\" in *--no-index*) /bin/sleep 0.2;; esac\nexec /usr/bin/git \"$@\"\n").unwrap();
+    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    bridge.git = slow;
+    let started = std::time::Instant::now();
+    let d = diff_from_git_within(&bridge, &repo, "HEAD", Duration::from_millis(700)).expect("git answered");
+    assert!(started.elapsed() < Duration::from_millis(2500), "the budget stopped the counting: {:?}", started.elapsed());
+    assert_eq!(d.files.len(), 20, "every new file is still listed");
+    assert!(d.partial, "the totals say they are a lower bound");
+    assert!(d.added > 0 && d.added < 40, "some files were counted, not all: {}", d.added);
+    // With a roomy budget nothing is partial and every line is counted.
+    let full = diff_from_git_within(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD", Duration::from_secs(30)).unwrap();
+    assert_eq!((full.added, full.partial), (40, false));
+}
+
+/// Timing of the new-file count: `cargo test --release --lib untracked_count_timing -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn untracked_count_timing() {
+    for n in [50usize, 500] {
+        let repo = tmp();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        for i in 0..n {
+            std::fs::write(repo.join(format!("n{i:03}.txt")), "a\nb\nc\n").unwrap();
+        }
+        let started = std::time::Instant::now();
+        let d = diff_from_git(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD").unwrap();
+        println!("TIMING {n} new files: {:?} (added {}, partial {})", started.elapsed(), d.added, d.partial);
+    }
 }
