@@ -78,8 +78,10 @@ export function Inbox() {
 
   const open = (i: CampaignItem) => {
     const project = itemProject(index, i) ?? null;
-    if (i.kind !== "plan" && P.crew && P.crew.campaign === i.campaign) go("crew", { slug: i.campaign, id: P.crew.runId }, project);
-    else go("review", { slug: i.campaign }, project);
+    // The link pins this project: the shell would otherwise place the campaign by its own folder.
+    const pin: Record<string, string> = project ? { pin: "1" } : {};
+    if (i.kind !== "plan" && P.crew && P.crew.campaign === i.campaign) go("crew", { slug: i.campaign, id: P.crew.runId, ...pin }, project);
+    else go("review", { slug: i.campaign, ...pin }, project);
   };
   const set = (k: string, o: Outcome) => setOutcome((m) => ({ ...m, [k]: o }));
   const approve = (i: CampaignItem) => {

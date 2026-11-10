@@ -100,7 +100,7 @@ describe("Opening an item focuses the exact project and campaign, and never appr
     mount();
     await screen.findByText("Deploy to staging");
     fireEvent.click(within(card("Deploy to staging")).getByRole("button", { name: S.inbox.open }));
-    expect(window.location.hash).toBe(`#/p/${API}/review?slug=api-1`);
+    expect(window.location.hash).toBe(`#/p/${API}/review?slug=api-1&pin=1`);
     expect(n("act_approve_plan")).toBe(0);
     expect(n("approve_plan")).toBe(0);
   });

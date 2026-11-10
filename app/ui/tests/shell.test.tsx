@@ -180,6 +180,13 @@ describe("Shell B frame (FG-03)", () => {
     expect(tabs().getByRole("link", { name: /^api/ }).getAttribute("aria-current")).not.toBe("page");
   });
 
+  it("History opens a campaign of another project in that project's frame", async () => {
+    boot(`#/p/${API}/history`);
+    fireEvent.click(await screen.findByRole("button", { name: "web-1" }));
+    await waitFor(() => expect(tabs().getByRole("link", { name: /^web/ }).getAttribute("aria-current")).toBe("page"));
+    expect(tabs().getByRole("link", { name: /^api/ }).getAttribute("aria-current")).not.toBe("page");
+  });
+
   it("places an old campaign link in its project: #/run?slug=web-1 is web's Review", async () => {
     boot("#/run?slug=web-1");
     await waitFor(() => expect(tabs().getByRole("link", { name: /^web/ }).getAttribute("aria-current")).toBe("page"));

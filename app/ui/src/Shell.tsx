@@ -48,15 +48,17 @@ function Frame() {
   const [inspector, setInspector] = useInspector();
   const main = useRef<HTMLElement>(null);
 
-  // Which project you are in: the one the link names (an inbox item is opened in the project the core filed it under),
-  // else the one that owns the campaign in the link, the last one you used, the one with the live run, else the first. `new` is the launcher for a folder that is not a project yet.
+  // Which project you are in: the one the link pins (`pin=1`: an inbox item is opened in the project the core filed it
+  // under), else the one that owns the campaign in the link, the one in the hash, the last one you used, the one with
+  // the live run, else the first. A link that only carries the current project (History's rows) follows its campaign. `new` is the launcher for a folder that is not a project yet.
   const known = (id: string | null | undefined): id is string => !!id && P.projects.some((p) => p.id === id);
   const slug = route.params.slug;
   const live = P.crew ? P.byCampaign[P.crew.campaign] : undefined;
   const remembered = lastProject();
   const pid: string | null = route.params.new ? null
-    : known(route.project) ? route.project
+    : route.params.pin === "1" && known(route.project) ? route.project
     : known(slug ? P.byCampaign[slug] : undefined) ? P.byCampaign[slug!]
+    : known(route.project) ? route.project
     : known(remembered) ? remembered
     : known(live) ? live
     : P.projects[0]?.id ?? null;
