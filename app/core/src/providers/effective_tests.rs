@@ -277,7 +277,9 @@ fn counting_new_files_stops_at_a_time_budget_keeps_listing_and_says_the_totals_a
     bridge.git = slow;
     let started = std::time::Instant::now();
     let d = diff_from_git_within(&bridge, &repo, "HEAD", Duration::from_millis(700)).expect("git answered");
-    assert!(started.elapsed() < Duration::from_millis(2500), "the budget stopped the counting: {:?}", started.elapsed());
+    // Only a runaway is caught by the time bound; that the budget really cut the count is what `partial` and "some, not
+    // all" below assert. It is loose because a loaded machine stretches every spawn (2.78 s was seen against 0.7 s).
+    assert!(started.elapsed() < Duration::from_secs(6), "the budget stopped the counting: {:?}", started.elapsed());
     assert_eq!(d.files.len(), 20, "every new file is still listed");
     assert!(d.partial, "the totals say they are a lower bound");
     assert!(d.added > 0 && d.added < 40, "some files were counted, not all: {}", d.added);
