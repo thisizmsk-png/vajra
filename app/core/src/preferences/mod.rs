@@ -2,7 +2,7 @@
 //! Explicit enums, bounded model identifiers and shortcut choices leave no token/env/command-string bucket.
 use crate::projects::contract::valid_project_id;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -21,6 +21,107 @@ choice!(Theme, System, Dark, Light);
 choice!(Editor, System, Code);
 choice!(Shell, Login, Sh, Bash, Zsh);
 choice!(Agent, Claude, Codex);
+
+/// An account (`vajra.provider_accounts/1` id), with the model and effort to ask it for. `None` is the CLI's own default.
+/// Names an account, never a credential.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Choice {
+    pub account: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// One entry of the ceiling. A `model` of `None` allows every model on that account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allowed {
+    pub account: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Per-project agent choice: a default, a choice per crew role (a role with no entry uses the default), and the ceiling
+/// the Director-General cannot go past. Replaces the `agent` preference; an old `agent` is mapped on read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agents {
+    pub default: Choice,
+    #[serde(default)]
+    pub roles: BTreeMap<String, Choice>,
+    pub allowed: Vec<Allowed>,
+}
+impl Agents {
+    /// An old `agent: "codex"` reads as `{default: codex, allowed: [codex]}`. No data is migrated.
+    pub fn from_legacy(agent: Agent) -> Agents {
+        let account = match agent {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+        };
+        Agents {
+            default: Choice {
+                account: account.into(),
+                model: None,
+                effort: None,
+            },
+            roles: BTreeMap::new(),
+            allowed: vec![Allowed {
+                account: account.into(),
+                model: None,
+            }],
+        }
+    }
+    /// The choice for a role; a role with no entry (or no role) gets the default.
+    pub fn choice_for(&self, role: Option<&str>) -> &Choice {
+        role.and_then(|r| self.roles.get(r))
+            .unwrap_or(&self.default)
+    }
+    /// Whether the ceiling lets this choice through.
+    pub fn permits(&self, c: &Choice) -> bool {
+        self.allowed
+            .iter()
+            .any(|a| a.account == c.account && (a.model.is_none() || a.model == c.model))
+    }
+    fn validate(&self) -> Result<(), Error> {
+        use crate::projects::contract::valid_provider;
+        let model_ok = |m: &Option<String>| {
+            m.as_deref()
+                .is_none_or(crate::providers::contract::valid_model_id)
+        };
+        let choice_ok = |c: &Choice| {
+            valid_provider(&c.account)
+                && model_ok(&c.model)
+                && c.effort.as_deref().is_none_or(|e| {
+                    !e.is_empty()
+                        && e.len() <= 16
+                        && e.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+        };
+        if self.roles.len() > 16
+            || self.allowed.is_empty()
+            || self.allowed.len() > 32
+            || !choice_ok(&self.default)
+            || self
+                .roles
+                .iter()
+                .any(|(r, c)| !valid_provider(r) || !choice_ok(c))
+            || self
+                .allowed
+                .iter()
+                .any(|a| !valid_provider(&a.account) || !model_ok(&a.model))
+        {
+            return Err(bad());
+        }
+        // The ceiling is enforced on write: nothing chosen may sit outside it.
+        if !self.permits(&self.default) || self.roles.values().any(|c| !self.permits(c)) {
+            return Err(Error("outside_allowed"));
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Shortcuts {
@@ -44,6 +145,9 @@ pub struct Preferences {
     pub notifications: bool,
     pub notifications_text: bool,
     pub agent: Agent,
+    /// Set by the per-role form; `None` reads as the old `agent` (see `Preferences::agents`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Agents>,
     pub model: String,
     pub workers: u8,
     pub rounds: u8,
@@ -58,6 +162,7 @@ impl Default for Preferences {
             notifications: true,
             notifications_text: false,
             agent: Agent::Claude,
+            agents: None,
             model: String::new(),
             workers: 4,
             rounds: 2,
@@ -75,6 +180,7 @@ pub struct Patch {
     pub notifications: Option<bool>,
     pub notifications_text: Option<bool>,
     pub agent: Option<Agent>,
+    pub agents: Option<Agents>,
     pub model: Option<String>,
     pub workers: Option<u8>,
     pub rounds: Option<u8>,
@@ -82,13 +188,14 @@ pub struct Patch {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inherit: Vec<String>,
 }
-const FIELDS: [&str; 10] = [
+const FIELDS: [&str; 11] = [
     "theme",
     "editor",
     "shell",
     "notifications",
     "notifications_text",
     "agent",
+    "agents",
     "model",
     "workers",
     "rounds",
@@ -115,7 +222,16 @@ impl From<std::io::Error> for Error {
     }
 }
 impl Preferences {
+    /// The agent choice in force: `agents` when set, else the old `agent` mapped on read.
+    pub fn agents(&self) -> Agents {
+        self.agents
+            .clone()
+            .unwrap_or_else(|| Agents::from_legacy(self.agent))
+    }
     fn validate(&self) -> Result<(), Error> {
+        if let Some(a) = &self.agents {
+            a.validate()?;
+        }
         if !(1..=16).contains(&self.workers)
             || !(1..=3).contains(&self.rounds)
             || self.model.len() > 80
@@ -155,6 +271,13 @@ impl Preferences {
             workers,
             rounds
         );
+        // The newest write wins: an old-style `agent` write drops `agents`, which reads as the old value again.
+        if p.agent.is_some() {
+            self.agents = None;
+        }
+        if let Some(v) = &p.agents {
+            self.agents = Some(v.clone());
+        }
         if let Some(v) = &p.model {
             self.model = v.clone();
         }
@@ -189,6 +312,8 @@ pub struct View {
     pub global: Preferences,
     pub overrides: Patch,
     pub effective: Preferences,
+    /// `effective.agents`, or the old `agent` mapped on read.
+    pub agents: Agents,
     pub sources: BTreeMap<String, String>,
 }
 impl Document {
@@ -200,27 +325,32 @@ impl Document {
         let raw = serde_json::to_value(&patch).expect("plain fields");
         let mut effective = self.global.clone();
         effective.apply(&patch);
+        let mut sources: BTreeMap<String, String> = FIELDS
+            .iter()
+            .map(|f| {
+                (
+                    f.to_string(),
+                    if raw[*f].is_null() {
+                        "global"
+                    } else {
+                        "project"
+                    }
+                    .into(),
+                )
+            })
+            .collect();
+        if !raw["agent"].is_null() {
+            sources.insert("agents".into(), "project".into());
+        }
         View {
+            agents: effective.agents(),
             schema: self.schema.clone(),
             rev: self.rev,
             project_id: project.map(str::to_owned),
             global: self.global.clone(),
             overrides: patch,
             effective,
-            sources: FIELDS
-                .iter()
-                .map(|f| {
-                    (
-                        f.to_string(),
-                        if raw[*f].is_null() {
-                            "global"
-                        } else {
-                            "project"
-                        }
-                        .into(),
-                    )
-                })
-                .collect(),
+            sources,
         }
     }
     fn validate(&self) -> Result<(), Error> {
@@ -296,6 +426,10 @@ impl Store {
                     if !raw[field].is_null() {
                         merged[field] = raw[field].clone();
                     }
+                }
+                // A newer old-style `agent` write supersedes a stored `agents`.
+                if !raw["agent"].is_null() && raw["agents"].is_null() {
+                    merged["agents"] = Value::Null;
                 }
                 *entry = serde_json::from_value(merged).map_err(|_| bad())?;
             }

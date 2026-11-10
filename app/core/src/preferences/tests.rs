@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::json;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{symlink, PermissionsExt};
 const P: &str = "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T";
 const Q: &str = "p_01JC5X8Z3B0K2M4N6P7Q8R9S0T";
 struct Home(std::path::PathBuf);
@@ -178,4 +178,126 @@ fn fg08_response_contract_and_notifications_are_private_by_default() {
         serde_json::from_str(include_str!("../../tests/fixtures/preferences-v1.json")).unwrap();
     assert_eq!(actual, expected);
     assert_eq!(actual["caps"]["editable"], false);
+}
+
+#[test]
+fn an_old_agent_preference_reads_as_a_default_and_an_allowed_set() {
+    let h = Home::new();
+    let s = h.store();
+    assert_eq!(
+        s.read(None).unwrap().agents,
+        Agents::from_legacy(Agent::Claude)
+    );
+    s.update(Some(P), 0, patch(json!({"agent":"codex"})), false)
+        .unwrap();
+    let a = s.read(Some(P)).unwrap().agents;
+    assert_eq!(
+        (
+            a.default.account.as_str(),
+            a.allowed.len(),
+            a.allowed[0].account.as_str(),
+            a.roles.len()
+        ),
+        ("codex", 1, "codex", 0)
+    );
+    assert_eq!(s.read(Some(P)).unwrap().sources["agents"], "project");
+    assert_eq!(s.read(Some(Q)).unwrap().agents.default.account, "claude");
+}
+
+fn agents_patch() -> serde_json::Value {
+    json!({"agents": {
+        "default": {"account": "claude"},
+        "roles": {"docs": {"account": "openrouter", "model": "deepseek/deepseek-v3.2"}, "tests": {"account": "codex", "effort": "medium"}},
+        "allowed": [{"account": "claude"}, {"account": "codex"}, {"account": "openrouter", "model": "deepseek/deepseek-v3.2"}]
+    }})
+}
+
+#[test]
+fn a_role_with_no_entry_falls_back_to_the_default() {
+    let h = Home::new();
+    let s = h.store();
+    let a = s
+        .update(None, 0, patch(agents_patch()), false)
+        .unwrap()
+        .agents;
+    assert_eq!(a.choice_for(Some("docs")).account, "openrouter");
+    assert_eq!(
+        a.choice_for(Some("tests")).effort.as_deref(),
+        Some("medium")
+    );
+    assert_eq!(a.choice_for(Some("backend")), &a.default);
+    assert_eq!(a.choice_for(None), &a.default);
+    // Survives a reload, and the serialized view still has the old key.
+    let v = h.store().read(None).unwrap();
+    assert_eq!(v.agents, a);
+    assert_eq!(v.effective.agent, Agent::Claude);
+}
+
+#[test]
+fn the_allowed_ceiling_is_enforced_on_write() {
+    let h = Home::new();
+    let s = h.store();
+    // A role outside the ceiling.
+    let mut p = agents_patch();
+    p["agents"]["roles"]["docs"] = json!({"account": "openrouter", "model": "x-ai/grok-4"});
+    assert_eq!(
+        s.update(None, 0, patch(p), false).unwrap_err().code(),
+        "outside_allowed"
+    );
+    // A default outside the ceiling.
+    let mut p = agents_patch();
+    p["agents"]["default"] = json!({"account": "gemini"});
+    assert_eq!(
+        s.update(Some(P), 0, patch(p), false).unwrap_err().code(),
+        "outside_allowed"
+    );
+    // An empty ceiling, a bad id and a secret-shaped model are refused as invalid.
+    for bad in [json!([]), json!([{"account": "Bad Id"}])] {
+        let mut p = agents_patch();
+        p["agents"]["allowed"] = bad;
+        assert!(s.update(None, 0, patch(p), false).is_err());
+    }
+    let mut p = agents_patch();
+    p["agents"]["roles"]["docs"]["model"] = json!("sk proj abc");
+    assert_eq!(
+        s.update(None, 0, patch(p), false).unwrap_err().code(),
+        "invalid_preferences"
+    );
+    // Nothing was written by the refusals.
+    assert_eq!(s.read(None).unwrap().rev, 0);
+    // A project cannot raise itself past the ceiling it inherits... it brings its own, validated the same way.
+    s.update(None, 0, patch(agents_patch()), false).unwrap();
+    let mut p = agents_patch();
+    p["agents"]["allowed"] = json!([{"account": "claude"}]);
+    assert_eq!(
+        s.update(Some(P), 1, patch(p), false).unwrap_err().code(),
+        "outside_allowed",
+        "its roles are outside its own ceiling"
+    );
+}
+
+#[test]
+fn a_newer_old_style_write_replaces_agents_and_unknown_fields_are_refused() {
+    let h = Home::new();
+    let s = h.store();
+    s.update(Some(P), 0, patch(agents_patch()), false).unwrap();
+    let v = s
+        .update(Some(P), 1, patch(json!({"agent": "codex"})), false)
+        .unwrap();
+    assert_eq!(
+        (v.agents.default.account.as_str(), v.agents.roles.len()),
+        ("codex", 0)
+    );
+    assert!(serde_json::from_value::<Patch>(json!({"agents": {"default": {"account": "claude", "token": "x"}, "allowed": [{"account": "claude"}]}})).is_err(), "no bucket for a secret");
+    // Inherit drops the project's choice back to the global one.
+    s.update(Some(P), 2, patch(agents_patch()), false).unwrap();
+    let v = s
+        .update(
+            Some(P),
+            3,
+            serde_json::from_value(json!({"inherit": ["agent", "agents"]})).unwrap(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(v.agents, Agents::from_legacy(Agent::Claude));
 }

@@ -27,6 +27,7 @@ export class FakeXterm {
   options: Record<string, unknown> = {};
   textarea = document.createElement("textarea");
   written: Uint8Array[] = [];
+  buffer = { active: { type: "normal" as "normal" | "alternate" } };
   focused = 0;
   disposed = false;
   selection = "";

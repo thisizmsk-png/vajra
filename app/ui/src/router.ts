@@ -4,7 +4,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 /** The views of shell B. `crew` and `history` are the full-tree and all-campaign screens, kept until their slices replace them. */
-export const SCREENS = ["orch", "board", "review", "worker", "crew", "history", "inbox", "settings"] as const;
+export const SCREENS = ["orch", "launch", "board", "review", "worker", "crew", "history", "inbox", "settings"] as const;
 export type Screen = (typeof SCREENS)[number];
 /** Names from the screen-list shell, still used by links and by screens that predate projects. */
 const ALIAS = { home: "orch", run: "review", chat: "orch" } as const;

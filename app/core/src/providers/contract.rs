@@ -207,6 +207,168 @@ impl ProjectProvider {
     }
 }
 
+// ---- `vajra.provider_accounts/1`: one record per way of running and paying for agents ------------------------------------
+//
+// Additive to `vajra.providers/1`. Same rules: unknown fields ignored, another major reported, an unknown state reads as
+// `cannot_tell`, an unknown billing kind as `unknown`. There is no field that can hold a key, token or secret: a stored key
+// is only the boolean `credential.saved`. There is no rotation field and none will be added (H7).
+
+pub const ACCOUNTS_SCHEMA: &str = "vajra.provider_accounts/1";
+pub const ACCOUNTS_MAJOR: u32 = 1;
+const MAX_ACCOUNTS: usize = 16;
+const MAX_MODELS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    /// The CLI owns its login; Vajra reads only the CLI's own status.
+    CliLogin,
+    /// A key the user pasted, held in the Keychain (written by a later change).
+    ApiKey,
+    /// A non-secret base URL plus a Keychain key.
+    Gateway,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    pub source: CredentialSource,
+    /// `api_key` and `gateway` only: whether a key is stored. Never the key, a prefix or a suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingKind {
+    Subscription,
+    ApiKey,
+    Gateway,
+    #[serde(other)]
+    Unknown,
+}
+
+/// An API key that would bill instead of the subscription. Holds the NAME of the setting and where it was found, never a
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideWarning {
+    /// An environment variable or setting name (`OPENAI_API_KEY`, `apiKeyHelper`).
+    pub name: String,
+    /// `cli_env_block`, `cli_config` or `cli_api_key_helper`.
+    pub found_in: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBilling {
+    pub kind: BillingKind,
+    /// Only what the CLI itself prints (a plan, a masked email). Never guessed, never a key.
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub override_warning: Option<OverrideWarning>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountState {
+    SignedIn,
+    SignedOut,
+    NotInstalled,
+    KeySaved,
+    KeyMissing,
+    /// Also the reading of any state this version does not know. Never blocks a start.
+    #[serde(other)]
+    CannotTell,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountModel {
+    /// Opaque; passed straight through to the harness.
+    pub id: String,
+    /// Picks the icon (`claude`, `gpt`, `grok`, `deepseek`, ...).
+    pub family: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    pub id: String,
+    pub provider: String,
+    /// The unmodified CLI that runs the worker (`claude`, `codex`). A gateway is a route, not a harness.
+    pub harness: String,
+    pub credential: Credential,
+    pub billing: AccountBilling,
+    pub label: String,
+    pub state: AccountState,
+    #[serde(default)]
+    pub models: Vec<AccountModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountList {
+    pub schema: String,
+    pub accounts: Vec<Account>,
+}
+
+/// A model id: opaque, bounded, no whitespace or control characters.
+pub(crate) fn valid_model_id(m: &str) -> bool {
+    !m.is_empty() && m.len() <= 80 && m.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._/:".contains(&b))
+}
+
+/// A setting or environment variable name.
+fn valid_setting_name(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 64 && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+impl Account {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if !valid_provider(&self.id) || !valid_provider(&self.provider) || !valid_provider(&self.harness) {
+            return Err(ContractError::Invalid("account id"));
+        }
+        if !text_ok(&self.label) || self.billing.account_label.as_deref().is_some_and(|l| !text_ok(l)) {
+            return Err(ContractError::Invalid("text"));
+        }
+        // `saved` belongs to a stored key and to nothing else.
+        if (self.credential.source == CredentialSource::CliLogin) != self.credential.saved.is_none() {
+            return Err(ContractError::Invalid("credential"));
+        }
+        if let Some(w) = &self.billing.override_warning {
+            if !valid_setting_name(&w.name) || !["cli_env_block", "cli_config", "cli_api_key_helper"].contains(&w.found_in.as_str()) {
+                return Err(ContractError::Invalid("override_warning"));
+            }
+        }
+        if self.models.len() > MAX_MODELS || self.models.iter().any(|m| !valid_model_id(&m.id) || !valid_provider(&m.family)) {
+            return Err(ContractError::Invalid("models"));
+        }
+        Ok(())
+    }
+}
+
+/// Parse and validate a `provider_accounts` answer. The schema tag is read first, so another major reads as unsupported.
+pub fn parse_account_list(bytes: &[u8]) -> Result<AccountList, ContractError> {
+    if bytes.len() > MAX_BYTES {
+        return Err(ContractError::TooLarge);
+    }
+    #[derive(Deserialize)]
+    struct Tag {
+        schema: String,
+    }
+    let t: Tag = serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
+    if schema_major(&t.schema, "provider_accounts") != Some(ACCOUNTS_MAJOR) {
+        return Err(ContractError::UnsupportedVersion { found: t.schema.chars().take(64).collect(), supported: ACCOUNTS_MAJOR });
+    }
+    let l: AccountList = serde_json::from_slice(bytes).map_err(|e| ContractError::Malformed(e.to_string()))?;
+    if l.accounts.len() > MAX_ACCOUNTS {
+        return Err(ContractError::Invalid("accounts"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for a in &l.accounts {
+        a.validate()?;
+        if !seen.insert(a.id.as_str()) {
+            return Err(ContractError::Invalid("account id"));
+        }
+    }
+    Ok(l)
+}
+
 /// Parse and validate a `provider_list` answer. The schema tag is read first, so another major reads as unsupported.
 pub fn parse_provider_list(bytes: &[u8]) -> Result<ProviderList, ContractError> {
     if bytes.len() > MAX_BYTES {
