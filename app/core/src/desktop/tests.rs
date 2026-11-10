@@ -3325,6 +3325,36 @@ fn an_old_record_without_a_store_pin_is_migrated_once_and_a_fresh_start_works() 
     assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pa.as_str()));
 }
 
+/// #104 review [P2]: an old record is migrated from its OWN guarded folder, never from the Git location it shares with
+/// another store project. A pre-store stand-in run (and an unpinned one) in `checkout/team`, with the checkout and the
+/// team folder registered separately: a launch anywhere at that location writes the team's id into the old record, as
+/// `store_identity` resolves it, and each folder still launches as its own project.
+#[test]
+fn an_old_record_in_a_registered_subfolder_is_migrated_to_that_subfolders_project() {
+    for standin in [true, false] {
+        let t = Tmp::new();
+        let app = t.app();
+        let c = t.0.join("checkout");
+        store_git(&c);
+        let team = c.join("team");
+        fs::create_dir_all(c.join("lib")).unwrap();
+        let pc = test_project(&t.0.join("data"), &t.home(), &c);
+        let pt = test_project(&t.0.join("data"), &t.home(), &team);
+        app.record_run("20261105-1230", &team, "0f8fad5b-d9cb-469f-a165-70867728950e", "c", true, 1).unwrap();
+        let rec = app.data.join("control/lead/20261105-1230").join(super::orchestrator::PROJECT_FILE);
+        if standin {
+            fs::write(&rec, super::orchestrator::project_ref(&team).0).unwrap();
+            assert_eq!(app.store_identity("20261105-1230"), Ok(Some(pt.clone())), "the stand-in resolves to the team");
+        } else {
+            without_pin(&app, "20261105-1230");
+        }
+        assert_eq!(app.launch_project(&c.join("lib")).unwrap().1.id, pc, "standin {standin}: the checkout's folder is the checkout's");
+        assert_eq!(app.pinned_project("20261105-1230").as_deref(), Some(pt.as_str()), "standin {standin}: the old record keeps the team");
+        assert_eq!(app.launch_project(&team).unwrap().1.id, pt);
+        assert_eq!(app.launch_project(&c).unwrap().1.id, pc);
+    }
+}
+
 #[test]
 fn an_old_record_that_conflicts_or_is_malformed_still_refuses() {
     let fresh = || {
