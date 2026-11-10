@@ -1543,7 +1543,10 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 - **When the tree is removed.** Never at `snapshot`. A ticket's worktree is kept until its task commit has been merged into the integration branch (`integrate` succeeded). Then the core runs the capture check:
   1. the tamper checks (16.6) pass again;
   2. the change set is listed: the tracked diff against `dispatch_head` plus untracked files, not counting ignored files, read with the baseline config;
-  3. **every path in it is in the task commit**, and each file's bytes match the committed blob. The core compares `git hash-object --no-filters` of the file with the blob id from `ls-tree`. With `--no-filters`, no filter runs, and a file edited after `snapshot` shows up as different;
+  3. **every path in it is in the task commit**, and each file matches the committed blob **the same way `snapshot` staged it.** The core compares `git hash-object --path=<path> <file>` with the blob id from `ls-tree`. It runs with the same environment as `snapshot`: the baseline config, `GIT_ATTR_SOURCE=<dispatch_head>` where supported, and attributes the `.gitattributes` tamper rule already pins.
+     - So a path with a trusted filter (LFS `clean`, for example) or a `text`/`eol` conversion hashes to the converted content, as it did at `add`. No filter runs that `snapshot` didn't already run.
+     - A path with no `filter`, `text` or `eol` attribute is hashed with `--no-filters`.
+     - A file edited after `snapshot` still shows up as different;
   4. there are no leftovers, and the task commit is an ancestor of the integration branch.
 - **If the capture check passes,** `worktree_remove` runs `git worktree remove --force`. That also removes its `<repo>/.git/worktrees/<name>` entry. Ignored files are discarded with the tree, such as dependency clones and build output. The card says so in the retention note.
 - **If it fails,** the tree is kept and shown with its leftovers, or with the file that differs from the commit, until the human discards it (with a confirm) or applies it. Nothing is removed on a guess.
@@ -1768,7 +1771,8 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - The worktree is not removed before `integrate`.
   - An edit made after `snapshot` makes the capture check fail. The tree is kept, and the card names the file.
   - A leftover outside the task globs keeps the tree. An ignored build file doesn't block removal.
-  - A planted clean filter never runs during the capture check (`--no-filters`, baseline config).
+  - A filter planted in `~/.gitconfig` after app start never runs during the capture check, because the check uses the baseline config.
+  - **An LFS-tracked file and a `text=auto` file with CRLF endings,** both unchanged after `snapshot`: after `integrate` the capture check passes, and the worktree is removed.
 - **6d1**
   - Parity of `validatePlan`, `topo` and `waves`.
   - Each dispatch refusal.
