@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use super::contract::{self, ContractError, Project, Session, SessionLog};
 use super::identity::{self, Guard, IdentityError};
 use super::pinned::Pinned;
-use crate::control::{fsx, time};
+use crate::control::time;
 
 /// Only the tail of a sessions file is read.
 const SESSIONS_READ_CAP: u64 = 1024 * 1024;
@@ -173,8 +173,27 @@ fn open_root(dir: &Path) -> std::result::Result<Pinned, Unavailable> {
         Ok(m) if !m.is_dir() => return Err(refuse(UnavailableReason::NotAFolder)),
         _ => {}
     }
-    fsx::private_dir(dir).map_err(|_| refuse(UnavailableReason::CannotOpen))?;
-    Pinned::open(dir, false).map_err(|e| refuse(if e.raw_os_error() == Some(libc::ELOOP) { UnavailableReason::Symlink } else { UnavailableReason::CannotOpen }))
+    pin_root(dir)
+}
+
+/// Create (0700) and open the projects folder with no path operation that follows a link: `mkdir` never follows one,
+/// the open is O_DIRECTORY | O_NOFOLLOW, and the mode is set through the opened descriptor (`fchmod`). A symlink swapped in
+/// after the check in `open_root` is refused, and its target is never created in or chmod-ed (#106 review). The parent
+/// (the app's data folder) is only created if missing, never chmod-ed here.
+fn pin_root(dir: &Path) -> std::result::Result<Pinned, Unavailable> {
+    let refuse = |reason| Unavailable { path: dir.to_path_buf(), reason };
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).map_err(|_| refuse(UnavailableReason::CannotOpen))?;
+    }
+    Pinned::open(dir, true).map_err(|e| {
+        refuse(match e.raw_os_error() {
+            Some(libc::ELOOP) => UnavailableReason::Symlink,
+            // macOS answers a symlink under O_DIRECTORY | O_NOFOLLOW with ENOTDIR: say which it is (only the message).
+            Some(libc::ENOTDIR) if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) => UnavailableReason::Symlink,
+            Some(libc::ENOTDIR) => UnavailableReason::NotAFolder,
+            _ => UnavailableReason::CannotOpen,
+        })
+    })
 }
 
 impl Store {

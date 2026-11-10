@@ -637,3 +637,26 @@ fn find_by_path_resolves_a_run_folder_to_its_project() {
     assert_eq!(found(&t.home().join("work")), None, "a folder no project holds");
     assert_eq!(found(&t.home().join("does-not-exist")), None);
 }
+
+/// #106 review: a symlink swapped in after `open_root`'s check (this calls the step after it directly) is refused, and
+/// nothing is done through it: its target keeps its mode and stays empty. A plain file there is "not a folder".
+#[test]
+fn a_symlink_swapped_in_after_the_check_is_refused_and_its_target_untouched() {
+    let t = Tmp::new("swap");
+    let (data, target) = (t.0.join("data"), t.0.join("target"));
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink(&target, data.join("projects")).unwrap();
+    let e = pin_root(&data.join("projects")).err().expect("refused");
+    assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755, "the target was chmod-ed");
+    assert_eq!(e.reason, UnavailableReason::Symlink, "{e:?}");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    fs::remove_file(data.join("projects")).unwrap();
+    fs::write(data.join("projects"), b"x").unwrap();
+    assert_eq!(pin_root(&data.join("projects")).err().expect("refused").reason, UnavailableReason::NotAFolder);
+    // And the normal case: made at 0700.
+    fs::remove_file(data.join("projects")).unwrap();
+    assert!(pin_root(&data.join("projects")).is_ok());
+    assert_eq!(fs::metadata(data.join("projects")).unwrap().permissions().mode() & 0o777, 0o700);
+}
