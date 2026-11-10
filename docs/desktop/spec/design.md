@@ -1261,7 +1261,7 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 
 | Today's workflow | Core path | Runs on |
 |---|---|---|
-| Create the campaign and register the tasks (`:448`, `:508`) | At round 1's `plan_tasks`: `CampaignCreate{slug: deliver-<run>, goal, features = the criteria}`, with the evidence-trust marker on an `outside_guard` run, then `TasksAdd` and `TasksDep` for each task. Later rounds register only their new tasks. | the engine scripts, through the bridge |
+| Create the campaign and register the tasks (`:448`, `:508`) | At round 1's `plan_tasks`: `CampaignCreate{slug: <campaign_slug>, goal, features = the criteria}`, with the evidence-trust marker on an `outside_guard` run, then `TasksAdd` and `TasksDep` for each task. Later rounds register only their new tasks. | the engine scripts, through the bridge |
 | Each worker claims and reports its own task (`:562`, `:573`) | The core claims at dispatch (`TasksClaim` with the worktree) and reports at the outcome (`TasksReport`). The task owner is the role's agent name in `crew::roles`. Workers never run Vajra scripts. | the bridge |
 | Merge (`:618`) | `integrate` (`gitw`) | the core |
 | Verify, plus the arjuna review, plus bhishma when `SECURITY` is set; all three in parallel (`:642–690`) | On a clean `integrate`, the core starts three tickets in parallel, each at the integration commit in its own fresh worktree: <br>• a **verify** ticket on the `verifier` seat; <br>• a **design review** ticket on the `reviewer` seat; <br>• a **security review** ticket on the `security_reviewer` seat, when the run is security-flagged. <br>Each one is a fresh session, never a writer's session. | any harness |
@@ -1328,10 +1328,10 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
    - **The risk, stated plainly** (in the card's "Why?" text and in T13): "A helper outside the Vajra guard ran the final check. It could read Vajra's signing key, so it could have faked this result, or copied the key and used it to fake other Vajra records and approvals. Vajra will close this gap in a coming update."
 3. **The brief** is exactly the commands the core built:
    - the verifier's setup commands, each one passed to `bash -c`, minus any the redo still marks as using outside paths;
-   - then `VAJRA_WALKTHROUGH_DIR=data/walkthroughs <scripts>/vajra-verify-work.sh deliver-<run> <the passing check commands and the suite command>`.
+   - then `VAJRA_WALKTHROUGH_DIR=data/walkthroughs <scripts>/vajra-verify-work.sh <campaign_slug> <the passing check commands and the suite command>`. The walkthrough bundle and the campaign use the same slug.
 
    The session runs with the same `network` setting as the verify ticket whose setup commands it re-runs.
-4. **The core doesn't trust the session's account of how it went.** It runs `CheckEvidence{path: data/walkthroughs/deliver-<run>/evidence.json, head: <integration commit>, repo: <the evidence worktree>}` through the bridge. Only a green answer counts. `check-evidence` judges the whole bundle, so either every criterion passes or none does. The core also requires two more things before it counts the bundle:
+4. **The core doesn't trust the session's account of how it went.** It runs `CheckEvidence{path: data/walkthroughs/<campaign_slug>/evidence.json, head: <integration commit>, repo: <the evidence worktree>}` through the bridge. Only a green answer counts. `check-evidence` judges the whole bundle, so either every criterion passes or none does. The core also requires two more things before it counts the bundle:
    - `git.worktreeTree` is not null. A sandbox that blocked `write-tree` would otherwise read as a stable tree;
    - the evidence worktree is clean against the integration commit, apart from `data/walkthroughs/`. The core checks this itself, with the read-only bridge.
 5. **The core never runs those commands itself, before 6k.** They are written by a model, and the core would run them as the user with no sandbox or guard.
@@ -1344,6 +1344,8 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
 **The evidence trust in the signed record (N17).** This needs no engine change.
 - **Where the marker goes.** For an `outside_guard` run, the core writes the marker `[evidence ran outside the Vajra guard]` into two parts of the campaign that only `create` sets:
   - **the slug**, as `deliver-<run>-og`. It is shown by `vajra-campaign.sh list`, which prints no goal;
+
+  **`campaign_slug`** is defined once, at Start, from the evidence trust: `deliver-<run>` for `guarded` and `deliver-<run>-og` for `outside_guard`. It is stored in `seats.json` and the start receipt. Every use reads that stored value: `CampaignCreate`, the evidence brief, the bundle path, `CheckEvidence`, `TasksClose --evidence`, `CampaignArchiveEvidence`, `KbAdd --evidence`, idempotent create, restart and resume. Nothing derives the slug again.
   - **the start of the goal.**
 - **Feature descriptions carry no marker.** `/vajra continue` reuses them word for word as criteria (`vajra-deliver.js:433`), and a marker there would break `resultsByCriterion`'s exact match.
 - **It is checked.** After `CampaignCreate`, the core reads the campaign back (`show`). If the slug and goal don't both carry the marker, the run is aborted before dispatch.
@@ -1413,7 +1415,7 @@ The owner answered N4 "do it full". A run with worker picks has every phase of t
     - `TasksClaim` passes the task's owner agent name (never the seat), `--stacked` and `--worktree`. `--stacked` matters because deps are closed only on evidence, so without it every task with deps gets exit 3.
     - `TasksClose` passes `--evidence`, `--head`, `--commit`, `--branch`, `--base-commit` and `--changed` (`:811–815`).
     - `TasksReport` maps outcomes onto the script's statuses: `done`→`done`, `progress`→`progress`, `failed`→`failed`, `needs_user`→`question`, `stopped`→`blocked`.
-  - **One campaign per run.** `CampaignCreate` is idempotent: when `deliver-<run>` exists with the same goal and features hash, it is reused. A lead restart and a resume bind to `deliver-<original run>`. S8 records whether `create` changes the global active campaign. If it does, the core restores the previous active campaign afterwards with the existing `active` subcommand.
+  - **One campaign per run.** `CampaignCreate` is idempotent: when `<campaign_slug>` exists with the same goal and features hash, it is reused. A lead restart and a resume bind to the original run's `campaign_slug`, copied from its `seats.json`, never recomputed, so a resumed `outside_guard` run reuses its `-og` campaign and can never create an unmarked one. S8 records whether `create` changes the global active campaign. If it does, the core restores the previous active campaign afterwards with the existing `active` subcommand.
   - **Kills and locks.** Campaign writes get SIGTERM and a 5 s grace period before SIGKILL, so `vajra-campaign.sh`'s `trap EXIT` frees its `mkdir` lock. A lock older than 10 minutes with no live owner pid is shown on the card with a **Repair** button, which runs the script's own unlock. The core never removes it on its own.
   - **When a bridge call fails:**
 
@@ -1738,6 +1740,7 @@ ADR-17 is independent. Its detection and "Install it yourself" ship first; the o
     - no later `pass` or `close` removes it;
     - the card, the criterion rows, task badges, the board, the report and an export all show the label, never a bare "Verified";
     - a record edited to drop the marker still shows the label, because the core's trust record wins.
+  - A resumed `outside_guard` run reuses its `-og` campaign, and no unmarked `deliver-<run>` campaign appears. The evidence bundle path and the verify-work slug are both `campaign_slug`.
   - A capped guarded evidence seat offers wait, another seat, or `not_verified`, and ends `not_verified` after `evidence_hold_max_s`.
   - A run with a Claude verifier ends plain `verified`.
   - **A Codex verifier whose setup command writes outside the worktree:** the evidence runs on that Codex seat inside its sandbox, and the write is denied. It never runs in a Claude session. The run is `evidence_unguarded`, or `not_verified`.
