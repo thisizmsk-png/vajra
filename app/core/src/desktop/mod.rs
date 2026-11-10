@@ -599,6 +599,11 @@ impl App {
         if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
         }
+        // A resume of this campaign counts at the same maxInFlight (#80 review). Written before anything spawns and refused
+        // on failure: without it a resume would count at the default and could pass the worker ceiling (#109 review).
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            return Err(fail("io", "could not record the run's worker count"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -842,9 +847,11 @@ impl App {
         if !adapter.capabilities().resume {
             return Err(fail("provider_cannot_resume", format!("{} cannot resume a run", engine.id())));
         }
+        // Counted at the maxInFlight the campaign's run was started with, not the default (#80 review).
+        let workers = self.original_workers(session_id, campaign);
         let r = self.launch_engine(engine, session_id, run_id, campaign, &cwd, |n| {
             adapter.resume_argv(session_id, run_id, campaign, n).map_err(invalid_input)
-        }, true, caps::DEFAULT_RUN_WORKERS)?;
+        }, true, workers)?;
         self.note("run_resumed", &[]);
         Ok(r)
     }

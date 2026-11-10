@@ -4538,3 +4538,46 @@ fn a_bad_max_in_flight_is_invalid_args_before_any_cap() {
     }
     let _ = app.sup.kill(&format!("run-{sid}"));
 }
+
+/// #80 optional: a resumed run is counted at the maxInFlight it was started with (read from its guarded record), not
+/// at the default, so a resume cannot push the app past the worker ceiling.
+#[test]
+fn a_resumed_run_counts_its_original_max_in_flight() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two"]);
+    app.launch_kind(SIDS[0], RUNS[0], "c0", &r[0], |_| Ok(vec!["true".into()]), false, true, Engine::Claude, 6).unwrap();
+    app.sup.wait(&format!("run-{}", SIDS[0]), Duration::from_secs(5)).unwrap();
+    app.reap_runs();
+    assert_eq!(app.original_workers(SIDS[0], "c0"), 6);
+    app.launch_kind(SIDS[1], RUNS[1], "c1", &r[1], sleeper, false, true, Engine::Claude, 4).unwrap();
+    // 6 (the resumed run as started) + 4 is over the ceiling of 8; counted at the default 4 it would not be.
+    let held = app.resume_run(SIDS[0], "c0", r[0].to_str().unwrap(), None).unwrap_err();
+    assert_eq!((code(&held), held["reason"].as_str()), ("run_held", Some("workers_full")), "{held}");
+    // A run recorded before this record existed, or one the guarded record does not vouch for, counts at the default.
+    assert_eq!(app.original_workers(SIDS[2], "c0"), caps::DEFAULT_RUN_WORKERS);
+    assert_eq!(app.original_workers(SIDS[0], "c-other"), caps::DEFAULT_RUN_WORKERS);
+    app.sup.kill(&format!("run-{}", SIDS[1])).unwrap();
+}
+
+/// #109 review: the run's maxInFlight is recorded before anything spawns; if that guarded write fails the launch is
+/// refused, nothing runs and no control session is left behind (a resume can never fall back to the default count).
+#[test]
+fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    // A directory where the record goes: the atomic write cannot replace it.
+    let dir = app.data.join("control/lead").join(RUNS[0]);
+    fs::create_dir_all(dir.join("workers")).unwrap();
+    let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s2 = spawned.clone();
+    let e = app
+        .launch_kind(SIDS[0], RUNS[0], "c0", &r[0], move |_| { s2.store(true, Ordering::SeqCst); Ok(vec!["sleep".into(), "5".into()]) }, false, true, Engine::Claude, 6)
+        .unwrap_err();
+    assert_eq!(code(&e), "io", "{e}");
+    assert!(!spawned.load(Ordering::SeqCst), "argv was built, so the spawn was reached");
+    assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false));
+    assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
+    assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
+}
