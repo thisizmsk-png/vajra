@@ -87,11 +87,13 @@ impl Skip {
 
 /// Finished, and not waiting on the human. Pure so the table is tested without a repo.
 pub(super) fn judge(status: Status, stopped: bool, message_pending: bool) -> Result<(), Skip> {
+    // A queued message first: a finished worker the human just wrote to is still the human's move, and closing it would
+    // stop the tailing that shows the reply.
+    if message_pending || matches!(status, Status::Blocked | Status::Question) {
+        return Err(Skip::WaitingOnYou);
+    }
     if matches!(status, Status::Done | Status::Failed) || stopped {
         return Ok(());
-    }
-    if matches!(status, Status::Blocked | Status::Question) || message_pending {
-        return Err(Skip::WaitingOnYou);
     }
     Err(Skip::Working)
 }
@@ -329,6 +331,9 @@ mod tests {
         assert_eq!(judge(Status::Question, false, false), Err(Skip::WaitingOnYou));
         assert_eq!(judge(Status::Blocked, false, false), Err(Skip::WaitingOnYou));
         assert_eq!(judge(Status::InProgress, false, true), Err(Skip::WaitingOnYou));
+        assert_eq!(judge(Status::Done, false, true), Err(Skip::WaitingOnYou), "a queued message keeps a finished worker open");
+        assert_eq!(judge(Status::Failed, true, true), Err(Skip::WaitingOnYou));
+        assert_eq!(judge(Status::Done, true, true), Err(Skip::WaitingOnYou));
     }
 
     #[test]
