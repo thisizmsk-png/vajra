@@ -426,13 +426,14 @@ impl App {
         // path bumped (a verdict cached by `evidence_list`, a task file rewritten, a worker list changed by `end_session`)
         // is never answered `unchanged` (#107 review). Receipts and the run generation only change under a bump; the inbox
         // has its own fingerprint above.
-        let board = self.board(project_id);
+        let cur_rev = lock(&self.acts).revs.get(project_id).copied();
+        let (board, board_fp) = self.board_for_state(project_id, cur_rev);
         let workers = lock(&self.control).workers_view();
         let usage = self.provider_usage_cached();
         let shown_fp = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            board.to_string().hash(&mut h);
+            board_fp.hash(&mut h);
             Value::from(workers.clone()).to_string().hash(&mut h);
             usage.fingerprint().hash(&mut h);
             h.finish()

@@ -241,6 +241,12 @@ pub struct App {
     evidence_cache: Mutex<HashMap<EvKey, (bool, Option<std::time::Instant>)>>,
     /// Why each non-green verdict in `evidence_cache` was not green (same key, same lifetime), so a cached answer says why too.
     evidence_why: Mutex<HashMap<EvKey, Value>>,
+    /// Moves on every write to `evidence_cache` or `worktree_state`: the board's cards read both (#107 review).
+    board_inputs_gen: std::sync::atomic::AtomicU64,
+    /// project_id -> the last board `project_state` built and the stamp of what it read (see `board::Cached`).
+    board_cache: Mutex<HashMap<String, board::Cached>>,
+    /// How many boards were built (tests count rebuilds).
+    board_builds: std::sync::atomic::AtomicU64,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
@@ -310,6 +316,9 @@ impl App {
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
             evidence_why: Mutex::new(HashMap::new()),
+            board_inputs_gen: std::sync::atomic::AtomicU64::new(0),
+            board_cache: Mutex::new(HashMap::new()),
+            board_builds: std::sync::atomic::AtomicU64::new(0),
             worktree_state: Mutex::new(HashMap::new()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
@@ -1184,6 +1193,7 @@ impl App {
                 }
                 cache.insert(k, (green, until));
             }
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // The checks ran first (the first batch gets its full timeout). Now, within what is left of the budget, the state of each
         // run repo that a passing check depends on: read once per call, reused for 5 s, and a repo that could not be read is
@@ -1376,6 +1386,7 @@ impl App {
         // Remember a failure only if git had its full time to answer: running out of the call's budget says nothing about the repo.
         if st.is_some() || budget >= WORKTREE_STATE_TIMEOUT {
             lock(&self.worktree_state).insert(repo.to_path_buf(), (std::time::Instant::now(), st.clone()));
+            self.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         st
     }
