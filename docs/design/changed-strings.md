@@ -173,6 +173,22 @@ its name until FG-02 replaces the run Lead with the per-project orchestrator. Th
 "Director-General" too, so nothing is renamed twice. Every user-facing label of the per-project orchestrator says
 "Director-General"; code and the contract keep `orchestrator`.
 
+Director-General conversation (FG-02, wave 2).
+
+| String | Where | Note |
+|---|---|---|
+| Director-General; Conversation N; New conversation | conversation header | new; the generation number answers "what does it remember" (ADR-15 §2.5) |
+| Waiting for a question / Answering a question / A run of this project is going | header state | the core's reason, sentence case |
+| You / Director-General / Tools used / Problem | transcript turn labels | new; tool use folds into "Tools used" |
+| Ask the Director-General; Ask about this project, or what to build next; Send; Stop answering | composer | new; ⌘↵ sends |
+| No questions yet; Ask what is happening in this project, or what should be built next. It can propose a run; only you can start it. | empty conversation | new |
+| The Director-General can talk once this project has a run started from this app. Start a run yourself; then you can ask it about the work. | project with no run | new; honest until the commands are keyed by project |
+| The Director-General is still answering. Ask again when it finishes, or stop it. | `lead_busy` | new |
+| Start a run?; Needs you; What the crew will be asked; Base; Fix rounds; From conversation N; Start run; Dismiss | run proposal card | new; the ask is shown in full, exactly as it will run |
+| The Director-General proposes; nothing runs until you start it. | above proposals | new (ADR-15 D4) |
+| Sent. Waiting for Vajra to confirm. / Run started. It shows on the board. / Dismissed. Nothing ran. / This proposal changed after you saw it. Nothing started; read it again. / No answer came back. Check the board before you try again. / Not done: REASON | proposal outcome | new; never says done before the core does (ADR-15 §3.2) |
+| Start a run yourself | header link; the launcher's own view (`#/p/<id>/launch`) | the Director-General view was the launcher in T4 |
+
 FG-08 settings (owner review).
 
 All new settings copy lives in `S.preferences` in `app/ui/strings.ts`; section titles and ledes live in

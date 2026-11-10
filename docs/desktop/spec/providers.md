@@ -87,6 +87,110 @@ present, not absent (absent means "none chosen"): `installed = false`, `login_st
 capabilities off, and `limits` for `start` and `resume` with code `not_supported`. Fixture:
 `project_state.provider.unsupported.v1.json`; the core builds it with `providers::detect::unsupported`.
 
+## `provider_accounts` (`vajra.provider_accounts/1`)
+
+Multi-provider, PR 1 (contract and read path only; no UI, no stored key). Tauri command `provider_accounts`, read-only.
+Additive to `vajra.providers/1`, which is unchanged. Same rules as above: at most 64 KiB, unknown fields ignored, another
+major reported and not read, ids unique. One record per way of running and paying for agents; today that is each CLI under
+its own login (`claude`, `codex`). Stored-key and gateway accounts use the same record in later changes.
+
+```json
+{
+  "schema": "vajra.provider_accounts/1",
+  "accounts": [{
+    "id": "claude", "provider": "claude", "harness": "claude",
+    "credential": {"source": "cli_login"},
+    "billing": {"kind": "subscription", "account_label": "max, s…@example.com", "override_warning": null},
+    "label": "Claude Code", "state": "signed_in", "models": []
+  }, {
+    "id": "codex", "provider": "codex", "harness": "codex",
+    "credential": {"source": "cli_login"},
+    "billing": {"kind": "unknown", "account_label": null,
+                "override_warning": {"name": "OPENAI_API_KEY", "found_in": "cli_config"}},
+    "label": "Codex CLI", "state": "cannot_tell", "models": []
+  }]
+}
+```
+
+- **`credential.source`**: `cli_login` (the CLI owns its login), `api_key` (a pasted key in the Keychain) or `gateway` (a
+  non-secret base URL plus a Keychain key). `credential.saved` exists for the last two and is the only trace of a key: no key,
+  prefix or last four characters. A `cli_login` record has no `saved`; the two others must have it.
+- **`billing.kind`**: `subscription`, `api_key`, `gateway` or `unknown` (also the reading of a value this version does not
+  know). `account_label` is only what the CLI itself prints, and only for a signed-in CLI: Claude's plan and a masked email
+  (`s…@example.com`); Codex a fixed word (`ChatGPT`), because its status line can carry a masked key and is never kept.
+- **`billing.override_warning`** is set when the CLI's own config would bill an API key instead of the login. It holds the NAME
+  of the setting and where it was found (`cli_env_block`, `cli_config`, `cli_api_key_helper`), never a value. The detector
+  reads only the CLIs' own config: Claude's `settings.json` and `settings.local.json` under `~/.claude` (a non-empty
+  `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` with a non-empty value) and Codex's
+  `config.toml` under `~/.codex`. The Codex file is parsed as TOML: a key named `OPENAI_API_KEY` or `CODEX_API_KEY`, in any
+  table, whose string value is non-blank counts. As for Claude, an empty value is not a key, and the value is only tested for
+  being blank, never kept. Comments and the text of multiline strings are not settings, and a file that does not parse as
+  TOML finds nothing. It never opens `auth.json`, a keychain item or the app's own environment (`ENV_ALLOW` already scrubs
+  that, and `providers[].billing.key_in_app_env` reports it). A plain file only, at most 256 KiB, and no link followed: the
+  CLI directory and the file are each opened relative to the one before, and neither may be a link. A file that is missing
+  or not understood finds nothing.
+- **`state`**: `signed_in`, `signed_out`, `not_installed`, `key_saved`, `key_missing`, `cannot_tell`. An unknown value reads as
+  `cannot_tell`, never `signed_in`. `cannot_tell` never blocks a start.
+- **`models`** (`id`, `family`): the models the user enabled on that account. Opaque ids passed straight through; `family`
+  picks the icon. Empty for a CLI login.
+- **One account per provider (D6).** There is no rotation field and none will be added (H7). No field is named `key`,
+  `token` or `secret`.
+
+### `preferences.agents` (replaces the `agent` preference)
+
+```json
+"agents": {
+  "default": {"account": "claude", "model": null, "effort": null},
+  "roles": {"docs": {"account": "openrouter", "model": "deepseek/deepseek-v3.2", "effort": null}},
+  "allowed": [{"account": "claude", "model": null}, {"account": "openrouter", "model": "deepseek/deepseek-v3.2"}]
+}
+```
+
+- Set with `act_preferences_update` like any other preference (project override or global, `inherit: ["agents"]` to drop an
+  override). `preferences_read` returns the resolved value as `agents` beside `effective`; `sources.agents` says where it came from.
+- **Mapped on read, no data migration.** With no `agents` stored, an old `agent: "codex"` reads as
+  `{default: {account: "codex"}, roles: {}, allowed: [{account: "codex"}]}`. A newer write of the old `agent` key drops a stored
+  `agents` at that scope; a write of `agents` wins over `agent`.
+- **A role with no entry uses `default`.** Roles are the crew role names (lowercase ids, at most 16).
+- **`allowed` is a ceiling, enforced on write.** The default and every role must be inside it: an entry matches an account, and
+  its `model` of `null` allows every model on it. A write that puts anything outside is refused (`outside_allowed`) and nothing
+  is saved; an empty ceiling or a malformed id is `invalid_preferences`. The check is on the effective value, so a project
+  override is held to its own ceiling.
+- `model` is an opaque id (letters, digits and `-._/:`, at most 80); `effort` is a lowercase level word (at most 16) or `null`
+  for the CLI's default. The core checks that an account exists, is installed and has its key when a worker starts, not here.
+
+## `provider_usage` (`vajra.provider_usage/1`)
+
+Multi-provider, PR 7 (usage meters, H5). Tauri command `provider_usage(page_open)`; the same answers ride in `project_state.usage`
+as a cache read. One entry per account:
+
+```json
+{"schema": "vajra.provider_usage/1", "usage": [
+  {"account": "claude", "read_at": null, "source": "none", "windows": [], "amounts": null},
+  {"account": "openrouter", "read_at": "2026-11-09T12:00:00Z", "source": "gateway_key",
+   "windows": [{"kind": "credit", "used_pct": 84, "resets_at": null, "warn": true}],
+   "amounts": {"usage": 8.4, "usage_daily": 1.25, "limit": 10.0, "limit_remaining": 1.6}}]}
+```
+
+- **Nothing is estimated.** A window exists only if the account's own source reported it. `windows: []` with `source: "none"`
+  is "Not reported". There is no price table, and Claude Code's `total_cost_usd` is ignored. Today the CLI logins report no
+  windows, so they read "Not reported"; a CLI that reports windows later fills `kind` (`5h`, `daily`, `weekly`), `used_pct` and
+  `resets_at` through the same shape.
+- **Warning.** `warn` is true at 80% used or more. The status bar chip shows the most used warned window, with its reset time
+  only if the source gave one.
+- **OpenRouter** (`source: "gateway_key"`): `GET /api/v1/key`. Only `usage`, `usage_daily`, `limit` and `limit_remaining` are
+  kept (`amounts`, in the key's own currency). The answer also carries the key's label; it is never deserialized, so it cannot
+  reach any reply. `usage` is all-time spend, while `limit` can reset daily, weekly or monthly and `limit_remaining` is what is
+  left of the current cap. So the `credit` window is `(limit - limit_remaining) / limit` and exists only when both are reported
+  and `limit` is above zero; otherwise there is no percentage (the figures in `amounts` are still shown as reported).
+- **When it calls out.** Only while Settings > Providers is open (`page_open`) or a run is active, and at most once a minute per
+  account. Otherwise the last answer is returned and no call is made; `project_state` never calls out. When a read changes what is shown (the figures, not `read_at`), the project revisions advance and a `changed` event names them, so the next `project_state` read is a full answer carrying the new `usage`; a read that changes nothing moves nothing. A failed read keeps the
+  previous answer (its `read_at` shows its age) and still counts as the minute's attempt.
+- **The key never enters the core.** The call is curl with `--proto =https`, a cleared environment and the header read from
+  stdin (`-H @-`). A key command (the Keychain read, from the Keychain store) is the producer of that stdin: it prints the key
+  straight into curl's pipe, so the key is never in argv, the environment, a file, a log or this process's memory. There is no
+  getter for a key. Until the Keychain store lands there is no key command, so no account is metered and no call is made.
+
 ## Versioning
 
 A `provider_list` whose schema is another major is reported as "update needed" and not read further. Adding fields is not a
