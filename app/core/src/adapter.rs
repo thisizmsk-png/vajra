@@ -100,7 +100,8 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 /// The launch argv for a Codex-harness account on the `ApiKey` or `Gateway` route. A login account, or a Claude one, is
-/// refused here: it launches through `adapter_for(..).run_argv` and never gets a generated config.
+/// refused here: it launches through `adapter_for(..).run_argv` and never gets a generated config. Not called by
+/// `start_run` yet; a later PR wires it with `providers::codex_home::write` and account and model selection.
 pub fn gateway_run_argv(account: &Account, ask: &str, model: &str, effort: Option<&str>) -> Result<Vec<String>, InvalidInput> {
     if account.engine != Engine::Codex || account.route == Route::CliLogin {
         return Err(InvalidInput { field: "provider", reason: "is not a Codex gateway account" });

@@ -165,9 +165,9 @@ writes):
 - **In memory.** The core wraps the key at once (no `Clone`, no `Display`, a redacting `Debug`) and zeroes its copies after
   the write. Copies the IPC layer makes are out of its reach.
 
-### Gateway launch (harness B)
+### Gateway launch (not yet wired into start_run)
 
-A Codex-harness run on the `gateway` or `api_key` route (code id `vajra-openrouter`) starts like this:
+The building blocks for a Codex-harness run on the `gateway` or `api_key` route (code id `vajra-openrouter`) exist, but `start_run` does not call them yet: no run uses them until a later PR wires them in with account and model selection. When wired, a run starts like this:
 
 - **Own `CODEX_HOME`.** `<data dir>/codex-home/<account>` (0700), holding a generated `config.toml` (0600) that is rewritten
   at every launch. The user's `~/.codex` is never read or written. The file names the provider, a non-secret `https://`
