@@ -787,7 +787,7 @@ fn copying_seats_from_a_malformed_or_refused_source_fails_and_writes_nothing() {
             _ => {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::write(&src, b"{}").unwrap();
-                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0)).unwrap();
+                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o000)).unwrap();
             }
         }
         assert!(app.read_run_seats(from).is_err(), "{case}");
