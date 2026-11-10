@@ -1572,6 +1572,43 @@ fn computing_the_tree_id_writes_nothing_to_the_repos_object_store() {
     assert_eq!(run(&["write-tree"]), tree);
 }
 
+/// #134 review: the repository's `info/exclude` and `info/attributes` are read by this process, so they cannot make the
+/// tree id hang (a FIFO with no writer) or read without bound (a link to `/dev/zero`, an oversized file). Each is refused
+/// quickly and the tree is not computed (the evidence then reads `unverified`); an ordinary info file is still honored.
+#[test]
+fn a_hostile_repo_info_file_never_hangs_or_floods_the_tree_id() {
+    let t = Tmp::new();
+    let (app, _slug, repo, _head) = live_evidence_repo(&t, true, false);
+    let info = repo.join(".git/info");
+    fs::create_dir_all(&info).unwrap();
+    // An ordinary exclude is honored: an excluded untracked file does not change the tree.
+    let base = app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).expect("tree id");
+    fs::write(info.join("exclude"), b"ignored.txt\n").unwrap();
+    fs::write(repo.join("ignored.txt"), b"x").unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).as_deref(), Some(base.as_str()), "info/exclude is still read");
+    fs::remove_file(repo.join("ignored.txt")).unwrap();
+    fs::remove_file(info.join("exclude")).unwrap();
+    // Each hostile file, in a thread with a deadline: a hang fails the test instead of blocking the suite.
+    let within = |what: &str| -> Option<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (b, r) = (app.bridge.clone(), repo.clone());
+        std::thread::spawn(move || { let _ = tx.send(b.tree_id(&r, &VERIFY_EXCLUDES)); });
+        rx.recv_timeout(Duration::from_secs(20)).unwrap_or_else(|_| panic!("tree_id hung on {what}"))
+    };
+    let attrs = info.join("attributes");
+    let c = std::ffi::CString::new(attrs.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    assert_eq!(within("a FIFO with no writer"), None);
+    fs::remove_file(&attrs).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", &attrs).unwrap();
+    assert_eq!(within("a link to /dev/zero"), None);
+    fs::remove_file(&attrs).unwrap();
+    fs::write(info.join("exclude"), vec![b'#'; 2 << 20]).unwrap();
+    assert_eq!(within("an oversized info/exclude"), None);
+    fs::remove_file(info.join("exclude")).unwrap();
+    assert_eq!(app.bridge.tree_id(&repo, &VERIFY_EXCLUDES).as_deref(), Some(base.as_str()), "and the tree is computed again");
+}
+
 #[test]
 fn the_tree_id_leaves_out_the_walkthrough_directory_the_evidence_was_written_under_like_the_verifier() {
     let t = Tmp::new();
