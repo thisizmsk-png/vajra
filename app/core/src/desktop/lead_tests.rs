@@ -1747,6 +1747,9 @@ fn one_recorded_location_shared_by_two_projects_through_different_runs_is_bookke
 #[path = "lead_store_tests.rs"]
 mod store;
 
+#[path = "lead_acts_tests.rs"]
+mod acts;
+
 /// #80 review [P1]: the Lead's own project and every other run's project are the ones pinned when the app launched
 /// them, never re-read from the worker-writable `.git` at ask time. A worker that points the repo's `.git` at another
 /// project cannot make that project "its own" and lift its deny rules.

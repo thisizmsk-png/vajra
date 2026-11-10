@@ -81,6 +81,32 @@ fn act_start_run(app: State<'_, App>, envelope: Envelope, ask: String, max_round
     app.act_start_run(&envelope, RunInput { ask, max_rounds, base, max_in_flight, campaign, provider }, &cwd)
 }
 
+/// The Director-General's actions as receipts (FG-02c, decision Q2); see `desktop::lead_acts`.
+#[tauri::command(async)]
+fn act_ask_lead(app: State<'_, App>, envelope: Envelope, run_id: String, text: String) -> Value {
+    app.act_ask_lead(&envelope, &run_id, &text)
+}
+
+#[tauri::command(async)]
+fn act_new_conversation(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
+    app.act_new_conversation(&envelope, &run_id)
+}
+
+#[tauri::command(async)]
+fn act_cancel_ask(app: State<'_, App>, envelope: Envelope, ask_id: String) -> Value {
+    app.act_cancel_ask(&envelope, &ask_id)
+}
+
+#[tauri::command(async)]
+fn act_start_proposal(app: State<'_, App>, envelope: Envelope, id: String, proposal_sha256: String) -> Value {
+    app.act_start_proposal(&envelope, &id, &proposal_sha256)
+}
+
+#[tauri::command(async)]
+fn act_dismiss_proposal(app: State<'_, App>, envelope: Envelope, id: String) -> Value {
+    app.act_dismiss_proposal(&envelope, &id)
+}
+
 #[tauri::command(async)]
 fn project_state(app: State<'_, App>, project_id: String, since_rev: Option<u64>) -> Res {
     app.project_state(&project_id, since_rev)
@@ -438,9 +464,14 @@ fn cancel_ask(app: State<'_, App>, ask_id: String) -> Res {
     app.cancel_ask(&ask_id)
 }
 
+/// By run (`runId`) or, with no run, by project (`projectId`, FG-02c): exactly one of them.
 #[tauri::command(async)]
-fn lead_status(app: State<'_, App>, run_id: String) -> Res {
-    app.lead_status(&run_id)
+fn lead_status(app: State<'_, App>, run_id: Option<String>, project_id: Option<String>) -> Res {
+    match (run_id, project_id) {
+        (Some(r), None) => app.lead_status(&r),
+        (None, Some(p)) => app.lead_status_for_project(&p),
+        _ => Err(serde_json::json!({"error": "invalid_args", "detail": "give runId or projectId"})),
+    }
 }
 
 /// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
@@ -634,6 +665,11 @@ fn main() {
             act_answer_question,
             act_stop_worker,
             act_start_run,
+            act_ask_lead,
+            act_new_conversation,
+            act_cancel_ask,
+            act_start_proposal,
+            act_dismiss_proposal,
             project_state,
             term_open,
             term_attach,
