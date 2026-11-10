@@ -4250,3 +4250,25 @@ fn a_resumed_run_counts_its_original_max_in_flight() {
     assert_eq!(app.original_workers(SIDS[0], "c-other"), caps::DEFAULT_RUN_WORKERS);
     app.sup.kill(&format!("run-{}", SIDS[1])).unwrap();
 }
+
+/// #109 review: the run's maxInFlight is recorded before anything spawns; if that guarded write fails the launch is
+/// refused, nothing runs and no control session is left behind (a resume can never fall back to the default count).
+#[test]
+fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one"]);
+    // A directory where the record goes: the atomic write cannot replace it.
+    let dir = app.data.join("control/lead").join(RUNS[0]);
+    fs::create_dir_all(dir.join("workers")).unwrap();
+    let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s2 = spawned.clone();
+    let e = app
+        .launch_kind(SIDS[0], RUNS[0], "c0", &r[0], move |_| { s2.store(true, Ordering::SeqCst); Ok(vec!["sleep".into(), "5".into()]) }, false, true, Engine::Claude, 6)
+        .unwrap_err();
+    assert_eq!(code(&e), "io", "{e}");
+    assert!(!spawned.load(Ordering::SeqCst), "argv was built, so the spawn was reached");
+    assert!(!app.sup.is_running(&format!("run-{}", SIDS[0])).unwrap_or(false));
+    assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
+    assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
+}

@@ -575,6 +575,11 @@ impl App {
         if self.record_run_pinned(run_id, cwd, &loc, Some(&project.id), session_id, campaign, workflow, ids::unix_now() as i64).is_err() {
             return Err(fail("io", "could not record the run's project"));
         }
+        // A resume of this campaign counts at the same maxInFlight (#80 review). Written before anything spawns and refused
+        // on failure: without it a resume would count at the default and could pass the worker ceiling (#109 review).
+        if workflow && self.record_run_workers(run_id, workers).is_err() {
+            return Err(fail("io", "could not record the run's worker count"));
+        }
         let nonce = {
             let mut svc = lock(&self.control);
             ctl(svc.start_session(session_id, run_id))?;
@@ -612,10 +617,6 @@ impl App {
         let entry = runindex::Entry { campaign: campaign.into(), session_id: session_id.into(), run_id: run_id.into(), cwd: cwd.to_path_buf(), lead_session_id: None, provider: Some(engine.id().to_string()) };
         if runindex::append(&self.data.join("runs.jsonl"), &entry).is_err() {
             self.note("run_index_failed", &[]);
-        }
-        // A resume of this campaign counts at the same maxInFlight (#80 review); without the record it counts at the default.
-        if workflow && self.record_run_workers(run_id, workers).is_err() {
-            self.note("run_workers_record_failed", &[]);
         }
         self.note_run(&project, run_id, campaign, engine);
         Ok(json!({"stream": stream, "session_id": session_id, "run_id": run_id, "campaign": campaign}))
