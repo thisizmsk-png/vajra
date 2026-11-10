@@ -432,7 +432,9 @@ impl App {
             let recent: Vec<Receipt> = h.store.recent(project_id, RECENT).into_iter().cloned().collect();
             (rev, rg, recent)
         };
-        self.emit_projects(moved);
+        if !moved.is_empty() {
+            self.emit_projects(moved);
+        }
         if since_rev == Some(rev) {
             return Ok(json!({"schema": "vajra.project_state/1", "project_id": project_id, "rev": rev, "unchanged": true}));
         }
