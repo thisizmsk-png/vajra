@@ -169,10 +169,11 @@ fn inbox_is_read_only_and_not_a_lead_tool() {
 }
 
 /// A project the store knows, whose Director-General has proposed `asks` (as `proposals_tests::proposed_at`). Returns
-/// the repo folder and the store's project id.
+/// the store's project id. Everything is set up under that store id and its canonical root, never a pre-store stand-in
+/// (`project_ref`), which the FG-02c project gate refuses.
 fn propose_in(app: &App, repo: &std::path::Path, asks: &[&str]) -> String {
-    let id = app.projects.add(repo, false).unwrap().project().id.clone();
-    let (pid, root) = super::super::orchestrator::project_ref(repo);
+    let pid = app.projects.add(repo, false).unwrap().project().id.clone();
+    let root = repo.canonicalize().unwrap();
     app.orchestrator(&pid, &root).unwrap();
     let mut svc = lock(&app.control);
     svc.start_session("0f8fad5b-d9cb-469f-a165-70867728950e", "20261108-1200").unwrap();
@@ -181,7 +182,7 @@ fn propose_in(app: &App, repo: &std::path::Path, asks: &[&str]) -> String {
     for a in asks {
         svc.call_tool_for_project(&pid, 1, "propose_run", &json!({"ask": a, "base": "ea73cb05d639b945e21c667e17103e56404861a8", "rounds": 1})).unwrap();
     }
-    id
+    pid
 }
 
 // Given 250 older items waiting in a project (past both the global 200 cut and the project's 50 cut), When its
