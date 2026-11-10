@@ -55,7 +55,7 @@ impl App {
 
     /// A refused projects folder refuses the command (`projects_unavailable`). Needed where the store's own answer would
     /// mislead: with no folder, the migration marker reads as written though it never was (#106 review).
-    fn projects_usable(&self) -> Result<(), Value> {
+    pub(super) fn projects_usable(&self) -> Result<(), Value> {
         match self.projects.unavailable() {
             Some(u) => Err(refusal(StoreError::Unavailable(u.clone()))),
             None => Ok(()),

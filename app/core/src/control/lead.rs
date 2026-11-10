@@ -42,6 +42,9 @@ pub enum LeadError {
     ProjectArchived,
     /// The run's project record is gone from the store.
     ProjectMissing,
+    /// The app's projects folder was refused at open (a symbolic link, not a folder; #106 review): what is wrong, what to
+    /// do (the fix names the path), and the path in its own field. Nothing that needs the store can run until it is fixed.
+    ProjectsUnavailable { detail: String, fix: String, path: String },
     Io(String),
 }
 
@@ -63,6 +66,7 @@ impl LeadError {
             Self::NotAProject(_) => "not_a_project",
             Self::ProjectArchived => "project_archived",
             Self::ProjectMissing => "project_missing",
+            Self::ProjectsUnavailable { .. } => "projects_unavailable",
             Self::Io(_) => "io_error",
         }
     }
@@ -76,6 +80,7 @@ impl LeadError {
             Self::NotAProject(_) => Some(NOT_A_PROJECT.into()),
             Self::ProjectArchived => Some(PROJECT_ARCHIVED.into()),
             Self::ProjectMissing => Some(PROJECT_MISSING.into()),
+            Self::ProjectsUnavailable { detail, .. } => Some(detail.clone()),
             _ => None,
         }
     }
@@ -83,6 +88,9 @@ impl LeadError {
     pub fn to_json(&self) -> serde_json::Value {
         if let Self::NotAProject(path) = self {
             return not_a_project_json(path);
+        }
+        if let Self::ProjectsUnavailable { detail, fix, path } = self {
+            return serde_json::json!({"error": self.code(), "detail": detail, "fix": fix, "path": path});
         }
         match self.detail() {
             Some(d) => serde_json::json!({"error": self.code(), "detail": d}),

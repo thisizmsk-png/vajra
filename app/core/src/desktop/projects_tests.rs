@@ -128,6 +128,40 @@ fn a_symlinked_projects_folder_does_not_stop_the_app_opening() {
     let row = app.projects_row().expect("a preflight row");
     assert_eq!((row["ok"].as_bool(), row["name"].as_str()), (Some(false), Some("Projects folder")), "{row}");
     assert!(row["detail"].as_str().unwrap().contains(data.join("projects").to_str().unwrap()), "{row}");
+    // #106 review: every start reads the store, so Home does not offer Start, and a start, a resume and an ask each say
+    // what is wrong and what to do (never a bare io_error or a record that "cannot be read").
+    let pf = app.preflight().unwrap();
+    assert_eq!(pf["start_enabled"], false, "{pf}");
+    assert!(pf["rows"].as_array().unwrap().iter().any(|r| r["name"] == "Projects folder" && r["ok"] == false), "{pf}");
+    let cwd_s = repo(&root, "src/a");
+    let cwd = std::path::Path::new(&cwd_s);
+    let unavailable = |e: Value, what: &str| {
+        assert_eq!(e["error"], "projects_unavailable", "{what}: {e}");
+        assert!(e["fix"].as_str().is_some_and(|f| f.contains(data.join("projects").to_str().unwrap())), "{what}: {e}");
+        assert_eq!(e["path"], data.join("projects").to_str().unwrap(), "{what}: {e}");
+    };
+    let input = crate::desktop::RunInput { ask: "x".into(), max_rounds: 1, base: "ea73cb05d639b945e21c667e17103e56404861a8".into(), max_in_flight: 1, campaign: None, provider: None };
+    unavailable(err(app.start_run(input, &cwd_s)), "start");
+    unavailable(err(app.resume_run("0f8fad5b-d9cb-469f-a165-70867728950e", "c", &cwd_s, None)), "resume");
+    unavailable(app.launch_project(cwd).unwrap_err(), "launch_project");
+    unavailable(err(app.ask_lead("20261106-0911", "hi")), "ask");
+    unavailable(app.isolation("20261106-0911", cwd).unwrap_err().to_json(), "isolation");
+    unavailable(app.orchestrator_for_run("20261106-0911", cwd).map(|_| json!(null)).map_err(|e| e.to_json()).unwrap_err(), "the run's Director-General");
+    // The Director-General's tool gate says the same (detail only: a tool result never carries a path).
+    let gate = crate::desktop::orchestrator::project_gate(&app.projects, "p_01M6YKE1Q5YEQZWJSJ91A6DQYT").unwrap_err().to_json();
+    assert_eq!(gate["error"], "projects_unavailable", "{gate}");
+    assert!(gate["detail"].as_str().is_some_and(|d| d.contains("symbolic link")) && gate.get("path").is_none(), "{gate}");
     assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
     let _ = fs::remove_dir_all(root);
+}
+
+/// #106 review: with every other check passing, a refused projects folder alone holds up Start; without it Start is on.
+#[test]
+fn a_refused_projects_folder_alone_disables_start() {
+    let rows = vec![crate::vajra::preflight::Row { name: "claude".into(), ok: true, detail: "found".into(), fix: String::new() }];
+    assert_eq!(crate::desktop::preflight_json(&rows, None)["start_enabled"], true);
+    let row = json!({"name": "Projects folder", "ok": false, "detail": "refused", "fix": "move it"});
+    let pf = crate::desktop::preflight_json(&rows, Some(row));
+    assert_eq!(pf["start_enabled"], false, "{pf}");
+    assert_eq!(pf["rows"].as_array().unwrap().len(), 2, "{pf}");
 }
