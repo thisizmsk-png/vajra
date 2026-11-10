@@ -57,7 +57,7 @@ function ModelRow({ account, model }: { account: Account; model: AccountModel })
   const check = model.tool_check === "failed" ? C.toolCheck.failed(model.checked_on) : C.toolCheck[model.tool_check];
   return (
     <li className="v-model">
-      <ProviderIcon family={model.family} via={account.provider === "openrouter" ? "openrouter" : undefined} />
+      <ProviderIcon family={model.family} model={model.id} via={account.provider === "openrouter" ? "openrouter" : undefined} />
       <span className="v-model__line">
         <span data-model-line>{modelLine(account, model.id, C.defaultModel)}</span>
         <span className="v-num v-model__id">{model.id}</span>

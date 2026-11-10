@@ -32,11 +32,16 @@ describe("usage warning chip", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("puts the account's mark before the warning", () => {
+    bar(list(acct("codex", [win("daily", 90)])));
+    expect(screen.getByRole("status").querySelector(".v-pt[data-family='codex'] img")).not.toBeNull();
+  });
+
   it("names the account by its label, not its id; an account with no known label keeps its id", () => {
     for (const [id, label] of [["codex", "Codex CLI"], ["openrouter", "OpenRouter"], ["acme-corp", "acme-corp"]]) {
       cleanup();
       bar(list(acct(id, [win("daily", 91)])));
-      expect(screen.getByRole("status").textContent).toBe(`${label} 91% used today.`);
+      expect(screen.getByRole("status").textContent?.replace(/\s+/g, " ").trim()).toBe(`${label} 91% used today.`); // the tile adds no words
     }
     expect(accountLabel("claude")).toBe("Claude Code");
   });

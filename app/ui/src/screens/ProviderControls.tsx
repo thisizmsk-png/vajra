@@ -9,6 +9,7 @@ import type { ResumeTarget } from "../ipc";
 import { parseProviderList } from "../providerContract";
 import type { CapabilityFlags, Limit, ProviderInfo } from "../providerContract";
 import { problemDetail } from "./states";
+import { ProviderIcon } from "./ProviderIcon";
 import "./providers.css";
 
 const C = S.providers;
@@ -100,7 +101,7 @@ export function ProviderCard({ provider: p }: { provider: ProviderInfo }) {
   const tested = C.tested[p.tested] ?? C.tested.unknown;
   return (
     <section className="v-prov" aria-labelledby={id}>
-      <h3 id={id} className="v-prov__title">{p.name}</h3>
+      <h3 id={id} className="v-prov__title"><ProviderIcon family={p.id} />{p.name}</h3>
       <dl className="v-prov__facts">
         <dt>{C.version}</dt>
         <dd>
@@ -149,7 +150,7 @@ export function RunProvider({ slug }: { slug: string }) {
   if (!other || !p) return null;
   return (
     <section className="v-prov__run" aria-label={C.runsOn(p.name)}>
-      <Text variant="label">{C.runsOn(p.name)}</Text>
+      <Text variant="label" className="v-prov__runon"><ProviderIcon family={p.id} />{C.runsOn(p.name)}</Text>
       {!p.installed && <Text variant="body-sm" muted>{C.resumeOff(p.name)}</Text>}
       <ProviderControls provider={p} only="off" />
     </section>

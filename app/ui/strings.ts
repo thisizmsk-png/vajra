@@ -618,7 +618,7 @@ export const S = {
     baseUrlSave: "Save base URL",
     baseUrlProblem: { empty: "Enter a web address.", scheme: "Use an https address (http only for this machine: localhost, 127.0.0.1 or ::1).", insecure: "Plain http would send your key unencrypted. Use https, or a localhost address.", credentials: "Remove the user name and password from the address. Keys are only saved in the Keychain." } as Record<string, string>,
     baseUrlFailed: "The base URL was not saved.",
-    tileLegend: "Two-letter tiles mark where each provider's official mark goes once its terms are cleared. The plain icon is the fallback for anything else.",
+    tileLegend: "A provider's own mark is shown only to say which provider runs a worker. A two-letter tile stands in until its mark is cleared. The plain icon is the fallback for anything else.",
   },
   /** Project scope: the default agent, per-role defaults and the allowed set. */
   agents: {
