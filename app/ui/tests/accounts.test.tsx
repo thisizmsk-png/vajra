@@ -3,13 +3,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ACCOUNTS as FIXTURE_ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
-import { allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
+import { BASE_URL_SAVE_WIRED, allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
 import type { Account } from "../src/accountsContract";
 import { setTransport } from "../src/ipc";
 import { PreferencesProvider } from "../src/preferences";
 import { DEFAULT_PREFERENCES } from "../src/preferenceContract";
 import { CurrentProject } from "../src/projects/current";
 import { ProviderIcon } from "../src/screens/ProviderIcon";
+import { BaseUrl } from "../src/screens/Accounts";
 import { Settings } from "../src/screens/settings/Settings";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -276,26 +277,31 @@ describe("the OpenRouter key", () => {
 });
 
 describe("advanced: base URL", () => {
-  it("is offered only for gateway (API key) accounts, never for CLI-login accounts", async () => {
-    settings();
-    const or = await account("OpenRouter");
-    expect(within(or).queryByLabelText(C.baseUrlLabel)).not.toBeNull();
-    for (const name of ["Claude Code", "Codex CLI"]) {
+  it("is not offered on any row while the core has no command to save it (no control that always errors)", async () => {
+    const f = settings();
+    for (const name of ["Claude Code", "Codex CLI", "OpenRouter"]) {
       const row = await account(name);
       expect(within(row).queryByText(C.advanced)).toBeNull();
+      expect(within(row).queryByLabelText(C.baseUrlLabel)).toBeNull();
     }
+    expect(BASE_URL_SAVE_WIRED).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "provider_base_url_save")).toBe(false);
   });
 
-  it("refuses a URL with a user name or password in it, and saves a plain one", async () => {
-    const f = settings();
-    const or = await account("OpenRouter");
-    const field = within(or).getByLabelText(C.baseUrlLabel);
+  // The box itself stays tested, so turning BASE_URL_SAVE_WIRED on later is a one-line change.
+  it("the box refuses a URL with a user name or password in it, and saves a plain one", async () => {
+    const f = fakeIpc({ provider_base_url_save: null });
+    setTransport(f.transport);
+    const or = clone(FIXTURE_ACCOUNTS).accounts.find((a) => a.id === "openrouter") as Account;
+    render(<ul><li aria-label="box"><BaseUrl account={or} onSaved={() => {}} /></li></ul>);
+    const box = screen.getByRole("listitem", { name: "box" });
+    const field = within(box).getByLabelText(C.baseUrlLabel);
     fireEvent.change(field, { target: { value: "https://user:hunter2@host/v1" } });
-    fireEvent.click(within(or).getByRole("button", { name: C.baseUrlSave }));
-    expect((await within(or).findByRole("alert")).textContent).toBe(C.baseUrlProblem.credentials);
+    fireEvent.click(within(box).getByRole("button", { name: C.baseUrlSave }));
+    expect((await within(box).findByRole("alert")).textContent).toBe(C.baseUrlProblem.credentials);
     expect(f.calls.some((c) => c.cmd === "provider_base_url_save")).toBe(false);
     fireEvent.change(field, { target: { value: "https://openrouter.ai/api/v1" } });
-    fireEvent.click(within(or).getByRole("button", { name: C.baseUrlSave }));
+    fireEvent.click(within(box).getByRole("button", { name: C.baseUrlSave }));
     await waitFor(() => expect(f.calls.find((c) => c.cmd === "provider_base_url_save")?.args).toEqual({ accountId: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }));
   });
 });

@@ -7,7 +7,7 @@ import { S } from "../../strings";
 import { api } from "../ipc";
 import { isNewModel, modelLine, modelName, pct, warnWindow } from "../accountsContract";
 import type { Account, AccountModel, Usage, UsageWindow } from "../accountsContract";
-import { baseUrlProblem } from "../accountsContract";
+import { BASE_URL_SAVE_WIRED, baseUrlProblem } from "../accountsContract";
 import { useAccounts } from "../providerData";
 import type { Accounts } from "../providerData";
 import { ProviderIcon } from "./ProviderIcon";
@@ -68,7 +68,7 @@ function ModelRow({ account, model }: { account: Account; model: AccountModel })
   );
 }
 
-function BaseUrl({ account, onSaved }: { account: Account; onSaved: () => void }) {
+export function BaseUrl({ account, onSaved }: { account: Account; onSaved: () => void }) {
   const [url, setUrl] = useState(account.base_url ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -119,7 +119,7 @@ export function AccountRow({ account: a, usage, onReload, onKey, onRemove }: { a
             {a.models.map((m) => <ModelRow key={m.id} account={a} model={m} />)}
           </ul>
         )}
-        {apiKey && <BaseUrl key={a.base_url ?? ""} account={a} onSaved={onReload} />}
+        {apiKey && BASE_URL_SAVE_WIRED && <BaseUrl key={a.base_url ?? ""} account={a} onSaved={onReload} />}
       </div>
       <div className="v-acct__actions">
         {!apiKey && <Button size="sm" variant="ghost" aria-label={`${C.check}: ${a.label}`} onClick={onReload}>{C.check}</Button>}

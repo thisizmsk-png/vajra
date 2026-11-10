@@ -59,6 +59,9 @@ export const ROLES = ["architect", "backend", "frontend", "tests", "verifier", "
 
 /** OpenRouter models carry "New" until the soak passes (build brief, PR 8). One switch, so the label comes off in one edit. */
 export const GATEWAY_SOAK_PASSED = false;
+/** The Advanced > base URL box is shown only while the core can save one. The core has no `provider_base_url_save` command yet,
+ *  so the box would be a control that always errors; flip this when the command lands. */
+export const BASE_URL_SAVE_WIRED = false;
 export const WARN_PCT = 80;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
