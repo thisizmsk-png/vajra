@@ -130,15 +130,27 @@ fn status_in(lc: &str) -> Option<u16> {
     None
 }
 
+/// Seconds from a `Retry-After` in `lc` (lower case). A bare number is seconds; `s`/`sec`/`seconds`, `m`/`min`/`minutes`
+/// and `h`/`hour(s)` are understood; anything else (a date, `2026-11-09T10:00Z`, an unknown unit) is `None`, which makes
+/// the policy ask the user instead of retrying early.
 fn retry_after_in(lc: &str) -> Option<u64> {
     for lead in ["retry-after:", "retry-after\":", "retry after ", "retry_after_s\":"] {
-        if let Some(at) = lc.find(lead) {
-            let rest = lc[at + lead.len()..].trim_start_matches([' ', '"']);
-            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            if let Ok(n) = digits.parse::<u64>() {
-                return Some(n);
-            }
+        let Some(at) = lc.find(lead) else { continue };
+        let rest = lc[at + lead.len()..].trim_start_matches([' ', '"']);
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let n: u64 = digits.parse().ok()?;
+        let unit: String = rest[digits.len()..].trim_start_matches(' ').chars().take_while(char::is_ascii_alphabetic).collect();
+        // A number glued to a date or time separator is not a count of seconds.
+        if rest[digits.len()..].starts_with(['-', ':', '/']) {
+            return None;
         }
+        let mult = match unit.as_str() {
+            "" | "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+            _ => return None,
+        };
+        return n.checked_mul(mult);
     }
     None
 }

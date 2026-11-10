@@ -37,6 +37,21 @@ fn a_429_carries_its_retry_after() {
 }
 
 #[test]
+fn a_retry_after_needs_a_unit_it_understands() {
+    let ra = |t: &str| classify(&format!("last status: 429 {t}")).retry_after_s;
+    assert_eq!(ra("Please retry after 20 minutes"), Some(1200));
+    assert_eq!(ra("retry after 20 min"), Some(1200));
+    assert_eq!(ra("retry after 2 hours"), Some(7200));
+    assert_eq!(ra("retry after 30 seconds"), Some(30));
+    assert_eq!(ra("retry-after: 7"), Some(7));
+    // A date or an unknown unit is not a count of seconds: None, so the user is asked.
+    assert_eq!(ra("retry after 2026-11-09T10:00Z"), None);
+    assert_eq!(ra("retry-after: 2026-11-09T10:00:00Z"), None);
+    assert_eq!(ra("retry after 5 fortnights"), None);
+    assert_eq!(decide(Kind::RateLimit, 1, ra("retry after 20 minutes")).action, Action::AskingUser);
+}
+
+#[test]
 fn claudes_stream_errors_classify() {
     for (text, kind) in [
         ("API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}", Kind::Auth),

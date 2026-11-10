@@ -123,8 +123,12 @@ fn redact_field(s: &str, name: &str) -> String {
             continue;
         }
         let mut value = rest[1..].trim_start_matches(|c: char| c == ' ' || quote(c));
-        if value.to_ascii_lowercase().starts_with("bearer ") {
-            value = &value["bearer ".len()..];
+        // An auth scheme word (Bearer, Basic, Token, Digest, ...) stays; the credential after it goes.
+        if name == "authorization" {
+            let word = value.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(0);
+            if word > 0 && value[word..].starts_with(' ') {
+                value = value[word..].trim_start_matches(' ');
+            }
         }
         let len = value.find(|c: char| !is_token_char(c)).unwrap_or(value.len());
         if len == 0 {
@@ -354,6 +358,10 @@ mod tests {
         }
         let out = redact_provider_text("authorization: Bearer FAKEtoken123 failed");
         assert!(!out.contains("FAKEtoken123") && out.ends_with(" failed"), "{out}");
+        for scheme in ["Basic dXNlcjpwYXNzd29yZA==", "Token abc", "Digest username=x"] {
+            let out = redact_provider_text(&format!("Authorization: {scheme} end"));
+            assert!(!out.contains("dXNlcj") && !out.contains("abc") && !out.contains("username=x"), "{out}");
+        }
         let out = redact_provider_text("sent Bearer FAKEtoken123");
         assert!(!out.contains("FAKEtoken123"), "{out}");
     }
