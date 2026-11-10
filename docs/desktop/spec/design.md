@@ -962,6 +962,499 @@ mutate only through `vajra_kb.py` and `atman.sh` (US-7.1 to US-7.4).
   memories inject context (P15 context-cost risk). The app never edits either one's settings.
 - **Would change our mind:** Competitor M documents a stable export format; then (b) uses that instead.
 
+**ADR-16 Per-worker launch: the core runs non-Claude crew workers as their own sessions (multi-provider D1, PR 6)**
+
+Status: proposed 2026-11-10. This is a design only: arjuna reviewed it and duryodhana ran a pre-mortem, and both are folded in here.
+
+- **Decision it implements:** the owner chose core-launched workers (D1) on 2026-11-09.
+- **What it builds on:**
+  - PR 3, the gateway adapter (#123);
+  - PR 4, the launch receipt (#128);
+  - PR 5, provider errors (#126);
+  - FG-02, Director-General proposals (#90).
+- **Related ADRs:** ADR-14 (approval-only resume) and ADR-15 (projects and the Director-General) are recorded with their FG specs, not in this file.
+
+**Open questions for the owner.** The design below takes the recommended answer to each one. The "Gates" column says which PR waits on it.
+
+| # | Question | Recommendation | Gates |
+|---|---|---|---|
+| Q1 | Should only non-Claude workers be launched by the core? Claude-account workers would stay subagents inside the run session. | **Yes (hybrid).** A Claude subagent keeps the guard, mid-run messages, redirect, its transcript and the workflow's typed report. A Claude seat still gets a receipt (16.6). | 6a |
+| Q2 | Approve engine changes **E13** and **E14**? E13 makes the workflow send a core-seat task through a relay step and adds a `RelayReport` schema. E14 adds a `bundled-agents/vajra-relay.md` definition and a dispatch-only MCP server on the run session. Both ship in 6c and need the owner's install and the manifest regeneration. | **Approve.** 6a and 6b can merge first. Until the installed workflow reports that it supports seats (the handshake in 16.2), every non-Claude seat is refused, so nothing is ever approved for a route that does not exist. | 6c |
+| Q3 | The Codex `workspace-write` sandbox stops writes outside the worktree and the shell's network, **but not reads**. A Codex worker can read any file the user can, and what it reads can reach that worker's model provider. Accept that? | **Accept, and disclose it.** The proposal card and the worker card say: "Runs outside the Vajra guard. Can read your files; can write only in its worktree." A project that does not accept this limits `allowed` to Claude. | 6b |
+| Q4 | Codex **login** workers use the user's own `~/.codex`: the login, and the config with any MCP servers and `notify` command in it. Those could act outside the guard and outside the sandbox. | **The core switches them off for the worker** (`-c mcp_servers={}`, `-c notify=[]`, spike S3). If Codex cannot do that, workers are **not offered on the login route**; they run on API-key or gateway accounts only. For the receipt, the core reads only the one session file of the thread it started (`~/.codex/sessions/**/rollout-*-<thread_id>.jsonl`, read-only, no-follow), never `auth.json` or `config.toml`. **Security review by bhishma is required.** | 6b |
+| Q5 | A seat is an **account for a whole role**: every task the plan gives that role, which can include config or CI edits. The DG's `task` text is a forecast, not a binding. Accept that? | **Accept, with one exception:** a task flagged as security (the workflow's `SEC_RE` or `touches_security`) stays on Claude unless its seat sets `security: true`. The card says "Expected task". The crew tree shows the real task→seat map once the run has planned. | 6a |
+| Q6 | No per-worker choice for a run started **from the form** (no proposal) in PR 6? | **Yes.** Only a human-started proposal can put a worker on a non-Claude account. The form follows in PR 8. | — |
+| Q7 | What happens when a cap is reached? | The task **waits in its seat's queue** (16.5). It never stops the run and never moves to another account (H7). Per-account caps are an optional setting with **no default**. Because a gateway key's credit limit is the only hard spend stop, Settings suggests setting one, and the proposal card says when a gateway account has none. | 6b |
+| Q8 | Work a core worker leaves **uncommitted** after a Stop, a timeout, a crash or an app quit. | **Kept in its worktree, never committed automatically.** The run card lists it with its diff (16.5, "Run end and restart"), and the user decides. | 6b |
+
+**Decision.**
+- **Who launches what.** The core spawns each **non-Claude** crew worker as its own PTY session, through that account's adapter (16.8 gives the argv). It supervises it like any other session: the PR 4 receipt, PR 5's typed errors and retry policy, and Stop. Claude workers stay subagents (Q1).
+- **How the lead hands off a task.** The run lead (Claude Code, D4) hands a task to a core worker through a **relay step**: a small Claude subagent, inside the guard, in its own worktree. It calls the dispatch-only tools `dispatch_worker` and `await_worker`, commits the task's files, and returns a `RelayReport`.
+- **Where the authority sits.** What may run where is fixed by the **human-started proposal** (16.1–16.3), held in a guarded record. The core checks it on every dispatch and never trusts what the run session says.
+
+**Options.**
+
+| Option | Verdict | Why |
+|---|---|---|
+| (a) Do nothing: every worker is a Claude subagent | Rejected | H2 needs agent, model and effort per worker. |
+| (b) A Claude subagent shells out to `codex exec` | Rejected in D1 | The worker would sit outside receipts, typed errors, caps, the session list and Stop, with the subagent's environment instead of `ENV_ALLOW`. |
+| (c) The core runs every worker, Claude included | Rejected for now (Q1) | Claude workers would lose mid-run messages and their transcript. |
+| (d) Hybrid core launch through a relay | **Chosen** | |
+| (e) The core creates the worktree and commits | Rejected | The git bridge is read-only by design (`vajra/bridge.rs`, `GIT_READ_ONLY`). The relay already has a worktree from Claude Code (`isolation: 'worktree'`) and commits under the guard, as every writer does. |
+| (f) The worker commits | Rejected | A linked worktree's objects and refs live in the main repo's `.git`, outside the sandbox's writable root. Widening `writable_roots` would let the worker write the user's refs, hooks and config. |
+
+### 16.1 `run_proposal.workers[]` and the hash
+
+`propose_run` gains two optional arguments, `workers` and `max_in_flight`, both in the MCP schema and in the `tools.rs` arg list.
+
+```json
+"max_in_flight": 4,
+"workers": [
+  { "slot": "w1", "role": "backend", "task": "Token bucket middleware", "account": "claude",
+    "model": null, "effort": null, "security": false, "why": "Touches auth; needs the guard and mid-run messages" },
+  { "slot": "w3", "role": "docs", "task": "Document the limits", "account": "openrouter",
+    "model": "deepseek/deepseek-v4-flash", "effort": null, "security": false, "why": "Plain writing, low risk" }
+]
+```
+
+**Fields.**
+
+| Field | Rule |
+|---|---|
+| `slot` | `w1` to `w16`, unique. |
+| `role` | A key of `crew::roles` (table below). |
+| `task` | Plain text, 1 to 200 bytes. |
+| `account` | A known account id. |
+| `model` | `null` or a `valid_model_id`. |
+| `effort` | `null` or 1 to 16 bytes of `[a-z0-9-]`, the same charset rule as `preferences`. It is passed through to a harness that has an effort setting; a harness without one refuses a non-null value. No fixed list (H8). |
+| `security` | Default `false`. |
+| `why` | Plain text, 0 to 300 bytes. |
+| `max_in_flight` | 1 to 16, default `caps::DEFAULT_RUN_WORKERS`. It replaces the constant that `desktop/proposals.rs:93` uses today. |
+
+- **Plain text.** Every text field passes the same `sanitise` check as `ask`.
+- **`workers: []` is refused.** Leave the field out instead.
+- **Claude seats (a Vajra limit, not a capability check).** A non-null `model` or `effort` on a Claude seat is refused with `not_supported_yet`, because the workflow cannot pass a model to a writer subagent today (writers pin their own, for example `bundled-agents/bhima.md`).
+- **`source` is set by the core, once, at proposal.** It is `role_default` when the choice equals `Agents::choice_for(role)`, and `dg` otherwise.
+  - It is **stored** on the ledger line and **hashed from the stored value**. Start never re-derives it, so editing a preference cannot turn every waiting proposal into `proposal_changed`.
+  - A `source` sent by the DG is refused (`deny_unknown_fields`), so the DG cannot claim `user`.
+
+**Roles (`crew::roles`).** The core maps each role to the workflow's writer ids, as data in one file. A parity test checks the table against the workflow's `ALL_WRITERS`. `Agents.roles` keys are validated against this table too (they are free-form today, in `preferences/mod.rs`).
+
+| Role | Writer ids |
+|---|---|
+| backend | bhima, sepoy-backend-1 |
+| frontend | nakula, sepoy-frontend-1 |
+| tests | sepoy-test-1 |
+| docs | abhimanyu |
+| platform | hanuman |
+| numerics | karna |
+| analysis | sahadeva |
+
+Architect, verifier, reviewer and merge steps never route to a seat.
+
+**Hash.** It is computed from a typed struct (`ProposalV2`, fields in a fixed order, `null` written out), never from map order.
+- **No `workers`:** exactly today's `vajra.run_proposal/1`, so proposals already waiting in a ledger still start.
+- **With `workers`:** `vajra.run_proposal/2` over `project, ask, base, rounds, max_in_flight, workers` (in slot order, each with its stored `source`).
+- **Any change** to any byte of any worker changes the hash, and Start refuses with `proposal_changed`.
+
+**Ledger and inbox.**
+- The `propose` line stores `workers` and `max_in_flight`. `open_proposals` parses them with the same bounds; a line that fails to parse is skipped, never half-read.
+- Each inbox item carries `workers`, plus for each worker its `limits` (16.4), `outside_guard: bool` and `route` (16.2).
+
+### 16.2 The H8 checks: what, and when
+
+One function, `providers::launch::launchable(choice, agents, probe, keys, route)`, runs at proposal time and again at start. It returns `Result<(), Refusal{slot, code, detail}>` and checks only these:
+
+| # | Check | Refusal code and detail |
+|---|---|---|
+| 1 | `agents.permits(choice)` | `outside_allowed` |
+| 2 | The harness binary is on the user's PATH (`detect::System::installed`, no process run) | `harness_missing`: "Codex is not installed (looked on your PATH)" |
+| 3 | For an `api_key` or `gateway` account, `Keys::saved(account)` | `key_missing`: "No key saved for OpenRouter. Add it in Settings > Providers". If the check itself fails: `key_unreadable`. The key is never read. |
+| 4 | **Route handshake** (non-Claude seats only): this build has the core route (6b), **and** the installed `~/.claude/workflows/vajra-deliver.js` declares the literal marker `seats: 'vajra.seats/1'` in its `meta`. The core reads it through the allowlisted reader the preflight already uses. | `core_route_unavailable`: "This Vajra install can't run Codex workers yet. Update Vajra." |
+
+Check 4 also guards against version skew between the app and the installed workflow. Nothing else is checked (H8): login state is advisory, and model ids are opaque. A model the CLI rejects comes back at run time as a typed `bad_request` error (PR 5).
+
+**At proposal.**
+- Every worker is checked.
+- If any fails, `propose_run` returns `invalid_args` with `refusals: [{slot, code, detail}]` listing **every** failing slot, and nothing is written.
+
+**At start.**
+- `start_proposal` re-checks every seat after applying the overrides.
+- If any fails, it answers `{"error":"worker_unavailable","refusals":[...]}` before the `requested` line is written. The proposal stays open.
+
+### 16.3 `start_proposal` overrides
+
+The call becomes `start_proposal(id, proposal_sha256, overrides?)`, with `overrides = [{slot, account, model, effort}]`, at most one per slot.
+
+**Each override:**
+- names an existing slot (otherwise `unknown_slot`);
+- passes `launchable`, so a choice outside `allowed` is refused for that slot with `outside_allowed`;
+- is recorded as `source: "user"`.
+
+**What the start records.** Overrides are not part of `proposal_sha256`, which covers what the DG proposed and the human read. Before anything spawns, the start writes:
+- `seats` (the final table) and `seats_sha256` on the `approve` `requested` line;
+- the guarded record `control/lead/<run>/seats.json`, atomically, next to `PROVIDER_FILE`.
+
+If either write fails, the start is refused.
+
+**`seats.json` is the only authority for dispatch** (16.5). On resume it is carried to the new run (16.5, "Run end and restart").
+
+**The start receipt.** It has one entry per seat: `{slot, role, source, requested{account, harness, model, effort}, route: "subagent"|"core"}`. `route` is the result of check 4, so it never claims a route the install lacks. The per-session launch receipts (PR 4) follow as each worker starts.
+
+### 16.4 Per-worker limits
+
+`Capabilities` (`adapter.rs`) become per worker. Each crew-tree node and each `project_state` worker gains `controls: {message, redirect, stop: "hook_block"|"terminate", reason}`, taken from the seat's engine.
+
+| Seat | Message / Redirect | Stop | Reason shown |
+|---|---|---|---|
+| Claude (subagent) | yes | sticky hook block (ADR-8) | — |
+| Codex (core) | **no** | **ends the process group** (SIGHUP, then SIGKILL after `KILL_GRACE`) | "This worker can't take a message mid-run." / "Stop ends this worker at once; its uncommitted work stays in its worktree." |
+
+**Crew-tree identity.**
+- A core worker is a node `core:<ticket>` under its task node, with the relay nested under it, not shown as its own worker.
+- `message_worker` and `redirect_worker` refuse every `core:` id with `not_supported_by_harness`, in the service, for the DG too.
+
+**Stop.**
+- `stop_worker` on a `core:` node keeps the human confirmation (ADR-8).
+- On confirm, the core kills the session (`Supervisor::kill`; `stop_asked` suppresses `provider_error`) and places a sticky stop on the relay.
+- The pending `await_worker` answers `stopped`.
+
+### 16.5 Caps, seats as queues, and the dispatch path
+
+**Caps.** The real caps live in `desktop/caps.rs`, not `nap.rs`, and they are not the "1 run, 16 workers" of the PR 6 brief:
+- 1 run per project;
+- `max_runs` runs in the app (default 2, from 1 to 4);
+- a ceiling of 8 workers across concurrent runs, counted at each run's recorded `maxInFlight` (1 to 16).
+
+They stay as they are. A core worker counts against:
+1. **its run's `maxInFlight`.** A relay is one of the workflow's parallel steps, and the core also enforces the limit across the run's live core sessions;
+2. **the app ceiling**, unchanged, whatever the provider;
+3. **an optional per-account cap** (Q7): `agents.account_caps`, `#[serde(default)]`, from 1 to 16 per account.
+
+**A seat is a queue, not a lock.**
+- `dispatch_worker` names the **task's owner** (a writer id), not a slot. The core chooses the seat:
+  - one with that role, `route: core`, and the task's security flag allowed (16.1);
+  - the first free one, or else the one with the shortest queue.
+- A seat runs **one task at a time**. A dispatch to a busy seat, or one over a cap, is **queued** (`state: queued`, with its position). It is never refused.
+- So three docs tasks on one docs seat run one after another, and the run never asks the user about it.
+- A task whose role has no core seat, or a security task, never reaches the relay. The workflow keeps it on a Claude writer.
+
+**The lead→worker path.**
+
+```
+workflow (run session, Claude)   [E13]
+  └─ for a task whose owner maps to a core seat (seats arg, 16.3):
+     step(task.<id>.r<n>, 'vajra-relay', relayPrompt, S.RelayReport, {isolation:'worktree'})
+       relay subagent (Claude, inside the guard, own worktree W, model pinned in its definition)
+         1. git checkout -B <branchFor(id,n)> <from>; merge deps                (as writers do today)
+         2. vajra-dispatch.dispatch_worker {task_id, round, owner, brief, cwd: W}   ──► core → ticket
+         3. loop: vajra-dispatch.await_worker {ticket, wait_s ≤ 110}               ──► core
+         4. outcome done|progress: git rev-parse --git-dir == gitdir from core; git add -- <task files>;
+            git commit (message and trailer built by the core); checkout --detach
+         5. return RelayReport {outcome, summary (from the core), branch, commit, files, leftovers}
+runTask maps RelayReport: done → ok; progress → continue from commit next round;
+  failed → ok:false (rework next round); needs_user|stopped → needsUser
+```
+
+- **The relay's prompt** is code-built. Its Bash is limited to the fixed git commands above (the agent's tools list, and the guard for `agent_type: vajra-relay`, spike S5).
+- **The relay never decides anything.** The summary, the commit message and the trailer `Vajra-Worker: <account> <model>` all come from the core's answer, built in code and wrapped as data. The untrusted worker text never becomes the relay's instructions, and the core removes any `STOPPED_RE` match from it, so a worker cannot fake a Stop.
+
+**What `RelayReport.outcome` means, and what the core state was.**
+
+| Outcome | Core state |
+|---|---|
+| `done` | `exited` with the task's files changed. |
+| `progress` | `partial`: the tree changed, then a retryable error happened (below). |
+| `failed` | `failed` (no typed human-facing error), `timed_out`, `abandoned`, `tampered`, or no changes. The workflow reworks the task next round. |
+| `needs_user` | A PR 5 `asking_user` event: auth, quota, or a rate limit longer than 15 minutes. |
+| `stopped` | The human stopped the worker. |
+
+Only `needs_user` and `stopped` stop the run at `need_input`.
+
+**Transport (`vajra-dispatch`, E14).**
+- **The server.** A run with core seats gets `--mcp-config <control>/<session>/dispatch-mcp.json`, an MCP server named **`vajra-dispatch`**, so its tools never collide with the Lead's.
+  - It is started with `VAJRA_RUN_DISPATCH=<run_id>` and a per-run random `VAJRA_DISPATCH_TOKEN`. The guarded record keeps only the token's sha256.
+  - It serves only `dispatch_worker`, `await_worker` and `cancel_worker`.
+  - It handles `tools/call` **concurrently** (one thread per request, replies written under one lock), so parallel relays never queue behind each other's waits.
+- **The app side.** The socket sends these tools to a new App-side `Dispatch` handler, **not** to the control `Service`. That handler owns the supervisor calls and parks each `await` on that ticket's condvar, so the Service mutex is never held across a wait. The client's read timeout for `await_worker` is `wait_s + 10` s; the 30 s default stays for every other tool.
+- **Who may call.**
+  - Only the `vajra-relay` definition lists the tools; every writer definition has an explicit tool list without them.
+  - The guard's E2 matcher widens to `mcp__vajra-(desktop|dispatch)__.*` and audit-logs every call.
+  - The socket checks the peer uid, as today, and for dispatch tools also the **peer pid** (`LOCAL_PEERPID`). That process must descend from the run session's PTY process. A Codex worker can read `dispatch-mcp.json` (Q3), but it is a child of the core, not of the run session, so it is refused (T3).
+
+**`dispatch_worker` checks, in order.**
+1. The token matches the run's record, the peer pid check passes, and the run is live.
+2. `task_id` matches `<run>.t<k>`, `round` is 1 to 3, and `owner` maps to a core seat in `seats.json`.
+3. **Idempotent:** a second dispatch for the same `(task_id, round)` returns the existing ticket.
+4. The `cwd` check (below).
+5. `launchable` passes again for the chosen seat, so a key removed mid-run is caught here.
+6. If the seat or a cap is busy, the dispatch is queued.
+
+**`brief`.**
+- It is plain text, at most 30 KiB (so the brief plus the fixed sentence stays under `argv::MAX_ASK_BYTES`), and redacted with the run's nonce set.
+- The core writes it to `<data>/workers/<run>/<task>-r<round>/brief.md` and passes it after `--`. It adds one fixed sentence: "Do not commit, push or switch branches. Leave your changes in the working tree; Vajra commits them."
+
+**The `cwd` check.**
+- `cwd` is opened no-follow and must be a directory below `<project root>/.claude/worktrees/`.
+- Its `.git` must be a regular **file** whose `gitdir:` resolves under the project's common dir (`caps::try_key_of_entry`). That rules out the main checkout.
+- Its HEAD, read through the bridge, must be on `refs/heads/<branchFor(task, round)>`. That rules out a writer's or the merge step's worktree.
+- It must not be the cwd of any other live core session.
+- The core records **`dispatch_head`** (HEAD's sha) and a hash of the `.git` file.
+
+**Leases, timeouts and retries.**
+- **Lease.** If a ticket gets no `await` for `2 × wait_s + 30` s (the relay died, ran out of plan or context, or stopped polling), the core kills the worker and the ticket reads `abandoned`. The seat frees and the queue moves on.
+- **Wall-clock budget.** A worker has `worker_timeout_s` (default 30 min); when it runs out, the worker is killed and reads `timed_out`.
+- **Running answers are small.** An `await` that finds the worker still running returns only `{state, attempt, elapsed_s, queue_position}`.
+- **Retries** belong to the core (PR 5 `run_with_policy`), and happen **only while the tree has not changed** since `dispatch_head`. That is checked as `git status --porcelain=v1 -z --ignore-submodules=all` being empty, through the bridge.
+  - Each retry is a new session on the **same** seat, account, model and cwd.
+  - Once the tree has changed, a retryable error ends as `partial`. The relay commits the task's files, and the workflow continues from that commit (its existing `progress` path).
+- **Error events.** `ProviderTag` gains `attempt`, and the supervisor's exit report is the only emitter. Today `sessions/mod.rs:599-600` always reports the decision as attempt 1.
+
+**The final `await` answer** `{state, ticket, seat, session_id, exit_code, attempt, summary, receipt, provider_error, diff, gitdir}` is sent only after the process group is gone and these checks pass:
+- the `.git` file is unchanged and is still a file;
+- HEAD still equals `dispatch_head` (the worker did not commit or switch branches);
+- no new nested `.git` entry exists in the tree.
+
+If any check fails, the state is `tampered`.
+
+The fields of that answer:
+
+| Field | What it holds |
+|---|---|
+| `summary` | Code-built: the state, plus the first 300 characters of the worker's last message, redacted (PR 5 redaction plus the nonce set) and wrapped as untrusted data. |
+| `receipt` | The PR 4 `LaunchReceipt`. |
+| `diff` | A `Diff` (16.7) of `cwd` **against `dispatch_head`**, so dependency merges are not counted as the worker's. |
+
+The relay stages **only the task's paths** (`git add -- <task files>`). Other changed paths go into `leftovers`, which the run card shows; they are never committed.
+
+**Run end and restart.**
+- **When a run ends or is stopped,** the core kills that run's core workers. Pending awaits answer `stopped`, and queued tickets are dropped.
+- **Restart.** Runs don't survive an app quit (ADR-9), so after a restart nothing is adopted.
+- **The ticket log.** `<data>/workers/<run>/tickets.jsonl` is guarded and append-only. The run card lists every ticket that ended with uncommitted work, with its worktree and diff (Q8).
+- **Resume** (`resume_run`) gives the new run the same seats:
+  - it copies `seats.json` from the newest run of the same session and campaign that the guarded record vouches for, as `original_workers` does;
+  - it writes a new `dispatch-mcp.json` with a **rotated** token;
+  - the resume argv (`build_resume_argv`) gains `--mcp-config`, and the workflow gains its `seats` argument.
+  - The approval-only resume (ADR-14) gets neither, because it runs no workers.
+
+### 16.6 Receipts for both kinds of seat
+
+- **A core seat** gets PR 4 as built. `effective` comes from the rollout file of the `thread_id` in the worker's `--json` stream:
+  - under the Vajra-owned `<data>/codex-home/<account>` for a gateway account;
+  - under `~/.codex` for a login account (Q4).
+  - It reads `unknown` when the file is not found, and a mismatch emits `launch_mismatch`.
+- **A Claude subagent seat:**
+  - `effective.model` is `message.model` from the first assistant record in the subagent's transcript, read through the existing bounded, allowlisted reader (`discover_workers`);
+  - `read_from` is `harness_transcript`, and billing stays `unknown`;
+  - the subagent is matched to its seat by its step label `task.<id>.r<n>` and its owner's role.
+
+### 16.7 The worker diff without one git process per new file (follow-up to #128)
+
+**The problem.** `diff_from_git` runs one `git diff --no-index` per untracked file, at about 19 ms each.
+- At the 2 s budget that is about 107 files, so 500 new files leave most lines uncounted and the diff is marked `partial`.
+- It also costs CPU while the run is busy.
+
+**The design.** The tracked changes (`git diff --numstat -z <base>`) and the new-file list (`git ls-files --others --exclude-standard -z`) stay one git call each, and gain `--ignore-submodules=all`. **Only the line count of each new file moves into the core,** as a direct read.
+
+**Opening the file.** `count_new_file_at(root: &File, rel: &[u8])` does this:
+- It holds the worktree root open with `O_DIRECTORY|O_NOFOLLOW`.
+- It opens each directory part with `open_at(.., O_DIRECTORY|O_NOFOLLOW)` (`preferences::open_at`, the same walk as PR 4's `rollout_file`).
+- It reads the last part with `fstatat(AT_SYMLINK_NOFOLLOW)`.
+- **Paths are bytes.** The `-z` output is split as `&[u8]`, so a non-UTF-8 name is still counted; it is shown lossily only in the UI.
+- These parts are refused and the diff marked `partial`: an empty part, `.`, `..`, a NUL, a path longer than `PATH_MAX`, and a trailing `/`. `ls-files` lists a nested repo as `sub/`.
+
+**Counting.** The rules follow `git diff --numstat`:
+
+| Entry | Lines added |
+|---|---|
+| A symlink | **1**, as git counts its target text. The link is never followed. |
+| A regular file | It is opened with `O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK`, `fstat` is checked again, and it is read in 64 KiB chunks. The count is the number of `\n`, plus 1 if the file is non-empty and does not end in `\n`. |
+| A file with a NUL in its first 8000 bytes (git's binary test) | 0, like numstat's `-`. |
+| An empty file | 0 |
+| A FIFO, socket or device | 0, and `partial`. It is never opened. |
+
+**Bounds.**
+
+| Bound | Value | Past it |
+|---|---|---|
+| `PER_FILE_CAP` | 8 MiB | The lines read so far are counted, and the diff is `partial`. |
+| `TOTAL_READ_CAP` | 64 MiB | Counting stops, and the diff is `partial`. |
+| `MAX_UNTRACKED` | 5000 files counted | Counting stops, and the diff is `partial`. |
+| `UNTRACKED_BUDGET` | 2 s | Counting stops, and the diff is `partial`. |
+
+Every file is still listed. Small files cost tens of µs, so 500 new files take well under 100 ms.
+
+**Known differences from git:**
+- a `.gitattributes` `binary`, `-diff` or `working-tree-encoding` mark is not applied, so such a file is counted as text;
+- the count is never more than the file's real newlines.
+
+`diff_from_git` keeps its signature, and the bridge stays read-only.
+
+**How `partial` reaches the UI.**
+- `Diff` gains `uncounted: u32`: the new files that were listed but not counted.
+- The crew-tree worker node and `project_state.workers[]` gain `diff: {files_total, files (first 200), added, removed, partial, uncounted}`. A core seat's diff comes from its final `await`; a subagent seat's from the receipt built at the end of the run.
+- `workerProvider.ts` parses it, and the worker card shows:
+  - `+N −M` when `partial` is false;
+  - **`≥ +N lines`** when it is true, with the accessible label "At least N lines added. U new files were not counted (too many or too large)."
+- It is never presented as exact. The strings go in `docs/design/changed-strings.md`.
+
+### 16.8 What runs outside the guard, and each process's environment
+
+| Process | Guard | Sandbox | Environment and argv | Can reach |
+|---|---|---|---|---|
+| Run session (Claude Code, `/vajra-deliver`) | Vajra guard | Claude Code's own, if enabled | `ENV_ALLOW`. Argv gains `--mcp-config` only when the run has core seats. | Unchanged |
+| `vajra-dispatch` MCP server (`vajra --mcp`, started by Claude Code) | none (ours) | none | What Claude Code gives a stdio server, plus `VAJRA_RUN_DISPATCH` and `VAJRA_DISPATCH_TOKEN` | Only the app socket; it forwards requests and holds no state. |
+| Relay subagent | **Vajra guard** | as the run | the run's | Its worktree, fixed git commands, and the dispatch tools |
+| Codex worker, gateway account | **None**: the Vajra guard is a Claude Code hook | Codex `workspace-write` (Seatbelt): writes only to cwd (`/tmp` and `$TMPDIR` excluded), **reads anywhere**, no shell network | `ENV_ALLOW` + `CODEX_HOME=<data>/codex-home/<account>` (a generated config); stdin `/dev/null`; **no key**. Argv is PR 3's `build_gateway_argv`. | The gateway API through Codex's own process. The key comes from `/usr/bin/security` (`auth.command`), outside the sandbox; a shell inside the sandbox can't read the item (spike). |
+| Codex worker, login account | **None** | The same, forced from argv so the user's config can't widen it | `ENV_ALLOW` only; the user's `~/.codex`. **A new `build_login_worker_argv`** (the interactive `Codex::run_argv` is not used): `/bin/sh -c 'exec "$@" </dev/null' sh codex exec --json --sandbox workspace-write [-m <model>] -c sandbox_workspace_write.network_access=false -c 'sandbox_workspace_write.writable_roots=[]' -c sandbox_workspace_write.exclude_slash_tmp=true -c sandbox_workspace_write.exclude_tmpdir_env_var=true -c 'mcp_servers={}' -c 'notify=[]' [-c model_reasoning_effort=…] -- <brief>` | OpenAI, through the user's login |
+| `git` from the core | none (ours) | none | The bridge's `BASE_PATH`, `-c core.fsmonitor=`, `--no-ext-diff --no-textconv`, and `--ignore-submodules=all` on `diff` and `status` | Read-only, in W, only after the worker's process group is gone |
+
+**Threats this design names.** Bhishma reviews 6b and 6c.
+
+| # | Threat | Handling |
+|---|---|---|
+| T1 | A worker reads secrets. | Q3: disclosed on both cards, and the project can limit `allowed`. |
+| T2 | A worker plants git config, hooks or a submodule to run code inside a later trusted git call. | The `.git`-file, HEAD and nested-`.git` checks before `exited`; the relay compares `--git-dir` just before committing; `--ignore-submodules=all`; the bridge's no-helper flags. A `.gitattributes` file can only name filter drivers that the user's own trusted config defines. |
+| T3 | A forged dispatch. | The token is not enough on its own, because a worker can read files. The peer-pid check refuses any caller outside the run session's process tree. What remains is `seats.json`, one task per seat at a time, the caps and `launchable`: the worst a forgery can do is run an approved seat on its approved account. |
+| T4 | A worker outlives Stop. | Killing the group misses a grandchild that calls `setsid`. That grandchild stays in the sandbox, with no network and writes only to W. It could still rewrite `.git` after the check; the relay's `--git-dir` comparison narrows this. **Residual risk**; spike S1 tests `setsid`. |
+| T5 | Key exposure. | No key in argv, env, files or logs (PR 2 and PR 3 tests); worker text is redacted (PR 5). |
+| T6 | Prompt injection through worker output. | The worker's text reaches only the code-built `summary`, wrapped as data, with `STOPPED_RE` matches removed. The relay's Bash is limited to fixed commands. |
+
+**Evidence against.**
+- The relay costs a pinned-model Claude subagent per core task: about 4 tool calls plus one `await` every 110 s.
+- A core worker can't take a message mid-run.
+- A Codex worker can read the user's files.
+- A seat holds a whole role (Q5).
+
+**Would change our mind.**
+- Codex gains a hook channel: messages become possible and (c) gets cheaper.
+- The Workflow tool gains model-free script steps: the relay becomes a script.
+- Codex gains read confinement: T1 closes.
+
+### 16.9 To verify (each item names the PR that needs it)
+
+| # | Item | PR | If false |
+|---|---|---|---|
+| S1 | Does Seatbelt `workspace-write` keep `<cwd>/.git` read-only, including a linked worktree's `.git` **file**? Does it allow `setsid`, and connecting to a unix socket? | 6b | The core checks still hold. Record the result in T2–T4. |
+| S2 | `codex exec` works in a linked worktree with no write access to the common dir: it reads history and runs `git diff`. | 6b | Add `--skip-git-repo-check`, and note that the worker sees no history. |
+| S3 | `-c 'mcp_servers={}'`, `-c 'notify=[]'`, `writable_roots=[]` and `network_access=false` override the user's config. `model_providers.openai.request_max_retries=0` and `stream_max_retries=0` apply to the built-in login provider. | 6b | Q4's fallback (no login-route workers). Without the retry override, the core adds **no** retries of its own on the login route. |
+| S4 | A Claude Code subagent's MCP tool-call timeout allows a 110 s `await_worker`. | 6c | Lower `wait_s`. |
+| S5 | A subagent whose definition lists `mcp__vajra-dispatch__*` can call a server from the parent's `--mcp-config`. Agent `tools` accept Bash command patterns. | 6c | Give the relay its own `mcpServers`, and have the guard enforce the Bash limit. |
+| S6 | The 16.7 counter matches `git diff --numstat --no-index` on the fixtures, recording the git version: text, no final newline, CRLF, empty, binary, symlink, nested folders, a newline in a name, a non-UTF-8 name, a nested repo, a FIFO. | 6b | Fix the counter. Parity is a test, not an assumption. |
+
+### 16.10 Split, files and acceptance tests
+
+The work is well over 800 lines, so it ships as **three** PRs. 6a and 6b need no engine change; non-Claude seats stay refused (16.2, check 4) until 6c is installed.
+
+#### 6a: proposal seats and start validation
+
+About 700 lines, half of them tests.
+
+**Files:**
+- `control/service/proposals.rs` (`workers`, `max_in_flight`, `ProposalV2` hash, ledger parse);
+- `control/service/tools.rs` and `control/mcp.rs` (schema);
+- `desktop/proposals.rs` (overrides, re-check, `seats.json`, start receipt, `max_in_flight` instead of the constant);
+- `desktop/lead.rs` (`record_run_seats`, `read_run_seats`, copy on resume);
+- new `providers/launch.rs` (`launchable`, the handshake);
+- new `crew/roles.rs`;
+- `preferences/mod.rs` (validate `roles` keys);
+- the inbox items;
+- `app/ui/src/screens/orch/dgApi.ts` (types only).
+
+**Acceptance tests:**
+- **The hash.**
+  - It changes when any field of any worker changes, or `max_in_flight` changes, and Start is refused with `proposal_changed`.
+  - A v1 proposal (no workers) hashes and starts as before.
+  - A preference edit between propose and start does **not** change the hash.
+- **Overrides.** An override outside `allowed` is refused for its slot (`outside_allowed`), and every other failing slot is listed too.
+- **A missing binary** is refused with `harness_missing` and its detail, both at proposal and at start (after an uninstall in between).
+- **Keys.**
+  - `key_missing` reads no key: the test uses a fake `Store` that panics on any read.
+  - A `Store` error gives `key_unreadable`.
+- **The handshake.** A Codex seat with no route handshake is refused with `core_route_unavailable`.
+- **Malformed input is refused:**
+  - a `source` supplied by the DG;
+  - an unknown role or slot;
+  - `workers: []`;
+  - a model on a Claude seat.
+- **The roles table** matches the workflow's `ALL_WRITERS` (parity test).
+- **A failed `seats.json` write** refuses the start and leaves the proposal open.
+
+#### 6b: core worker supervision and the dispatch handler
+
+About 950 lines with tests. Split out the 16.7 counter as **6b-1** if the review asks.
+
+**Files:**
+- new `desktop/workers.rs`: seat queues, dispatch, await, cancel, lease, timeout, the cwd and `.git` and HEAD checks, `tickets.jsonl`, and killing workers when the run ends;
+- `control/socket.rs` (route dispatch tools to the App handler; the peer-pid check; the per-call read timeout);
+- `main.rs` (wiring);
+- `sessions/mod.rs` (the PR 3 env in `SpawnSpec`; `attempt` in `ProviderTag`);
+- `sessions/argv.rs` (`build_login_worker_argv`);
+- `control/service/tools.rs` (`not_supported_by_harness` for `core:` ids);
+- `desktop/caps.rs` (count live core sessions per run and per account);
+- `preferences/mod.rs` (`account_caps`);
+- `providers/effective.rs` (the 16.7 counter, `uncounted`, `--ignore-submodules=all`);
+- `vajra/bridge.rs` (`--ignore-submodules=all` on `diff` and `status`);
+- `desktop/state.rs` and `crew/tree.rs` (`core:` nodes with `controls`, `diff`, `provider`);
+- `app/ui/src/workerProvider.ts` and the worker card's diff line.
+
+**Acceptance tests:**
+- **Caps and queues.**
+  - With 3 docs tasks, 1 docs seat and `maxInFlight` 4, all three run one after another with no refusal.
+  - Caps hold across mixed providers, and the app ceiling is unchanged with Codex seats.
+- **Controls.**
+  - A Codex worker's Message control is disabled with its reason, and `message_worker` on a `core:` id is refused in the service.
+  - Stop ends the process group, the `await` answers `stopped`, and no `provider_error` fires.
+- **Dispatch refuses** each of these:
+  - a bad token, or a caller pid outside the run's process tree;
+  - an owner with no core seat;
+  - a `cwd` that is the main checkout, outside `.claude/worktrees`, or on the wrong branch.
+- **Dispatch is idempotent** for the same (task, round).
+- **Tampering.**
+  - A worker that rewrites its `.git` file, commits, or creates a nested `.git` gets `tampered`.
+  - A symlinked folder in a path is not followed, and a FIFO is not opened.
+- **Lease and timeout.**
+  - A stub relay that stops polling has its worker killed and marked `abandoned` within the lease.
+  - `worker_timeout_s` gives `timed_out`.
+- **Retries.**
+  - A 504 on an unchanged tree retries twice on the same account (fake clock), then reports `blocked`.
+  - A 504 after an edit reports `partial`.
+- **The diff** is taken against `dispatch_head`, so a merged dependency's lines are not counted.
+- **End to end, with a fake harness binary.** A script on a temp PATH prints spike-shaped `--json` events, writes a rollout file and edits a file. Two core workers on different accounts (Codex login and the gateway) each return a matched launch receipt, a diff and an `await` result. A test-driven relay stands in for the Claude lead: this is the brief's "lead plus two workers".
+- **The counter** matches git numstat on the S6 fixtures, and 500 new files finish in under 300 ms with `partial == false`.
+
+#### 6c: the engine route (E13, E14)
+
+About 350 lines. It waits for Q2.
+
+**Files:**
+- `workflows/vajra-deliver.js`: the `seats` argument; `meta.seats`; relay routing in `runTask`; the `RelayReport` schema and how its outcomes map; security tasks stay on Claude;
+- new `bundled-agents/vajra-relay.md`: Bash limited to the fixed git commands plus the two dispatch tools, a pinned low-cost model, and `maxTurns` bounded;
+- `sessions/argv.rs`: `--mcp-config` on the run and resume argv when the run has core seats;
+- `desktop/mod.rs`: writes `dispatch-mcp.json`, and generates and rotates the token;
+- `control/mcp.rs`: the `vajra-dispatch` server mode with concurrent `tools/call`;
+- `tests/workflows`: parity, plus relay routing with a stubbed `agent()`.
+
+**Acceptance tests:**
+- A run with no core seats gets a byte-identical argv and workflow args.
+- A core-seat task goes through `vajra-relay`, and its commit passes `checkChange`.
+- Outcome mapping:
+  - `failed` reworks the task next round, without `need_input`;
+  - `stopped` holds the task back;
+  - `progress` continues from the commit.
+- A security task stays on Claude unless its seat sets `security: true`.
+- A resumed run with core seats lists the three tools, with a rotated token.
+- The run session's dispatch server lists exactly those three tools.
+
+**Reviewers.**
+- The standard gate on all three PRs, plus:
+  - api-and-interface-design on 6a;
+  - bhishma (security-and-hardening) on 6b and 6c;
+  - a duryodhana pre-mortem on 6c, because it goes to the owner's install.
+- GPT once per PR, on the final head:
+  - gpt-6.1-sol **high** on 6b and 6c;
+  - gpt-6.1-sol medium on 6a.
+
 ## 7. Error handling
 
 | What fails | Detection | Handling | User sees |
