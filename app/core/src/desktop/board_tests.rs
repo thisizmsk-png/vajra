@@ -228,3 +228,30 @@ fn a_moved_board_input_rebuilds_and_moves_the_revision() {
     app.project_state(&pid, rev2).unwrap();
     assert!(builds(&app) > mid, "a cache write did not rebuild the board");
 }
+
+/// #107 review: a cached verdict or repo state that expires while a board is being built is not dropped from the
+/// cache's deadline, and that build is not served afterwards: the next steady poll rebuilds.
+#[test]
+fn a_verdict_expiring_during_a_rebuild_is_never_served_after_it() {
+    let t = Tmp::new();
+    let d = std::path::PathBuf::from("/x");
+    let (app, slug) = campaign_with_tasks(&t, vec![ev_task(&d, "t1", "pending", &["ac-1"], "")]);
+    let pid = project_with(&t, &app, std::slice::from_ref(&slug));
+    let mut rev = app.project_state(&pid, None).unwrap()["rev"].as_u64();
+    for _ in 0..3 {
+        rev = app.project_state(&pid, rev).unwrap()["rev"].as_u64().or(rev);
+    }
+    // A live verdict that stops counting 60 ms from now, written (so the next poll rebuilds) just before a 150 ms build.
+    let until = std::time::Instant::now() + Duration::from_millis(60);
+    app.evidence_cache.lock().unwrap().insert((t.0.join("ev.json"), b"{}".to_vec(), None, None, None), (true, Some(until)));
+    app.board_inputs_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *lock(&app.board_build_pause) = Duration::from_millis(150);
+    let since = std::time::Instant::now();
+    app.project_state(&pid, rev).unwrap();
+    *lock(&app.board_build_pause) = Duration::ZERO;
+    // The deadline that passed during the build is still reported from the build's start.
+    assert_eq!(app.next_input_expiry(since), Some(until));
+    let before = builds(&app);
+    app.project_state(&pid, rev).unwrap();
+    assert!(builds(&app) > before, "the board built across the deadline was served from the cache");
+}
