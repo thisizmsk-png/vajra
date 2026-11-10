@@ -44,6 +44,12 @@ impl Service {
         Ok(())
     }
 
+    /// Install the store check every Director-General call passes first (FG-02c): an archived or missing project's
+    /// calls are refused while the project is in that state, live, whatever generation they carry.
+    pub fn set_project_gate(&mut self, gate: super::ProjectGate) {
+        self.project_gate = Some(gate);
+    }
+
     /// The project's Director-General is now on conversation `generation`; calls from any other generation are refused.
     pub fn set_generation(&mut self, project: &str, generation: u32) -> Result<()> {
         if !crate::ids::valid_project_ref(project) {

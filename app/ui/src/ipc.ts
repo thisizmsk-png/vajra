@@ -4,23 +4,25 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 // them to the snake_case parameters of the Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ProviderList } from "./providerContract";
+import type { ProviderList, UsageList } from "./providerContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
+const PLAIN = new Set(["lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
+
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
-  // The Director-General's guard preconditions and its turn cap already carry a one-line "why and what to do" (for
-  // example the sandbox one), so they are shown as they are, without the code in front.
-  if (isIpcError(e) && (e.error === "lead_guard_missing" || e.error === "turns_full") && e.detail) return e.detail;
   // A refused projects folder (#77 follow-up): what is wrong, then what to do (the fix names the path).
   if (isIpcError(e) && e.error === "projects_unavailable" && e.detail) {
     const fix = (e as { fix?: unknown }).fix;
     return typeof fix === "string" && fix ? `${e.detail} ${fix}` : e.detail;
   }
+  // The Director-General's guard preconditions, its turn cap and the project-store refusals (FG-02c) already carry a
+  // one-line "why and what to do" (for example the sandbox one), so they are shown as they are, without the code.
+  if (isIpcError(e) && PLAIN.has(e.error) && e.detail) return e.detail;
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }
@@ -120,11 +122,16 @@ export type RunOverview = {
 export type EvidenceDetail = { task: string; commands: ProofCommand[]; notes: string | null; truncated: boolean };
 export type WorktreeInfo = { worker: string; worktree: string; branch: string | null; base: string | null };
 /** ADR-15 2: one Director-General per project; `generation` is its conversation number (1, then +1 per "New conversation"). */
-export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; generation: number; name: string };
+export type AskStarted = { ask_id: string; state: string; stream: string; lead_session_id: string; project_id: string; project_name?: string | null; generation: number; name: string };
 export type DirectorGeneralState = "idle" | "thinking" | "running";
 export type LeadStatus = {
   available: boolean; read_only_reason?: string; busy: boolean; ask_id?: string; name: string;
   state?: DirectorGeneralState; reason?: string; project_id?: string; generation?: number; stream?: string;
+  /** The store project's name (FG-02c). */
+  project_name?: string | null;
+  /** When unavailable because of the project store: `not_a_project`, `project_archived` or `project_missing`. For
+   *  `not_a_project`, `action: "add_project"` and the folder `path` let the window offer to add it (decision Q1). */
+  error?: "not_a_project" | "project_archived" | "project_missing"; action?: "add_project"; path?: string;
 };
 export type NewConversation = { project_id: string; generation: number; stream: string };
 /** ADR-14 (read-only, B1): a task waiting on the human. `body` and `context` are untrusted text, shown as plain text. */
@@ -196,6 +203,10 @@ export type ProjectState =
       receipts: Receipt[];
       /** This project's waiting items (at most 50; `count` is the true number). `ok: false` means the read failed: never show it as empty. */
       inbox: { ok: true; count: number; campaign_count?: number; items: InboxItem[] } | { ok: false; error?: string };
+      /** This project's pending run proposals, newest first, picked before any inbox cut (at most 50; `more` were left out). */
+      proposals?: { ok: true; count: number; more: number; items: InboxItem[] } | { ok: false; error?: string };
+      /** The last usage answers (`vajra.provider_usage/1`), a cache read on the core side. Parse with `parseUsage`. */
+      usage?: UsageList;
     };
 /** The `changed` event payload: which streams moved, and the new revision of each known project. */
 export type Changed = { streams: string[]; snapshot_needed: boolean; projects?: { project_id: string; rev: number }[] };

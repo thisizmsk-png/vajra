@@ -232,3 +232,125 @@ export function parseProjectProvider(text: string): ParseResult<ProjectProvider>
   if (!limitsOk(lims)) return bad("invalid", "limits");
   return { ok: true, value: { id: o.id, name: o.name, installed: o.installed, tested, login_state: state, capabilities: caps, limits: lims } };
 }
+
+// ---- `vajra.provider_accounts/1` (types only; the parser arrives with the Providers screen) ----------------------------
+// One record per way of running and paying for agents. There is no field that can hold a key, token or secret, and no
+// rotation field (H7): a stored key is only the boolean `credential.saved`. Unknown states read as "cannot_tell".
+
+export const ACCOUNTS_SCHEMA = "vajra.provider_accounts/1";
+
+export type CredentialSource = "cli_login" | "api_key" | "gateway";
+export type BillingKind = "subscription" | "api_key" | "gateway" | "unknown";
+export type AccountState = "signed_in" | "signed_out" | "not_installed" | "key_saved" | "key_missing" | "cannot_tell";
+
+export interface AccountCredential {
+  source: CredentialSource;
+  /** `api_key` and `gateway` only: whether a key is stored. Never the key, a prefix or a suffix. */
+  saved?: boolean;
+}
+
+/** An API key setting that would bill instead of the subscription: the NAME of the setting and where it was found. */
+export interface OverrideWarning {
+  name: string;
+  found_in: "cli_env_block" | "cli_config" | "cli_api_key_helper";
+}
+
+export interface AccountBilling {
+  kind: BillingKind;
+  /** Only what the CLI itself prints. */
+  account_label: string | null;
+  override_warning: OverrideWarning | null;
+}
+
+export interface AccountModel {
+  /** Opaque; passed straight through to the harness. */
+  id: string;
+  /** Picks the icon. */
+  family: string;
+}
+
+export interface Account {
+  id: string;
+  provider: string;
+  /** The unmodified CLI that runs the worker. */
+  harness: string;
+  credential: AccountCredential;
+  billing: AccountBilling;
+  label: string;
+  state: AccountState;
+  models: AccountModel[];
+}
+
+export interface AccountList {
+  schema: string;
+  accounts: Account[];
+}
+
+/** An account with the model and effort to ask it for; `null` is the CLI's own default. */
+export interface AgentChoice {
+  account: string;
+  model: string | null;
+  effort: string | null;
+}
+
+/** One ceiling entry; a `model` of `null` allows every model on that account. */
+export interface AllowedAgent {
+  account: string;
+  model: string | null;
+}
+
+/** Per-project agent choice (`preferences.agents`). A role with no entry uses `default`. The old `agent` preference reads as
+ *  `{default: {account: agent}, roles: {}, allowed: [{account: agent}]}`. */
+export interface Agents {
+  default: AgentChoice;
+  roles: Record<string, AgentChoice>;
+  allowed: AllowedAgent[];
+}
+
+// ---- `vajra.provider_usage/1` (H5): what an account has used, as its own source reports it ------------------------------
+// `windows` is empty when nothing is reported: say "Not reported", never estimate. `warn` is set at 80% used.
+
+export const USAGE_SCHEMA = "vajra.provider_usage/1";
+
+export interface UsageWindow {
+  /** `5h`, `daily`, `weekly` or `credit` (a key's own spending limit). */
+  kind: string;
+  used_pct: number;
+  resets_at: string | null;
+  warn: boolean;
+}
+
+export interface Usage {
+  account: string;
+  read_at: string | null;
+  /** `none` or `gateway_key`. */
+  source: string;
+  windows: UsageWindow[];
+  amounts: { usage: number; usage_daily: number | null; limit: number | null; limit_remaining: number | null } | null;
+}
+
+export interface UsageList {
+  schema: string;
+  usage: Usage[];
+}
+
+/** Accept a `provider_usage` answer only if it has the shape the chip reads; anything else is "not reported" (null). */
+export function parseUsage(v: unknown): UsageList | null {
+  if (!isObj(v) || v.schema !== USAGE_SCHEMA || !Array.isArray(v.usage)) return null;
+  const windowOk = (w: unknown): w is UsageWindow => isObj(w) && str(w.kind) && typeof w.used_pct === "number" && Number.isFinite(w.used_pct)
+    && typeof w.warn === "boolean" && (w.resets_at === null || w.resets_at === undefined || str(w.resets_at));
+  const entryOk = (u: unknown): u is Usage => isObj(u) && str(u.account) && validProvider(u.account) && Array.isArray(u.windows) && u.windows.every(windowOk);
+  if (v.usage.length > MAX_PROVIDERS * 2 || !v.usage.every(entryOk)) return null;
+  return { schema: USAGE_SCHEMA, usage: v.usage.map((u) => ({ ...u, windows: u.windows.map((w) => ({ ...w, resets_at: w.resets_at ?? null })) })) };
+}
+
+/** The window the status bar chip is about: the most used one that is at or over the warning level. */
+export function usageWarning(list: UsageList | null | undefined): { account: string; window: UsageWindow } | null {
+  let worst: { account: string; window: UsageWindow } | null = null;
+  for (const u of list?.usage ?? []) {
+    for (const w of u.windows) {
+      if (w.warn && (worst === null || w.used_pct > worst.window.used_pct)) worst = { account: u.account, window: w };
+    }
+  }
+  return worst;
+}

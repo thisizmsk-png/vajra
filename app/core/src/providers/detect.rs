@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::contract::{BillingInfo, CapabilityFlags, Limit, Login, LoginState, ProviderInfo, ProviderList, StopKind, Tested, PROVIDERS_SCHEMA};
+use super::contract::{Account, AccountBilling, AccountList, AccountState, BillingKind, Credential, CredentialSource, OverrideWarning, ACCOUNTS_SCHEMA, BillingInfo, CapabilityFlags, Limit, Login, LoginState, ProviderInfo, ProviderList, StopKind, Tested, PROVIDERS_SCHEMA};
 use crate::adapter::{self, AgentAdapter, Engine};
 
 /// The status commands answer in well under a second; a hung one is `cannot_tell`.
@@ -28,16 +28,32 @@ pub trait Probe {
     /// Run `path args...` with the scrubbed environment and a timeout. `None` when it did not finish whole.
     fn run(&self, path: &Path, args: &[&str]) -> Option<Out>;
     fn env(&self, key: &str) -> Option<OsString>;
+    /// The text of `name` inside the CLI's own directory `dir` under the user's home, for that CLI's config only. `None`
+    /// when it is missing, a link (the file or the directory), not a plain file, too large or not text. The default reads
+    /// nothing.
+    fn read_cli_config(&self, _dir: &str, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The real machine: the user's PATH dirs, the bridge's scrubbed-env runner.
 pub struct System {
     dirs: Vec<PathBuf>,
+    home: Option<PathBuf>,
 }
+
+/// A CLI config larger than this is not read.
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 
 impl System {
     pub fn new(dirs: Vec<PathBuf>) -> Self {
-        Self { dirs }
+        Self { dirs, home: None }
+    }
+
+    /// Let the override detector read the CLIs' own config under `home`.
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.home = Some(home);
+        self
     }
 }
 
@@ -59,6 +75,27 @@ impl Probe for System {
     }
     fn env(&self, key: &str) -> Option<OsString> {
         std::env::var_os(key)
+    }
+    fn read_cli_config(&self, dir: &str, name: &str) -> Option<String> {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // Each step is opened relative to the one before, and neither the directory nor the file may be a link: a link in
+        // the middle of the path would read a config outside the CLI's own directory.
+        let open_at = |parent: &std::fs::File, name: &str, flags: i32| {
+            let c = std::ffi::CString::new(name).ok()?;
+            // SAFETY: a valid directory fd and a NUL-terminated name for this call; a returned fd is owned exactly once.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), flags | libc::O_CLOEXEC) };
+            (fd >= 0).then(|| unsafe { std::fs::File::from_raw_fd(fd) })
+        };
+        let home = std::fs::OpenOptions::new().read(true).open(self.home.as_ref()?).ok()?;
+        let dir = open_at(&home, dir, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+        let f = open_at(&dir, name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
+        if !f.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        f.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes).ok()?;
+        (bytes.len() as u64 <= MAX_CONFIG_BYTES).then(|| String::from_utf8(bytes).ok()).flatten()
     }
 }
 
@@ -236,6 +273,138 @@ pub fn list(p: &dyn Probe) -> ProviderList {
 /// One provider by id, for start and resume.
 pub fn one(p: &dyn Probe, id: &str) -> Option<ProviderInfo> {
     METAS.iter().find(|m| m.engine.id() == id).map(|m| describe(m, p))
+}
+
+// ---- accounts (`vajra.provider_accounts/1`) -------------------------------------------------------------------------------
+
+/// The CLI's own config files that can hold a key setting. Never `auth.json` or a keychain item: those hold the login
+/// itself, which only the CLI reads.
+fn config_files(engine: Engine) -> (&'static str, &'static [&'static str]) {
+    match engine {
+        Engine::Claude => (".claude", &["settings.json", "settings.local.json"]),
+        Engine::Codex => (".codex", &["config.toml"]),
+    }
+}
+
+fn warn(name: &str, found_in: &str) -> OverrideWarning {
+    OverrideWarning { name: name.into(), found_in: found_in.into() }
+}
+
+/// Whether the CLI's own config would make it bill an API key instead of the login. Reads setting NAMES: a value is never
+/// copied, stored or reported, and the warning carries a name and a place.
+///
+/// - Claude settings (JSON): a non-empty `apiKeyHelper`, or an `env` block naming `ANTHROPIC_API_KEY` or
+///   `ANTHROPIC_AUTH_TOKEN` with a non-empty value.
+/// - Codex config (TOML, parsed as TOML so comments and multiline strings are not mistaken for settings): a key named
+///   `OPENAI_API_KEY` or `CODEX_API_KEY`, in any table, whose string value is non-blank. The value is only tested for being
+///   blank, never kept.
+///
+/// A file that is missing or not understood finds nothing: "cannot tell" never blocks.
+pub fn override_warning(engine: Engine, p: &dyn Probe) -> Option<OverrideWarning> {
+    let (dir, names) = config_files(engine);
+    names.iter().find_map(|name| {
+        let text = p.read_cli_config(dir, name)?;
+        match engine {
+            Engine::Claude => claude_override(&text),
+            Engine::Codex => codex_override(&text),
+        }
+    })
+}
+
+fn claude_override(text: &str) -> Option<OverrideWarning> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let set = |x: Option<&serde_json::Value>| x.and_then(|s| s.as_str()).is_some_and(|s| !s.trim().is_empty());
+    if set(v.get("apiKeyHelper")) {
+        return Some(warn("apiKeyHelper", "cli_api_key_helper"));
+    }
+    let env = v.get("env")?.as_object()?;
+    adapter::CLAUDE_KEYS.iter().find(|k| set(env.get(**k))).map(|k| warn(k, "cli_env_block"))
+}
+
+fn codex_override(text: &str) -> Option<OverrideWarning> {
+    fn find(t: &toml::Table) -> Option<OverrideWarning> {
+        t.iter().find_map(|(k, v)| match v {
+            toml::Value::String(s) if adapter::CODEX_KEYS.contains(&k.as_str()) && !s.trim().is_empty() => Some(warn(k, "cli_config")),
+            toml::Value::Table(inner) => find(inner),
+            _ => None,
+        })
+    }
+    find(&text.parse::<toml::Table>().ok()?)
+}
+
+/// A masked address (`s…@example.com`), or `None` when it does not look like one.
+fn mask_email(email: &str) -> Option<String> {
+    let (local, domain) = email.split_once('@')?;
+    let first = local.chars().next()?;
+    (first.is_alphanumeric() && !domain.is_empty() && domain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')).then(|| format!("{first}…@{domain}"))
+}
+
+fn label_ok(s: &str) -> bool {
+    !s.trim().is_empty() && s.chars().count() <= 60 && s.chars().all(|c| !c.is_control() && !crate::control::lead::invisible(c))
+}
+
+/// Billing kind and label from a signed-in CLI's own status answer. Anything not recognised is `Unknown`. Codex can print
+/// a masked key on this line, so its label is a fixed word and the line itself is never kept.
+fn billing_from_status(engine: Engine, out: &Out) -> (BillingKind, Option<String>) {
+    match engine {
+        Engine::Claude => {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&out.stdout) else { return (BillingKind::Unknown, None) };
+            let s = |k: &str| v.get(k).and_then(|x| x.as_str());
+            let kind = match s("authMethod").map(str::to_ascii_lowercase) {
+                Some(m) if m == "claude.ai" => BillingKind::Subscription,
+                Some(m) if m.contains("api") => BillingKind::ApiKey,
+                _ => BillingKind::Unknown,
+            };
+            if kind != BillingKind::Subscription {
+                return (kind, None);
+            }
+            let parts: Vec<String> = [s("subscriptionType").map(str::to_string), s("email").and_then(mask_email)].into_iter().flatten().filter(|x| label_ok(x)).collect();
+            (kind, (!parts.is_empty()).then(|| parts.join(", ")))
+        }
+        Engine::Codex => {
+            let said = format!("{}\n{}", out.stdout, out.stderr).to_ascii_lowercase();
+            if said.contains("chatgpt") {
+                (BillingKind::Subscription, Some("ChatGPT".into()))
+            } else if said.contains("api key") {
+                (BillingKind::ApiKey, None)
+            } else {
+                (BillingKind::Unknown, None)
+            }
+        }
+    }
+}
+
+fn account_of(m: &Meta, p: &dyn Probe) -> Account {
+    let unknown = (BillingKind::Unknown, None);
+    let (state, billing) = match p.find(m.engine.id()) {
+        None => (AccountState::NotInstalled, unknown),
+        Some(path) => {
+            let out = p.run(&path, m.status);
+            let billing = out.as_ref().map_or(unknown.clone(), |o| billing_from_status(m.engine, o));
+            match login_state(m.engine, out).0 {
+                LoginState::SignedIn => (AccountState::SignedIn, billing),
+                LoginState::SignedOut => (AccountState::SignedOut, unknown),
+                LoginState::NotInstalled => (AccountState::NotInstalled, unknown),
+                LoginState::CannotTell => (AccountState::CannotTell, unknown),
+            }
+        }
+    };
+    let acct = adapter::Account::login(m.engine);
+    Account {
+        id: acct.id,
+        provider: m.engine.id().into(),
+        harness: m.engine.id().into(),
+        credential: Credential { source: CredentialSource::CliLogin, saved: None },
+        billing: AccountBilling { kind: billing.0, account_label: billing.1, override_warning: override_warning(m.engine, p) },
+        label: m.name.into(),
+        state,
+        models: Vec::new(),
+    }
+}
+
+/// The accounts this build can read without a stored key: each CLI under its own login. Always answers.
+pub fn accounts(p: &dyn Probe) -> AccountList {
+    AccountList { schema: ACCOUNTS_SCHEMA.into(), accounts: METAS.iter().map(|m| account_of(m, p)).collect() }
 }
 
 #[cfg(test)]

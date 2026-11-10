@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -255,6 +256,31 @@ impl Store {
     pub fn get(&self, id: &str) -> Result<Project> {
         let _g = self.lock();
         self.read_one(id)
+    }
+
+    /// The project a folder belongs to, archived ones included (FG-02c): the folder itself or the nearest folder above
+    /// it that is a project's recorded root, matched by device and inode (so a symlinked or differently cased path is
+    /// the same folder) or by git common dir (so a linked worktree is its repository's project). The deepest match
+    /// wins, which is the inner project of two nested ones. `None` when no project holds the folder. Nothing is run:
+    /// the common dir is read from `.git` with its back-link checked (`identity::git_common_dir`).
+    pub fn find_by_path(&self, path: &Path) -> Result<Option<Project>> {
+        let Ok(canon) = fs::canonicalize(path) else { return Ok(None) };
+        let listing = self.list(true)?;
+        if listing.truncated {
+            // A partial inventory could miss the right project and match an outer one: refuse instead.
+            return Err(StoreError::Full);
+        }
+        for dir in canon.ancestors() {
+            let Ok(meta) = fs::metadata(dir) else { continue };
+            let common = identity::git_common_dir(dir).map(|c| c.to_string_lossy().into_owned());
+            let hit = listing.projects.iter().find(|p| {
+                (p.root_key.dev, p.root_key.ino) == (meta.dev(), meta.ino()) || (common.is_some() && p.root_key.git_common_dir == common)
+            });
+            if let Some(p) = hit {
+                return Ok(Some(p.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn read_all(&self) -> Result<Listing> {

@@ -129,15 +129,37 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     "deliver-20261107-1840": { session_id: "s-1840", run_id: "20261107-1840", cwd: "~/code/harbor-web" },
     "deliver-20261106-0915": { session_id: "s-0915", run_id: "20261106-0915", cwd: "~/code/harbor-web" },
   } }),
-  stream_window: () => {
+  stream_window: (args?: Record<string, unknown>) => {
+    if (typeof args?.stream === "string" && args.stream.startsWith("orchestrator-")) {
+      const dg = [
+        "you\tWhere are we on rate limiting?",
+        "lead\tThe run is in its first round. Architect finished the design (t1) and the Redis store (t7) passes AC-4.",
+        "lead\tBackend is building the token bucket middleware (t2); Frontend is showing limits on the API keys page (t3).",
+        "tool\tget_run_overview deliver-20261106-2140",
+        "tool\tRead docs/rate-limits.md",
+        "lead\tOne thing needs you: Backend worker 1 asked whether the 429 body should name the limit and the reset time.",
+        "you\tYes, name both. What should we do after this run?",
+        "lead\tThe admin audit log failed on 2 November with 2 of 7 criteria. I would retry it with a narrower ask, on main, with 2 fix rounds. I have proposed that run below; nothing starts until you start it.",
+      ];
+      return { lines: dg.map((t, i) => ({ seq: i + 1, text: t })), head_seq: dg.length, first_seq: 1, at_start: true, at_end: true, gap: false };
+    }
     const text = [
       "Reading src/middleware/index.ts", "Adding TokenBucket with capacity and refill per key", "Wrote src/middleware/rateLimit.ts (84 lines)",
       "Running npm test -- rateLimit", "PASS tests/rateLimit.test.ts (6 tests)", "Next: wire the limiter into the router",
     ];
     return { lines: text.map((t, i) => ({ seq: i + 1, text: t })), head_seq: text.length, first_seq: 1, at_start: true, at_end: true, gap: false };
   },
+  lead_status: () => ({ available: true, busy: false, name: "Director-General", state: "running", reason: "a run of this project is going", project_id: "p_01JC3H0000000000000000000A", generation: 3, stream: "orchestrator-p_01JC3H0000000000000000000A-g3" }),
+  ask_lead: () => ({ ask_id: "01JC3H0000000000000000ASK1", state: "running", stream: "orchestrator-p_01JC3H0000000000000000000A-g3", lead_session_id: "s", project_id: "p_01JC3H0000000000000000000A", generation: 3, name: "Director-General" }),
+  cancel_ask: () => ({}),
+  new_conversation: () => ({ project_id: "p_01JC3H0000000000000000000A", generation: 4, stream: "orchestrator-p_01JC3H0000000000000000000A-g4" }),
+  start_proposal: () => ({ action_id: "a_fixture1", state: "started", run: {} }),
+  dismiss_proposal: () => ({ action_id: "a_fixture2", state: "dismissed" }),
   act_approve_plan: () => ({ receipt: null, error: { error: "not_in_fixture", detail: "approve" } }),
-  inbox: () => ({ count: 2, items: [
+  inbox: () => ({ count: 3, items: [
+    { id: "proposal:01JC3H0000000000000000PRP1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "2026-11-06T22:03:00Z", age_s: 120,
+      title: "Start a run?", body: "", ask: "Retry the admin audit log: record who changed roles, API keys and billing settings, with the actor, target, old and new values and the time. Show it under Settings > Audit log with a filter by actor and a CSV export. Skip the retention policy for now.",
+      base: "main", rounds: 2, project_id: "p_01JC3H0000000000000000000A", project: "~/code/harbor-api", generation: 3, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] },
     { id: "p-deploy", kind: "plan", campaign: SLUG, origin: "app", created: "2026-11-06T22:03:00Z", age_s: 120, title: "Deploy the limiter to staging", body: "", actions: ["approve", "reject"], plan_sha256: "9f2c4e7a1b8d03c5e6f7a89b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5", action: "deploy", plan: { target: "staging", commands: ["make deploy ENV=staging"], rollback: ["make rollback ENV=staging"], health_checks: ["curl -f https://staging.example/health"], risk: "low" }, invalid: null },
     { id: "q-t4", kind: "question", campaign: SLUG, origin: "app", created: "2026-11-06T22:01:00Z", age_s: 240, title: "Should the 429 body name the limit and the reset time?", body: "", actions: ["answer"] },
   ] }),

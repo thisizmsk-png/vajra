@@ -21,8 +21,18 @@ use std::sync::Mutex;
 const RECENT: usize = 20;
 /// Inbox items in one project's projection (the count is the true number waiting in that project).
 const INBOX_MAX: usize = 50;
+/// Pending run proposals in one project's projection, newest first, picked before any inbox cut so other waiting
+/// items can never push them out (#90 review). `more` counts the ones left out.
+const PROPOSALS_MAX: usize = 50;
 /// Error codes that mean the effect was attempted and broke, not that it was refused up front.
 const FAILED_CODES: [&str; 5] = ["io_error", "send_failed", "spawn_failed", "launch_failed", "kb_failed"];
+
+/// One project's pending run proposals from its whole oldest-first waiting list: newest first, at most
+/// `PROPOSALS_MAX`, with the true count and how many were left out. Every waiting run proposal is pending.
+pub(super) fn pending_proposals(mine: &[&Value]) -> Value {
+    let open: Vec<&Value> = mine.iter().rev().filter(|i| i["kind"] == "run_proposal").copied().collect();
+    json!({"ok": true, "count": open.len(), "more": open.len().saturating_sub(PROPOSALS_MAX), "items": open.into_iter().take(PROPOSALS_MAX).collect::<Vec<_>>()})
+}
 
 pub(super) struct Hub {
     pub(super) store: Store,
@@ -228,7 +238,7 @@ impl App {
 
     /// Send a `changed` payload naming the projects whose revision moved. The sink is installed by the shell;
     /// without one (tests, the socket server) nothing is sent.
-    fn emit_projects(&self, projects: Vec<Value>) {
+    pub(super) fn emit_projects(&self, projects: Vec<Value>) {
         if let Some(sink) = lock(&self.sink).as_ref() {
             sink(json!({"streams": [], "snapshot_needed": false, "projects": projects}));
         }
@@ -371,14 +381,15 @@ impl App {
         // the one that already includes it.
         let read = self.inbox_all();
         self.inbox_availability(read.is_ok(), project_id);
-        let inbox = match read {
+        let (inbox, proposals) = match read {
             Ok(v) => {
                 // Counted and picked from the whole list: the global 200-item cut belongs to `inbox`, not to a project.
                 let mine: Vec<&Value> = v.iter().filter(|i| i["project_id"] == project_id).collect();
-                json!({"ok": true, "count": mine.len(), "campaign_count": mine.iter().filter(|i| i["kind"] != "run_proposal").count(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()})
+                let proposals = pending_proposals(&mine);
+                (json!({"ok": true, "count": mine.len(), "campaign_count": mine.iter().filter(|i| i["kind"] != "run_proposal").count(), "items": mine.into_iter().take(INBOX_MAX).collect::<Vec<_>>()}), proposals)
             }
             // Never "nothing waiting" on a failed read.
-            Err(e) => json!({"ok": false, "error": e["error"]}),
+            Err(e) => (json!({"ok": false, "error": e["error"]}), json!({"ok": false, "error": e["error"]})),
         };
         let (rev, run_gen, recent) = {
             let mut h = lock(&self.acts);
@@ -401,6 +412,9 @@ impl App {
             "workers": workers,
             "receipts": recent,
             "inbox": inbox,
+            "proposals": proposals,
+            // The last usage answers (a cache read: this never calls out).
+            "usage": self.provider_usage_cached(),
         }))
     }
 }
