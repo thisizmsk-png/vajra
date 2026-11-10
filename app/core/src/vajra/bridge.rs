@@ -216,23 +216,30 @@ impl Bridge {
 }
 
 impl Bridge {
-    /// True when the repo's own config (local, worktree or command scope) defines a `clean`, `smudge` or `process` filter, or
-    /// when that cannot be determined: `git add` would run that command, and a repo-configured helper must never run from the
-    /// desktop (an agent can write the config and the attribute). Filters from the user's own global config are theirs and are
-    /// not counted. Fails closed.
+    /// True when the repo's own config (any scope but the user's global one) defines a `clean`, `smudge` or `process`
+    /// filter, or when that cannot be determined: `git add` would run that command, and a repo-configured helper must never
+    /// run from the desktop (an agent can write the config and the attribute). Filters from the user's own global config are
+    /// theirs and are not counted. Fails closed.
     pub fn repo_filters(&self, repo: &Path, timeout: Duration) -> bool {
+        self.frozen_config(repo, timeout).is_none()
+    }
+
+    /// The repo's whole effective config, read ONCE (includes expanded), or `None` when it defines a filter outside the
+    /// user's global config or cannot be read. `tree_id` gives exactly these entries to `git add` through a private git dir
+    /// with no config file of its own (#113 review): a filter written into the repo's config after this read is never seen.
+    /// Left out: the include directives (already expanded), the keys every command sets itself (`core.fsmonitor`,
+    /// `core.hooksPath`), the repository layout ones (`core.worktree`, `core.bare`) and the format ones
+    /// (`core.repositoryformatversion`, `extensions.*`, applied by `private_git_dir`).
+    fn frozen_config(&self, repo: &Path, timeout: Duration) -> Option<FrozenConfig> {
         if timeout.is_zero() {
-            return true;
+            return None;
         }
         let argv: Vec<String> = ["--no-pager", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C"].map(String::from).into_iter()
             .chain([repo.to_string_lossy().into_owned()])
-            .chain(["config", "--show-scope", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"].map(String::from))
+            .chain(["config", "--list", "--show-scope", "-z"].map(String::from))
             .collect();
-        match run_process_env(&self.git, &argv, None, timeout, self.home.as_deref(), None, &[]) {
-            Ok(o) if o.exit() == Some(1) => false, // no such key
-            Ok(o) if o.exit() == Some(0) => o.stdout.lines().any(|l| matches!(l.split('\t').next(), Some("local" | "worktree" | "command") | None)),
-            _ => true,
-        }
+        let out = run_process_env(&self.git, &argv, None, timeout, self.home.as_deref(), None, &[]).ok().filter(|o| o.exit() == Some(0) && !o.truncated)?;
+        parse_frozen(&out.stdout)
     }
 
     /// The whole-tree id of `repo`'s working tree (tracked edits and untracked files included, `exclude`d paths, relative to `repo`, left out),
@@ -246,13 +253,13 @@ impl Bridge {
     /// (`repo_filters`: `add` would run it). Same git hardening as `Request::Git`.
     pub fn tree_id(&self, repo: &Path, exclude: &[&str]) -> Option<String> {
         let start = Instant::now();
-        if self.repo_filters(repo, self.timeout) {
-            return None;
-        }
+        // The one read of the config this snapshot uses; the steps below never read the repo's config files again.
+        let frozen = self.frozen_config(repo, self.timeout)?;
         let dir = std::env::temp_dir().join(format!("vajra-tree-{}-{}", std::process::id(), start.elapsed().as_nanos() ^ rand_tag()));
         private_dir(&dir)?;
         let idx = dir.join("index");
         let objects = dir.join("objects");
+        let gitdir = dir.join("git");
         let repo_objects: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
         // Every step runs from the repository's top level, as verify-work does (`--show-toplevel`): the run's cwd may be a
         // subdirectory, and `add -A -- .` from there would leave dirty files elsewhere at their HEAD content.
@@ -265,10 +272,29 @@ impl Bridge {
                     .chain(args.iter().map(|a| a.to_string()))
                     .collect();
                 let alt = repo_objects.borrow().clone();
-                let env: Vec<(&str, &Path)> = match (with_index, alt.as_deref()) {
-                    (true, Some(alt)) => vec![("GIT_INDEX_FILE", idx.as_path()), ("GIT_OBJECT_DIRECTORY", objects.as_path()), ("GIT_ALTERNATE_OBJECT_DIRECTORIES", alt)],
+                let work = top.borrow().clone();
+                // The index steps run on the private git dir: the repo's own config, `info/` and hooks are not read, only
+                // the frozen config entries (command scope), with no system or global file either.
+                let mut env: Vec<(String, std::ffi::OsString)> = match (with_index, alt.as_deref()) {
+                    (true, Some(alt)) => vec![
+                        ("GIT_DIR".into(), gitdir.clone().into()),
+                        ("GIT_WORK_TREE".into(), work.into()),
+                        ("GIT_INDEX_FILE".into(), idx.clone().into()),
+                        ("GIT_OBJECT_DIRECTORY".into(), objects.clone().into()),
+                        ("GIT_ALTERNATE_OBJECT_DIRECTORIES".into(), alt.into()),
+                        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                        ("GIT_CONFIG_COUNT".into(), frozen.entries.len().to_string().into()),
+                    ],
+                    (true, None) => return None,
                     _ => vec![],
                 };
+                if with_index {
+                    for (i, (k, v)) in frozen.entries.iter().enumerate() {
+                        env.push((format!("GIT_CONFIG_KEY_{i}"), k.into()));
+                        env.push((format!("GIT_CONFIG_VALUE_{i}"), v.into()));
+                    }
+                }
+                let env: Vec<(&str, &Path)> = env.iter().map(|(k, v)| (k.as_str(), Path::new(v))).collect();
                 run_process_env(&self.git, &argv, None, left, self.home.as_deref(), None, &env).ok().filter(|o| o.exit() == Some(0))
             };
             let root = git(&["rev-parse", "--show-toplevel"], false)?.stdout.trim().to_string();
@@ -278,6 +304,19 @@ impl Bridge {
             let found = if Path::new(&found).is_absolute() { PathBuf::from(found) } else { top.borrow().join(found) };
             *repo_objects.borrow_mut() = Some(found.canonicalize().ok()?);
             private_dir(&objects)?;
+            // The repo's ignore and attribute files under its git dir decide which files are added and how, as for
+            // verify-work; copied (they name filters but define none: the definitions are the frozen config's).
+            let mut info: Vec<(&str, Vec<u8>)> = Vec::new();
+            for name in ["exclude", "attributes"] {
+                let p = git(&["rev-parse", "--git-path", &format!("info/{name}")], false)?.stdout.trim().to_string();
+                let p = if Path::new(&p).is_absolute() { PathBuf::from(p) } else { top.borrow().join(p) };
+                match std::fs::read(&p) {
+                    Ok(b) => info.push((name, b)),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+            private_git_dir(&gitdir, &frozen, &info)?;
             if let Some(head) = git(&["rev-parse", "--verify", "-q", "HEAD"], false) {
                 let head = head.stdout.trim().to_string();
                 git(&["read-tree", &head], true)?;
@@ -293,6 +332,8 @@ impl Bridge {
                 abs.strip_prefix(&top_dir).ok().filter(|r| !r.as_os_str().is_empty()).map(|r| format!(":(exclude){}", r.display()))
             }));
             let add: Vec<&str> = add.iter().map(String::as_str).collect();
+            #[cfg(test)]
+            BEFORE_ADD.with(|h| if let Some(f) = h.borrow().as_ref() { f() });
             git(&add, true)?;
             let tree = git(&["write-tree"], true)?.stdout.trim().to_string();
             (tree.len() >= 40).then_some(tree)
@@ -300,6 +341,80 @@ impl Bridge {
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
+}
+
+/// A repo config as read once by `frozen_config`: the entries `git add` gets, and the repository format.
+#[derive(Debug, Default)]
+struct FrozenConfig {
+    entries: Vec<(String, String)>,
+    /// `extensions.objectformat` (`sha1` or `sha256`), when the repo sets it.
+    object_format: Option<String>,
+}
+
+/// Parse `git config --list --show-scope -z` (`scope NUL key LF value NUL`, or `scope NUL key NUL` for a key with no
+/// value). `None` on a filter command outside the global scope, an object format this code does not know, or bad output.
+fn parse_frozen(out: &str) -> Option<FrozenConfig> {
+    let mut f = FrozenConfig::default();
+    let mut parts = out.split('\0');
+    while let Some(scope) = parts.next() {
+        if scope.is_empty() {
+            // The final NUL leaves one empty piece; anything after it is bad output.
+            return parts.next().is_none().then_some(f);
+        }
+        let item = parts.next()?;
+        let (key, value) = match item.split_once('\n') {
+            Some((k, v)) => (k, v),
+            None => (item, "true"),
+        };
+        let lower = key.to_ascii_lowercase();
+        let (section, rest) = lower.split_once('.')?;
+        let name = rest.rsplit('.').next()?;
+        if section == "filter" && matches!(name, "clean" | "smudge" | "process") && scope != "global" {
+            return None;
+        }
+        match (section, rest) {
+            ("include" | "includeif", _) => continue,
+            ("core", "fsmonitor" | "hookspath" | "worktree" | "bare" | "repositoryformatversion") => continue,
+            ("extensions", "objectformat") => {
+                let v = value.to_ascii_lowercase();
+                if v != "sha1" && v != "sha256" {
+                    return None;
+                }
+                f.object_format = Some(v);
+                continue;
+            }
+            ("extensions", _) => continue,
+            _ => {}
+        }
+        f.entries.push((key.to_string(), value.to_string()));
+    }
+    Some(f)
+}
+
+/// A git dir of the app's own under the snapshot's temp dir (mode 0700): `HEAD`, `refs/`, an `objects/` placeholder
+/// (`GIT_OBJECT_DIRECTORY` is the real one), `info/` with the copied files, and a config file holding only the
+/// repository format. No hooks dir.
+fn private_git_dir(gitdir: &Path, frozen: &FrozenConfig, info: &[(&str, Vec<u8>)]) -> Option<()> {
+    private_dir(gitdir)?;
+    for d in ["refs", "objects", "info"] {
+        private_dir(&gitdir.join(d))?;
+    }
+    std::fs::write(gitdir.join("HEAD"), b"ref: refs/heads/vajra-tree\n").ok()?;
+    let config = match &frozen.object_format {
+        Some(fmt) => format!("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = {fmt}\n"),
+        None => "[core]\n\trepositoryformatversion = 0\n".to_string(),
+    };
+    std::fs::write(gitdir.join("config"), config).ok()?;
+    for (name, bytes) in info {
+        std::fs::write(gitdir.join("info").join(name), bytes).ok()?;
+    }
+    Some(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: run between the config check and `git add` in `tree_id` (a worker rewriting the config in that window).
+    pub(crate) static BEFORE_ADD: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Create `path` readable by its owner alone (mode 0700, before any object is written into it): `git add` stores the
@@ -555,5 +670,35 @@ mod private_dir_tests {
         let _ = std::fs::remove_dir(&base);
         assert_eq!(mode, 0o700, "a directory that holds repository contents must not be readable by other users");
         // A plain create_dir under the same umask would have left it open: that is what this guards.
+    }
+}
+
+#[cfg(test)]
+mod frozen_config_tests {
+    use super::parse_frozen;
+
+    #[test]
+    fn a_filter_outside_the_global_scope_refuses_and_a_global_one_is_kept() {
+        assert!(parse_frozen("local\0filter.evil.clean\ncat\0").is_none());
+        assert!(parse_frozen("worktree\0filter.evil.process\nx\0").is_none());
+        assert!(parse_frozen("command\0FILTER.Evil.Smudge\nx\0").is_none(), "keys compare without case");
+        assert!(parse_frozen("unknown\0filter.evil.clean\nx\0").is_none(), "a scope git cannot name is not the user's");
+        let f = parse_frozen("global\0filter.lfs.clean\ngit-lfs clean -- %f\0").unwrap();
+        assert_eq!(f.entries, vec![("filter.lfs.clean".to_string(), "git-lfs clean -- %f".to_string())]);
+    }
+
+    #[test]
+    fn includes_layout_and_forced_keys_are_left_out_and_formats_are_checked() {
+        let f = parse_frozen(
+            "local\0include.path\n/tmp/x\0local\0includeif.gitdir:/x.path\n/y\0local\0core.hookspath\n/h\0local\0core.fsmonitor\n/m\0\
+             local\0core.worktree\n/w\0local\0core.bare\nfalse\0local\0core.repositoryformatversion\n1\0local\0extensions.worktreeconfig\ntrue\0\
+             local\0extensions.objectformat\nsha256\0local\0core.autocrlf\ninput\0local\0x.flag\0",
+        )
+        .unwrap();
+        assert_eq!(f.object_format.as_deref(), Some("sha256"));
+        assert_eq!(f.entries, vec![("core.autocrlf".to_string(), "input".to_string()), ("x.flag".to_string(), "true".to_string())]);
+        assert!(parse_frozen("local\0extensions.objectformat\nmd5\0").is_none());
+        assert!(parse_frozen("local\0core.autocrlf\ninput\0trailing").is_none(), "output not ending in NUL is refused");
+        assert!(parse_frozen("").unwrap().entries.is_empty());
     }
 }

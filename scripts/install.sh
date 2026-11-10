@@ -20,6 +20,13 @@
 
 set -euo pipefail
 
+# The same root-owned system dirs the hooks and the key-holding scripts run with (NFR-SEC-2): what this installer
+# accepts is exactly what they will find at run time, and it never runs a jq or openssl from a dir a same-uid worker
+# can write (/opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ...), here where it generates the HMAC key.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"; export PATH
+OPENSSL="/usr/bin/openssl"
+PYTHON3="/usr/bin/python3"
+
 DRY_RUN=0 NO_HOOKS=0 UNREGISTER=0
 for arg in "$@"; do
   case "$arg" in
@@ -74,14 +81,14 @@ say "=== Vajra install$([ "$DRY_RUN" = 1 ] && echo ' (dry run)') ==="
 
 # --- 1. Dependencies --------------------------------------------------------
 say "[1/5] Dependencies"
-for dep in git jq openssl; do
-  command -v "$dep" >/dev/null 2>&1 || die "$dep not found (install it and re-run)"
-done
+command -v git >/dev/null 2>&1 || die "git not found in /usr/bin, /bin, /usr/sbin or /sbin (xcode-select --install provides /usr/bin/git) and re-run"
+command -v jq >/dev/null 2>&1 || die "jq not found in /usr/bin, /bin, /usr/sbin or /sbin. Vajra's hooks and scripts run jq only from those root-owned dirs: a jq in /opt/homebrew/bin, /usr/local/bin or ~/.local/bin is never used, because a same-uid worker can replace it. macOS 15+ ships /usr/bin/jq; upgrade macOS or put a root-owned jq in one of those dirs, then re-run"
+[ -x "$OPENSSL" ] || die "openssl not found at ${OPENSSL} (the scripts that hold the HMAC key use only that one)"
 command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || die "need sha256sum or shasum"
-command -v python3 >/dev/null 2>&1 || say "  WARNING: python3 not found; the /vajra prompt router will do nothing"
+[ -x "$PYTHON3" ] || say "  WARNING: ${PYTHON3} not found; the /vajra prompt router will do nothing (xcode-select --install provides it)"
 [ -d "$VAJRA_SKILL" ] || die "Vajra must live at ${VAJRA_SKILL} (git clone it there, or symlink it)"
 [ -f "$HOOKS_JSON" ] && jq -e '.hooks | type == "object"' "$HOOKS_JSON" >/dev/null 2>&1 || die "missing or invalid ${HOOKS_JSON}"
-say "  ok: git jq openssl$(command -v python3 >/dev/null 2>&1 && echo ' python3')"
+say "  ok: git jq openssl$([ -x "$PYTHON3" ] && echo ' python3')"
 
 # --- hooks merge helpers ----------------------------------------------------
 # Remove every hook handler whose command points into the Vajra hooks dir,
@@ -158,7 +165,7 @@ else
   if [ "$DRY_RUN" = 1 ]; then
     plan "generate ${KEY_FILE} with openssl rand -hex 32 (mode 600)"
   else
-    ( umask 077; openssl rand -hex 32 > "${KEY_FILE}.tmp" )
+    ( umask 077; "$OPENSSL" rand -hex 32 > "${KEY_FILE}.tmp" )
     mv "${KEY_FILE}.tmp" "$KEY_FILE"
     chmod 600 "$KEY_FILE"
     key_ok || die "could not create a valid HMAC key"
@@ -222,7 +229,7 @@ else
   else
     ( umask 077
       sha256_of "$MANIFEST" | tr -d '\n' \
-        | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex \
+        | "$OPENSSL" dgst -sha256 -mac HMAC -macopt "hexkey:$(tr -d '[:space:]' < "$KEY_FILE")" -hex \
         | awk '{print $NF}' > "$SIG_FILE" )
     chmod 600 "$SIG_FILE"
     rm -f "${VAJRA_HOME}/.integrity-violation"
