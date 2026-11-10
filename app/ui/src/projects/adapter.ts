@@ -7,6 +7,7 @@ import type { StatusKey } from "../../strings";
 import type { Campaign, EvidenceRow, InboxItem, ResumeTarget, RunOverview } from "../ipc";
 import { PROJECT_SCHEMA, validId } from "../projectContract";
 import type { Project as StoreProject } from "../projectContract";
+import { parseWorkerProvider } from "../workerProvider";
 import type { ActiveCrew, BoardCard, DayGroup, Lane, Project, ProjectId, ProjectSummary, SessionRow, SessionStatus, TabState } from "./contract";
 
 export const UNSORTED_ID = "p_unsorted";
@@ -165,7 +166,7 @@ export function boardCards(overview: RunOverview, evidence: EvidenceRow[], inbox
     else if (status === "failed") lane = "review";
     else lane = "backlog";
     return {
-      key: `task:${t.id}`, kind: "task", local: t.local, title: t.title ?? t.local, owner: t.owner, status, lane,
+      key: `task:${t.id}`, kind: "task", local: t.local, title: t.title ?? t.local, owner: t.owner, provider: parseWorkerProvider(t.provider), status, lane,
       needsYou: status === "question" || status === "blocked",
       criteria: rows.length ? { pass, total: rows.length } : null,
     };

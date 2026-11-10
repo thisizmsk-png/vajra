@@ -12,17 +12,22 @@ const SLUG = `deliver-${RUN}`;
 
 const n = (id: string, kind: string, title: string, status: string, children: CrewNodeDto[] = [], extra: Partial<CrewNodeDto> = {}): CrewNodeDto =>
   ({ id, kind, title, engine_id: null, role: null, status, overlays: [], children, ...extra });
-const agent = (id: string, role: string, engine: string, status: string, overlays: string[] = []) =>
-  n(`agent:${id}`, "worker", role, status, [], { role, engine_id: engine, overlays });
+const agent = (id: string, role: string, engine: string, status: string, overlays: string[] = [], provider?: unknown) =>
+  n(`agent:${id}`, "worker", role, status, [], { role, engine_id: engine, overlays, ...(provider ? { provider } : {}) });
+// What each worker ran on (the launch receipt's `effective`), for the run cards, the crew list, the Board and the Crew pane.
+const onClaude = { account: "claude", label: "Claude Code", family: "claude", model: null, model_name: null, billing: "subscription", requested: null, error: null };
+const onGateway = { account: "openrouter", label: "OpenRouter", family: "deepseek", model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", billing: "gateway", requested: null, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } };
+const onHarnessB = { account: "codex", label: "Codex CLI", family: "codex", model: null, model_name: null, billing: "unknown",
+  requested: { model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", label: "OpenRouter" }, error: null };
 
 const crew = n("lead", "lead", "Lead", "in_progress", [
   n(`run:${RUN}`, "run", "Add per-key rate limiting", "in_progress", [
-    n("task:t1", "task", "t1 Design the limiter", "done", [agent("architect", "Architect", "arjuna", "done")]),
-    n("task:t2", "task", "t2 Token bucket middleware", "in_progress", [agent("backend", "Backend", "bhima", "in_progress", ["activity"])]),
-    n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress")]),
-    n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question")]),
-    n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready")]),
-    n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done")]),
+    n("task:t1", "task", "t1 Design the limiter", "done", [agent("architect", "Architect", "arjuna", "done", [], onClaude)]),
+    n("task:t2", "task", "t2 Token bucket middleware", "in_progress", [agent("backend", "Backend", "bhima", "in_progress", ["activity"], onClaude)]),
+    n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress", [], onGateway)]),
+    n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question", [], onHarnessB)]),
+    n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready", [], onClaude)]),
+    n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done", [], onClaude)]),
   ]),
 ]);
 
@@ -161,7 +166,13 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   inbox: () => ({ count: 3, items: [
     { id: "proposal:01JC3H0000000000000000PRP1", kind: "run_proposal", origin: "app", source: "from the Director-General", created: "2026-11-06T22:03:00Z", age_s: 120,
       title: "Start a run?", body: "", ask: "Retry the admin audit log: record who changed roles, API keys and billing settings, with the actor, target, old and new values and the time. Show it under Settings > Audit log with a filter by actor and a CSV export. Skip the retention policy for now.",
-      base: "main", rounds: 2, project_id: "p_01JC3H0000000000000000000A", project: "~/code/harbor-api", generation: 3, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"] },
+      base: "main", rounds: 2, project_id: "p_01JC3H0000000000000000000A", project: "~/code/harbor-api", generation: 3, proposal_sha256: "ab".repeat(32), actions: ["start", "dismiss"],
+      workers: [
+        { slot: "w1", role: "backend", task: "Token bucket middleware", account: "claude", model: null, effort: "high", source: "role_default", why: "Touches auth; keeps the guard and mid-run messages" },
+        { slot: "w2", role: "backend", task: "429 body and Retry-After", account: "claude", model: null, effort: "high", source: "role_default", why: "Same code path as the middleware" },
+        { slot: "w3", role: "docs", task: "Document the limits", account: "openrouter", model: "deepseek/deepseek-v3.2", effort: null, source: "role_default", why: "Plain writing, low risk" },
+        { slot: "w4", role: "tests", task: "Fixtures for the limits", account: "codex", model: null, effort: "medium", source: "dg", why: "Generated test data" },
+      ] },
     { id: "p-deploy", kind: "plan", campaign: SLUG, origin: "app", created: "2026-11-06T22:03:00Z", age_s: 120, title: "Deploy the limiter to staging", body: "", actions: ["approve", "reject"], plan_sha256: "9f2c4e7a1b8d03c5e6f7a89b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5", action: "deploy", plan: { target: "staging", commands: ["make deploy ENV=staging"], rollback: ["make rollback ENV=staging"], health_checks: ["curl -f https://staging.example/health"], risk: "low" }, invalid: null },
     { id: "q-t4", kind: "question", campaign: SLUG, origin: "app", created: "2026-11-06T22:01:00Z", age_s: 240, title: "Should the 429 body name the limit and the reset time?", body: "", actions: ["answer"] },
   ] }),
@@ -169,10 +180,10 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     slug: SLUG, run_id: RUN, stale: false,
     timeline: { phases: [{ name: "Plan", state: "done" }, { name: "Execute", state: "current", round: 1, max_rounds: 3 }, { name: "Verify", state: "pending" }], current: "Execute", status: "active" },
     graph: { waves: 3, tasks: [
-      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "arjuna", status: "done", deps: [], wave: 1 },
-      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "bhima", status: "in_progress", deps: ["t1"], wave: 2 },
-      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "nakula", status: "in_progress", deps: ["t1"], wave: 2 },
-      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "sepoy-backend-1", status: "question", deps: ["t2"], wave: 2 },
+      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "arjuna", status: "done", deps: [], wave: 1, provider: onClaude },
+      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "bhima", status: "in_progress", deps: ["t1"], wave: 2, provider: onClaude },
+      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "nakula", status: "in_progress", deps: ["t1"], wave: 2, provider: onGateway },
+      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "sepoy-backend-1", status: "question", deps: ["t2"], wave: 2, provider: onHarnessB },
       { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "vidura", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
       { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "bhima", status: "pending", deps: ["t2"], wave: 3 },
       { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "bhima", status: "done", deps: ["t1"], wave: 2 },

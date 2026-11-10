@@ -9,6 +9,7 @@ import { api, newActionId } from "../ipc";
 import type { Campaign, CloseFinishedResult } from "../ipc";
 import { unsavedText, useCloseout } from "../projects/closeout";
 import type { Route } from "../router";
+import { ProviderLine } from "../screens/ProviderLine";
 
 export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorker, onSession }: {
   project: Project;
@@ -102,6 +103,7 @@ export function ProjectColumn({ project, campaigns, crew, route, onOrch, onWorke
                     {(co?.state === "unsaved_work" || co?.state === "terminal_busy") && <span className="v-w2__tag v-w2__tag--warn" title={unsavedText(co)}>{co.state === "unsaved_work" ? S.closeout.unsaved : S.closeout.busyTag}</span>}
                     <StatusDot status={w.status} label={w.statusLabel} className="v-w2__s" /></span>
                   <span className="v-w2__t">{w.task}</span>
+                  {w.provider && <ProviderLine p={w.provider} compact />}
                 </button>
               );
             }) : <p className="v-pcol__none">{crew ? S.column.noWorkers : S.column.workersHint}</p>}

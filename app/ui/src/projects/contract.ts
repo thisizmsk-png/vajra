@@ -3,6 +3,7 @@
 // `project_list` (#77) with their T1 ids; `adapter.ts` adds a folder placeholder for runs whose folder is not
 // registered yet, and the Unsorted bucket for runs with no folder.
 import type { StatusKey } from "../../strings";
+import type { WorkerProvider } from "../workerProvider";
 import type { Project as ContractProject, SessionStatus } from "../projectContract";
 
 export type { SessionStatus };
@@ -28,7 +29,7 @@ export type SessionRow = { slug: string; title: string; status: SessionStatus; d
 export type DayGroup = { key: string; label: string; summary: string; items: SessionRow[] };
 
 /** A worker of the project's live run, from the crew tree. */
-export type WorkerRow = { id: string; name: string; status: StatusKey; statusLabel: string; task: string };
+export type WorkerRow = { id: string; name: string; status: StatusKey; statusLabel: string; task: string; provider?: WorkerProvider | null };
 /** The live run and its workers. Today at most one run is active in the whole app (`no_active_run`). */
 export type ActiveCrew = { campaign: string; runId: string; workers: WorkerRow[] };
 
@@ -45,6 +46,7 @@ export type BoardCard = {
   local: string;
   title: string;
   owner: string | null;
+  provider?: WorkerProvider | null;
   status: StatusKey;
   lane: Lane;
   needsYou: boolean;

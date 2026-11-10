@@ -1,44 +1,21 @@
 // Settings > Providers, the multi-provider part: several accounts (billing, override warning, usage, models), Add / Replace /
 // Remove for an api_key account, and the advanced base URL. The key is typed into a password field, handed to the core once and
 // dropped: it is never kept after Save, never re-rendered, and no stored value comes back to show (the record says `saved` only).
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { AlertDialog, Badge, Button, Input, Sheet, Text } from "../../components/ui/base";
 import { S } from "../../strings";
 import { api } from "../ipc";
-import { isNewModel, modelLine, modelName, parseAccounts, parseUsage, pct, warnWindow } from "../accountsContract";
+import { isNewModel, modelLine, modelName, pct, warnWindow } from "../accountsContract";
 import type { Account, AccountModel, Usage, UsageWindow } from "../accountsContract";
 import { baseUrlProblem } from "../accountsContract";
+import { useAccounts } from "../providerData";
+import type { Accounts } from "../providerData";
 import { ProviderIcon } from "./ProviderIcon";
 import { problemDetail } from "./states";
 import "./providers.css";
+import "./accounts.css";
 
 const C = S.accounts;
-
-export type Accounts = { list: Account[] | null; usage: Usage[]; error: string; loading: boolean; reload: () => void };
-
-/** The accounts and their usage, validated. A late answer from an earlier ask is dropped. Usage is best effort: if it fails, the meters say "not reported". */
-export function useAccounts(on: boolean): Accounts {
-  const seq = useRef(0);
-  const [s, setS] = useState<Omit<Accounts, "reload">>({ list: null, usage: [], error: "", loading: on });
-  const reload = useCallback(() => {
-    const mine = ++seq.current;
-    setS((x) => ({ ...x, error: "", loading: true }));
-    Promise.all([api.providerAccounts(), api.providerUsage().catch(() => null)]).then(([a, u]) => {
-      if (mine !== seq.current) return;
-      const r = parseAccounts(a);
-      const us = u === null ? null : parseUsage(u);
-      setS(r.ok ? { list: r.value.accounts, usage: us?.ok ? us.value : [], error: "", loading: false }
-        : { list: null, usage: [], error: r.reason === "unsupported_version" ? C.updateNeeded : C.unreadable, loading: false });
-    }, (e) => {
-      if (mine === seq.current) setS({ list: null, usage: [], error: problemDetail(e), loading: false });
-    });
-  }, []);
-  useEffect(() => {
-    if (on) reload();
-    return () => { ++seq.current; };
-  }, [on, reload]);
-  return { ...s, reload };
-}
 
 const meterText = (w: UsageWindow): string => {
   if (w.kind === "credit" && w.used_usd !== null && w.limit_usd !== null) return C.credit(w.used_usd, w.limit_usd);

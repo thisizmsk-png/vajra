@@ -230,3 +230,19 @@ export function baseUrlProblem(raw: string): "empty" | "scheme" | "insecure" | "
   if (u.username || u.password) return "credentials";
   return null;
 }
+
+/** One worker of a run proposal (spec section 3). `source` says where the pick came from; `why` is the Director-General's own words (plain text, untrusted). */
+export interface ProposalWorker { slot: string; role: string; task: string; why: string; source: "role_default" | "dg" | "user"; pick: AgentPick }
+/** What Start carries for a pick the user changed: validated again by the core, and recorded there as source "user". */
+export interface ProposalOverride { slot: string; account: string; model: string | null; effort: string | null }
+
+export function parseProposalWorkers(v: unknown): ProposalWorker[] {
+  if (!Array.isArray(v)) return [];
+  const out: ProposalWorker[] = [];
+  for (const w of v.slice(0, 16)) {
+    const p = isObj(w) ? pickOf(w) : null;
+    if (!isObj(w) || !p || !str(w.slot) || !idOk(w.slot) || !str(w.role) || !str(w.task) || !label(w.task)) continue;
+    out.push({ slot: w.slot, role: w.role, task: w.task, why: str(w.why) && label(w.why) ? w.why : "", source: known(w.source, ["role_default", "dg", "user"] as const, "role_default"), pick: p });
+  }
+  return out;
+}

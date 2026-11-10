@@ -5,6 +5,7 @@ import type { PreferencePatch, PreferenceView, PreferenceEnvelope, PreferenceAct
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ProviderList, UsageList } from "./providerContract";
+import type { ProposalOverride } from "./accountsContract";
 import type { AppInfo, Project, Session } from "./projectContract";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
@@ -84,7 +85,7 @@ export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_tex
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
@@ -119,7 +120,7 @@ export type EvidenceRow = {
 /** One recorded verification command with its exit code; `output_tail` is the end of its output for a failed one. Plain text. */
 export type ProofCommand = { cmd: string | null; exit_code: number | null; passed: boolean; output_tail: string | null };
 export type TimelinePhase = { name: string; state: "done" | "current" | "pending"; round?: number | null; max_rounds?: number | null };
-export type GraphTask = { id: string; local: string; title: string | null; owner: string | null; status: string; deps: string[]; wave: number };
+export type GraphTask = { id: string; local: string; title: string | null; owner: string | null; status: string; deps: string[]; wave: number; provider?: unknown };
 export type RunOverview = {
   slug: string; run_id: string; stale: boolean;
   timeline: { phases: TimelinePhase[]; current: string; status: "active" | "done" | "need_input" | "rejected" };
@@ -339,7 +340,7 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
-  startProposal: (id: string, proposalSha256: string) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256 }),
+  startProposal: (id: string, proposalSha256: string, overrides: ProposalOverride[] = []) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256, ...(overrides.length > 0 ? { overrides } : {}) }),
   dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
   inbox: () => call<{ count: number; campaign_count?: number; items: InboxItem[] }>("inbox"),
   /** Which record versions this build reads (`vajra.app_info/1`). */
