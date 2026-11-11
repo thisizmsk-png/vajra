@@ -432,6 +432,9 @@ fn sessions_extra_env_outside_the_allowlist_refuses_the_spawn() {
         vec![("OPENAI_API_KEY", OsString::from("sentinel-not-a-key"))],
         vec![("CODEX_HOME", OsString::from("/a")), ("CODEX_HOME", OsString::from("/b"))],
         vec![("TMPDIR", OsString::new())],
+        // The Setup profile's proxy and CA variables never reach an agent (ADR-17, bhishma condition 8).
+        vec![("HTTPS_PROXY", OsString::from("http://proxy.example:3128"))],
+        vec![("NODE_EXTRA_CA_CERTS", OsString::from("/etc/ca.pem"))],
     ] {
         let mut s = spec(&["/usr/bin/env"], &dir);
         s.extra_env = env;

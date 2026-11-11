@@ -605,6 +605,26 @@ fn run_process_inner(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    run_built(cmd, stdin, timeout)
+}
+
+/// Run `program` with exactly `env` (nothing inherited), the same timeout, output cap and group kill as every other
+/// run. For the setup helpers (ADR-17 17b), whose env is the Setup profile: tool dirs, the base PATH and the proxy and
+/// CA variables, never a key.
+pub fn run_process_exact(program: &Path, argv: &[std::ffi::OsString], cwd: &Path, timeout: Duration, env: &[(&str, std::ffi::OsString)]) -> Result<Output, BridgeError> {
+    let mut cmd = Command::new(program);
+    cmd.args(argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.env_clear();
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.current_dir(cwd);
+    run_built(cmd, None, timeout)
+}
+
+/// Spawn a built command in its own process group, feed `stdin`, keep at most `OUTPUT_CAP` of each stream, and kill the
+/// group at `timeout`.
+fn run_built(mut cmd: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<Output, BridgeError> {
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(BridgeError::Spawn)?;
     let pid = child.id();

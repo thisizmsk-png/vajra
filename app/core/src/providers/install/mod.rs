@@ -4,5 +4,6 @@
 
 pub mod admin;
 pub mod closure;
+pub mod env;
 pub mod tar;
 pub mod tools;
