@@ -762,7 +762,10 @@ bash_case BLOCK "N4 sed script names <control> oddly" "sed 's#${APP}/seats.json#
 # The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
 bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
 bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
-bash_case ALLOW "amb: glob write in /tmp"           'touch /tmp/vajra-test-*.log'
+# A temp dir beside HOME, never above it (on Linux the suite HOME itself lives under /tmp).
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out-XXXXXX")"
+bash_case ALLOW "amb: glob write in a temp dir"     "touch \"$OUTSIDE\"/vajra-test-*.log"
+rm -rf "$OUTSIDE"
 EA=$'\xc3\xa9'
 bash_case ALLOW "amb: non-ASCII name in project"    "echo x > caf${EA}.txt" "$PROJ"
 bash_case BLOCK "amb: non-ASCII name in HOME"       "echo x > caf${EA}.txt" "$H"
