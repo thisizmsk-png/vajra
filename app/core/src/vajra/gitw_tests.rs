@@ -1350,3 +1350,139 @@ fn an_include_reached_at_the_depth_cap_and_directly_is_expanded() {
     }
     no_marker(&f);
 }
+
+// ---------------------------------------------------------------- 6c: the #146 carry-overs and dependency clones
+
+fn ignore_deps() -> (&'static str, &'static str) {
+    (".gitignore", "target/\nnode_modules/\n.venv/\n")
+}
+
+/// N7: an ignored, untracked dependency folder of the repo is cloned into the worktree. One that is tracked, not
+/// ignored, a symlink or absent is not. A forced clone failure is reported per folder and the ticket still works.
+#[test]
+fn ignored_dependency_folders_are_cloned_and_the_rest_are_not() {
+    let f = fx_with("depclone", "[user]\n\tname = U\n\temail = u@e\n", &[(".gitignore", "target/\nnode_modules/\n"), ("vendor/v.rs", "tracked\n")]);
+    std::fs::create_dir_all(f.repo.join("node_modules/pkg")).unwrap();
+    std::fs::write(f.repo.join("node_modules/pkg/index.js"), "module.exports = 1\n").unwrap();
+    std::fs::create_dir_all(f.repo.join("target/debug")).unwrap();
+    std::fs::write(f.repo.join("target/debug/out"), "bin\n").unwrap();
+    // `.venv` is a symlink here: never cloned.
+    std::os::unix::fs::symlink(f.d.join("elsewhere"), f.repo.join(".venv")).unwrap();
+    let mut t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    let r = f.gw.clone_deps(&mut t);
+    let ok: Vec<&str> = r.iter().filter(|d| d.error.is_none()).map(|d| d.name.as_str()).collect();
+    assert_eq!(ok, vec!["node_modules", "target"], "{r:?}");
+    assert!(r.iter().all(|d| d.name != "vendor" && d.name != ".venv"), "tracked and linked folders are skipped: {r:?}");
+    assert_eq!(std::fs::read_to_string(t.wt.join("node_modules/pkg/index.js")).unwrap(), "module.exports = 1\n");
+    assert_eq!(t.deps, vec!["node_modules".to_string(), "target".to_string()]);
+    f.gw.preflight(&t).unwrap();
+    // Forced failure: named on the card, nothing recorded.
+    let mut u = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base).unwrap();
+    FAIL_CLONE.with(|c| c.set(true));
+    let r = f.gw.clone_deps(&mut u);
+    FAIL_CLONE.with(|c| c.set(false));
+    assert!(r.iter().all(|d| d.error.is_some()) && !r.is_empty(), "{r:?}");
+    assert!(u.deps.is_empty() && !u.wt.join("node_modules").exists());
+    no_marker(&f);
+}
+
+/// #146 optional: a dependency clone that ships `.gitattributes` and a nested `.git` (a package installed from git)
+/// doesn't make the ticket tampered, and the worktree is still removed after integration. The same files outside a
+/// clone the core made are still caught.
+#[test]
+fn special_git_files_inside_a_core_dependency_clone_are_not_tampered() {
+    let f = fx_with("depwalk", "[user]\n\tname = U\n\temail = u@e\n", &[ignore_deps()]);
+    for (p, c) in [("node_modules/pkg/.gitattributes", "* text=auto\n"), ("node_modules/gitdep/.git/HEAD", "ref: refs/heads/main\n"), ("node_modules/pkg/i.js", "1\n")] {
+        let at = f.repo.join(p);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, c).unwrap();
+    }
+    let mut t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    assert_eq!(f.gw.clone_deps(&mut t).iter().filter(|d| d.error.is_none()).count(), 1);
+    edit(&t, "src/lib.rs", "fn a() { 2 }\n");
+    let commit = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    f.gw.integrate(&it, &f.base, std::slice::from_ref(&commit)).unwrap();
+    f.gw.worktree_remove(&t, &commit, &Gitw::integration_ref(&it)).unwrap();
+    assert!(!t.wt.exists());
+    // Not a core clone: the same files planted by a worker in another ignored folder are still tampered.
+    let u = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base).unwrap();
+    edit(&u, "target/pkg/.gitattributes", "* filter=x\n");
+    edit(&u, "src/lib.rs", "fn a() { 3 }\n");
+    assert_eq!(f.gw.snapshot(&u, &globs(), &[], "w m").unwrap_err().code(), "tampered");
+    // A clone root a worker swapped for a symlink is walked as any other entry (not skipped, never followed).
+    let mut v = f.gw.worktree_add(&f.repo, "p", "r1", "t3", 1, &f.base).unwrap();
+    f.gw.clone_deps(&mut v);
+    std::fs::remove_dir_all(v.wt.join("node_modules")).unwrap();
+    std::fs::create_dir_all(v.wt.join("nm2")).unwrap();
+    edit(&v, "nm2/.gitattributes", "* filter=x\n");
+    std::os::unix::fs::symlink("nm2", v.wt.join("node_modules")).unwrap();
+    edit(&v, "src/lib.rs", "fn a() { 4 }\n");
+    assert_eq!(f.gw.snapshot(&v, &globs(), &[], "w m").unwrap_err().code(), "tampered", "nm2/.gitattributes is still found");
+    no_marker(&f);
+}
+
+/// #146 R1 (bhishma): the human replaces the global baseline with one that names a new interpreter filter. The held
+/// repo baseline's program list is refreshed, so the new program needs the human's accept before any content call,
+/// and an earlier accept doesn't carry over to it.
+#[test]
+fn replacing_the_global_baseline_refreshes_the_held_program_lists() {
+    let f = fx("r1refresh");
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    std::fs::write(f.home.join(".gitconfig"), "[user]\n\tname = U\n\temail = u@e\n[filter \"nb\"]\n\tclean = /usr/bin/python3 -m nbx\n").unwrap();
+    let mut g = GlobalBaseline::take_or_load(Path::new(GIT), &f.gw.data, &f.home, None).unwrap();
+    g.replace(Path::new(GIT), &f.home, None, false).unwrap();
+    f.gw.use_global(&g).unwrap();
+    assert_eq!(f.gw.repos.unvetted_programs(&common), vec!["filter.nb.clean".to_string()]);
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["program filter.nb.clean".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+}
+
+/// #146 optional: an unvetted program keeps the repo from content calls, but not from discarding a ticket or deleting
+/// a task branch: neither runs a filter.
+#[test]
+fn unvetted_programs_do_not_block_discard_or_branch_delete() {
+    let f = fx("unvetdiscard");
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/vajra/r1/task-t1-r1", &f.base]);
+    ugit(&f.home, &f.repo, &["config", "filter.nb.clean", "/usr/bin/python3 -m nbx"]);
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    assert!(!f.gw.repos.unvetted_programs(&common).is_empty());
+    f.gw.discard(&t).unwrap();
+    assert!(!t.wt.exists());
+    f.gw.branch_delete(&f.repo, "refs/heads/vajra/r1/task-t1-r1").unwrap();
+    // A changed config still refuses them.
+    let u = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base);
+    assert!(u.is_err(), "content calls stay refused");
+    ugit(&f.home, &f.repo, &["config", "core.x", "1"]);
+    assert_eq!(f.gw.branch_delete(&f.repo, "refs/heads/vajra/r1/task-t1-r1").unwrap_err().code(), "repo_config_changed");
+}
+
+/// #146 optional: the repo baseline check runs git without holding the baselines lock, so another thread's card read
+/// isn't stuck behind it. The hook runs inside the check, where git is spawned: the other thread's read must finish.
+#[test]
+fn the_repo_baseline_check_does_not_hold_the_lock_across_git() {
+    let f = Arc::new(fx("checklock"));
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let got = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (f2, c2, g2) = (f.clone(), common.clone(), got.clone());
+    IN_CHECK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (f3, c3) = (f2.clone(), c2.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(f3.gw.repos.unvetted_programs(&c3));
+            });
+            g2.store(rx.recv_timeout(Duration::from_secs(3)).is_ok(), Ordering::SeqCst);
+        }))
+    });
+    f.gw.repos.check(&f.gw, &common).unwrap();
+    IN_CHECK.with(|h| *h.borrow_mut() = None);
+    assert!(got.load(Ordering::SeqCst), "the card read waited for the check's git calls");
+}

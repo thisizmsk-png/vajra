@@ -804,15 +804,45 @@ impl RepoBaselines {
         Ok(())
     }
 
+    /// After the human replaced the global baseline (only with no agent session running): every held repo's program
+    /// list is taken again from the new effective config, so a program the new baseline names is fingerprinted and,
+    /// when unvetted, needs the human's accept. An earlier accept carries over only when the unvetted set is unchanged
+    /// (#146 R1). The git calls run outside the lock.
+    fn refresh_programs(&self, gw: &Gitw) {
+        let commons: Vec<PathBuf> = crate::lock(&self.held).keys().cloned().collect();
+        for c in commons {
+            let (programs, unvetted) = gw.programs(&c);
+            if let Some(h) = crate::lock(&self.held).get_mut(&c) {
+                h.programs_accepted &= h.unvetted == unvetted;
+                h.programs = programs;
+                h.unvetted = unvetted;
+            }
+        }
+    }
+
     /// The program keys the human has to accept before the repo gets content calls (for the card). Names only.
     pub fn unvetted_programs(&self, common: &Path) -> Vec<String> {
         crate::lock(&self.held).get(common).filter(|h| !h.programs_accepted).map(|h| h.unvetted.clone()).unwrap_or_default()
     }
 
+    /// Before a content call: the unvetted-program gate, then the hashes.
     fn check(&self, gw: &Gitw, common: &Path) -> R<()> {
-        let m = crate::lock(&self.held);
-        let h = m.get(common).ok_or(GitwError::Invalid("no repo baseline is held; start the run first"))?;
-        if !h.unvetted.is_empty() && !h.programs_accepted {
+        self.check_as(gw, common, true)
+    }
+
+    /// Before a call that runs no filter or driver (`discard`'s `worktree remove --force`, `branch -D`): the hashes
+    /// only. An unvetted program can't run there, so it doesn't block them (#146 claude).
+    fn check_meta(&self, gw: &Gitw, common: &Path) -> R<()> {
+        self.check_as(gw, common, false)
+    }
+
+    fn check_as(&self, gw: &Gitw, common: &Path, content: bool) -> R<()> {
+        // A copy, so the git calls below never run under the lock (#146 claude): a card read or another repo's check
+        // isn't stuck behind them.
+        let h = crate::lock(&self.held).get(common).cloned().ok_or(GitwError::Invalid("no repo baseline is held; start the run first"))?;
+        #[cfg(test)]
+        IN_CHECK.with(|c| if let Some(f) = c.borrow().as_ref() { f() });
+        if content && !h.unvetted.is_empty() && !h.programs_accepted {
             return Err(GitwError::RepoConfigChanged { keys: h.unvetted.iter().map(|k| format!("program {k}")).collect() });
         }
         let partial = |why: &str| GitwError::RepoConfigChanged { keys: vec![format!("include.path ({why})")] };
@@ -921,6 +951,8 @@ pub struct Ticket {
     pub dispatch_head: String,
     /// An integration tree's HEAD is the integration branch, not detached.
     integration: bool,
+    /// The top-level dependency folders `clone_deps` cloned in (N7): untracked at `dispatch_head` and git-ignored.
+    pub deps: Vec<String>,
 }
 
 impl Ticket {
@@ -930,6 +962,46 @@ impl Ticket {
     pub fn task_ref(&self) -> String {
         format!("refs/heads/vajra/{}/task-{}-r{}", self.run, self.task, self.round)
     }
+}
+
+/// A task commit's change set against `dispatch_head`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub files: Vec<String>,
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// The dependency folders N7 clones, where they exist and are git-ignored.
+pub const DEP_DIRS: [&str; 4] = ["node_modules", ".venv", "target", "vendor"];
+
+/// One folder `clone_deps` considered; `error` is the card's reason when the clone failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepClone {
+    pub name: String,
+    pub error: Option<String>,
+}
+
+/// `clonefile(src, dst, CLONE_NOFOLLOW | CLONE_NOOWNERCOPY)`: a copy-on-write clone of a whole tree; `dst` must not exist.
+/// A partial clone left by a failure is removed.
+fn clonefile(src: &Path, dst: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(test)]
+    if FAIL_CLONE.with(|c| c.get()) {
+        return Err("the copy failed (test)".into());
+    }
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| "a path holds a NUL".to_string());
+    let (s, d) = (c(src)?, c(dst)?);
+    // SAFETY: both are valid NUL-terminated paths that outlive the call.
+    let r = unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), 0x0001 | 0x0002) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    if std::fs::symlink_metadata(dst).is_ok_and(|m| m.is_dir()) {
+        let _ = std::fs::remove_dir_all(dst);
+    }
+    Err(if e.raw_os_error() == Some(libc::EXDEV) { "the folder is on another volume, so it can't be cloned".into() } else { format!("the copy failed: {e}") })
 }
 
 /// A finished snapshot.
@@ -1050,6 +1122,7 @@ impl Gitw {
             return Err(GitwError::Invalid("a different baseline copy"));
         }
         *crate::lock(&self.global_sha) = g.sha.clone();
+        self.repos.refresh_programs(self);
         Ok(())
     }
 
@@ -1247,6 +1320,7 @@ impl Gitw {
             gitdir,
             dispatch_head: from.into(),
             integration,
+            deps: Vec::new(),
         };
         Ok(t)
     }
@@ -1285,6 +1359,75 @@ impl Gitw {
         self.preflight(t)
     }
 
+    /// N7: APFS clones (`clonefile`, copy-on-write) of the repo's dependency folders into a fresh ticket, before its
+    /// `dispatch_head` is final. A folder is cloned only when it is a real directory at the repo's top level, has no
+    /// path tracked at `dispatch_head` and is git-ignored there. One whose clone fails (another volume, S7) is reported
+    /// so the card can say so, and the worker starts without it. Returns one entry per folder considered.
+    pub fn clone_deps(&self, t: &mut Ticket) -> Vec<DepClone> {
+        let mut out = Vec::new();
+        if t.integration || self.preflight(t).is_err() {
+            return out;
+        }
+        for name in DEP_DIRS {
+            let src = t.repo.join(name);
+            if !std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            let tracked = self.run(Call::new(At::Pinned(t), &["ls-tree", "-z", "--name-only", &t.dispatch_head, "--", name]));
+            if !matches!(&tracked, Ok(o) if o.exit() == Some(0) && o.stdout.is_empty()) {
+                continue;
+            }
+            let dst = t.wt.join(name);
+            let error = clonefile(&src, &dst).err();
+            if error.is_none() {
+                // Ignored at `dispatch_head`'s rules: git lists the whole folder as one ignored directory. (Read after the
+                // clone: git answers only for a path that exists. `check-ignore` refuses literal pathspecs.) No filter runs.
+                let ls = self.run(Call::new(At::Pinned(t), &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", name]));
+                if !matches!(&ls, Ok(o) if o.exit() == Some(0) && o.stdout == format!("{name}/\0")) {
+                    let _ = std::fs::remove_dir_all(&dst);
+                    continue;
+                }
+                t.deps.push(name.to_string());
+            }
+            out.push(DepClone { name: name.to_string(), error });
+        }
+        out
+    }
+
+    /// The "unchanged tree" test (16.5): every tamper check passes (so HEAD is still `dispatch_head`, detached), and
+    /// nothing differs from `dispatch_head` but ignored files, read through a fresh private index with the baseline
+    /// config, after the walk rule. The bridge's `git status` would read the user's live global config, which a
+    /// worker can edit. `Ok(false)` when something changed; a tamper is an error.
+    pub fn unchanged(&self, t: &Ticket) -> R<bool> {
+        let _quiet = self.quiesce.pause(&t.common.path);
+        self.preflight(t)?;
+        self.walk_rule(t)?;
+        let idx = self.fresh_index(t, "status-index")?;
+        Ok(self.changed(t, &idx)?.is_empty())
+    }
+
+    /// The task commit's line counts against `dispatch_head`: tree to tree, so no worktree file is read and no filter
+    /// runs, and lines from merged deps are never the worker's (16.10's base). Binary files count 0.
+    pub fn diff_stat(&self, t: &Ticket, commit: &str) -> R<DiffStat> {
+        if !valid_oid(commit) {
+            return Err(GitwError::Invalid("commit id"));
+        }
+        self.preflight(t)?;
+        let o = self.ok("diff-tree", Call::new(At::Pinned(t), &["diff-tree", "-r", "--numstat", "-z", "--no-renames", &t.dispatch_head, commit]))?;
+        if !o.whole() {
+            return Err(GitwError::Git { step: "diff-tree", first_line: "output too large".into() });
+        }
+        let mut d = DiffStat::default();
+        for rec in o.stdout.split('\0').filter(|s| !s.is_empty()) {
+            let mut f = rec.splitn(3, '\t');
+            let (a, r, p) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+            d.added += a.parse::<u64>().unwrap_or(0);
+            d.removed += r.parse::<u64>().unwrap_or(0);
+            d.files.push(p.to_string());
+        }
+        Ok(d)
+    }
+
     /// Fresh private index at `name`, loaded from `dispatch_head`.
     fn fresh_index(&self, t: &Ticket, name: &str) -> R<PathBuf> {
         let idx = t.private.join(name);
@@ -1319,7 +1462,7 @@ impl Gitw {
         if !self.checks_on() {
             return Ok(());
         }
-        let found = special_files(&t.wt)?;
+        let found = special_files(&t.wt, &t.deps)?;
         if found.is_empty() {
             return Ok(());
         }
@@ -1602,7 +1745,7 @@ impl Gitw {
 
     /// The human discarded the ticket (after a confirm): remove it without the capture check.
     pub fn discard(&self, t: &Ticket) -> R<()> {
-        self.repos.check(self, &t.common.path)?;
+        self.repos.check_meta(self, &t.common.path)?;
         self.remove(t)
     }
 
@@ -1622,11 +1765,19 @@ impl Gitw {
         // Paused, and never through a planted directory symlink or symbolic ref: `branch -D` would delete a ref of the
         // same name elsewhere, with its reflog (#146 bhishma delta).
         let _quiet = self.quiesce.pause(&common);
-        self.repos.check(self, &common)?;
+        self.repos.check_meta(self, &common)?;
         self.plain_ref_in(&common, At::Repo(repo), r, "the task branch")?;
         self.ok("branch -D", Call::new(At::Repo(repo), &["branch", "-D", "--", r.trim_start_matches("refs/heads/")]))?;
         Ok(())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: runs inside the repo baseline check, after the held copy is taken and before its git calls.
+    pub(crate) static IN_CHECK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    /// Tests: every `clonefile` fails.
+    pub(crate) static FAIL_CLONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1721,7 +1872,12 @@ fn git_special(name: &str) -> Option<&'static str> {
 /// Every `.gitattributes`, `.gitmodules`, `.lfsconfig` or `.git` in the worktree (as the volume compares names), as `(relative path, canonical name)`,
 /// by plain `lstat` walk: no git, no symlink followed, ignored files included. The worktree's own `.git` file at the
 /// root is skipped (the tamper checks hash it).
-fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
+///
+/// `deps` are the top-level dependency clones the core made: a real directory there is not walked. They are untracked
+/// at `dispatch_head` and git-ignored, so an attributes file inside one only names ignored paths no core call stages,
+/// and a worker that un-ignores one makes its files show as changed, where `name_rule` still refuses them (#146
+/// claude: a package that ships `.gitattributes` or a git checkout is not tampering).
+fn special_files(wt: &Path, deps: &[String]) -> R<Vec<(String, &'static str)>> {
     const MAX_ENTRIES: usize = 5_000_000;
     let (mut out, mut seen) = (Vec::new(), 0usize);
     let mut stack: Vec<(PathBuf, String)> = vec![(wt.to_path_buf(), String::new())];
@@ -1747,6 +1903,9 @@ fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
                 continue;
             }
             if e.file_type().map_err(io)?.is_dir() {
+                if rel.is_empty() && deps.contains(&name) {
+                    continue;
+                }
                 stack.push((e.path(), r));
             }
         }
