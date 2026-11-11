@@ -1466,7 +1466,21 @@ impl Gitw {
         // make any write through `r` move main (#146 codex), so `r` is refused when symbolic, written only with
         // `--no-deref`, and never checked out: the merges run on a detached HEAD.
         self.plain_ref(it, &r, "the integration branch")?;
-        self.ok("update-ref", Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, base]))?;
+        // From the value it has now (none: the zero id), checked again right before the write: a directory swapped in
+        // between by a process the pause can't reach makes the write fail, never move a ref elsewhere (#146 bhishma
+        // delta).
+        let now = self.run(Call::new(At::Pinned(it), &["rev-parse", "-q", "--verify", "--end-of-options", &r]))?;
+        let old = match now.exit() {
+            Some(0) if valid_oid(now.stdout.trim()) => now.stdout.trim().to_string(),
+            Some(1) => "0".repeat(base.len()),
+            _ => return Err(tampered("the integration branch")),
+        };
+        self.plain_ref(it, &r, "the integration branch")?;
+        #[cfg(test)]
+        BEFORE_REF_WRITE.with(|b| if let Some(f) = b.borrow().as_ref() { f() });
+        if self.run(Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, base, &old]))?.exit() != Some(0) {
+            return Err(tampered("the integration branch"));
+        }
         self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "--detach", base]))?;
         let mut prev = base.to_string();
         if self.detached(it).is_err() || self.head(it)? != prev {
@@ -1517,7 +1531,12 @@ impl Gitw {
     /// its path under the common dir is a real directory or absent: a planted directory symlink (`refs/heads/vajra/<run>
     /// -> ../feat`) would carry even a `--no-deref` write to another branch's file (#146 bhishma delta).
     fn plain_ref(&self, t: &Ticket, r: &str, what: &str) -> R<()> {
-        let mut d = t.common.path.clone();
+        self.plain_ref_in(&t.common.path, At::Pinned(t), r, what)
+    }
+
+    /// `plain_ref` for a repo with no ticket (`branch_delete`).
+    fn plain_ref_in(&self, common: &Path, at: At<'_>, r: &str, what: &str) -> R<()> {
+        let mut d = common.to_path_buf();
         let parts: Vec<&str> = r.split('/').collect();
         for part in &parts[..parts.len().saturating_sub(1)] {
             d.push(part);
@@ -1527,7 +1546,7 @@ impl Gitw {
                 _ => return Err(tampered(format!("{what}'s directory is not a plain directory"))),
             }
         }
-        if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered(format!("{what} is a symbolic ref"))) }
+        if self.run(Call::new(at, &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered(format!("{what} is a symbolic ref"))) }
     }
 
     /// HEAD is detached: `symbolic-ref -q HEAD` exits 1.
@@ -1560,6 +1579,8 @@ impl Gitw {
             let d = self.ok("diff-tree", Call::new(At::Pinned(t), &["diff-tree", "-r", "--name-only", "-z", "--no-renames", &want, &cap]))?;
             return Err(GitwError::Kept { paths: d.stdout.split('\0').filter(|s| !s.is_empty()).map(String::from).collect() });
         }
+        // Read through no planted symlink or symbolic ref (#146 bhishma delta).
+        self.plain_ref(t, integration_ref, "the integration branch")?;
         let a = self.run(Call::new(At::Pinned(t), &["merge-base", "--is-ancestor", commit, integration_ref]))?;
         if a.exit() != Some(0) {
             return Err(GitwError::Kept { paths: vec!["(the task commit is not integrated)".into()] });
@@ -1595,7 +1616,11 @@ impl Gitw {
     pub fn branch_delete(&self, repo: &Path, r: &str) -> R<()> {
         vajra_ref(r)?;
         let common = self.common_of(repo)?;
+        // Paused, and never through a planted directory symlink or symbolic ref: `branch -D` would delete a ref of the
+        // same name elsewhere, with its reflog (#146 bhishma delta).
+        let _quiet = self.quiesce.pause(&common);
         self.repos.check(self, &common)?;
+        self.plain_ref_in(&common, At::Repo(repo), r, "the task branch")?;
         self.ok("branch -D", Call::new(At::Repo(repo), &["branch", "-D", "--", r.trim_start_matches("refs/heads/")]))?;
         Ok(())
     }
@@ -1617,6 +1642,12 @@ thread_local! {
 thread_local! {
     /// Tests: runs before each `integrate` merge (a worker moving the branch in the common dir).
     pub(crate) static BEFORE_MERGE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: runs right before `integrate` first writes the integration ref, after its last check.
+    pub(crate) static BEFORE_REF_WRITE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

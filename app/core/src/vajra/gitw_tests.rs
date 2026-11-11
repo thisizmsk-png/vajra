@@ -1271,3 +1271,50 @@ fn a_symlinked_ref_directory_is_refused_and_the_other_branch_never_moves() {
     assert_eq!(rev(&f, "refs/heads/feat/integration"), other, "the other branch never moves");
     no_marker(&f);
 }
+
+/// #146 bhishma delta M-b: a run's ref directory swapped for a symlink after integrate's last check (a process the
+/// pause can't reach) makes the first write fail on its old value; the other branch never moves.
+#[test]
+fn a_ref_directory_swapped_before_the_first_integrate_write_moves_nothing() {
+    let f = fx("refdirswap");
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let other = out(ugit(&f.home, &f.repo, &["-c", "user.name=W", "-c", "user.email=w@e", "commit-tree", &format!("{}^{{tree}}", f.base), "-p", &f.base, "-m", "other"]));
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/feat/integration", &other]);
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let c2 = common.clone();
+    BEFORE_REF_WRITE.with(|b| *b.borrow_mut() = Some(Box::new(move || {
+        std::fs::create_dir_all(c2.join("refs/heads/vajra")).unwrap();
+        std::os::unix::fs::symlink("../feat", c2.join("refs/heads/vajra/r1")).unwrap();
+    })));
+    let r = f.gw.integrate(&it, &f.base, &[]);
+    BEFORE_REF_WRITE.with(|b| *b.borrow_mut() = None);
+    assert_eq!(r.unwrap_err(), GitwError::Tampered { what: "the integration branch".into() });
+    assert_eq!(rev(&f, "refs/heads/feat/integration"), other, "the other branch never moves");
+    // A plain directory again: the run integrates (the ref absent, so its old value is the zero id).
+    std::fs::remove_file(common.join("refs/heads/vajra/r1")).unwrap();
+    assert_eq!(f.gw.integrate(&it, &f.base, &[]).unwrap(), f.base);
+    // And again from the value it now has.
+    assert_eq!(f.gw.integrate(&it, &f.base, &[]).unwrap(), f.base);
+    no_marker(&f);
+}
+
+/// #146 bhishma delta M-a: `branch_delete` holds the repo's pause through the delete and never deletes through a
+/// planted directory symlink, so another run's branch of the same name survives.
+#[test]
+fn branch_delete_is_paused_and_never_deletes_through_a_symlinked_directory() {
+    let q = Arc::new(Counting::default());
+    let f = fx_q("brdel", "[user]\n\tname = U\n\temail = u@e\n", &[], q.clone());
+    let common = f.gw.common_of(&f.repo).unwrap();
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/other/task-t1-r1", &f.base]);
+    std::fs::create_dir_all(common.join("refs/heads/vajra")).unwrap();
+    std::os::unix::fs::symlink("../other", common.join("refs/heads/vajra/r1")).unwrap();
+    assert_eq!(f.gw.branch_delete(&f.repo, "refs/heads/vajra/r1/task-t1-r1").unwrap_err(), GitwError::Tampered { what: "the task branch's directory is not a plain directory".into() });
+    assert_eq!(rev(&f, "refs/heads/other/task-t1-r1"), f.base, "the other branch survives");
+    // A real task branch: deleted while the pause is held (the only resume comes after its ref file is gone).
+    std::fs::remove_file(common.join("refs/heads/vajra/r1")).unwrap();
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/vajra/r1/task-t1-r1", &f.base]);
+    *crate::lock(&q.watch) = Some(common.join("refs/heads/vajra/r1/task-t1-r1"));
+    f.gw.branch_delete(&f.repo, "refs/heads/vajra/r1/task-t1-r1").unwrap();
+    assert_eq!(*crate::lock(&q.seen), vec![false]);
+    no_marker(&f);
+}
