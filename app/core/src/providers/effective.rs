@@ -460,7 +460,9 @@ fn count_chunks(f: &mut impl Read, size: u64, read_left: &mut u64, deadline: Ins
         let want = buf.len().min((size - seen) as usize);
         let n = f.read(&mut buf[..want]).ok()?;
         if n == 0 {
-            break;
+            // The file ended before the size `fstat` gave: it shrank while it was being read, so what was read is not
+            // the file. Uncounted (the diff is partial), never an exact count of a prefix.
+            return None;
         }
         let chunk = &buf[..n];
         // The probe is the first BINARY_PROBE bytes of the file, which may span chunks.

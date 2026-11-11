@@ -546,3 +546,16 @@ fn a_binary_read_that_outlasts_the_budget_is_uncounted() {
     let deadline = Instant::now() + Duration::from_millis(30);
     assert_eq!(count_lines(&mut SlowRead(b"a\nb\n", slow), 4, &mut left, deadline), None);
 }
+
+#[test]
+fn a_file_that_shrinks_while_it_is_read_is_uncounted() {
+    let mut left = TOTAL_READ_CAP;
+    // `fstat` said 100 bytes, the file then held 4: a prefix is not the file.
+    assert_eq!(count_lines(&mut &b"a\nb\n"[..], 100, &mut left, far()), None);
+    // The same bytes with the size they really have count normally.
+    assert_eq!(count_lines(&mut &b"a\nb\n"[..], 4, &mut left, far()), Some(2));
+    // End of file at once (truncated to empty) is the same.
+    assert_eq!(count_lines(&mut &b""[..], 10, &mut left, far()), None);
+    // An empty file really is empty: size 0, nothing to read, 0 lines.
+    assert_eq!(count_lines(&mut &b""[..], 0, &mut left, far()), Some(0));
+}
