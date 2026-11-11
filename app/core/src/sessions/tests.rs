@@ -30,7 +30,7 @@ fn spec(argv: &[&str], cwd: &std::path::Path) -> SpawnSpec {
         rows: 24,
         cols: 80,
         redact: Redactor::default(),
-        codex_home: None,
+        extra_env: Vec::new(),
     }
 }
 
@@ -409,7 +409,7 @@ fn sessions_gateway_launch_env_is_allowlist_plus_codex_home_and_stdin_is_null() 
     argv[4] = fake.display().to_string();
     let mut s = spec(&["true"], &dir);
     s.argv = argv;
-    s.codex_home = Some(home.clone());
+    s.extra_env = vec![("CODEX_HOME", home.clone().into())];
     sup.spawn("s-gw", s).unwrap();
     sup.wait("s-gw", WAIT).unwrap().expect("exited");
     let l = wait_lines(&bus, "s-gw", |l| l.iter().any(|x| x.starts_with("TERM=")));
@@ -423,6 +423,23 @@ fn sessions_gateway_launch_env_is_allowlist_plus_codex_home_and_stdin_is_null() 
     for k in crate::adapter::CODEX_KEYS.iter().chain(crate::adapter::CLAUDE_KEYS.iter()) {
         assert!(!names.contains(k), "{k} leaked");
     }
+}
+
+#[test]
+fn sessions_extra_env_outside_the_allowlist_refuses_the_spawn() {
+    let (sup, _bus, dir) = setup("badenv");
+    for env in [
+        vec![("OPENAI_API_KEY", OsString::from("sentinel-not-a-key"))],
+        vec![("CODEX_HOME", OsString::from("/a")), ("CODEX_HOME", OsString::from("/b"))],
+        vec![("TMPDIR", OsString::new())],
+    ] {
+        let mut s = spec(&["/usr/bin/env"], &dir);
+        s.extra_env = env;
+        assert_eq!(sup.spawn("s-badenv", s), Err(SessionError::BadEnv));
+    }
+    let mut s = spec(&["/usr/bin/env"], &dir);
+    s.extra_env = vec![("TMPDIR", dir.clone().into()), ("CLAUDE_CONFIG_DIR", dir.join("cfg").into())];
+    sup.spawn("s-okenv", s).unwrap();
 }
 
 #[test]

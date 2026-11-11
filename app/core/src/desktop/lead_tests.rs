@@ -1312,7 +1312,7 @@ fn lead_status_names_the_director_general_and_its_state() {
     let t = Tmp::new();
     let app = t.app();
     // A run of this project that is alive: its process is up, not just its entry kept for the crew view.
-    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Redactor::default(), codex_home: None }).unwrap();
+    app.sup.spawn(&format!("run-{SID}"), crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.repo(), rows: 24, cols: 80, redact: Redactor::default(), extra_env: Vec::new() }).unwrap();
     let s = app.lead_status(RUN_ID).unwrap();
     assert_eq!((s["name"].as_str(), s["state"].as_str(), s["generation"].as_u64()), (Some("Director-General"), Some("running"), Some(1)));
     assert_eq!((s["project_id"].as_str(), s["stream"].as_str()), (Some(pid(&t).as_str()), Some(stream_name(&t).as_str())));

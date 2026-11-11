@@ -283,6 +283,15 @@ pub fn read_codex(events: &str, codex_home: &Path) -> Effective {
     eff
 }
 
+/// The text of a Codex worker's own session file (at most `MAX_READ` bytes), found the way `read_codex` finds it, for
+/// the profile read-back (`adapter::profiles::check_codex_applied`). `None` with no thread id or no readable file.
+pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
+    let file = codex_thread_id(events).and_then(|t| rollout_file(codex_home, &t))?;
+    let mut text = String::new();
+    file.take(MAX_READ).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
 /// What a Claude worker ran on, from the `system`/`init` event of its stream. Claude has no effort setting here, so the
 /// effective effort is `None`. The stream does not say how the CLI was signed in (plan or API key), so billing stays
 /// unknown.

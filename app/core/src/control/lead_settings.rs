@@ -89,6 +89,29 @@ fn rule(base: &str, suffix: &str) -> String {
     format!("Read(//{}/{suffix})", &base[1..])
 }
 
+/// Extra write-protected files under `$HOME` for a Claude worker: the user's git config, which the core's git baseline
+/// is taken from.
+pub const WORKER_EDIT_HOME_RULES: [&str; 2] = [".gitconfig", ".config/git/**"];
+
+/// A Claude worker's `Edit(//...)` deny rules (Claude Code applies Edit rules to every built-in edit tool): every
+/// `HOME_RULES` entry plus `WORKER_EDIT_HOME_RULES`, and the whole data dir, in both the given and realpath forms. They
+/// cover the edit tools only; a Bash write is the guard's or the OS sandbox's to stop (#147 gate H1).
+pub fn worker_edit_rules(home: &Path, data: &Path) -> Result<Vec<String>, LeadError> {
+    let mut out: Vec<String> = Vec::new();
+    let tables: [(&Path, &str, &[&str]); 3] = [(home, "HOME", &HOME_RULES), (home, "HOME", &WORKER_EDIT_HOME_RULES), (data, "data dir", &DATA_RULES)];
+    for (base, what, table) in tables {
+        for form in forms(base, what)? {
+            for suffix in table {
+                let r = format!("Edit(//{}/{suffix})", &form[1..]);
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Every deny rule for this machine, deduped, in table order. A base that is not a plain absolute path is refused
 /// (`lead_guard_missing`). When a base differs from its realpath (macOS `/var` → `/private/var`, a symlinked HOME
 /// or repo) both forms are emitted: the spike did not show the twin is needed, but emitting it costs nothing.

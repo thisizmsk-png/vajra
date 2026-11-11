@@ -521,6 +521,13 @@ fn a_git_that_cannot_answer_is_none_and_garbage_numstat_is_partial() {
     assert_eq!((ok.added, ok.partial), (2, false));
 }
 
+#[test]
+fn the_profile_read_back_reads_the_same_session_file() {
+    let home = codex_home(ROLLOUT);
+    assert_eq!(codex_rollout(EVENTS, &home).as_deref(), Some(ROLLOUT));
+    assert_eq!(codex_rollout("{}\n", &home), None, "no thread id, no file");
+}
+
 /// A reader that takes its time, like a stalled network volume.
 struct SlowRead<'a>(&'a [u8], Duration);
 
