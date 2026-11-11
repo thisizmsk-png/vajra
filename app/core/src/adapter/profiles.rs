@@ -98,9 +98,8 @@ const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "them
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does the worktree's project settings file load). The owner runs
-/// `app/bench/spikes/s4-claude-settings.sh`. Owner run on 2026-11-10 with claude 2.1.322: S4 PASS, all 7 checks. If a
-/// later run fails (a new Claude Code release), set this back to `false` and the profile is refused again.
-pub const CLAUDE_WORKER_S4_PASSED: bool = true;
+/// `app/bench/spikes/s4-claude-settings.sh`; once it prints PASS, set this to `true` (and update the pinning test).
+pub const CLAUDE_WORKER_S4_PASSED: bool = false;
 
 pub const S4_UNVERIFIED: Unsupported = Unsupported {
     reason: "s4_unverified",
