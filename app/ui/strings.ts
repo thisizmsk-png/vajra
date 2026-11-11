@@ -677,7 +677,8 @@ export const S = {
       checking: "Measuring the copies",
       failed: "Could not measure the copies.",
       none: "No worker copies on disk.",
-      use: (copies: number, size: string) => `${copies} ${copies === 1 ? "copy" : "copies"}, up to ${size} on disk.`,
+      use: (copies: number, size: string, partial = false) =>
+        `${copies} ${copies === 1 ? "copy" : "copies"}, ${partial ? "at least" : "up to"} ${size} on disk.${partial ? " Too many files to count them all." : ""}`,
       shared: "Copies share unchanged files with your repo where the disk allows, so the real space used is often less.",
       cleanUp: "Clean up",
       cleanUpHint: "Removes only copies whose work is merged and that hold nothing else. Copies with unmerged work stay.",

@@ -304,6 +304,19 @@ impl Service {
         Ok(json!({"action_id": a.id, "state": State::Refused.as_str()}))
     }
 
+    /// A `core:` ticket ended: a Lead's stop on it that still waits for the human is refused (`worker_finished`), so
+    /// the dialog never offers to stop a worker that is gone.
+    pub fn core_ticket_ended(&mut self, ticket: &str) {
+        let key = format!("{CORE_PREFIX}{ticket}");
+        let now = SystemTime::now();
+        let asks: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.state == State::AwaitingHumanConfirm && a.worker == key).cloned().collect();
+        for a in asks {
+            if self.record(&a, State::Refused, json!({"reason": "worker_finished"}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
+    }
+
     /// The only way a stop is cleared. Appends a ledger line and the audit
     /// line `TS ALLOW desktop-control reason="resume id=<action_id>"`.
     pub fn resume_worker(&mut self, actor: Actor, worker: &str) -> Result<Value> {

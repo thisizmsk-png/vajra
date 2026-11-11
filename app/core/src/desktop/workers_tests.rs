@@ -367,6 +367,19 @@ fn a_startup_event_pushed_out_of_the_ring_still_validates_and_fills_the_receipt(
     assert_eq!(receipt["effective"]["read_from"], "harness_session_file", "{receipt}");
 }
 
+#[test]
+fn the_disk_walk_stops_at_its_entry_cap_and_says_the_size_is_partial() {
+    let d = tmpdir("diskcap");
+    for i in 0..10 {
+        std::fs::write(d.join(format!("f{i}")), vec![1u8; 8192]).unwrap();
+    }
+    let (all, partial) = allocated_upto(&d, 1000);
+    assert!(!partial && all >= 10 * 8192, "{all}");
+    let (some, partial) = allocated_upto(&d, 4);
+    assert!(partial && some < all, "{some} < {all}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 // ---------------------------------------------------------------- controls
 
 #[test]

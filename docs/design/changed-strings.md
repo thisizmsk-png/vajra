@@ -317,6 +317,7 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | Worker copies | Settings > General panel title | new |
 | Each worker edits its own copy of your repo. A copy stays until its work is merged, or until you discard it. | panel lede | |
 | N copies, up to SIZE on disk. | panel size line | "1 copy" for one; allocated space |
+| N copies, at least SIZE on disk. Too many files to count them all. | panel size line | the walk stopped at its entry cap (1,000,000), so SIZE is a lower bound |
 | Copies share unchanged files with your repo where the disk allows, so the real space used is often less. | under the size line | copy-on-write clones count in full |
 | No worker copies on disk. | panel, empty | Clean up is off |
 | Clean up | panel button | |

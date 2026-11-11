@@ -96,12 +96,19 @@ impl WorkerHost {
     }
 
     /// The runtime, built the first time it is asked for (6d dispatches through it). Refused while agents are off.
-    pub fn runtime(&self, sup: &Arc<Supervisor>, bus: &Arc<Bus>, on_repo: impl Fn(&Path) -> Vec<String> + Send + Sync + 'static, cfg: impl FnOnce() -> Config) -> Result<&WorkerRuntime, Value> {
+    pub fn runtime(
+        &self,
+        sup: &Arc<Supervisor>,
+        bus: &Arc<Bus>,
+        on_repo: impl Fn(&Path) -> Vec<String> + Send + Sync + 'static,
+        hooks: impl FnOnce() -> Hooks,
+        cfg: impl FnOnce() -> Config,
+    ) -> Result<&WorkerRuntime, Value> {
         let g = self.baseline.as_ref().map_err(|o| json!({"error": AGENTS_OFF, "detail": o.why}))?;
         Ok(self.rt.get_or_init(|| {
             let quiesce = Arc::new(SessionQuiesce::new(sup.clone(), on_repo));
             let gw = Arc::new(Gitw::new(self.git.clone(), self.home.clone(), self.data.clone(), self.work.clone(), g, quiesce));
-            WorkerRuntime::new(cfg(), gw, sup.clone(), bus.clone(), Hooks::default())
+            WorkerRuntime::new(cfg(), gw, sup.clone(), bus.clone(), hooks())
         }))
     }
 
@@ -118,7 +125,8 @@ impl WorkerHost {
     /// Settings: the disk under `<work>`, every copy any app life made. A walk only: no git, and no runtime is built.
     pub fn disk_use(&self) -> Value {
         let copies = copies_under(&self.work);
-        json!({"copies": copies, "bytes": super::workers::allocated(&self.work)})
+        let (bytes, partial) = super::workers::allocated(&self.work);
+        json!({"copies": copies, "bytes": bytes, "partial": partial})
     }
 
     /// Settings' Clean up. Only this app life's tickets are known, so only their copies can be checked; with no runtime

@@ -52,6 +52,14 @@ describe("worker copies in Settings", () => {
     expect(empty.calls.some((c) => c.cmd === "act_worker_clean_up")).toBe(false);
   });
 
+  it("a walk that hit its cap says the size is a lower bound", async () => {
+    setTransport(fakeIpc({ worker_disk: { copies: 2, bytes: 2048, partial: true } }).transport);
+    render(<WorkerCopies />);
+    const line = C.use(2, "2 KB", true);
+    expect(line).toContain("at least 2 KB");
+    expect(await screen.findByText(line)).toBeTruthy();
+  });
+
   it("a size reads in the largest whole unit", () => {
     expect([size(0), size(900), size(2048), size(5 * 1024 ** 3)]).toEqual(["0 bytes", "900 bytes", "2 KB", "5.0 GB"]);
   });

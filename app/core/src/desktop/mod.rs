@@ -481,7 +481,17 @@ impl App {
             let live: Vec<(String, PathBuf)> = lock(&runs).iter().map(|(stream, r)| (stream.clone(), r.cwd.clone())).collect();
             live.into_iter().filter(|(_, cwd)| cwd.canonicalize().unwrap_or_else(|_| cwd.clone()).starts_with(&root)).map(|(s, _)| s).collect()
         };
-        self.workers.runtime(&self.sup, &self.bus, on_repo, cfg)
+        let control = self.control.clone();
+        let hooks = move || workers::Hooks {
+            on_dispatch: None,
+            // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
+            // thread, since a human Stop ends a queued ticket while it holds the control lock.
+            on_outcome: Some(Box::new(move |v: &workers::TicketView| {
+                let (control, id) = (control.clone(), v.id.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+            })),
+        };
+        self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
     }
 
     /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).

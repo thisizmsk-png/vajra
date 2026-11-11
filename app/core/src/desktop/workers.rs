@@ -266,11 +266,24 @@ fn pick(e: &Entry) -> Option<Pick> {
 }
 
 /// Allocated bytes under `root`, never following a symlink.
-pub(crate) fn allocated(root: &std::path::Path) -> u64 {
+pub(crate) fn allocated(root: &std::path::Path) -> (u64, bool) {
+    allocated_upto(root, DISK_WALK_ENTRIES)
+}
+
+/// Most entries Settings' disk walk visits; past it the size is a lower bound (`partial`), so a huge copy folder
+/// can't hold the Settings call for minutes.
+const DISK_WALK_ENTRIES: usize = 1_000_000;
+
+/// Allocated bytes under `root` and whether the walk stopped at `max` entries before the end.
+fn allocated_upto(root: &std::path::Path, max: usize) -> (u64, bool) {
     use std::os::unix::fs::MetadataExt;
-    let mut total = 0;
+    let (mut total, mut seen) = (0, 0usize);
     let mut stack = vec![root.to_path_buf()];
     while let Some(p) = stack.pop() {
+        if seen >= max {
+            return (total, true);
+        }
+        seen += 1;
         let Ok(m) = p.symlink_metadata() else { continue };
         total += m.blocks() * 512;
         if m.is_dir() {
@@ -279,7 +292,7 @@ pub(crate) fn allocated(root: &std::path::Path) -> u64 {
             }
         }
     }
-    total
+    (total, false)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

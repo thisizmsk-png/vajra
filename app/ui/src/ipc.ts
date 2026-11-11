@@ -215,7 +215,7 @@ export type CloseoutState = "closed" | "closable" | "working" | "waiting_on_you"
 export type CloseoutRow = { worker: string; state: CloseoutState; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number };
 export type CloseFinishedResult = { closed: { worker: string; label: string }[]; skipped: { worker: string; label: string; reason: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }[] };
 /** Settings: the worker copies on disk (`worker_disk`). `bytes` is allocated space, so shared clones count in full. */
-export type WorkerDisk = { copies: number; bytes: number };
+export type WorkerDisk = { copies: number; bytes: number; partial?: boolean };
 export type CleanUpResult = { removed: string[]; disk: WorkerDisk };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */

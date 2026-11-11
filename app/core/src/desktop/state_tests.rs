@@ -753,3 +753,28 @@ fn a_lead_reaches_only_its_own_runs_core_workers_and_its_stop_waits_for_the_huma
     assert_eq!(done["state"], "queued", "{done}");
     assert_eq!(rt.view(&id).unwrap().state, T::Ended);
 }
+
+/// A Lead's stop still waiting for the human is refused once its ticket ends some other way, so the dialog never
+/// offers to stop a worker that is gone.
+#[test]
+fn a_pending_lead_stop_is_refused_when_its_ticket_ends() {
+    let t = Tmp::new();
+    let app = t.app();
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "claude");
+    let asked = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &json!({"worker": format!("core:{id}")})).unwrap();
+    let action = asked["action_id"].as_str().unwrap().to_string();
+    assert!(rt.cancel(&id), "the ticket ends without the human's confirm");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let refused = loop {
+        let l = app.ledger().unwrap();
+        if let Some(r) = l["records"].as_array().unwrap().iter().find(|r| r["action_id"] == action && r["state"] == "refused") {
+            break r.clone();
+        }
+        assert!(std::time::Instant::now() < deadline, "never refused: {l}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(refused["reason"], "worker_finished", "{refused}");
+    assert_eq!(app.confirm_stop(&action).unwrap_err()["error"], "action_not_found", "nothing left to confirm");
+}

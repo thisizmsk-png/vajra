@@ -51,7 +51,7 @@ export function WorkerCopies() {
         {!disk && !err && <LoadingRows rows={1} label={C.checking} />}
         {disk && (
           <>
-            <Text variant="body" numeric>{disk.copies === 0 ? C.none : C.use(disk.copies, size(disk.bytes))}</Text>
+            <Text variant="body" numeric>{disk.copies === 0 ? C.none : C.use(disk.copies, size(disk.bytes), disk.partial)}</Text>
             {disk.copies > 0 && <Text variant="body" muted>{C.shared}</Text>}
             <div className="v-copies__act">
               <Button size="sm" busy={busy} disabled={disk.copies === 0} aria-describedby="v-copies-hint" onClick={clean}>{C.cleanUp}</Button>
