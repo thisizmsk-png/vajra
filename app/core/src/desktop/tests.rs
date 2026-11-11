@@ -1217,6 +1217,29 @@ fn a_running_runs_snapshot_starts_one_background_count_and_then_serves_it_from_t
 }
 
 #[test]
+fn an_agent_id_that_comes_back_with_another_worktree_is_counted_again_and_never_shows_the_old_count() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let wd = &app.worker_diffs;
+    wd.refresh(&app.bridge, &[diff_target(&repo, 1)]);
+    assert_eq!(wd.get("aa870dd40540481f0").unwrap()["added"], 1);
+    // The same id and the same output stamp, but another worktree: due at once, whatever the stamp and the throttle.
+    let mut moved = diff_target(&repo, 1);
+    moved.cwd = repo.join(".claude/worktrees/w2").to_string_lossy().into_owned();
+    assert!(wd.due(&moved, std::time::Instant::now()));
+    // A snapshot with the new identity no longer serves the old worktree's count; the new one is none (not a worktree).
+    wd.forget_moved(&[moved.clone()]);
+    assert!(wd.get("aa870dd40540481f0").is_none());
+    wd.refresh(&app.bridge, &[moved]);
+    assert!(wd.get("aa870dd40540481f0").is_none());
+    assert_eq!(wd.counts(), 2);
+    // A failed earlier result (None) does not pin the id either: another repo makes it due.
+    let mut other_repo = diff_target(&repo, 1);
+    other_repo.repo = t.0.join("elsewhere");
+    assert!(wd.due(&other_repo, std::time::Instant::now()));
+}
+
+#[test]
 fn a_worker_outside_the_crew_worktrees_gets_no_diff() {
     let t = Tmp::new();
     let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));

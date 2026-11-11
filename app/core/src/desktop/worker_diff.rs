@@ -27,6 +27,10 @@ const ROUND_BUDGET: Duration = Duration::from_secs(8);
 
 /// What the cache knows about one worker.
 struct Slot {
+    /// Whose count this is: the cwd and run repo it was taken for. An agent id that comes back with another worktree
+    /// must not be shown (or kept as "not due") on the strength of the old one.
+    cwd: String,
+    repo: PathBuf,
     checked: Instant,
     stamp: u64,
     /// `None`: no base to count against, or git could not answer.
@@ -69,6 +73,7 @@ impl WorkerDiffs {
     pub(super) fn due(&self, t: &Target, now: Instant) -> bool {
         match lock(&self.slots).get(&t.id) {
             None => true,
+            Some(s) if s.cwd != t.cwd || s.repo != t.repo => true,
             Some(s) => now.duration_since(s.checked) >= DIFF_TTL && s.stamp != t.stamp,
         }
     }
@@ -85,13 +90,25 @@ impl WorkerDiffs {
             }
             let diff = count(bridge, &t.cwd, &t.repo);
             self.counts.fetch_add(1, Ordering::SeqCst);
-            lock(&self.slots).insert(t.id.clone(), Slot { checked: Instant::now(), stamp: t.stamp, diff });
+            lock(&self.slots).insert(t.id.clone(), Slot { cwd: t.cwd.clone(), repo: t.repo.clone(), checked: Instant::now(), stamp: t.stamp, diff });
+        }
+    }
+
+    /// Drop the count of any worker whose id now names another worktree or repo, so the snapshot built right after this
+    /// shows nothing for it until it has been counted again (memory only, no disk).
+    pub(super) fn forget_moved(&self, targets: &[Target]) {
+        let mut slots = lock(&self.slots);
+        for t in targets {
+            if slots.get(&t.id).is_some_and(|s| s.cwd != t.cwd || s.repo != t.repo) {
+                slots.remove(&t.id);
+            }
         }
     }
 
     /// Hand the due workers to one background thread and return at once. A round already running takes the place of
     /// this one (the next snapshot asks again), so the threads never pile up.
     pub fn refresh_in_background(self: &Arc<Self>, bridge: &Bridge, targets: Vec<Target>) {
+        self.forget_moved(&targets);
         let now = Instant::now();
         let due: Vec<Target> = targets.into_iter().filter(|t| self.due(t, now)).collect();
         if due.is_empty() || self.busy.swap(true, Ordering::SeqCst) {
