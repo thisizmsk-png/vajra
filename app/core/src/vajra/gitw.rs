@@ -515,14 +515,32 @@ impl Drop for Pause {
     }
 }
 
+/// Live pauses on one repo, and every session id stopped for them.
+type PauseCount = (usize, Vec<String>);
+
+/// How often a held pause stops its sessions again.
+const RESTOP_MS: u64 = 3;
+
 /// The live session ids on the repo with this common dir.
 pub type SessionsOnRepo = Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>;
 
 /// The production `Quiesce`: `on_repo` names the live session ids on a repo (common dir), and the supervisor stops
 /// their process groups.
+///
+/// Pauses are counted per repo (#146 review): two core calls on one repo can overlap (two tickets' snapshots, or a
+/// snapshot and a `merge_deps`), and the sessions must stay stopped until the last of them ends. The first pause on a
+/// repo stops its sessions; each later one also stops any session started since; only the last drop resumes them all.
 pub struct SessionQuiesce {
-    pub sup: Arc<crate::sessions::Supervisor>,
-    pub on_repo: SessionsOnRepo,
+    sup: Arc<crate::sessions::Supervisor>,
+    on_repo: SessionsOnRepo,
+    /// Per common dir: how many pauses are live, and every session id stopped for them.
+    held: Arc<Mutex<HashMap<PathBuf, PauseCount>>>,
+}
+
+impl SessionQuiesce {
+    pub fn new(sup: Arc<crate::sessions::Supervisor>, on_repo: SessionsOnRepo) -> SessionQuiesce {
+        SessionQuiesce { sup, on_repo, held: Arc::default() }
+    }
 }
 
 impl std::fmt::Debug for SessionQuiesce {
@@ -533,9 +551,40 @@ impl std::fmt::Debug for SessionQuiesce {
 
 impl Quiesce for SessionQuiesce {
     fn pause(&self, common: &Path) -> Pause {
-        let stopped = self.sup.pause(&(self.on_repo)(common));
-        let sup = self.sup.clone();
-        Pause::new(move || sup.resume(&stopped))
+        let key = common.to_path_buf();
+        let first = {
+            let mut m = crate::lock(&self.held);
+            let (n, stopped) = m.entry(key.clone()).or_default();
+            *n += 1;
+            let new: Vec<String> = (self.on_repo)(common).into_iter().filter(|id| !stopped.contains(id)).collect();
+            stopped.extend(self.sup.pause(&new));
+            *n == 1
+        };
+        if first {
+            // While the repo is paused, stop its sessions again every few ms: a member that exits while its group is
+            // stopped makes the kernel continue the (orphaned) group. Re-stopping happens under the same lock as the
+            // last drop's resume, so nothing is stopped after it.
+            let (sup, held, key) = (self.sup.clone(), self.held.clone(), key.clone());
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(RESTOP_MS));
+                let m = crate::lock(&held);
+                let Some((_, stopped)) = m.get(&key) else { break };
+                sup.restop(stopped);
+            });
+        }
+        let (sup, held) = (self.sup.clone(), self.held.clone());
+        Pause::new(move || {
+            let mut m = crate::lock(&held);
+            let last = m.get_mut(&key).map(|(n, _)| {
+                *n -= 1;
+                *n == 0
+            });
+            if last == Some(true) {
+                if let Some((_, stopped)) = m.remove(&key) {
+                    sup.resume(&stopped);
+                }
+            }
+        })
     }
 }
 
