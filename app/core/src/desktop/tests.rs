@@ -4787,6 +4787,43 @@ fn replacing_a_key_drops_its_figures_and_says_so_but_a_refused_save_changes_noth
     assert_eq!(replaced["usage"]["usage"][2]["source"], "none");
 }
 
+fn openrouter_row(app: &App) -> Value {
+    let accounts = app.provider_accounts().unwrap();
+    accounts["accounts"].as_array().unwrap().iter().find(|a| a["id"] == "openrouter").expect("the OpenRouter account is listed").clone()
+}
+
+#[test]
+fn settings_lists_the_stored_key_account_and_its_saved_state_follows_save_replace_and_remove() {
+    let bin = crate::providers::keychain::tests::FakeBin::new();
+    let t = Tmp::new();
+    let app = key_app(&t, &bin);
+    // No key yet: the row is there (so Settings can offer Add key), with nothing saved.
+    let row = openrouter_row(&app);
+    assert_eq!((row["credential"]["source"].clone(), row["credential"]["saved"].clone(), row["state"].clone()), (json!("api_key"), json!(false), json!("key_missing")));
+    assert_eq!((row["label"].clone(), row["harness"].clone(), row["billing"]["kind"].clone()), (json!("OpenRouter"), json!("codex"), json!("gateway")));
+    // The command takes `account_id`-style args from the UI: Save, Replace and Remove all move the row.
+    app.provider_key_save("openrouter", STORED_KEY.into()).unwrap();
+    assert_eq!((openrouter_row(&app)["credential"]["saved"].clone(), openrouter_row(&app)["state"].clone()), (json!(true), json!("key_saved")));
+    app.provider_key_replace("openrouter", "another-key-0123456789abcdef".into()).unwrap();
+    assert_eq!(openrouter_row(&app)["state"], "key_saved");
+    app.provider_key_remove("openrouter").unwrap();
+    assert_eq!((openrouter_row(&app)["credential"]["saved"].clone(), openrouter_row(&app)["state"].clone()), (json!(false), json!("key_missing")));
+    // Nothing in any answer carries a key.
+    assert!(!app.provider_accounts().unwrap().to_string().contains("another-key") && !app.provider_accounts().unwrap().to_string().contains("SENTINEL"));
+    // The CLI accounts are still first.
+    assert_eq!(app.provider_accounts().unwrap()["accounts"][0]["id"], "claude");
+}
+
+#[test]
+fn a_keychain_that_cannot_be_asked_reads_as_cannot_tell_not_as_no_key() {
+    let t = Tmp::new();
+    let mut app = t.app();
+    // The default test store cannot reach the real Keychain: asking fails, and the row must not claim "no key".
+    app.provider_dirs = Some(vec![]);
+    let row = openrouter_row(&app);
+    assert_eq!(row["state"], "cannot_tell");
+}
+
 #[test]
 fn cached_reads_never_run_security_and_an_active_read_finds_the_key_and_says_so() {
     let bin = crate::providers::keychain::tests::FakeBin::new();

@@ -95,7 +95,12 @@ capabilities off, and `limits` for `start` and `resume` with code `not_supported
 Multi-provider, PR 1 (contract and read path only; no UI, no stored key). Tauri command `provider_accounts`, read-only.
 Additive to `vajra.providers/1`, which is unchanged. Same rules as above: at most 64 KiB, unknown fields ignored, another
 major reported and not read, ids unique. One record per way of running and paying for agents; today that is each CLI under
-its own login (`claude`, `codex`). Stored-key and gateway accounts use the same record in later changes.
+its own login (`claude`, `codex`), followed by each account that takes a pasted key. Those come from one table in
+`providers/detect.rs` (`KEYED`), which must name exactly the accounts the Keychain store accepts (`KEY_ACCOUNTS`; a test
+holds the two together). Today that is `openrouter`: `credential: {"source": "api_key", "saved": true|false}`,
+`billing.kind: "gateway"`, `harness: "codex"` (the unmodified CLI that runs through the gateway), and `state` `key_saved`,
+`key_missing`, or `cannot_tell` when the Keychain could not be asked (locked, timed out; never read as "no key"). The
+record says whether a key is there and nothing else. The Keychain is asked when Settings asks for the list, not at idle.
 
 ```json
 {
@@ -141,8 +146,10 @@ its own login (`claude`, `codex`). Stored-key and gateway accounts use the same 
 
 ### Stored API keys (D3)
 
-Multi-provider, PR 2. `app/core/src/providers/keychain.rs`. Tauri commands, each with `account` (and `key` for the two
-writes):
+Multi-provider, PR 2. `app/core/src/providers/keychain.rs`. Tauri commands, each with `accountId` from the UI (the Rust
+parameter is `account_id`; Tauri maps the two) and `key` for the two writes. The names are pinned on both sides by
+`app/core/tests/fixtures/ipc/key-commands.json`. The Settings screen calls Save for an account with no key and Replace for
+one that has a key (Save refuses a second key):
 
 | Command | Does | Answer |
 |---|---|---|

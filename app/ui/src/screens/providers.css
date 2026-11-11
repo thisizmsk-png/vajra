@@ -52,3 +52,6 @@
 .v-prov__title, .v-prov__runon { display: flex; align-items: center; gap: var(--space-sm); }
 .v-sbar__usage { display: inline-flex; align-items: center; gap: 6px; }
 .v-pref__row .v-pt { flex: none; margin-inline-start: auto; margin-inline-end: 8px; }
+
+/* A vendor file whose glyph is dark on a transparent ground sits on a light plate (the file is never recoloured). */
+.v-pt--plate { background: var(--c-mark-plate); }

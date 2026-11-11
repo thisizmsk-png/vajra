@@ -1,21 +1,26 @@
 // Provider tiles: a shipped mark is exactly the file in SOURCES.md, the tile keeps its size, the name is announced only where no text
 // name sits beside it, and a provider without a cleared mark keeps its monogram.
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { MARKS } from "../src/assets/providers/marks";
-import { ProviderIcon } from "../src/screens/ProviderIcon";
+import { ProviderIcon, vendorOf } from "../src/screens/ProviderIcon";
 
 const DIR = join(__dirname, "../src/assets/providers");
 const sources = readFileSync(join(DIR, "SOURCES.md"), "utf8");
-const rows = [...sources.matchAll(/^\| `([^`]+\.(?:svg|ico))` \|.*?\| `([0-9a-f]{64})` \|/gm)].map((m) => ({ file: m[1], sha: m[2] }));
+const rows = [...sources.matchAll(/^\| `([^`]+\.(?:svg|ico|png))` \|.*?\| `([0-9a-f]{64})` \|/gm)].map((m) => ({ file: m[1], sha: m[2] }));
+
+const tile = (el: JSX.Element) => render(el).container.querySelector(".v-pt") as HTMLElement;
 
 describe("provider icon files", () => {
   it("every svg in the folder has a row in SOURCES.md, and its sha256 matches", () => {
-    const files = readdirSync(DIR).filter((f) => /\.(svg|ico)$/.test(f)).sort();
-    expect(rows.map((r) => r.file).sort()).toEqual(files);
+    const walk = (d: string): string[] => readdirSync(join(DIR, d)).flatMap((n) => (statSync(join(DIR, d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]));
+    const all = walk("").filter((f) => f !== "SOURCES.md" && f !== "marks.ts");
+    expect(all.filter((f) => !/\.(svg|png|ico)$/.test(f)), "only svg, png and ico files ship").toEqual([]);
+    const files = all.sort();
+    expect(rows.map((r) => r.file).sort()).toEqual(files.map((f) => f.split("\\").join("/")));
     for (const r of rows) expect(createHash("sha256").update(readFileSync(join(DIR, r.file))).digest("hex"), r.file).toBe(r.sha);
   });
   it("a shipped mark has a source URL, a download date and its terms quoted", () => {
@@ -43,13 +48,41 @@ describe("provider icon files", () => {
       const status = row.split(" | ").pop()!;
       if (r.file.startsWith("fallback")) { expect(status, r.file).toMatch(/^Ours: /); continue; }
       const cleared = /^Cleared: /.test(status) && /don't stretch, recolor, or remix/.test(row); // terms quoted in the row
-      const exception = /^Owner exception: .*accepted the (usage terms and the )?clearance risk 2026-11-10/.test(status);
+      const exception = /^Owner exception[^:]*: .*accepted the (usage terms and the )?clearance risk 2026-11-10/.test(status);
       expect(cleared || exception, `${r.file} needs "Cleared" with its terms quoted, or a dated "Owner exception"`).toBe(true);
     }
     expect(sources).toMatch(/"Owner exception"/); // the rule names the exception
   });
+  it("every vendor in the list resolves to a mark whose files exist; the same vendor under its other names too", () => {
+    const vendors = ["aion-labs", "bytedance-seed", "cohere", "fireworks", "google", "inclusionai", "liquid", "meituan", "meta", "minimax", "mistralai",
+      "moondream", "moonshotai", "nousresearch", "perceptron", "perplexity", "reflection", "relace", "stepfun", "tencent", "thinkingmachines", "upstage", "writer", "xiaomi", "z-ai"];
+    for (const v of vendors) {
+      const t = tile(<ProviderIcon family={v} model={`${v}/some-model`} via="openrouter" />);
+      expect(t.querySelectorAll(":scope > img"), v).toHaveLength(2);
+      expect(t.getAttribute("data-family"), v).toBe(v);
+      expect(MARKS[v].light && MARKS[v].dark, v).toBeTruthy();
+    }
+    expect(MARKS.mistralai.light).not.toBe(MARKS.mistralai.dark); // the Black and White pair
+    expect(MARKS.perceptron.light).not.toBe(MARKS.perceptron.dark);
+    for (const [model, key] of [["meta-llama/llama-4", "meta"], ["bytedance/x", "bytedance-seed"], ["~google/gemini-latest", "google"], ["~openai/gpt-latest", "codex"], ["anthropic/claude-x", "claude"], ["x-ai/grok-4", "grok"], ["Qwen/Qwen3", "qwen"]]) {
+      expect(vendorOf(model), model).toBe(key);
+    }
+  });
+  it("a vendor with no mark gets its initials, never a blank or the generic icon", () => {
+    for (const [model, initials] of [["qwen/qwen3-coder", "QW"], ["nvidia/nemotron", "NV"], ["inference-net/x", "IN"], ["rekaai/reka-flash", "RE"], ["acme-corp/x", "AC"]]) {
+      const t = tile(<ProviderIcon family="x" model={model} via="openrouter" />);
+      expect(t.querySelector(":scope > img"), model).toBeNull();
+      expect(t.querySelector(".v-pt__fb")).toBeNull();
+      expect([...t.childNodes].find((n) => n.nodeType === 3)?.textContent, model).toBe(initials);
+    }
+  });
+  it("a glyph that is dark on a transparent ground sits on a plate", () => {
+    expect(tile(<ProviderIcon family="liquid" model="liquid/lfm" />).className).toContain("v-pt--plate");
+    expect(tile(<ProviderIcon family="perplexity" model="perplexity/sonar" />).className).toContain("v-pt--plate");
+    expect(tile(<ProviderIcon family="google" model="google/gemini" />).className).not.toContain("v-pt--plate");
+  });
   it("only providers with a documented mark have one", () => {
-    expect(Object.keys(MARKS).sort()).toEqual(["claude", "codex", "deepseek", "grok", "openrouter"]);
+    for (const k of ["claude", "codex", "deepseek", "grok", "openrouter"]) expect(MARKS[k], k).toBeTruthy();
   });
   it("the app code never reaches the network for an icon", () => {
     const code = readFileSync(join(__dirname, "../src/screens/ProviderIcon.tsx"), "utf8") + readFileSync(join(DIR, "marks.ts"), "utf8");
@@ -58,7 +91,6 @@ describe("provider icon files", () => {
 });
 
 describe("ProviderIcon", () => {
-  const tile = (el: JSX.Element) => render(el).container.querySelector(".v-pt") as HTMLElement;
   it("a cleared provider shows its two files (one per theme), unaltered", () => {
     const t = tile(<ProviderIcon family="openrouter" />);
     const imgs = [...t.querySelectorAll("img")];

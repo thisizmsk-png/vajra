@@ -17,6 +17,7 @@
   --c-action: #ededef;
   --c-text-on-action: #101113;
   --c-panel: #141518;
+  --c-mark-plate: #ffffff; /* behind a vendor mark whose glyph is dark on a transparent ground; white in both themes */
   --c-shadow-soft: rgb(0 0 0 / 0.3);
   --c-success: #5fd38d;
   --c-warning: #f0b44c;
@@ -65,6 +66,7 @@
   --c-action: #18191c;
   --c-text-on-action: #ffffff;
   --c-panel: #ffffff;
+  --c-mark-plate: #ffffff;
   --c-shadow-soft: rgb(24 25 28 / 0.06);
   --c-success: #1a7341;
   --c-warning: #855600;
