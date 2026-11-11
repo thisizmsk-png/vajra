@@ -252,6 +252,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
 
   if (!open && !tabs.length) return null;
   const active = tabs.find((t) => t.key === cur);
+  // "+" opens beside the active tab, except a sign-in tab: its private folder is not a place a shell may open in.
+  const next: Place | undefined = active && active.kind !== "sign_in" ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace;
   return (
     <section className="v-term" aria-label={S.terminal.region} aria-describedby="v-term-hint" hidden={!open}>
       <p id="v-term-hint" className="v-term__sr">{S.terminal.leaveHint}</p>
@@ -268,7 +270,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
             );
           })}
         </div>
-        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
+        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!next} onClick={() => { if (next) add(next); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
       <LifeLine life={life} refresh={refreshLife} />

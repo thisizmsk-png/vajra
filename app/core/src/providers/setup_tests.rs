@@ -160,13 +160,24 @@ fn no_mcp_or_control_tool_can_reach_set_up_or_sign_in() {
     for word in ["setup", "set_up", "sign_in", "signin", "install", "login"] {
         assert!(!tools.contains(word), "{word} in {tools}");
     }
-    // The control socket and MCP server code never name the setup module.
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control");
-    for entry in std::fs::read_dir(src).unwrap() {
-        let p = entry.unwrap().path();
-        if p.extension().is_some_and(|e| e == "rs") {
-            let code = std::fs::read_to_string(&p).unwrap();
-            assert!(!code.contains("providers::setup") && !code.contains("open_sign_in"), "{}", p.display());
+    // No file under src/control (the socket, the MCP server and every control-service tool, at any depth) names set up,
+    // sign-in or the PATH refresh.
+    let banned = ["providers::setup", "open_sign_in", "SignInCommand", "setup_sign_in_command", "setup_list", "userpath::refresh"];
+    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control")];
+    let mut scanned = 0;
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                let code = std::fs::read_to_string(&p).unwrap();
+                for word in banned {
+                    assert!(!code.contains(word), "{word} in {}", p.display());
+                }
+                scanned += 1;
+            }
         }
     }
+    assert!(scanned > 0);
 }

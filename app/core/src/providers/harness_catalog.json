@@ -24,7 +24,7 @@
       "binary": "codex",
       "detect_args": ["--version"],
       "adapter": "codex",
-      "sign_in": { "argv": ["codex"] },
+      "sign_in": { "argv": ["codex", "login"] },
       "docs_url": "https://github.com/openai/codex",
       "source_verified_by": null,
       "source_verified_on": null,

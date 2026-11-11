@@ -36,6 +36,15 @@ fn the_sign_in_argv_starts_with_the_entry_binary() {
     }
 }
 
+#[test]
+fn sign_in_runs_the_login_subcommand_where_the_vendor_has_one() {
+    // A bare `codex` starts a full agent session, not a login. Gemini CLI has no login subcommand, so it stays bare.
+    let argv = |id: &str| find(id).expect(id).sign_in.argv.clone();
+    assert_eq!(argv("claude"), ["claude", "auth", "login"]);
+    assert_eq!(argv("codex"), ["codex", "login"]);
+    assert_eq!(argv("gemini"), ["gemini"]);
+}
+
 fn parse(text: &str) -> Result<Catalog, CatalogError> {
     let c: Catalog = serde_json::from_str(text).map_err(|e| CatalogError(e.to_string()))?;
     validate(&c).map(|_| c)

@@ -686,7 +686,7 @@ fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_term
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new("signin");
     let bin = f.dir.join("claude");
-    std::fs::write(&bin, "#!/bin/sh\necho \"ARGS=[$*] PWD=$(pwd) CH=[$CODEX_HOME] CC=[$CLAUDE_CONFIG_DIR] S=[$VAJRA_SIGNIN_SECRET] SIGNIN$((40+2))\"\n").unwrap();
+    std::fs::write(&bin, "#!/bin/sh\necho \"ARGS=[$*] PWD=$(pwd) CH=[$CODEX_HOME] CC=[$CLAUDE_CONFIG_DIR] S=[$CARGO_PKG_NAME] SIGNIN$((40+2))\"\n").unwrap();
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     struct At(PathBuf);
     impl Probe for At {
@@ -700,8 +700,8 @@ fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_term
             None
         }
     }
-    // SAFETY: a unique name no other test reads.
-    unsafe { std::env::set_var("VAJRA_SIGNIN_SECRET", "leakme") };
+    // cargo sets CARGO_PKG_NAME in this process, so the tab must drop it like any other inherited variable.
+    assert!(std::env::var_os("CARGO_PKG_NAME").is_some());
     let cmd = crate::providers::setup::sign_in("claude", &At(bin)).unwrap();
     let t = f.terminals();
     let (s, out) = sink();

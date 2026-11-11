@@ -568,7 +568,7 @@ export const S = {
     },
     chips: "Workers by provider",
   },
-  /** Multi-provider accounts (Settings > Providers). Every model row reads "Model · provider" (H6); no secret is ever worded as shown. */
+  /** Settings > Providers > Set up (ADR-17 step 1): each agent CLI's state, the vendor's own steps, and the CLI's own sign-in. */
   setup: {
     title: "Set up",
     lede: "Agent CLIs Vajra knows how to find. Install a missing one with its vendor's own steps, then sign in with the CLI itself. Vajra never handles the login.",
@@ -596,6 +596,7 @@ export const S = {
     engineState: { installed: "Installed", missing: "Not installed" },
     engineHint: "Run this in a terminal to install them.",
   },
+  /** Multi-provider accounts (Settings > Providers). Every model row reads "Model · provider" (H6); no secret is ever worded as shown. */
   accounts: {
     title: "Accounts",
     lede: "The accounts your agents run on, and which ones each project may use.",
