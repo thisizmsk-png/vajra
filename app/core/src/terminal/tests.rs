@@ -713,3 +713,39 @@ fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_term
     assert!(seen.contains("CH=[] CC=[] S=[]"), "no Vajra CLI home and nothing secret: {seen}");
     t.shutdown();
 }
+
+#[test]
+fn a_sign_in_through_a_multicall_shim_reaches_the_cli_detection_ran() {
+    // Version managers install each CLI as a symlink to one binary that dispatches on argv[0]. Sign-in must invoke
+    // the shim by the name detection ran, not its symlink target (which would run the manager's own "auth login").
+    use crate::providers::detect::{Out, Probe};
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("signin-shim");
+    let manager = f.dir.join("manager");
+    std::fs::write(&manager, "#!/bin/sh\necho \"TOOL=$(basename \"$0\") ARGS=[$*] SHIM$((40+2))\"\n").unwrap();
+    std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shims = f.dir.join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let shim = shims.join("claude");
+    std::os::unix::fs::symlink(&manager, &shim).unwrap();
+    struct At(PathBuf);
+    impl Probe for At {
+        fn find(&self, n: &str) -> Option<PathBuf> {
+            (n == "claude").then(|| self.0.clone())
+        }
+        fn run(&self, _: &Path, _: &[&str]) -> Option<Out> {
+            Some(Out { code: Some(0), stdout: "2.1.322 (Claude Code)".into(), stderr: String::new() })
+        }
+        fn env(&self, _: &str) -> Option<OsString> {
+            None
+        }
+    }
+    let cmd = crate::providers::setup::sign_in("claude", &At(shim.clone())).unwrap();
+    assert_eq!(cmd.program(), shim, "the PATH entry detection ran, not its symlink target");
+    let t = f.terminals();
+    let (s, out) = sink();
+    t.open_sign_in(&cmd, 24, 80, s).unwrap();
+    let seen = out.until("SHIM42", 5);
+    assert!(seen.contains("TOOL=claude ARGS=[auth login]"), "{seen}");
+    t.shutdown();
+}

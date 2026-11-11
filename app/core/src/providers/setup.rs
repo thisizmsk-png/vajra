@@ -148,7 +148,8 @@ impl std::fmt::Display for SetupError {
 }
 
 /// A CLI's own sign-in, ready for a user terminal. Only `sign_in` builds one, from the compiled catalog and the binary
-/// detection found (canonical path), so a terminal can be asked to run nothing else.
+/// detection found (the absolute PATH entry it ran, which must resolve to a real file), so a terminal can be asked to run
+/// nothing else.
 #[derive(Debug)]
 pub struct SignInCommand {
     program: PathBuf,
@@ -188,8 +189,13 @@ fn private_dir() -> Result<PathBuf, SetupError> {
 pub fn sign_in(id: &str, p: &dyn Probe) -> Result<SignInCommand, SetupError> {
     let h = catalog::find(id).ok_or(SetupError::Unknown)?;
     let Found::Ok(path, _, _) = found(h, p) else { return Err(SetupError::NotInstalled) };
-    let program = path.canonicalize().map_err(|_| SetupError::NotInstalled)?;
-    Ok(SignInCommand { program, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
+    // Run the PATH entry detection ran, by that name: a version-manager shim is a symlink to one binary that dispatches
+    // on argv[0], so its symlink target would run the manager, not the CLI. It must still resolve to a real file.
+    let real = path.canonicalize().map_err(|_| SetupError::NotInstalled)?;
+    if !path.is_absolute() || !real.is_file() {
+        return Err(SetupError::NotInstalled);
+    }
+    Ok(SignInCommand { program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
 }
 
 #[cfg(test)]

@@ -154,7 +154,7 @@ fn sign_in_runs_the_catalog_argv_on_the_detected_binary_in_a_fresh_private_dir()
         }
     }
     let s = sign_in("claude", &At(bin.clone())).unwrap();
-    assert_eq!(s.program(), bin.canonicalize().unwrap());
+    assert_eq!(s.program(), bin);
     assert_eq!(s.args(), ["auth", "login"]);
     let cwd = s.cwd();
     assert!(cwd.is_dir());
