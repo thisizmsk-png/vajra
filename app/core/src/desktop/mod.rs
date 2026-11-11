@@ -1068,7 +1068,9 @@ impl App {
             (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
             _ => Signals::default(),
         };
-        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &[], &signals)))?;
+        // The core's own workers come from the app's runtime, when one was built (#151).
+        let core = self.workers.core_workers(run_id);
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &core, &signals)))?;
         // The counts come from the cache; due workers are handed to a background thread, never counted here.
         if let (true, Some((_, r))) = (running, &run) {
             let targets = workers

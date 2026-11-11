@@ -679,6 +679,29 @@ fn queue(rt: &crate::desktop::workers::WorkerRuntime, t: &Tmp, task: &str, accou
     rt.dispatch(spec, seat).unwrap()
 }
 
+/// #151: the app's crew view shows the runtime's tickets as `core:<ticket>` nodes with their controls, and an app with
+/// no runtime built shows none (and building one is never a side effect of looking).
+#[test]
+fn the_crew_view_shows_the_runtimes_tickets_as_core_nodes_with_controls() {
+    fn find<'a>(n: &'a Value, id: &str) -> Option<&'a Value> {
+        if n["id"] == id {
+            return Some(n);
+        }
+        n["children"].as_array()?.iter().find_map(|c| find(c, id))
+    }
+    let t = Tmp::new();
+    let app = t.app();
+    let before = app.crew("c", CORE_RUN).unwrap();
+    assert!(!before.to_string().contains("\"core:"), "{before}");
+    assert!(!app.workers.runtime_built(), "the crew view doesn't build the runtime");
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "codex");
+    let tree = app.crew("c", CORE_RUN).unwrap();
+    let node = find(&tree, &format!("core:{id}")).unwrap_or_else(|| panic!("no core node in {tree}"));
+    assert_eq!(node["controls"]["message"]["enabled"], false, "{node}");
+    assert!(node["controls"]["stop"].is_object(), "{node}");
+}
+
 #[test]
 fn a_core_worker_takes_no_message_with_its_profiles_reason_and_stops_through_a_guarded_receipt() {
     use crate::desktop::workers::{Outcome, State as T};

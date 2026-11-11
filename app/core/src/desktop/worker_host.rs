@@ -110,6 +110,11 @@ impl WorkerHost {
         self.rt.get().is_some()
     }
 
+    /// The crew view's `core:<ticket>` workers for `run`, from the runtime if it was built (never builds it).
+    pub fn core_workers(&self, run: &str) -> Vec<crate::crew::tree::CoreWorker> {
+        self.rt.get().map(|rt| rt.list(run).iter().map(super::workers::TicketView::core_worker).collect()).unwrap_or_default()
+    }
+
     /// Settings: the disk under `<work>`, every copy any app life made. A walk only: no git, and no runtime is built.
     pub fn disk_use(&self) -> Value {
         let copies = copies_under(&self.work);
