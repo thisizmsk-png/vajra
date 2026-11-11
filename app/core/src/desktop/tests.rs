@@ -309,7 +309,7 @@ fn node_json_is_recursive() {
         children: vec![],
     };
     let root = Node { id: "r".into(), kind: tree::NodeKind::Run, title: "Run".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None, children: vec![leaf] };
-    let v = node_json(&root);
+    let v = node_json(&root, &|_| None);
     assert_eq!(v["kind"], "run");
     assert_eq!(v["children"][0]["kind"], "worker");
     assert_eq!(v["children"][0]["overlays"], json!(["stopped"]));
@@ -321,7 +321,7 @@ fn a_node_carries_the_provider_the_worker_reported() {
     use crate::providers::effective::ProviderTag;
     let tag = ProviderTag::new("openrouter", "vendor/model-a", "gateway", None);
     let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), children: vec![] };
-    assert_eq!(node_json(&leaf)["provider"], json!({"account": "openrouter", "label": "OpenRouter", "family": "vendor", "model": "vendor/model-a", "model_name": null, "billing": "gateway", "requested": null, "error": null}));
+    assert_eq!(node_json(&leaf, &|_| None)["provider"], json!({"account": "openrouter", "label": "OpenRouter", "family": "vendor", "model": "vendor/model-a", "model_name": null, "billing": "gateway", "requested": null, "error": null}));
 }
 
 #[test]
@@ -1138,6 +1138,95 @@ fn worktree_info_returns_the_crew_worktree_its_branch_and_base() {
     assert!(d["diff"].as_str().unwrap().contains("+two"), "{d}");
 }
 
+/// What `crew()` hands the diff cache for the fixture's worker.
+fn diff_target(repo: &Path, stamp: u64) -> worker_diff::Target {
+    worker_diff::Target { id: "aa870dd40540481f0".into(), cwd: repo.join(".claude/worktrees/w1").to_string_lossy().into_owned(), repo: repo.to_path_buf(), stamp }
+}
+
+/// Finds the worker's node in a crew payload.
+fn find_node<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
+    if v["id"] == id {
+        return Some(v);
+    }
+    v["children"].as_array()?.iter().find_map(|c| find_node(c, id))
+}
+
+#[test]
+fn a_worker_node_carries_its_cached_diff_and_omits_the_field_otherwise() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let id = "agent:aa870dd40540481f0";
+    // Nothing counted yet: the field is absent (not null), and the rest of the node is as before.
+    let before = app.crew("c", "20261105-1230").unwrap();
+    let node = find_node(&before, id).expect("the worker is in the tree");
+    assert!(node.get("diff").is_none(), "{node}");
+    // Counted (off the snapshot path): the next snapshot carries it, in the shape the UI parses.
+    app.worker_diffs.refresh(&app.bridge, &[diff_target(&repo, 1)]);
+    let after = app.crew("c", "20261105-1230").unwrap();
+    let d = &find_node(&after, id).unwrap()["diff"];
+    assert_eq!((d["added"].as_u64(), d["removed"].as_u64(), d["files_total"].as_u64(), d["partial"].as_bool()), (Some(1), Some(0), Some(1), Some(false)), "{d}");
+    assert_eq!(d["files"], json!(["f.txt"]));
+    // Group nodes never get one.
+    assert!(after.get("diff").is_none());
+}
+
+#[test]
+fn a_snapshot_never_recounts_and_a_worker_is_counted_again_only_when_due() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let wd = &app.worker_diffs;
+    wd.refresh(&app.bridge, &[diff_target(&repo, 1)]);
+    assert_eq!(wd.counts(), 1);
+    // Snapshots read the cache and nothing else.
+    for _ in 0..5 {
+        app.crew("c", "20261105-1230").unwrap();
+    }
+    wd.wait_idle();
+    assert_eq!(wd.counts(), 1, "building a snapshot did not count");
+    // The same output stamp: not due, even long after.
+    let later = std::time::Instant::now() + worker_diff::DIFF_TTL + Duration::from_secs(1);
+    assert!(!wd.due(&diff_target(&repo, 1), later));
+    // The output moved, but too soon: not due. Moved and past the throttle: due.
+    assert!(!wd.due(&diff_target(&repo, 2), std::time::Instant::now()));
+    assert!(wd.due(&diff_target(&repo, 2), later));
+    wd.refresh(&app.bridge, &[diff_target(&repo, 1)]);
+    assert_eq!(wd.counts(), 1, "refresh skips what is not due");
+    // A worker never seen is due at once.
+    let mut other = diff_target(&repo, 1);
+    other.id = "someone-else".into();
+    assert!(wd.due(&other, std::time::Instant::now()));
+}
+
+#[test]
+fn a_running_runs_snapshot_starts_one_background_count_and_then_serves_it_from_the_cache() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    lock(&app.runs).clear();
+    launch_sleep(&app, "1b4e28ba-2fa1-41d2-883f-0016d3cca427", "20261105-1230", "c", &repo, false);
+    let id = "agent:aa870dd40540481f0";
+    app.crew("c", "20261105-1230").unwrap(); // starts the count and does not wait for it
+    app.worker_diffs.wait_idle();
+    for _ in 0..5 {
+        app.crew("c", "20261105-1230").unwrap();
+    }
+    app.worker_diffs.wait_idle();
+    assert_eq!(app.worker_diffs.counts(), 1, "one count, however many snapshots");
+    let later = app.crew("c", "20261105-1230").unwrap();
+    assert_eq!(find_node(&later, id).unwrap()["diff"]["added"], 1, "{later}");
+    app.sup.kill("run-1b4e28ba-2fa1-41d2-883f-0016d3cca427").unwrap();
+}
+
+#[test]
+fn a_worker_outside_the_crew_worktrees_gets_no_diff() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let mut outside = diff_target(&repo, 1);
+    outside.cwd = repo.to_string_lossy().into_owned(); // the repo itself is not a crew worktree
+    app.worker_diffs.refresh(&app.bridge, &[outside]);
+    assert!(app.worker_diffs.get("aa870dd40540481f0").is_none());
+    assert_eq!(app.worker_diffs.counts(), 1, "it was asked once and the answer (none) is remembered");
+}
+
 #[test]
 fn diff_lists_untracked_files_apart_and_respects_ignore_rules() {
     let t = Tmp::new();
@@ -1915,10 +2004,10 @@ fn evidence_outside_the_campaign_or_with_a_dotdot_path_is_unverified_without_run
 fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
     use crate::crew::tree::{Node, NodeKind, Status};
     let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], provider: None, children: vec![] };
-    let j = node_json(&n);
+    let j = node_json(&n, &|_| None);
     assert_eq!(j["role"], "Backend", "{j}");
     assert_eq!(j["engine_id"], "bhima");
-    let g = node_json(&Node { engine_id: None, ..n });
+    let g = node_json(&Node { engine_id: None, ..n }, &|_| None);
     assert!(g["role"].is_null());
 }
 
