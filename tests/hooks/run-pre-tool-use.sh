@@ -678,6 +678,15 @@ bash_case BLOCK "D16 cd data && plain-word redirect" "cd \"$DATA\" && printf x >
 bash_case BLOCK "D16 cd escaped space && rm"        'cd ~/Library/Application\ Support/VajraDesktop/runs && rm -rf r1'
 bash_case BLOCK "D16 cwd is data dir"               "echo x > seats.json" "$DATA"
 bash_case BLOCK "D16 cwd below data dir"            "touch x" "$DATA/runs/r1"
+# #148 review: a reader's plain-word redirect from a cwd below <data> skipped the per-cwd fast path.
+bash_case BLOCK "D16 reader redirect, cwd runs/r1"  "echo x > brief.md" "$DATA/runs/r1"
+bash_case BLOCK "D16 cd profiles && printf >"       "cd \"$DATA/profiles\" && printf x > claude-worker.json"
+bash_case BLOCK "D16 cd profiles escaped && echo >" 'cd ~/Library/Application\ Support/VajraDesktop/profiles && echo "{}" > claude-worker.json'
+bash_case BLOCK "D16 tee plain word, cwd git-baseline" "echo x | tee config" "$DATA/git-baseline"
+bash_case BLOCK "D16 cat heredoc, cwd runs/r1/lead" "cat > brief.md <<'EOF'
+x
+EOF" "$DATA/runs/r1/lead"
+bash_case ALLOW "D16 reader redirect, cwd in work"  "echo x > a.txt" "$WORK/proj/r1/t1-r1"
 bash_case BLOCK "D16 odd spacing \${IFS}"           'echo x > ~/Library/Application${IFS}Support/VajraDesktop/seats.json'
 bash_case BLOCK "D16 odd spacing \$'\\040'"          'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/seats.json'
 bash_case BLOCK "D16 variable spelling"             'D="$HOME/Library/Application"; echo x > "$D Support/VajraDesktop/seats.json"'

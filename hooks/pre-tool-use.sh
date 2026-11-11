@@ -1476,7 +1476,7 @@ eval_segment_body() { # uses SEG array
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
     FAST_CWD="$SEGCWD"; FAST_OK=1; FAST_LINKS=0
     local e
-    for e in "$CL" "$DCTL" "$DCTL2"; do
+    for e in "$CL" "$DCTL" "$DCTL2" "$DDATA" "$DDATA2"; do
       if inside "$SEGCWD" "$e" || inside "$e" "$SEGCWD"; then FAST_OK=0; fi
     done
     shopt -s nullglob dotglob
