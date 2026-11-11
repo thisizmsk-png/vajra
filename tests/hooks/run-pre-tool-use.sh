@@ -789,7 +789,10 @@ bash_case ALLOW "F5 cd glob in HOME, read"      'cd ~/Devel* && ls'
 bash_case ALLOW "F5 cd glob in HOME, then cd abs and write" 'cd ~/Devel* && ls && cd /tmp && echo x > vajra-f5.txt'
 bash_case ALLOW "F5 declare and readonly values" 'declare X="$HOME/bin:$PATH"; readonly Y="$HOME/a*"'
 bash_case ALLOW "F3 glob read piped into a reader" "ls -d \"$AS\"/$G1 | wc -l"
-bash_case ALLOW "F1 abs value outside protected" 'V=/tmp/vajra-f1.txt; echo x > $V'
+# A temp dir beside HOME, never above it (on Linux the suite HOME lives under /tmp, an ancestor of HOME).
+OUT2="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out2-XXXXXX")"
+bash_case ALLOW "F1 abs value outside protected" "V=$OUT2/vajra-f1.txt; echo x > \$V"
+rm -rf "$OUT2"
 bash_case ALLOW "F1 for loop over project files" 'for f in src/*.ts; do sed -i "" s/a/b/ "$f"; done' "$PROJ"
 bash_case ALLOW "F1 single \$OUT from worker cwd" 'echo x > $OUT' "$TW"
 # Fail closed: a ".." after a glob is judged from "/", even inside <work> (write the path without the climb).
