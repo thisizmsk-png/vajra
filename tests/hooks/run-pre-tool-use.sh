@@ -803,6 +803,13 @@ bash_case ALLOW "R1 echo with a ~2s approximation"     'echo "the build takes ~2
 bash_case ALLOW "R1 commit message with ~3x"           'git commit -m "make it ~3x faster"' "$PROJ"
 bash_case ALLOW "R1 gh body with a ~ approximation"    'gh pr create --title t --body "build takes ~2s"' "$PROJ"
 bash_case ALLOW "R1 ~nosuchaccount word"               'echo ~nosuchaccount9z/x' "$PROJ"
+# ~0, ~+0 and ~-0 are the cwd in bash even with no pushd (claude review on 51da747).
+DREL="${DATA#$H/}"
+bash_case BLOCK "R1 ~0 from cwd HOME"                  "echo x > ~0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~+0 from cwd HOME"                 "echo x > ~+0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~-0 from cwd HOME"                 "echo x > ~-0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~0 after cd ~"                     "cd ~ && echo x > ~0/\"$DREL/seats.json\"" "$PROJ"
+bash_case ALLOW "R1 ~2 in a sentence stays literal"    'echo "about ~2 minutes"' "$PROJ"
 bash_case BLOCK "R1 ~user of a real account stays"     "echo x > ~$U/x.txt" "$PROJ"
 bash_case BLOCK "R1 dir-stack ~1 after pushd"          'pushd /tmp && pushd ~ && echo x > ~1/a.txt' "$PROJ"
 # (2) The backslash-escaped space is a plain spelling for reads; writes still meet the path analysis.

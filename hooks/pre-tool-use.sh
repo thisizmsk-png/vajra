@@ -124,7 +124,9 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
       if [ "$tn" = - ]; then block "a ~- path cannot be resolved; write the path in full: $p"; fi
       case "$tnd" in
         ""|*[!0-9]*) ;;
-        *) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
+        *[!0]*) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
+        # ~0, ~+0 and ~-0 always expand to the cwd (bash 3.2, even with no pushd): resolve like ~+.
+        *) p="${base%/}${p#"~$tn"}" ;;
       esac
       case "$tn" in
         [A-Za-z_]*) case "$tn" in *[!A-Za-z0-9._-]*) ;; *)
