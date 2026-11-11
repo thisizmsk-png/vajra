@@ -279,3 +279,12 @@ Settings Notifications (PR 100 review): the section's controls are hidden until 
 | String | Where | Note |
 |---|---|---|
 | OS notifications, Include item text, "Item text is off by default. Delivery also requires OS permission. Without text opt-in, notifications contain only project name and item kind. Native permission and redaction still apply." | Settings > Notifications | removed with the controls they labelled |
+
+Worker diff count (PR 6c-0, ADR-16 16.10).
+
+| String | Where | Note |
+|---|---|---|
+| +N −M | worker pane header | exact count |
+| ≥ +N lines | worker pane header | a lower bound: some new files were not counted |
+| At least N lines added. U new files were not counted (too many or too large). | accessible label of the `≥` form | "1 new file was not counted" for one |
+| N lines added, M removed, in F files. | accessible label of the exact form | new |
