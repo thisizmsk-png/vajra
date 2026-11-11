@@ -111,6 +111,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
   edit|wide) edit ;;
+  flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   504) echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -340,6 +341,30 @@ fn a_fresh_gateway_account_gets_its_codex_home_before_the_worker_starts() {
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), s).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("profile_not_applied")), "{v:?}");
     assert!(r.log().is_empty(), "nothing ran");
+}
+
+#[test]
+fn two_ticket_ids_that_differ_only_in_dots_and_hyphens_get_their_own_sessions() {
+    // `a-b.c.r1` and `a.b-c.r1` are both valid; rewriting dots to hyphens made them one supervisor session.
+    let r = rig("sids", Opts { mode: "slow", ..Opts::default() });
+    let a = r.rt.dispatch(r.task("a-b", "c"), seat("w1", "codex")).unwrap();
+    let b = r.rt.dispatch(r.task("a", "b-c"), seat("w1", "codex")).unwrap();
+    assert_eq!((a.as_str(), b.as_str()), ("a-b.c.r1", "a.b-c.r1"));
+    let (va, vb) = (r.done(&a), r.done(&b));
+    assert_eq!((va.outcome, vb.outcome), (Some(Outcome::Done), Some(Outcome::Done)), "{va:?} {vb:?}");
+    let sid = |v: &TicketView| v.receipt.as_ref().unwrap()["session_id"].as_str().unwrap().to_string();
+    assert_ne!(sid(&va), sid(&vb));
+}
+
+#[test]
+fn a_startup_event_pushed_out_of_the_ring_still_validates_and_fills_the_receipt() {
+    // About 400 KiB after `thread.started`: more than the bus ring (256 KiB) holds.
+    let r = rig("flood", Opts { mode: "flood", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let receipt = v.receipt.unwrap();
+    assert_eq!(receipt["effective"]["model"], "model-fake-1", "{receipt}");
+    assert_eq!(receipt["effective"]["read_from"], "harness_session_file", "{receipt}");
 }
 
 // ---------------------------------------------------------------- controls
