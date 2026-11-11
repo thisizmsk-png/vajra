@@ -516,3 +516,33 @@ fn a_git_that_cannot_answer_is_none_and_garbage_numstat_is_partial() {
     let ok = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
     assert_eq!((ok.added, ok.partial), (2, false));
 }
+
+/// A reader that takes its time, like a stalled network volume.
+struct SlowRead<'a>(&'a [u8], Duration);
+
+impl std::io::Read for SlowRead<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(self.1);
+        let n = self.0.len().min(out.len());
+        out[..n].copy_from_slice(&self.0[..n]);
+        self.0 = &self.0[n..];
+        Ok(n)
+    }
+}
+
+#[test]
+fn a_binary_read_that_outlasts_the_budget_is_uncounted() {
+    let data = b"\0binary\n";
+    let slow = Duration::from_millis(80);
+    // The deadline is still ahead when the read starts and gone when it returns, and the chunk holds a NUL.
+    let mut left = TOTAL_READ_CAP;
+    let deadline = Instant::now() + Duration::from_millis(30);
+    assert_eq!(count_lines(&mut SlowRead(data, slow), data.len() as u64, &mut left, deadline), None);
+    // The same read with room to spare is binary: it counts 0.
+    let mut left = TOTAL_READ_CAP;
+    assert_eq!(count_lines(&mut SlowRead(data, Duration::ZERO), data.len() as u64, &mut left, far()), Some(0));
+    // And a slow text read that ends past the deadline is uncounted too.
+    let mut left = TOTAL_READ_CAP;
+    let deadline = Instant::now() + Duration::from_millis(30);
+    assert_eq!(count_lines(&mut SlowRead(b"a\nb\n", slow), 4, &mut left, deadline), None);
+}

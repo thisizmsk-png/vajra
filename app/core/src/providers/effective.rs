@@ -443,9 +443,14 @@ fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64, deadline: Ins
     }
 }
 
-/// `deadline` is checked before every chunk and before the count is accepted, so a slow read cannot outlast the budget:
-/// past it the file is uncounted (`None`), never counted late.
-fn count_lines(f: &mut File, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
+/// `deadline` is checked before every chunk and again after the read, on every way out (the binary early return too), so
+/// a slow read cannot outlast the budget: past it the file is uncounted (`None`), never counted late.
+fn count_lines(f: &mut impl Read, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
+    let counted = count_chunks(f, size, read_left, deadline)?;
+    (Instant::now() < deadline).then_some(counted)
+}
+
+fn count_chunks(f: &mut impl Read, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
     let mut buf = [0u8; 64 * 1024];
     let (mut seen, mut lines, mut last) = (0u64, 0u64, b'\n');
     while seen < size {
@@ -469,9 +474,6 @@ fn count_lines(f: &mut File, size: u64, read_left: &mut u64, deadline: Instant) 
         seen += n as u64;
     }
     *read_left = read_left.saturating_sub(seen);
-    if Instant::now() >= deadline {
-        return None;
-    }
     Some(lines + u64::from(seen > 0 && last != b'\n'))
 }
 
