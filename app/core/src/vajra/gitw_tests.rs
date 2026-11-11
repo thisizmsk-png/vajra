@@ -321,6 +321,7 @@ fn a_repo_config_change_is_tampered_and_refuses_new_worktrees() {
     // The human accepts it only with no agent session on the repo.
     assert!(f.gw.repos.accept_new(&f.gw, &common, true).is_err());
     f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
     assert!(f.gw.worktree_add(&f.repo, "p", "r2", "t2", 1, &f.base).is_ok());
     no_marker(&f);
 }
@@ -358,6 +359,8 @@ fn info_attributes_in_the_common_dir_is_a_tamper_signal() {
 fn a_global_filter_changed_mid_run_never_runs_and_is_only_a_note() {
     let f = fx_with("global", "[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = cat\n\tsmudge = cat\n", &[(".gitattributes", "*.rs filter=x\n")]);
     let mark = marker_script(&f.d, &f.marker);
+    // The baseline's filter is not git-lfs: the human accepts it before the run (#146 re-check N2).
+    f.gw.repos.accept_programs(&f.gw.common_of(&f.repo).unwrap(), false).unwrap();
     let a = f.gw.worktree_add(&f.repo, "p", "r1", "ta", 1, &f.base).unwrap();
     // Task A (a Claude worker has no OS sandbox) edits the user's global config, and an include it adds.
     std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[include]\n\tpath = ~/.extra\n[filter \"x\"]\n\tclean = {m}\n\tsmudge = {m}\n", m = mark.display())).unwrap();
@@ -452,6 +455,7 @@ fn a_missing_user_email_falls_back_and_a_hanging_gpg_never_blocks() {
     ugit(&f.home, &f.repo, &["config", "gpg.program", hang.to_str().unwrap()]);
     let common = f.gw.common_of(&f.repo).unwrap();
     f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
     edit(&t, "src/lib.rs", "x\n");
     let started = std::time::Instant::now();
@@ -579,6 +583,8 @@ fn case_variants_of_agent_config_and_git_names_are_caught() {
 fn a_rewritten_global_baseline_copy_is_tampered_and_never_runs() {
     let f = fx_with("baseline", "[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = cat\n", &[(".gitattributes", "*.rs filter=x\n")]);
     let mark = marker_script(&f.d, &f.marker);
+    // The baseline's filter is not git-lfs: the human accepts it before the run (#146 re-check N2).
+    f.gw.repos.accept_programs(&f.gw.common_of(&f.repo).unwrap(), false).unwrap();
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
     edit(&t, "src/lib.rs", "x\n");
     let good = std::fs::read(&f.gw.global).unwrap();
@@ -647,6 +653,7 @@ fn a_changed_repo_config_include_or_config_worktree_is_tampered() {
     ugit(&f.home, &f.repo, &["config", "include.path", inc.to_str().unwrap()]);
     let common = f.gw.common_of(&f.repo).unwrap();
     f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
     edit(&t, "src/lib.rs", "x\n");
     std::fs::write(&inc, format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
@@ -792,6 +799,7 @@ fn a_changed_or_shadowed_filter_program_is_tampered() {
     ugit(&f.home, &f.repo, &["config", "merge.y.driver", "vtool %O %A %B"]);
     let common = f.gw.common_of(&f.repo).unwrap();
     f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
     edit(&t, "src/lib.rs", "x\n");
     assert!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.is_some());
@@ -805,6 +813,7 @@ fn a_changed_or_shadowed_filter_program_is_tampered() {
     no_marker(&f);
     // The human accepts it; then a new `vtool` shadows the trusted one.
     f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
     std::fs::copy(late.join("vtool"), early.join("vtool")).unwrap();
     match f.gw.worktree_add(&f.repo, "p", "r1", "t3", 1, &f.base) {
         Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["program vtool".to_string()]),
@@ -812,4 +821,109 @@ fn a_changed_or_shadowed_filter_program_is_tampered() {
     }
     assert!(first_word("  \"/a b/c\" --x").as_deref() == Some("/a b/c") && first_word("git-lfs filter-process").as_deref() == Some("git-lfs"));
     assert!(program_key("filter.lfs.process") && program_key("merge.ours.driver") && program_key("diff.x.textconv") && !program_key("filter.process") && !program_key("user.email"));
+}
+
+/// #146 re-check N1: APFS case-folds beyond ASCII. Long s (U+017F) and the Kelvin sign (U+212A) spell protected
+/// names; every probe form counts as that name, so none is committed and no filter runs.
+#[test]
+fn unicode_case_variants_of_protected_names_are_caught() {
+    for p in [".mcp.j\u{17F}on", "AGENT\u{17F}.md", "sub/AGENT\u{17F}.md", ".hu\u{17F}ky/pre-commit", ".hus\u{212A}y/pre-commit", ".github/workflow\u{17F}/ci.yml", ".Codex/c.toml"] {
+        assert!(agent_config(p), "{p}");
+    }
+    assert_eq!(git_special(".gitattribute\u{17F}"), Some(".gitattributes"));
+    assert_eq!(git_special(".gitmodule\u{17F}"), Some(".gitmodules"));
+    assert_eq!(git_special(".LFSCONFIG"), Some(".lfsconfig"));
+    assert_eq!(git_special(".GIT"), Some(".git"));
+    assert_eq!(git_special(".gitignore"), None);
+    let f = fx("unicase");
+    let mark = marker_script(&f.d, &f.marker);
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t0", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    edit(&t, ".hu\u{17F}ky/pre-commit", "#!/bin/sh\necho hook\n");
+    edit(&t, ".mcp.j\u{17F}on", "{}\n");
+    edit(&t, "src/AGENT\u{17F}.md", "injected\n");
+    let s = f.gw.snapshot(&t, &["**".into()], &[], "w m").unwrap();
+    assert_eq!(s.files, vec!["src/lib.rs".to_string()], "leftovers: {:?}", s.leftovers);
+    assert_eq!(s.leftovers.len(), 3, "{:?}", s.leftovers);
+    for (task, path) in [("t1", "src/.gitattribute\u{17F}"), ("t2", ".gitmodule\u{17F}"), ("t3", "src/.lfsconfig"), ("t4", "src/.LFSCONFIG")] {
+        let t = f.gw.worktree_add(&f.repo, "p", "r1", task, 1, &f.base).unwrap();
+        edit(&t, "src/lib.rs", "x\n");
+        edit(&t, path, "* filter=x\n");
+        assert_eq!(f.gw.snapshot(&t, &["**".into()], &[], "w m").unwrap_err().code(), "tampered", "{path}");
+    }
+    no_marker(&f);
+}
+
+/// #146 re-check N1: where the volume folds a name, its own answer (same dev and ino) decides, whatever `fold` knows.
+#[test]
+fn the_volume_decides_what_a_name_is() {
+    let d = tmpdir("vol");
+    std::fs::write(d.join(".gitattributes"), "x").unwrap();
+    std::fs::create_dir_all(d.join(".husky")).unwrap();
+    assert_eq!(on_volume(&d, "other", &SPECIAL_GIT), None);
+    assert_eq!(on_volume(&d, ".gitattributes", &SPECIAL_GIT), None, "the name itself is not a second spelling");
+    if !d.join(".GITATTRIBUTES").exists() {
+        return; // a case-sensitive volume: no other spelling exists
+    }
+    assert_eq!(on_volume(&d, ".GITATTRIBUTES", &SPECIAL_GIT), Some(".gitattributes"));
+    assert_eq!(canonical(Some(&d), ".HUSKY/x"), ".husky/x");
+    if d.join(".gitattribute\u{17F}").exists() {
+        assert_eq!(on_volume(&d, ".gitattribute\u{17F}", &SPECIAL_GIT), Some(".gitattributes"));
+    }
+}
+
+/// #146 re-check N2: a trusted `python3 -m` filter would import a module a worker planted in the worktree when the
+/// core's git refreshes or adds. A program that isn't git-lfs makes the repo ineligible for content calls until the
+/// human accepts it, and the planted module never runs.
+#[test]
+fn an_interpreter_filter_is_refused_until_the_human_accepts_it_and_planted_code_never_runs() {
+    let f = fx_with("pyfilter", "[user]\n\tname = U\n\temail = u@e\n", &[("nb.ipynb", "{}\n")]);
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    // The shape `nbstripout --install` writes.
+    std::fs::write(f.repo.join(".git/info/attributes"), "*.ipynb filter=nb\n").unwrap();
+    ugit(&f.home, &f.repo, &["config", "filter.nb.clean", "/usr/bin/python3 -m nbx"]);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    edit(&t, "nbx.py", &format!("open('{}', 'a').write('ran')\n", f.marker.display()));
+    edit(&t, "nb.ipynb", "{\"x\": 1}\n");
+    match f.gw.snapshot(&t, &["**".into()], &[], "w m") {
+        Err(GitwError::Tampered { what }) => assert!(what.contains("program filter.nb.clean"), "{what}"),
+        other => panic!("{other:?}"),
+    }
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["program filter.nb.clean".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(f.gw.repos.unvetted_programs(&common), vec!["filter.nb.clean".to_string()]);
+    no_marker(&f);
+    // Only the human accepts it, with no agent session on the repo; then the card no longer lists it.
+    assert!(f.gw.repos.accept_programs(&common, true).is_err());
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    assert!(f.gw.repos.unvetted_programs(&common).is_empty());
+    for c in ["git-lfs filter-process", "git-lfs clean -- %f", "git-lfs smudge -- %f", "/opt/homebrew/bin/git-lfs filter-process"] {
+        assert!(vetted_program(c), "{c}");
+    }
+    for c in ["/usr/bin/python3 -m nbx", "python3 x.py", "node x.js", "sh ./x", "bundle exec x", "./git-lfs clean", "bin/git-lfs clean", "~/bin/git-lfs clean", "git-lfs track", "git-lfs", "git-lfs filter-process; sh x", "git-lfs clean $(x)", "git-lfs clean `x`", "cat"] {
+        assert!(!vetted_program(c), "{c}");
+    }
+}
+
+/// #146 re-check N4 and N5: the baseline copy lives under the guard-protected control dir, and a `~/` program word is
+/// fingerprinted (a relative one resolves to nothing, and is never vetted).
+#[test]
+fn the_baseline_copy_is_under_control_and_home_programs_are_fingerprinted() {
+    let f = fx("homeprog");
+    assert!(f.gw.global.starts_with(f.gw.data.join("control/git-baseline")), "{}", f.gw.global.display());
+    use std::os::unix::fs::PermissionsExt;
+    let tool = f.home.join("bin/tool");
+    std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+    std::fs::write(&tool, "#!/bin/sh\ncat\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = f.gw.program("~/bin/tool");
+    assert!(a.at.is_some());
+    std::fs::write(&tool, "#!/bin/sh\necho changed\ncat\n").unwrap();
+    assert_ne!(f.gw.program("~/bin/tool"), a, "a rewrite is seen");
+    assert!(f.gw.program("./bin/tool").at.is_none());
+    assert!(!vetted_program("~/bin/tool"));
 }

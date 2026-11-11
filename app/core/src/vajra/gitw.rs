@@ -15,7 +15,8 @@
 //! directory's identity and its detached HEAD are checked with plain filesystem reads (`tampered`), and before any
 //! call that reads worktree content a plain walk refuses new or changed attribute and module files and nested repos,
 //! names case-folded. The repo baseline also fingerprints every filter, merge-driver and diff program the trusted
-//! config names, as git's shell would resolve it. Every call that can run one stops the repo's other live agent
+//! config names, as git's shell would resolve it, and any of them other than git-lfs keeps the repo from content calls
+//! until the human accepts it (git runs them in the worktree, where a worker can plant the code they load). Every call that can run one stops the repo's other live agent
 //! sessions first (`Quiesce`), so the checks and git's use see the same files. `snapshot` uses plumbing only, through a fresh private index under the core's data dir; it
 //! never writes through the worker's HEAD or index.
 
@@ -239,6 +240,8 @@ impl<'a> Call<'a> {
 /// The copy lives in `<data>/git-baseline/`, which a Claude worker with no OS sandbox could write. So its sha256 is
 /// kept in memory (`Gitw` checks it before every call) and, across restarts, in `<control>/git-baseline.sha256`, which
 /// the guard write-protects. A copy that no longer matches is `Tampered` and is never used: only the human re-takes it.
+/// The copy itself lives in `<control>/git-baseline/` too, so the window between the core's check and git's own read
+/// of `GIT_CONFIG_GLOBAL` needs a write the guard refuses (#146 re-check N4).
 #[derive(Clone, Debug)]
 pub struct GlobalBaseline {
     pub copy: PathBuf,
@@ -249,6 +252,10 @@ pub struct GlobalBaseline {
 
 const BASELINE_TAMPERED: &str = "the global git baseline";
 
+fn baseline_dir(data: &Path) -> PathBuf {
+    data.join("control").join("git-baseline")
+}
+
 fn baseline_anchor(data: &Path) -> PathBuf {
     data.join("control").join("git-baseline.sha256")
 }
@@ -256,7 +263,8 @@ fn baseline_anchor(data: &Path) -> PathBuf {
 impl GlobalBaseline {
     /// Load the stored baseline, or take one when there is none. Call before any agent session launches.
     pub fn take_or_load(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>) -> R<GlobalBaseline> {
-        let dir = data.join("git-baseline");
+        let dir = baseline_dir(data);
+        crate::paths::ensure_private_dir(&data.join("control")).map_err(io)?;
         crate::paths::ensure_private_dir(&dir).map_err(io)?;
         let copy = dir.join("global.config");
         let anchor = hash_file(&baseline_anchor(data), false);
@@ -281,9 +289,9 @@ impl GlobalBaseline {
     }
 
     fn take(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>) -> R<GlobalBaseline> {
-        let dir = data.join("git-baseline");
-        crate::paths::ensure_private_dir(&dir).map_err(io)?;
+        let dir = baseline_dir(data);
         crate::paths::ensure_private_dir(&data.join("control")).map_err(io)?;
+        crate::paths::ensure_private_dir(&dir).map_err(io)?;
         let flat = flatten_global(git, home, xdg)?;
         let copy = dir.join("global.config");
         write_private(&copy, flat.as_bytes())?;
@@ -317,7 +325,7 @@ impl GlobalBaseline {
         if agents_running {
             return Err(GitwError::Invalid("a Vajra agent session is running"));
         }
-        let data = self.copy.parent().and_then(Path::parent).ok_or(GitwError::Invalid("baseline dir"))?.to_path_buf();
+        let data = self.copy.parent().and_then(Path::parent).and_then(Path::parent).ok_or(GitwError::Invalid("baseline dir"))?.to_path_buf();
         *self = Self::take(git, &data, home, xdg)?;
         Ok(())
     }
@@ -558,6 +566,18 @@ fn program_key(k: &str) -> bool {
     }
 }
 
+/// A trusted-config command the core runs without asking: `git-lfs` (bare, or by absolute path) running
+/// `filter-process`, `clean` or `smudge`, with nothing a shell would treat specially. Every other filter, merge driver
+/// or diff program may load code from the worktree (git runs it with the worktree as its cwd: `python3 -m x`, `node`,
+/// `sh ./x`), so the human has to accept it first (#146 re-check N2).
+fn vetted_program(cmd: &str) -> bool {
+    let mut w = cmd.split_ascii_whitespace();
+    let prog = w.next().unwrap_or("");
+    let lfs = prog == "git-lfs" || (prog.starts_with('/') && prog.ends_with("/git-lfs"));
+    lfs && matches!(w.next(), Some("filter-process" | "clean" | "smudge"))
+        && !cmd.chars().any(|c| ";|&<>()`$\\\"'*?[]{}~\n".contains(c))
+}
+
 /// The program a shell command runs first: the first word, or a quoted first word.
 fn first_word(cmd: &str) -> Option<String> {
     let c = cmd.trim_start();
@@ -584,6 +604,10 @@ struct Held {
     others: Vec<(PathBuf, FileHash)>,
     /// The programs the effective trusted config (global baseline plus repo) can run.
     programs: Vec<Program>,
+    /// The config keys naming a program outside `vetted_program`: they may run code from the worktree, so the repo
+    /// gets no content call until the human accepts them (`accept_programs`).
+    unvetted: Vec<String>,
+    programs_accepted: bool,
     /// The baseline config's entries, kept only to name the keys that changed.
     entries: Vec<(String, String)>,
     runs: usize,
@@ -633,9 +657,28 @@ impl RepoBaselines {
         Ok(())
     }
 
+    /// The human accepts the programs the repo's trusted config runs that Vajra can't vet ("This program may run code
+    /// from the worktree"): only with no Vajra agent session on the repo. A later change to them is checked as usual.
+    pub fn accept_programs(&self, common: &Path, agents_on_repo: bool) -> R<()> {
+        if agents_on_repo {
+            return Err(GitwError::Invalid("a Vajra agent session is running on this repo"));
+        }
+        let mut m = crate::lock(&self.held);
+        m.get_mut(common).ok_or(GitwError::Invalid("no baseline is held for this repo"))?.programs_accepted = true;
+        Ok(())
+    }
+
+    /// The program keys the human has to accept before the repo gets content calls (for the card). Names only.
+    pub fn unvetted_programs(&self, common: &Path) -> Vec<String> {
+        crate::lock(&self.held).get(common).filter(|h| !h.programs_accepted).map(|h| h.unvetted.clone()).unwrap_or_default()
+    }
+
     fn check(&self, gw: &Gitw, common: &Path) -> R<()> {
         let m = crate::lock(&self.held);
         let h = m.get(common).ok_or(GitwError::Invalid("no repo baseline is held; start the run first"))?;
+        if !h.unvetted.is_empty() && !h.programs_accepted {
+            return Err(GitwError::RepoConfigChanged { keys: h.unvetted.iter().map(|k| format!("program {k}")).collect() });
+        }
         let config = hash_file(&common.join("config"), false);
         let attributes = hash_file(&common.join("info/attributes"), false);
         let others = repo_others(gw, common);
@@ -679,11 +722,14 @@ fn repo_others(gw: &Gitw, common: &Path) -> Vec<(PathBuf, FileHash)> {
 }
 
 fn take_repo(gw: &Gitw, common: &Path) -> Held {
+    let (progs, unvetted) = gw.programs(common);
     Held {
         config: hash_file(&common.join("config"), false),
         attributes: hash_file(&common.join("info/attributes"), false),
         others: repo_others(gw, common),
-        programs: gw.programs(common),
+        programs: progs,
+        unvetted,
+        programs_accepted: false,
         entries: read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default(),
         runs: 0,
     }
@@ -808,9 +854,12 @@ impl Gitw {
         g
     }
 
-    /// Resolve one program word the way git's shell would, and fingerprint what it finds.
+    /// Resolve one program word the way git's shell would, and fingerprint what it finds. `~/` expands against HOME
+    /// (#146 re-check N5); a relative word with a `/` resolves to nothing, and is never vetted.
     fn program(&self, word: &str) -> Program {
-        let found = if word.contains('/') {
+        let found = if let Some(rest) = word.strip_prefix("~/") {
+            Some(self.home.join(rest))
+        } else if word.contains('/') {
             Path::new(word).is_absolute().then(|| PathBuf::from(word))
         } else {
             self.prog_dirs.iter().map(|d| d.join(word)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0))
@@ -818,12 +867,18 @@ impl Gitw {
         Program { word: word.to_string(), at: found.as_deref().and_then(fingerprint) }
     }
 
-    /// The programs the effective config of this repo names (global baseline plus repo config). Config only: no filter
-    /// runs to read it.
-    fn programs(&self, common: &Path) -> Vec<Program> {
-        let Ok(o) = self.run(Call::new(At::Repo(common), &["config", "--list", "-z"])) else { return Vec::new() };
-        let words: BTreeSet<String> = parse_list_z(&o.stdout).into_iter().filter(|(k, _)| program_key(k)).filter_map(|(_, v)| first_word(&v)).collect();
-        words.iter().map(|w| self.program(w)).collect()
+    /// The programs the effective config of this repo names (global baseline plus repo config), and the keys whose
+    /// command `vetted_program` doesn't pass. Config only: no filter runs to read it. A config that can't be read is
+    /// one unvetted entry, so it fails closed.
+    fn programs(&self, common: &Path) -> (Vec<Program>, Vec<String>) {
+        let o = match self.run(Call::new(At::Repo(common), &["config", "--list", "-z"])) {
+            Ok(o) if o.exit() == Some(0) && o.whole() => o,
+            _ => return (Vec::new(), vec!["config".into()]),
+        };
+        let entries: Vec<(String, String)> = parse_list_z(&o.stdout).into_iter().filter(|(k, _)| program_key(k)).collect();
+        let words: BTreeSet<String> = entries.iter().filter_map(|(_, v)| first_word(v)).collect();
+        let unvetted: BTreeSet<String> = entries.iter().filter(|(_, v)| !vetted_program(v)).map(|(k, _)| k.clone()).collect();
+        (words.iter().map(|w| self.program(w)).collect(), unvetted.into_iter().collect())
     }
 
     fn version(&self) -> Option<(u32, u32)> {
@@ -864,6 +919,10 @@ impl Gitw {
             ("GIT_LFS_SKIP_SMUDGE", "1".into()),
             ("GIT_LITERAL_PATHSPECS", "1".into()),
             ("GIT_NO_REPLACE_OBJECTS", "1".into()),
+            // An accepted Python filter does not put its cwd (the worktree) first on `sys.path` (3.11 and later).
+            ("PYTHONSAFEPATH", "1".into()),
+            ("PYTHONNOUSERSITE", "1".into()),
+            ("PYTHONDONTWRITEBYTECODE", "1".into()),
         ];
         let cwd = match c.at {
             At::Repo(r) => {
@@ -1136,18 +1195,20 @@ impl Gitw {
         Ok(())
     }
 
-    /// No created or changed `.gitattributes` (any depth) or `.gitmodules`, and no nested repository, before any `add`.
-    fn name_rule(&self, changed: &[String]) -> R<()> {
+    /// No created or changed `.gitattributes` (any depth), `.gitmodules` or `.lfsconfig`, and no nested repository,
+    /// before any `add`. Names compare as the volume compares them.
+    fn name_rule(&self, wt: &Path, changed: &[String]) -> R<()> {
         if !self.checks_on() {
             return Ok(());
         }
         for p in changed {
-            let base = p.rsplit('/').next().unwrap_or(p);
-            if matches!(git_special(base), Some(".gitattributes" | ".gitmodules")) {
+            let c = canonical(Some(wt), p.trim_end_matches('/'));
+            let base = c.rsplit('/').next().unwrap_or(&c);
+            if matches!(git_special(base), Some(".gitattributes" | ".gitmodules" | ".lfsconfig")) {
                 return Err(tampered(p.clone()));
             }
             // An embedded repository shows as `dir/`; a `.git` component anywhere is a nested repo.
-            if p.ends_with('/') || p.split('/').any(|c| git_special(c) == Some(".git")) {
+            if p.ends_with('/') || c.split('/').any(|x| x == ".git") {
                 return Err(tampered(format!("nested git repository at {p}")));
             }
         }
@@ -1172,9 +1233,9 @@ impl Gitw {
         self.walk_rule(t)?;
         let idx = self.fresh_index(t, "index")?;
         let changed = self.changed(t, &idx)?;
-        self.name_rule(&changed)?;
+        self.name_rule(&t.wt, &changed)?;
         let (files, leftovers): (Vec<String>, Vec<String>) =
-            changed.into_iter().partition(|p| globs.iter().any(|g| glob_match(g, p)) && (!agent_config(p) || named.contains(p)) && !escaping_link(&t.wt, p));
+            changed.into_iter().partition(|p| globs.iter().any(|g| glob_match(g, p)) && (!agent_config_in(Some(&t.wt), p) || named.contains(p)) && !escaping_link(&t.wt, p));
         if files.is_empty() {
             return Ok(Snapshot { commit: None, task_ref: None, files, leftovers });
         }
@@ -1299,7 +1360,7 @@ impl Gitw {
         self.walk_rule(t)?;
         let idx = self.fresh_index(t, "capture-index")?;
         // The same name rule as `snapshot`, before this `add` too (git before 2.40 has no `GIT_ATTR_SOURCE`).
-        self.name_rule(&self.changed(t, &idx)?)?;
+        self.name_rule(&t.wt, &self.changed(t, &idx)?)?;
         self.ok("add", Call::new(At::Pinned(t), &["add", "-A", "--", "."]).index(&idx))?;
         let cap = self.ok("write-tree", Call::new(At::Pinned(t), &["write-tree"]).index(&idx))?.stdout.trim().to_string();
         let want = self.ok("rev-parse", Call::new(At::Pinned(t), &["rev-parse", "--verify", &format!("{commit}^{{tree}}")]))?.stdout.trim().to_string();
@@ -1363,23 +1424,66 @@ thread_local! {
     pub(crate) static BEFORE_MERGE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Names git or an agent harness reads specially. A worktree component that the volume treats as one of these is
+/// that name.
+const SPECIAL_GIT: [&str; 4] = [".gitattributes", ".gitmodules", ".git", ".lfsconfig"];
+const PROTECTED: [&str; 13] = [".claude", ".codex", ".husky", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".envrc", ".github", "workflows", ".gitattributes", ".gitmodules", ".git", ".lfsconfig"];
+
+/// A name as a case-insensitive volume compares it, approximately: full case mapping (upper, then lower, so `ſ` and
+/// the Kelvin sign become ASCII `s` and `k`), with combining marks dropped. It over-matches rather than under-matches
+/// (APFS keeps accents distinct); `on_volume` backs it with the volume's own answer (#146 re-check N1).
+fn fold(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .filter(|c| !matches!(*c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F))
+        .collect()
+}
+
+fn same_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || fold(a) == fold(b)
+}
+
+/// The protected name an existing entry `dir/name` is, by the volume's own rules: `dir/<protected>` is the same
+/// directory entry (dev and ino). Catches every fold or normalization APFS applies, whatever `fold` misses.
+fn on_volume(dir: &Path, name: &str, names: &[&'static str]) -> Option<&'static str> {
+    let m = std::fs::symlink_metadata(dir.join(name)).ok()?;
+    names.iter().copied().find(|n| *n != name && std::fs::symlink_metadata(dir.join(n)).is_ok_and(|x| x.dev() == m.dev() && x.ino() == m.ino()))
+}
+
+/// `p` with every component the volume would read as a protected name spelled as that name. `wt` is the worktree
+/// for the volume check; components that don't exist keep the `fold` answer.
+fn canonical(wt: Option<&Path>, p: &str) -> String {
+    let mut dir = wt.map(Path::to_path_buf);
+    let mut out: Vec<String> = Vec::new();
+    for c in p.split('/') {
+        let named = PROTECTED.iter().copied().find(|n| same_name(n, c)).or_else(|| dir.as_deref().and_then(|d| on_volume(d, c, &PROTECTED)));
+        out.push(named.map(String::from).unwrap_or_else(|| c.to_string()));
+        dir = dir.map(|d| d.join(c));
+    }
+    out.join("/")
+}
+
 /// An agent config file (16.4 rule 6), at any depth for the named files and dirs; `.github/workflows/` at the root.
-/// Names are compared ASCII-case-folded: the worktree volume (APFS by default) is case-insensitive, so `.Claude/` is
-/// `.claude/` to Claude Code.
+/// Names compare the way a case-insensitive volume compares them (`canonical`), so `.Claude/`, `.huſky/` and
+/// `AGENTſ.md` count.
 pub fn agent_config(p: &str) -> bool {
-    let p = p.to_ascii_lowercase();
-    let comps: Vec<&str> = p.split('/').collect();
+    agent_config_in(None, p)
+}
+
+fn agent_config_in(wt: Option<&Path>, p: &str) -> bool {
+    let c = canonical(wt, p);
+    let comps: Vec<&str> = c.split('/').collect();
     let base = comps.last().copied().unwrap_or("");
-    let is = |set: &[&str], c: &str| set.iter().any(|x| x.eq_ignore_ascii_case(c));
-    is(&AGENT_FILES, base) || comps[..comps.len().saturating_sub(1)].iter().any(|c| is(&AGENT_DIRS, c)) || p.starts_with(".github/workflows/")
+    AGENT_FILES.contains(&base) || comps[..comps.len().saturating_sub(1)].iter().any(|c| AGENT_DIRS.contains(c)) || c.starts_with(".github/workflows/")
 }
 
-/// A name git reads as attributes, submodules or a repository, compared ASCII-case-folded (see `agent_config`).
+/// A name git reads as attributes, submodules, LFS config or a repository (see `fold`).
 fn git_special(name: &str) -> Option<&'static str> {
-    [".gitattributes", ".gitmodules", ".git"].into_iter().find(|x| x.eq_ignore_ascii_case(name))
+    SPECIAL_GIT.into_iter().find(|x| same_name(x, name))
 }
 
-/// Every `.gitattributes`, `.gitmodules` or `.git` in the worktree (case-folded), as `(relative path, canonical name)`,
+/// Every `.gitattributes`, `.gitmodules`, `.lfsconfig` or `.git` in the worktree (as the volume compares names), as `(relative path, canonical name)`,
 /// by plain `lstat` walk: no git, no symlink followed, ignored files included. The worktree's own `.git` file at the
 /// root is skipped (the tamper checks hash it).
 fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
@@ -1387,6 +1491,8 @@ fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
     let (mut out, mut seen) = (Vec::new(), 0usize);
     let mut stack: Vec<(PathBuf, String)> = vec![(wt.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
+        // What `dir/<special>` is on this volume, once per dir: an entry with the same dev and ino is that name.
+        let ids: Vec<(&'static str, u64, u64)> = SPECIAL_GIT.iter().filter_map(|n| std::fs::symlink_metadata(dir.join(n)).ok().map(|m| (*n, m.dev(), m.ino()))).collect();
         for e in std::fs::read_dir(&dir).map_err(io)? {
             let e = e.map_err(io)?;
             seen += 1;
@@ -1395,7 +1501,11 @@ fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
             }
             let name = e.file_name().to_string_lossy().into_owned();
             let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-            if let Some(k) = git_special(&name) {
+            let by_volume = || {
+                let m = e.metadata().ok()?;
+                ids.iter().find(|(_, d, i)| *d == m.dev() && *i == m.ino()).map(|(n, _, _)| *n)
+            };
+            if let Some(k) = git_special(&name).or_else(by_volume) {
                 if !(r == ".git" && k == ".git" && name == ".git") {
                     out.push((r, k));
                 }
