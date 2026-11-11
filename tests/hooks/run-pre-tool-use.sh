@@ -759,6 +759,41 @@ file_case BLOCK "N3 long s, Edit"      Edit  "$AS/${APP%?????}${LS}ktop/seats.js
 file_case BLOCK "N3 long s, Write into the skill dir" Write "$H/.claude/${LS}kills/vajra/hooks/pre-tool-use.sh"
 bash_case BLOCK "N3 kelvin, cd && echo" "cd \"$AS/${APP%????}${KS}top\" && echo x > seats.json"
 bash_case BLOCK "N4 sed script names <control> oddly" "sed 's#${APP}/seats.json#${APP}/control/seats.json#g' /tmp/f > /tmp/g"
+# bhishma re-check on 3296d41 (F1-F3, F5, F6).
+G1="${APP%?}*"; TW="$WORK/proj/r1/t1-r1"
+bash_case BLOCK "F1 glob then ../.. redirect"   "echo PWN > \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 cp glob then ../.."         "cp /etc/hosts \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 V=.. then glob"             "V=..; echo PWN > \"$WORK\"/\$V/$G1/seats.json"
+bash_case BLOCK "F1 V=.. from worker cwd"       "V=../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
+bash_case BLOCK "F1 cd V=.. then cd glob"       "V=..; cd \"$WORK\"/\$V && cd $G1 && echo PWN > seats.json"
+bash_case BLOCK "F1 cd glob/.. then cd glob"    "cd \"$WORK\"/p*/.. && cd $G1 && echo x > seats.json"
+bash_case BLOCK "F1 brace {..,zz} then glob"    "touch \"$WORK\"/{..,zz}/$G1/new"
+bash_case BLOCK "F1 <control> via V=.."         "V=..; echo PWN > \"$WORK\"/\$V/$G1/${CTRL##*/}*/x.json"
+bash_case BLOCK "F1 split name in two vars"     "V=../../../../${APP%???????}; W=${APP#?????}; echo PWN > \$V\$W/seats.json" "$TW"
+bash_case BLOCK "F1 for list climbs"            "for v in ../../../..; do echo PWN > \$v/$G1/seats.json; done" "$TW"
+bash_case BLOCK "F1 abs value near <data>"      "V=\"$AS/${APP%???????}\"; echo PWN > \${V}${APP#?????}/seats.json"
+bash_case BLOCK "F1 cd unknown, then non-reader" "cd \"$AS\"/$G1 && touch seats.json"
+bash_case BLOCK "F2 >| glob"                    "echo PWN >| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 1>| glob"                   "echo PWN 1>| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >|glob no space"            "echo PWN >|\"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >| literal seats.json"      "echo PWN >| \"$DATA/seats.json\""
+bash_case BLOCK "F3 ls -d glob | xargs -I sh"   "ls -d \"$AS\"/$G1 | xargs -I{} sh -c 'echo PWN > \"{}/seats.json\"'"
+bash_case BLOCK "F3 echo glob | xargs -0 cp"    "echo \"$AS\"/$G1/seats.json | tr '\\n' '\\0' | xargs -0 -n1 cp /etc/hosts"
+bash_case BLOCK "F3 printf glob | xargs cp"     "printf '%s\\n' \"$AS\"/$G1/seats.json | xargs -n1 cp /etc/hosts"
+bash_case BLOCK "F6 >| skill hook"              "echo x >| \"$SKILL/hooks/pre-tool-use.sh\""
+bash_case BLOCK "F6 >| glob skill hook"         "echo x >| \"$SKILL\"/hook*/pre-tool-use.sh"
+bash_case BLOCK "F6 >| user settings"           "echo x >| \"$H/.claude/settings.json\""
+bash_case BLOCK "F6 >| glob user settings"      "echo x >| \"$H/.claude\"/setting*.json"
+bash_case ALLOW "F5 export PATH with \$HOME"    'export PATH="$HOME/bin:$PATH"'
+bash_case ALLOW "F5 cd glob in HOME, read"      'cd ~/Devel* && ls'
+bash_case ALLOW "F5 cd glob in HOME, then cd abs and write" 'cd ~/Devel* && ls && cd /tmp && echo x > vajra-f5.txt'
+bash_case ALLOW "F5 declare and readonly values" 'declare X="$HOME/bin:$PATH"; readonly Y="$HOME/a*"'
+bash_case ALLOW "F3 glob read piped into a reader" "ls -d \"$AS\"/$G1 | wc -l"
+bash_case ALLOW "F1 abs value outside protected" 'V=/tmp/vajra-f1.txt; echo x > $V'
+bash_case ALLOW "F1 for loop over project files" 'for f in src/*.ts; do sed -i "" s/a/b/ "$f"; done' "$PROJ"
+bash_case ALLOW "F1 single \$OUT from worker cwd" 'echo x > $OUT' "$TW"
+# Fail closed: a ".." after a glob is judged from "/", even inside <work> (write the path without the climb).
+bash_case BLOCK "F1 glob climb inside <work> tree" "touch \"$WORK\"/proj/r1/t1-r1/s*/../a.txt"
 # The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
 bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
 bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
