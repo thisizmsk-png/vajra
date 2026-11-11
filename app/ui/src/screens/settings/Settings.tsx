@@ -16,6 +16,7 @@ import { ProviderCard, useProviders } from "../ProviderControls";
 import { AccountsPanel } from "../Accounts";
 import { useAccounts } from "../../providerData";
 import { ProjectAgents } from "../ProjectAgents";
+import { SetupPanel } from "./SetupPanel";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
@@ -75,6 +76,7 @@ export function Settings() {
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
             {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
+            {section === "providers" && <SetupPanel />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-agents" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">

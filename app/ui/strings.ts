@@ -569,6 +569,32 @@ export const S = {
     chips: "Workers by provider",
   },
   /** Multi-provider accounts (Settings > Providers). Every model row reads "Model · provider" (H6); no secret is ever worded as shown. */
+  setup: {
+    title: "Set up",
+    lede: "Agent CLIs Vajra knows how to find. Install a missing one with its vendor's own steps, then sign in with the CLI itself. Vajra never handles the login.",
+    checking: "Looking for agent CLIs",
+    failed: "Could not look for the agent CLIs.",
+    updateNeeded: "This build cannot read the setup check from the core. Update the desktop app.",
+    unreadable: "The setup check answered something this build cannot read.",
+    state: {
+      installed: "Installed",
+      unsupported: "Installed. Vajra can't run it as an agent yet.",
+      broken: "Broken",
+      manual: "Install it yourself",
+    } as Record<string, string>,
+    reason: {
+      version_failed: "It is on your PATH but did not report a version. Reinstall it with the vendor's steps.",
+      source_not_verified: "Run one of these in a terminal. One-click install comes after a security review of each source.",
+    } as Record<string, string>,
+    tool: { brew: "Homebrew", npm: "npm", script: "Vendor script" } as Record<string, string>,
+    vendorSteps: (name: string) => `${name} install steps`,
+    signIn: (name: string) => `Sign in to ${name}`,
+    signInTab: (name: string) => `Sign in: ${name}`,
+    signInHint: "Opens the CLI's own sign-in in a terminal tab.",
+    engine: "Vajra engine scripts",
+    engineState: { installed: "Installed", missing: "Not installed" },
+    engineHint: "Run this in a terminal to install them.",
+  },
   accounts: {
     title: "Accounts",
     lede: "The accounts your agents run on, and which ones each project may use.",

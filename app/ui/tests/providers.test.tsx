@@ -19,6 +19,7 @@ const fx = (name: string) => JSON.parse(readFileSync(resolve(__dirname, "../../c
 const LIST = fx("providers.v1.json");
 const P = "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T";
 const C = S.providers;
+const SETUP_EMPTY = { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } };
 
 const view = (project: string | null = null, agent: "claude" | "codex" = "claude", rev = 0) => ({
   schema: "vajra.preferences/1", rev, project_id: project, caps: { active_runs: 1, workers_per_run: 16, editable: false },
@@ -38,7 +39,7 @@ afterEach(() => {
 
 function settings(replies: Record<string, unknown>, inProject = true) {
   window.location.hash = "#/settings";
-  const f = fakeIpc({ preflight, provider_list: LIST, preferences_read: (a?: Record<string, unknown>) => view(a?.projectId as string | null), ...replies });
+  const f = fakeIpc({ preflight, provider_list: LIST, setup_list: SETUP_EMPTY, preferences_read: (a?: Record<string, unknown>) => view(a?.projectId as string | null), ...replies });
   setTransport(f.transport);
   render(
     <CurrentProject.Provider value={{ project: inProject ? project : null, campaigns: [], focus: null, runId: null }}>

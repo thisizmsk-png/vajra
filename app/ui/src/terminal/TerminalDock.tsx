@@ -10,7 +10,7 @@ import "./terminal.css";
 
 const TerminalView = lazy(() => import("./TerminalView"));
 
-export type Kind = "shell" | "agent";
+export type Kind = "shell" | "agent" | "sign_in";
 /** `kind` defaults to a plain user shell; an agent terminal is its own tab even in the same folder as a shell. */
 export type Place = { cwd: string; label: string; kind?: Kind };
 
@@ -18,8 +18,14 @@ const HERE = "vajra:terminal-here";
 /** "Terminal here": open (or focus) a terminal in this project folder or worktree. */
 export const openTerminalHere = (place: Place) => window.dispatchEvent(new CustomEvent<Place>(HERE, { detail: place }));
 
+const SIGN_IN = "vajra:setup-sign-in";
+/** A CLI's own sign-in (ADR-17): `id` is a catalog harness id; the core builds the command. */
+export type SignInRequest = { id: string; label: string };
+/** "Sign in": open (or focus) a tab running that harness's own login. Never saved in the layout. */
+export const openSignIn = (r: SignInRequest) => window.dispatchEvent(new CustomEvent<SignInRequest>(SIGN_IN, { detail: r }));
+
 /** `live` is false for a tab restored from the saved layout: it has no view and no shell until it is first shown. */
-type Tab = { key: number; cwd: string; label: string; kind: Kind; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
+type Tab = { key: number; cwd: string; label: string; kind: Kind; /** A sign-in tab's harness id. */ signIn?: string; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
 let seq = 0;
 
 // ---- durable layout --------------------------------------------------------------------------------------------------
@@ -47,8 +53,10 @@ export function readLayout(): { tabs: Saved[]; cur: number } {
 }
 function writeLayout(tabs: Tab[], cur: number | null) {
   try {
-    const i = tabs.findIndex((t) => t.key === cur);
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: Math.max(i, 0), tabs: tabs.map((t) => ({ cwd: t.cwd, label: t.label, kind: t.kind })) }));
+    // A sign-in tab is never saved: a restart must not run a sign-in again.
+    const kept = tabs.filter((t) => t.kind !== "sign_in");
+    const i = kept.findIndex((t) => t.key === cur);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: Math.max(i, 0), tabs: kept.map((t) => ({ cwd: t.cwd, label: t.label, kind: t.kind })) }));
   } catch {
     // storage full or blocked: the dock works, it just forgets the layout
   }
@@ -92,13 +100,13 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     if (el instanceof HTMLElement && el.isConnected) el.focus();
   }, []);
   /** Open a tab and select it, or at the cap say so and change nothing (no selection of a tab that does not exist). */
-  const add = useCallback((p: Place, attachId?: number): number | null => {
+  const add = useCallback((p: Place, attachId?: number, signIn?: string): number | null => {
     if (tabsRef.current.length >= MAX_TABS) {
       setNote(S.terminal.errors.too_many_terminals);
       return null;
     }
     const key = ++seq;
-    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", live: true, attachId, gen: 0, state: { status: "starting" } };
+    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", signIn, live: true, attachId, gen: 0, state: { status: "starting" } };
     tabsRef.current = [...tabsRef.current, tab]; // so a second add in the same tick sees the cap too
     setTabs((t) => [...t, tab]);
     setCur(key);
@@ -191,11 +199,20 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       else add(p);
       show();
     };
+    const onSignIn = (e: Event) => {
+      const r = (e as CustomEvent<SignInRequest>).detail;
+      const have = tabsRef.current.find((t) => t.kind === "sign_in" && t.signIn === r.id && t.state.status !== "ended");
+      if (have) setCur(have.key);
+      else add({ cwd: "", label: r.label, kind: "sign_in" }, undefined, r.id);
+      show();
+    };
     window.addEventListener("keydown", onKey, true); // capture: xterm stops the key before the window sees it otherwise
     window.addEventListener(HERE, onHere);
+    window.addEventListener(SIGN_IN, onSignIn);
     return () => {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener(HERE, onHere);
+      window.removeEventListener(SIGN_IN, onSignIn);
     };
   }, [add, hide, show]);
 
@@ -265,7 +282,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         )}
         <Suspense fallback={<span className="v-term__muted">{S.states.loading}</span>}>
           {tabs.filter((t) => t.live).map((t) => (
-            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} onActivity={onActivity(t.key)} />
+            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} signIn={t.signIn} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} onActivity={onActivity(t.key)} />
           ))}
         </Suspense>
         {active?.state.status === "starting" && <p className="v-term__badge v-term__muted">{S.terminal.starting}</p>}

@@ -312,6 +312,10 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  /** A CLI's own sign-in in a terminal tab (ADR-17). Only a catalog harness id goes over; the core builds the argv. */
+  setupSignIn: (id: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("setup_sign_in", { id, rows, cols }, onMsg),
+  /** `vajra.harness_setup/1`: Settings > Providers > Set up. Parse with `parseSetupList`. */
+  setupList: () => call<unknown>("setup_list"),
   recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),
