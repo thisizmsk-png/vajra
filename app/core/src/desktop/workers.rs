@@ -413,8 +413,12 @@ impl WorkerRuntime {
             e.tree.clone().ok_or(GitwError::Invalid("the ticket has no worktree"))?
         };
         self.0.gw.discard(&t)?;
-        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+        let view = crate::lock(&self.0.book).tickets.get_mut(id).map(|e| {
             e.view.retention = Some(json!({"state": "discarded"}));
+            e.view.clone()
+        });
+        if let Some(v) = view {
+            self.record(&v, "discarded");
         }
         Ok(())
     }
@@ -986,7 +990,14 @@ impl Launch {
                 let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };
-                l.argv = profiles::claude_worker_argv(&wl, &c).map_err(|_| "invalid_input")?;
+                l.argv = match profiles::claude_worker_argv(&wl, &c) {
+                    Ok(a) => a,
+                    Err(_) => {
+                        // The flag file is this launch's alone: nothing spawns, so it goes now.
+                        let _ = profiles::remove_claude_worker_flag(&flag);
+                        return Err("invalid_input");
+                    }
+                };
                 l.env = profiles::worker_env(engine, &wl, None);
                 l.flag = Some(flag);
                 l.session_id = Some(sid);

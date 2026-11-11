@@ -523,6 +523,31 @@ fn a_claude_worker_is_refused_until_s4_and_runs_through_its_profile_when_allowed
 }
 
 #[test]
+fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
+    let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });
+    // The model id passes dispatch but not the argv builder, which runs after the flag file is written.
+    let mut s = seat("w1", "claude");
+    s.model = Some("-bad".into());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), s).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Failed), "{v:?}");
+    assert!(r.log().is_empty(), "nothing ran");
+    let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(flags.is_empty(), "no flag file is left: {flags:?}");
+}
+
+#[test]
+fn a_discard_is_recorded_in_tickets_jsonl() {
+    let r = rig("discardrec", Opts::default());
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let v = r.done(&id);
+    r.rt.discard(&id).unwrap();
+    assert!(!v.worktree.unwrap().exists());
+    let text = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!((last["event"].as_str(), last["ticket"]["retention"]["state"].as_str()), (Some("discarded"), Some("discarded")), "{last}");
+}
+
+#[test]
 fn a_check_ticket_starts_fresh_at_its_commit_and_is_not_judged_by_files() {
     let r = rig("check", Opts { mode: "nothing", ..Opts::default() });
     let v = r.done(&r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap());
