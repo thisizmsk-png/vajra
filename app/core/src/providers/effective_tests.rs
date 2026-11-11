@@ -372,17 +372,21 @@ fn every_fixture_is_counted_the_way_git_counts_it() {
     });
     std::os::unix::fs::symlink("text.txt", repo.join("link-to-text")).unwrap();
     std::os::unix::fs::symlink("/nonexistent/target/that/is/long", repo.join("dangling")).unwrap();
+    // A target is arbitrary text: with newlines it is more than one line, as git counts the link's blob.
+    std::os::unix::fs::symlink("two\nlines", repo.join("link-newline")).unwrap();
+    std::os::unix::fs::symlink("ends\nwith\nnewline\n", repo.join("link-trailing-newline")).unwrap();
     let mut names: Vec<&[u8]> = fixtures.iter().map(|(n, _)| *n).collect();
-    names.extend([b"link-to-text".as_slice(), b"dangling".as_slice()]);
+    names.extend([b"link-to-text".as_slice(), b"dangling".as_slice(), b"link-newline".as_slice(), b"link-trailing-newline".as_slice()]);
     for name in names {
         let want = git_count(&repo, std::ffi::OsStr::from_bytes(name));
         assert_eq!(count_at(&repo, name), Some(want), "{}", String::from_utf8_lossy(name));
     }
     assert_eq!(count_at(&repo, b"link-to-text"), Some(1), "a link counts one line and is not followed");
-    // The whole diff agrees with the sum of git's own counts (3+3+3+0+1+3+0+1+2+2, plus two links), and nothing is partial.
+    assert_eq!((count_at(&repo, b"link-newline"), count_at(&repo, b"link-trailing-newline")), (Some(2), Some(3)));
+    // The whole diff agrees with the sum of git's own counts (3+3+3+0+1+3+0+1+2+2, plus four links: 1, 1, 2, 3, so 18 + 7), and nothing is partial.
     let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
     let non_utf8 = 1 - skipped; // `bad-\xff\xfe-name.txt`: 3 lines when the filesystem takes it
-    assert_eq!((d.files_total, d.added, d.removed, d.partial, d.uncounted), (12 + non_utf8 as u64, 20 + 3 * non_utf8 as u64, 0, false, 0));
+    assert_eq!((d.files_total, d.added, d.removed, d.partial, d.uncounted), (14 + non_utf8 as u64, 25 + 3 * non_utf8 as u64, 0, false, 0));
 }
 
 #[test]

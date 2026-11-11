@@ -403,7 +403,8 @@ fn open_dir_nofollow(path: &Path) -> Option<File> {
 ///
 /// `rel` is the path git listed, as bytes, relative to `root`. Every directory part is opened with `O_NOFOLLOW`, so a
 /// symlinked directory partway down is never entered. The last part is looked at with `fstatat(AT_SYMLINK_NOFOLLOW)`:
-/// - a symlink counts 1 line (its target text, as git does) and is not followed;
+/// - a symlink is not followed: its target text is counted as git counts the link's blob (a target without a newline is
+///   1 line, one with newlines is more);
 /// - a plain file is reopened with `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat`: its lines are its `\n` count, plus 1
 ///   when it is non-empty and does not end in one; a NUL in its first 8000 bytes means binary, which counts 0;
 /// - a FIFO, socket or device is never opened.
@@ -430,7 +431,16 @@ fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64, deadline: Ins
         return None;
     }
     match st.st_mode & libc::S_IFMT {
-        libc::S_IFLNK => Some(1),
+        libc::S_IFLNK => {
+            // Git counts the lines of the link's blob, its target text: read the target (never follow it) and count it
+            // by the same rule as a file, so a target holding newlines is not taken for one line.
+            let mut target = vec![0u8; libc::PATH_MAX as usize + 1];
+            // SAFETY: a valid directory fd, a NUL-terminated name and a buffer of the length passed, all live for this call.
+            let n = unsafe { libc::readlinkat(dir.as_raw_fd(), name.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
+            // A negative result is an error; a full buffer may be a cut target. Neither is counted.
+            let n = usize::try_from(n).ok().filter(|n| *n < target.len())?;
+            count_lines(&mut &target[..n], n as u64, read_left, deadline)
+        }
         libc::S_IFREG => {
             let mut f = open_at(dir, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0).ok()?;
             let size = f.metadata().ok().filter(|m| m.is_file())?.len();
