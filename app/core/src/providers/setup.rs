@@ -181,9 +181,9 @@ impl SignInCommand {
 }
 
 /// `mkdtemp` under the temp dir: a new 0700 folder no other sign-in shares.
-fn private_dir() -> Result<PathBuf, SetupError> {
+pub(crate) fn private_dir(tag: &str) -> Result<PathBuf, SetupError> {
     use std::os::unix::ffi::OsStringExt;
-    let tmpl = std::env::temp_dir().join("vajra-signin-XXXXXXXX");
+    let tmpl = std::env::temp_dir().join(format!("{tag}-XXXXXXXX"));
     let mut bytes = std::ffi::CString::new(tmpl.into_os_string().into_vec()).map_err(|e| SetupError::Io(e.to_string()))?.into_bytes_with_nul();
     // SAFETY: a writable NUL-terminated template that outlives the call.
     let p = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
@@ -205,7 +205,7 @@ pub fn sign_in(id: &str, p: &dyn Probe) -> Result<SignInCommand, SetupError> {
     if !path.is_absolute() || !real.is_file() {
         return Err(SetupError::NotInstalled);
     }
-    Ok(SignInCommand { id: h.id.clone(), name: h.name.clone(), program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
+    Ok(SignInCommand { id: h.id.clone(), name: h.name.clone(), program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir("vajra-signin")? })
 }
 
 #[cfg(test)]

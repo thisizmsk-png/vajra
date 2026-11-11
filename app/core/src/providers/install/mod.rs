@@ -5,5 +5,10 @@
 pub mod admin;
 pub mod closure;
 pub mod env;
+pub mod npm;
+pub mod plan;
 pub mod tar;
 pub mod tools;
+
+#[cfg(test)]
+pub(crate) mod testkit;
