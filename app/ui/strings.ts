@@ -681,7 +681,7 @@ export const S = {
       shared: "Copies share unchanged files with your repo where the disk allows, so the real space used is often less.",
       cleanUp: "Clean up",
       cleanUpHint: "Removes only copies whose work is merged and that hold nothing else. Copies with unmerged work stay.",
-      cleaned: (n: number) => (n === 0 ? "Nothing to remove: every copy still holds work that isn't merged." : `Removed ${n} ${n === 1 ? "copy" : "copies"}.`),
+      cleaned: (n: number) => (n === 0 ? "Nothing removed: no copy is proven merged with nothing else in it." : `Removed ${n} ${n === 1 ? "copy" : "copies"}.`),
       cleanFailed: "Could not clean up.",
     },
     keys: {

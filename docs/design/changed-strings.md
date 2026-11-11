@@ -310,7 +310,7 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | Git settings for agents | preflight row name | shown only while agents are off; Start is disabled |
 | Install developer tools | preflight row button | only while git is missing; opens Apple's installer on click |
 | When the install finishes, restart Vajra. | after that click | announced (status region) |
-| Restart Vajra. If this keeps happening, check that git works in Terminal. | preflight row fix | |
+| Restart Vajra. If this keeps happening, check that git works in Terminal. | preflight row fix | only when the take itself failed; none for a tampered copy or overlapping folders |
 | This worker can't take a message mid-run. | `core:` worker Message and Redirect | Codex profile |
 | Messages to this worker need a Vajra update that isn't installed yet. | `core:` worker Message and Redirect | Claude profile, until the control hook serves top-level sessions |
 | Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill) |
@@ -321,5 +321,5 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | No worker copies on disk. | panel, empty | Clean up is off |
 | Clean up | panel button | |
 | Removes only copies whose work is merged and that hold nothing else. Copies with unmerged work stay. | beside the button | |
-| Removed N copies. / Nothing to remove: every copy still holds work that isn't merged. | after Clean up | announced (status region) |
+| Removed N copies. / Nothing removed: no copy is proven merged with nothing else in it. | after Clean up | announced (status region) |
 | Could not measure the copies. / Could not clean up. | panel errors | |

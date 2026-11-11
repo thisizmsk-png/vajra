@@ -29,8 +29,12 @@ const NO_GIT: &str = "Agents are off: git isn't installed. Vajra needs Apple's d
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Off {
     pub why: String,
+    /// What to do, when there is something: a restart helps only a failed take, never a tampered copy.
+    pub fix: &'static str,
     pub action: Option<&'static str>,
 }
+
+const RESTART: &str = "Restart Vajra. If this keeps happening, check that git works in Terminal.";
 
 /// Where git can come from on macOS: the selected developer dir, then the Command Line Tools, then Xcode. `/usr/bin/git`
 /// is only a shim into one of them; without them, running it opens Apple's install dialog.
@@ -60,9 +64,9 @@ impl WorkerHost {
     pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf]) -> WorkerHost {
         let work = gitw::work_root(home);
         let baseline = if git_installed(dev_roots) {
-            gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| Off { why: why(&e), action: None })
+            gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| Off { why: why(&e), fix: fix(&e), action: None })
         } else {
-            Err(Off { why: NO_GIT.into(), action: Some(INSTALL_DEV_TOOLS) })
+            Err(Off { why: NO_GIT.into(), fix: "", action: Some(INSTALL_DEV_TOOLS) })
         };
         WorkerHost { git: git.to_path_buf(), home: home.to_path_buf(), data: data.to_path_buf(), work, baseline, rt: OnceLock::new() }
     }
@@ -87,7 +91,7 @@ impl WorkerHost {
         let off = self.baseline.as_ref().err()?;
         Some(match off.action {
             Some(a) => json!({"name": "Git settings for agents", "ok": false, "detail": off.why, "fix": "", "action": a, "action_label": "Install developer tools", "action_note": "When the install finishes, restart Vajra."}),
-            None => json!({"name": "Git settings for agents", "ok": false, "detail": off.why, "fix": "Restart Vajra. If this keeps happening, check that git works in Terminal."}),
+            None => json!({"name": "Git settings for agents", "ok": false, "detail": off.why, "fix": off.fix}),
         })
     }
 
@@ -148,6 +152,14 @@ fn copies_under(work: &Path) -> usize {
         std::fs::read_dir(p).map(|rd| rd.flatten().filter(|d| d.file_type().is_ok_and(|t| t.is_dir())).map(|d| d.path()).collect()).unwrap_or_default()
     };
     dirs(work).iter().flat_map(|p| dirs(p)).flat_map(|r| dirs(&r)).filter(|t| t.file_name().is_some_and(|n| n != "tmp")).count()
+}
+
+/// What the row suggests: nothing for a tampered copy or overlapping folders (a restart finds them again).
+fn fix(e: &GitwError) -> &'static str {
+    match e {
+        GitwError::Tampered { .. } | GitwError::WorktreeRootInvalid => "",
+        _ => RESTART,
+    }
 }
 
 /// The plain line for a baseline that couldn't be taken.

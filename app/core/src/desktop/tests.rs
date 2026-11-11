@@ -5422,6 +5422,7 @@ fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_l
     let pf = app.preflight().unwrap();
     let row = pf["rows"].as_array().unwrap().iter().find(|r| r["name"] == "Git settings for agents").cloned().expect("the row");
     assert_eq!((row["ok"].clone(), pf["start_enabled"].clone()), (json!(false), json!(false)), "{pf}");
+    assert_eq!(row["fix"], "", "a restart can't fix a tampered copy, so the row doesn't suggest one");
 }
 
 #[test]
