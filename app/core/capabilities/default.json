@@ -1,11 +1,14 @@
 {
   "identifier": "default",
-  "description": "Core permissions for the main window only, plus dragging the window by its overlay title bar. No shell or fs plugins.",
+  "description": "Core permissions for the main window only, plus dragging the window by its overlay title bar and the one-click install commands (ADR-17). No shell or fs plugins.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-setup-plan",
+    "allow-setup-consent",
+    "allow-setup-run"
   ]
 }

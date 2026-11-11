@@ -5367,3 +5367,20 @@ fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
     assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
     assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
 }
+
+#[test]
+fn one_click_setup_offers_nothing_for_an_unverified_source_and_runs_nothing() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(code(&app.setup_plan("nope").unwrap_err()), "unknown_harness");
+    let v = app.setup_plan("codex").unwrap();
+    assert_eq!(v["manual"], "source_not_verified", "{v}");
+    assert!(v.get("plan").is_none());
+    let token = app.setup_consent("codex", &"a".repeat(64)).unwrap();
+    let token = token["token"].as_str().unwrap().to_string();
+    assert_eq!(token.len(), 32);
+    assert_eq!(code(&app.setup_consent("codex", "not-a-hash").unwrap_err()), "bad_hash");
+    assert_eq!(code(&app.setup_run("codex", &token).unwrap_err()), "source_not_verified");
+    assert!(!t.home().join(".claude/vajra/audit.log").exists() || !fs::read_to_string(t.home().join(".claude/vajra/audit.log")).unwrap().contains("setup id="), "nothing ran, nothing audited");
+    assert!(!format!("{:?}", app.consents).contains(&token));
+}

@@ -82,6 +82,15 @@ fn found(h: &Harness, p: &dyn Probe) -> Found {
     }
 }
 
+/// The binary Set up finds for `h` and the version it reports (None: broken), for a Broken mark. None when missing.
+pub(crate) fn current(h: &Harness, p: &dyn Probe) -> Option<(PathBuf, Option<String>)> {
+    match found(h, p) {
+        Found::Missing => None,
+        Found::Broken(path) => Some((path, None)),
+        Found::Ok(path, v, _) => Some((path, Some(v))),
+    }
+}
+
 fn commands(h: &Harness) -> Vec<Command> {
     h.methods.iter().map(|m| Command { tool: m.tool().unwrap_or("script").into(), command: m.command().into() }).collect()
 }

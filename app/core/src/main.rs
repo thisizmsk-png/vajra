@@ -399,6 +399,25 @@ fn setup_list(app: State<'_, App>) -> Res {
     app.setup_list()
 }
 
+/// The one-click plan for a catalog harness, or why it is "Install it yourself" (ADR-17 rule 3). Main window only: the
+/// app manifest guards it and only the main window's capability allows it.
+#[tauri::command(async)]
+fn setup_plan(app: State<'_, App>, id: String) -> Res {
+    app.setup_plan(&id)
+}
+
+/// The user's Install click on the plan whose hash is `hash`: a single-use consent token (ADR-17 rule 4). Main window only.
+#[tauri::command(async)]
+fn setup_consent(app: State<'_, App>, id: String, hash: String) -> Res {
+    app.setup_consent(&id, &hash)
+}
+
+/// Run the consented install; its output streams on `setup-<id>`. Main window only.
+#[tauri::command(async)]
+fn setup_run(app: State<'_, App>, id: String, token: String) -> Res {
+    app.setup_run(&id, &token)
+}
+
 /// A CLI's own sign-in in a user terminal tab. The UI names a catalog harness id, never a program; the core builds the
 /// argv from the compiled catalog and the binary detection found.
 #[tauri::command(async)]
@@ -735,6 +754,9 @@ fn main() {
             provider_accounts,
             setup_list,
             setup_sign_in,
+            setup_plan,
+            setup_consent,
+            setup_run,
             provider_key_saved,
             provider_key_save,
             provider_key_replace,

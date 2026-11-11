@@ -174,8 +174,14 @@ fn no_mcp_or_control_tool_can_reach_set_up_or_sign_in() {
     }
     // No file under src/control (the socket, the MCP server and every control-service tool, at any depth) names set up,
     // sign-in or the PATH refresh.
-    let banned = ["providers::setup", "open_sign_in", "SignInCommand", "setup_sign_in_command", "setup_list", "userpath::refresh"];
-    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/control")];
+    // Nor the one-click install (bhishma condition 7): its consent and run are main-window commands only, and the CLI
+    // example drives no install either.
+    let banned = [
+        "providers::setup", "open_sign_in", "SignInCommand", "setup_sign_in_command", "setup_list", "userpath::refresh",
+        "providers::install", "setup_plan", "setup_consent", "setup_run", "spawn_setup", "Consents",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut dirs = vec![root.join("src/control"), root.join("examples")];
     let mut scanned = 0;
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -209,4 +215,13 @@ fn a_broken_mark_holds_even_when_the_version_check_passes() {
     let newer = Fake::default().with("claude", 0, "2.1.323 (Claude Code)");
     let r = list_marked(&newer, false, &marks).rows.into_iter().find(|r| r.id == "claude").unwrap();
     assert_eq!(r.state, State::Installed, "a new version clears it");
+}
+
+#[test]
+fn current_names_the_binary_and_its_version_or_none() {
+    let h = catalog::find("claude").unwrap();
+    let (path, v) = current(h, &Fake::default().with("claude", 0, "2.1.322 (Claude Code)")).unwrap();
+    assert_eq!((path.to_str(), v.as_deref()), (Some("/opt/homebrew/bin/claude"), Some("2.1.322")));
+    assert_eq!(current(h, &Fake::default().with("claude", 1, "")).unwrap().1, None, "broken: a path, no version");
+    assert!(current(h, &Fake::default()).is_none());
 }
