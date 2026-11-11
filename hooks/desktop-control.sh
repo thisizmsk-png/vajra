@@ -186,6 +186,8 @@ M_ID="" M_KIND=""
 CORE_MAX_BYTES=65536
 match_entry() { # file want(stop|deliver) -> sets M_ID, M_KIND; rc 0 on match
   local out mode rest c sz
+  # A core worker reads only regular files: never a FIFO (a read would hang) and never through a symlink.
+  if [ -z "$AID" ]; then [ -f "$1" ] && [ ! -L "$1" ] || return 1; fi
   if [ -z "$AID" ] && [ "$2" = deliver ]; then
     sz="$(wc -c < "$1")" || return 1
     sz="${sz//[^0-9]/}"
@@ -200,21 +202,42 @@ match_entry() { # file want(stop|deliver) -> sets M_ID, M_KIND; rc 0 on match
   [ -n "$c" ] && [ "$c" = "$PCWD" ]
 }
 
-# A main session is a core worker only while its own dir holds a stop, or an unexpired queue entry, matching
-# {"session": <its session id>}. Anything else (no such entry, a malformed or oversized one) keeps today's exit 0.
-# grep only picks the files that name the session id (cheap); match_entry then checks each one exactly.
+# A main session becomes a core worker when its own dir holds a stop, or an unexpired queue entry, matching
+# {"session": <its session id>}. Anything else (no such entry, a malformed or oversized one, a FIFO or a symlink)
+# keeps today's exit 0. grep reads only the regular files (a FIFO would hang it) and picks those that name the session
+# id (cheap); match_entry then checks each one exactly.
 core_worker() {
-  local f
+  local f files=()
+  for f in "$D"/stops/*.json "$D"/queue/*.json; do
+    [ -f "$f" ] && [ ! -L "$f" ] && files[${#files[@]}]="$f"
+  done
+  [ "${#files[@]}" -gt 0 ] || return 1
   while IFS= read -r f; do
     case "$f" in
       "$D"/stops/*) match_entry "$f" stop && return 0 ;;
       "$D"/queue/*) match_entry "$f" deliver && return 0 ;;
     esac
-  done < <(grep -lF -- "\"$SID\"" "$D"/stops/*.json "$D"/queue/*.json 2>/dev/null)
+  done < <(grep -lF -- "\"$SID\"" "${files[@]}" 2>/dev/null)
   return 1
 }
-if [ -z "$AID" ]; then
+# Once a core worker, always one for this session: the marker keeps the nonce echo check and the tag warning on
+# between entries (bhishma #150). It holds the session id; a symlink, another owner or another id is not trusted.
+# It never makes an entry match: delivery and stop still need a session entry.
+CORE_MARK="$D/core-worker"
+core_marked() {
+  local s=""
+  [ -f "$CORE_MARK" ] && [ ! -L "$CORE_MARK" ] && [ -O "$CORE_MARK" ] || return 1
+  IFS= read -r s < "$CORE_MARK" || [ -n "$s" ] || return 1
+  [ "$s" = "$SID" ]
+}
+mark_core() {
+  local tmp="$D/.core-worker.$$.tmp"
+  printf '%s\n' "$SID" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CORE_MARK" 2>/dev/null && return 0
+  rm -f "$tmp"; return 1
+}
+if [ -z "$AID" ] && ! core_marked; then
   core_worker || exit 0
+  mark_core || true
 fi
 
 case "$EV" in
