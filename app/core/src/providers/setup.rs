@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use super::catalog::{self, Harness};
 use super::detect::{is_tested, version_of, Probe};
+use super::install::marks::Marks;
 
 pub const SETUP_SCHEMA: &str = "vajra.harness_setup/1";
 
@@ -85,7 +86,7 @@ fn commands(h: &Harness) -> Vec<Command> {
     h.methods.iter().map(|m| Command { tool: m.tool().unwrap_or("script").into(), command: m.command().into() }).collect()
 }
 
-fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
+fn row(h: &Harness, p: &dyn Probe, marks: &Marks) -> SetupRow {
     let base = |state, version: Option<String>, path: Option<&Path>, reason: Option<&str>, commands: Vec<Command>| SetupRow {
         id: h.id.clone(),
         name: h.name.clone(),
@@ -102,6 +103,10 @@ fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
         Found::Missing => base(State::Manual, None, None, Some("source_not_verified"), commands(h)),
         Found::Broken(path) => base(State::Broken, None, Some(&path), Some("version_failed"), commands(h)),
         Found::Ok(path, v, mm) => {
+            // A failed closure check or rollback holds until a passing check or a different binary or version (condition 1).
+            if let Some(reason) = marks.active(&h.id, &path, Some(&v)) {
+                return base(State::Broken, Some(v), Some(&path), Some(&reason), commands(h));
+            }
             // Runnable only with an adapter tested on this version (ADR-17 rule 9), the same range launch checks.
             let state = if h.adapter.as_deref().is_some_and(|a| is_tested(a, mm)) { State::Installed } else { State::Unsupported };
             base(state, Some(v), Some(&path), None, Vec::new())
@@ -112,10 +117,15 @@ fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
 /// One row per catalog entry, plus the engine-scripts row (`engine_installed` from the caller's preflight read). Always
 /// answers; a catalog that does not parse gives no rows.
 pub fn list(p: &dyn Probe, engine_installed: bool) -> SetupList {
+    list_marked(p, engine_installed, &Marks::none())
+}
+
+/// `list`, with the Broken marks of a failed one-click install (`install::marks`).
+pub fn list_marked(p: &dyn Probe, engine_installed: bool, marks: &Marks) -> SetupList {
     let cat = catalog::catalog().ok();
     SetupList {
         schema: SETUP_SCHEMA.into(),
-        rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p)).collect()).unwrap_or_default(),
+        rows: cat.map(|c| c.harnesses.iter().map(|h| row(h, p, marks)).collect()).unwrap_or_default(),
         engine: EngineRow { installed: engine_installed, command: cat.map(|c| c.engine_scripts.manual_command.clone()).unwrap_or_default() },
     }
 }

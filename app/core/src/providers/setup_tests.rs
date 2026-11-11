@@ -193,3 +193,20 @@ fn no_mcp_or_control_tool_can_reach_set_up_or_sign_in() {
     }
     assert!(scanned > 0);
 }
+
+#[test]
+fn a_broken_mark_holds_even_when_the_version_check_passes() {
+    let d = std::env::temp_dir().join(format!("vajra-setup-marks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let marks = crate::providers::install::marks::Marks::at(&d);
+    let fake = Fake::default().with("claude", 0, "2.1.322 (Claude Code)");
+    let path = list(&fake, false).rows.iter().find(|r| r.id == "claude").unwrap().path.clone().unwrap();
+    marks.set("claude", Path::new(&path), Some("2.1.322"), "closure_mismatch").unwrap();
+    let r = list_marked(&fake, false, &marks).rows.into_iter().find(|r| r.id == "claude").unwrap();
+    assert_eq!((r.state, r.reason_code.as_deref()), (State::Broken, Some("closure_mismatch")));
+    assert!(!r.can_sign_in);
+    let newer = Fake::default().with("claude", 0, "2.1.323 (Claude Code)");
+    let r = list_marked(&newer, false, &marks).rows.into_iter().find(|r| r.id == "claude").unwrap();
+    assert_eq!(r.state, State::Installed, "a new version clears it");
+}

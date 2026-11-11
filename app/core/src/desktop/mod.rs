@@ -754,7 +754,8 @@ impl App {
             crate::userpath::refresh(&self.home);
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
-        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+        let marks = crate::providers::install::marks::Marks::at(&self.data);
+        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
     }
 
     /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
