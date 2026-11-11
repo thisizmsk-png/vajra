@@ -306,21 +306,34 @@ fn node_json_is_recursive() {
         status: Status::Done,
         overlays: vec!["stopped"],
         provider: None,
+        controls: None,
+        diff: None,
         children: vec![],
     };
-    let root = Node { id: "r".into(), kind: tree::NodeKind::Run, title: "Run".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None, children: vec![leaf] };
+    let root = Node { id: "r".into(), kind: tree::NodeKind::Run, title: "Run".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None, controls: None, diff: None, children: vec![leaf] };
     let v = node_json(&root, &|_| None);
     assert_eq!(v["kind"], "run");
     assert_eq!(v["children"][0]["kind"], "worker");
     assert_eq!(v["children"][0]["overlays"], json!(["stopped"]));
     assert_eq!(v["children"][0]["provider"], Value::Null, "a worker that has not reported a model has no provider tag");
+    assert!(v["children"][0].get("controls").is_none() && v["children"][0].get("diff").is_none(), "left out, not null");
+}
+
+#[test]
+fn a_core_node_carries_its_controls_and_its_own_diff() {
+    let leaf = Node {
+        id: "core:r1.t1.r1".into(), kind: tree::NodeKind::Round, title: "round 1".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None,
+        controls: Some(json!({"message": {"enabled": false}})), diff: Some(json!({"added": 2})), children: vec![],
+    };
+    let v = node_json(&leaf, &|_| Some(json!({"added": 99})));
+    assert_eq!((v["controls"]["message"]["enabled"].as_bool(), v["diff"]["added"].as_u64()), (Some(false), Some(2)));
 }
 
 #[test]
 fn a_node_carries_the_provider_the_worker_reported() {
     use crate::providers::effective::ProviderTag;
     let tag = ProviderTag::new("openrouter", "vendor/model-a", "gateway", None);
-    let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), children: vec![] };
+    let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), controls: None, diff: None, children: vec![] };
     assert_eq!(node_json(&leaf, &|_| None)["provider"], json!({"account": "openrouter", "label": "OpenRouter", "family": "vendor", "model": "vendor/model-a", "model_name": null, "billing": "gateway", "requested": null, "error": null}));
 }
 
@@ -2047,7 +2060,7 @@ fn evidence_outside_the_campaign_or_with_a_dotdot_path_is_unverified_without_run
 #[test]
 fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
     use crate::crew::tree::{Node, NodeKind, Status};
-    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], provider: None, children: vec![] };
+    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], provider: None, controls: None, diff: None, children: vec![] };
     let j = node_json(&n, &|_| None);
     assert_eq!(j["role"], "Backend", "{j}");
     assert_eq!(j["engine_id"], "bhima");

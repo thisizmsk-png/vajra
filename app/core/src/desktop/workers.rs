@@ -201,6 +201,8 @@ pub struct TicketView {
     pub leftovers: Vec<String>,
     pub receipt: Option<Value>,
     pub mismatch: Option<Value>,
+    /// What the worker ran on, from its receipt, for every surface that draws it.
+    pub provider: Option<effective::ProviderTag>,
     /// Code-built, redacted, wrapped as data.
     pub summary: Option<Value>,
     /// Retention: `kept` with the paths that keep it, or `removed`.
@@ -285,7 +287,7 @@ impl WorkerRuntime {
             id: id.clone(), run: s.run.clone(), task: s.task.clone(), round: s.round, kind, slot: seat.slot.clone(), account: seat.account.clone(),
             state: State::Queued, queue_position: None, wait: None, attempt: 0, elapsed_s: 0, dispatch_head: None, worktree: None, deps: Vec::new(),
             outcome: None, reason: None, detail: None, harness_session: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
-            receipt: None, mismatch: None, summary: None, retention: None, started: None,
+            receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
         b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None });
@@ -714,6 +716,7 @@ impl WorkerRuntime {
             if let Some(r) = &receipt {
                 e.view.receipt = serde_json::to_value(r).ok();
                 e.view.mismatch = r.mismatch_event();
+                e.view.provider = r.provider();
             }
             finish_view(&mut e.view, o, reason);
             e.view.summary = Some(summary(&e.view, &self.0.cfg.redact));
@@ -772,6 +775,42 @@ impl Clock for TicketClock<'_> {
                 return;
             }
             b = self.rt.0.changed.wait_timeout(b, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+}
+
+impl TicketView {
+    /// The crew tree's `core:<ticket>` node input (16.7): status from the state and outcome, the controls from the
+    /// seat's harness profile, the diff once there is a commit.
+    pub fn core_worker(&self) -> crate::crew::tree::CoreWorker {
+        use crate::crew::tree::Status;
+        let (status, overlay) = match (self.state, self.outcome) {
+            (State::Queued, _) => (Status::Pending, Some("queued")),
+            (State::Running, _) => (Status::InProgress, None),
+            (State::Ended, Some(Outcome::Done)) => (Status::Done, None),
+            (State::Ended, Some(Outcome::Progress)) => (Status::Blocked, Some("partly done")),
+            (State::Ended, Some(Outcome::NeedsUser)) => (Status::Question, None),
+            (State::Ended, Some(Outcome::Stopped)) => (Status::Failed, Some("stopped by the human")),
+            (State::Ended, _) => (Status::Failed, None),
+        };
+        let controls = match launch::harness_of(&self.account) {
+            Some(e) => profiles::controls(e).to_json(),
+            None => json!({}),
+        };
+        let diff = self.commit.as_ref().map(|_| {
+            let files: Vec<&String> = self.files.iter().take(200).collect();
+            json!({"files_total": self.files.len(), "files": files, "added": self.added, "removed": self.removed, "partial": false, "uncounted": 0})
+        });
+        crate::crew::tree::CoreWorker {
+            ticket: self.id.clone(),
+            task: self.task.clone(),
+            round: self.round,
+            check: self.kind != "writer",
+            status,
+            overlays: overlay.into_iter().collect(),
+            provider: self.provider.clone(),
+            controls,
+            diff,
         }
     }
 }

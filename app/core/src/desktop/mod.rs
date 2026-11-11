@@ -1002,7 +1002,7 @@ impl App {
             (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
             _ => Signals::default(),
         };
-        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &[], &signals)))?;
         // The counts come from the cache; due workers are handed to a background thread, never counted here.
         if let (true, Some((_, r))) = (running, &run) {
             let targets = workers
@@ -2236,9 +2236,13 @@ fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
         "provider": n.provider,
         "children": n.children.iter().map(|c| node_json(c, diff_of)).collect::<Vec<_>>(),
     });
-    // A worker's change count, once counted; the field is left out (not null) while there is none.
-    if let Some(diff) = n.id.strip_prefix("agent:").and_then(diff_of) {
+    // A worker's change count, once counted; the field is left out (not null) while there is none. A core worker's
+    // count comes with its ticket.
+    if let Some(diff) = n.diff.clone().or_else(|| n.id.strip_prefix("agent:").and_then(diff_of)) {
         v["diff"] = diff;
+    }
+    if let Some(c) = &n.controls {
+        v["controls"] = c.clone();
     }
     v
 }

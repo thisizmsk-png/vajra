@@ -459,3 +459,16 @@ fn s4_passes_only_when_every_probe_ran_and_was_refused() {
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("FAIL  the Write call came back refused") && out.contains("FAIL  the plan reached its last turn"), "{out}");
 }
+
+/// 16.7: the harness profile decides Message, Redirect and Stop for a core worker.
+#[test]
+fn controls_follow_the_harness_profile() {
+    let codex = controls(Engine::Codex);
+    assert_eq!((codex.message, codex.stop), (Some(NO_MESSAGE), StopHow::GroupKill));
+    let j = codex.to_json();
+    assert_eq!((j["message"]["enabled"].as_bool(), j["redirect"]["reason"].as_str()), (Some(false), Some("This worker can't take a message mid-run.")));
+    assert_eq!(j["stop"]["note"], "Stop ends this worker at once; its uncommitted work stays in its worktree.");
+    let claude = controls(Engine::Claude);
+    assert_eq!((claude.message, claude.stop), (None, StopHow::HookBlock));
+    assert_eq!(claude.to_json()["message"]["enabled"], true);
+}

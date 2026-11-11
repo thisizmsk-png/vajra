@@ -485,3 +485,14 @@ fn a_stop_during_a_retry_backoff_ends_the_ticket_at_once() {
     assert_eq!(v.outcome, Some(Outcome::Stopped), "{v:?}");
     assert!(t0.elapsed() < Duration::from_secs(5), "not after the 30 s backoff: {:?}", t0.elapsed());
 }
+
+#[test]
+fn an_ended_ticket_becomes_a_core_node_with_its_profile_controls_diff_and_provider() {
+    let r = rig("corenode", Opts::default());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let c = v.core_worker();
+    assert_eq!((c.ticket.as_str(), c.task.as_str(), c.round, c.check, c.status), ("r1.t1.r1", "t1", 1, false, crate::crew::tree::Status::Done));
+    assert_eq!(c.controls["message"]["reason"], profiles::NO_MESSAGE, "Codex: Message is off, with its reason");
+    assert_eq!(c.diff.unwrap()["added"], 1);
+    assert_eq!(c.provider.unwrap().model, "model-fake-1");
+}
