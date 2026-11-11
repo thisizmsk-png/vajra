@@ -114,6 +114,10 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
   case "$p" in
     "~") p="$HOME" ;;
     "~/"*) p="$HOME/${p#??}" ;;
+    "~+"|"~+/"*) p="${base%/}${p#??}" ;;  # ~+ is the cwd
+    # ~name (another or the same account, via the account database) and ~- (OLDPWD)
+    # expand to a directory this script cannot know: fail closed, as Glob does.
+    "~"?*) block "a ~name or ~- path cannot be resolved; write the path in full: $p" ;;
   esac
   case "$p" in /*) ;; *) p="${base%/}/$p" ;; esac
   while :; do
@@ -833,10 +837,34 @@ if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
   [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
 fi
-# ADR-16: the same for any path below the app data dir, so a spelling the path
-# analysis cannot resolve (a variable, ${IFS}, $'\040') never hides a write there.
-if [[ "$CMD" == *vajradesktop/* || "$CMD" == *vajradesktop\\* ]]; then
+# ADR-16: the same for the app data dir <data> and every path below it, so a
+# spelling the path analysis cannot resolve never hides a write there. A command
+# names <data> path-wise when, in the raw text or with quotes and backslashes
+# removed (Vajra''Desktop, "Vajra"Desktop, Vajra\Desktop), it has /VajraDesktop at
+# a word end, VajraDesktop/ or VajraDesktop\. Such a command:
+#   * must spell "Application Support" plainly (not ${IFS}, $'\040', ...);
+#   * may use no shell expansion but $HOME/${HOME}: a variable, $(...), backticks,
+#     $'...' or ${...} could hold or build the path (D=<data>; rm -rf "$D").
+# A command with an "Application ... Support/Vajra..." path (other than VajraWorktrees,
+# the writable <work>) gets the expansion rule too, so Vajra$V is refused as well.
+# bash 3.2 pattern substitution is slow on big strings: tr strips a big command linearly.
+if [ "${#CMD}" -lt 16384 ]; then DRAW="${CMD//[\"\'\\]/}"; else DRAW="$(printf '%s' "$CMD" | LC_ALL=C tr -d "\"'\\\\")"; fi
+DNAMED=0 DAPP=0
+for v in "$CMD" "$DRAW"; do
+  [[ "$v" == *vajra* ]] || continue # every form below names "vajra"; skip the costlier patterns otherwise
+  case "$v" in
+    */vajradesktop|*/vajradesktop[!a-z0-9_.-]*|*vajradesktop/*|*vajradesktop\\*) DNAMED=1 ;;
+  esac
+  case "$v" in *application*support/vajra|*application*support/vajra[!w]*) DAPP=1 ;; esac
+done
+if [ "$DNAMED" = 1 ]; then
   [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
+fi
+if [ "$DNAMED" = 1 ] || [ "$DAPP" = 1 ]; then
+  DX="${CMD//'${HOME}'/}"
+  [[ "$DX" == *'$HOME'[A-Za-z0-9_]* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables; write the path literally (\$HOME is fine)"
+  DX="${DX//'$HOME'/}"
+  [[ "$DX" == *'$'* || "$DX" == *'`'* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables or substitutions; write the path literally (\$HOME is fine)"
 fi
 shopt -u nocasematch
 

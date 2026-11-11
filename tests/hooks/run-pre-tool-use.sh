@@ -687,6 +687,52 @@ bash_case BLOCK "D16 cat heredoc, cwd runs/r1/lead" "cat > brief.md <<'EOF'
 x
 EOF" "$DATA/runs/r1/lead"
 bash_case ALLOW "D16 reader redirect, cwd in work"  "echo x > a.txt" "$WORK/proj/r1/t1-r1"
+# bhishma H1/L1 on #148: readers with a plain-word target from every first-level dir below <data>.
+bash_case BLOCK "D16 cwd below data, echo > plain word"  'echo x > brief.md'        "$DATA/runs/r1/lead"
+bash_case BLOCK "D16 cwd below data, printf >> plain"    'printf x >> new.json'     "$DATA/runs"
+bash_case BLOCK "D16 cwd profiles, echo > plain"         'echo x > claude-worker.json' "$DATA/profiles"
+bash_case BLOCK "D16 cwd git-baseline, printf > plain"   'printf x > config'        "$DATA/git-baseline"
+bash_case BLOCK "D16 cd below data && echo > plain"      "cd \"$DATA/runs\" && echo x > a.json"
+bash_case BLOCK "D16 cd git-baseline && cat > config"    "cd \"$DATA/git-baseline\" && cat /tmp/x > config"
+bash_case BLOCK "D16 cd below data && git log > plain"   "cd \"$DATA/runs\" && git log > a"
+bash_case BLOCK "D16 cd below data && jq > plain"        "cd \"$DATA/runs/r1/lead\" && jq . brief.md > b2.md"
+# claude #148 thread 2: an odd spelling of the bare <data> root.
+bash_case BLOCK "D16 rm -rf root, \${IFS}"          'rm -rf ~/Library/Application${IFS}Support/VajraDesktop'
+bash_case BLOCK "D16 mv root, \$'\\040'"             'mv ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop /tmp/x'
+bash_case BLOCK "D16 rm -rf root, \${IFS}, trailing ;" 'rm -rf ~/Library/Application${IFS}Support/VajraDesktop; ls'
+bash_case BLOCK "D16 mv root, \${IFS}, quoted"       'mv "$HOME/Library/Application${IFS}Support/VajraDesktop" /tmp/x'
+# bhishma H2: a variable holds <data> or an ancestor; quote-split app names.
+bash_case BLOCK "D16 var holds data, redirect"      "D=\"$DATA\"; echo x > \"\$D/seats.json\""
+bash_case BLOCK "D16 var holds data, cd && echo"    "D=\"$DATA\"; cd \"\$D\" && echo x > seats.json"
+bash_case BLOCK "D16 var holds data, cp"            "D=\"$DATA\"; cp /tmp/e \"\$D/seats.json\""
+bash_case BLOCK "D16 export var, tee"               "export D=\"$DATA\"; echo x | tee \"\$D/runs/x\""
+bash_case BLOCK "D16 var holds data, rm -rf root"   "D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 var holds data, \${D}"         "D=\"$DATA\"; echo x > \"\${D}/seats.json\""
+bash_case BLOCK "D16 var holds app-support parent"  "A=\"$H/Library/Application Support\"; echo x > \"\$A/VajraDesktop/seats.json\""
+bash_case BLOCK "D16 var builds the app name"       'V=Desktop; echo x > ~/Library/Application\ Support/Vajra$V/seats.json'
+bash_case BLOCK "D16 \$(...) builds the path"       'echo x > "$(echo ~/Library/Application\ Support)/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 backticks build the path"      'echo x > "`echo ~`/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 \$HOMEX is not \$HOME"         'echo x > "$HOMEX/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 B1 \${IFS} + \"VajraDesktop\"/" 'echo x > ~/Library/Application${IFS}Support/"VajraDesktop"/seats.json'
+bash_case BLOCK "D16 B2 \${IFS} + Vajra''Desktop/"   "echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 B3 \$'\\040' + Vajra\\Desktop/"  'echo x > ~/Library/Application$'"'"'\040'"'"'Support/Vajra\Desktop/seats.json'
+bash_case BLOCK "D16 var holds data, >16 KB command" "echo $(printf 'a%.0s' $(seq 1 17000)) ; D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 quote-split, >16 KB command"   "echo $(printf 'a%.0s' $(seq 1 17000)) ; echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 quote-split, plain spelling"  "echo x > ~/Library/Application\ Support/Vajra''Desktop/seats.json"
+# bhishma M1: ~name and ~- forms are refused outright (fail closed); ~+ is the cwd.
+U="$(id -un)"
+bash_case BLOCK "D16 ~user tilde, redirect"         "echo x > ~$U/\"${DATA#$H/}/seats.json\""
+bash_case BLOCK "D16 ~user tilde, control"          "echo x > ~$U/\"${DATA#$H/}/control/x\""
+bash_case BLOCK "D16 ~user tilde, rm -rf root"      "rm -rf ~$U/Library/Application\ Support/VajraDesktop"
+file_case BLOCK "D16 ~user tilde, Write"            Write "~$U/${DATA#$H/}/seats.json"
+bash_case BLOCK "D16 ~- tilde"                      'echo x > ~-/seats.json'
+bash_case BLOCK "D16 ~+ is the cwd"                 'echo x > ~+/seats.json' "$DATA"
+bash_case ALLOW "D16 ~+ inside work"                'echo x > ~+/a.txt' "$WORK/proj/r1/t1-r1"
+# The plain forms keep working: $HOME and ${HOME}, the bare word, a $ with no <data> path.
+bash_case ALLOW "D16 cat via \$HOME"                'cat "$HOME/Library/Application Support/VajraDesktop/seats.json"'
+bash_case ALLOW "D16 ls via \${HOME}"               'ls "${HOME}/Library/Application Support/VajraDesktop"'
+bash_case ALLOW "D16 bare word with a \$ anchor"    "grep -rn 'VajraDesktop\$' src"
+bash_case ALLOW "D16 var in work, no data path"     "W=\"$WORK/proj/r1/t1-r1\"; echo x > \"\$W/a.txt\""
 bash_case BLOCK "D16 odd spacing \${IFS}"           'echo x > ~/Library/Application${IFS}Support/VajraDesktop/seats.json'
 bash_case BLOCK "D16 odd spacing \$'\\040'"          'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/seats.json'
 bash_case BLOCK "D16 variable spelling"             'D="$HOME/Library/Application"; echo x > "$D Support/VajraDesktop/seats.json"'
