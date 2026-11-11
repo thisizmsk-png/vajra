@@ -16,7 +16,7 @@ import { ProviderCard, useProviders } from "../ProviderControls";
 import { AccountsPanel } from "../Accounts";
 import { useAccounts } from "../../providerData";
 import { ProjectAgents } from "../ProjectAgents";
-import { SetupPanel } from "./SetupPanel";
+import { SetupPanel, useSetup } from "./SetupPanel";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
@@ -36,7 +36,7 @@ export const SHORTCUTS: ReadonlyArray<{ label: string; keys: string[] }> = [
   { label: S.settings.keys.start, keys: ["⌘", "↵"] },
 ];
 
-function useChecks(on: boolean, also?: () => void) {
+function useChecks(on: boolean, recheck: () => void) {
   const [pre, setPre] = useState<Preflight | null>(null);
   const [err, setErr] = useState("");
   const [at, setAt] = useState<Date | null>(null);
@@ -45,7 +45,7 @@ function useChecks(on: boolean, also?: () => void) {
     api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e))).finally(() => setAt(new Date()));
   }, []);
   useEffect(() => { if (on) run(); }, [on, run]);
-  useCommands(on ? [{ id: "recheck", label: S.settings.recheck, run: () => { run(); also?.(); } }] : []);
+  useCommands(on ? [{ id: "recheck", label: S.settings.recheck, run: recheck }] : []);
   return { pre, err, at, run };
 }
 
@@ -57,8 +57,10 @@ export function Settings() {
   const meta = S.settings.sections[section];
   const providers = useProviders(section === "providers");
   const accounts = useAccounts(section === "providers");
-  const checks = useChecks(section === "providers", providers.reload);
-  const recheck = () => { checks.run(); providers.reload(); accounts.reload(); };
+  const setup = useSetup(section === "providers");
+  const checks = useChecks(section === "providers", () => recheck());
+  // Set up first: asking for it re-resolves the user PATH, so a CLI installed into a new bin folder is found by the checks after it.
+  const recheck = () => { void setup.reload().then(() => { checks.run(); providers.reload(); accounts.reload(); }); };
   return (
     <div className="v-screen v-settings">
       <div className="v-settings__grid">
@@ -76,7 +78,7 @@ export function Settings() {
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
             {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
-            {section === "providers" && <SetupPanel />}
+            {section === "providers" && <SetupPanel setup={setup} />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-agents" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">

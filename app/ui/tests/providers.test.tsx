@@ -154,6 +154,36 @@ describe("Settings > Providers (FG-09)", () => {
   });
 });
 
+describe("Settings > Providers > Set up recheck (ADR-17 rule 7)", () => {
+  const row = (installed: boolean) => ({
+    id: "codex", name: "Codex CLI", state: installed ? "installed" : "manual", version: installed ? "0.167.1" : null,
+    path: installed ? "/new/bin/codex" : null, reason_code: installed ? null : "source_not_verified",
+    commands: [{ tool: "brew", command: "brew install --cask codex" }], docs_url: "https://github.com/openai/codex", can_sign_in: installed,
+  });
+  const setupList = (installed: boolean) => ({ ...SETUP_EMPTY, rows: [row(installed)] });
+
+  it("Check again re-reads Set up, so a CLI installed with the vendor's steps gains Sign in without leaving the page", async () => {
+    let n = 0;
+    settings({ setup_list: () => setupList(++n > 1) });
+    await screen.findByText(S.setup.state.manual);
+    expect(screen.queryByRole("button", { name: S.setup.signIn("Codex CLI") })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.settings.recheck }));
+    expect(await screen.findByRole("button", { name: S.setup.signIn("Codex CLI") })).toBeTruthy();
+    expect(screen.getByText("/new/bin/codex")).toBeTruthy();
+    expect(screen.queryByText(S.setup.state.manual)).toBeNull();
+  });
+
+  it("refreshes the PATH (setup_list) before the checks that depend on it", async () => {
+    const f = settings({ setup_list: () => setupList(false) });
+    await screen.findByText(S.setup.state.manual);
+    const from = f.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: S.settings.recheck }));
+    await waitFor(() => expect(f.calls.slice(from).map((c) => c.cmd)).toEqual(expect.arrayContaining(["setup_list", "preflight", "provider_list"])));
+    const order = f.calls.slice(from).map((c) => c.cmd).filter((c) => ["setup_list", "preflight", "provider_list"].includes(c));
+    expect(order[0]).toBe("setup_list");
+  });
+});
+
 describe("Start and Resume use the chosen provider (FG-09)", () => {
   // Home starts through an action receipt (FG-11); the provider rides in the same input a direct start sends.
   const started = { receipt: { schema: "vajra.receipt/1", action_id: "act-x", project_id: "p_x", action: "start_run", target: "p_x", expect_generation: null, current_generation: null, state: "done", reason: null, detail: null, retry: "no", rev: 1, ts_ms: 1 }, result: { stream: "s", session_id: "u", run_id: "r1", campaign: "c1" } };

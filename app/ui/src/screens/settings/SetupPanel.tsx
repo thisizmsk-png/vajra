@@ -14,13 +14,15 @@ import { openSignIn } from "../../terminal/TerminalDock";
 const C = S.setup;
 
 
+/** The Set up list. Asking for it also re-resolves the user PATH in the core (ADR-17 rule 7), so a page recheck awaits
+ * `reload` before the checks that read the PATH. The returned promise never rejects. */
 export function useSetup(on = true) {
   const seq = useRef(0);
   const [s, setS] = useState<{ list: SetupList | null; error: string }>({ list: null, error: "" });
-  const reload = useCallback(() => {
+  const reload = useCallback((): Promise<void> => {
     const mine = ++seq.current;
     setS((x) => ({ ...x, error: "" }));
-    api.setupList().then((v) => {
+    return api.setupList().then((v) => {
       if (mine !== seq.current) return;
       const r = parseSetupList(v);
       setS(r.ok ? { list: r.value, error: "" } : { list: null, error: r.reason === "unsupported_version" ? C.updateNeeded : C.unreadable });
@@ -99,9 +101,11 @@ function Engine({ engine }: { engine: SetupList["engine"] }) {
   );
 }
 
-/** The Set up panel; Settings > Providers mounts it above the agents on this Mac. */
-export function SetupPanel() {
-  const { list, error, reload } = useSetup();
+/** The Set up panel; Settings > Providers mounts it above the agents on this Mac and passes its own `useSetup`, so the
+ * page's Check again re-reads it. Without one the panel loads by itself. */
+export function SetupPanel({ setup }: { setup?: ReturnType<typeof useSetup> }) {
+  const own = useSetup(!setup);
+  const { list, error, reload } = setup ?? own;
   return (
     <section aria-labelledby="v-settings-setup" className="v-panel v-settings__checks">
       <div className="v-panel__bar">
