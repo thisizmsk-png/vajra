@@ -48,7 +48,7 @@ function Steps({ row }: { row: SetupRow }) {
         ))}
       </ul>
       <p className="v-setup__docs">
-        <span className="v-setup__tool">{C.vendorSteps(row.name)}</span>
+        <span className="v-setup__tool" aria-hidden="true">{C.docs}</span>
         <code className="v-prov__path" aria-label={C.vendorSteps(row.name)}>{row.docs_url}</code>
       </p>
     </div>

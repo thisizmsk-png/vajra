@@ -588,6 +588,7 @@ export const S = {
     } as Record<string, string>,
     tool: { brew: "Homebrew", npm: "npm", script: "Vendor script" } as Record<string, string>,
     vendorSteps: (name: string) => `${name} install steps`,
+    docs: "Docs",
     signIn: (name: string) => `Sign in to ${name}`,
     signInTab: (name: string) => `Sign in: ${name}`,
     signInHint: "Opens the CLI's own sign-in in a terminal tab.",
