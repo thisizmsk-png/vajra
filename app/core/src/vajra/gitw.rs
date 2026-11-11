@@ -719,11 +719,34 @@ impl Gitw {
         if wt.exists() || private.exists() {
             return Err(GitwError::Exists);
         }
-        for d in [&run_dir, &tmp, &private] {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d).map_err(io)?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&run_dir).map_err(io)?;
+        let wt_s = wt.to_str().ok_or(GitwError::Invalid("worktree path"))?.to_string();
+        self.ok("worktree add", Call::new(At::Repo(&repo), &["worktree", "add", "--detach", "--", &wt_s, from]))?;
+        // From here every error rolls back: the worktree is unregistered and removed, and the dirs this call made are
+        // gone, so a retry of the same ticket starts clean (never a permanent `Exists`).
+        let made = (|| {
+            #[cfg(test)]
+            if FAIL_AFTER_ADD.with(|f| f.get()) {
+                return Err(tampered("test: fail after worktree add"));
+            }
+            for d in [&tmp, &private] {
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d).map_err(io)?;
+            }
+            self.verify_tree(repo.clone(), &common, &wt, &tmp, &private, (project, run, task, round), from, integration)
+        })();
+        if made.is_err() {
+            let _ = self.run(Call::new(At::Repo(&repo), &["worktree", "remove", "--force", "--", &wt_s]));
+            let _ = self.run(Call::new(At::Repo(&repo), &["worktree", "prune"]));
+            for d in [&tmp, &private] {
+                let _ = std::fs::remove_dir_all(d);
+            }
         }
-        let wt_s = wt.to_str().ok_or(GitwError::Invalid("worktree path"))?;
-        self.ok("worktree add", Call::new(At::Repo(&repo), &["worktree", "add", "--detach", "--", wt_s, from]))?;
+        made
+    }
+
+    /// Read back a just-added worktree's `.git` file and `commondir`, and record what the tamper checks compare.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_tree(&self, repo: PathBuf, common: &Path, wt: &Path, tmp: &Path, private: &Path, (project, run, task, round): (&str, &str, &str, u32), from: &str, integration: bool) -> R<Ticket> {
         let wt = wt.canonicalize().map_err(io)?;
         let dotgit = read_bounded(&wt.join(".git"), false).ok().flatten().ok_or_else(|| tampered(".git"))?;
         let gitdir = std::str::from_utf8(&dotgit).ok().and_then(|s| s.strip_prefix("gitdir: ")).map(|s| PathBuf::from(s.trim_end())).ok_or_else(|| tampered(".git"))?;
@@ -736,6 +759,7 @@ impl Gitw {
         if resolved != common {
             return Err(tampered("commondir"));
         }
+        let common = common.to_path_buf();
         let t = Ticket {
             project: project.into(),
             run: run.into(),
@@ -995,6 +1019,12 @@ impl Gitw {
 
 #[cfg(test)]
 thread_local! {
+    /// Tests: fail right after `worktree add` succeeded (the rollback path).
+    pub(crate) static FAIL_AFTER_ADD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Tests: one more path for `add` that is not in the staged list (forces the tree check).
     pub(crate) static EXTRA_ADD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -1008,12 +1038,15 @@ pub fn agent_config(p: &str) -> bool {
 
 /// The longest task glob accepted.
 pub const MAX_GLOB: usize = 256;
+/// The longest path matched (longer than any macOS path, `PATH_MAX` 1024).
+const MAX_MATCH_PATH: usize = 4096;
 
 /// A task glob: `**` matches any number of path segments, `*` and `?` stay inside one segment, a trailing `/` means
 /// the whole directory. Literal otherwise.
 pub fn glob_match(pat: &str, path: &str) -> bool {
-    // The plan's globs are untrusted: bounded so matching can't backtrack without end.
-    if pat.len() > MAX_GLOB || pat.matches("**").count() > 4 || pat.matches('*').count() > 12 {
+    // The plan's globs and the worker's file names are both untrusted: matching is linear-time per segment pair and
+    // polynomial overall (a DP table for `**`), so no pattern can make it backtrack without end.
+    if pat.len() > MAX_GLOB || path.len() > MAX_MATCH_PATH {
         return false;
     }
     let pat = if let Some(d) = pat.strip_suffix('/') { format!("{d}/**") } else { pat.to_string() };
@@ -1022,22 +1055,42 @@ pub fn glob_match(pat: &str, path: &str) -> bool {
     }
     let p: Vec<&str> = pat.split('/').collect();
     let s: Vec<&str> = path.split('/').collect();
-    fn segs(p: &[&str], s: &[&str]) -> bool {
-        match p.split_first() {
-            None => s.is_empty(),
-            Some((&"**", rest)) => (0..=s.len()).any(|i| segs(rest, &s[i..])),
-            Some((h, rest)) => !s.is_empty() && seg(h.as_bytes(), s[0].as_bytes()) && segs(rest, &s[1..]),
+    // dp[i][j]: p[i..] matches s[j..]. Filled from the end, so each cell is computed once.
+    let (np, ns) = (p.len(), s.len());
+    let mut dp = vec![vec![false; ns + 1]; np + 1];
+    dp[np][ns] = true;
+    for i in (0..np).rev() {
+        for j in (0..=ns).rev() {
+            dp[i][j] = if p[i] == "**" {
+                dp[i + 1][j] || (j < ns && dp[i][j + 1])
+            } else {
+                j < ns && dp[i + 1][j + 1] && seg_match(p[i].as_bytes(), s[j].as_bytes())
+            };
         }
     }
-    fn seg(p: &[u8], s: &[u8]) -> bool {
-        match p.split_first() {
-            None => s.is_empty(),
-            Some((b'*', rest)) => (0..=s.len()).any(|i| seg(rest, &s[i..])),
-            Some((b'?', rest)) => !s.is_empty() && seg(rest, &s[1..]),
-            Some((c, rest)) => s.first() == Some(c) && seg(rest, &s[1..]),
+    dp[0][0]
+}
+
+/// One segment, `*` and `?` inside it: the iterative match that backtracks only to the last `*`, O(len(p) * len(s)).
+fn seg_match(p: &[u8], s: &[u8]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while j < s.len() {
+        if i < p.len() && p[i] == b'*' {
+            star = Some((i, j));
+            i += 1;
+        } else if i < p.len() && (p[i] == b'?' || p[i] == s[j]) {
+            i += 1;
+            j += 1;
+        } else if let Some((si, sj)) = star {
+            i = si + 1;
+            j = sj + 1;
+            star = Some((si, sj + 1));
+        } else {
+            return false;
         }
     }
-    segs(&p, &s)
+    p[i..].iter().all(|&c| c == b'*')
 }
 
 #[cfg(test)]

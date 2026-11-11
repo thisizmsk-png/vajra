@@ -478,12 +478,17 @@ fn agent_config_and_globs_match_as_specified() {
     }
     assert!(glob_match("src/**", "src/a/b.rs") && glob_match("src/", "src/x") && glob_match("**/*.rs", "a.rs") && glob_match("a?c", "abc"));
     assert!(!glob_match("src/*", "src/a/b.rs") && !glob_match("../x", "../x") && !glob_match("src/**", "srcx/a"));
-    // A hostile glob is refused fast instead of backtracking.
-    let long = "a/".repeat(60) + "b";
+    // Accepted patterns against long adversarial names finish in bounded time (#144 review).
+    let name = "a".repeat(200);
+    let deep = "a/".repeat(500) + "b";
     let started = std::time::Instant::now();
-    assert!(!glob_match("**/**/**/**/**/x", &long) && !glob_match(&"*".repeat(13), "a"));
-    assert!(!glob_match("**/*a*/**/*a*/**/*a*/**/*a*/c", &long));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!glob_match("*a*a*a*a*a*a*a*a*a*a*a*b", &name));
+    assert!(glob_match("*a*a*a*a*a*a*a*a*a*a*a*", &name));
+    assert!(!glob_match(&("*".repeat(40) + "b"), &name));
+    assert!(!glob_match("**/**/**/**/**/**/**/**/x", &deep));
+    assert!(glob_match("**/*a*/**/*a*/**/b", &deep));
+    assert!(!glob_match("**/*a*a*a*a*/**/*a*a*a*/**/c", &format!("{deep}/{name}")));
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
     assert_eq!(parse_list_z("core.bare\0user.email\nu@e\0"), vec![("core.bare".into(), "true".into()), ("user.email".into(), "u@e".into())]);
 }
 
@@ -503,4 +508,23 @@ fn the_shipped_sandbox_denies_data_and_leaves_work_writable() {
     assert!(deny_write.iter().any(|d| data.starts_with(d)), "the shipped policy must keep denying <data>");
     assert!(!deny_write.iter().chain(&deny_read).any(|d| work.starts_with(d) || d.starts_with(&work)), "<work> must stay writable");
     assert!(!data.starts_with(&work) && !work.starts_with(&data));
+}
+
+/// A failed `worktree add` (an id that is not a commit) and a failure after it succeeded both leave nothing behind:
+/// no registered worktree, no private or tmp dir, so the same ticket can be retried (#144 review).
+#[test]
+fn a_failed_worktree_add_rolls_back_and_the_ticket_can_be_retried() {
+    let f = fx("rollback");
+    let blob = out(ugit(&f.home, &f.repo, &["rev-parse", "HEAD:a.txt"]));
+    assert_eq!(f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &blob).unwrap_err().code(), "git_failed");
+    FAIL_AFTER_ADD.with(|x| x.set(true));
+    let r = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base);
+    FAIL_AFTER_ADD.with(|x| x.set(false));
+    assert_eq!(r.unwrap_err().code(), "tampered");
+    let list = out(ugit(&f.home, &f.repo, &["worktree", "list", "--porcelain"]));
+    assert_eq!(list.matches("worktree ").count(), 1, "only the main worktree is registered: {list}");
+    assert!(!f.gw.work.join("p/r1/t1-r1").exists() && !f.gw.work.join("p/r1/tmp/t1-r1").exists() && !f.gw.data.join("tickets/p/r1/t1-r1").exists());
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    assert!(t.wt.exists() && t.private.exists() && t.tmp.exists());
+    no_marker(&f);
 }
