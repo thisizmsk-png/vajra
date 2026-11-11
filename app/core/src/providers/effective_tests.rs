@@ -192,7 +192,7 @@ fn the_diff_comes_from_git_for_a_run_that_only_edited_through_a_shell() {
     let bridge = Bridge::new(PathBuf::from("/nonexistent"));
     let d = diff_from_git(&bridge, &repo, "HEAD").expect("git answered");
     // One line appended to a.txt and one line in the new b.txt.
-    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], added: 2, removed: 0, partial: false });
+    assert_eq!(d, Diff { files: vec!["a.txt".into(), "b.txt".into()], files_total: 2, added: 2, removed: 0, partial: false, uncounted: 0 });
     // A clean tree is an empty diff, not a failure; an unknown base is a failure (None), not an empty diff.
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "w"]);
@@ -260,32 +260,17 @@ fn a_run_that_only_created_files_counts_their_lines_as_added() {
 #[test]
 fn counting_new_files_stops_at_a_time_budget_keeps_listing_and_says_the_totals_are_partial() {
     let repo = tmp();
-    git(&repo, &["init", "-q", "-b", "main"]);
-    git(&repo, &["config", "user.email", "t@example.invalid"]);
-    git(&repo, &["config", "user.name", "t"]);
-    std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "base"]);
+    init_repo(&repo);
     for i in 0..20 {
         std::fs::write(repo.join(format!("n{i:02}.txt")), "a\nb\n").unwrap();
     }
-    // A git whose per-file count is slow (0.2 s); every other command is the real git.
-    let slow = tmp().join("slow-git");
-    std::fs::write(&slow, "#!/bin/sh\ncase \"$*\" in *--no-index*) /bin/sleep 0.2;; esac\nexec /usr/bin/git \"$@\"\n").unwrap();
-    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let mut bridge = Bridge::new(PathBuf::from("/nonexistent"));
-    bridge.git = slow;
-    let started = std::time::Instant::now();
-    let d = diff_from_git_within(&bridge, &repo, "HEAD", Duration::from_millis(700)).expect("git answered");
-    // Only a runaway is caught by the time bound; that the budget really cut the count is what `partial` and "some, not
-    // all" below assert. It is loose because a loaded machine stretches every spawn (2.78 s was seen against 0.7 s).
-    assert!(started.elapsed() < Duration::from_secs(6), "the budget stopped the counting: {:?}", started.elapsed());
-    assert_eq!(d.files.len(), 20, "every new file is still listed");
-    assert!(d.partial, "the totals say they are a lower bound");
-    assert!(d.added > 0 && d.added < 40, "some files were counted, not all: {}", d.added);
-    // With a roomy budget nothing is partial and every line is counted.
-    let full = diff_from_git_within(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD", Duration::from_secs(30)).unwrap();
-    assert_eq!((full.added, full.partial), (40, false));
+    let bridge = Bridge::new(PathBuf::from("/nonexistent"));
+    // No time at all: every new file is listed and none is counted.
+    let d = diff_from_git_within(&bridge, &repo, "HEAD", Duration::ZERO).expect("git answered");
+    assert_eq!((d.files_total, d.files.len(), d.added, d.partial, d.uncounted), (20, 20, 0, true, 20));
+    // A roomy budget counts every line, and nothing is partial.
+    let full = diff_from_git_within(&bridge, &repo, "HEAD", Duration::from_secs(30)).unwrap();
+    assert_eq!((full.added, full.partial, full.uncounted), (40, false, 0));
 }
 
 /// Timing of the new-file count: `cargo test --release --lib untracked_count_timing -- --ignored --nocapture`.
@@ -309,37 +294,272 @@ fn untracked_count_timing() {
     }
 }
 
-#[test]
-fn a_new_file_git_cannot_count_is_listed_and_makes_the_totals_partial() {
-    let repo = tmp();
-    git(&repo, &["init", "-q", "-b", "main"]);
-    git(&repo, &["config", "user.email", "t@example.invalid"]);
-    git(&repo, &["config", "user.name", "t"]);
+fn init_repo(repo: &Path) {
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.email", "t@example.invalid"]);
+    git(repo, &["config", "user.name", "t"]);
     std::fs::write(repo.join("keep.txt"), "one\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-q", "-m", "base"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "base"]);
+}
+
+fn bridge() -> Bridge {
+    Bridge::new(PathBuf::from("/nonexistent"))
+}
+
+/// What git itself counts for one new file: `git diff --numstat --no-index /dev/null <file>` (exit 1 when it differs).
+fn git_count(repo: &Path, rel: &std::ffi::OsStr) -> u64 {
+    let out = Command::new("/usr/bin/git").current_dir(repo).args(["diff", "--numstat", "-z", "--no-index", "--", "/dev/null"]).arg(rel).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let first = text.split('\0').next().unwrap_or("");
+    first.split('\t').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+fn root_of(repo: &Path) -> File {
+    open_dir_nofollow(repo).unwrap()
+}
+
+/// A deadline far enough away that it never fires in a test.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
+
+fn count_at(repo: &Path, rel: &[u8]) -> Option<u64> {
+    count_new_file_at(&root_of(repo), rel, &mut TOTAL_READ_CAP.clone(), far())
+}
+
+#[test]
+fn the_git_version_the_counter_was_checked_against() {
+    let v = Command::new("/usr/bin/git").arg("--version").output().unwrap();
+    println!("S6 git --version: {}", String::from_utf8_lossy(&v.stdout).trim());
+    assert!(v.status.success());
+}
+
+#[test]
+fn every_fixture_is_counted_the_way_git_counts_it() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = tmp();
+    init_repo(&repo);
+    std::fs::create_dir_all(repo.join("a/b/c")).unwrap();
+    let mut crlf = Vec::new();
+    crlf.extend_from_slice(b"one\r\ntwo\r\nthree\r\n");
+    let mut late_nul = vec![b'x'; 9000];
+    late_nul.push(0);
+    let fixtures: Vec<(&[u8], Vec<u8>)> = vec![
+        (b"text.txt", b"a\nb\nc\n".to_vec()),
+        (b"no-final-newline.txt", b"a\nb\nc".to_vec()),
+        (b"crlf.txt", crlf),
+        (b"empty.txt", Vec::new()),
+        (b"one-byte.txt", b"x".to_vec()),
+        (b"blank-lines.txt", b"\n\n\n".to_vec()),
+        (b"binary.bin", b"\0\x01text\nmore\n".to_vec()),
+        (b"nul-after-the-probe.txt", late_nul),
+        (b"a/b/c/deep.txt", b"deep\nfile\n".to_vec()),
+        (b"line\nbreak.txt", b"x\ny\n".to_vec()),
+        (b"bad-\xff\xfe-name.txt", b"p\nq\nr\n".to_vec()),
+    ];
+    let mut skipped = 0;
+    let mut fixtures = fixtures;
+    fixtures.retain(|(name, body)| match std::fs::write(repo.join(std::ffi::OsStr::from_bytes(name)), body) {
+        Ok(()) => true,
+        // APFS refuses a name that is not valid UTF-8 (EILSEQ); the fixture runs on filesystems that allow one.
+        Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => {
+            skipped += 1;
+            println!("skipped a non-UTF-8 name: this filesystem refuses it");
+            false
+        }
+        Err(e) => panic!("{e}"),
+    });
+    std::os::unix::fs::symlink("text.txt", repo.join("link-to-text")).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/target/that/is/long", repo.join("dangling")).unwrap();
+    // A target is arbitrary text: with newlines it is more than one line, as git counts the link's blob.
+    std::os::unix::fs::symlink("two\nlines", repo.join("link-newline")).unwrap();
+    std::os::unix::fs::symlink("ends\nwith\nnewline\n", repo.join("link-trailing-newline")).unwrap();
+    let mut names: Vec<&[u8]> = fixtures.iter().map(|(n, _)| *n).collect();
+    names.extend([b"link-to-text".as_slice(), b"dangling".as_slice(), b"link-newline".as_slice(), b"link-trailing-newline".as_slice()]);
+    for name in names {
+        let want = git_count(&repo, std::ffi::OsStr::from_bytes(name));
+        assert_eq!(count_at(&repo, name), Some(want), "{}", String::from_utf8_lossy(name));
+    }
+    assert_eq!(count_at(&repo, b"link-to-text"), Some(1), "a link counts one line and is not followed");
+    assert_eq!((count_at(&repo, b"link-newline"), count_at(&repo, b"link-trailing-newline")), (Some(2), Some(3)));
+    // The whole diff agrees with the sum of git's own counts (3+3+3+0+1+3+0+1+2+2, plus four links: 1, 1, 2, 3, so 18 + 7), and nothing is partial.
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    let non_utf8 = 1 - skipped; // `bad-\xff\xfe-name.txt`: 3 lines when the filesystem takes it
+    assert_eq!((d.files_total, d.added, d.removed, d.partial, d.uncounted), (14 + non_utf8 as u64, 25 + 3 * non_utf8 as u64, 0, false, 0));
+}
+
+#[test]
+fn a_nested_repository_is_listed_and_makes_the_result_partial() {
+    let repo = tmp();
+    init_repo(&repo);
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    init_repo(&repo.join("sub"));
+    std::fs::write(repo.join("plain.txt"), "a\n").unwrap();
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    assert!(d.files.iter().any(|f| f == "sub/"), "{:?}", d.files);
+    assert_eq!((d.added, d.partial, d.uncounted), (1, true, 1));
+}
+
+#[test]
+fn five_hundred_new_files_are_counted_quickly_and_exactly() {
+    let repo = tmp();
+    init_repo(&repo);
+    for i in 0..500 {
+        std::fs::write(repo.join(format!("n{i:03}.txt")), "a\nb\nc\n").unwrap();
+    }
+    let started = Instant::now();
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    let took = started.elapsed();
+    assert_eq!((d.files_total, d.added, d.partial, d.uncounted), (500, 1500, false, 0));
+    assert_eq!(d.files.len(), MAX_LISTED, "only the first {MAX_LISTED} are listed");
+    assert!(took < Duration::from_millis(300) || cfg!(debug_assertions) && took < Duration::from_secs(2), "{took:?}");
+}
+
+#[test]
+fn six_thousand_files_are_partial_and_the_rest_are_uncounted() {
+    let repo = tmp();
+    init_repo(&repo);
+    for i in 0..6000 {
+        std::fs::write(repo.join(format!("n{i:04}.txt")), "a\n").unwrap();
+    }
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    assert_eq!(d.files_total, 6000);
+    assert!(d.partial && d.uncounted > 0, "{d:?}");
+    assert_eq!(d.added + d.uncounted, 6000, "each new file is counted or uncounted, never lost");
+}
+
+#[test]
+fn a_file_over_the_per_file_cap_or_past_the_total_read_cap_is_uncounted() {
+    let repo = tmp();
+    init_repo(&repo);
+    let f = File::create(repo.join("huge.txt")).unwrap();
+    f.set_len(PER_FILE_CAP + 1).unwrap();
+    std::fs::write(repo.join("small.txt"), "a\nb\n").unwrap();
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    assert_eq!((d.added, d.partial, d.uncounted), (2, true, 1));
+    // The total cap: a read budget of 5 bytes covers the first small file only.
+    let root = root_of(&repo);
+    let mut left = 5u64;
+    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left, far()), Some(2));
+    assert_eq!(left, 1);
+    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left, far()), None);
+}
+
+#[test]
+fn the_budget_is_enforced_inside_a_file_read() {
+    let repo = tmp();
+    init_repo(&repo);
+    // Several chunks, so the loop's own check has to fire; and a one-chunk file, so the check before accepting does.
+    std::fs::write(repo.join("big.txt"), "x\n".repeat(200_000)).unwrap();
+    std::fs::write(repo.join("one.txt"), "a\nb\n").unwrap();
+    let root = root_of(&repo);
+    let passed = Instant::now();
+    let mut left = TOTAL_READ_CAP;
+    assert_eq!(count_new_file_at(&root, b"big.txt", &mut left, passed), None);
+    assert_eq!(count_new_file_at(&root, b"one.txt", &mut left, passed), None);
+    assert_eq!(left, TOTAL_READ_CAP, "nothing was read once the deadline had passed, or only what was read is charged");
+    assert_eq!(count_new_file_at(&root, b"one.txt", &mut left, far()), Some(2));
+}
+
+#[test]
+fn a_symlinked_directory_partway_down_is_not_followed_and_a_fifo_is_never_opened() {
+    let repo = tmp();
+    init_repo(&repo);
+    let outside = tmp();
+    std::fs::write(outside.join("secret.txt"), "s1\ns2\ns3\n").unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("linkdir")).unwrap();
+    assert_eq!(count_at(&repo, b"linkdir/secret.txt"), None, "the walk refuses the link in the path");
+    // A directory swapped for a link after git listed its files is not entered either.
+    std::fs::create_dir_all(repo.join("real")).unwrap();
+    std::fs::write(repo.join("real/in.txt"), "x\n").unwrap();
+    assert_eq!(count_at(&repo, b"real/in.txt"), Some(1));
+    std::fs::remove_dir_all(repo.join("real")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("real")).unwrap();
+    assert_eq!(count_at(&repo, b"real/secret.txt"), None);
+    // A FIFO with no writer would block an open forever; it is never opened and the diff says so.
+    let fifo = repo.join("pipe");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    assert_eq!(count_at(&repo, b"pipe"), None);
+    let started = Instant::now();
+    let d = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Git does not list a FIFO at all; the two links count one line each and nothing blocks.
+    assert_eq!((d.added, d.partial), (2, false), "{d:?}");
+}
+
+#[test]
+fn refused_paths_are_not_counted() {
+    let repo = tmp();
+    init_repo(&repo);
+    std::fs::write(repo.join("ok.txt"), "a\n").unwrap();
+    for bad in [&b""[..], b"ok.txt/", b"./ok.txt", b"../x", b"a//b", b"a/./b", b"a/../ok.txt", b"ok\0.txt", b"/ok.txt"] {
+        assert_eq!(count_at(&repo, bad), None, "{:?}", String::from_utf8_lossy(bad));
+    }
+    assert_eq!(count_at(&repo, &vec![b'a'; libc::PATH_MAX as usize]), None, "a path longer than PATH_MAX");
+    assert_eq!(count_at(&repo, b"ok.txt"), Some(1));
+}
+
+#[test]
+fn a_git_that_cannot_answer_is_none_and_garbage_numstat_is_partial() {
+    let repo = tmp();
+    init_repo(&repo);
     std::fs::write(repo.join("new.txt"), "a\nb\n").unwrap();
-    // Each fake git answers every command like the real one, except the per-file count (`--no-index`) or the tracked
-    // numstat, which it breaks in one way.
-    let broken = |tag: &str, on: &str, then: &str| {
+    let with = |tag: &str, on: &str, then: &str| {
         let bin = tmp().join(format!("git-{tag}"));
         std::fs::write(&bin, format!("#!/bin/sh\ncase \"$*\" in *'{on}'*) {then};; esac\nexec /usr/bin/git \"$@\"\n")).unwrap();
         std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let mut b = Bridge::new(PathBuf::from("/nonexistent"));
         b.git = bin;
-        diff_from_git(&b, &repo, "HEAD").unwrap_or_else(|| panic!("{tag}: git answered the rest"))
+        diff_from_git(&b, &repo, "HEAD")
     };
-    for (tag, on, then) in [
-        ("fails", "--no-index", "exit 2"),
-        ("garbage", "--no-index", "printf 'x\\ty\\t\\0'; exit 1"),
-        ("empty", "--no-index", "exit 1"),
-        ("tracked-garbage", "--numstat -z HEAD", "printf 'x\\ty\\tkeep.txt\\0'; exit 0"),
-    ] {
-        let d = broken(tag, on, then);
-        assert!(d.files.contains(&"new.txt".to_string()) || tag == "tracked-garbage", "{tag}: the file is still listed");
-        assert!(d.partial, "{tag}: an uncounted file means the totals are partial");
-    }
-    // The real git counts it exactly: not partial.
-    let ok = diff_from_git(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD").unwrap();
+    assert_eq!(with("fails", "ls-files", "exit 2"), None);
+    let d = with("garbage", "--numstat -z", "printf 'x\\ty\\tkeep.txt\\0'; exit 0").unwrap();
+    assert!(d.partial && d.files.iter().any(|f| f == "keep.txt") && d.files.iter().any(|f| f == "new.txt"), "{d:?}");
+    let ok = diff_from_git(&bridge(), &repo, "HEAD").unwrap();
     assert_eq!((ok.added, ok.partial), (2, false));
+}
+
+/// A reader that takes its time, like a stalled network volume.
+struct SlowRead<'a>(&'a [u8], Duration);
+
+impl std::io::Read for SlowRead<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(self.1);
+        let n = self.0.len().min(out.len());
+        out[..n].copy_from_slice(&self.0[..n]);
+        self.0 = &self.0[n..];
+        Ok(n)
+    }
+}
+
+#[test]
+fn a_binary_read_that_outlasts_the_budget_is_uncounted() {
+    let data = b"\0binary\n";
+    let slow = Duration::from_millis(80);
+    // The deadline is still ahead when the read starts and gone when it returns, and the chunk holds a NUL.
+    let mut left = TOTAL_READ_CAP;
+    let deadline = Instant::now() + Duration::from_millis(30);
+    assert_eq!(count_lines(&mut SlowRead(data, slow), data.len() as u64, &mut left, deadline), None);
+    // The same read with room to spare is binary: it counts 0.
+    let mut left = TOTAL_READ_CAP;
+    assert_eq!(count_lines(&mut SlowRead(data, Duration::ZERO), data.len() as u64, &mut left, far()), Some(0));
+    // And a slow text read that ends past the deadline is uncounted too.
+    let mut left = TOTAL_READ_CAP;
+    let deadline = Instant::now() + Duration::from_millis(30);
+    assert_eq!(count_lines(&mut SlowRead(b"a\nb\n", slow), 4, &mut left, deadline), None);
+}
+
+#[test]
+fn a_file_that_shrinks_while_it_is_read_is_uncounted() {
+    let mut left = TOTAL_READ_CAP;
+    // `fstat` said 100 bytes, the file then held 4: a prefix is not the file.
+    assert_eq!(count_lines(&mut &b"a\nb\n"[..], 100, &mut left, far()), None);
+    // The same bytes with the size they really have count normally.
+    assert_eq!(count_lines(&mut &b"a\nb\n"[..], 4, &mut left, far()), Some(2));
+    // End of file at once (truncated to empty) is the same.
+    assert_eq!(count_lines(&mut &b""[..], 10, &mut left, far()), None);
+    // An empty file really is empty: size 0, nothing to read, 0 lines.
+    assert_eq!(count_lines(&mut &b""[..], 0, &mut left, far()), Some(0));
 }

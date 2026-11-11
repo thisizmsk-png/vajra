@@ -539,6 +539,13 @@ export const S = {
   },
   /** The provider a worker ran on, on run cards, the crew list, the Board and the Crew pane. */
   workerProvider: {
+    /** A worker's change count: `+N −M` when exact; `≥ +N lines` when some new files were not counted (ADR-16 16.10). */
+    diff: {
+      exact: (added: number, removed: number) => `+${added} \u2212${removed}`,
+      atLeast: (added: number) => `\u2265 +${added} lines`,
+      atLeastLabel: (added: number, uncounted: number) => `At least ${added} lines added. ${uncounted} new ${uncounted === 1 ? "file was" : "files were"} not counted (too many or too large).`,
+      exactLabel: (added: number, removed: number, files: number) => `${added} lines added, ${removed} removed, in ${files} ${files === 1 ? "file" : "files"}.`,
+    },
     notReported: "Not reported",
     ranOn: (ran: string, asked: string) => `Ran on ${ran} (asked for ${asked})`,
     billing: { subscription: "Plan", api_key: "API key", gateway: "Gateway key", unknown: "Billing unknown" } as Record<string, string>,

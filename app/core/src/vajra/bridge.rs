@@ -55,6 +55,8 @@ pub struct Output {
     /// None when the process was killed (timeout) or died on a signal.
     pub code: Option<i32>,
     pub stdout: String,
+    /// The same bytes, unconverted: for output whose names may not be UTF-8 (`git ... -z`).
+    pub stdout_raw: Vec<u8>,
     pub stderr: String,
     pub truncated: bool,
     pub timed_out: bool,
@@ -637,6 +639,7 @@ fn run_process_inner(
     Ok(Output {
         code,
         stdout: String::from_utf8_lossy(&so).into_owned(),
+        stdout_raw: so,
         stderr: String::from_utf8_lossy(&se).into_owned(),
         truncated: to || te,
         timed_out,

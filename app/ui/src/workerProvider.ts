@@ -45,7 +45,24 @@ export function parseWorkerProvider(v: unknown): WorkerProvider | null {
   };
 }
 
+/** A worker's change set (`diff` on a crew node or a `project_state` worker): the counts and the first files. */
+export interface WorkerDiff { files_total: number; files: string[]; added: number; removed: number; partial: boolean; uncounted: number }
+const count = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
+
+/** Absent or malformed reads as "no diff to show". Paths are shown as text only, so a control or invisible character is dropped. */
+export function parseWorkerDiff(v: unknown): WorkerDiff | null {
+  if (!isObj(v)) return null;
+  const files_total = count(v.files_total), added = count(v.added), removed = count(v.removed), uncounted = count(v.uncounted ?? 0);
+  if (files_total === null || added === null || removed === null || uncounted === null || typeof v.partial !== "boolean") return null;
+  const files = (Array.isArray(v.files) ? v.files : []).slice(0, 200).filter((f): f is string => typeof f === "string" && f.length <= 4096 && !CONTROL.test(f) && !INVISIBLE.test(f));
+  return { files_total, files, added, removed, partial: v.partial, uncounted };
+}
+
 const W = S.workerProvider;
+/** `+N −M` when the count is exact; `≥ +N lines` when it is only a lower bound. */
+export const diffText = (d: WorkerDiff): string => (d.partial ? W.diff.atLeast(d.added) : W.diff.exact(d.added, d.removed));
+/** The accessible label: what the short form means. */
+export const diffLabel = (d: WorkerDiff): string => (d.partial ? W.diff.atLeastLabel(d.added, d.uncounted) : W.diff.exactLabel(d.added, d.removed, d.files_total));
 /** "Model · provider": the model's name (or id, or the CLI default, or "Not reported") with its provider. Never a bare model. */
 export const providerText = (label: string, model: string | null, name: string | null): string =>
   `${model === "unknown" ? W.notReported : name ?? model ?? S.accounts.defaultModel} · ${label}`;
