@@ -1,0 +1,486 @@
+use super::*;
+use std::process::Command;
+use std::sync::atomic::Ordering;
+
+const GIT: &str = "/usr/bin/git";
+
+struct Fx {
+    d: PathBuf,
+    home: PathBuf,
+    repo: PathBuf,
+    gw: Gitw,
+    base: String,
+    marker: PathBuf,
+}
+
+fn tmpdir(tag: &str) -> PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let d = std::env::temp_dir().join(format!("vajra-gitw-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d.canonicalize().unwrap()
+}
+
+/// The fixture's own git, as a user would run it: temp HOME, no system config.
+fn ugit(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    let o = Command::new(GIT).args(args).current_dir(cwd).env_clear().env("PATH", "/usr/bin:/bin").env("HOME", home).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    o
+}
+
+fn out(o: std::process::Output) -> String {
+    String::from_utf8(o.stdout).unwrap().trim().to_string()
+}
+
+/// A script that records it ran, then passes its stdin through (a filter that would be harmless if it ran).
+fn marker_script(d: &Path, marker: &Path) -> PathBuf {
+    let s = d.join("mark.sh");
+    std::fs::write(&s, format!("#!/bin/sh\necho ran >> '{}'\ncat\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+    s
+}
+
+fn fx_with(tag: &str, gitconfig: &str, files: &[(&str, &str)]) -> Fx {
+    let d = tmpdir(tag);
+    let (home, data, work, repo) = (d.join("home"), d.join("data"), d.join("work"), d.join("repo"));
+    for p in [&home, &data, &repo] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let marker = d.join("MARKER");
+    std::fs::write(home.join(".gitconfig"), gitconfig).unwrap();
+    ugit(&home, &repo, &["init", "-q", "-b", "main"]);
+    for (p, c) in [("a.txt", "a\n"), ("src/lib.rs", "fn a() {}\n"), ("other/x.rs", "x\n"), ("AGENTS.md", "agents\n"), (".gitignore", "target/\n")].iter().chain(files) {
+        let f = repo.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, c).unwrap();
+    }
+    ugit(&home, &repo, &["add", "-A"]);
+    ugit(&home, &repo, &["-c", "user.name=U", "-c", "user.email=u@e", "commit", "-q", "-m", "base"]);
+    let base = out(ugit(&home, &repo, &["rev-parse", "HEAD"]));
+    // Hooks a repo could carry: none may ever run in the core's git.
+    for h in ["post-checkout", "post-commit", "post-merge", "pre-commit", "reference-transaction", "post-index-change", "pre-merge-commit"] {
+        let p = repo.join(".git/hooks").join(h);
+        std::fs::write(&p, format!("#!/bin/sh\necho hook-{h} >> '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let g = GlobalBaseline::take_or_load(Path::new(GIT), &data, &home, None).unwrap();
+    check_roots(&data, &work).unwrap();
+    let gw = Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), g.copy.clone());
+    let common = gw.common_of(&repo).unwrap();
+    gw.repos.acquire(&gw, &common, false).unwrap();
+    Fx { d, home, repo: repo.canonicalize().unwrap(), gw, base, marker }
+}
+
+fn fx(tag: &str) -> Fx {
+    fx_with(tag, "[user]\n\tname = U\n\temail = u@e\n", &[])
+}
+
+fn globs() -> Vec<String> {
+    vec!["src/**".into()]
+}
+
+fn edit(t: &Ticket, p: &str, c: &str) {
+    let f = t.wt.join(p);
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(f, c).unwrap();
+}
+
+fn no_marker(f: &Fx) {
+    assert!(!f.marker.exists(), "something ran: {}", std::fs::read_to_string(&f.marker).unwrap_or_default());
+}
+
+fn rev(f: &Fx, r: &str) -> String {
+    out(ugit(&f.home, &f.repo, &["rev-parse", r]))
+}
+
+#[test]
+fn refs_outside_vajra_and_bad_names_are_refused() {
+    assert!(vajra_ref("refs/heads/vajra/r1/task-t1-r1").is_ok());
+    for bad in ["refs/heads/main", "refs/heads/vajra/../main", "refs/tags/vajra/x", "refs/heads/vajra/a..b", "refs/heads/vajra/x.lock", "refs/heads/vajra/-x"] {
+        assert!(vajra_ref(bad).is_err(), "{bad}");
+    }
+    let f = fx("names");
+    for (p, r, t) in [("../x", "r1", "t1"), ("p", "r 1", "t1"), ("p", "r1", "t/1")] {
+        assert_eq!(f.gw.worktree_add(&f.repo, p, r, t, 1, &f.base).unwrap_err().code(), "invalid");
+    }
+    assert_eq!(f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, "main").unwrap_err().code(), "invalid", "only a full commit id");
+    assert_eq!(f.gw.branch_delete(&f.repo, "refs/heads/main").unwrap_err().code(), "invalid");
+}
+
+#[test]
+fn overlapping_roots_refuse_worker_launch() {
+    let d = tmpdir("roots");
+    let data = d.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    assert_eq!(check_roots(&data, &data.join("work")), Err(GitwError::WorktreeRootInvalid));
+    let work = d.join("work");
+    std::fs::create_dir_all(work.join("data")).unwrap();
+    assert_eq!(check_roots(&work.join("data"), &work), Err(GitwError::WorktreeRootInvalid));
+    assert_eq!(check_roots(&data, &d.join("sibling")), Ok(()));
+    assert!(work_root(Path::new("/Users/u")).ends_with("Library/Application Support/VajraWorktrees"));
+}
+
+/// End to end: a normal edit is snapshotted, integrated and removed; no planted hook runs at any step; the worker's
+/// HEAD and index never move, so the tree is dirty until the capture check lets it go.
+#[test]
+fn a_normal_edit_is_snapshotted_integrated_and_removed_and_no_hook_runs() {
+    let f = fx("e2e");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    assert!(t.wt.starts_with(&f.gw.work) && t.private.starts_with(&f.gw.data) && t.tmp.starts_with(&f.gw.work));
+    edit(&t, "src/lib.rs", "fn a() { 1 }\n");
+    edit(&t, "target/build.o", "ignored\n");
+    let s = f.gw.snapshot(&t, &globs(), &[], "codex vendor/model-a").unwrap();
+    let commit = s.commit.clone().unwrap();
+    assert_eq!(s.files, vec!["src/lib.rs".to_string()]);
+    assert!(s.leftovers.is_empty(), "{:?}", s.leftovers);
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/task-t1-r1"), commit);
+    let msg = out(ugit(&f.home, &f.repo, &["log", "-1", "--format=%B", &commit]));
+    assert!(msg.contains("Vajra-Worker: codex vendor/model-a"), "{msg}");
+    // The worker's HEAD and index are untouched: still detached at dispatch_head, and dirty.
+    assert_eq!(out(ugit(&f.home, &t.wt, &["rev-parse", "HEAD"])), f.base);
+    assert!(!out(ugit(&f.home, &t.wt, &["-c", "core.hooksPath=/dev/null", "status", "--porcelain"])).is_empty());
+    // Not removed before integrate.
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let iref = Gitw::integration_ref(&it);
+    assert_eq!(f.gw.worktree_remove(&t, &commit, &iref).unwrap_err().code(), "kept", "not integrated yet");
+    assert!(t.wt.exists());
+    let head = f.gw.integrate(&it, &f.base, std::slice::from_ref(&commit)).unwrap();
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/integration"), head);
+    f.gw.worktree_remove(&t, &commit, &iref).unwrap();
+    assert!(!t.wt.exists() && !t.gitdir.exists() && !t.private.exists());
+    f.gw.branch_delete(&f.repo, &t.task_ref()).unwrap();
+    assert_eq!(rev(&f, "main"), f.base, "main never moves");
+    no_marker(&f);
+}
+
+#[test]
+fn the_capture_check_keeps_a_tree_that_differs_from_its_commit() {
+    let f = fx("capture");
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let iref = Gitw::integration_ref(&it);
+    // (label, change after snapshot, the path the card names)
+    type After = fn(&Ticket);
+    let cases: [(&str, After, &str); 5] = [
+        ("post-snapshot edit", |t| edit(t, "src/lib.rs", "changed again\n"), "src/lib.rs"),
+        ("restored to dispatch", |t| edit(t, "src/lib.rs", "fn a() {}\n"), "src/lib.rs"),
+        ("mode only", |t| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(t.wt.join("src/lib.rs"), std::fs::Permissions::from_mode(0o755)).unwrap()
+        }, "src/lib.rs"),
+        ("deleted", |t| std::fs::remove_file(t.wt.join("src/lib.rs")).unwrap(), "src/lib.rs"),
+        ("leftover", |t| edit(t, "other/x.rs", "leftover\n"), "other/x.rs"),
+    ];
+    let mut commits = Vec::new();
+    let mut tickets = Vec::new();
+    for (i, (_, _, _)) in cases.iter().enumerate() {
+        let t = f.gw.worktree_add(&f.repo, "p", "r1", &format!("c{i}"), 1, &f.base).unwrap();
+        edit(&t, "src/lib.rs", &format!("snap {i}\n"));
+        let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+        commits.push(c);
+        tickets.push(t);
+    }
+    // Each touches the same file differently; integrate one at a time into its own round.
+    for (i, (label, after, path)) in cases.iter().enumerate() {
+        let it = if i == 0 { it.clone() } else { f.gw.integration_tree(&f.repo, "p", "r1", i as u32 + 1, &f.base).unwrap() };
+        let iref = if i == 0 { iref.clone() } else { Gitw::integration_ref(&it) };
+        f.gw.integrate(&it, &f.base, &[commits[i].clone()]).unwrap();
+        after(&tickets[i]);
+        match f.gw.worktree_remove(&tickets[i], &commits[i], &iref) {
+            Err(GitwError::Kept { paths }) => assert_eq!(paths, vec![path.to_string()], "{label}"),
+            other => panic!("{label}: {other:?}"),
+        }
+        assert!(tickets[i].wt.exists(), "{label}: kept");
+    }
+    no_marker(&f);
+}
+
+#[test]
+fn snapshot_stages_only_the_task_files_and_ignores_what_the_worker_staged() {
+    let f = fx("staged");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "allowed\n");
+    edit(&t, "other/x.rs", "out of task\n");
+    edit(&t, "AGENTS.md", "injected\n");
+    edit(&t, "src/.claude/settings.json", "{}\n");
+    edit(&t, "src/CLAUDE.md", "x\n");
+    // The worker pre-stages the out-of-task file and the AGENTS.md edit in its own index.
+    ugit(&f.home, &t.wt, &["add", "other/x.rs", "AGENTS.md"]);
+    let s = f.gw.snapshot(&t, &["src/**".into(), "AGENTS.md".into()], &[], "w m").unwrap();
+    assert_eq!(s.files, vec!["src/lib.rs".to_string()]);
+    let mut l = s.leftovers.clone();
+    l.sort();
+    assert_eq!(l, vec!["AGENTS.md", "other/x.rs", "src/.claude/settings.json", "src/CLAUDE.md"]);
+    let names = out(ugit(&f.home, &f.repo, &["diff-tree", "-r", "--name-only", &f.base, &s.commit.unwrap()]));
+    assert_eq!(names, "src/lib.rs");
+    // The ask names AGENTS.md: then it is committed.
+    let t2 = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base).unwrap();
+    edit(&t2, "AGENTS.md", "named\n");
+    let s2 = f.gw.snapshot(&t2, &["AGENTS.md".into()], &["AGENTS.md".into()], "w m").unwrap();
+    assert_eq!(s2.files, vec!["AGENTS.md".to_string()]);
+}
+
+#[test]
+fn a_tree_holding_a_path_outside_the_list_is_tampered() {
+    let f = fx("forced");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "allowed\n");
+    edit(&t, "other/x.rs", "sneaked\n");
+    EXTRA_ADD.with(|e| *e.borrow_mut() = Some("other/x.rs".into()));
+    let r = f.gw.snapshot(&t, &globs(), &[], "w m");
+    EXTRA_ADD.with(|e| *e.borrow_mut() = None);
+    assert_eq!(r.unwrap_err().code(), "tampered");
+    assert!(ugit(&f.home, &f.repo, &["for-each-ref", "refs/heads/vajra/"]).stdout.is_empty(), "nothing committed");
+}
+
+#[test]
+fn update_ref_never_overwrites_a_task_ref() {
+    let f = fx("noover");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "one\n");
+    let first = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    edit(&t, "src/lib.rs", "two\n");
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m"), Err(GitwError::Exists));
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/task-t1-r1"), first);
+}
+
+#[test]
+fn a_rewritten_git_file_a_worker_commit_and_a_nested_repo_are_tampered() {
+    let f = fx("tamper");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::write(t.wt.join(".git"), format!("gitdir: {}\n\n", t.gitdir.display())).unwrap();
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: ".git".into() });
+
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    // The worker's own git (hooks off, so the marker only ever means the core ran one).
+    ugit(&f.home, &t.wt, &["-c", "core.hooksPath=/dev/null", "-c", "user.name=W", "-c", "user.email=w@e", "commit", "-qam", "worker commit"]);
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: "HEAD".into() });
+
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t3", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::create_dir_all(t.wt.join("src/inner")).unwrap();
+    ugit(&f.home, &t.wt.join("src/inner"), &["init", "-q"]);
+    edit(&t, "src/inner/f", "x\n");
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err().code(), "tampered");
+    no_marker(&f);
+}
+
+#[test]
+fn gitattributes_at_any_depth_and_gitmodules_are_tampered_before_add_and_no_filter_runs() {
+    let f = fx("attrs");
+    let mark = marker_script(&f.d, &f.marker);
+    // The user's own trusted filter, defined at app start; a worker only adds the attribute that would apply it.
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    for (task, path) in [("t1", "src/sub/dir/.gitattributes"), ("t2", ".gitattributes"), ("t3", ".gitmodules")] {
+        let t = f.gw.worktree_add(&f.repo, "p", "r1", task, 1, &f.base).unwrap();
+        edit(&t, "src/lib.rs", "x\n");
+        edit(&t, path, "* filter=x\n");
+        assert_eq!(f.gw.snapshot(&t, &["**".into()], &[], "w m").unwrap_err(), GitwError::Tampered { what: path.into() }, "{path}");
+    }
+    no_marker(&f);
+}
+
+#[test]
+fn a_repo_config_change_is_tampered_and_refuses_new_worktrees() {
+    let f = fx("repocfg");
+    let mark = marker_script(&f.d, &f.marker);
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    edit(&t, "src/.keep", "x\n");
+    ugit(&f.home, &f.repo, &["config", "filter.x.clean", mark.to_str().unwrap()]);
+    ugit(&f.home, &f.repo, &["config", "gpg.program", mark.to_str().unwrap()]);
+    match f.gw.snapshot(&t, &globs(), &[], "w m") {
+        Err(GitwError::Tampered { what }) => assert!(what.contains("filter.x.clean") && what.contains("gpg.program") && !what.contains(mark.to_str().unwrap()), "names only: {what}"),
+        other => panic!("{other:?}"),
+    }
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert!(keys.contains(&"filter.x.clean".to_string())),
+        other => panic!("{other:?}"),
+    }
+    // A second run on the repo reuses the held baseline and never takes the changed file as trusted.
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.acquire(&f.gw, &common, false).unwrap();
+    assert_eq!(f.gw.worktree_add(&f.repo, "p", "r2", "t1", 1, &f.base).unwrap_err().code(), "repo_config_changed");
+    // The human accepts it only with no agent session on the repo.
+    assert!(f.gw.repos.accept_new(&f.gw, &common, true).is_err());
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    assert!(f.gw.worktree_add(&f.repo, "p", "r2", "t2", 1, &f.base).is_ok());
+    no_marker(&f);
+}
+
+#[test]
+fn info_attributes_in_the_common_dir_is_a_tamper_signal() {
+    let f = fx("infoattr");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::write(f.repo.join(".git/info/attributes"), "* filter=x\n").unwrap();
+    match f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err() {
+        GitwError::Tampered { what } => assert!(what.contains("info/attributes"), "{what}"),
+        e => panic!("{e:?}"),
+    }
+}
+
+/// Two tickets and the frozen global config: the base commit has `* filter=x`, and `~/.gitconfig` at app start
+/// defines a harmless `filter.x`. Task A rewrites it to a command that writes a marker; task B is then created,
+/// snapshotted and integrated with the baseline copy, and the marker never appears. The global change is a card note,
+/// never a tamper signal.
+#[test]
+fn a_global_filter_changed_mid_run_never_runs_and_is_only_a_note() {
+    let f = fx_with("global", "[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = cat\n\tsmudge = cat\n", &[(".gitattributes", "*.rs filter=x\n")]);
+    let mark = marker_script(&f.d, &f.marker);
+    let a = f.gw.worktree_add(&f.repo, "p", "r1", "ta", 1, &f.base).unwrap();
+    // Task A (a Claude worker has no OS sandbox) edits the user's global config, and an include it adds.
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[include]\n\tpath = ~/.extra\n[filter \"x\"]\n\tclean = {m}\n\tsmudge = {m}\n", m = mark.display())).unwrap();
+    std::fs::write(f.home.join(".extra"), format!("[filter \"y\"]\n\tclean = {}\n", mark.display())).unwrap();
+    std::fs::create_dir_all(f.home.join(".config/git")).unwrap();
+    std::fs::write(f.home.join(".config/git/config"), "[core]\n\tpager = cat\n").unwrap();
+    edit(&a, "src/lib.rs", "a\n");
+    let ca = f.gw.snapshot(&a, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let mut b = f.gw.worktree_add(&f.repo, "p", "r1", "tb", 1, &f.base).unwrap();
+    f.gw.merge_deps(&mut b, std::slice::from_ref(&ca)).unwrap();
+    edit(&b, "src/lib.rs", "b\n");
+    edit(&b, "src/new.rs", "new\n");
+    let cb = f.gw.snapshot(&b, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    f.gw.integrate(&it, &f.base, &[ca, cb.clone()]).unwrap();
+    f.gw.worktree_remove(&b, &cb, &Gitw::integration_ref(&it)).unwrap();
+    no_marker(&f);
+    let g = GlobalBaseline::take_or_load(Path::new(GIT), &f.gw.data, &f.home, None).unwrap();
+    let changed = g.changed_files(Path::new(GIT), &f.home, None);
+    assert!(changed.contains(&f.home.join(".gitconfig")) && changed.contains(&f.home.join(".extra")) && changed.contains(&f.home.join(".config/git/config")), "{changed:?}");
+    let keys = g.changed_keys(Path::new(GIT), &f.home, None);
+    assert!(keys.contains(&"filter.x.clean".to_string()) && keys.contains(&"filter.y.clean".to_string()), "{keys:?}");
+    assert!(keys.iter().any(|k| highlighted(k)));
+}
+
+#[test]
+fn the_global_baseline_survives_a_restart_and_is_replaced_only_by_a_human_with_no_agents() {
+    let f = fx("restart");
+    let copy = std::fs::read_to_string(&f.gw.global).unwrap();
+    assert!(copy.contains("email = \"u@e\""), "{copy}");
+    std::fs::write(f.home.join(".gitconfig"), "[user]\n\tname = New\n\temail = new@e\n").unwrap();
+    let mut g = GlobalBaseline::take_or_load(Path::new(GIT), &f.gw.data, &f.home, None).unwrap();
+    assert_eq!(std::fs::read_to_string(&g.copy).unwrap(), copy, "a restart keeps the stored baseline");
+    assert!(g.replace(Path::new(GIT), &f.home, None, true).is_err(), "disabled while an agent session runs");
+    g.replace(Path::new(GIT), &f.home, None, false).unwrap();
+    assert!(std::fs::read_to_string(&g.copy).unwrap().contains("new@e"));
+    assert!(g.changed_files(Path::new(GIT), &f.home, None).is_empty());
+}
+
+/// A worker points `commondir` at its own directory: the original objects plus a `config` whose `filter.x.clean`
+/// writes a marker and an `info/attributes` that applies it. HEAD still reads `dispatch_head` and no `.gitattributes`
+/// changes: the plain-filesystem check catches it before any `add`. With that check off, the pinned `GIT_COMMON_DIR`
+/// still keeps git from reading the planted config.
+#[test]
+fn a_redirected_commondir_is_tampered_and_the_pin_still_stops_the_filter() {
+    let f = fx("commondir");
+    let mark = marker_script(&f.d, &f.marker);
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let evil = f.d.join("evil");
+    std::fs::create_dir_all(evil.join("info")).unwrap();
+    std::os::unix::fs::symlink(f.repo.join(".git/objects"), evil.join("objects")).unwrap();
+    std::os::unix::fs::symlink(f.repo.join(".git/refs"), evil.join("refs")).unwrap();
+    std::fs::copy(f.repo.join(".git/HEAD"), evil.join("HEAD")).unwrap();
+    std::fs::create_dir_all(evil.join("worktrees")).unwrap();
+    std::os::unix::fs::symlink(&t.gitdir, evil.join("worktrees/t1-r1")).unwrap();
+    std::fs::write(evil.join("config"), format!("[core]\n\trepositoryformatversion = 0\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    std::fs::write(evil.join("info/attributes"), "* filter=x\n").unwrap();
+    std::fs::write(t.gitdir.join("commondir"), format!("{}\n", evil.display())).unwrap();
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: "commondir".into() });
+    no_marker(&f);
+    f.gw.checks.store(false, Ordering::SeqCst);
+    let s = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap();
+    assert!(s.commit.is_some());
+    no_marker(&f);
+}
+
+/// A worker runs `git symbolic-ref HEAD refs/heads/main` while `main` sits at `dispatch_head`: the sha alone can't see
+/// it, the detached check can. With that check off, `snapshot`'s plumbing still never moves `main`.
+#[test]
+fn a_symbolic_head_is_tampered_and_main_never_moves() {
+    let f = fx("symref");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::write(t.gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: "HEAD".into() });
+    f.gw.checks.store(false, Ordering::SeqCst);
+    let s = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap();
+    assert!(s.commit.is_some());
+    assert_eq!(rev(&f, "main"), f.base, "main never moves");
+}
+
+#[test]
+fn a_missing_user_email_falls_back_and_a_hanging_gpg_never_blocks() {
+    let f = fx_with("ident", "", &[]);
+    let hang = f.d.join("gpg.sh");
+    std::fs::write(&hang, format!("#!/bin/sh\necho gpg >> '{}'\nsleep 600\n", f.marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The user's own setup, before the run: signing on, with a gpg that hangs.
+    ugit(&f.home, &f.repo, &["config", "commit.gpgsign", "true"]);
+    ugit(&f.home, &f.repo, &["config", "gpg.program", hang.to_str().unwrap()]);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let started = std::time::Instant::now();
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let who = out(ugit(&f.home, &f.repo, &["log", "-1", "--format=%an <%ae>", &c]));
+    assert_eq!(who, "Vajra <vajra@localhost>");
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    f.gw.integrate(&it, &f.base, &[c]).unwrap();
+    no_marker(&f);
+}
+
+#[test]
+fn deps_merge_at_dispatch_and_a_conflict_is_typed() {
+    let f = fx("deps");
+    let a = f.gw.worktree_add(&f.repo, "p", "r1", "ta", 1, &f.base).unwrap();
+    edit(&a, "src/lib.rs", "from a\n");
+    let ca = f.gw.snapshot(&a, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let b = f.gw.worktree_add(&f.repo, "p", "r1", "tb", 1, &f.base).unwrap();
+    edit(&b, "src/lib.rs", "from b\n");
+    let cb = f.gw.snapshot(&b, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let mut c = f.gw.worktree_add(&f.repo, "p", "r1", "tc", 1, &f.base).unwrap();
+    f.gw.merge_deps(&mut c, std::slice::from_ref(&ca)).unwrap();
+    assert_ne!(c.dispatch_head, f.base);
+    f.gw.preflight(&c).unwrap();
+    let mut d = f.gw.worktree_add(&f.repo, "p", "r1", "td", 1, &f.base).unwrap();
+    assert_eq!(f.gw.merge_deps(&mut d, &[ca, cb]).unwrap_err().code(), "deps_conflict");
+    no_marker(&f);
+}
+
+#[test]
+fn agent_config_and_globs_match_as_specified() {
+    for p in [".claude/settings.json", "a/.claude/x", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", ".codex/c.toml", ".envrc", ".husky/pre-commit", ".github/workflows/ci.yml"] {
+        assert!(agent_config(p), "{p}");
+    }
+    for p in ["src/lib.rs", "docs/claude.md", ".github/CODEOWNERS"] {
+        assert!(!agent_config(p), "{p}");
+    }
+    assert!(glob_match("src/**", "src/a/b.rs") && glob_match("src/", "src/x") && glob_match("**/*.rs", "a.rs") && glob_match("a?c", "abc"));
+    assert!(!glob_match("src/*", "src/a/b.rs") && !glob_match("../x", "../x") && !glob_match("src/**", "srcx/a"));
+}
+
+/// The shipped sandbox policy, unchanged: it denies agent writes to `<data>`, and no deny entry covers `<work>`, so a
+/// Claude seat under it can build in its worktree while the core's state stays out of reach.
+#[test]
+fn the_shipped_sandbox_denies_data_and_leaves_work_writable() {
+    let s: serde_json::Value = serde_json::from_str(include_str!("../../../../config/sandbox.json")).unwrap();
+    let home = Path::new("/Users/u");
+    let fs = &s["settings"]["sandbox"]["filesystem"];
+    let expand = |v: &serde_json::Value| -> Vec<PathBuf> {
+        v.as_array().unwrap().iter().map(|x| home.join(x.as_str().unwrap().trim_start_matches("~/"))).collect()
+    };
+    let (deny_write, deny_read) = (expand(&fs["denyWrite"]), expand(&fs["denyRead"]));
+    let data = crate::paths::resolve_data_dir(None, home);
+    let work = work_root(home);
+    assert!(deny_write.iter().any(|d| data.starts_with(d)), "the shipped policy must keep denying <data>");
+    assert!(!deny_write.iter().chain(&deny_read).any(|d| work.starts_with(d) || d.starts_with(&work)), "<work> must stay writable");
+    assert!(!data.starts_with(&work) && !work.starts_with(&data));
+}

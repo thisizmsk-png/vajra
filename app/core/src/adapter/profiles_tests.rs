@@ -163,9 +163,11 @@ fn the_flag_file_always_carries_the_guard_and_turns_hooks_and_bypass_back_on() {
     let pre = v["hooks"]["PreToolUse"].to_string();
     assert!(pre.contains("pre-tool-use.sh") && pre.contains("desktop-control.sh"), "{pre}");
     let deny: Vec<&str> = v["permissions"]["deny"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-    assert!(deny.contains(&format!("Read(/{}/**)", data.display()).as_str()), "{deny:?}");
-    assert!(deny.contains(&format!("Read(/{}/.claude/vajra/**)", home.display()).as_str()));
-    assert!(deny.contains(&format!("Read(/{}/**/.env)", work.display()).as_str()));
+    let generated = crate::control::lead_settings::deny_rules_for(&home, &[work.clone(), repo.clone()], &data, &[]).unwrap();
+    assert_eq!(deny, generated.iter().map(String::as_str).collect::<Vec<_>>(), "the rules come from the one generator");
+    for want in [format!("{}/**", data.display()), format!("{}/.claude/vajra/**", home.display()), format!("{}/**/.env", work.display())] {
+        assert!(deny.iter().any(|r| r.ends_with(&format!("{})", &want[1..]))), "{want} missing from {deny:?}");
+    }
     let path = write_claude_worker_flag(&data, &s).unwrap();
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
