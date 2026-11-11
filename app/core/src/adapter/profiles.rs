@@ -88,7 +88,7 @@ const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.m
 
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
-    Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker.json` (deny rules, guard hooks, disableAllHooks:false)" },
+    Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker-<session>.json`, fresh per launch and hash-checked before spawn (Read and Edit deny rules, guard hooks, disableAllHooks:false)" },
     Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
     Always { setting: "tools", how: "`--tools` and `--allowedTools`, both the role's list" },
     Always { setting: "model", how: "`--model` when the seat names one" },
@@ -386,7 +386,8 @@ const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
 /// "with the guard" while no guard runs.
 pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Path) -> Result<String, String> {
     let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
-    let deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
+    let mut deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
+    deny.extend(crate::control::lead_settings::worker_edit_rules(home, data).map_err(|e| e.to_string())?);
     let hooks: Value = serde_json::from_str::<Value>(HOOKS_JSON).map_err(|e| e.to_string())?["hooks"].clone();
     if !hooks.is_object() {
         return Err("hooks/hooks.json has no hooks".into());
@@ -405,21 +406,50 @@ pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Pa
     Ok(s)
 }
 
-/// Write `<data>/profiles/claude-worker.json` (dir 0700, file 0600, through a temp file and a rename) and return its path.
-pub fn write_claude_worker_flag(data: &Path, contents: &str) -> std::io::Result<PathBuf> {
+/// One launch's flag file and the sha256 of the bytes the core wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlagFile {
+    pub path: PathBuf,
+    pub sha: String,
+}
+
+/// Write this launch's `<data>/profiles/claude-worker-<session id>.json` (dir 0700, file 0600, through a temp file
+/// opened `O_EXCL|O_NOFOLLOW` and a rename). Every launch gets its own fresh file, so one worker that rewrote an
+/// earlier launch's file never reaches the next; `verify_claude_worker_flag` runs just before the spawn (#147 gate H1).
+pub fn write_claude_worker_flag(data: &Path, session_id: &str, contents: &str) -> std::io::Result<FlagFile> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    if !crate::ids::valid_session_id(session_id) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "session id"));
+    }
     let dir = data.join("profiles");
     crate::paths::ensure_private_dir(&dir)?;
-    let path = dir.join("claude-worker.json");
-    // A per-call name: two threads writing at once never share the temp file.
+    let path = dir.join(format!("claude-worker-{session_id}.json"));
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = dir.join(format!(".claude-worker.json.{}.{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    f.write_all(contents.as_bytes())?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let tmp = dir.join(format!(".claude-worker.{}.{}.{nanos:08x}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(&tmp)?;
+    let r = f.write_all(contents.as_bytes()).and_then(|()| f.sync_all()).and_then(|()| std::fs::rename(&tmp, &path));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r?;
+    Ok(FlagFile { path, sha: crate::control::sha256::hex_digest(contents.as_bytes()) })
+}
+
+/// Just before the spawn: the flag file still holds exactly the bytes the core wrote, read without following a link.
+/// Anything else refuses the launch with `profile_not_applied`.
+pub fn verify_claude_worker_flag(f: &FlagFile) -> Result<(), NotApplied> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let no = || NotApplied("the worker settings file changed after Vajra wrote it".into());
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&f.path).map_err(|_| no())?;
+    if !file.metadata().map_err(|_| no())?.is_file() {
+        return Err(no());
+    }
+    let mut b = Vec::new();
+    file.take(1 << 20).read_to_end(&mut b).map_err(|_| no())?;
+    if crate::control::sha256::hex_digest(&b) == f.sha { Ok(()) } else { Err(no()) }
 }
 
 // ------------------------------------------------------------ run-time read-back (16.4 rule 4)
@@ -441,7 +471,9 @@ pub struct CodexWant {
 /// Check the first `turn_context` of a rollout against the profile. Anything missing, unknown or wider fails: the
 /// approval policy must be `never`; the sandbox `workspace-write` (or the narrower `read-only`) with network as the
 /// seat says, `/tmp` and `$TMPDIR` excluded, and every writable root, in both the legacy policy and the file-system
-/// policy, the worktree or the ticket temp dir.
+/// policy, the worktree or the ticket temp dir. The session's cwd must be the worktree (workspace-write makes the cwd
+/// writable), network is checked under either sandbox, and a file-system entry's access is `read` or `none`, or
+/// `write` to an allowed path; any other access value fails.
 pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApplied> {
     let no = |m: &str| Err(NotApplied(m.into()));
     let Some(tc) = rollout.lines().take(10_000).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|r| r["type"] == "turn_context") else {
@@ -451,14 +483,24 @@ pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApp
     if p["approval_policy"] != "never" {
         return no("approval policy is not never");
     }
-    let sp = &p["sandbox_policy"];
-    match sp["type"].as_str() {
-        Some("read-only") => return Ok(()),
-        Some("workspace-write") => {}
-        _ => return no("sandbox is wider than workspace-write"),
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    match p["cwd"].as_str() {
+        Some(c) if canon(Path::new(c)) == canon(&want.cwd) => {}
+        _ => return no("the session's cwd is not the worktree"),
     }
-    if sp["network_access"].as_bool() != Some(false) && !want.network {
+    let sp = &p["sandbox_policy"];
+    let read_only = match sp["type"].as_str() {
+        Some("read-only") => true,
+        Some("workspace-write") => false,
+        _ => return no("sandbox is wider than workspace-write"),
+    };
+    // Absent on read-only means no network; anything but `false` on workspace-write is on.
+    let net = sp.get("network_access").map_or(!read_only, |v| v.as_bool() != Some(false));
+    if net && !want.network {
         return no("network is on");
+    }
+    if read_only {
+        return check_fs_entries(p, &[]);
     }
     if sp["exclude_slash_tmp"].as_bool() != Some(true) || sp["exclude_tmpdir_env_var"].as_bool() != Some(true) {
         return no("/tmp or $TMPDIR is writable");
@@ -469,21 +511,31 @@ pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApp
     if !roots.iter().all(|r| r.as_str().is_some_and(ok_path)) {
         return no("a writable root is outside the worktree and the ticket temp dir");
     }
-    // The file-system policy lists the effective write entries; it is absent on an older layout, never ignored when
-    // present. A special entry (`slash_tmp`, `tmpdir`, `root`) with write access is wider than the profile.
-    if let Some(entries) = p.pointer("/file_system_sandbox_policy/entries").and_then(Value::as_array) {
-        for e in entries.iter().filter(|e| e["access"] == "write") {
-            match e.pointer("/path/path").and_then(Value::as_str) {
-                Some(s) if ok_path(s) => {}
-                _ => return no("a write entry is outside the worktree and the ticket temp dir"),
-            }
+    check_fs_entries(p, &allowed)
+}
+
+/// The file-system policy lists the effective entries; it is absent on an older layout, never ignored when present.
+/// `read` and `none` pass; `write` only to an `allowed` path (a special entry such as `slash_tmp`, `tmpdir` or `root`
+/// has no path and fails); an access value Vajra doesn't know fails.
+fn check_fs_entries(p: &Value, allowed: &[PathBuf]) -> Result<(), NotApplied> {
+    let Some(entries) = p.pointer("/file_system_sandbox_policy/entries") else { return Ok(()) };
+    let Some(entries) = entries.as_array() else { return Err(NotApplied("the file-system policy is not a list".into())) };
+    for e in entries {
+        match e["access"].as_str() {
+            Some("read" | "none") => {}
+            Some("write") => match e.pointer("/path/path").and_then(Value::as_str) {
+                Some(s) if allowed.iter().any(|a| a == Path::new(s)) => {}
+                _ => return Err(NotApplied("a write entry is outside the worktree and the ticket temp dir".into())),
+            },
+            _ => return Err(NotApplied("a file-system entry has an access Vajra doesn't know".into())),
         }
     }
     Ok(())
 }
 
 /// Check a Claude worker's `system`/`init` event: permission mode `dontAsk`, and no built-in tool outside the role's
-/// list (the user's own MCP tools, `mcp__*`, are kept for workers under Q4).
+/// list. The user's own MCP tools, `mcp__*`, are kept for workers under Q4, except Vajra's own namespaces: a worker has
+/// no Vajra tools (16.4), so an `mcp__vajra*` tool from a server named like Vajra's fails.
 pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied> {
     let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
     let Some(init) = init else { return Err(NotApplied("no init event".into())) };
@@ -494,6 +546,9 @@ pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied>
     let Some(got) = init["tools"].as_array() else { return Err(NotApplied("no tool list".into())) };
     for t in got {
         let t = t.as_str().unwrap_or("");
+        if t.to_ascii_lowercase().starts_with("mcp__vajra") {
+            return Err(NotApplied(format!("tool {t} is a Vajra tool")));
+        }
         if !t.starts_with("mcp__") && !want.contains(&t) {
             return Err(NotApplied(format!("tool {t} is outside the role's list")));
         }

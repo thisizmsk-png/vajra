@@ -163,16 +163,58 @@ fn the_flag_file_always_carries_the_guard_and_turns_hooks_and_bypass_back_on() {
     let pre = v["hooks"]["PreToolUse"].to_string();
     assert!(pre.contains("pre-tool-use.sh") && pre.contains("desktop-control.sh"), "{pre}");
     let deny: Vec<&str> = v["permissions"]["deny"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-    let generated = crate::control::lead_settings::deny_rules_for(&home, &[work.clone(), repo.clone()], &data, &[]).unwrap();
+    let mut generated = crate::control::lead_settings::deny_rules_for(&home, &[work.clone(), repo.clone()], &data, &[]).unwrap();
+    generated.extend(crate::control::lead_settings::worker_edit_rules(&home, &data).unwrap());
     assert_eq!(deny, generated.iter().map(String::as_str).collect::<Vec<_>>(), "the rules come from the one generator");
     for want in [format!("{}/**", data.display()), format!("{}/.claude/vajra/**", home.display()), format!("{}/**/.env", work.display())] {
         assert!(deny.iter().any(|r| r.ends_with(&format!("{})", &want[1..]))), "{want} missing from {deny:?}");
     }
-    let path = write_claude_worker_flag(&data, &s).unwrap();
+    // #147 gate H1: the edit tools can't rewrite the data dir (this flag file, the git baseline), any HOME_RULES path or
+    // the user's git config, in both spellings of every base.
+    use crate::control::lead_settings::{DATA_RULES, HOME_RULES, WORKER_EDIT_HOME_RULES};
+    let edit = |base: &Path, suffix: &str| format!("Edit(/{}/{suffix})", base.display());
+    for b in [home.clone(), home.canonicalize().unwrap()] {
+        for suffix in HOME_RULES.iter().chain(&WORKER_EDIT_HOME_RULES) {
+            assert!(deny.contains(&edit(&b, suffix).as_str()), "{suffix} missing from {deny:?}");
+        }
+    }
+    for b in [data.clone(), data.canonicalize().unwrap()] {
+        assert!(deny.contains(&edit(&b, DATA_RULES[0]).as_str()), "data missing from {deny:?}");
+    }
+    let sid = "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6";
+    let f = write_claude_worker_flag(&data, sid, &s).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), s);
+    assert!(f.path.ends_with(format!("profiles/claude-worker-{sid}.json")));
+    assert_eq!(std::fs::metadata(&f.path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(f.path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(std::fs::read_to_string(&f.path).unwrap(), s);
+    assert!(write_claude_worker_flag(&data, "../x", &s).is_err(), "only a canonical session id names the file");
+}
+
+/// #147 gate H1: a worker that rewrites the flag file, or swaps it for a link, between the write and the spawn has the
+/// launch refused.
+#[test]
+fn a_flag_file_changed_before_the_spawn_refuses_the_launch() {
+    let d = tmpdir("flagcheck");
+    let (home, work, repo, data) = (d.join("home"), d.join("work"), d.join("repo"), d.join("data"));
+    for p in [&home, &work, &repo, &data] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    let s = claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data).unwrap();
+    let f = write_claude_worker_flag(&data, "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6", &s).unwrap();
+    assert_eq!(verify_claude_worker_flag(&f), Ok(()));
+    let mut v: Value = serde_json::from_str(&s).unwrap();
+    v["permissions"]["deny"] = json!([]);
+    v["hooks"] = json!({"SessionStart": [{"hooks": [{"type": "command", "command": "true"}]}]});
+    std::fs::write(&f.path, v.to_string()).unwrap();
+    assert!(verify_claude_worker_flag(&f).is_err(), "rewritten");
+    let copy = d.join("copy.json");
+    std::fs::write(&copy, &s).unwrap();
+    std::fs::remove_file(&f.path).unwrap();
+    std::os::unix::fs::symlink(&copy, &f.path).unwrap();
+    assert!(verify_claude_worker_flag(&f).is_err(), "a link to the same bytes");
+    std::fs::remove_file(&f.path).unwrap();
+    assert!(verify_claude_worker_flag(&f).is_err(), "deleted");
 }
 
 /// A temp HOME with a sentinel "key" in the app's environment and hostile user settings for both harnesses: the
@@ -195,7 +237,7 @@ fn no_sentinel_key_reaches_argv_env_or_files() {
         all.push(v.to_string_lossy().into_owned());
     }
     let flag = claude_worker_flag(&home, &work, &[repo], &data).unwrap();
-    write_claude_worker_flag(&data, &flag).unwrap();
+    write_claude_worker_flag(&data, "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6", &flag).unwrap();
     all.push(flag);
     assert!(!all.iter().any(|x| x.contains(SENTINEL)));
     for e in walk(&data) {
@@ -236,7 +278,7 @@ fn rollout(sandbox: Value, writes: &[&str], approval: &str) -> String {
         .chain(writes.iter().map(|w| if w.starts_with('/') { json!({"path": {"type": "path", "path": w}, "access": "write"}) } else { json!({"path": {"type": "special", "value": {"kind": w}}, "access": "write"}) }))
         .collect();
     let meta = json!({"type": "session_meta", "payload": {"model_provider": "vajra-openrouter"}});
-    let tc = json!({"type": "turn_context", "payload": {"approval_policy": approval, "sandbox_policy": sandbox, "file_system_sandbox_policy": {"kind": "restricted", "entries": entries}}});
+    let tc = json!({"type": "turn_context", "payload": {"cwd": WT, "approval_policy": approval, "sandbox_policy": sandbox, "file_system_sandbox_policy": {"kind": "restricted", "entries": entries}}});
     format!("{meta}\n{tc}\n")
 }
 
@@ -273,6 +315,33 @@ fn the_read_back_accepts_the_applied_profile_and_refuses_anything_wider() {
     assert_eq!(check_codex_applied(&rollout(s, &[WT, TMP], "never"), &w), Ok(()));
 }
 
+/// #147 gate M1: the read-back fails closed on narrower-looking or unknown shapes.
+#[test]
+fn the_read_back_fails_closed_on_read_only_network_unknown_access_and_another_cwd() {
+    let bad = |r: String, why: &str| assert!(check_codex_applied(&r, &want()).is_err(), "{why}: {r}");
+    let ro = |net: Option<bool>| {
+        let mut s = json!({"type": "read-only"});
+        if let Some(n) = net {
+            s["network_access"] = json!(n);
+        }
+        rollout(s, &[], "never")
+    };
+    assert_eq!(check_codex_applied(&ro(Some(false)), &want()), Ok(()));
+    assert_eq!(check_codex_applied(&ro(None), &want()), Ok(()), "read-only with no network field has none");
+    bad(ro(Some(true)), "read-only with network on");
+    let with_access = |a: &str| rollout(good_sandbox(), &[WT, TMP], "never").replace("\"access\":\"read\"", &format!("\"access\":\"{a}\""));
+    assert_eq!(check_codex_applied(&with_access("none"), &want()), Ok(()));
+    for a in ["read-write", "full", "Write", ""] {
+        bad(with_access(a), a);
+    }
+    let good = rollout(good_sandbox(), &[WT, TMP], "never");
+    bad(good.replace(&format!("\"cwd\":\"{WT}\""), "\"cwd\":\"/Users/u\""), "another cwd");
+    bad(good.replace(&format!("\"cwd\":\"{WT}\","), ""), "no cwd");
+    let mut v: Value = serde_json::from_str(good.lines().nth(1).unwrap()).unwrap();
+    v["payload"]["file_system_sandbox_policy"]["entries"] = json!({"access": "write"});
+    bad(format!("{v}\n"), "entries not a list");
+}
+
 #[test]
 fn the_claude_read_back_checks_the_mode_and_the_tool_set() {
     let init = |mode: &str, tools: &[&str]| format!("{}\n", json!({"type": "system", "subtype": "init", "permissionMode": mode, "tools": tools}));
@@ -280,6 +349,10 @@ fn the_claude_read_back_checks_the_mode_and_the_tool_set() {
     assert!(check_claude_applied(&init("bypassPermissions", &["Read"]), CHECKER_TOOLS).is_err());
     assert!(check_claude_applied(&init("dontAsk", &["Read", "Write"]), CHECKER_TOOLS).is_err());
     assert!(check_claude_applied("{}\n", CHECKER_TOOLS).is_err());
+    // #147 gate L1: a worker has no Vajra tools, even from a user server named like Vajra's.
+    for t in ["mcp__vajra-desktop__run_start", "mcp__vajra__x", "mcp__Vajra_lookalike__y"] {
+        assert!(check_claude_applied(&init("dontAsk", &["Read", t]), CHECKER_TOOLS).is_err(), "{t}");
+    }
 }
 
 #[test]
