@@ -84,3 +84,22 @@ fn the_run_needs_a_token_for_the_plan_it_recomputes() {
     assert_eq!(r.outcome, super::super::run::Outcome::Installed);
     assert_eq!(run(&h, &m, &consents, &token, &sup, paths, &current).err(), Some("consent_required"), "a token works once");
 }
+
+#[test]
+fn a_plan_that_needs_admin_never_runs_whatever_the_ui_sends() {
+    let f = FakeNpm::new("flow-admin", &bytes(), NOT_INSTALLED, Some("/usr"));
+    let data = f.dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let bus = Arc::new(Bus::open(&data.join("spill"), Config::default()).unwrap());
+    let sup = Supervisor::new(bus, None);
+    let h = harness(true, vec![npm_method()]);
+    let m = world(&f);
+    let consents = Consents::default();
+    let shown = offer(&h, &m).unwrap().plan;
+    assert!(shown.needs_admin.is_some());
+    let token = consents.mint("x", &shown.hash, Instant::now());
+    let current = || None;
+    let paths = Paths { data: &data, audit: &data.join("audit.log") };
+    assert_eq!(run(&h, &m, &consents, &token, &sup, paths, &current).err(), Some("needs_admin"));
+    assert!(!f.log().contains("install -g"), "{}", f.log());
+}

@@ -73,6 +73,8 @@ impl Plan {
             pin: &'a Pin,
             scope_registry: &'a Option<String>,
             deps: &'a [String],
+            needs_admin: &'a Option<AdminRow>,
+            notes: &'a [&'static str],
         }
         let b = Bound {
             id: &self.id,
@@ -85,6 +87,8 @@ impl Plan {
             pin: &self.pin,
             scope_registry: &self.scope_registry,
             deps: &self.deps,
+            needs_admin: &self.needs_admin,
+            notes: &self.notes,
         };
         let json = serde_json::to_vec(&b).unwrap_or_default();
         self.hash = hex(&Sha256::digest(&json));

@@ -42,3 +42,14 @@ fn the_sheet_never_carries_the_pin_internals_or_the_tarball_bytes() {
     assert!(json.contains("\"hash\""));
     assert!(json.contains(TARBALL));
 }
+
+#[test]
+fn needs_admin_and_the_notes_are_bound_by_the_hash() {
+    let p = plan("1.0.0", Pin::Npm { tgz_sha512: "sha512-x".into() });
+    let mut admin = p.clone();
+    admin.needs_admin = Some(AdminRow { path: "/usr/local".into(), reason: "root_owned" });
+    assert_ne!(admin.rehash().hash, p.hash);
+    let mut noted = p.clone();
+    noted.notes.push("owned_by_you");
+    assert_ne!(noted.rehash().hash, p.hash);
+}

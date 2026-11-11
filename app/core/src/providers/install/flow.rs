@@ -121,6 +121,10 @@ fn curl_get(env: &SetupEnv) -> impl Fn(&str, &Path) -> Result<(), &'static str> 
 pub fn run(h: &Harness, m: &Machine, consents: &Consents, token: &str, sup: &Supervisor, paths: Paths, current: &dyn Fn() -> Option<(PathBuf, Option<String>)>) -> Result<Report, &'static str> {
     let _running = consents.begin(&h.id).map_err(ConsentError::code)?;
     let o = offer(h, m)?;
+    // ADR-17 rule 5, in the core and not only in the sheet: a plan that needs admin rights is never spawned.
+    if o.plan.needs_admin.is_some() {
+        return Err("needs_admin");
+    }
     consents.take(token, &h.id, &o.plan.hash, Instant::now()).map_err(ConsentError::code)?;
     let marks = Marks::at(paths.data);
     let ctx = Ctx { sup, env: &o.env, marks: &marks, audit: paths.audit, timeout: RUN_TIMEOUT, current };

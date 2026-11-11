@@ -82,3 +82,12 @@ fn missing_targets_are_skipped() {
     let t = Targets { dirs: vec![PathBuf::from("/nonexistent/vajra")], trees: vec![PathBuf::from("/nonexistent/vajra/x")], files: vec![PathBuf::from("/nonexistent/vajra/bin/x")] };
     assert_eq!(check(&t, me(), 10), None);
 }
+
+#[test]
+fn a_target_folder_that_is_a_dangling_link_needs_admin() {
+    let d = Dir::new("dangling");
+    let link = d.0.join("gone");
+    std::os::unix::fs::symlink(d.0.join("nowhere"), &link).unwrap();
+    let t = Targets { dirs: vec![link.clone()], trees: vec![], files: vec![] };
+    assert_eq!(check(&t, me(), 100).map(|b| (b.path, b.reason)), Some((link, "not_writable")));
+}

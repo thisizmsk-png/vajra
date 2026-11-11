@@ -43,7 +43,15 @@ fn writable(path: &Path) -> bool {
 pub fn check(t: &Targets, uid: u32, limit: usize) -> Option<Blocker> {
     for d in &t.dirs {
         let Ok(m) = std::fs::symlink_metadata(d) else { continue };
-        let m = if m.file_type().is_symlink() { std::fs::metadata(d).ok()? } else { m };
+        // A link to nothing can't be checked: treat it as a folder the user can't write.
+        let m = if m.file_type().is_symlink() {
+            match std::fs::metadata(d) {
+                Ok(m) => m,
+                Err(_) => return Some(Blocker { path: d.clone(), reason: "not_writable" }),
+            }
+        } else {
+            m
+        };
         if let Some(b) = owner(d, &m, uid) {
             return Some(b);
         }
