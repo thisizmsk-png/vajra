@@ -629,6 +629,91 @@ worker BLOCK "Sol: worker grep -r with cwd above control"   "$(bj "cd \"$H/Libra
 raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
 worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
 
+# --- ADR-16: the whole app data dir <data> is write-protected; <work> is not ---
+# design.md 16.6/16.8: seats.json, run records, profiles, ticket dirs and the git
+# baseline live under <data> beside the control dir. Agents never write any of it;
+# reads stay allowed. Worktrees live under <work>, a sibling root, and stay writable.
+DATA="$H/Library/Application Support/VajraDesktop"
+WORK="$H/Library/Application Support/VajraWorktrees"
+mkdir -p "$DATA/runs/r1/lead" "$DATA/profiles" "$DATA/git-baseline" "$WORK/proj/r1/t1-r1" "$WORK/proj/r1/tmp/t1-r1"
+echo '{}' > "$DATA/seats.json"; echo brief > "$DATA/runs/r1/lead/brief.md"; echo '{}' > "$DATA/profiles/claude-worker.json"
+echo x > "$WORK/proj/r1/t1-r1/a.txt"
+ln -s "$DATA" "$PROJ/datalink"; ln -s "$DATA/runs" "$PROJ/runslink"; ln -s "$DATA/seats.json" "$PROJ/seatslink"
+file_case BLOCK "D16 Write seats.json"              Write "$DATA/seats.json"
+file_case BLOCK "D16 Edit profile"                  Edit "$DATA/profiles/claude-worker.json"
+file_case BLOCK "D16 MultiEdit run record"          MultiEdit "$DATA/runs/r1/lead/brief.md"
+file_case BLOCK "D16 NotebookEdit under data"       NotebookEdit "$DATA/runs/r1/n.ipynb"
+file_case BLOCK "D16 Write new file in git-baseline" Write "$DATA/git-baseline/config"
+file_case BLOCK "D16 Write data dir itself"         Write "$DATA"
+file_case BLOCK "D16 Write tilde path"              Write "~/Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write case variant"            Write "$H/LIBRARY/application support/vajradesktop/SEATS.json"
+file_case BLOCK "D16 Write via dir symlink"         Write "$PROJ/datalink/seats.json"
+file_case BLOCK "D16 Write via subdir symlink"      Write "$PROJ/runslink/r1/lead/brief.md"
+file_case BLOCK "D16 Write via file symlink"        Write "$PROJ/seatslink"
+file_case BLOCK "D16 Write relative .."             Write "../Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write .. through work"         Write "$WORK/../VajraDesktop/seats.json"
+bash_case BLOCK "D16 redirect quoted"               "echo x > \"$DATA/seats.json\""
+bash_case BLOCK "D16 redirect escaped space"        'echo x > ~/Library/Application\ Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 append redirect"               "echo x >> '$DATA/runs/r1/lead/brief.md'"
+bash_case BLOCK "D16 redirect case variant"         "echo x > \"$H/library/APPLICATION SUPPORT/VAJRADESKTOP/seats.json\""
+bash_case BLOCK "D16 redirect via symlink"          'echo x > datalink/seats.json'
+bash_case BLOCK "D16 redirect via file symlink"     'printf x > seatslink'
+bash_case BLOCK "D16 tee"                           "echo x | tee \"$DATA/seats.json\""
+bash_case BLOCK "D16 tee -a via symlink"            'echo x | tee -a runslink/r1/lead/brief.md'
+bash_case BLOCK "D16 cp into data"                  "cp /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 cp -r into data"               "cp -r out \"$DATA/profiles/\""
+bash_case BLOCK "D16 mv into data"                  "mv /tmp/evil.json \"$DATA/profiles/claude-worker.json\""
+bash_case BLOCK "D16 mv out of data"                "mv \"$DATA/seats.json\" /tmp/x.json"
+bash_case BLOCK "D16 mv case variant"               "mv /tmp/e.json \"$H/Library/Application Support/vajradesktop/RUNS/\""
+bash_case BLOCK "D16 ln -s into data"               "ln -s /tmp/evil \"$DATA/runs/r1/evil\""
+bash_case BLOCK "D16 ln -sf over seats.json"        "ln -sf /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 python open for write"         "python3 -c 'open(\"$DATA/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 python via symlink"            "python3 -c 'open(\"datalink/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 sed -i"                        "sed -i '' s/a/b/ \"$DATA/seats.json\""
+bash_case BLOCK "D16 touch"                         "touch \"$DATA/new\""
+bash_case BLOCK "D16 mkdir under data"              "mkdir -p \"$DATA/runs/r2\""
+bash_case BLOCK "D16 rm seats.json"                 "rm \"$DATA/seats.json\""
+bash_case BLOCK "D16 rm -rf runs"                   "rm -rf \"$DATA/runs\""
+bash_case BLOCK "D16 cd data && plain-word redirect" "cd \"$DATA\" && printf x > seats.json"
+bash_case BLOCK "D16 cd escaped space && rm"        'cd ~/Library/Application\ Support/VajraDesktop/runs && rm -rf r1'
+bash_case BLOCK "D16 cwd is data dir"               "echo x > seats.json" "$DATA"
+bash_case BLOCK "D16 cwd below data dir"            "touch x" "$DATA/runs/r1"
+bash_case BLOCK "D16 odd spacing \${IFS}"           'echo x > ~/Library/Application${IFS}Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 odd spacing \$'\\040'"          'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 variable spelling"             'D="$HOME/Library/Application"; echo x > "$D Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 glob App*Support"              'echo x > ~/Library/App*Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 glob App*/Vajra*"              'echo x > ~/Library/App*/Vajra*/seats.json'
+bash_case BLOCK "D16 glob, new file name"           'echo x > ~/Library/App*Support/VajraDesktop/brandnew.json'
+bash_case BLOCK "D16 cd glob && plain-word redirect" 'cd ~/Library/App*Support && echo x > VajraDesktop/seats.json'
+bash_case ALLOW "D16 bare app name in a grep"       'grep -rn VajraDesktop src'
+# Never weaker than before: the <data> root was an ancestor of <control>, so copying it whole stays blocked.
+bash_case BLOCK "D16 cp -r data root out"           "cp -r \"$DATA\" out/d"
+bash_case BLOCK "D16 rsync data root out"           "rsync -a \"$DATA\" out/d"
+bash_case BLOCK "D16 cp -R alias spelling root out" 'cp -R ~/Library/Application\ Support/VajraDesktop out/d'
+worker BLOCK "D16 worker Write seats.json"        "$(fj Write "$DATA/seats.json")"
+worker BLOCK "D16 worker redirect into data"        "$(bj "echo x > \"$DATA/runs/r1/lead/brief.md\"")"
+# Reads stay allowed (the control dir keeps its own worker read block above).
+file_case ALLOW "D16 Read seats.json"               Read "$DATA/seats.json"
+file_case ALLOW "D16 Read via symlink"              Read "$PROJ/seatslink"
+path_case ALLOW "D16 Grep runs dir"                 Grep "$DATA/runs"
+bash_case ALLOW "D16 cat seats.json"                "cat \"$DATA/seats.json\""
+bash_case ALLOW "D16 ls data dir"                   "ls \"$DATA\""
+bash_case ALLOW "D16 cp data file out"              "cp \"$DATA/seats.json\" out/seats.json"
+bash_case ALLOW "D16 jq a profile"                  "jq . \"$DATA/profiles/claude-worker.json\""
+worker ALLOW "D16 worker Read run brief"            "$(fj Read "$DATA/runs/r1/lead/brief.md")"
+worker ALLOW "D16 worker cat seats.json"            "$(bj "cat \"$DATA/seats.json\"")"
+# <work> stays writable, and so does a sibling whose name only starts like <data>.
+file_case ALLOW "D16 Write in work worktree"        Write "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Edit in work worktree"         Edit "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Write ticket tmp"              Write "$WORK/proj/r1/tmp/t1-r1/scratch"
+file_case ALLOW "D16 Write data-prefixed sibling"   Write "$H/Library/Application Support/VajraDesktopX/x.json"
+bash_case ALLOW "D16 redirect into work"            "echo x > \"$WORK/proj/r1/t1-r1/a.txt\""
+bash_case ALLOW "D16 redirect into work, escaped"   'echo x > ~/Library/Application\ Support/VajraWorktrees/proj/r1/t1-r1/a.txt'
+bash_case ALLOW "D16 tee into work"                 "echo x | tee \"$WORK/proj/r1/t1-r1/b.txt\""
+bash_case ALLOW "D16 mkdir and cp in work"          "mkdir -p \"$WORK/proj/r1/t1-r1/src\" && cp out/x \"$WORK/proj/r1/t1-r1/src/\""
+bash_case ALLOW "D16 cwd is a work worktree"        "echo x > a.txt && rm a.txt" "$WORK/proj/r1/t1-r1"
+worker ALLOW "D16 worker writes its worktree"       "$(jq -nc --arg c 'echo x > a.txt' --arg d "$WORK/proj/r1/t1-r1" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}')"
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"

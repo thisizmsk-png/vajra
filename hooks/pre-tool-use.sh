@@ -175,6 +175,15 @@ ROOTS=(
 canon "$HOME/Library/Application Support/VajraDesktop/control" /; DCTL="$CANON"
 canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; DCTL2="$CANON"
 ROOTS+=( "$DCTL" "$DCTL2" )
+# ADR-16 (design.md 16.6/16.8): the whole Vajra Desktop app data dir <data>
+# ("$HOME/Library/Application Support/VajraDesktop") is core-only state (seats.json,
+# run records, profiles, ticket dirs, the git baseline, the control queue): agents
+# never write anywhere under it. Reads stay allowed (the control dir keeps its own
+# worker read block below). The worktree root <work> (VajraWorktrees, a sibling,
+# never a prefix match) stays writable.
+canon "$HOME/Library/Application Support/VajraDesktop" /; DDATA="$CANON"
+canon "$HOME/Library/Application__SP__Support/VajraDesktop" /; DDATA2="$CANON"
+ROOTS+=( "$DDATA" "$DDATA2" )
 # Read-protected for workers (payload carries agent_id): the control dir holds the
 # steering nonce, and transcripts hold each worker's brief (which carries it). The
 # main session and the Lead chat session have no agent_id and keep reading.
@@ -201,7 +210,7 @@ PKIND=""
 # The shortcut above is valid only while no protected root was moved by a symlink under HOME.
 CLASSIFY_FAST=""
 if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
-   && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
+   && [[ "$DCTL" == "$CHOME/Library/"* ]] && [[ "$DDATA" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
 classify() { local was=0; shopt -q nocasematch && was=1; shopt -s nocasematch; classify_ "$1"; [ "$was" = 1 ] || shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
@@ -823,6 +832,11 @@ shopt -s nocasematch
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
   [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+fi
+# ADR-16: the same for any path below the app data dir, so a spelling the path
+# analysis cannot resolve (a variable, ${IFS}, $'\040') never hides a write there.
+if [[ "$CMD" == *vajradesktop/* || "$CMD" == *vajradesktop\\* ]]; then
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
 fi
 shopt -u nocasematch
 
@@ -1515,8 +1529,11 @@ eval_segment_body() { # uses SEG array
             [ "$dataarg" = 1 ] && continue
             hit=1
             # A copier may read a protected source (not an ancestor of one)
-            # into a destination outside every protected area.
-            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]]; then continue; fi
+            # into a destination outside every protected area. A source that holds
+            # the control dir (the <data> root, an ancestor before ADR-16) never is.
+            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]] \
+               && ! { inside "$DCTL" "$cc" && ! same_dir "$DCTL" "$cc"; } \
+               && ! { inside "$DCTL2" "$cc" && ! same_dir "$DCTL2" "$cc"; }; then continue; fi
             [ "$copier" = 1 ] && [ "$reader" = 0 ] && block "only read-only commands may touch protected path $cc (a copy may read protected files only into a destination outside every protected area; never into one, never via links)"
             [ "$reader" = 1 ] || block "only read-only commands may touch protected path $cc"
             ;;
