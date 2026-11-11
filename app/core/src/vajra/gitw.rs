@@ -480,9 +480,18 @@ fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf]
         if !present || depth >= 10 {
             continue;
         }
-        let Some(f) = p.to_str() else { continue };
+        let Some(f) = p.to_str() else {
+            // Its includes can't be read back through git's argv: partial, never skipped (#146 bhishma delta).
+            partial = Some("a config path that is not UTF-8".into());
+            continue;
+        };
         let Some(o) = config_read(git, home, xdg, &["config", "--file", f, "--no-includes", "--get-regexp", "-z", "^include(if\\..*)?\\.path$"]) else { continue };
         for (_, target) in parse_list_z(&o.stdout) {
+            // Output is decoded lossily: a target that wasn't UTF-8 names a different file than git reads.
+            if target.contains('\u{FFFD}') {
+                partial = Some("an include path that is not UTF-8".into());
+                continue;
+            }
             match include_target(&target, &p, home) {
                 Some(t) => queue.push((t, depth + 1)),
                 None => partial = Some("a ~user or %(prefix) path Vajra can't resolve".into()),
@@ -501,6 +510,8 @@ fn include_target(target: &str, from: &Path, home: &Path) -> Option<PathBuf> {
     if let Some(rest) = target.strip_prefix('~') {
         let (user, tail) = rest.split_once('/').unwrap_or((rest, ""));
         let base = if user.is_empty() { home.to_path_buf() } else { user_home(user)? };
+        // A home that isn't UTF-8 can't be handed to git's argv to read its own includes.
+        base.to_str()?;
         return Some(if tail.is_empty() { base } else { base.join(tail) });
     }
     if target.starts_with("%(prefix)/") {
@@ -1502,8 +1513,20 @@ impl Gitw {
         Ok(prev)
     }
 
-    /// `r` is a plain ref or none: `symbolic-ref -q` exits 1. `what` names it in the tamper reason.
+    /// `r` is a plain ref or none: `symbolic-ref -q` exits 1. `what` names it in the tamper reason. Every directory on
+    /// its path under the common dir is a real directory or absent: a planted directory symlink (`refs/heads/vajra/<run>
+    /// -> ../feat`) would carry even a `--no-deref` write to another branch's file (#146 bhishma delta).
     fn plain_ref(&self, t: &Ticket, r: &str, what: &str) -> R<()> {
+        let mut d = t.common.path.clone();
+        let parts: Vec<&str> = r.split('/').collect();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            d.push(part);
+            match std::fs::symlink_metadata(&d) {
+                Ok(m) if m.is_dir() => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                _ => return Err(tampered(format!("{what}'s directory is not a plain directory"))),
+            }
+        }
         if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered(format!("{what} is a symbolic ref"))) }
     }
 

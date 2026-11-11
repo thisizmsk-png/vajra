@@ -944,12 +944,17 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
         sup.spawn(id, spec).unwrap();
         f
     };
-    let grows = |f: &Path| {
+    let growth = |f: &Path| {
         let size = || std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
         let a = size();
         std::thread::sleep(Duration::from_millis(300));
-        size() > a
+        size() - a
     };
+    let grows = |f: &Path| growth(f) > 0;
+    // Held: at most two ticks in 300 ms (a running ticker writes about fifteen). The kernel can continue a stopped
+    // session's group the moment a member exits, and under heavy test load the next 3 ms re-stop can come late, so a
+    // tick can slip through: the window ADR 16.6 records as an accepted residual.
+    let held = |f: &Path| growth(f) <= 4;
     let a = ticker("w-a");
     let live = Arc::new(Mutex::new(vec!["w-a".to_string()]));
     let l2 = live.clone();
@@ -957,15 +962,15 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
     let other = ticker("w-other");
     assert!(grows(&a) && grows(&other), "both run before");
     let p1 = q.pause(Path::new("/repo-one"));
-    assert!(!grows(&a), "stopped by the first pause");
+    assert!(held(&a), "stopped by the first pause");
     assert!(grows(&other), "a session on another repo keeps running");
     // A session that starts during the first pause is stopped by the second.
     let b = ticker("w-b");
     crate::lock(&live).push("w-b".into());
     let p2 = q.pause(Path::new("/repo-one"));
-    assert!(!grows(&b), "stopped by the second pause");
+    assert!(held(&b), "stopped by the second pause");
     drop(p1);
-    assert!(!grows(&a) && !grows(&b), "the first drop resumes nothing while the second call runs");
+    assert!(held(&a) && held(&b), "the first drop resumes nothing while the second call runs");
     drop(p2);
     assert!(grows(&a) && grows(&b), "the last drop resumes both");
     // A session that starts during a single held pause is stopped too, with no second pause (#146 bhishma delta).
@@ -974,12 +979,12 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
     assert!(grows(&c), "it runs until the repo's session list names it");
     crate::lock(&live).push("w-c".into());
     std::thread::sleep(Duration::from_millis(100));
-    assert!(!grows(&c), "stopped while the single pause is held");
+    assert!(held(&c), "stopped while the single pause is held");
     drop(p);
     assert!(grows(&c), "resumed by its drop");
     // A fresh pause after both ended stops them again, and its drop resumes them.
     let p3 = q.pause(Path::new("/repo-one"));
-    assert!(!grows(&a));
+    assert!(held(&a));
     drop(p3);
     assert!(grows(&a));
     for id in ["w-a", "w-b", "w-c", "w-other"] {
@@ -1225,5 +1230,44 @@ fn a_tilde_user_include_is_hashed_where_git_reads_it() {
         other => panic!("{other:?}"),
     }
     USER_HOMES.with(|u| u.borrow_mut().clear());
+    no_marker(&f);
+}
+
+/// #146 bhishma delta: an include git can't be followed through exactly (a non-UTF-8 target, or a `~user` home that
+/// isn't UTF-8) makes the graph partial, never silently skipped.
+#[test]
+fn a_non_utf8_include_makes_the_graph_partial() {
+    use std::os::unix::ffi::OsStrExt;
+    let d = tmpdir("nonutf8");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let cfg = d.join("config");
+    let mut bytes = b"[include]\n\tpath = ".to_vec();
+    bytes.extend(d.join("x").as_os_str().as_bytes());
+    bytes.extend(b"\xff.gitconfig\n");
+    std::fs::write(&cfg, bytes).unwrap();
+    let (_, partial) = config_sources(Path::new(GIT), &home, None, std::slice::from_ref(&cfg), false);
+    assert_eq!(partial.as_deref(), Some("an include path that is not UTF-8"));
+    std::fs::write(&cfg, "[include]\n\tpath = ~vajra-bytes/x.gitconfig\n").unwrap();
+    USER_HOMES.with(|u| u.borrow_mut().push(("vajra-bytes".into(), PathBuf::from(std::ffi::OsStr::from_bytes(b"/homes/\xff")))));
+    assert_eq!(include_target("~vajra-bytes/x.gitconfig", &cfg, &home), None);
+    let (_, partial) = config_sources(Path::new(GIT), &home, None, std::slice::from_ref(&cfg), false);
+    USER_HOMES.with(|u| u.borrow_mut().clear());
+    assert_eq!(partial.as_deref(), Some("a ~user or %(prefix) path Vajra can't resolve"));
+}
+
+/// #146 bhishma delta: a run's ref directory planted as a symlink to another branch directory is refused before any
+/// ref write, so that branch's `integration` file never moves.
+#[test]
+fn a_symlinked_ref_directory_is_refused_and_the_other_branch_never_moves() {
+    let f = fx("refdirlink");
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let other = out(ugit(&f.home, &f.repo, &["-c", "user.name=W", "-c", "user.email=w@e", "commit-tree", &format!("{}^{{tree}}", f.base), "-p", &f.base, "-m", "other"]));
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/feat/integration", &other]);
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    std::fs::create_dir_all(common.join("refs/heads/vajra")).unwrap();
+    std::os::unix::fs::symlink("../feat", common.join("refs/heads/vajra/r1")).unwrap();
+    assert_eq!(f.gw.integrate(&it, &f.base, &[]).unwrap_err(), GitwError::Tampered { what: "the integration branch's directory is not a plain directory".into() });
+    assert_eq!(rev(&f, "refs/heads/feat/integration"), other, "the other branch never moves");
     no_marker(&f);
 }
