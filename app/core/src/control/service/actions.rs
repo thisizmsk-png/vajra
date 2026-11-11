@@ -76,6 +76,11 @@ impl Service {
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
         }
+        // A core worker's profile decides (16.7): nothing is queued that no channel would deliver.
+        if let Some(t) = worker.strip_prefix(CORE_PREFIX) {
+            let c = self.core_ticket(t)?;
+            return Err(ControlError::NotSupportedByHarness(c.core.message_off(t)));
+        }
         let (sid, w) = self.resolve(worker)?;
         if let Some(want) = expect {
             let have = u64::from(w.round.unwrap_or(0));
@@ -154,6 +159,9 @@ impl Service {
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
         }
+        if let Some(t) = worker.strip_prefix(CORE_PREFIX) {
+            return self.stop_core(actor, t, reason, expect);
+        }
         let (sid, w) = self.resolve(worker)?;
         if let Some(want) = expect {
             let have = u64::from(w.round.unwrap_or(0));
@@ -192,7 +200,44 @@ impl Service {
         }
     }
 
+    /// Stop on `core:<ticket>` (16.7): the human's stop runs the profile's stop; a Lead's waits for the human's confirm,
+    /// as every Lead stop does. One ledger line per step, like a hook stop.
+    fn stop_core(&mut self, actor: Actor, ticket: &str, reason: Option<String>, expect: Option<u64>) -> Result<Value> {
+        let c = self.core_ticket(ticket)?;
+        if expect.is_some_and(|want| want != u64::from(c.round)) {
+            return Err(ControlError::StaleGeneration(u64::from(c.round)));
+        }
+        let key = format!("{CORE_PREFIX}{ticket}");
+        let now = SystemTime::now();
+        if actor == Actor::Lead {
+            if let Some(p) = self.pending.values().find(|p| p.kind == Kind::Stop && p.state == State::AwaitingHumanConfirm && p.worker == key) {
+                return Ok(json!({"action_id": p.id, "state": p.state.as_str()}));
+            }
+        }
+        let mut a = self.new_action(Kind::Stop, actor, None, now)?;
+        (a.session_id, a.run_id, a.worker, a.reason) = (c.session, c.run, key, reason);
+        match actor {
+            Actor::Lead => {
+                a.state = State::AwaitingHumanConfirm;
+                self.record(&a, a.state, json!({}), now)?;
+                self.pending.insert(a.id.clone(), a.clone());
+                Ok(json!({"action_id": a.id, "state": a.state.as_str()}))
+            }
+            Actor::Human => self.write_stop(a, now),
+        }
+    }
+
     pub(super) fn write_stop(&mut self, mut a: Action, now: SystemTime) -> Result<Value> {
+        if let Some(t) = a.worker.strip_prefix(CORE_PREFIX).map(str::to_string) {
+            // Still live (a confirm may come after the ticket ended): recorded first, then stopped.
+            let c = self.core_ticket(&t)?;
+            self.pending.remove(&a.id);
+            a.actor = Actor::Human;
+            a.state = State::Queued;
+            self.record(&a, State::Queued, json!({}), now)?;
+            c.core.stop(&t);
+            return Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}));
+        }
         // Into the session the stop was asked for, never whichever session happens to be live now.
         let s = self.session(&a.session_id)?;
         let mut entry = json!({

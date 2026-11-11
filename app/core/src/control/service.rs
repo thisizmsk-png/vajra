@@ -26,6 +26,14 @@ mod watcher; // the ack watcher and the thread that ticks it
 pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
 pub use seats::{DEFAULT_MAX_IN_FLIGHT, LeadSeat, MAX_WORKERS, SeatCheck, SeatPolicy, Seats, WorkerSeat, proposal_sha_v2, security_warning};
 pub use types::*;
+
+/// What `core_ticket` found.
+struct CoreRef {
+    core: Arc<dyn CoreWorkers>,
+    session: String,
+    run: String,
+    round: u32,
+}
 pub use watcher::{Watcher, spawn_watcher};
 
 use std::collections::HashMap;
@@ -79,6 +87,8 @@ pub struct Service {
     project_gate: Option<ProjectGate>,
     /// Role defaults and the launch checks for proposal seats (ADR-16). `None`: no seat default exists and none is checked.
     seat_policy: Option<Arc<dyn SeatPolicy>>,
+    /// `core:<ticket>` workers (6c): `None` until the app hands over its runtime.
+    core: Option<Arc<dyn CoreWorkers>>,
     /// Whether `propose_run` takes `lead`, `workers` and `max_in_flight`. Off until the core route ships (6d).
     seats_enabled: bool,
     /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
@@ -114,6 +124,7 @@ impl Service {
             generations: HashMap::new(),
             project_gate: None,
             seat_policy: None,
+            core: None,
             seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
             bound_project: None,
             pending: HashMap::new(),
@@ -200,6 +211,9 @@ impl Service {
     /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
     /// that is ambiguous across sessions has no generation (the caller must use the agent id).
     pub fn worker_generation(&self, arg: &str) -> Option<u64> {
+        if let Some(t) = arg.strip_prefix(CORE_PREFIX) {
+            return self.core_ticket(t).ok().map(|c| u64::from(c.round));
+        }
         self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
     }
 
@@ -273,6 +287,20 @@ impl Service {
     }
 
     /// The session an action without a worker is about: the bound one, or the only one.
+    /// A `core:<ticket>` ref: the runtime holding it, and the in-scope session of the ticket's run. A Lead bound to
+    /// another run, or a ticket of a run with no control session, finds nothing.
+    fn core_ticket(&self, ticket: &str) -> Result<CoreRef> {
+        let core = self.core.clone().ok_or(ControlError::WorkerNotFound)?;
+        let (run, round) = core.live(ticket)?;
+        let session = self.in_scope().find(|s| s.run_id == run).map(|s| s.id.clone()).ok_or(ControlError::WorkerNotFound)?;
+        Ok(CoreRef { core, session, run, round })
+    }
+
+    /// The app's worker runtime, for `core:<ticket>` workers.
+    pub fn set_core_workers(&mut self, core: Arc<dyn CoreWorkers>) {
+        self.core = Some(core);
+    }
+
     fn default_session(&self) -> Option<&Session> {
         let mut it = self.in_scope();
         match (it.next(), it.next()) {

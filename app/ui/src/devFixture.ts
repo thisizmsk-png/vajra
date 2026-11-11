@@ -214,6 +214,8 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     { worker: "verifier", state: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 },
     { worker: "backend", state: "working" },
   ] }),
+  worker_disk: () => ({ copies: 3, bytes: 412_000_000 }),
+  act_worker_clean_up: () => ({ receipt: { action_id: "a_fixture4", state: "done" }, result: { removed: ["t1-r1"], disk: { copies: 2, bytes: 268_000_000 } } }),
   act_close_finished: () => ({ receipt: { action_id: "a_fixture3", state: "done" }, result: { closed: [], skipped: [{ worker: "architect", label: "t1", reason: "unsaved_work", changed_files: 3, unpushed_commits: 2, no_upstream: false, busy_terminals: 0 }, { worker: "verifier", label: "t5", reason: "terminal_busy", changed_files: 0, unpushed_commits: 0, no_upstream: false, busy_terminals: 2 }] } }),
   worktree_info: (a) => ({ worker: String(a?.worker), worktree: `.claude/worktrees/${String(a?.worker)}`, branch: `vajra/${RUN}/t2`, base: "4e1c9a2" }),
   task: () => ({ task: { title: "Token bucket middleware", owner_agent: "bhima", deps: ["t1"], files: ["src/middleware/rateLimit.ts", "src/server.ts"], acceptance: ["AC-1", "AC-3"], attempts: 1 } }),

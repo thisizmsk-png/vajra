@@ -74,7 +74,22 @@ pub enum ControlError {
     InvalidArgs(String),
     /// Seats the launch checks refused: one `{seat, code, detail}` for each, all in one `invalid_args` answer.
     Refusals(Vec<Value>),
+    /// Message or Redirect to a core worker whose harness has no channel for it (16.7): why, from its profile.
+    NotSupportedByHarness(&'static str),
     Io(io::Error),
+}
+
+/// A worker the core runs itself (6c) is named `core:<ticket>`.
+pub const CORE_PREFIX: &str = "core:";
+
+/// The app's worker runtime, answering for `core:<ticket>` workers (16.7). Their controls come from the harness profile.
+pub trait CoreWorkers: Send + Sync {
+    /// The ticket's run and round while it can still be stopped: `WorkerNotFound`, or `WorkerFinished` once it ended.
+    fn live(&self, ticket: &str) -> Result<(String, u32)>;
+    /// Why Message and Redirect are off for the ticket's harness. No harness offers them to a core worker yet.
+    fn message_off(&self, ticket: &str) -> &'static str;
+    /// The profile's stop.
+    fn stop(&self, ticket: &str);
 }
 
 impl ControlError {
@@ -95,6 +110,7 @@ impl ControlError {
             Self::ProjectsUnavailable(_) => "projects_unavailable",
             Self::UnknownTool => "unknown_tool",
             Self::InvalidArgs(_) | Self::Refusals(_) => "invalid_args",
+            Self::NotSupportedByHarness(_) => "not_supported_by_harness",
             Self::Io(_) => "io_error",
         }
     }
@@ -104,6 +120,7 @@ impl ControlError {
             Self::InvalidArgs(m) | Self::ProjectsUnavailable(m) => json!({"error": self.code(), "detail": m}),
             Self::Refusals(r) => json!({"error": self.code(), "detail": "some seats cannot be launched", "refusals": r}),
             Self::StaleGeneration(g) => json!({"error": self.code(), "detail": "the worker changed attempt since you looked; refresh and try again", "current_generation": g}),
+            Self::NotSupportedByHarness(why) => json!({"error": self.code(), "detail": why}),
             _ => json!({"error": self.code()}),
         }
     }

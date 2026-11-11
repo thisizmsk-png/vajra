@@ -5380,3 +5380,46 @@ fn a_failed_worker_count_record_refuses_the_launch_before_spawn() {
     assert!(lock(&app.control).nonce(SIDS[0]).is_none(), "no control session left behind");
     assert!(runindex::entries(&app.data.join("runs.jsonl")).is_empty(), "no index line for a run that never started");
 }
+
+// ---------------------------------------------------------------- ADR 16.6 at startup
+
+/// A stored baseline copy with no anchor: `take_or_load` calls it tampered, so the app opens with agents off.
+pub(super) fn break_baseline(data: &Path) {
+    let d = data.join("control/git-baseline");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("global.config"), "[user]\n\tname = x\n").unwrap();
+}
+
+#[test]
+fn the_app_opens_holding_the_git_baseline_and_builds_no_worker_runtime_until_asked() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.workers.agents_allowed(), Ok(()), "taken in open, before anything could launch");
+    assert!(!app.workers.runtime_built(), "an idle app holds no runtime");
+    drop(app);
+    // The next open loads the same baseline.
+    let again = t.app();
+    assert_eq!(again.workers.agents_allowed(), Ok(()));
+    assert_eq!(again.worker_disk().unwrap()["copies"], 0);
+    assert_eq!(again.worker_clean_up().unwrap()["removed"], json!([]));
+    assert!(!again.workers.runtime_built(), "Settings' disk line and Clean up build nothing");
+    let pf = again.preflight().unwrap();
+    assert!(!pf["rows"].as_array().unwrap().iter().any(|r| r["name"] == "Git settings for agents"), "{pf}");
+}
+
+#[test]
+fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_line() {
+    let t = Tmp::new();
+    break_baseline(&t.0.join("data"));
+    let app = t.app();
+    let sid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b";
+    let e = app.launch(sid, "20261105-1230", "c", &t.0.join("repo"), |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!(code(&e), "agents_off", "{e}");
+    assert!(e["detail"].as_str().unwrap().starts_with("Agents are off: the saved copy of your git settings"), "{e}");
+    assert!(!app.sup.is_running(&format!("run-{sid}")).unwrap_or(false), "nothing spawned");
+    assert!(lock(&app.control).nonce(sid).is_none(), "no control session was opened");
+    assert_eq!(code(&app.worker_runtime(|| unreachable!("no runtime is built while agents are off")).err().unwrap()), "agents_off");
+    let pf = app.preflight().unwrap();
+    let row = pf["rows"].as_array().unwrap().iter().find(|r| r["name"] == "Git settings for agents").cloned().expect("the row");
+    assert_eq!((row["ok"].clone(), pf["start_enabled"].clone()), (json!(false), json!(false)), "{pf}");
+}

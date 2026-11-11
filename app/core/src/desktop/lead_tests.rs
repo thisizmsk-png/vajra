@@ -455,6 +455,18 @@ fn lead_refused_without_guard_script() {
 }
 
 #[test]
+fn lead_refused_while_agents_are_off_for_a_broken_git_baseline() {
+    let t = Tmp::new();
+    crate::desktop::tests::break_baseline(&t.data());
+    let app = t.app();
+    let e = app.ask_lead(RUN_ID, "hi").unwrap_err();
+    assert_eq!(code(&e), "lead_guard_missing", "{e}");
+    assert!(e.to_string().contains("Agents are off"), "{e}");
+    assert!(t.ledger().is_empty() && t.files("stdin.").is_empty(), "nothing recorded, nothing spawned (no self-test either)");
+    assert!(idle(&app), "the busy lock is released");
+}
+
+#[test]
 fn lead_refused_when_the_doctor_fails_or_the_env_cannot_run_the_guard() {
     let t = Tmp::new();
     let app = t.app();

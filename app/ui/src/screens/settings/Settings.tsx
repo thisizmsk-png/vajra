@@ -11,6 +11,7 @@ import { toHash, useRoute } from "../../router";
 import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import { PreflightList } from "../PreflightList";
 import { PreferenceForm } from "./PreferenceForm";
+import { WorkerCopies } from "./WorkerCopies";
 import type { AgentChoice } from "./PreferenceForm";
 import { ProviderCard, useProviders } from "../ProviderControls";
 import { AccountsPanel } from "../Accounts";
@@ -73,6 +74,7 @@ export function Settings() {
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
+            {section === "general" && <WorkerCopies />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
             {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
             {section === "providers" && (

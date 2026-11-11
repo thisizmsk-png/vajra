@@ -243,13 +243,6 @@ struct Shared {
 #[derive(Clone)]
 pub struct WorkerRuntime(Arc<Shared>);
 
-/// Settings' disk line: how many worker copies are on disk and the space they hold.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct DiskUse {
-    pub copies: usize,
-    pub bytes: u64,
-}
-
 /// What Clean up removed: the tickets whose copies are gone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CleanUp {
@@ -269,13 +262,8 @@ fn pick(e: &Entry) -> Option<Pick> {
     Some(Pick { id: e.view.id.clone(), tree: e.tree.clone()?, commit: e.view.commit.clone()?, integration: e.integration.clone()?, repo: e.job.spec().repo.clone() })
 }
 
-/// A ticket whose worktree was made and not removed or discarded.
-fn has_copy(e: &Entry) -> bool {
-    e.tree.is_some() && !e.view.retention.as_ref().is_some_and(|r| r["state"] == "removed" || r["state"] == "discarded")
-}
-
 /// Allocated bytes under `root`, never following a symlink.
-fn allocated(root: &std::path::Path) -> u64 {
+pub(crate) fn allocated(root: &std::path::Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     let mut total = 0;
     let mut stack = vec![root.to_path_buf()];
@@ -440,17 +428,6 @@ impl WorkerRuntime {
                 .collect()
         };
         self.retain(picked)
-    }
-
-    /// Settings: the disk the worker copies use. A walk of each copy still on disk, no git and no lock while it
-    /// walks. Allocated blocks, so a copy-on-write clone counts in full even where it shares its blocks.
-    pub fn disk_use(&self) -> DiskUse {
-        let trees: Vec<PathBuf> = {
-            let b = crate::lock(&self.0.book);
-            b.tickets.values().filter(|e| has_copy(e)).filter_map(|e| Some(e.tree.as_ref()?.wt.clone())).collect()
-        };
-        let trees: Vec<PathBuf> = trees.into_iter().filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
-        DiskUse { copies: trees.len(), bytes: trees.iter().map(|p| allocated(p)).sum() }
     }
 
     /// Settings' Clean up: removes only copies that are clean now. That is an integrated copy that was kept, whose

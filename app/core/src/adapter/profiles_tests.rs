@@ -469,6 +469,8 @@ fn controls_follow_the_harness_profile() {
     assert_eq!((j["message"]["enabled"].as_bool(), j["redirect"]["reason"].as_str()), (Some(false), Some("This worker can't take a message mid-run.")));
     assert_eq!(j["stop"]["note"], "Stop ends this worker at once; its uncommitted work stays in its worktree.");
     let claude = controls(Engine::Claude);
-    assert_eq!((claude.message, claude.stop), (None, StopHow::HookBlock));
-    assert_eq!(claude.to_json()["message"]["enabled"], true);
+    // Off until the control hook serves top-level sessions (the engine change): never queued and silently lost.
+    assert_eq!((claude.message, claude.stop), (Some(MESSAGE_NEEDS_UPDATE), StopHow::GroupKill));
+    let j = claude.to_json();
+    assert_eq!((j["message"]["enabled"].as_bool(), j["message"]["reason"].as_str()), (Some(false), Some("Messages to this worker need a Vajra update that isn't installed yet.")));
 }

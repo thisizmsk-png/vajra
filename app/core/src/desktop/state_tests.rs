@@ -642,3 +642,91 @@ fn a_steady_project_state_read_emits_nothing() {
     assert_eq!(got.len(), after_first, "{got:?}");
     assert!(got.iter().all(|p| !p["projects"].as_array().unwrap().is_empty()), "{got:?}");
 }
+
+// ---------------------------------------------------------------- core workers (6c-2, 16.7)
+
+/// A runtime whose tickets stay queued: both accounts are capped at 0, so nothing is ever spawned or checked out.
+fn queued_runtime<'a>(t: &Tmp, app: &'a App) -> &'a crate::desktop::workers::WorkerRuntime {
+    let (home, data) = (t.0.join("home"), t.0.join("data"));
+    app.worker_runtime(|| crate::desktop::workers::Config {
+        home,
+        data,
+        codex: "/nonexistent/vajra-test/codex".into(),
+        claude: "/nonexistent/vajra-test/claude".into(),
+        codex_home: t.0.join("codex-home"),
+        tools: crate::adapter::profiles::WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
+        account_caps: [("codex".to_string(), 0), ("claude".to_string(), 0)].into_iter().collect(),
+        worker_timeout: Duration::from_secs(60),
+        poll: Duration::from_millis(20),
+        clock: None,
+        redact: Redactor::default(),
+        claude_unverified_ok: false,
+    })
+    .unwrap()
+}
+
+const CORE_RUN: &str = "20261111-0900";
+
+fn queue(rt: &crate::desktop::workers::WorkerRuntime, t: &Tmp, task: &str, account: &str) -> String {
+    let spec = crate::desktop::workers::TaskSpec {
+        project: "p".into(), run: CORE_RUN.into(), repo: t.0.join("repo"), task: task.into(), round: 1, from: "0".repeat(40), deps: Vec::new(),
+        globs: vec!["src/**".into()], named: Vec::new(), brief: "Do it.".into(),
+    };
+    let seat = crate::control::service::WorkerSeat {
+        slot: format!("w-{task}"), role: "backend".into(), task: task.into(), account: account.into(), model: None, effort: None, security: false,
+        network: false, why: String::new(), source: "user".into(),
+    };
+    rt.dispatch(spec, seat).unwrap()
+}
+
+#[test]
+fn a_core_worker_takes_no_message_with_its_profiles_reason_and_stops_through_a_guarded_receipt() {
+    use crate::desktop::workers::{Outcome, State as T};
+    let t = Tmp::new();
+    let app = t.app();
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    assert_eq!(app.control_message("core:x.t1.r1", "hi").unwrap_err()["error"], "worker_not_found", "no runtime, no ticket");
+    let rt = queued_runtime(&t, &app);
+    let (codex, claude) = (queue(rt, &t, "t1", "codex"), queue(rt, &t, "t2", "claude"));
+    let m = app.control_message(&format!("core:{codex}"), "hi").unwrap_err();
+    assert_eq!((m["error"].as_str(), m["detail"].as_str()), (Some("not_supported_by_harness"), Some("This worker can't take a message mid-run.")));
+    let r = app.control_redirect(&format!("core:{claude}"), "do x").unwrap_err();
+    assert_eq!((r["error"].as_str(), r["detail"].as_str()), (Some("not_supported_by_harness"), Some("Messages to this worker need a Vajra update that isn't installed yet.")));
+
+    let stale = app.act_stop_worker(&env("stop-core-0001", Some(2)), &format!("core:{codex}"), None);
+    assert_eq!((state_of(&stale), stale["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")), "{stale}");
+    assert_eq!(rt.view(&codex).unwrap().state, T::Queued, "the effect never ran");
+    let ok = app.act_stop_worker(&env("stop-core-0002", Some(1)), &format!("core:{codex}"), None);
+    assert_eq!(state_of(&ok), "done", "{ok}");
+    let v = rt.view(&codex).unwrap();
+    assert_eq!((v.state, v.outcome), (T::Ended, Some(Outcome::Stopped)));
+    assert_eq!(app.control_stop(&format!("core:{codex}"), None).unwrap_err()["error"], "worker_finished");
+    assert_eq!(rt.view(&claude).unwrap().state, T::Queued, "the other ticket is untouched");
+    let l = app.ledger().unwrap();
+    assert!(l["records"].as_array().unwrap().iter().any(|r| r["kind"] == "stop" && r["worker"] == format!("core:{codex}")), "the stop has its ledger line: {l}");
+}
+
+#[test]
+fn a_lead_reaches_only_its_own_runs_core_workers_and_its_stop_waits_for_the_human() {
+    use crate::desktop::workers::State as T;
+    let t = Tmp::new();
+    let app = t.app();
+    let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    lock(&app.control).start_session(other, "20261111-0901").unwrap();
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "claude");
+    let w = json!({"worker": format!("core:{id}")});
+    let elsewhere = lock(&app.control).call_tool_for_run(Some("20261111-0901"), "stop_worker", &w).unwrap_err();
+    assert_eq!(elsewhere.code(), "worker_not_found", "another run's Lead can't see it");
+    let msg = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "message_worker", &json!({"worker": format!("core:{id}"), "text": "hi"})).unwrap_err();
+    assert_eq!(msg.code(), "not_supported_by_harness");
+    let asked = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &w).unwrap();
+    assert_eq!(asked["state"], "awaiting_human_confirm", "{asked}");
+    let again = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &w).unwrap();
+    assert_eq!(again["action_id"], asked["action_id"], "one pending request per worker");
+    assert_eq!(rt.view(&id).unwrap().state, T::Queued, "nothing stops before the human confirms");
+    let done = app.confirm_stop(asked["action_id"].as_str().unwrap()).unwrap();
+    assert_eq!(done["state"], "queued", "{done}");
+    assert_eq!(rt.view(&id).unwrap().state, T::Ended);
+}

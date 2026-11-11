@@ -469,24 +469,23 @@ pub fn verify_claude_worker_flag(f: &FlagFile) -> Result<(), NotApplied> {
 
 /// The reason a Codex worker's Message and Redirect are off.
 pub const NO_MESSAGE: &str = "This worker can't take a message mid-run.";
+/// A Claude core worker is a top-level session, which the installed control hook doesn't serve yet (an engine change).
+pub const MESSAGE_NEEDS_UPDATE: &str = "Messages to this worker need a Vajra update that isn't installed yet.";
 pub const GROUP_STOP_NOTE: &str = "Stop ends this worker at once; its uncommitted work stays in its worktree.";
-pub const HOOK_STOP_NOTE: &str = "Stop blocks this worker's next step and ends it; its uncommitted work stays in its worktree.";
 /// The service's refusal code for a message or redirect to a worker whose harness has no channel.
 pub const NOT_SUPPORTED_BY_HARNESS: &str = "not_supported_by_harness";
 
 /// How the core stops a worker of this harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopHow {
-    /// The sticky hook block (ADR-8), through the worker's own session queue.
-    HookBlock,
-    /// The process group is terminated.
+    /// The process group is terminated. (Claude's sticky hook block joins when the hook serves core workers.)
     GroupKill,
 }
 
 /// What a core worker's node offers, decided by its harness profile (16.7), never by the lead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Controls {
-    /// `None`: Message and Redirect go through the E1 queue under the worker's own session. `Some`: why they're off.
+    /// `None`: Message and Redirect are on. `Some`: why they're off.
     pub message: Option<&'static str>,
     pub stop: StopHow,
     pub stop_note: &'static str,
@@ -501,7 +500,7 @@ impl Controls {
 
 pub fn controls(engine: Engine) -> Controls {
     match engine {
-        Engine::Claude => Controls { message: None, stop: StopHow::HookBlock, stop_note: HOOK_STOP_NOTE },
+        Engine::Claude => Controls { message: Some(MESSAGE_NEEDS_UPDATE), stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE },
         Engine::Codex => Controls { message: Some(NO_MESSAGE), stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE },
     }
 }
