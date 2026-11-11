@@ -458,7 +458,7 @@ fn error_sink() -> (ErrorSink, Arc<Mutex<Vec<ProviderError>>>) {
 }
 
 fn tag() -> ProviderTag {
-    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into() }
+    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into(), attempt: 1 }
 }
 
 fn wait_events(got: &Arc<Mutex<Vec<ProviderError>>>, n: usize) -> Vec<ProviderError> {
@@ -526,4 +526,22 @@ fn a_serialized_codex_error_event_is_decoded_classified_and_redacted_on_exit() {
     // The raw escaped line (no decoding) is redacted too.
     let raw = event.to_string();
     assert!(!crate::crew::redact::redact_provider_text(&raw).contains("SENTINEL0000"));
+}
+
+/// 6c: a retry's exit is reported with its own attempt (not always 1), the policy decides on that attempt, and the
+/// session keeps its last lines for the core's retry rule.
+#[test]
+fn a_retry_reports_its_own_attempt_and_keeps_its_last_lines() {
+    let (sup, _bus, dir) = setup("attempt");
+    let (sink, got) = error_sink();
+    sup.set_error_sink(sink);
+    let t = |n| ProviderTag { attempt: n, ..tag() };
+    sup.spawn_tagged("s-a2", spec(&["sh", "-c", "echo 'unexpected status 504'; exit 1"], &dir), Some(t(2))).unwrap();
+    let ev = wait_events(&got, 1);
+    assert_eq!((ev[0].attempt, ev[0].action), (2, errors::Action::Retrying), "the second failure still retries (2 min)");
+    assert!(sup.wait("s-a2", WAIT).unwrap().is_some());
+    assert!(sup.last_lines("s-a2").unwrap().iter().any(|l| l.contains("504")));
+    sup.spawn_tagged("s-a3", spec(&["sh", "-c", "echo 'unexpected status 504'; exit 1"], &dir), Some(t(3))).unwrap();
+    let ev = wait_events(&got, 2);
+    assert_eq!((ev[1].attempt, ev[1].action), (3, errors::Action::AskingUser), "the third asks the user");
 }
