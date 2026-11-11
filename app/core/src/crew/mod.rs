@@ -4,5 +4,7 @@
 pub mod names;
 pub mod record;
 pub mod redact;
+pub mod roles;
+pub mod security;
 pub mod tailer;
 pub mod tree;

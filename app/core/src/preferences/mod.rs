@@ -52,6 +52,12 @@ pub struct Agents {
     #[serde(default)]
     pub roles: BTreeMap<String, Choice>,
     pub allowed: Vec<Allowed>,
+    /// The Director-General's lead seat; `None` reads as `default` (see `Agents::lead`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<Choice>,
+    /// Most seats one account may hold at once, by account id. Empty means no cap.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_caps: BTreeMap<String, u32>,
 }
 impl Agents {
     /// An old `agent: "codex"` reads as `{default: codex, allowed: [codex]}`. No data is migrated.
@@ -71,6 +77,8 @@ impl Agents {
                 account: account.into(),
                 model: None,
             }],
+            lead: None,
+            account_caps: BTreeMap::new(),
         }
     }
     /// The choice for a role; a role with no entry (or no role) gets the default.
@@ -78,11 +86,23 @@ impl Agents {
         role.and_then(|r| self.roles.get(r))
             .unwrap_or(&self.default)
     }
+    /// The lead seat's choice: its own, else the default.
+    pub fn lead(&self) -> &Choice {
+        self.lead.as_ref().unwrap_or(&self.default)
+    }
     /// Whether the ceiling lets this choice through.
     pub fn permits(&self, c: &Choice) -> bool {
         self.allowed
             .iter()
             .any(|a| a.account == c.account && (a.model.is_none() || a.model == c.model))
+    }
+    /// A role key outside the crew roles is refused on write (`unknown_role`). It is never checked on read: a file already
+    /// on disk with an older or newer key must still load, and the key is simply never used.
+    fn check_role_keys(&self) -> Result<(), Error> {
+        if self.roles.keys().any(|r| !crate::crew::roles::is_pref_role(r)) {
+            return Err(Error("unknown_role"));
+        }
+        Ok(())
     }
     fn validate(&self) -> Result<(), Error> {
         use crate::projects::contract::valid_provider;
@@ -101,13 +121,16 @@ impl Agents {
                 })
         };
         if self.roles.len() > 16
+            || self.account_caps.len() > 32
+            || self.account_caps.iter().any(|(a, n)| !valid_provider(a) || !(1..=64).contains(n))
+            || self.lead.as_ref().is_some_and(|c| !choice_ok(c))
             || self.allowed.is_empty()
             || self.allowed.len() > 32
             || !choice_ok(&self.default)
             || self
                 .roles
                 .iter()
-                .any(|(r, c)| !valid_provider(r) || !choice_ok(c))
+                .any(|(_, c)| !choice_ok(c))
             || self
                 .allowed
                 .iter()
@@ -116,7 +139,7 @@ impl Agents {
             return Err(bad());
         }
         // The ceiling is enforced on write: nothing chosen may sit outside it.
-        if !self.permits(&self.default) || self.roles.values().any(|c| !self.permits(c)) {
+        if !self.permits(&self.default) || self.roles.values().any(|c| !self.permits(c)) || self.lead.as_ref().is_some_and(|c| !self.permits(c)) {
             return Err(Error("outside_allowed"));
         }
         Ok(())
@@ -406,6 +429,10 @@ impl Store {
         reset: bool,
     ) -> Result<View, Error> {
         Self::scope(project)?;
+        // Only the roles this write brings are checked, so an old key already on disk never blocks an unrelated write.
+        if let Some(a) = &patch.agents {
+            a.check_role_keys()?;
+        }
         let dir = self.directory()?;
         lock_file(&dir, true)?;
         let mut doc = Self::load(&dir)?;

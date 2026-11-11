@@ -54,8 +54,8 @@ export interface AgentPick { account: string; model: string | null; effort: stri
 export interface Allowed { account: string; model: string | null }
 export interface Agents { default: AgentPick; roles: Record<string, AgentPick>; allowed: Allowed[] }
 
-/** The crew roles the workflow already uses; a per-role default is keyed by one of these. */
-export const ROLES = ["architect", "backend", "frontend", "tests", "verifier", "docs"] as const;
+/** The keys the core accepts for a per-role default: its seat roles (`crew::roles`) plus the planner's `architect`. Keep the two lists the same. */
+export const ROLES = ["architect", "backend", "frontend", "tests", "verifier", "docs", "reviewer", "security_reviewer", "platform", "numerics", "analysis"] as const;
 
 /** OpenRouter models carry "New" until the soak passes (build brief, PR 8). One switch, so the label comes off in one edit. */
 export const GATEWAY_SOAK_PASSED = false;
@@ -234,7 +234,7 @@ export function baseUrlProblem(raw: string): "empty" | "scheme" | "insecure" | "
 /** One worker of a run proposal (spec section 3). `source` says where the pick came from; `why` is the Director-General's own words (plain text, untrusted). */
 export interface ProposalWorker { slot: string; role: string; task: string; why: string; source: "role_default" | "dg" | "user"; pick: AgentPick }
 /** What Start carries for a pick the user changed: validated again by the core, and recorded there as source "user". */
-export interface ProposalOverride { slot: string; account: string; model: string | null; effort: string | null }
+export interface ProposalOverride { seat: string; account?: string; model?: string | null; effort?: string | null; network?: boolean }
 
 export function parseProposalWorkers(v: unknown): ProposalWorker[] {
   if (!Array.isArray(v)) return [];

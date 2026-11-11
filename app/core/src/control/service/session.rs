@@ -50,6 +50,16 @@ impl Service {
         self.project_gate = Some(gate);
     }
 
+    /// Install the seat defaults and launch checks `propose_run` uses for a proposal with worker picks.
+    pub fn set_seat_policy(&mut self, policy: Arc<dyn SeatPolicy>) {
+        self.seat_policy = Some(policy);
+    }
+
+    /// Let `propose_run` take seats (off in this build until the core route ships).
+    pub fn set_seats_enabled(&mut self, on: bool) {
+        self.seats_enabled = on;
+    }
+
     /// The project's Director-General is now on conversation `generation`; calls from any other generation are refused.
     pub fn set_generation(&mut self, project: &str, generation: u32) -> Result<()> {
         if !crate::ids::valid_project_ref(project) {

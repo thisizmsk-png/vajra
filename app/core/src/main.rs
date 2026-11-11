@@ -136,8 +136,9 @@ fn act_cancel_ask(app: State<'_, App>, envelope: Envelope, ask_id: String) -> Va
 }
 
 #[tauri::command(async)]
-fn act_start_proposal(app: State<'_, App>, envelope: Envelope, id: String, proposal_sha256: String) -> Value {
-    app.act_start_proposal(&envelope, &id, &proposal_sha256)
+fn act_start_proposal(app: State<'_, App>, envelope: Envelope, id: String, proposal_sha256: String, overrides: Option<Vec<Value>>, approve_checker: Option<bool>) -> Value {
+    let opts = vajra_desktop::desktop::StartOptions { overrides: overrides.unwrap_or_default(), approve_checker: approve_checker.unwrap_or(false) };
+    app.act_start_proposal_opts(&envelope, &id, &proposal_sha256, opts)
 }
 
 #[tauri::command(async)]
@@ -550,8 +551,9 @@ fn lead_status(app: State<'_, App>, run_id: Option<String>, project_id: Option<S
 
 /// ADR-15 2.4: start a run a Director-General proposed, as the inbox showed it (`proposal_sha256`).
 #[tauri::command(async)]
-fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String) -> Res {
-    app.start_proposal(&id, &proposal_sha256)
+fn start_proposal(app: State<'_, App>, id: String, proposal_sha256: String, overrides: Option<Vec<Value>>, approve_checker: Option<bool>) -> Res {
+    let opts = vajra_desktop::desktop::StartOptions { overrides: overrides.unwrap_or_default(), approve_checker: approve_checker.unwrap_or(false) };
+    app.start_proposal_opts(&id, &proposal_sha256, opts)
 }
 
 /// ADR-15 2.4: dismiss a proposed run; nothing runs.

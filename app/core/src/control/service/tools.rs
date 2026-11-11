@@ -83,6 +83,7 @@ impl Service {
             "inspect_worker" => &["worker", "lines"],
             "message_worker" | "redirect_worker" => &["worker", "text"],
             "stop_worker" => &["worker", "reason"],
+            "propose_run" if self.seats_enabled => &["ask", "base", "rounds", "lead", "workers", "max_in_flight"],
             "propose_run" => &["ask", "base", "rounds"],
             _ => return Err(ControlError::UnknownTool),
         };
@@ -121,7 +122,8 @@ impl Service {
                     None => None,
                     Some(v) => Some(v.as_u64().ok_or_else(|| ControlError::InvalidArgs("rounds must be an integer".into()))?),
                 };
-                self.propose_run(s("ask", true)?.unwrap_or(""), s("base", false)?, rounds)
+                let seat_args = super::seats::SeatArgs { lead: args.get("lead"), workers: args.get("workers"), max_in_flight: args.get("max_in_flight") };
+                self.propose_run(s("ask", true)?.unwrap_or(""), s("base", false)?, rounds, &seat_args)
             }
             _ => self.stop_worker(lead, s("worker", true)?.unwrap_or(""), s("reason", false)?),
         }

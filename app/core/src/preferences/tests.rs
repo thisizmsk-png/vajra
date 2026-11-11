@@ -301,3 +301,68 @@ fn a_newer_old_style_write_replaces_agents_and_unknown_fields_are_refused() {
         .unwrap();
     assert_eq!(v.agents, Agents::from_legacy(Agent::Claude));
 }
+
+#[test]
+fn the_lead_defaults_to_the_default_choice_and_account_caps_default_empty() {
+    let h = Home::new();
+    let s = h.store();
+    let a = s.update(None, 0, patch(agents_patch()), false).unwrap().agents;
+    assert_eq!(a.lead(), &a.default);
+    assert!(a.account_caps.is_empty());
+    let mut p = agents_patch();
+    p["agents"]["lead"] = json!({"account": "codex", "effort": "high"});
+    p["agents"]["account_caps"] = json!({"codex": 3});
+    let a = s.update(None, 1, patch(p), false).unwrap().agents;
+    assert_eq!((a.lead().account.as_str(), a.account_caps["codex"]), ("codex", 3));
+    assert_eq!(h.store().read(None).unwrap().agents, a, "survives a reload");
+}
+
+#[test]
+fn a_lead_outside_the_ceiling_or_a_bad_cap_is_refused() {
+    let h = Home::new();
+    let s = h.store();
+    let mut p = agents_patch();
+    p["agents"]["lead"] = json!({"account": "gemini"});
+    assert_eq!(s.update(None, 0, patch(p), false).unwrap_err().code(), "outside_allowed");
+    let mut p = agents_patch();
+    p["agents"]["account_caps"] = json!({"Bad Id": 1});
+    assert_eq!(s.update(None, 0, patch(p), false).unwrap_err().code(), "invalid_preferences");
+    let mut p = agents_patch();
+    p["agents"]["account_caps"] = json!({"codex": 0});
+    assert_eq!(s.update(None, 0, patch(p), false).unwrap_err().code(), "invalid_preferences");
+}
+
+#[test]
+fn a_role_key_must_be_a_known_crew_role() {
+    let h = Home::new();
+    let s = h.store();
+    let mut p = agents_patch();
+    p["agents"]["roles"]["arjuna"] = json!({"account": "claude"});
+    assert_eq!(s.update(None, 0, patch(p), false).unwrap_err().code(), "unknown_role");
+    // `architect` is the planner's key (the UI offers it) and is accepted.
+    let mut p = agents_patch();
+    p["agents"]["roles"]["architect"] = json!({"account": "claude"});
+    s.update(None, 0, patch(p), false).unwrap();
+    for r in ["verifier", "reviewer", "security_reviewer", "platform", "numerics", "analysis"] {
+        let mut p = agents_patch();
+        p["agents"]["roles"][r] = json!({"account": "claude"});
+        s.update(None, s.read(None).unwrap().rev, patch(p), false).unwrap_or_else(|e| panic!("{r}: {}", e.code()));
+    }
+}
+
+#[test]
+fn a_settings_file_already_on_disk_with_any_role_key_still_loads() {
+    let h = Home::new();
+    let s = h.store();
+    s.update(None, 0, patch(agents_patch()), false).unwrap();
+    let path = h.0.join("preferences/settings.json");
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    doc["global"]["agents"]["roles"]["architect"] = json!({"account": "claude"});
+    doc["global"]["agents"]["roles"]["some_old_role"] = json!({"account": "claude"});
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let v = s.read(None).unwrap();
+    assert!(v.agents.roles.contains_key("architect") && v.agents.roles.contains_key("some_old_role"));
+    // An unrelated write still works, and the old key is left alone.
+    s.update(None, v.rev, patch(json!({"theme": "dark"})), false).unwrap();
+    assert!(s.read(None).unwrap().agents.roles.contains_key("some_old_role"));
+}

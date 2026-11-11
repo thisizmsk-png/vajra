@@ -65,6 +65,8 @@ pub(super) struct Isolation {
 }
 /// The adapter that ran the run (`claude` or `codex`). Guarded like the cwd; `runs.jsonl` only ever hints.
 const PROVIDER_FILE: &str = "provider";
+/// The run's seats (ADR-16 16.3), guarded like the provider record.
+const SEATS_FILE: &str = "seats.json";
 const SESSION_FILE: &str = "session";
 const CAMPAIGN_FILE: &str = "campaign";
 /// Present for a run that started no new workflow (the approval-only resume).
@@ -560,6 +562,41 @@ impl App {
         let dir = self.lead_sid_dir(run_id);
         fsx::private_dir(&dir)?;
         fsx::write_atomic(&dir, PROVIDER_FILE, engine.id().as_bytes()).map(|_| ())
+    }
+
+    /// Record, before the run starts, the seats it was approved with (`seats.json`, atomic). Returns the sha256 of the
+    /// exact bytes written, which the `requested` line carries as `seats_sha256`. A failure refuses the start.
+    pub(super) fn record_run_seats(&self, run_id: &str, seats: &Value) -> std::io::Result<String> {
+        let control = self.data.join("control");
+        fsx::private_dir(&control)?;
+        fsx::private_dir(&control.join("lead"))?;
+        let dir = self.lead_sid_dir(run_id);
+        fsx::private_dir(&dir)?;
+        let bytes = serde_json::to_vec(seats).map_err(std::io::Error::other)?;
+        fsx::write_atomic(&dir, SEATS_FILE, &bytes)?;
+        Ok(crate::control::sha256::hex_digest(&bytes))
+    }
+
+    #[allow(dead_code)] // 6d reads it at resume
+    /// The guarded seats of a run: `Ok(None)` only when the record does not exist (a v1 run). Any other failure (a refused
+    /// link, a permissions error, truncated or malformed JSON) is an error, so a caller can fail closed.
+    #[allow(dead_code)] // 6d reads it at resume
+    pub(super) fn read_run_seats(&self, run_id: &str) -> std::io::Result<Option<Value>> {
+        match fsx::read_nofollow(&self.lead_sid_dir(run_id).join(SEATS_FILE)) {
+            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A resume starts a new run that keeps the seats, the evidence trust and the campaign slug of the one it continues:
+    /// copied, never recomputed. `Ok(None)` when `from` has no seats; an unreadable source is an error and writes nothing.
+    #[allow(dead_code)] // 6d is its first caller (resume)
+    pub(super) fn copy_run_seats(&self, from: &str, to: &str) -> std::io::Result<Option<String>> {
+        match self.read_run_seats(from)? {
+            Some(v) => self.record_run_seats(to, &v).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// The guarded provider of a run: `Some` for a run this build launched, `None` for one from before providers

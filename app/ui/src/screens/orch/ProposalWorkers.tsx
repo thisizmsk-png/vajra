@@ -43,7 +43,7 @@ export default function ProposalWorkers({ item, onOverrides }: { item: InboxItem
   const current = (slot: string): AgentPick => picks[slot] ?? workers.find((w) => w.slot === slot)!.pick;
   const changed = workers.filter((w) => picks[w.slot] && !same(picks[w.slot], w.pick));
   useEffect(() => {
-    onOverrides(changed.map((w) => ({ slot: w.slot, account: picks[w.slot].account, model: picks[w.slot].model, effort: picks[w.slot].effort })));
+    onOverrides(changed.map((w) => ({ seat: w.slot, account: picks[w.slot].account, model: picks[w.slot].model, effort: picks[w.slot].effort })));
     // `changed` is derived from `picks`; the callback is the parent's setter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picks]);

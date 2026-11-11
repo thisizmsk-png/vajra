@@ -173,7 +173,17 @@ export type InboxItem = {
   project?: string | null; project_name?: string | null; generation?: number;
   /** What `start_proposal` must be given back: the hash of exactly what was shown. */
   proposal_sha256?: string;
+  /** `run_proposal` with worker picks (ADR-16 16.1): the seats, the security warning and the label the run will get. */
+  seats_card?: SeatsCard;
 };
+export type SeatEntry = { seat: string; role: string; account: string; harness: "claude" | "codex" | null; network: boolean; protection: string;
+  limits: { message?: boolean; redirect?: boolean; stop?: string; note?: string }; disclosures: string[];
+  slot?: string; task?: string; model?: string | null; effort?: string | null; security?: boolean; why?: string; source?: string };
+export type SeatsCard = { max_in_flight: number; seats: SeatEntry[]; security_warning?: string;
+  evidence: { seat: string | null; trust: "guarded" | "outside_guard"; card?: string; label?: string; why?: string; approval_offer?: string } };
+/** What a start with seats returns besides `run` (ADR-16 16.3): one entry per seat, and the run's evidence trust. */
+export type StartReceiptSeat = { seat: string; role: string; source: string; protection: string;
+  requested: { account: string; harness: string | null; model: string | null; effort: string | null; network: boolean } };
 export type RunInput = { ask: string; maxRounds: number; base: string; maxInFlight: number; campaign: string | null;
   /** The effective `agent` preference (`claude` or `codex`) read when the form opened; omitted means claude. A provider that cannot start is refused, never swapped. */
   provider?: string | null;
@@ -345,7 +355,8 @@ export const api = {
   /** Reject plan `id` with a reason (1 to 500 characters). */
   rejectPlan: (id: string, reason: string) => call<{ action_id: string; state: string }>("reject_plan", { id, reason }),
   /** ADR-15 2.4: start a proposed run as shown. Refused (`proposal_changed`) unless `proposalSha256` is the shown hash. */
-  startProposal: (id: string, proposalSha256: string, overrides: ProposalOverride[] = []) => call<{ action_id: string; state: string; run: Json }>("start_proposal", { id, proposalSha256, ...(overrides.length > 0 ? { overrides } : {}) }),
+  startProposal: (id: string, proposalSha256: string, overrides: ProposalOverride[] = [], approveChecker = false) =>
+    call<{ action_id: string; state: string; run: Json; seats?: StartReceiptSeat[]; evidence_seat?: string; evidence_trust?: string; campaign_slug?: string }>("start_proposal", { id, proposalSha256, ...(overrides.length > 0 ? { overrides } : {}), ...(approveChecker ? { approveChecker } : {}) }),
   dismissProposal: (id: string) => call<{ action_id: string; state: string }>("dismiss_proposal", { id }),
   inbox: () => call<{ count: number; campaign_count?: number; items: InboxItem[] }>("inbox"),
   /** Which record versions this build reads (`vajra.app_info/1`). */

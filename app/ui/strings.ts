@@ -630,7 +630,7 @@ export const S = {
     roleDefaults: "Role defaults",
     roleHint: "A role with no choice uses the project default.",
     useDefault: "Project default",
-    role: { architect: "Architect", backend: "Backend", frontend: "Frontend", tests: "Tests", verifier: "Verifier", docs: "Docs" } as Record<string, string>,
+    role: { architect: "Architect", backend: "Backend", frontend: "Frontend", tests: "Tests", verifier: "Verifier", docs: "Docs", reviewer: "Design reviewer", security_reviewer: "Security reviewer", platform: "Platform", numerics: "Numerics", analysis: "Analysis" } as Record<string, string>,
     effortDefault: "CLI default",
     noEffort: "No effort setting",
     allowed: "Allowed for workers",

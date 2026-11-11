@@ -18,11 +18,13 @@
 mod actions; // list, inspect, message, redirect, stop, confirm, cancel, resume
 mod asks; // the Lead-ask and plan-decision records
 mod proposals; // ADR-15 2.4: run proposals from a Director-General, started or dismissed by a human
+mod seats; // proposal seats: the lead and worker picks of a proposal, their hash and their launch checks
 mod session; // start, resume and end a session; the nonce, redactor and worker list
 mod tools; // the Lead's tool surface (socket calls and their dispatch)
 mod types; // actors, errors, the action model, the ask and decision records, the limits
 mod watcher; // the ack watcher and the thread that ticks it
 pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
+pub use seats::{DEFAULT_MAX_IN_FLIGHT, LeadSeat, MAX_WORKERS, SeatCheck, SeatPolicy, Seats, WorkerSeat, proposal_sha_v2, security_warning};
 pub use types::*;
 pub use watcher::{Watcher, spawn_watcher};
 
@@ -75,6 +77,10 @@ pub struct Service {
     /// Asked on every Director-General call, before anything else: does the project still exist, and is it active?
     /// The app installs it with its project store; with none installed, nothing is gated (the service's own tests).
     project_gate: Option<ProjectGate>,
+    /// Role defaults and the launch checks for proposal seats (ADR-16). `None`: no seat default exists and none is checked.
+    seat_policy: Option<Arc<dyn SeatPolicy>>,
+    /// Whether `propose_run` takes `lead`, `workers` and `max_in_flight`. Off until the core route ships (6d).
+    seats_enabled: bool,
     /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
     bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
@@ -107,6 +113,8 @@ impl Service {
             scope: None,
             generations: HashMap::new(),
             project_gate: None,
+            seat_policy: None,
+            seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
             bound_project: None,
             pending: HashMap::new(),
             last_stop: HashMap::new(),
