@@ -9,10 +9,13 @@
 //! - on a worker's worktree, `GIT_DIR`, `GIT_COMMON_DIR` (the recorded one) and `GIT_WORK_TREE`, so git never reads the
 //!   worktree's `.git` file or `commondir`.
 //!
-//! Before every call on a repo the repo's `<common>/config` and `info/attributes` are checked against the repo
-//! baseline (`repo_config_changed`), and before every call on a ticket its per-worktree files, its common directory's
-//! identity and its detached HEAD are checked with plain filesystem reads (`tampered`). `snapshot` uses plumbing only,
-//! through a fresh private index under the core's data dir; it never writes through the worker's HEAD or index.
+//! Before every call the global baseline copy is checked against the sha256 taken at load. Before every call on a repo
+//! the repo's `<common>/config`, `config.worktree`, every file they include, and `info/attributes` are checked
+//! against the repo baseline (`repo_config_changed`). Before every call on a ticket its per-worktree files, its common
+//! directory's identity and its detached HEAD are checked with plain filesystem reads (`tampered`), and before any
+//! call that reads worktree content a plain walk refuses new or changed attribute and module files and nested repos,
+//! names case-folded. `snapshot` uses plumbing only, through a fresh private index under the core's data dir; it
+//! never writes through the worker's HEAD or index.
 
 use std::collections::{BTreeSet, HashMap};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -123,6 +126,38 @@ pub fn check_roots(data: &Path, work: &Path) -> R<()> {
     Ok(())
 }
 
+/// Create `root/rel` one component at a time. Each component must end up a real directory owned by us, never a
+/// symlink: a planted link under `<work>` must not move a ticket's `tmp` or worktree elsewhere (#146 gate M4).
+fn make_dirs(root: &Path, rel: &[&str]) -> R<PathBuf> {
+    let mut cur = root.canonicalize().map_err(io)?;
+    let uid = unsafe { libc::geteuid() };
+    for c in rel {
+        if !valid_name(c) && *c != "tmp" && *c != "tickets" {
+            return Err(GitwError::Invalid("directory name"));
+        }
+        cur.push(c);
+        match std::fs::DirBuilder::new().mode(0o700).create(&cur) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io(e)),
+        }
+        let m = std::fs::symlink_metadata(&cur).map_err(io)?;
+        if m.file_type().is_symlink() || !m.is_dir() || m.uid() != uid {
+            return Err(tampered(format!("{} is not a directory Vajra made", rel.join("/"))));
+        }
+    }
+    Ok(cur)
+}
+
+/// Remove a core-built dir only while its recorded canonical path still resolves to itself under one of the roots, so
+/// a parent swapped for a symlink never redirects the delete.
+fn remove_own_dir(d: &Path, roots: &[&Path]) {
+    let here = d.canonicalize().ok();
+    if here.as_deref() == Some(d) && roots.iter().filter_map(|r| r.canonicalize().ok()).any(|r| d.starts_with(&r) && d != r) {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 // ------------------------------------------------------------ hashing
 
 /// A file's state for a tamper or baseline check.
@@ -198,10 +233,22 @@ impl<'a> Call<'a> {
 /// The global baseline (16.6 "The trusted git baseline"): one flattened copy of the user's global config with its
 /// includes resolved, taken at app start and kept across restarts, plus the hashes of the files it came from (a card
 /// note when they change, never a tamper signal).
+///
+/// The copy lives in `<data>/git-baseline/`, which a Claude worker with no OS sandbox could write. So its sha256 is
+/// kept in memory (`Gitw` checks it before every call) and, across restarts, in `<control>/git-baseline.sha256`, which
+/// the guard write-protects. A copy that no longer matches is `Tampered` and is never used: only the human re-takes it.
 #[derive(Clone, Debug)]
 pub struct GlobalBaseline {
     pub copy: PathBuf,
+    /// The copy's sha256 when it was taken or loaded.
+    pub sha: String,
     sources: Vec<(PathBuf, FileHash)>,
+}
+
+const BASELINE_TAMPERED: &str = "the global git baseline";
+
+fn baseline_anchor(data: &Path) -> PathBuf {
+    data.join("control").join("git-baseline.sha256")
 }
 
 impl GlobalBaseline {
@@ -210,22 +257,40 @@ impl GlobalBaseline {
         let dir = data.join("git-baseline");
         crate::paths::ensure_private_dir(&dir).map_err(io)?;
         let copy = dir.join("global.config");
-        let sources = dir.join("sources.json");
-        if copy.is_file() {
-            if let Some(s) = std::fs::read_to_string(&sources).ok().and_then(|t| parse_sources(&t)) {
-                return Ok(GlobalBaseline { copy, sources: s });
+        let anchor = hash_file(&baseline_anchor(data), false);
+        let stored = hash_file(&copy, false);
+        match (&stored, &anchor) {
+            (FileHash::Absent, FileHash::Absent) => Self::take(git, data, home, xdg),
+            (FileHash::Sha(have), FileHash::Sha(_)) if read_bounded(&baseline_anchor(data), false).ok().flatten().is_some_and(|a| a.trim_ascii() == have.as_bytes()) => {
+                let sources = read_bounded(&dir.join("sources.json"), false).ok().flatten().and_then(|b| parse_sources(&String::from_utf8_lossy(&b))).ok_or_else(|| tampered(BASELINE_TAMPERED))?;
+                Ok(GlobalBaseline { copy, sha: have.clone(), sources })
             }
+            // A copy without its anchor, an anchor without its copy, or a mismatch.
+            _ => Err(tampered(BASELINE_TAMPERED)),
         }
-        Self::take(git, &dir, home, xdg)
     }
 
-    fn take(git: &Path, dir: &Path, home: &Path, xdg: Option<&Path>) -> R<GlobalBaseline> {
+    /// The human re-takes a tampered baseline from the live global config: only while no Vajra agent session runs.
+    pub fn retake(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, agents_running: bool) -> R<GlobalBaseline> {
+        if agents_running {
+            return Err(GitwError::Invalid("a Vajra agent session is running"));
+        }
+        Self::take(git, data, home, xdg)
+    }
+
+    fn take(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>) -> R<GlobalBaseline> {
+        let dir = data.join("git-baseline");
+        crate::paths::ensure_private_dir(&dir).map_err(io)?;
+        crate::paths::ensure_private_dir(&data.join("control")).map_err(io)?;
         let flat = flatten_global(git, home, xdg)?;
         let copy = dir.join("global.config");
         write_private(&copy, flat.as_bytes())?;
         let sources = global_sources(git, home, xdg);
         write_private(&dir.join("sources.json"), render_sources(&sources).as_bytes())?;
-        Ok(GlobalBaseline { copy, sources })
+        let sha = sha256::hex_digest(flat.as_bytes());
+        // The anchor last: a crash before it leaves a copy with no anchor, which only the human re-takes.
+        write_private(&baseline_anchor(data), format!("{sha}\n").as_bytes())?;
+        Ok(GlobalBaseline { copy, sha, sources })
     }
 
     /// The global files whose bytes differ from when the baseline was taken (for the card note
@@ -250,8 +315,8 @@ impl GlobalBaseline {
         if agents_running {
             return Err(GitwError::Invalid("a Vajra agent session is running"));
         }
-        let dir = self.copy.parent().ok_or(GitwError::Invalid("baseline dir"))?.to_path_buf();
-        *self = Self::take(git, &dir, home, xdg)?;
+        let data = self.copy.parent().and_then(Path::parent).ok_or(GitwError::Invalid("baseline dir"))?.to_path_buf();
+        *self = Self::take(git, &data, home, xdg)?;
         Ok(())
     }
 }
@@ -269,13 +334,22 @@ fn diff_keys(a: &[(String, String)], b: &[(String, String)]) -> Vec<String> {
     keys.into_iter().collect()
 }
 
+/// Write through a fresh temp file and rename. The temp name is unpredictable and opened `O_EXCL|O_NOFOLLOW`, so a
+/// planted file or symlink at it fails the write instead of redirecting it.
 fn write_private(p: &Path, bytes: &[u8]) -> R<()> {
     use std::io::Write;
-    let tmp = p.with_extension(format!("tmp{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(io)?;
-    f.write_all(bytes).map_err(io)?;
-    f.sync_all().map_err(io)?;
-    std::fs::rename(&tmp, p).map_err(io)
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut name = p.file_name().ok_or(GitwError::Invalid("file name"))?.to_os_string();
+    name.push(format!(".tmp{}-{n}-{nanos:08x}", std::process::id()));
+    let tmp = p.with_file_name(name);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(0o600).open(&tmp).map_err(io)?;
+    let r = f.write_all(bytes).and_then(|()| f.sync_all()).and_then(|()| std::fs::rename(&tmp, p));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r.map_err(io)
 }
 
 fn render_sources(s: &[(PathBuf, FileHash)]) -> String {
@@ -368,13 +442,20 @@ fn flatten_global(git: &Path, home: &Path, xdg: Option<&Path>) -> R<String> {
 
 /// `~/.gitconfig`, the XDG file and every include target (following git's path rules, to depth 10), each hashed.
 fn global_sources(git: &Path, home: &Path, xdg: Option<&Path>) -> Vec<(PathBuf, FileHash)> {
+    config_sources(git, home, xdg, &[home.join(".gitconfig"), xdg_config(home, xdg)], true)
+}
+
+/// The config files and every `include.path` / `includeIf.*.path` target below them (to depth 10, at most 64 files),
+/// each hashed, whatever the include condition says. `follow_roots` is false for repo files (opened `O_NOFOLLOW`);
+/// include targets may be a dotfiles link.
+fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> Vec<(PathBuf, FileHash)> {
     let mut out: Vec<(PathBuf, FileHash)> = Vec::new();
-    let mut queue: Vec<(PathBuf, usize)> = vec![(home.join(".gitconfig"), 0), (xdg_config(home, xdg), 0)];
+    let mut queue: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
     while let Some((p, depth)) = queue.pop() {
         if out.iter().any(|(q, _)| q == &p) || out.len() >= 64 {
             continue;
         }
-        let h = hash_file(&p, true);
+        let h = hash_file(&p, depth > 0 || follow_roots);
         let present = matches!(h, FileHash::Sha(_));
         out.push((p.clone(), h));
         if !present || depth >= 10 {
@@ -403,6 +484,8 @@ fn global_sources(git: &Path, home: &Path, xdg: Option<&Path>) -> Vec<(PathBuf, 
 struct Held {
     config: FileHash,
     attributes: FileHash,
+    /// `<common>/config.worktree` and every include target of the two config files.
+    others: Vec<(PathBuf, FileHash)>,
     /// The baseline config's entries, kept only to name the keys that changed.
     entries: Vec<(String, String)>,
     runs: usize,
@@ -457,12 +540,24 @@ impl RepoBaselines {
         let h = m.get(common).ok_or(GitwError::Invalid("no repo baseline is held; start the run first"))?;
         let config = hash_file(&common.join("config"), false);
         let attributes = hash_file(&common.join("info/attributes"), false);
-        if config == h.config && attributes == h.attributes {
+        let others = repo_others(gw, common);
+        if config == h.config && attributes == h.attributes && others == h.others {
             return Ok(());
         }
         let mut keys = if config == h.config { Vec::new() } else { diff_keys(&h.entries, &read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default()) };
         if attributes != h.attributes {
             keys.push("info/attributes".into());
+        }
+        if others != h.others {
+            let wt = common.join("config.worktree");
+            let changed = |p: &PathBuf| others.iter().find(|(q, _)| q == p) != h.others.iter().find(|(q, _)| q == p);
+            let paths: BTreeSet<&PathBuf> = others.iter().chain(&h.others).map(|(p, _)| p).filter(|p| changed(p)).collect();
+            if paths.contains(&wt) {
+                keys.push("config.worktree".into());
+            }
+            if paths.iter().any(|p| **p != wt) {
+                keys.push("include.path".into());
+            }
         }
         if keys.is_empty() {
             keys.push("config".into());
@@ -471,10 +566,19 @@ impl RepoBaselines {
     }
 }
 
+/// `config.worktree` and the include targets: everything the repo's config sources but the two files hashed by name.
+fn repo_others(gw: &Gitw, common: &Path) -> Vec<(PathBuf, FileHash)> {
+    let (config, wt) = (common.join("config"), common.join("config.worktree"));
+    let mut v = config_sources(&gw.git, &gw.home, None, &[config.clone(), wt], false);
+    v.retain(|(p, _)| *p != config);
+    v
+}
+
 fn take_repo(gw: &Gitw, common: &Path) -> Held {
     Held {
         config: hash_file(&common.join("config"), false),
         attributes: hash_file(&common.join("info/attributes"), false),
+        others: repo_others(gw, common),
         entries: read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default(),
         runs: 0,
     }
@@ -572,6 +676,8 @@ pub struct Gitw {
     pub work: PathBuf,
     /// The global baseline copy every call reads as its global config.
     pub global: PathBuf,
+    /// Its sha256, checked before every call (16.6, T4).
+    global_sha: Mutex<String>,
     pub repos: RepoBaselines,
     /// git 2.40 or later: `GIT_ATTR_SOURCE` is honoured.
     attr_source: bool,
@@ -580,10 +686,10 @@ pub struct Gitw {
 }
 
 impl Gitw {
-    /// `check_roots` must have passed. `global` is the `GlobalBaseline` copy.
-    pub fn new(git: PathBuf, home: PathBuf, data: PathBuf, work: PathBuf, global: PathBuf) -> Self {
+    /// `check_roots` must have passed.
+    pub fn new(git: PathBuf, home: PathBuf, data: PathBuf, work: PathBuf, global: &GlobalBaseline) -> Self {
         let mut g = Gitw {
-            git, home, data, work, global, repos: RepoBaselines::default(), attr_source: false,
+            git, home, data, work, global: global.copy.clone(), global_sha: Mutex::new(global.sha.clone()), repos: RepoBaselines::default(), attr_source: false,
             #[cfg(test)]
             checks: std::sync::atomic::AtomicBool::new(true),
         };
@@ -598,6 +704,15 @@ impl Gitw {
         Some((it.next()??, it.next()??))
     }
 
+    /// After the human replaced or re-took the global baseline.
+    pub fn use_global(&self, g: &GlobalBaseline) -> R<()> {
+        if g.copy != self.global {
+            return Err(GitwError::Invalid("a different baseline copy"));
+        }
+        *crate::lock(&self.global_sha) = g.sha.clone();
+        Ok(())
+    }
+
     fn checks_on(&self) -> bool {
         #[cfg(test)]
         return self.checks.load(std::sync::atomic::Ordering::SeqCst);
@@ -606,6 +721,10 @@ impl Gitw {
     }
 
     fn run(&self, c: Call<'_>) -> R<Output> {
+        // The copy git is about to read as its global config is the one taken at app start, byte for byte.
+        if hash_file(&self.global, false) != FileHash::Sha(crate::lock(&self.global_sha).clone()) {
+            return Err(tampered(BASELINE_TAMPERED));
+        }
         let mut argv: Vec<String> = vec!["--no-pager".into(), "--no-optional-locks".into()];
         for kv in FIXED.iter().chain(c.config.iter()) {
             argv.extend(["-c".into(), kv.to_string()]);
@@ -712,14 +831,15 @@ impl Gitw {
         let common = self.common_of(&repo)?;
         self.repos.check(self, &common)?;
         let leaf = if integration { if round == 1 { "integration".to_string() } else { format!("integration-r{round}") } } else { format!("{task}-r{round}") };
-        let run_dir = self.work.join(project).join(run);
+        let (work, data) = (self.work.canonicalize().map_err(io)?, self.data.canonicalize().map_err(io)?);
+        let tmp = work.join(project).join(run).join("tmp").join(&leaf);
+        let private = data.join("tickets").join(project).join(run).join(&leaf);
+        let run_dir = make_dirs(&work, &[project, run])?;
         let wt = run_dir.join(&leaf);
-        let tmp = run_dir.join("tmp").join(&leaf);
-        let private = self.data.join("tickets").join(project).join(run).join(&leaf);
-        if wt.exists() || private.exists() {
+        let there = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+        if there(&wt) || there(&private) {
             return Err(GitwError::Exists);
         }
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&run_dir).map_err(io)?;
         let wt_s = wt.to_str().ok_or(GitwError::Invalid("worktree path"))?.to_string();
         self.ok("worktree add", Call::new(At::Repo(&repo), &["worktree", "add", "--detach", "--", &wt_s, from]))?;
         // From here every error rolls back: the worktree is unregistered and removed, and the dirs this call made are
@@ -729,17 +849,15 @@ impl Gitw {
             if FAIL_AFTER_ADD.with(|f| f.get()) {
                 return Err(tampered("test: fail after worktree add"));
             }
-            for d in [&tmp, &private] {
-                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d).map_err(io)?;
-            }
+            let tmp = make_dirs(&work, &[project, run, "tmp", &leaf])?;
+            let private = make_dirs(&data, &["tickets", project, run, &leaf])?;
             self.verify_tree(repo.clone(), &common, &wt, &tmp, &private, (project, run, task, round), from, integration)
         })();
         if made.is_err() {
             let _ = self.run(Call::new(At::Repo(&repo), &["worktree", "remove", "--force", "--", &wt_s]));
             let _ = self.run(Call::new(At::Repo(&repo), &["worktree", "prune"]));
-            for d in [&tmp, &private] {
-                let _ = std::fs::remove_dir_all(d);
-            }
+            remove_own_dir(&tmp, &[&work]);
+            remove_own_dir(&private, &[&data]);
         }
         made
     }
@@ -759,6 +877,13 @@ impl Gitw {
         if resolved != common {
             return Err(tampered("commondir"));
         }
+        // Every core-built dir is under its own root and outside the repo (#146 gate M4).
+        let (tmp, private) = (tmp.canonicalize().map_err(io)?, private.canonicalize().map_err(io)?);
+        let (work, data) = (self.work.canonicalize().map_err(io)?, self.data.canonicalize().map_err(io)?);
+        let outside_repo = |p: &Path| !p.starts_with(&repo) && !p.starts_with(common);
+        if !(wt.starts_with(&work) && tmp.starts_with(&work) && private.starts_with(&data) && [&wt, &tmp, &private].iter().all(|p| outside_repo(p))) {
+            return Err(tampered("a ticket directory is outside its root"));
+        }
         let common = common.to_path_buf();
         let t = Ticket {
             project: project.into(),
@@ -768,8 +893,8 @@ impl Gitw {
             repo,
             wt: wt.clone(),
             common: common_id(&common).ok_or_else(|| tampered("the common git directory"))?,
-            private: private.canonicalize().map_err(io)?,
-            tmp: tmp.canonicalize().map_err(io)?,
+            private,
+            tmp,
             dotgit: hash_file(&wt.join(".git"), false),
             commondir: hash_file(&gitdir.join("commondir"), false),
             config_worktree: hash_file(&gitdir.join("config.worktree"), false),
@@ -839,6 +964,46 @@ impl Gitw {
         Ok(set.into_iter().collect())
     }
 
+    /// Before any git call on the ticket that reads file content (`update-index --refresh`, `add`): a plain filesystem
+    /// walk of the whole worktree, ignored files included, names case-folded. Every `.gitattributes` or `.gitmodules`
+    /// must be the regular file `dispatch_head` tracks at that exact path with the same bytes, and there is no `.git`
+    /// below the root. No filter can have run yet, on any git version (#146 gate M1).
+    fn walk_rule(&self, t: &Ticket) -> R<()> {
+        if !self.checks_on() {
+            return Ok(());
+        }
+        let found = special_files(&t.wt)?;
+        if found.is_empty() {
+            return Ok(());
+        }
+        let ls = self.ok("ls-tree", Call::new(At::Pinned(t), &["ls-tree", "-r", "-z", "--full-tree", &t.dispatch_head]))?;
+        if !ls.whole() {
+            return Err(GitwError::Git { step: "ls-tree", first_line: "output too large".into() });
+        }
+        let tracked: HashMap<&str, (&str, &str)> = ls
+            .stdout
+            .split('\0')
+            .filter_map(|e| {
+                let (meta, path) = e.split_once('\t')?;
+                let mut m = meta.split(' ');
+                let (mode, kind, oid) = (m.next()?, m.next()?, m.next()?);
+                (kind == "blob" && git_special(path.rsplit('/').next().unwrap_or(path)).is_some()).then_some((path, (mode, oid)))
+            })
+            .collect();
+        for (rel, kind) in found {
+            if kind == ".git" {
+                return Err(tampered(format!("nested git repository at {rel}")));
+            }
+            let Some((mode, oid)) = tracked.get(rel.as_str()) else { return Err(tampered(rel)) };
+            let disk = read_bounded(&t.wt.join(&rel), false).ok().flatten();
+            let blob = self.ok("cat-file", Call::new(At::Pinned(t), &["cat-file", "blob", oid]))?;
+            if !matches!(*mode, "100644" | "100755") || !blob.whole() || disk.as_deref() != Some(blob.stdout.as_bytes()) {
+                return Err(tampered(rel));
+            }
+        }
+        Ok(())
+    }
+
     /// No created or changed `.gitattributes` (any depth) or `.gitmodules`, and no nested repository, before any `add`.
     fn name_rule(&self, changed: &[String]) -> R<()> {
         if !self.checks_on() {
@@ -846,11 +1011,11 @@ impl Gitw {
         }
         for p in changed {
             let base = p.rsplit('/').next().unwrap_or(p);
-            if base == ".gitattributes" || base == ".gitmodules" {
+            if matches!(git_special(base), Some(".gitattributes" | ".gitmodules")) {
                 return Err(tampered(p.clone()));
             }
             // An embedded repository shows as `dir/`; a `.git` component anywhere is a nested repo.
-            if p.ends_with('/') || p.split('/').any(|c| c == ".git") {
+            if p.ends_with('/') || p.split('/').any(|c| git_special(c) == Some(".git")) {
                 return Err(tampered(format!("nested git repository at {p}")));
             }
         }
@@ -871,10 +1036,12 @@ impl Gitw {
             GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
             e => e,
         })?;
+        self.walk_rule(t)?;
         let idx = self.fresh_index(t, "index")?;
         let changed = self.changed(t, &idx)?;
         self.name_rule(&changed)?;
-        let (files, leftovers): (Vec<String>, Vec<String>) = changed.into_iter().partition(|p| globs.iter().any(|g| glob_match(g, p)) && (!agent_config(p) || named.contains(p)));
+        let (files, leftovers): (Vec<String>, Vec<String>) =
+            changed.into_iter().partition(|p| globs.iter().any(|g| glob_match(g, p)) && (!agent_config(p) || named.contains(p)) && !escaping_link(&t.wt, p));
         if files.is_empty() {
             return Ok(Snapshot { commit: None, task_ref: None, files, leftovers });
         }
@@ -941,12 +1108,19 @@ impl Gitw {
         let branch = r.trim_start_matches("refs/heads/");
         self.preflight(it)?;
         self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "-B", branch, base]))?;
+        // Refs live in the common dir, which any worker on the repo can write: every step checks where HEAD landed.
+        let mut prev = base.to_string();
+        if self.head(it)? != prev {
+            return Err(tampered("the integration tree's HEAD"));
+        }
         let mut cfg = vec![NO_SIGN];
         cfg.extend(self.identity(it)?);
         for c in commits {
+            #[cfg(test)]
+            BEFORE_MERGE.with(|b| if let Some(f) = b.borrow().as_ref() { f() });
             self.preflight(it)?;
             let head = self.ok("symbolic-ref", Call::new(At::Pinned(it), &["symbolic-ref", "-q", "HEAD"]))?;
-            if head.stdout.trim() != r {
+            if head.stdout.trim() != r || self.head(it)? != prev {
                 return Err(tampered("the integration tree's HEAD"));
             }
             let o = self.run(Call::new(At::Pinned(it), &["merge", "--no-ff", "--no-edit", "--no-verify", "--", c]).config(&cfg))?;
@@ -954,8 +1128,29 @@ impl Gitw {
                 let _ = self.run(Call::new(At::Pinned(it), &["merge", "--abort"]));
                 return Err(GitwError::MergeConflict { sha: c.clone() });
             }
+            let now = self.head(it)?;
+            if now != prev {
+                // A new merge commit: first parent the previous head, second parent this commit.
+                let ps = self.ok("rev-parse", Call::new(At::Pinned(it), &["rev-parse", "HEAD^1", "HEAD^2"]))?.stdout;
+                let ps: Vec<&str> = ps.split_whitespace().collect();
+                if ps != [prev.as_str(), c.as_str()] {
+                    return Err(tampered("the integration tree's HEAD"));
+                }
+            } else if self.run(Call::new(At::Pinned(it), &["merge-base", "--is-ancestor", c, &prev]))?.exit() != Some(0) {
+                // "Already up to date" is only right when the commit is already in.
+                return Err(tampered("the integration tree's HEAD"));
+            }
+            prev = now;
         }
-        Ok(self.ok("rev-parse", Call::new(At::Pinned(it), &["rev-parse", "--verify", "HEAD"]))?.stdout.trim().to_string())
+        if self.head(it)? != prev {
+            return Err(tampered("the integration tree's HEAD"));
+        }
+        Ok(prev)
+    }
+
+    fn head(&self, t: &Ticket) -> R<String> {
+        let h = self.ok("rev-parse", Call::new(At::Pinned(t), &["rev-parse", "--verify", "HEAD"]))?.stdout.trim().to_string();
+        if valid_oid(&h) { Ok(h) } else { Err(GitwError::Git { step: "rev-parse", first_line: "no HEAD".into() }) }
     }
 
     /// The capture check (16.6 Retention): the tamper checks pass, the whole worktree staged the way `snapshot` staged
@@ -966,6 +1161,7 @@ impl Gitw {
         }
         vajra_ref(integration_ref)?;
         self.preflight(t)?;
+        self.walk_rule(t)?;
         let idx = self.fresh_index(t, "capture-index")?;
         // The same name rule as `snapshot`, before this `add` too (git before 2.40 has no `GIT_ATTR_SOURCE`).
         self.name_rule(&self.changed(t, &idx)?)?;
@@ -998,12 +1194,9 @@ impl Gitw {
     fn remove(&self, t: &Ticket) -> R<()> {
         let wt = t.wt.to_str().ok_or(GitwError::Invalid("worktree path"))?;
         self.ok("worktree remove", Call::new(At::Repo(&t.repo), &["worktree", "remove", "--force", "--", wt]))?;
-        for d in [&t.tmp, &t.private] {
-            // Only the core-built dirs under <work> and <data>.
-            if d.starts_with(&self.work) || d.starts_with(&self.data) {
-                let _ = std::fs::remove_dir_all(d);
-            }
-        }
+        // Only the core-built dirs, still where they were made.
+        remove_own_dir(&t.tmp, &[&self.work]);
+        remove_own_dir(&t.private, &[&self.data]);
         Ok(())
     }
 
@@ -1029,11 +1222,81 @@ thread_local! {
     pub(crate) static EXTRA_ADD: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: runs before each `integrate` merge (a worker moving the branch in the common dir).
+    pub(crate) static BEFORE_MERGE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// An agent config file (16.4 rule 6), at any depth for the named files and dirs; `.github/workflows/` at the root.
+/// Names are compared ASCII-case-folded: the worktree volume (APFS by default) is case-insensitive, so `.Claude/` is
+/// `.claude/` to Claude Code.
 pub fn agent_config(p: &str) -> bool {
+    let p = p.to_ascii_lowercase();
     let comps: Vec<&str> = p.split('/').collect();
     let base = comps.last().copied().unwrap_or("");
-    AGENT_FILES.contains(&base) || comps[..comps.len().saturating_sub(1)].iter().any(|c| AGENT_DIRS.contains(c)) || p.starts_with(".github/workflows/")
+    let is = |set: &[&str], c: &str| set.iter().any(|x| x.eq_ignore_ascii_case(c));
+    is(&AGENT_FILES, base) || comps[..comps.len().saturating_sub(1)].iter().any(|c| is(&AGENT_DIRS, c)) || p.starts_with(".github/workflows/")
+}
+
+/// A name git reads as attributes, submodules or a repository, compared ASCII-case-folded (see `agent_config`).
+fn git_special(name: &str) -> Option<&'static str> {
+    [".gitattributes", ".gitmodules", ".git"].into_iter().find(|x| x.eq_ignore_ascii_case(name))
+}
+
+/// Every `.gitattributes`, `.gitmodules` or `.git` in the worktree (case-folded), as `(relative path, canonical name)`,
+/// by plain `lstat` walk: no git, no symlink followed, ignored files included. The worktree's own `.git` file at the
+/// root is skipped (the tamper checks hash it).
+fn special_files(wt: &Path) -> R<Vec<(String, &'static str)>> {
+    const MAX_ENTRIES: usize = 5_000_000;
+    let (mut out, mut seen) = (Vec::new(), 0usize);
+    let mut stack: Vec<(PathBuf, String)> = vec![(wt.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        for e in std::fs::read_dir(&dir).map_err(io)? {
+            let e = e.map_err(io)?;
+            seen += 1;
+            if seen > MAX_ENTRIES {
+                return Err(GitwError::Invalid("the worktree holds too many files to check"));
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            if let Some(k) = git_special(&name) {
+                if !(r == ".git" && k == ".git" && name == ".git") {
+                    out.push((r, k));
+                }
+                continue;
+            }
+            if e.file_type().map_err(io)?.is_dir() {
+                stack.push((e.path(), r));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// A symlink whose target is absolute or climbs out of the worktree (#146 gate L3): never committed, a leftover.
+fn escaping_link(wt: &Path, rel: &str) -> bool {
+    let Ok(m) = std::fs::symlink_metadata(wt.join(rel)) else { return false };
+    if !m.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(target) = std::fs::read_link(wt.join(rel)) else { return true };
+    let mut depth = rel.split('/').count() as i64 - 1;
+    for c in target.components() {
+        match c {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
 }
 
 /// The longest task glob accepted.

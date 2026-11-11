@@ -67,7 +67,7 @@ fn fx_with(tag: &str, gitconfig: &str, files: &[(&str, &str)]) -> Fx {
     }
     let g = GlobalBaseline::take_or_load(Path::new(GIT), &data, &home, None).unwrap();
     check_roots(&data, &work).unwrap();
-    let gw = Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), g.copy.clone());
+    let gw = Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g);
     let common = gw.common_of(&repo).unwrap();
     gw.repos.acquire(&gw, &common, false).unwrap();
     Fx { d, home, repo: repo.canonicalize().unwrap(), gw, base, marker }
@@ -473,7 +473,11 @@ fn agent_config_and_globs_match_as_specified() {
     for p in [".claude/settings.json", "a/.claude/x", ".mcp.json", "CLAUDE.md", "sub/AGENTS.md", ".codex/c.toml", ".envrc", ".husky/pre-commit", ".github/workflows/ci.yml"] {
         assert!(agent_config(p), "{p}");
     }
-    for p in ["src/lib.rs", "docs/claude.md", ".github/CODEOWNERS"] {
+    // The worktree volume is case-insensitive (#146 gate H1).
+    for p in [".Claude/settings.json", "a/.CLAUDE/x", ".MCP.json", "Claude.md", "docs/claude.md", "sub/Agents.md", ".Codex/c.toml", ".ENVRC", ".Husky/pre-commit", ".GitHub/Workflows/ci.yml"] {
+        assert!(agent_config(p), "{p}");
+    }
+    for p in ["src/lib.rs", "docs/claude.txt", ".github/CODEOWNERS"] {
         assert!(!agent_config(p), "{p}");
     }
     assert!(glob_match("src/**", "src/a/b.rs") && glob_match("src/", "src/x") && glob_match("**/*.rs", "a.rs") && glob_match("a?c", "abc"));
@@ -527,4 +531,188 @@ fn a_failed_worktree_add_rolls_back_and_the_ticket_can_be_retried() {
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
     assert!(t.wt.exists() && t.private.exists() && t.tmp.exists());
     no_marker(&f);
+}
+
+/// #146 gate H1: on a case-insensitive volume `.Claude/settings.json` is `.claude/settings.json`, and `.GitAttributes`
+/// is `.gitattributes`. None of them is committed, and no filter runs.
+#[test]
+fn case_variants_of_agent_config_and_git_names_are_caught() {
+    let f = fx("case");
+    let mark = marker_script(&f.d, &f.marker);
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t0", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    edit(&t, ".Claude/settings.json", "{\"hooks\":{}}\n");
+    edit(&t, "src/claude.md", "x\n");
+    edit(&t, ".MCP.json", "{}\n");
+    let s = f.gw.snapshot(&t, &["**".into()], &[], "w m").unwrap();
+    assert_eq!(s.files, vec!["src/lib.rs".to_string()]);
+    let mut l = s.leftovers.clone();
+    l.sort();
+    assert_eq!(l, vec![".Claude/settings.json", ".MCP.json", "src/claude.md"]);
+    for (task, path) in [("t1", "src/.GitAttributes"), ("t2", ".GITMODULES"), ("t3", "src/.GIT/config")] {
+        let t = f.gw.worktree_add(&f.repo, "p", "r1", task, 1, &f.base).unwrap();
+        edit(&t, "src/lib.rs", "x\n");
+        edit(&t, path, "* filter=x\n");
+        assert_eq!(f.gw.snapshot(&t, &["**".into()], &[], "w m").unwrap_err().code(), "tampered", "{path}");
+    }
+    no_marker(&f);
+}
+
+/// #146 gate H2: the frozen copy in `<data>` is checked against the hash taken at load before every call, and across a
+/// restart against the anchor in `<control>`. A changed copy is never used, and only the human re-takes it.
+#[test]
+fn a_rewritten_global_baseline_copy_is_tampered_and_never_runs() {
+    let f = fx_with("baseline", "[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = cat\n", &[(".gitattributes", "*.rs filter=x\n")]);
+    let mark = marker_script(&f.d, &f.marker);
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let good = std::fs::read(&f.gw.global).unwrap();
+    let mut evil = good.clone();
+    evil.extend(format!("[filter \"x\"]\n\tclean = {}\n", mark.display()).as_bytes());
+    std::fs::write(&f.gw.global, &evil).unwrap();
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: "the global git baseline".into() });
+    assert_eq!(f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base).unwrap_err().code(), "tampered");
+    no_marker(&f);
+    let load = || GlobalBaseline::take_or_load(Path::new(GIT), &f.gw.data, &f.home, None);
+    assert_eq!(load().unwrap_err().code(), "tampered", "a restart refuses it too");
+    std::fs::write(&f.gw.global, &good).unwrap();
+    assert!(load().is_ok(), "the original bytes load");
+    // A deleted anchor, and a deleted copy with the anchor left behind.
+    let anchor = f.gw.data.join("control/git-baseline.sha256");
+    let a = std::fs::read(&anchor).unwrap();
+    std::fs::remove_file(&anchor).unwrap();
+    assert_eq!(load().unwrap_err().code(), "tampered");
+    std::fs::write(&anchor, &a).unwrap();
+    std::fs::remove_file(&f.gw.global).unwrap();
+    assert_eq!(load().unwrap_err().code(), "tampered");
+    // The human re-takes it, only with no agent session running.
+    assert!(GlobalBaseline::retake(Path::new(GIT), &f.gw.data, &f.home, None, true).is_err());
+    let g = GlobalBaseline::retake(Path::new(GIT), &f.gw.data, &f.home, None, false).unwrap();
+    f.gw.use_global(&g).unwrap();
+    assert!(load().is_ok());
+    assert!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.is_some());
+    no_marker(&f);
+}
+
+/// #146 gate M1: a `.gitattributes` hidden by a `.gitignore`, and a tracked one rewritten to apply a filter the user
+/// trusts, are caught by the filesystem walk before git reads any file content, with `GIT_ATTR_SOURCE` off (git
+/// before 2.40). A tracked, unchanged `.gitattributes` passes.
+#[test]
+fn an_ignored_or_rewritten_gitattributes_is_caught_before_git_reads_content() {
+    let mut f = fx_with("ignattr", "[user]\n\tname = U\n\temail = u@e\n", &[("keep/.gitattributes", "*.bin binary\n")]);
+    f.gw.attr_source = false;
+    let mark = marker_script(&f.d, &f.marker);
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    assert!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.is_some(), "the tracked one passes");
+    let cases: [(&str, &[(&str, &str)]); 2] = [
+        ("t2", &[("src/sub/.gitignore", "*\n"), ("src/sub/.gitattributes", "* filter=x\n")]),
+        ("t3", &[("keep/.gitattributes", "* filter=x\n")]),
+    ];
+    for (task, files) in cases {
+        let t = f.gw.worktree_add(&f.repo, "p", "r1", task, 1, &f.base).unwrap();
+        edit(&t, "src/lib.rs", "x\n");
+        for (p, c) in files {
+            edit(&t, p, c);
+        }
+        assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err().code(), "tampered", "{task}");
+    }
+    no_marker(&f);
+}
+
+/// #146 gate M2: a filter planted in a file the repo config includes, or in the main worktree's `config.worktree`, is
+/// a repo config change.
+#[test]
+fn a_changed_repo_config_include_or_config_worktree_is_tampered() {
+    let f = fx("include");
+    let mark = marker_script(&f.d, &f.marker);
+    let inc = f.d.join("shared.gitconfig");
+    std::fs::write(&inc, "[core]\n\tpager = cat\n").unwrap();
+    ugit(&f.home, &f.repo, &["config", "include.path", inc.to_str().unwrap()]);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::write(&inc, format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    match f.gw.snapshot(&t, &globs(), &[], "w m") {
+        Err(GitwError::Tampered { what }) => assert!(what.contains("include.path"), "{what}"),
+        other => panic!("{other:?}"),
+    }
+    std::fs::write(&inc, "[core]\n\tpager = cat\n").unwrap();
+    std::fs::write(common.join("config.worktree"), format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["config.worktree".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    no_marker(&f);
+}
+
+/// #146 gate M4: a `tmp` dir planted as a symlink into `<data>` never becomes a ticket's tmp, and the rollback never
+/// deletes through it. A run dir that is a link is refused before git runs.
+#[test]
+fn a_planted_dir_symlink_is_refused_and_nothing_is_deleted_through_it() {
+    let f = fx("tmplink");
+    let target = f.gw.data.join("elsewhere");
+    std::fs::create_dir_all(target.join("t1-r1")).unwrap();
+    std::fs::write(target.join("t1-r1/keep"), "x").unwrap();
+    std::fs::create_dir_all(f.gw.work.join("p/r1")).unwrap();
+    std::os::unix::fs::symlink(&target, f.gw.work.join("p/r1/tmp")).unwrap();
+    assert_eq!(f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap_err().code(), "tampered");
+    assert!(target.join("t1-r1/keep").exists(), "nothing deleted through the link");
+    let list = out(ugit(&f.home, &f.repo, &["worktree", "list", "--porcelain"]));
+    assert_eq!(list.matches("worktree ").count(), 1, "rolled back: {list}");
+    std::fs::create_dir_all(f.gw.work.join("q")).unwrap();
+    std::os::unix::fs::symlink(&f.repo, f.gw.work.join("q/r1")).unwrap();
+    assert_eq!(f.gw.worktree_add(&f.repo, "q", "r1", "t1", 1, &f.base).unwrap_err().code(), "tampered");
+    assert!(!f.repo.join("t1-r1").exists());
+}
+
+/// #146 gate L1: a worker moves the integration branch (refs live in the common dir) between merges.
+#[test]
+fn a_moved_integration_branch_is_tampered() {
+    let f = fx("intmove");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let evil = out(ugit(&f.home, &f.repo, &["-c", "user.name=W", "-c", "user.email=w@e", "commit-tree", &format!("{}^{{tree}}", f.base), "-p", &f.base, "-m", "evil"]));
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let (home, repo, e) = (f.home.clone(), f.repo.clone(), evil.clone());
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = Some(Box::new(move || {
+        ugit(&home, &repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/vajra/r1/integration", &e]);
+    })));
+    let r = f.gw.integrate(&it, &f.base, std::slice::from_ref(&c));
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = None);
+    assert_eq!(r.unwrap_err(), GitwError::Tampered { what: "the integration tree's HEAD".into() });
+    no_marker(&f);
+}
+
+/// #146 gate L3: a symlink to an absolute path or out of the worktree is a leftover, never committed.
+#[test]
+fn escaping_symlinks_are_leftovers() {
+    let f = fx("links");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::os::unix::fs::symlink("/etc/hosts", t.wt.join("src/abs")).unwrap();
+    std::os::unix::fs::symlink("../../outside", t.wt.join("src/up")).unwrap();
+    std::os::unix::fs::symlink("lib.rs", t.wt.join("src/ok")).unwrap();
+    std::os::unix::fs::symlink("../a.txt", t.wt.join("src/ok2")).unwrap();
+    let s = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap();
+    assert_eq!(s.files, vec!["src/lib.rs".to_string(), "src/ok".into(), "src/ok2".into()]);
+    let mut l = s.leftovers.clone();
+    l.sort();
+    assert_eq!(l, vec!["src/abs", "src/up"]);
+}
+
+/// #146 gate L2: a link planted at the old predictable temp name is never followed.
+#[test]
+fn write_private_never_follows_a_planted_temp_name() {
+    let d = tmpdir("wp");
+    let victim = d.join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    std::os::unix::fs::symlink(&victim, d.join(format!("f.tmp{}", std::process::id()))).unwrap();
+    write_private(&d.join("f"), b"new").unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert_eq!(std::fs::read_to_string(d.join("f")).unwrap(), "new");
 }
