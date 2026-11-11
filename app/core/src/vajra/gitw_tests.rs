@@ -1392,6 +1392,10 @@ fn ignored_dependency_folders_are_cloned_and_the_rest_are_not() {
 #[test]
 fn special_git_files_inside_a_core_dependency_clone_are_not_tampered() {
     let f = fx_with("depwalk", "[user]\n\tname = U\n\temail = u@e\n", &[ignore_deps()]);
+    if !f.gw.attr_source {
+        // Git before 2.40: the clone is walked, so this is the tampered case (the test below).
+        return;
+    }
     for (p, c) in [("node_modules/pkg/.gitattributes", "* text=auto\n"), ("node_modules/gitdep/.git/HEAD", "ref: refs/heads/main\n"), ("node_modules/pkg/i.js", "1\n")] {
         let at = f.repo.join(p);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
@@ -1419,6 +1423,26 @@ fn special_git_files_inside_a_core_dependency_clone_are_not_tampered() {
     std::os::unix::fs::symlink("nm2", v.wt.join("node_modules")).unwrap();
     edit(&v, "src/lib.rs", "fn a() { 4 }\n");
     assert_eq!(f.gw.snapshot(&v, &globs(), &[], "w m").unwrap_err().code(), "tampered", "nm2/.gitattributes is still found");
+    no_marker(&f);
+}
+
+/// #149 bhishma M1: git before 2.40 has no `GIT_ATTR_SOURCE`, so a `.gitattributes` inside a core dependency clone
+/// would apply to the worktree. There the clone is walked: the ticket is tampered before any filter runs.
+#[test]
+fn without_attr_source_a_gitattributes_in_a_dependency_clone_is_tampered() {
+    let mut f = fx_with("depwalkold", "[user]\n\tname = U\n\temail = u@e\n", &[ignore_deps()]);
+    f.gw.attr_source = false;
+    let mark = marker_script(&f.d, &f.marker);
+    std::fs::write(f.home.join(".gitconfig"), format!("[user]\n\tname = U\n\temail = u@e\n[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    let at = f.repo.join("node_modules/pkg/.gitattributes");
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::fs::write(at, "* filter=x\n").unwrap();
+    let mut t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    assert_eq!(f.gw.clone_deps(&mut t).iter().filter(|d| d.error.is_none()).count(), 1);
+    assert_eq!(t.deps, vec!["node_modules".to_string()]);
+    edit(&t, "src/lib.rs", "fn a() { 2 }\n");
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err().code(), "tampered");
+    assert_eq!(f.gw.unchanged(&t).unwrap_err().code(), "tampered", "the dispatch check too");
     no_marker(&f);
 }
 
