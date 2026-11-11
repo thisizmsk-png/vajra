@@ -50,6 +50,9 @@ pub const LEAVE_CHANGES: &str = "Leave your changes in the working tree; Vajra c
 const GROUP_GRACE: Duration = Duration::from_secs(2);
 /// File names a summary lists at most.
 const SUMMARY_FILES: usize = 20;
+/// How much of an attempt's opening output is kept for its startup event (the harness prints it first).
+const OPENING_LINES: usize = 64;
+const OPENING_BYTES: usize = 64 * 1024;
 
 /// What the runtime needs from the app. Every path is absolute and core-built.
 pub struct Config {
@@ -616,7 +619,12 @@ impl WorkerRuntime {
             let (o, why) = kill_outcome(r);
             return Attempt::End(o, why.into(), None);
         }
-        let sid = format!("core-{}-a{n}", id.replace('.', "-"));
+        // The ticket's dispatch number, unique for this runtime and short: no two tickets share a supervisor session
+        // (ids such as `a-b.c.r1` and `a.b-c.r1` would collide if their dots were rewritten, #149 codex).
+        let Some(seq) = crate::lock(&self.0.book).tickets.get(id).map(|e| e.seq) else {
+            return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
+        };
+        let sid = format!("core-{seq}-a{n}");
         let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: self.0.cfg.redact.clone(), extra_env: l.env.clone() };
         if let Some(f) = &l.flag {
             if profiles::verify_claude_worker_flag(f).is_err() {
@@ -640,6 +648,8 @@ impl WorkerRuntime {
         }
         let start = Instant::now();
         let mut applied: Option<Result<(), String>> = None;
+        // The harness's opening lines carry its startup identity; kept once seen, so later output can't push it out.
+        let mut opening = String::new();
         let exit = loop {
             if let Ok(Some(x)) = self.0.sup.wait(&sid, self.0.cfg.poll) {
                 break Some(x);
@@ -654,7 +664,7 @@ impl WorkerRuntime {
                 break None;
             }
             if applied.is_none() {
-                applied = l.read_back(&self.events(&sid), t);
+                applied = l.read_back(&self.attempt_events(&sid, l, &mut opening), t);
                 if let Some(Err(_)) = &applied {
                     let _ = self.0.sup.kill(&sid);
                 }
@@ -662,7 +672,7 @@ impl WorkerRuntime {
         };
         let pid = self.0.sup.pid(&sid).unwrap_or(0);
         wait_group_gone(pid);
-        let events = self.events(&sid);
+        let events = self.attempt_events(&sid, l, &mut opening);
         let receipt = Some(l.receipt(seat, &events, &sid));
         if let Some(r) = self.killed(id) {
             let (o, why) = kill_outcome(r);
@@ -757,6 +767,18 @@ impl WorkerRuntime {
 
     fn killed(&self, id: &str) -> Option<KillReason> {
         crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.kill)
+    }
+
+    /// What one attempt's checks read: its opening lines, read from the start of the stream through the spill and
+    /// kept once they hold the harness's startup event, then the recent ring. Heavy early output evicts the startup
+    /// line from the ring (256 KiB), never from here (#149 codex).
+    fn attempt_events(&self, sid: &str, l: &Launch, opening: &mut String) -> String {
+        if !l.started(opening) {
+            if let Ok(w) = self.0.bus.window(sid, Some(1), OPENING_LINES, OPENING_BYTES) {
+                *opening = w.lines.iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n");
+            }
+        }
+        format!("{opening}\n{}", self.events(sid))
     }
 
     fn events(&self, sid: &str) -> String {
@@ -1022,6 +1044,14 @@ impl Launch {
             }
         }
         Ok(l)
+    }
+
+    /// The harness has printed its startup event: Codex `thread.started`, Claude `system`/`init`.
+    fn started(&self, text: &str) -> bool {
+        match self.engine {
+            Engine::Codex => text.contains("\"thread.started\""),
+            Engine::Claude => text.contains("\"init\""),
+        }
     }
 
     /// The run-time read-back (16.4 rule 4): `None` until the harness has reported, then whether it matches.
