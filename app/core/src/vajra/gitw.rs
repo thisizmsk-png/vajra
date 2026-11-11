@@ -319,7 +319,8 @@ fn config_read(git: &Path, home: &Path, xdg: Option<&Path>, args: &[&str]) -> Op
 fn parse_list_z(s: &str) -> Vec<(String, String)> {
     s.split('\0').filter(|x| !x.is_empty()).map(|item| match item.split_once('\n') {
         Some((k, v)) => (k.to_string(), v.to_string()),
-        None => (item.to_string(), String::new()),
+        // A bare key (no `=`) means true; rendering it empty would read as false.
+        None => (item.to_string(), "true".to_string()),
     }).collect()
 }
 
@@ -814,6 +815,24 @@ impl Gitw {
         Ok(set.into_iter().collect())
     }
 
+    /// No created or changed `.gitattributes` (any depth) or `.gitmodules`, and no nested repository, before any `add`.
+    fn name_rule(&self, changed: &[String]) -> R<()> {
+        if !self.checks_on() {
+            return Ok(());
+        }
+        for p in changed {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            if base == ".gitattributes" || base == ".gitmodules" {
+                return Err(tampered(p.clone()));
+            }
+            // An embedded repository shows as `dir/`; a `.git` component anywhere is a nested repo.
+            if p.ends_with('/') || p.split('/').any(|c| c == ".git") {
+                return Err(tampered(format!("nested git repository at {p}")));
+            }
+        }
+        Ok(())
+    }
+
     /// 16.6 `snapshot`: plumbing only, through a fresh private index. `globs` are the task's files; `named` the agent
     /// config files the ask names; `worker` the trailer's "<account> <model>".
     pub fn snapshot(&self, t: &Ticket, globs: &[String], named: &[String], worker: &str) -> R<Snapshot> {
@@ -830,18 +849,7 @@ impl Gitw {
         })?;
         let idx = self.fresh_index(t, "index")?;
         let changed = self.changed(t, &idx)?;
-        if self.checks_on() {
-            for p in &changed {
-                let base = p.rsplit('/').next().unwrap_or(p);
-                if base == ".gitattributes" || base == ".gitmodules" {
-                    return Err(tampered(p.clone()));
-                }
-                // An embedded repository shows as `dir/`; a `.git` component anywhere is a nested repo.
-                if p.ends_with('/') || p.split('/').any(|c| c == ".git") {
-                    return Err(tampered(format!("nested git repository at {p}")));
-                }
-            }
-        }
+        self.name_rule(&changed)?;
         let (files, leftovers): (Vec<String>, Vec<String>) = changed.into_iter().partition(|p| globs.iter().any(|g| glob_match(g, p)) && (!agent_config(p) || named.contains(p)));
         if files.is_empty() {
             return Ok(Snapshot { commit: None, task_ref: None, files, leftovers });
@@ -869,6 +877,12 @@ impl Gitw {
             return Err(GitwError::CommitFailed { first_line: first_line(&o) });
         }
         let commit = o.stdout.trim().to_string();
+        // Checked again before the ref exists: a change made while `add` ran (another live session on the repo) never
+        // becomes a task ref. The residual is that a filter it planted may already have run inside `add`.
+        self.preflight(t).map_err(|e| match e {
+            GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
+            e => e,
+        })?;
         let zero = "0".repeat(commit.len());
         let u = self.run(Call::new(At::Pinned(t), &["update-ref", &task_ref, &commit, &zero]))?;
         if u.exit() != Some(0) {
@@ -929,6 +943,8 @@ impl Gitw {
         vajra_ref(integration_ref)?;
         self.preflight(t)?;
         let idx = self.fresh_index(t, "capture-index")?;
+        // The same name rule as `snapshot`, before this `add` too (git before 2.40 has no `GIT_ATTR_SOURCE`).
+        self.name_rule(&self.changed(t, &idx)?)?;
         self.ok("add", Call::new(At::Pinned(t), &["add", "-A", "--", "."]).index(&idx))?;
         let cap = self.ok("write-tree", Call::new(At::Pinned(t), &["write-tree"]).index(&idx))?.stdout.trim().to_string();
         let want = self.ok("rev-parse", Call::new(At::Pinned(t), &["rev-parse", "--verify", &format!("{commit}^{{tree}}")]))?.stdout.trim().to_string();
@@ -990,9 +1006,16 @@ pub fn agent_config(p: &str) -> bool {
     AGENT_FILES.contains(&base) || comps[..comps.len().saturating_sub(1)].iter().any(|c| AGENT_DIRS.contains(c)) || p.starts_with(".github/workflows/")
 }
 
+/// The longest task glob accepted.
+pub const MAX_GLOB: usize = 256;
+
 /// A task glob: `**` matches any number of path segments, `*` and `?` stay inside one segment, a trailing `/` means
 /// the whole directory. Literal otherwise.
 pub fn glob_match(pat: &str, path: &str) -> bool {
+    // The plan's globs are untrusted: bounded so matching can't backtrack without end.
+    if pat.len() > MAX_GLOB || pat.matches("**").count() > 4 || pat.matches('*').count() > 12 {
+        return false;
+    }
     let pat = if let Some(d) = pat.strip_suffix('/') { format!("{d}/**") } else { pat.to_string() };
     if Path::new(&pat).components().any(|c| matches!(c, Component::ParentDir | Component::RootDir)) {
         return false;

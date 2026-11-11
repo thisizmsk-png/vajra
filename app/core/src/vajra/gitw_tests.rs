@@ -312,6 +312,19 @@ fn a_repo_config_change_is_tampered_and_refuses_new_worktrees() {
 }
 
 #[test]
+fn a_gitattributes_created_after_snapshot_is_refused_before_the_capture_add() {
+    let f = fx("capattr");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    f.gw.integrate(&it, &f.base, std::slice::from_ref(&c)).unwrap();
+    edit(&t, "src/.gitattributes", "* filter=x\n");
+    assert_eq!(f.gw.worktree_remove(&t, &c, &Gitw::integration_ref(&it)).unwrap_err().code(), "tampered");
+    assert!(t.wt.exists());
+}
+
+#[test]
 fn info_attributes_in_the_common_dir_is_a_tamper_signal() {
     let f = fx("infoattr");
     let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
@@ -465,6 +478,13 @@ fn agent_config_and_globs_match_as_specified() {
     }
     assert!(glob_match("src/**", "src/a/b.rs") && glob_match("src/", "src/x") && glob_match("**/*.rs", "a.rs") && glob_match("a?c", "abc"));
     assert!(!glob_match("src/*", "src/a/b.rs") && !glob_match("../x", "../x") && !glob_match("src/**", "srcx/a"));
+    // A hostile glob is refused fast instead of backtracking.
+    let long = "a/".repeat(60) + "b";
+    let started = std::time::Instant::now();
+    assert!(!glob_match("**/**/**/**/**/x", &long) && !glob_match(&"*".repeat(13), "a"));
+    assert!(!glob_match("**/*a*/**/*a*/**/*a*/**/*a*/c", &long));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(parse_list_z("core.bare\0user.email\nu@e\0"), vec![("core.bare".into(), "true".into()), ("user.email".into(), "u@e".into())]);
 }
 
 /// The shipped sandbox policy, unchanged: it denies agent writes to `<data>`, and no deny entry covers `<work>`, so a
