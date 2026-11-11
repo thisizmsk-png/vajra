@@ -372,6 +372,52 @@ OG
   ( cd "$RC" && OC close ) >/dev/null 2>&1
 fi
 
+# --- lock owner and unlock --if-stale (6h-e) ---
+C create lk --feature "f1|one" >/dev/null 2>&1; check "lock: create a campaign" $?
+LD="$CD/lk"
+[ ! -e "$LD/.lock" ]; check "lock: a normal create leaves no lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: a normal pass succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: a normal pass leaves no lock and no owner file" $?
+
+# A copy that holds the lock for a while, so a test can SIGKILL it with the lock held.
+HOLD_SCRIPT="$WORK/hold-campaign.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 30"}' "$SCRIPT" > "$HOLD_SCRIPT"
+grep -q '^  sleep 30' "$HOLD_SCRIPT"; check "lock: the hold copy was built" $?
+# hold_lock: start a holder in its own process group; sets HP (the script's pid) once the owner file is written.
+hold_lock() {
+  set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+  local i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+kill_holder() { kill -9 -- "-$HP" 2>/dev/null; wait "$HP" 2>/dev/null; }
+
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "lock: owner.json records the holder's pid" $?
+[ -n "$(jq -r .start "$LD/.lock/owner.json")" ]; check "lock: owner.json records a start time" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner with the same start time is kept" $?
+kill_holder
+[ -d "$LD/.lock" ] && [ -f "$LD/.lock/owner.json" ]; check "lock: SIGKILL leaves the lock and its owner file" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock --if-stale on a killed owner succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: --if-stale removed the owner file and the lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: the campaign is usable again" $?
+
+# a reused pid: the pid is alive (this shell) but the recorded start time is not its start time
+mkdir "$LD/.lock"; jq -n --argjson pid "$$" '{pid: $pid, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "lock: a reused pid (different start time) is treated as dead" $?
+# the same pid with the matching start time is live
+mkdir "$LD/.lock"; SELF_START="$(LC_ALL=C ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //; s/ $//')"
+jq -n --argjson pid "$$" --arg s "$SELF_START" '{pid: $pid, start: $s}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live pid with its real start time is kept" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+# no owner file: never removed
+mkdir "$LD/.lock"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a lock with no owner file is kept" $?
+printf 'not json' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: an unreadable owner file keeps the lock" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+C unlock lk >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock without --if-stale is refused" $?
+C unlock "../x" --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock refuses an invalid slug" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock with no lock held is a no-op success" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
