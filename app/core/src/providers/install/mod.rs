@@ -5,6 +5,7 @@
 pub mod admin;
 pub mod brew;
 pub mod closure;
+pub mod consent;
 pub mod env;
 pub mod npm;
 pub mod plan;
