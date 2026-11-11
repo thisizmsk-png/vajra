@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use super::workers::{CleanUp, Config, Hooks, State, WorkerRuntime};
 use crate::adapter::profiles;
 use crate::control::service::{ControlError, CoreWorkers};
-use crate::providers::launch;
 use crate::bus::Bus;
 use crate::sessions::Supervisor;
 use crate::vajra::gitw::{self, GitwError, Gitw, GlobalBaseline, SessionQuiesce};
@@ -149,8 +148,8 @@ impl CoreWorkers for WorkerHost {
 
     fn message_to(&self, ticket: &str) -> Result<String, &'static str> {
         let v = self.rt.get().and_then(|rt| rt.view(ticket)).ok_or(profiles::NO_MESSAGE)?;
-        let engine = launch::harness_of(&v.account).ok_or(profiles::NO_MESSAGE)?;
-        if let Some(why) = profiles::controls(engine).message {
+        // The same answer the crew node shows (#151).
+        if let Some(why) = v.message_off() {
             return Err(why);
         }
         v.harness_session.ok_or(profiles::NOT_STARTED)

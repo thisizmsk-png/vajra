@@ -693,6 +693,58 @@ fn a_claude_task_worker_gets_its_steering_channel_by_session_id_before_it_starts
     assert_eq!(crate::lock(&opened).len(), 1, "a Codex worker has no steering channel");
 }
 
+/// Waits for a ticket's first attempt to be running, and returns its view then.
+fn running(r: &Rig, id: &str) -> TicketView {
+    let start = Instant::now();
+    loop {
+        let v = r.rt.view(id).unwrap();
+        if v.state == State::Running && v.harness_session.is_some() {
+            return v;
+        }
+        assert!(start.elapsed() < WAIT, "never ran: {v:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #151: a running Claude check worker has no steering channel (a check is the independent gate), so its node offers
+/// no Message or Redirect, and a message is refused with that reason, never "hasn't started yet".
+#[test]
+fn a_running_claude_check_worker_shows_message_off_with_its_true_reason() {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let o2 = opened.clone();
+    let steer: Steer = Arc::new(move |_: &str| {
+        o2.fetch_add(1, Ordering::SeqCst);
+        Some("00112233445566778899aabbccddeeff".into())
+    });
+    let r = rig("claude-check", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let mut s = seat("v1", "claude");
+    s.role = crate::crew::roles::VERIFIER.into();
+    let id = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), s, &r.base).unwrap();
+    let v = running(&r, &id);
+    assert_eq!(v.message_off(), Some(profiles::CHECK_NOT_STEERED), "{v:?}");
+    let c = v.core_worker().controls;
+    for k in ["message", "redirect"] {
+        assert_eq!((c[k]["enabled"].as_bool(), c[k]["reason"].as_str()), (Some(false), Some(profiles::CHECK_NOT_STEERED)), "{c}");
+    }
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "a check never gets a control dir");
+}
+
+/// #151: a running Claude task worker whose control dir couldn't be opened says so, and a steered one takes messages.
+#[test]
+fn a_claude_task_whose_steering_channel_failed_says_so_and_a_steered_one_is_open() {
+    let ok = Arc::new(AtomicUsize::new(0));
+    let o2 = ok.clone();
+    // The first open fails, the second succeeds.
+    let steer: Steer = Arc::new(move |_: &str| (o2.fetch_add(1, Ordering::SeqCst) > 0).then(|| "00112233445566778899aabbccddeeff".to_string()));
+    let r = rig("claude-nochan", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let failed = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(failed.message_off(), Some(profiles::NO_STEER_CHANNEL), "{failed:?}");
+    assert_eq!(failed.core_worker().controls["message"]["enabled"], false);
+    let steered = running(&r, &r.rt.dispatch(r.task("r2", "t1"), seat("w2", "claude")).unwrap());
+    assert_eq!(steered.message_off(), None, "{steered:?}");
+    assert_eq!(steered.core_worker().controls["message"]["enabled"], true);
+}
+
 #[test]
 fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
     let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });

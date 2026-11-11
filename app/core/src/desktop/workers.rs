@@ -201,6 +201,9 @@ pub struct TicketView {
     pub detail: Option<String>,
     /// The harness's own session id, where it has one (a Claude worker's message queue is keyed by it, 6c-2).
     pub harness_session: Option<String>,
+    /// Why a running Claude worker has no steering channel (a check, or its control dir didn't open). `None` when it
+    /// has one, or its harness never steers (see `message_off`).
+    pub steer_off: Option<&'static str>,
     pub commit: Option<String>,
     pub task_ref: Option<String>,
     pub files: Vec<String>,
@@ -345,7 +348,7 @@ impl WorkerRuntime {
         let view = TicketView {
             id: id.clone(), run: s.run.clone(), task: s.task.clone(), round: s.round, kind, slot: seat.slot.clone(), account: seat.account.clone(),
             state: State::Queued, queue_position: None, wait: None, attempt: 0, elapsed_s: 0, dispatch_head: None, worktree: None, deps: Vec::new(),
-            outcome: None, reason: None, detail: None, harness_session: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
+            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
@@ -724,6 +727,7 @@ impl WorkerRuntime {
             e.session = Some(sid.clone());
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
+            e.view.steer_off = l.steer_off;
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
@@ -934,6 +938,14 @@ impl Clock for TicketClock<'_> {
 }
 
 impl TicketView {
+    /// Why Message and Redirect are off for this ticket, `None` when it takes them. The one answer both the crew
+    /// node and the control service (`CoreWorkers::message_to`) use: the harness profile's reason, then "not
+    /// started" until a Claude worker's session exists, then why it has no steering channel.
+    pub fn message_off(&self) -> Option<&'static str> {
+        let Some(e) = launch::harness_of(&self.account) else { return Some(profiles::NO_MESSAGE) };
+        profiles::controls(e).message.or_else(|| self.harness_session.is_none().then_some(profiles::NOT_STARTED)).or(self.steer_off)
+    }
+
     /// The crew tree's `core:<ticket>` node input (16.7): status from the state and outcome, the controls from the
     /// seat's harness profile, the diff once there is a commit.
     pub fn core_worker(&self) -> crate::crew::tree::CoreWorker {
@@ -948,14 +960,7 @@ impl TicketView {
             (State::Ended, _) => (Status::Failed, None),
         };
         let controls = match launch::harness_of(&self.account) {
-            Some(e) => {
-                let mut c = profiles::controls(e);
-                // Claude's channel is keyed by its session id: none until the ticket's session exists.
-                if c.message.is_none() && self.harness_session.is_none() {
-                    c.message = Some(profiles::NOT_STARTED);
-                }
-                c.to_json()
-            }
+            Some(e) => profiles::Controls { message: self.message_off(), ..profiles::controls(e) }.to_json(),
             None => json!({}),
         };
         let diff = self.commit.as_ref().map(|_| {
@@ -1097,6 +1102,8 @@ struct Launch {
     codex_home: PathBuf,
     /// The app's nonce set, plus this worker's steering nonce: never shown in its output.
     redact: Redactor,
+    /// See `TicketView::steer_off`.
+    steer_off: Option<&'static str>,
 }
 
 impl Launch {
@@ -1124,9 +1131,15 @@ impl Launch {
         };
         // Only a task worker is steered, as in a workflow (a check is the independent gate). Its control dir exists
         // before it starts, so the first tool call can already take a message.
-        let nonce = match (job, &claude_sid, &cfg.steer) {
-            (Job::Task(_), Some(sid), Some(open)) => open(sid),
-            _ => None,
+        // A Claude worker that isn't steered records why, so it is never offered Message (#151).
+        let (nonce, steer_off) = match (job, &claude_sid, &cfg.steer) {
+            (_, None, _) => (None, None),
+            (Job::Check(..), Some(_), _) => (None, Some(profiles::CHECK_NOT_STEERED)),
+            (Job::Task(_), Some(sid), Some(open)) => match open(sid) {
+                Some(n) => (Some(n), None),
+                None => (None, Some(profiles::NO_STEER_CHANNEL)),
+            },
+            (Job::Task(_), Some(_), None) => (None, Some(profiles::NO_STEER_CHANNEL)),
         };
         let mut brief = match job {
             Job::Task(s) => format!("{}\n\n{LEAVE_CHANGES}", s.brief),
@@ -1140,7 +1153,7 @@ impl Launch {
         let wl = WorkerLaunch { kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp };
         let mut l = Launch {
             engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
-            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact,
+            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off,
         };
         match engine {
             Engine::Codex => {

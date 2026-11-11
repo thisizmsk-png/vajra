@@ -151,8 +151,9 @@ impl Service {
             return Err(ControlError::StaleGeneration(u64::from(c.round)));
         }
         let sid = c.core.message_to(ticket).map_err(ControlError::NotSupportedByHarness)?;
+        // `message_to` already refuses a worker that was never given a channel; this is one this service has no dir for.
         if !self.core_dirs.contains_key(&sid) {
-            return Err(ControlError::NotSupportedByHarness(crate::adapter::profiles::NOT_STARTED));
+            return Err(ControlError::NotSupportedByHarness(crate::adapter::profiles::NO_STEER_CHANNEL));
         }
         let now = SystemTime::now();
         let mut a = self.new_action(kind, actor, None, now)?;

@@ -313,6 +313,8 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | Restart Vajra. If this keeps happening, check that git works in Terminal. | preflight row fix | only when the take itself failed; none for a tampered copy or overlapping folders |
 | This worker can't take a message mid-run. | `core:` worker Message and Redirect | Codex profile |
 | This worker hasn't started yet. Message it once it's running. | `core:` worker Message and Redirect | Claude profile, while the ticket is queued (it has no session yet); once running, Message and Redirect are on through the control hook (#148/#150) |
+| This worker checks the work on its own, so it can't take a message. | `core:` worker Message and Redirect | a running Claude check ticket (verify, review, security review, evidence): a check is never steered |
+| Vajra couldn't open this worker's message channel. Stop it and run it again to message it. | `core:` worker Message and Redirect | a running Claude task whose control dir couldn't be opened before it started |
 | Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill) |
 | Worker copies | Settings > General panel title | new |
 | Each worker edits its own copy of your repo. A copy stays until its work is merged, or until you discard it. | panel lede | |

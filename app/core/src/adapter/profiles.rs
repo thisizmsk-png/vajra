@@ -471,6 +471,10 @@ pub fn verify_claude_worker_flag(f: &FlagFile) -> Result<(), NotApplied> {
 pub const NO_MESSAGE: &str = "This worker can't take a message mid-run.";
 /// A Claude core worker takes messages through the control hook once it runs; a queued one has no session yet.
 pub const NOT_STARTED: &str = "This worker hasn't started yet. Message it once it's running.";
+/// A Claude check worker (verify, review, security review, evidence) is the independent gate: never steered.
+pub const CHECK_NOT_STEERED: &str = "This worker checks the work on its own, so it can't take a message.";
+/// A Claude task worker whose control dir couldn't be opened before it started.
+pub const NO_STEER_CHANNEL: &str = "Vajra couldn't open this worker's message channel. Stop it and run it again to message it.";
 
 /// The steering paragraph a Claude core worker's brief carries (the same contract as a workflow task brief): the
 /// control hook delivers a steer as hook context in a block with this nonce, and only that block counts.
