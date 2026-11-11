@@ -63,7 +63,7 @@ case "$1" in
   -p) echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
-    D='{codex_home}/sessions/2026/11/11'
+    D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
     mkdir -p "$D"
     NET=false
     [ "$MODE" = wide ] && NET=true
@@ -275,6 +275,31 @@ fn an_account_cap_queues_across_runs_and_mixed_providers_and_releases() {
     assert_ne!(r.rt.view(&c).unwrap().state, State::Queued, "another account is not held by codex's cap");
     r.done(&a);
     assert_eq!(r.done(&b).outcome, Some(Outcome::Done));
+}
+
+#[test]
+fn a_fresh_gateway_account_gets_its_codex_home_before_the_worker_starts() {
+    let r = rig("gateway", Opts::default());
+    let home = r.gw.data.join("codex-home/openrouter");
+    assert!(!home.exists(), "no account home before the launch");
+    let mut s = seat("w1", "openrouter");
+    s.model = Some("openai/gpt-fake-1".into());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), s).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(cfg.contains("base_url = \"https://openrouter.ai/api/v1\""), "{cfg}");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(home.join("config.toml")).unwrap().permissions().mode() & 0o777, 0o600);
+    // The worker ran with that home: its rollout landed there, not in the app's own Codex home.
+    assert!(home.join("sessions").exists(), "the harness saw CODEX_HOME");
+    // A failed write stops the launch: a file where the homes folder goes.
+    let r = rig("gateway-fail", Opts::default());
+    std::fs::write(r.gw.data.join("codex-home"), "not a folder\n").unwrap();
+    let mut s = seat("w1", "openrouter");
+    s.model = Some("openai/gpt-fake-1".into());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), s).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("profile_not_applied")), "{v:?}");
+    assert!(r.log().is_empty(), "nothing ran");
 }
 
 // ---------------------------------------------------------------- controls
