@@ -16,7 +16,7 @@ pub mod argv;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::bus::{self, Bus};
 use crate::crew::redact::Redactor;
+use crate::providers::install::env::SetupEnv;
 use crate::logging::Logger;
 use crate::providers::errors::{self, Ident, ProviderError};
 
@@ -125,6 +126,9 @@ pub struct SpawnSpec {
     /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
     pub extra_env: Vec<(&'static str, OsString)>,
 }
+
+/// The bus stream prefix reserved for one-click installs (`Supervisor::spawn_setup`).
+pub const SETUP_STREAM: &str = "setup-";
 
 /// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
 pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
@@ -345,6 +349,30 @@ impl Supervisor {
 
     /// `spawn` for a provider worker: a failed exit is reported as a `provider_error` against `tag`.
     pub fn spawn_tagged(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>) -> Result<(), SessionError> {
+        if id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
+        let mut env = user_env();
+        env.extend(spec.extra_env.iter().cloned());
+        self.start(id, &spec, &env, tag)
+    }
+
+    /// A one-click install (ADR-17, bhishma condition 8) on bus stream `setup-<id>`: exactly the Setup env profile,
+    /// never `user_env`, and the profile's proxy value and login are redacted from every line. Only `setup-` streams.
+    pub fn spawn_setup(&self, id: &str, argv: Vec<String>, cwd: &Path, env: &SetupEnv, redact: Redactor) -> Result<(), SessionError> {
+        if !id.starts_with(SETUP_STREAM) {
+            return Err(SessionError::InvalidId);
+        }
+        let mut r = crate::providers::install::env::redactor(env);
+        r.absorb(&redact);
+        let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: 24, cols: 100, redact: r, extra_env: Vec::new() };
+        self.start(id, &spec, env.vars(), None)
+    }
+
+    fn start(&self, id: &str, spec: &SpawnSpec, env: &[(&'static str, OsString)], tag: Option<ProviderTag>) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -356,9 +384,6 @@ impl Supervisor {
         }
         if spec.argv.iter().any(|a| a.contains('\0')) {
             return Err(SessionError::NulInArgv);
-        }
-        if !extra_env_ok(&spec.extra_env) {
-            return Err(SessionError::BadEnv);
         }
         if !spec.cwd.is_dir() {
             return Err(SessionError::BadCwd);
@@ -387,10 +412,7 @@ impl Supervisor {
         // would start a shell, and we never call it.
         let mut cmd = CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect());
         cmd.env_clear();
-        for (k, v) in user_env() {
-            cmd.env(k, v);
-        }
-        for (k, v) in &spec.extra_env {
+        for (k, v) in env {
             cmd.env(k, v);
         }
         cmd.cwd(&spec.cwd);
