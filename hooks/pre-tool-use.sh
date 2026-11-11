@@ -272,6 +272,48 @@ key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
   inside "$1" "$2" && inside "$2" "$1"
 }
+# ADR-16 (#148 review N1-N3): one rule for every word the analysis cannot resolve to
+# one path. A word is ambiguous when it holds a glob or brace character (* ? [ {), an
+# unresolved expansion ($, backticks) or a non-ASCII byte (APFS folds U+212A KELVIN
+# SIGN to k and U+017F LONG S to s, and is normalization-insensitive). Its literal
+# directory is the text before the first such character, up to the last "/" (none:
+# the cwd). If that directory is HOME or above it, or is or holds a protected path
+# (classify: core or ancestor), the word could resolve into <data> or another
+# protected root, so a write through it is refused. Mode "uni" checks only non-ASCII
+# (the file tools never expand globs or variables).
+AMB_D="" AMB_R=0
+amb_reach() { # canonical dir -> 0 if an ambiguous name there could reach a protected path
+  [ "$1" = "$AMB_D" ] && return $AMB_R
+  AMB_D="$1"; AMB_R=1
+  if inside "$CHOME" "$1"; then AMB_R=0; else classify "$1"; [ -n "$PKIND" ] && AMB_R=0; fi
+  return $AMB_R
+}
+amb_check() { # word base mode(all|uni) -> block if ambiguous and its literal directory can reach a protected path
+  local w="$1" lit l2 d
+  # Most words a 4 KB interpreter string splits into have no "/": their literal dir is the cwd (cached).
+  case "$w" in
+    */*|"~"*) ;;
+    *) case "$w" in *[\*\?\[\{\$\`]*|*[![:ascii:]]*) ;; *) return 0 ;; esac
+       [ "$3" = uni ] && case "$w" in *[![:ascii:]]*) ;; *) return 0 ;; esac
+       amb_reach "$2" && block "a glob, brace, variable or non-ASCII name under $2 could resolve into a protected Vajra path (such as the Vajra Desktop app data dir); write the full path literally"
+       return 0 ;;
+  esac
+  case "$3" in
+    uni) case "$w" in *[![:ascii:]]*) ;; *) return 0 ;; esac; lit="${w%%[![:ascii:]]*}" ;;
+    *)
+      case "$w" in *[\*\?\[\{\$\`]*|*[![:ascii:]]*) ;; *) return 0 ;; esac
+      lit="${w%%[\*\?\[\{\$\`]*}"; l2="${w%%[![:ascii:]]*}"
+      [ "${#l2}" -lt "${#lit}" ] && lit="$l2" ;;
+  esac
+  case "$lit" in
+    */*) d="${lit%/*}"; [ -n "$d" ] || d=/ ;;
+    "~"*) d="$lit" ;;
+    *) d="" ;;
+  esac
+  if [ -z "$d" ]; then d="$2"; else canon "$d" "$2"; d="$CANON"; fi
+  amb_reach "$d" && block "a glob, brace, variable or non-ASCII name under $d could resolve into a protected Vajra path (such as the Vajra Desktop app data dir); write the full path literally"
+  return 0
+}
 # A Glob pattern can reach the state directory's file names (the HMAC key, the audit log) however it is written. Every
 # pattern goes through ONE normalizer, and a pattern whose meaning cannot be decided is denied:
 #   1. Backslash is read both ways: as an escape, and (second pass) as a separator, so "..\.claude\vajra\*" is judged too.
@@ -476,6 +518,7 @@ case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     for f in "$P1" "$P2" "$P3"; do
       [ -n "$f" ] || continue
+      amb_check "$f" "$CWD" uni
       canon "$f" "$CWD"
       classify "$CANON"
       case "$PKIND" in
@@ -1163,10 +1206,10 @@ eval_segment_body() { # uses SEG array
         while [ "$i" -lt "$n" ]; do
           case "${SEG[$i]}" in
             -C|--chdir)
-              [ $((i + 1)) -lt "$n" ] && { canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
+              [ $((i + 1)) -lt "$n" ] && { amb_check "${SEG[$((i + 1))]}" "$SEGCWD" all; canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
               i=$((i + 2)) ;;
-            --chdir=*) canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
-            -C?*) canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            --chdir=*) amb_check "${SEG[$i]#--chdir=}" "$SEGCWD" all; canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -C?*) amb_check "${SEG[$i]#-C}" "$SEGCWD" all; canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
             -u|-P|--unset) i=$((i + 2)) ;;
             -S|--split-string) i=$((i + 1)); break ;;
             --) i=$((i + 1)); break ;;
@@ -1187,6 +1230,8 @@ eval_segment_body() { # uses SEG array
   # cd / pushd: move the effective cwd for later segments.
   if [ "$wb" = cd ] || [ "$wb" = pushd ]; then
     SEG_CD=1
+    # A cd target the analysis cannot resolve to one dir would leave it tracking the wrong cwd.
+    for ((c = wi + 1; c < n; c++)); do amb_check "${SEG[$c]}" "$SEGCWD" all; done
     if [ $((wi + 1)) -lt "$n" ] && [ "${SEG[$((wi + 1))]}" != "-" ]; then
       canon "${SEG[$((wi + 1))]}" "$SEGCWD"; SEGCWD="$CANON"
     else
@@ -1540,6 +1585,12 @@ eval_segment_body() { # uses SEG array
       *) parts=( "$tok" ) ;;
     esac
     for part in ${parts[@]+"${parts[@]}"}; do
+      # A redirect target, or an argument of a command that may write, must not be ambiguous near a protected root.
+      # A source operand of an understood copy (CP_OK) is a read: the copy-out rule below judges it.
+      if [ "$redirect" = 1 ] || { [ "$reader" = 0 ] && [ "$dataarg" = 0 ] && [ "$c" -gt "$wi" ] \
+           && ! { [ "$CP_OK" = 1 ] && [[ "$CP_SRC" == *" $c "* ]]; }; }; then
+        amb_check "$part" "$SEGCWD" all
+      fi
       if [ "$fastcwd" = 1 ]; then
         case "$part" in
           ""|.|..|*/*|*"~"*|.*[\*\?\[]*) ;;

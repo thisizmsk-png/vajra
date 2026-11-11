@@ -728,6 +728,48 @@ file_case BLOCK "D16 ~user tilde, Write"            Write "~$U/${DATA#$H/}/seats
 bash_case BLOCK "D16 ~- tilde"                      'echo x > ~-/seats.json'
 bash_case BLOCK "D16 ~+ is the cwd"                 'echo x > ~+/seats.json' "$DATA"
 bash_case ALLOW "D16 ~+ inside work"                'echo x > ~+/a.txt' "$WORK/proj/r1/t1-r1"
+# bhishma re-check on 7ee4b96 (N1-N4): one rule for ambiguous words (glob, brace,
+# variable, non-ASCII) whose literal directory could reach <data>.
+AS="${DATA%/*}"; APP="${DATA##*/}"
+bash_case BLOCK "N1 redirect glob over seats.json"  "echo x > \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N1 redirect ? glob"                "echo x > \"$AS\"/?${APP#?}/seats.json"
+bash_case BLOCK "N1 cp [..] glob dest"              "cp /tmp/e \"$AS\"/${APP%???????}[${APP:5:1}]${APP#??????}/seats.json"
+bash_case BLOCK "N1 touch brace"                    "touch \"$AS\"/${APP%???????}{${APP#?????},Zz}/new"
+bash_case BLOCK "N1 cwd parent, touch brace"        "touch ${APP%???????}{${APP#?????},Zz}/new" "$AS"
+bash_case BLOCK "N1 cd glob && echo > plain"        "cd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd ? glob && echo > plain"      "cd \"$AS\"/${APP%???????}?${APP#??????} && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd glob"           "cd \"$AS\" && cd ${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd brace"          "cd \"$AS\" && cd ${APP%???????}{${APP#?????},} && echo x > seats.json"
+bash_case BLOCK "N1 pushd glob && echo > plain"     "pushd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd -P glob && echo > plain"     "cd -P \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 env -C glob echo"               "env -C \"$AS\"/${APP%?}* sh -c 'echo x > seats.json'"
+bash_case BLOCK "N1 mv glob dest"                   "mv /tmp/e \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N2 ./ + \$V"           "V=${APP#?????}; echo x > \"$AS\"/./${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 // + \$V"           "V=${APP#?????}; echo x > \"$AS\"//${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 <work>/.. + \$V"    "V=${APP#?????}; echo x > \"$WORK\"/../${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cd parent; \$V"     "cd \"$AS\" && V=${APP#?????} && echo x > ${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cwd parent; \$V"    "V=${APP#?????}; echo x > ${APP%???????}\$V/seats.json" "$AS"
+bash_case BLOCK "N2 cwd parent; whole \$V" "V=$APP; echo x > \$V/seats.json" "$AS"
+bash_case ALLOW "N2 \$V inside <work>"  "V=a; echo x > \"$WORK/proj/r1/t1-r1/\$V.txt\""
+KS=$'\xe2\x84\xaa'; LS=$'\xc5\xbf'
+bash_case BLOCK "N3 kelvin, redirect"  "echo x > \"$AS/${APP%????}${KS}top/seats.json\""
+bash_case BLOCK "N3 long s, redirect"  "echo x > \"$AS/${APP%?????}${LS}ktop/seats.json\""
+file_case BLOCK "N3 kelvin, Write"     Write "$AS/${APP%????}${KS}top/seats.json"
+file_case BLOCK "N3 long s, Edit"      Edit  "$AS/${APP%?????}${LS}ktop/seats.json"
+file_case BLOCK "N3 long s, Write into the skill dir" Write "$H/.claude/${LS}kills/vajra/hooks/pre-tool-use.sh"
+bash_case BLOCK "N3 kelvin, cd && echo" "cd \"$AS/${APP%????}${KS}top\" && echo x > seats.json"
+bash_case BLOCK "N4 sed script names <control> oddly" "sed 's#${APP}/seats.json#${APP}/control/seats.json#g' /tmp/f > /tmp/g"
+# The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
+bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
+bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
+bash_case ALLOW "amb: glob write in /tmp"           'touch /tmp/vajra-test-*.log'
+EA=$'\xc3\xa9'
+bash_case ALLOW "amb: non-ASCII name in project"    "echo x > caf${EA}.txt" "$PROJ"
+bash_case BLOCK "amb: non-ASCII name in HOME"       "echo x > caf${EA}.txt" "$H"
+file_case ALLOW "amb: non-ASCII Write in project"   Write "$PROJ/caf"$'\xc3\xa9'".txt"
+bash_case ALLOW "amb: cd glob in the project"       'cd sr* && ls' "$PROJ"
+bash_case ALLOW "amb: glob read of <data>"          "cat \"$AS\"/${APP%?}*/seats.json"
+bash_case ALLOW "amb: glob write in <work>"         "touch \"$WORK\"/proj/r1/t1-r1/*.txt"
 # The plain forms keep working: $HOME and ${HOME}, the bare word, a $ with no <data> path.
 bash_case ALLOW "D16 cat via \$HOME"                'cat "$HOME/Library/Application Support/VajraDesktop/seats.json"'
 bash_case ALLOW "D16 ls via \${HOME}"               'ls "${HOME}/Library/Application Support/VajraDesktop"'
