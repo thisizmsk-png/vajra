@@ -115,9 +115,23 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
     "~") p="$HOME" ;;
     "~/"*) p="$HOME/${p#??}" ;;
     "~+"|"~+/"*) p="${base%/}${p#??}" ;;  # ~+ is the cwd
-    # ~name (another or the same account, via the account database) and ~- (OLDPWD)
-    # expand to a directory this script cannot know: fail closed, as Glob does.
-    "~"?*) block "a ~name or ~- path cannot be resolved; write the path in full: $p" ;;
+    # ~- (OLDPWD), a dir-stack entry (~N, ~+N, ~-N, once the command uses pushd) and ~name for an
+    # existing account expand to a directory this script cannot know: fail closed, as Glob does. Any
+    # other ~word stays literal in bash (~2s in a sentence), so it is a plain relative name (#148 review).
+    "~"?*)
+      local tn="${p#\~}" tnd
+      tn="${tn%%/*}"; tnd="${tn#[+-]}"
+      if [ "$tn" = - ]; then block "a ~- path cannot be resolved; write the path in full: $p"; fi
+      case "$tnd" in
+        ""|*[!0-9]*) ;;
+        *) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
+      esac
+      case "$tn" in
+        [A-Za-z_]*) case "$tn" in *[!A-Za-z0-9._-]*) ;; *)
+          /usr/bin/id -u "$tn" >/dev/null 2>&1 && block "a ~name path cannot be resolved; write the path in full: $p" ;;
+        esac ;;
+      esac
+      ;;
   esac
   case "$p" in /*) ;; *) p="${base%/}/$p" ;; esac
   while :; do
@@ -341,17 +355,30 @@ amb_val_dyn() { # value -> AMB_DYN=1 if it could climb, is computed, or its lite
   return 0
 }
 amb_dyn_scan() { # tokens...
-  local t f=0
+  # read/mapfile/readarray/getopts count only as a segment's command word, and -v only as an option of
+  # printf/declare/typeset/local/read (#148 review: grep -v or cp -v is not an assignment).
+  local t f=0 first=1 cw=""
   AMB_DYN=0
   for t in "$@"; do
-    case "$t" in
-      read|mapfile|readarray|getopts|-v) AMB_DYN=1; return 0 ;;
-      for|select) f=1; continue ;;
-      ";"|PIPE) f=0; continue ;;
-    esac
+    case "$t" in ";"|PIPE) f=0; first=1; cw=""; continue ;; esac
+    if [ "$first" = 1 ]; then
+      case "$t" in
+        do|then|else|elif|if|while|until|"!"|"{"|time) continue ;; # keywords: the command word comes next
+        ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0; continue ;; # VAR=value prefix
+      esac
+      first=0; cw="${t##*/}"
+      case "$cw" in
+        read|mapfile|readarray|getopts) AMB_DYN=1; return 0 ;;
+        for|select) f=1 ;;
+      esac
+      continue
+    fi
     if [ "$f" = 1 ]; then [ "$t" = in ] && f=2; continue; fi
     if [ "$f" = 2 ]; then amb_val_dyn "$t"; [ "$AMB_DYN" = 1 ] && return 0; continue; fi
-    case "$t" in ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0 ;; esac
+    case "$t" in
+      -v|-v?*) case "$cw" in printf|declare|typeset|local|read) AMB_DYN=1; return 0 ;; esac ;;
+      ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0 ;;
+    esac
   done
   return 0
 }
@@ -912,6 +939,13 @@ re_escape() { # ERE-escape -> RE_OUT
 re_escape "$HOME"; HOME_RE="$RE_OUT"
 
 # --- Whole-command signatures --------------------------------------------
+# "Application Support" is spelled plainly when the raw command has the two words joined by a space, or by a
+# backslash-escaped space (the form tab completion writes). Either way N holds a real space, and the second pass
+# joins it and judges the real path. (The old pattern was a space followed by anything, so it also accepted text
+# between the words; that is kept, and the path analysis still runs on every form.)
+appsup_plain() {
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* || "$CMD" == *[Aa]pplication\\\ [Ss]upport* ]]
+}
 shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
@@ -920,7 +954,7 @@ shopt -s nocasematch
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
-  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+  appsup_plain || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
 fi
 # ADR-16: the same for the app data dir <data> and every path below it, so a
 # spelling the path analysis cannot resolve never hides a write there. A command
@@ -945,7 +979,7 @@ for v in "$CMD" "$DRAW"; do
   case "$v" in *application*support/vajra|*application*support/vajra[!w]*) DAPP=1 ;; esac
 done
 if [ "$DNAMED" = 1 ]; then
-  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
+  appsup_plain || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
 fi
 if [ "$DNAMED" = 1 ] || [ "$DAPP" = 1 ]; then
   DX="${CMD//'${HOME}'/}"

@@ -794,6 +794,26 @@ bash_case ALLOW "F1 for loop over project files" 'for f in src/*.ts; do sed -i "
 bash_case ALLOW "F1 single \$OUT from worker cwd" 'echo x > $OUT' "$TW"
 # Fail closed: a ".." after a glob is judged from "/", even inside <work> (write the path without the climb).
 bash_case BLOCK "F1 glob climb inside <work> tree" "touch \"$WORK\"/proj/r1/t1-r1/s*/../a.txt"
+# claude review on 33aff51: three false positives.
+# (1) A ~word that is not an account, ~- or a dir-stack entry stays literal (bash leaves it so).
+bash_case ALLOW "R1 echo with a ~2s approximation"     'echo "the build takes ~2s now"' "$PROJ"
+bash_case ALLOW "R1 commit message with ~3x"           'git commit -m "make it ~3x faster"' "$PROJ"
+bash_case ALLOW "R1 gh body with a ~ approximation"    'gh pr create --title t --body "build takes ~2s"' "$PROJ"
+bash_case ALLOW "R1 ~nosuchaccount word"               'echo ~nosuchaccount9z/x' "$PROJ"
+bash_case BLOCK "R1 ~user of a real account stays"     "echo x > ~$U/x.txt" "$PROJ"
+bash_case BLOCK "R1 dir-stack ~1 after pushd"          'pushd /tmp && pushd ~ && echo x > ~1/a.txt' "$PROJ"
+# (2) The backslash-escaped space is a plain spelling for reads; writes still meet the path analysis.
+bash_case ALLOW "R2 ls escaped-space runs dir"         'ls ~/Library/Application\ Support/VajraDesktop/runs' "$PROJ"
+bash_case ALLOW "R2 cat escaped-space seats.json"      'cat ~/Library/Application\ Support/VajraDesktop/seats.json' "$PROJ"
+bash_case BLOCK "R2 redirect escaped space still blocked" 'echo x > ~/Library/Application\ Support/VajraDesktop/runs/x' "$PROJ"
+# (3) AMB_DYN only for read/mapfile/readarray/getopts as a command word and -v of printf/declare/typeset/local/read.
+bash_case ALLOW "R3 grep -v redirected to \$TMPDIR"    'grep -v x a.txt > "$TMPDIR/out.txt"' "$PROJ"
+bash_case ALLOW "R3 cp -v into \$DEST"                 'cp -v a.txt "$DEST/"' "$PROJ"
+bash_case ALLOW "R3 rsync -v to a variable target"     'rsync -v a.txt "$DEST"/' "$PROJ"
+bash_case ALLOW "R3 test -v then write"                'test -v DEST && cp a.txt "$DEST/x"' "$PROJ"
+bash_case ALLOW "R3 commit message with read and \$X"  'git commit -m "read the $X docs" && cp a.txt "$DEST/"' "$PROJ"
+bash_case BLOCK "R3 while read feeds a write"          "while read v; do echo PWN > \$v/$G1/seats.json; done < list.txt" "$TW"
+bash_case BLOCK "R3 printf -v feeds a write"           "printf -v V ../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
 # The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
 bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
 bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
