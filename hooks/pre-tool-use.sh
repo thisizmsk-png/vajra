@@ -114,6 +114,29 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
   case "$p" in
     "~") p="$HOME" ;;
     "~/"*) p="$HOME/${p#??}" ;;
+    "~+"|"~+/"*) p="${base%/}${p#??}" ;;  # ~+ is the cwd
+    # ~- (OLDPWD), a dir-stack entry (~N, ~+N, ~-N, once the command uses pushd) and ~name for an
+    # existing account expand to a directory this script cannot know: fail closed, as Glob does. Any
+    # other ~word stays literal in bash (~2s in a sentence), so it is a plain relative name (#148 review).
+    "~"?*)
+      local tn="${p#\~}" tnd
+      tn="${tn%%/*}"; tnd="${tn#[+-]}"
+      if [ "$tn" = - ]; then block "a ~- path cannot be resolved; write the path in full: $p"; fi
+      case "$tnd" in
+        ""|*[!0-9]*) ;;
+        *[!0]*) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
+        # ~0 and ~+0 are always the cwd. ~-0 is the bottom stack entry: the cwd only while the stack has one
+        # entry, so once the command uses pushd it is refused like any other stack entry (#148 review).
+        *)
+          case "$tn" in -*) [[ "$CMD" == *pushd* ]] && block "a ~-N dir-stack path cannot be resolved; write the path in full: $p" ;; esac
+          p="${base%/}${p#"~$tn"}" ;;
+      esac
+      case "$tn" in
+        [A-Za-z_]*) case "$tn" in *[!A-Za-z0-9._-]*) ;; *)
+          /usr/bin/id -u "$tn" >/dev/null 2>&1 && block "a ~name path cannot be resolved; write the path in full: $p" ;;
+        esac ;;
+      esac
+      ;;
   esac
   case "$p" in /*) ;; *) p="${base%/}/$p" ;; esac
   while :; do
@@ -175,6 +198,15 @@ ROOTS=(
 canon "$HOME/Library/Application Support/VajraDesktop/control" /; DCTL="$CANON"
 canon "$HOME/Library/Application__SP__Support/VajraDesktop/control" /; DCTL2="$CANON"
 ROOTS+=( "$DCTL" "$DCTL2" )
+# ADR-16 (design.md 16.6/16.8): the whole Vajra Desktop app data dir <data>
+# ("$HOME/Library/Application Support/VajraDesktop") is core-only state (seats.json,
+# run records, profiles, ticket dirs, the git baseline, the control queue): agents
+# never write anywhere under it. Reads stay allowed (the control dir keeps its own
+# worker read block below). The worktree root <work> (VajraWorktrees, a sibling,
+# never a prefix match) stays writable.
+canon "$HOME/Library/Application Support/VajraDesktop" /; DDATA="$CANON"
+canon "$HOME/Library/Application__SP__Support/VajraDesktop" /; DDATA2="$CANON"
+ROOTS+=( "$DDATA" "$DDATA2" )
 # Read-protected for workers (payload carries agent_id): the control dir holds the
 # steering nonce, and transcripts hold each worker's brief (which carries it). The
 # main session and the Lead chat session have no agent_id and keep reading.
@@ -201,7 +233,7 @@ PKIND=""
 # The shortcut above is valid only while no protected root was moved by a symlink under HOME.
 CLASSIFY_FAST=""
 if [ "$CL" = "$CHOME/.claude" ] && [ "$VS_C" = "$CL/vajra" ] && [ "$SKILL" = "$CL/skills/vajra" ] \
-   && [[ "$DCTL" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
+   && [[ "$DCTL" == "$CHOME/Library/"* ]] && [[ "$DDATA" == "$CHOME/Library/"* ]]; then CLASSIFY_FAST=1; fi
 classify() { local was=0; shopt -q nocasematch && was=1; shopt -s nocasematch; classify_ "$1"; [ "$was" = 1 ] || shopt -u nocasematch; return 0; }
 classify_() { # canonical path -> PKIND = key|core|ancestor|""
   local p="$1" r rest
@@ -258,6 +290,102 @@ key_anc() { [ "$1" = / ] || inside "$KEY" "$1"; }
 
 same_dir() { # path dir -> 0 if they are the same directory (case-insensitive)
   inside "$1" "$2" && inside "$2" "$1"
+}
+# ADR-16 (#148 review N1-N3): one rule for every word the analysis cannot resolve to
+# one path. A word is ambiguous when it holds a glob or brace character (* ? [ {), an
+# unresolved expansion ($, backticks) or a non-ASCII byte (APFS folds U+212A KELVIN
+# SIGN to k and U+017F LONG S to s, and is normalization-insensitive). Its literal
+# directory is the text before the first such character, up to the last "/" (none:
+# the cwd). If that directory is HOME or above it, or is or holds a protected path
+# (classify: core or ancestor), the word could resolve into <data> or another
+# protected root, so a write through it is refused. Mode "uni" checks only non-ASCII
+# (the file tools never expand globs or variables).
+AMB_D="" AMB_R=0
+amb_reach() { # canonical dir -> 0 if an ambiguous name there could reach a protected path
+  [ "$1" = "$AMB_D" ] && return $AMB_R
+  AMB_D="$1"; AMB_R=1
+  # "/" holds everything (inside would compare against "//*").
+  if [ "$1" = / ] || inside "$CHOME" "$1"; then AMB_R=0; else classify "$1"; [ -n "$PKIND" ] && AMB_R=0; fi
+  return $AMB_R
+}
+amb_check() { # word base mode(all|uni|cd|read) -> block if ambiguous and it could reach a protected path
+  # cd: mark the cwd unknown instead of blocking; read: return 0 (reach) / 1, never block (pipe taint, #148 F3).
+  local w="$1" lit l2 d rest
+  if [ "$3" = uni ]; then
+    case "$w" in *[![:ascii:]]*) ;; *) return 1 ;; esac
+    lit="${w%%[![:ascii:]]*}"
+  else
+    case "$w" in *[\*\?\[\{\$\`]*|*[![:ascii:]]*) ;; *) return 1 ;; esac
+    case "$w" in
+      */*|"~"*) lit="${w%%[\*\?\[\{\$\`]*}"; l2="${w%%[![:ascii:]]*}"; [ "${#l2}" -lt "${#lit}" ] && lit="$l2" ;;
+      *) lit="" ;; # no "/": the literal dir is the cwd (the common case in a long interpreter string; amb_reach caches it)
+    esac
+  fi
+  case "$lit" in
+    */*) d="${lit%/*}"; [ -n "$d" ] || d=/ ;;
+    "~"*) d="$lit" ;;
+    *) d="" ;;
+  esac
+  # #148 F1: what follows the first ambiguous character can climb out of the literal dir: a ".." after it, a second
+  # ambiguous segment, or (when this command assigns a value that could climb or point near a protected root,
+  # AMB_DYN) any expansion. The literal dir then bounds nothing, so the word is judged from "/".
+  rest="${w:${#lit}}"
+  case "$rest" in
+    *..*) d=/ ;;
+    */*[\*\?\[\{\$\`]*) [ "$3" = uni ] || d=/ ;;
+    *[\$\`]*) [ "$3" != uni ] && [ "$AMB_DYN" = 1 ] && d=/ ;;
+  esac
+  if [ -z "$d" ]; then d="$2"; elif [ "$d" != / ]; then canon "$d" "$2"; d="$CANON"; fi
+  amb_reach "$d" || return 1
+  case "$3" in
+    cd) CWD_UNK=1; return 0 ;;
+    read) return 0 ;;
+  esac
+  block "a glob, brace, variable or non-ASCII name under $d could resolve into a protected Vajra path (such as the Vajra Desktop app data dir); write the full path literally"
+}
+# Set once per command by amb_dyn_scan: 1 if it assigns a variable a value that could climb (..), is computed ($(...),
+# backticks) or whose literal dir could reach a protected path, or fills one by for/select/read/mapfile/printf -v.
+AMB_DYN=0
+# 1 after a cd/pushd whose target is ambiguous near a protected path: the real cwd is unknown, so a later relative
+# write target, or any non-reader, in the same command is refused (#148 F1/F5).
+CWD_UNK=0
+amb_val_dyn() { # value -> AMB_DYN=1 if it could climb, is computed, or its literal dir could reach a protected path
+  local v="$1" lit d
+  case "$v" in *..*|*'$('*|*\`*) AMB_DYN=1; return 0 ;; esac
+  case "$v" in /*|"~"*) ;; *) return 0 ;; esac
+  lit="${v%%[\*\?\[\{\$\`]*}"
+  case "$lit" in */*) d="${lit%/*}"; [ -n "$d" ] || d=/ ;; *) d="$lit" ;; esac
+  canon "$d" "$CWD"
+  amb_reach "$CANON" && AMB_DYN=1
+  return 0
+}
+amb_dyn_scan() { # tokens...
+  # read/mapfile/readarray/getopts count only as a segment's command word, and -v only as an option of
+  # printf/declare/typeset/local/read (#148 review: grep -v or cp -v is not an assignment).
+  local t f=0 first=1 cw=""
+  AMB_DYN=0
+  for t in "$@"; do
+    case "$t" in ";"|PIPE) f=0; first=1; cw=""; continue ;; esac
+    if [ "$first" = 1 ]; then
+      case "$t" in
+        do|then|else|elif|if|while|until|"!"|"{"|time) continue ;; # keywords: the command word comes next
+        ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0; continue ;; # VAR=value prefix
+      esac
+      first=0; cw="${t##*/}"
+      case "$cw" in
+        read|mapfile|readarray|getopts) AMB_DYN=1; return 0 ;;
+        for|select) f=1 ;;
+      esac
+      continue
+    fi
+    if [ "$f" = 1 ]; then [ "$t" = in ] && f=2; continue; fi
+    if [ "$f" = 2 ]; then amb_val_dyn "$t"; [ "$AMB_DYN" = 1 ] && return 0; continue; fi
+    case "$t" in
+      -v|-v?*) case "$cw" in printf|declare|typeset|local|read) AMB_DYN=1; return 0 ;; esac ;;
+      ?*=*) amb_val_dyn "${t#*=}"; [ "$AMB_DYN" = 1 ] && return 0 ;;
+    esac
+  done
+  return 0
 }
 # A Glob pattern can reach the state directory's file names (the HMAC key, the audit log) however it is written. Every
 # pattern goes through ONE normalizer, and a pattern whose meaning cannot be decided is denied:
@@ -463,6 +591,7 @@ case "$TOOL" in
   Write|Edit|MultiEdit|NotebookEdit)
     for f in "$P1" "$P2" "$P3"; do
       [ -n "$f" ] || continue
+      amb_check "$f" "$CWD" uni
       canon "$f" "$CWD"
       classify "$CANON"
       case "$PKIND" in
@@ -770,6 +899,7 @@ END {
   T = " " N " "
   gsub(/\$\(/, " ; ", T); gsub(/`/, " ; ", T)
   gsub(/\(/, " ; ", T); gsub(/\)/, " ; ", T); gsub(/,/, " ", T)
+  gsub(/>\|/, " > ", T)
   gsub(/>&/, " __DUP__ ", T); gsub(/&>/, " > ", T)
   gsub(/&/, " ; ", T); gsub(/;/, " ; ", T); gsub(/\|/, " PIPE ", T)
   gsub(/>/, " > ", T); gsub(/</, " < ", T)
@@ -814,6 +944,13 @@ re_escape() { # ERE-escape -> RE_OUT
 re_escape "$HOME"; HOME_RE="$RE_OUT"
 
 # --- Whole-command signatures --------------------------------------------
+# "Application Support" is spelled plainly when the raw command has the two words joined by a space, or by a
+# backslash-escaped space (the form tab completion writes). Either way N holds a real space, and the second pass
+# joins it and judges the real path. (The old pattern was a space followed by anything, so it also accepted text
+# between the words; that is kept, and the path analysis still runs on every form.)
+appsup_plain() {
+  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* || "$CMD" == *[Aa]pplication\\\ [Ss]upport* ]]
+}
 shopt -s nocasematch
 [[ "$N" == *".hmac-key"* ]] && block "the Vajra HMAC key is never a command target"
 # Checked on the raw command too: even a heredoc body may not set it.
@@ -822,7 +959,38 @@ shopt -s nocasematch
 [[ "$N" == *VAJRA_OPERATOR_SIGN* || "$CMD" == *VAJRA_OPERATOR_SIGN* ]] && block "VAJRA_OPERATOR_SIGN is for the operator re-signing the manifest, not the agent"
 if [[ "$CMD" == *vajradesktop/control* ]]; then
   [ -n "$AID" ] && block "workers may not touch the Vajra Desktop control dir"
-  [[ "$CMD" == *[Aa]pplication[\ ]*[Ss]upport* ]] || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+  appsup_plain || block "the Vajra Desktop control dir is named by an unusual spelling; write the path plainly"
+fi
+# ADR-16: the same for the app data dir <data> and every path below it, so a
+# spelling the path analysis cannot resolve never hides a write there. A command
+# names <data> path-wise when, in the raw text or with quotes and backslashes
+# removed (Vajra''Desktop, "Vajra"Desktop, Vajra\Desktop), it has /VajraDesktop at
+# a word end, VajraDesktop/ or VajraDesktop\. Such a command:
+#   * must spell "Application Support" plainly (not ${IFS}, $'\040', ...);
+#   * may use no shell expansion but $HOME/${HOME}: a variable, $(...), backticks,
+#     $'...' or ${...} could hold or build the path (D=<data>; rm -rf "$D").
+# A command with an "Application ... Support/Vajra..." path (other than VajraWorktrees,
+# the writable <work>) gets the expansion rule too, so Vajra$V is refused as well.
+# bash 3.2 pattern substitution is quadratic (a 4 KB command took ~600 ms): tr strips linearly.
+DRAW="$CMD"
+case "$CMD" in *[\"\'\\]*) DRAW="$(printf '%s' "$CMD" | LC_ALL=C tr -d "\"'\\\\")" ;; esac
+DNAMED=0 DAPP=0
+for v in "$CMD" "$DRAW"; do
+  # Every form below holds "vajradesktop" or "support/vajra"; skip the costlier patterns otherwise.
+  [[ "$v" == *vajradesktop* || "$v" == *support/vajra* ]] || continue
+  case "$v" in
+    */vajradesktop|*/vajradesktop[!a-z0-9_.-]*|*vajradesktop/*|*vajradesktop\\*) DNAMED=1 ;;
+  esac
+  case "$v" in *application*support/vajra|*application*support/vajra[!w]*) DAPP=1 ;; esac
+done
+if [ "$DNAMED" = 1 ]; then
+  appsup_plain || block "the Vajra Desktop app data dir is named by an unusual spelling; write the path plainly"
+fi
+if [ "$DNAMED" = 1 ] || [ "$DAPP" = 1 ]; then
+  DX="${CMD//'${HOME}'/}"
+  [[ "$DX" == *'$HOME'[A-Za-z0-9_]* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables; write the path literally (\$HOME is fine)"
+  DX="${DX//'$HOME'/}"
+  [[ "$DX" == *'$'* || "$DX" == *'`'* ]] && block "a command that names the Vajra Desktop app data dir may not use shell variables or substitutions; write the path literally (\$HOME is fine)"
 fi
 shopt -u nocasematch
 
@@ -887,6 +1055,7 @@ if [ "$BIGNORM" = 0 ]; then
 T=" $N "
 T="${T//'$('/ ; }"; T="${T//\`/ ; }"
 T="${T//(/ ; }"; T="${T//)/ ; }"; T="${T//,/ }"
+T="${T//>|/ > }"  # >| (noclobber override) is a plain redirect, never a pipe
 T="${T//>&/ __DUP__ }"; T="${T//&>/ > }"
 T="${T//&/ ; }"; T="${T//;/ ; }"; T="${T//|/ PIPE }"
 T="${T//>/ > }"; T="${T//</ < }"
@@ -1095,11 +1264,11 @@ copy_layout() {
 # env -C/--chdir moves the cwd for one command only (Sol r4485195331): run the
 # segment with that cwd, then restore it unless the segment was a cd/pushd.
 eval_segment() {
-  local saved="$SEGCWD"
+  local saved="$SEGCWD" saved_unk="$CWD_UNK"
   SEG_CD=0
   eval_segment_body
   local rc=$?
-  [ "$SEG_CD" = 1 ] || SEGCWD="$saved"
+  [ "$SEG_CD" = 1 ] || { SEGCWD="$saved"; CWD_UNK="$saved_unk"; }
   return $rc
 }
 
@@ -1119,10 +1288,10 @@ eval_segment_body() { # uses SEG array
         while [ "$i" -lt "$n" ]; do
           case "${SEG[$i]}" in
             -C|--chdir)
-              [ $((i + 1)) -lt "$n" ] && { canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
+              [ $((i + 1)) -lt "$n" ] && { amb_check "${SEG[$((i + 1))]}" "$SEGCWD" all; canon "${SEG[$((i + 1))]}" "$SEGCWD"; SEGCWD="$CANON"; }
               i=$((i + 2)) ;;
-            --chdir=*) canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
-            -C?*) canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            --chdir=*) amb_check "${SEG[$i]#--chdir=}" "$SEGCWD" all; canon "${SEG[$i]#--chdir=}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
+            -C?*) amb_check "${SEG[$i]#-C}" "$SEGCWD" all; canon "${SEG[$i]#-C}" "$SEGCWD"; SEGCWD="$CANON"; i=$((i + 1)) ;;
             -u|-P|--unset) i=$((i + 2)) ;;
             -S|--split-string) i=$((i + 1)); break ;;
             --) i=$((i + 1)); break ;;
@@ -1143,6 +1312,14 @@ eval_segment_body() { # uses SEG array
   # cd / pushd: move the effective cwd for later segments.
   if [ "$wb" = cd ] || [ "$wb" = pushd ]; then
     SEG_CD=1
+    # A cd target the analysis cannot resolve to one dir near a protected path leaves the real cwd unknown
+    # (CWD_UNK): later relative writes and non-readers are refused, reads still run (#148 F1/F5).
+    local cdt="" cdunk=$CWD_UNK
+    for ((c = wi + 1; c < n; c++)); do case "${SEG[$c]}" in -P|-L|-e|-@|--) ;; *) cdt="${SEG[$c]}"; break ;; esac; done
+    CWD_UNK=0
+    for ((c = wi + 1; c < n; c++)); do amb_check "${SEG[$c]}" "$SEGCWD" cd; done
+    # From an unknown cwd only an absolute or ~ target (or none: HOME) is known again.
+    if [ "$CWD_UNK" = 0 ] && [ "$cdunk" = 1 ]; then case "$cdt" in /*|"~"|"~/"*|"") ;; *) CWD_UNK=1 ;; esac; fi
     if [ $((wi + 1)) -lt "$n" ] && [ "${SEG[$((wi + 1))]}" != "-" ]; then
       canon "${SEG[$((wi + 1))]}" "$SEGCWD"; SEGCWD="$CANON"
     else
@@ -1462,7 +1639,7 @@ eval_segment_body() { # uses SEG array
   if [ "$SEGCWD" != "$FAST_CWD" ]; then
     FAST_CWD="$SEGCWD"; FAST_OK=1; FAST_LINKS=0
     local e
-    for e in "$CL" "$DCTL" "$DCTL2"; do
+    for e in "$CL" "$DCTL" "$DCTL2" "$DDATA" "$DDATA2"; do
       if inside "$SEGCWD" "$e" || inside "$e" "$SEGCWD"; then FAST_OK=0; fi
     done
     shopt -s nullglob dotglob
@@ -1471,8 +1648,9 @@ eval_segment_body() { # uses SEG array
   fi
   fastcwd=$FAST_OK
   CP_OK=0; CP_SRC=" "
-  local copier=0
+  local copier=0 asg=0
   case "$wb" in cp|gcp|ditto|rsync|install|ginstall) copier=1; copy_layout ;; esac
+  case "$wb" in export|declare|local|readonly|typeset) asg=1 ;; esac
   local parts=()
   for ((c = 0; c < n; c++)); do  # from 0: VAR=value prefixes count too
     tok="${SEG[$c]}"
@@ -1496,6 +1674,19 @@ eval_segment_body() { # uses SEG array
       *) parts=( "$tok" ) ;;
     esac
     for part in ${parts[@]+"${parts[@]}"}; do
+      # A redirect target, or an argument of a command that may write, must not be ambiguous near a protected root.
+      # A source operand of an understood copy (CP_OK) is a read: the copy-out rule below judges it.
+      # An export/declare/local/readonly/typeset value is not a path the command writes (#148 F5).
+      if [ "$redirect" = 1 ] || { [ "$reader" = 0 ] && [ "$dataarg" = 0 ] && [ "$c" -gt "$wi" ] \
+           && ! { [ "$CP_OK" = 1 ] && [[ "$CP_SRC" == *" $c "* ]]; } && ! { [ "$asg" = 1 ] && [[ "$tok" == *=* ]]; }; }; then
+        amb_check "$part" "$SEGCWD" all
+        if [ "$CWD_UNK" = 1 ]; then
+          case "$part" in /*|"~"|"~/"*) ;; *) block "the cwd is unknown after a cd to a glob or variable near a protected Vajra path; cd to the literal path first" ;; esac
+        fi
+      elif [ "$c" -gt "$wi" ]; then
+        # #148 F3: a reader's ambiguous word near a protected path taints the pipe, as a literal protected path does.
+        amb_check "$part" "$SEGCWD" read && hit=1
+      fi
       if [ "$fastcwd" = 1 ]; then
         case "$part" in
           ""|.|..|*/*|*"~"*|.*[\*\?\[]*) ;;
@@ -1515,8 +1706,11 @@ eval_segment_body() { # uses SEG array
             [ "$dataarg" = 1 ] && continue
             hit=1
             # A copier may read a protected source (not an ancestor of one)
-            # into a destination outside every protected area.
-            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]]; then continue; fi
+            # into a destination outside every protected area. A source that holds
+            # the control dir (the <data> root, an ancestor before ADR-16) never is.
+            if [ "$CP_OK" = 1 ] && [ "$PKIND" = core ] && [ "$part" = "$tok" ] && [[ "$CP_SRC" == *" $c "* ]] \
+               && ! { inside "$DCTL" "$cc" && ! same_dir "$DCTL" "$cc"; } \
+               && ! { inside "$DCTL2" "$cc" && ! same_dir "$DCTL2" "$cc"; }; then continue; fi
             [ "$copier" = 1 ] && [ "$reader" = 0 ] && block "only read-only commands may touch protected path $cc (a copy may read protected files only into a destination outside every protected area; never into one, never via links)"
             [ "$reader" = 1 ] || block "only read-only commands may touch protected path $cc"
             ;;
@@ -1529,6 +1723,8 @@ eval_segment_body() { # uses SEG array
   if [ "$PIPE_TAINT" = 1 ] && [ "$reader" = 0 ]; then
     block "protected path piped into a non-reader (${wb})"
   fi
+  # #148 F1/F5: after an ambiguous cd near a protected path only readers may run.
+  [ "$reader" = 0 ] && [ "$CWD_UNK" = 1 ] && block "the cwd is unknown after a cd to a glob or variable near a protected Vajra path; only read-only commands may follow it"
   if [ "$reader" = 0 ] && [ "$script" = 0 ]; then
     classify "$SEGCWD"
     [ "$PKIND" = core ] && block "only read-only commands may run inside protected directory $SEGCWD"
@@ -1541,7 +1737,7 @@ eval_segment_body() { # uses SEG array
 }
 
 run_pass() { # judge every segment of TOKS from the starting cwd
-  SEGCWD="$CWD"
+  SEGCWD="$CWD" CWD_UNK=0
   FAST_CWD="" FAST_OK=0 FAST_LINKS=0
   PIPE_IN=0 PIPE_TAINT=0 PIPE_KTAINT=0 SEG_HIT=0 SEG_KANC=0
   SEG=()
@@ -1562,14 +1758,22 @@ run_pass() { # judge every segment of TOKS from the starting cwd
     esac
   done
 }
+APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
+T2="${T//$APPSUP_PAT/Application__SP__Support}"
+# AMB_DYN (new in #148) reads assignment values from the joined view when the command names "Application
+# Support": the split view cuts a <work> path at the space and would see ~/Library as its literal dir.
+if [ "$T2" != "$T" ]; then
+  set -f; DTOKS=( $T2 ); set +f
+  amb_dyn_scan ${DTOKS[@]+"${DTOKS[@]}"}
+else
+  amb_dyn_scan ${TOKS[@]+"${TOKS[@]}"}
+fi
 run_pass
 
 # Second pass, additive only: the pass above has already run unchanged. If the
 # command names "Application Support" (any case), rerun the same segment loop
 # with that phrase joined into one token, so a path with that space (the Vajra
 # Desktop control dir) is judged as one path. It can only add blocks.
-APPSUP_PAT='[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn] [Ss][Uu][Pp][Pp][Oo][Rr][Tt]'
-T2="${T//$APPSUP_PAT/Application__SP__Support}"
 if [ "$T2" != "$T" ]; then
   set -f
   TOKS=( $T2 )
