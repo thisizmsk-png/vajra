@@ -629,6 +629,258 @@ worker BLOCK "Sol: worker grep -r with cwd above control"   "$(bj "cd \"$H/Libra
 raw_case ALLOW "F-D main session may still name it"       "$(bj "ls \"$CTRL\"")"
 worker ALLOW "worker vajra_tasks.py still runs" "$(bj "python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py show --campaign x")"
 
+# --- ADR-16: the whole app data dir <data> is write-protected; <work> is not ---
+# design.md 16.6/16.8: seats.json, run records, profiles, ticket dirs and the git
+# baseline live under <data> beside the control dir. Agents never write any of it;
+# reads stay allowed. Worktrees live under <work>, a sibling root, and stay writable.
+DATA="$H/Library/Application Support/VajraDesktop"
+WORK="$H/Library/Application Support/VajraWorktrees"
+mkdir -p "$DATA/runs/r1/lead" "$DATA/profiles" "$DATA/git-baseline" "$WORK/proj/r1/t1-r1" "$WORK/proj/r1/tmp/t1-r1"
+echo '{}' > "$DATA/seats.json"; echo brief > "$DATA/runs/r1/lead/brief.md"; echo '{}' > "$DATA/profiles/claude-worker.json"
+echo x > "$WORK/proj/r1/t1-r1/a.txt"
+ln -s "$DATA" "$PROJ/datalink"; ln -s "$DATA/runs" "$PROJ/runslink"; ln -s "$DATA/seats.json" "$PROJ/seatslink"
+file_case BLOCK "D16 Write seats.json"              Write "$DATA/seats.json"
+file_case BLOCK "D16 Edit profile"                  Edit "$DATA/profiles/claude-worker.json"
+file_case BLOCK "D16 MultiEdit run record"          MultiEdit "$DATA/runs/r1/lead/brief.md"
+file_case BLOCK "D16 NotebookEdit under data"       NotebookEdit "$DATA/runs/r1/n.ipynb"
+file_case BLOCK "D16 Write new file in git-baseline" Write "$DATA/git-baseline/config"
+file_case BLOCK "D16 Write data dir itself"         Write "$DATA"
+file_case BLOCK "D16 Write tilde path"              Write "~/Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write case variant"            Write "$H/LIBRARY/application support/vajradesktop/SEATS.json"
+file_case BLOCK "D16 Write via dir symlink"         Write "$PROJ/datalink/seats.json"
+file_case BLOCK "D16 Write via subdir symlink"      Write "$PROJ/runslink/r1/lead/brief.md"
+file_case BLOCK "D16 Write via file symlink"        Write "$PROJ/seatslink"
+file_case BLOCK "D16 Write relative .."             Write "../Library/Application Support/VajraDesktop/seats.json"
+file_case BLOCK "D16 Write .. through work"         Write "$WORK/../VajraDesktop/seats.json"
+bash_case BLOCK "D16 redirect quoted"               "echo x > \"$DATA/seats.json\""
+bash_case BLOCK "D16 redirect escaped space"        'echo x > ~/Library/Application\ Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 append redirect"               "echo x >> '$DATA/runs/r1/lead/brief.md'"
+bash_case BLOCK "D16 redirect case variant"         "echo x > \"$H/library/APPLICATION SUPPORT/VAJRADESKTOP/seats.json\""
+bash_case BLOCK "D16 redirect via symlink"          'echo x > datalink/seats.json'
+bash_case BLOCK "D16 redirect via file symlink"     'printf x > seatslink'
+bash_case BLOCK "D16 tee"                           "echo x | tee \"$DATA/seats.json\""
+bash_case BLOCK "D16 tee -a via symlink"            'echo x | tee -a runslink/r1/lead/brief.md'
+bash_case BLOCK "D16 cp into data"                  "cp /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 cp -r into data"               "cp -r out \"$DATA/profiles/\""
+bash_case BLOCK "D16 mv into data"                  "mv /tmp/evil.json \"$DATA/profiles/claude-worker.json\""
+bash_case BLOCK "D16 mv out of data"                "mv \"$DATA/seats.json\" /tmp/x.json"
+bash_case BLOCK "D16 mv case variant"               "mv /tmp/e.json \"$H/Library/Application Support/vajradesktop/RUNS/\""
+bash_case BLOCK "D16 ln -s into data"               "ln -s /tmp/evil \"$DATA/runs/r1/evil\""
+bash_case BLOCK "D16 ln -sf over seats.json"        "ln -sf /tmp/evil.json \"$DATA/seats.json\""
+bash_case BLOCK "D16 python open for write"         "python3 -c 'open(\"$DATA/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 python via symlink"            "python3 -c 'open(\"datalink/seats.json\",\"w\").write(\"x\")'"
+bash_case BLOCK "D16 sed -i"                        "sed -i '' s/a/b/ \"$DATA/seats.json\""
+bash_case BLOCK "D16 touch"                         "touch \"$DATA/new\""
+bash_case BLOCK "D16 mkdir under data"              "mkdir -p \"$DATA/runs/r2\""
+bash_case BLOCK "D16 rm seats.json"                 "rm \"$DATA/seats.json\""
+bash_case BLOCK "D16 rm -rf runs"                   "rm -rf \"$DATA/runs\""
+bash_case BLOCK "D16 cd data && plain-word redirect" "cd \"$DATA\" && printf x > seats.json"
+bash_case BLOCK "D16 cd escaped space && rm"        'cd ~/Library/Application\ Support/VajraDesktop/runs && rm -rf r1'
+bash_case BLOCK "D16 cwd is data dir"               "echo x > seats.json" "$DATA"
+bash_case BLOCK "D16 cwd below data dir"            "touch x" "$DATA/runs/r1"
+# #148 review: a reader's plain-word redirect from a cwd below <data> skipped the per-cwd fast path.
+bash_case BLOCK "D16 reader redirect, cwd runs/r1"  "echo x > brief.md" "$DATA/runs/r1"
+bash_case BLOCK "D16 cd profiles && printf >"       "cd \"$DATA/profiles\" && printf x > claude-worker.json"
+bash_case BLOCK "D16 cd profiles escaped && echo >" 'cd ~/Library/Application\ Support/VajraDesktop/profiles && echo "{}" > claude-worker.json'
+bash_case BLOCK "D16 tee plain word, cwd git-baseline" "echo x | tee config" "$DATA/git-baseline"
+bash_case BLOCK "D16 cat heredoc, cwd runs/r1/lead" "cat > brief.md <<'EOF'
+x
+EOF" "$DATA/runs/r1/lead"
+bash_case ALLOW "D16 reader redirect, cwd in work"  "echo x > a.txt" "$WORK/proj/r1/t1-r1"
+# bhishma H1/L1 on #148: readers with a plain-word target from every first-level dir below <data>.
+bash_case BLOCK "D16 cwd below data, echo > plain word"  'echo x > brief.md'        "$DATA/runs/r1/lead"
+bash_case BLOCK "D16 cwd below data, printf >> plain"    'printf x >> new.json'     "$DATA/runs"
+bash_case BLOCK "D16 cwd profiles, echo > plain"         'echo x > claude-worker.json' "$DATA/profiles"
+bash_case BLOCK "D16 cwd git-baseline, printf > plain"   'printf x > config'        "$DATA/git-baseline"
+bash_case BLOCK "D16 cd below data && echo > plain"      "cd \"$DATA/runs\" && echo x > a.json"
+bash_case BLOCK "D16 cd git-baseline && cat > config"    "cd \"$DATA/git-baseline\" && cat /tmp/x > config"
+bash_case BLOCK "D16 cd below data && git log > plain"   "cd \"$DATA/runs\" && git log > a"
+bash_case BLOCK "D16 cd below data && jq > plain"        "cd \"$DATA/runs/r1/lead\" && jq . brief.md > b2.md"
+# claude #148 thread 2: an odd spelling of the bare <data> root.
+bash_case BLOCK "D16 rm -rf root, \${IFS}"          'rm -rf ~/Library/Application${IFS}Support/VajraDesktop'
+bash_case BLOCK "D16 mv root, \$'\\040'"             'mv ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop /tmp/x'
+bash_case BLOCK "D16 rm -rf root, \${IFS}, trailing ;" 'rm -rf ~/Library/Application${IFS}Support/VajraDesktop; ls'
+bash_case BLOCK "D16 mv root, \${IFS}, quoted"       'mv "$HOME/Library/Application${IFS}Support/VajraDesktop" /tmp/x'
+# bhishma H2: a variable holds <data> or an ancestor; quote-split app names.
+bash_case BLOCK "D16 var holds data, redirect"      "D=\"$DATA\"; echo x > \"\$D/seats.json\""
+bash_case BLOCK "D16 var holds data, cd && echo"    "D=\"$DATA\"; cd \"\$D\" && echo x > seats.json"
+bash_case BLOCK "D16 var holds data, cp"            "D=\"$DATA\"; cp /tmp/e \"\$D/seats.json\""
+bash_case BLOCK "D16 export var, tee"               "export D=\"$DATA\"; echo x | tee \"\$D/runs/x\""
+bash_case BLOCK "D16 var holds data, rm -rf root"   "D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 var holds data, \${D}"         "D=\"$DATA\"; echo x > \"\${D}/seats.json\""
+bash_case BLOCK "D16 var holds app-support parent"  "A=\"$H/Library/Application Support\"; echo x > \"\$A/VajraDesktop/seats.json\""
+bash_case BLOCK "D16 var builds the app name"       'V=Desktop; echo x > ~/Library/Application\ Support/Vajra$V/seats.json'
+bash_case BLOCK "D16 \$(...) builds the path"       'echo x > "$(echo ~/Library/Application\ Support)/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 backticks build the path"      'echo x > "`echo ~`/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 \$HOMEX is not \$HOME"         'echo x > "$HOMEX/Library/Application Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 B1 \${IFS} + \"VajraDesktop\"/" 'echo x > ~/Library/Application${IFS}Support/"VajraDesktop"/seats.json'
+bash_case BLOCK "D16 B2 \${IFS} + Vajra''Desktop/"   "echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 B3 \$'\\040' + Vajra\\Desktop/"  'echo x > ~/Library/Application$'"'"'\040'"'"'Support/Vajra\Desktop/seats.json'
+bash_case BLOCK "D16 var holds data, >16 KB command" "echo $(printf 'a%.0s' $(seq 1 17000)) ; D=\"$DATA\"; rm -rf \"\$D\""
+bash_case BLOCK "D16 quote-split, >16 KB command"   "echo $(printf 'a%.0s' $(seq 1 17000)) ; echo x > ~/Library/Application\${IFS}Support/Vajra''Desktop/seats.json"
+bash_case BLOCK "D16 quote-split, plain spelling"  "echo x > ~/Library/Application\ Support/Vajra''Desktop/seats.json"
+# bhishma M1: ~name and ~- forms are refused outright (fail closed); ~+ is the cwd.
+U="$(id -un)"
+bash_case BLOCK "D16 ~user tilde, redirect"         "echo x > ~$U/\"${DATA#$H/}/seats.json\""
+bash_case BLOCK "D16 ~user tilde, control"          "echo x > ~$U/\"${DATA#$H/}/control/x\""
+bash_case BLOCK "D16 ~user tilde, rm -rf root"      "rm -rf ~$U/Library/Application\ Support/VajraDesktop"
+file_case BLOCK "D16 ~user tilde, Write"            Write "~$U/${DATA#$H/}/seats.json"
+bash_case BLOCK "D16 ~- tilde"                      'echo x > ~-/seats.json'
+bash_case BLOCK "D16 ~+ is the cwd"                 'echo x > ~+/seats.json' "$DATA"
+bash_case ALLOW "D16 ~+ inside work"                'echo x > ~+/a.txt' "$WORK/proj/r1/t1-r1"
+# bhishma re-check on 7ee4b96 (N1-N4): one rule for ambiguous words (glob, brace,
+# variable, non-ASCII) whose literal directory could reach <data>.
+AS="${DATA%/*}"; APP="${DATA##*/}"
+bash_case BLOCK "N1 redirect glob over seats.json"  "echo x > \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N1 redirect ? glob"                "echo x > \"$AS\"/?${APP#?}/seats.json"
+bash_case BLOCK "N1 cp [..] glob dest"              "cp /tmp/e \"$AS\"/${APP%???????}[${APP:5:1}]${APP#??????}/seats.json"
+bash_case BLOCK "N1 touch brace"                    "touch \"$AS\"/${APP%???????}{${APP#?????},Zz}/new"
+bash_case BLOCK "N1 cwd parent, touch brace"        "touch ${APP%???????}{${APP#?????},Zz}/new" "$AS"
+bash_case BLOCK "N1 cd glob && echo > plain"        "cd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd ? glob && echo > plain"      "cd \"$AS\"/${APP%???????}?${APP#??????} && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd glob"           "cd \"$AS\" && cd ${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd parent && cd brace"          "cd \"$AS\" && cd ${APP%???????}{${APP#?????},} && echo x > seats.json"
+bash_case BLOCK "N1 pushd glob && echo > plain"     "pushd \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 cd -P glob && echo > plain"     "cd -P \"$AS\"/${APP%?}* && echo x > seats.json"
+bash_case BLOCK "N1 env -C glob echo"               "env -C \"$AS\"/${APP%?}* sh -c 'echo x > seats.json'"
+bash_case BLOCK "N1 mv glob dest"                   "mv /tmp/e \"$AS\"/${APP%?}*/seats.json"
+bash_case BLOCK "N2 ./ + \$V"           "V=${APP#?????}; echo x > \"$AS\"/./${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 // + \$V"           "V=${APP#?????}; echo x > \"$AS\"//${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 <work>/.. + \$V"    "V=${APP#?????}; echo x > \"$WORK\"/../${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cd parent; \$V"     "cd \"$AS\" && V=${APP#?????} && echo x > ${APP%???????}\$V/seats.json"
+bash_case BLOCK "N2 cwd parent; \$V"    "V=${APP#?????}; echo x > ${APP%???????}\$V/seats.json" "$AS"
+bash_case BLOCK "N2 cwd parent; whole \$V" "V=$APP; echo x > \$V/seats.json" "$AS"
+bash_case ALLOW "N2 \$V inside <work>"  "V=a; echo x > \"$WORK/proj/r1/t1-r1/\$V.txt\""
+KS=$'\xe2\x84\xaa'; LS=$'\xc5\xbf'
+bash_case BLOCK "N3 kelvin, redirect"  "echo x > \"$AS/${APP%????}${KS}top/seats.json\""
+bash_case BLOCK "N3 long s, redirect"  "echo x > \"$AS/${APP%?????}${LS}ktop/seats.json\""
+file_case BLOCK "N3 kelvin, Write"     Write "$AS/${APP%????}${KS}top/seats.json"
+file_case BLOCK "N3 long s, Edit"      Edit  "$AS/${APP%?????}${LS}ktop/seats.json"
+file_case BLOCK "N3 long s, Write into the skill dir" Write "$H/.claude/${LS}kills/vajra/hooks/pre-tool-use.sh"
+bash_case BLOCK "N3 kelvin, cd && echo" "cd \"$AS/${APP%????}${KS}top\" && echo x > seats.json"
+bash_case BLOCK "N4 sed script names <control> oddly" "sed 's#${APP}/seats.json#${APP}/control/seats.json#g' /tmp/f > /tmp/g"
+# bhishma re-check on 3296d41 (F1-F3, F5, F6).
+G1="${APP%?}*"; TW="$WORK/proj/r1/t1-r1"
+bash_case BLOCK "F1 glob then ../.. redirect"   "echo PWN > \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 cp glob then ../.."         "cp /etc/hosts \"$WORK\"/p*/../../$G1/seats.json"
+bash_case BLOCK "F1 V=.. then glob"             "V=..; echo PWN > \"$WORK\"/\$V/$G1/seats.json"
+bash_case BLOCK "F1 V=.. from worker cwd"       "V=../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
+bash_case BLOCK "F1 cd V=.. then cd glob"       "V=..; cd \"$WORK\"/\$V && cd $G1 && echo PWN > seats.json"
+bash_case BLOCK "F1 cd glob/.. then cd glob"    "cd \"$WORK\"/p*/.. && cd $G1 && echo x > seats.json"
+bash_case BLOCK "F1 brace {..,zz} then glob"    "touch \"$WORK\"/{..,zz}/$G1/new"
+bash_case BLOCK "F1 <control> via V=.."         "V=..; echo PWN > \"$WORK\"/\$V/$G1/${CTRL##*/}*/x.json"
+bash_case BLOCK "F1 split name in two vars"     "V=../../../../${APP%???????}; W=${APP#?????}; echo PWN > \$V\$W/seats.json" "$TW"
+bash_case BLOCK "F1 for list climbs"            "for v in ../../../..; do echo PWN > \$v/$G1/seats.json; done" "$TW"
+bash_case BLOCK "F1 abs value near <data>"      "V=\"$AS/${APP%???????}\"; echo PWN > \${V}${APP#?????}/seats.json"
+bash_case BLOCK "F1 cd unknown, then non-reader" "cd \"$AS\"/$G1 && touch seats.json"
+bash_case BLOCK "F2 >| glob"                    "echo PWN >| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 1>| glob"                   "echo PWN 1>| \"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >|glob no space"            "echo PWN >|\"$AS\"/$G1/seats.json"
+bash_case BLOCK "F2 >| literal seats.json"      "echo PWN >| \"$DATA/seats.json\""
+bash_case BLOCK "F3 ls -d glob | xargs -I sh"   "ls -d \"$AS\"/$G1 | xargs -I{} sh -c 'echo PWN > \"{}/seats.json\"'"
+bash_case BLOCK "F3 echo glob | xargs -0 cp"    "echo \"$AS\"/$G1/seats.json | tr '\\n' '\\0' | xargs -0 -n1 cp /etc/hosts"
+bash_case BLOCK "F3 printf glob | xargs cp"     "printf '%s\\n' \"$AS\"/$G1/seats.json | xargs -n1 cp /etc/hosts"
+bash_case BLOCK "F6 >| skill hook"              "echo x >| \"$SKILL/hooks/pre-tool-use.sh\""
+bash_case BLOCK "F6 >| glob skill hook"         "echo x >| \"$SKILL\"/hook*/pre-tool-use.sh"
+bash_case BLOCK "F6 >| user settings"           "echo x >| \"$H/.claude/settings.json\""
+bash_case BLOCK "F6 >| glob user settings"      "echo x >| \"$H/.claude\"/setting*.json"
+bash_case ALLOW "F5 export PATH with \$HOME"    'export PATH="$HOME/bin:$PATH"'
+bash_case ALLOW "F5 cd glob in HOME, read"      'cd ~/Devel* && ls'
+bash_case ALLOW "F5 cd glob in HOME, then cd abs and write" 'cd ~/Devel* && ls && cd /tmp && echo x > vajra-f5.txt'
+bash_case ALLOW "F5 declare and readonly values" 'declare X="$HOME/bin:$PATH"; readonly Y="$HOME/a*"'
+bash_case ALLOW "F3 glob read piped into a reader" "ls -d \"$AS\"/$G1 | wc -l"
+# A temp dir beside HOME, never above it (on Linux the suite HOME lives under /tmp, an ancestor of HOME).
+OUT2="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out2-XXXXXX")"
+bash_case ALLOW "F1 abs value outside protected" "V=$OUT2/vajra-f1.txt; echo x > \$V"
+rm -rf "$OUT2"
+bash_case ALLOW "F1 for loop over project files" 'for f in src/*.ts; do sed -i "" s/a/b/ "$f"; done' "$PROJ"
+bash_case ALLOW "F1 single \$OUT from worker cwd" 'echo x > $OUT' "$TW"
+# Fail closed: a ".." after a glob is judged from "/", even inside <work> (write the path without the climb).
+bash_case BLOCK "F1 glob climb inside <work> tree" "touch \"$WORK\"/proj/r1/t1-r1/s*/../a.txt"
+# claude review on 33aff51: three false positives.
+# (1) A ~word that is not an account, ~- or a dir-stack entry stays literal (bash leaves it so).
+bash_case ALLOW "R1 echo with a ~2s approximation"     'echo "the build takes ~2s now"' "$PROJ"
+bash_case ALLOW "R1 commit message with ~3x"           'git commit -m "make it ~3x faster"' "$PROJ"
+bash_case ALLOW "R1 gh body with a ~ approximation"    'gh pr create --title t --body "build takes ~2s"' "$PROJ"
+bash_case ALLOW "R1 ~nosuchaccount word"               'echo ~nosuchaccount9z/x' "$PROJ"
+# ~0, ~+0 and ~-0 are the cwd in bash even with no pushd (claude review on 51da747).
+DREL="${DATA#$H/}"
+bash_case BLOCK "R1 ~0 from cwd HOME"                  "echo x > ~0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~+0 from cwd HOME"                 "echo x > ~+0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~-0 from cwd HOME"                 "echo x > ~-0/\"$DREL/seats.json\"" "$H"
+bash_case BLOCK "R1 ~0 after cd ~"                     "cd ~ && echo x > ~0/\"$DREL/seats.json\"" "$PROJ"
+bash_case ALLOW "R1 ~2 in a sentence stays literal"    'echo "about ~2 minutes"' "$PROJ"
+bash_case BLOCK "R1 ~-0 with a populated stack"        "cd \"$DATA\" && pushd /tmp && echo x > ~-0/seats.json" "$PROJ"
+bash_case BLOCK "R1 ~+0 after pushd is still judged"   "pushd \"$DATA\" && echo x > ~+0/seats.json" "$PROJ"
+bash_case BLOCK "R1 ~user of a real account stays"     "echo x > ~$U/x.txt" "$PROJ"
+bash_case BLOCK "R1 dir-stack ~1 after pushd"          'pushd /tmp && pushd ~ && echo x > ~1/a.txt' "$PROJ"
+# (2) The backslash-escaped space is a plain spelling for reads; writes still meet the path analysis.
+bash_case ALLOW "R2 ls escaped-space runs dir"         'ls ~/Library/Application\ Support/VajraDesktop/runs' "$PROJ"
+bash_case ALLOW "R2 cat escaped-space seats.json"      'cat ~/Library/Application\ Support/VajraDesktop/seats.json' "$PROJ"
+bash_case BLOCK "R2 redirect escaped space still blocked" 'echo x > ~/Library/Application\ Support/VajraDesktop/runs/x' "$PROJ"
+# (3) AMB_DYN only for read/mapfile/readarray/getopts as a command word and -v of printf/declare/typeset/local/read.
+bash_case ALLOW "R3 grep -v redirected to \$TMPDIR"    'grep -v x a.txt > "$TMPDIR/out.txt"' "$PROJ"
+bash_case ALLOW "R3 cp -v into \$DEST"                 'cp -v a.txt "$DEST/"' "$PROJ"
+bash_case ALLOW "R3 rsync -v to a variable target"     'rsync -v a.txt "$DEST"/' "$PROJ"
+bash_case ALLOW "R3 test -v then write"                'test -v DEST && cp a.txt "$DEST/x"' "$PROJ"
+bash_case ALLOW "R3 commit message with read and \$X"  'git commit -m "read the $X docs" && cp a.txt "$DEST/"' "$PROJ"
+bash_case BLOCK "R3 while read feeds a write"          "while read v; do echo PWN > \$v/$G1/seats.json; done < list.txt" "$TW"
+bash_case BLOCK "R3 printf -v feeds a write"           "printf -v V ../../../..; echo PWN > \$V/$G1/seats.json" "$TW"
+# The rule leaves ordinary globs, variables and non-ASCII names outside protected areas alone.
+bash_case ALLOW "amb: \$OUT in the project"         'echo x > $OUT' "$PROJ"
+bash_case ALLOW "amb: \$TMPDIR target from project" 'rm -rf "$TMPDIR"/x' "$PROJ"
+# A temp dir beside HOME, never above it (on Linux the suite HOME itself lives under /tmp).
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/vajra-ptu-out-XXXXXX")"
+bash_case ALLOW "amb: glob write in a temp dir"     "touch \"$OUTSIDE\"/vajra-test-*.log"
+rm -rf "$OUTSIDE"
+EA=$'\xc3\xa9'
+bash_case ALLOW "amb: non-ASCII name in project"    "echo x > caf${EA}.txt" "$PROJ"
+bash_case BLOCK "amb: non-ASCII name in HOME"       "echo x > caf${EA}.txt" "$H"
+file_case ALLOW "amb: non-ASCII Write in project"   Write "$PROJ/caf"$'\xc3\xa9'".txt"
+bash_case ALLOW "amb: cd glob in the project"       'cd sr* && ls' "$PROJ"
+bash_case ALLOW "amb: glob read of <data>"          "cat \"$AS\"/${APP%?}*/seats.json"
+bash_case ALLOW "amb: glob write in <work>"         "touch \"$WORK\"/proj/r1/t1-r1/*.txt"
+# The plain forms keep working: $HOME and ${HOME}, the bare word, a $ with no <data> path.
+bash_case ALLOW "D16 cat via \$HOME"                'cat "$HOME/Library/Application Support/VajraDesktop/seats.json"'
+bash_case ALLOW "D16 ls via \${HOME}"               'ls "${HOME}/Library/Application Support/VajraDesktop"'
+bash_case ALLOW "D16 bare word with a \$ anchor"    "grep -rn 'VajraDesktop\$' src"
+bash_case ALLOW "D16 var in work, no data path"     "W=\"$WORK/proj/r1/t1-r1\"; echo x > \"\$W/a.txt\""
+bash_case BLOCK "D16 odd spacing \${IFS}"           'echo x > ~/Library/Application${IFS}Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 odd spacing \$'\\040'"          'echo x > ~/Library/Application$'"'"'\040'"'"'Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 variable spelling"             'D="$HOME/Library/Application"; echo x > "$D Support/VajraDesktop/seats.json"'
+bash_case BLOCK "D16 glob App*Support"              'echo x > ~/Library/App*Support/VajraDesktop/seats.json'
+bash_case BLOCK "D16 glob App*/Vajra*"              'echo x > ~/Library/App*/Vajra*/seats.json'
+bash_case BLOCK "D16 glob, new file name"           'echo x > ~/Library/App*Support/VajraDesktop/brandnew.json'
+bash_case BLOCK "D16 cd glob && plain-word redirect" 'cd ~/Library/App*Support && echo x > VajraDesktop/seats.json'
+bash_case ALLOW "D16 bare app name in a grep"       'grep -rn VajraDesktop src'
+# Never weaker than before: the <data> root was an ancestor of <control>, so copying it whole stays blocked.
+bash_case BLOCK "D16 cp -r data root out"           "cp -r \"$DATA\" out/d"
+bash_case BLOCK "D16 rsync data root out"           "rsync -a \"$DATA\" out/d"
+bash_case BLOCK "D16 cp -R alias spelling root out" 'cp -R ~/Library/Application\ Support/VajraDesktop out/d'
+worker BLOCK "D16 worker Write seats.json"        "$(fj Write "$DATA/seats.json")"
+worker BLOCK "D16 worker redirect into data"        "$(bj "echo x > \"$DATA/runs/r1/lead/brief.md\"")"
+# Reads stay allowed (the control dir keeps its own worker read block above).
+file_case ALLOW "D16 Read seats.json"               Read "$DATA/seats.json"
+file_case ALLOW "D16 Read via symlink"              Read "$PROJ/seatslink"
+path_case ALLOW "D16 Grep runs dir"                 Grep "$DATA/runs"
+bash_case ALLOW "D16 cat seats.json"                "cat \"$DATA/seats.json\""
+bash_case ALLOW "D16 ls data dir"                   "ls \"$DATA\""
+bash_case ALLOW "D16 cp data file out"              "cp \"$DATA/seats.json\" out/seats.json"
+bash_case ALLOW "D16 jq a profile"                  "jq . \"$DATA/profiles/claude-worker.json\""
+worker ALLOW "D16 worker Read run brief"            "$(fj Read "$DATA/runs/r1/lead/brief.md")"
+worker ALLOW "D16 worker cat seats.json"            "$(bj "cat \"$DATA/seats.json\"")"
+# <work> stays writable, and so does a sibling whose name only starts like <data>.
+file_case ALLOW "D16 Write in work worktree"        Write "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Edit in work worktree"         Edit "$WORK/proj/r1/t1-r1/a.txt"
+file_case ALLOW "D16 Write ticket tmp"              Write "$WORK/proj/r1/tmp/t1-r1/scratch"
+file_case ALLOW "D16 Write data-prefixed sibling"   Write "$H/Library/Application Support/VajraDesktopX/x.json"
+bash_case ALLOW "D16 redirect into work"            "echo x > \"$WORK/proj/r1/t1-r1/a.txt\""
+bash_case ALLOW "D16 redirect into work, escaped"   'echo x > ~/Library/Application\ Support/VajraWorktrees/proj/r1/t1-r1/a.txt'
+bash_case ALLOW "D16 tee into work"                 "echo x | tee \"$WORK/proj/r1/t1-r1/b.txt\""
+bash_case ALLOW "D16 mkdir and cp in work"          "mkdir -p \"$WORK/proj/r1/t1-r1/src\" && cp out/x \"$WORK/proj/r1/t1-r1/src/\""
+bash_case ALLOW "D16 cwd is a work worktree"        "echo x > a.txt && rm a.txt" "$WORK/proj/r1/t1-r1"
+worker ALLOW "D16 worker writes its worktree"       "$(jq -nc --arg c 'echo x > a.txt' --arg d "$WORK/proj/r1/t1-r1" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}')"
+
 # --- Tamper flag: reads still run, mutations blocked -----------------------
 echo '{}' > "$VS/.integrity-violation"
 file_case BLOCK "tamper: Write blocked"    Write "$PROJ/src/a.ts"
