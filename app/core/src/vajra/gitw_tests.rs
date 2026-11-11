@@ -4,6 +4,16 @@ use std::sync::atomic::Ordering;
 
 const GIT: &str = "/usr/bin/git";
 
+/// No other live session on any repo.
+#[derive(Debug)]
+struct NoAgents;
+
+impl Quiesce for NoAgents {
+    fn pause(&self, _: &Path) -> Pause {
+        Pause::new(|| {})
+    }
+}
+
 struct Fx {
     d: PathBuf,
     home: PathBuf,
@@ -42,6 +52,10 @@ fn marker_script(d: &Path, marker: &Path) -> PathBuf {
 }
 
 fn fx_with(tag: &str, gitconfig: &str, files: &[(&str, &str)]) -> Fx {
+    fx_q(tag, gitconfig, files, Arc::new(NoAgents))
+}
+
+fn fx_q(tag: &str, gitconfig: &str, files: &[(&str, &str)], q: Arc<dyn Quiesce>) -> Fx {
     let d = tmpdir(tag);
     let (home, data, work, repo) = (d.join("home"), d.join("data"), d.join("work"), d.join("repo"));
     for p in [&home, &data, &repo] {
@@ -67,7 +81,7 @@ fn fx_with(tag: &str, gitconfig: &str, files: &[(&str, &str)]) -> Fx {
     }
     let g = GlobalBaseline::take_or_load(Path::new(GIT), &data, &home, None).unwrap();
     check_roots(&data, &work).unwrap();
-    let gw = Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g);
+    let gw = Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g, q);
     let common = gw.common_of(&repo).unwrap();
     gw.repos.acquire(&gw, &common, false).unwrap();
     Fx { d, home, repo: repo.canonicalize().unwrap(), gw, base, marker }
@@ -715,4 +729,87 @@ fn write_private_never_follows_a_planted_temp_name() {
     write_private(&d.join("f"), b"new").unwrap();
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     assert_eq!(std::fs::read_to_string(d.join("f")).unwrap(), "new");
+}
+
+/// #146 gate M3: while the core's git touches a repo's content, every other live session on the repo is stopped
+/// (its whole process group), so it can't change config or attributes between the check and the use; it resumes after.
+#[test]
+fn other_live_sessions_on_the_repo_are_stopped_during_content_calls() {
+    use crate::bus::{Bus, Config};
+    let d = tmpdir("quiesce");
+    let bus = Arc::new(Bus::open(&d.join("spill"), Config::default()).unwrap());
+    let sup = Arc::new(crate::sessions::Supervisor::new(bus, None));
+    let ticks = d.join("ticks");
+    let script = format!("while :; do echo x >> '{}'; sleep 0.02; done", ticks.display());
+    let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), codex_home: None };
+    sup.spawn("w-live", spec).unwrap();
+    let q = SessionQuiesce { sup: sup.clone(), on_repo: Box::new(|_| vec!["w-live".to_string(), "w-gone".to_string()]) };
+    let f = fx_q("quiesce-fx", "[user]\n\tname = U\n\temail = u@e\n", &[], Arc::new(q));
+    let size = || std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
+    let grows = || {
+        let a = size();
+        std::thread::sleep(Duration::from_millis(300));
+        size() > a
+    };
+    assert!(grows(), "the session runs before");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let s2 = seen.clone();
+    let t2 = ticks.clone();
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = Some(Box::new(move || {
+        let a = std::fs::metadata(&t2).map(|m| m.len()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(300));
+        *crate::lock(&s2) = Some(std::fs::metadata(&t2).map(|m| m.len()).unwrap_or(0) == a);
+    })));
+    let r = f.gw.integrate(&it, &f.base, std::slice::from_ref(&c));
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = None);
+    r.unwrap();
+    assert_eq!(*crate::lock(&seen), Some(true), "stopped inside the content call");
+    assert!(grows(), "resumed after");
+    sup.kill("w-live").unwrap();
+    no_marker(&f);
+}
+
+/// #146 gate L4: a trusted filter program rewritten after the baseline, or shadowed by a new binary earlier on git's
+/// search path, is a repo config change; the rewritten program never runs.
+#[test]
+fn a_changed_or_shadowed_filter_program_is_tampered() {
+    let mut f = fx_with("prog", "[user]\n\tname = U\n\temail = u@e\n", &[(".gitattributes", "*.rs filter=x\n")]);
+    use std::os::unix::fs::PermissionsExt;
+    let tool = f.d.join("tool.sh");
+    std::fs::write(&tool, "#!/bin/sh\ncat\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (early, late) = (f.d.join("bin-early"), f.d.join("bin-late"));
+    for b in [&early, &late] {
+        std::fs::create_dir_all(b).unwrap();
+    }
+    std::fs::copy(&tool, late.join("vtool")).unwrap();
+    f.gw.prog_dirs = vec![early.clone(), late.clone()];
+    ugit(&f.home, &f.repo, &["config", "filter.x.clean", tool.to_str().unwrap()]);
+    ugit(&f.home, &f.repo, &["config", "merge.y.driver", "vtool %O %A %B"]);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    assert!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.is_some());
+    // The trusted script is rewritten to leave a marker.
+    std::fs::write(&tool, format!("#!/bin/sh\necho ran >> '{}'\ncat\n", f.marker.display())).unwrap();
+    let t2 = f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base);
+    match t2 {
+        Err(GitwError::RepoConfigChanged { keys }) => assert!(keys.iter().any(|k| k.starts_with("program ") && k.contains("tool.sh")), "{keys:?}"),
+        other => panic!("{other:?}"),
+    }
+    no_marker(&f);
+    // The human accepts it; then a new `vtool` shadows the trusted one.
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    std::fs::copy(late.join("vtool"), early.join("vtool")).unwrap();
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t3", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["program vtool".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    assert!(first_word("  \"/a b/c\" --x").as_deref() == Some("/a b/c") && first_word("git-lfs filter-process").as_deref() == Some("git-lfs"));
+    assert!(program_key("filter.lfs.process") && program_key("merge.ours.driver") && program_key("diff.x.textconv") && !program_key("filter.process") && !program_key("user.email"));
 }

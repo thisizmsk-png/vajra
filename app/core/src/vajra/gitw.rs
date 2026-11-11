@@ -14,16 +14,18 @@
 //! against the repo baseline (`repo_config_changed`). Before every call on a ticket its per-worktree files, its common
 //! directory's identity and its detached HEAD are checked with plain filesystem reads (`tampered`), and before any
 //! call that reads worktree content a plain walk refuses new or changed attribute and module files and nested repos,
-//! names case-folded. `snapshot` uses plumbing only, through a fresh private index under the core's data dir; it
+//! names case-folded. The repo baseline also fingerprints every filter, merge-driver and diff program the trusted
+//! config names, as git's shell would resolve it. Every call that can run one stops the repo's other live agent
+//! sessions first (`Quiesce`), so the checks and git's use see the same files. `snapshot` uses plumbing only, through a fresh private index under the core's data dir; it
 //! never writes through the worker's HEAD or index.
 
 use std::collections::{BTreeSet, HashMap};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::bridge::{run_process_env, Output};
+use super::bridge::{run_process_env, Output, BASE_PATH};
 use crate::control::sha256;
 
 /// Every call's fixed config. `core.sshCommand=false` and `protocol.allow=never` stop every transport.
@@ -478,6 +480,100 @@ fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf]
     out
 }
 
+// ------------------------------------------------------------ quiescing other sessions (M3)
+
+/// While the core's git reads or writes a repo's content (filters and drivers can run), every other live Vajra agent
+/// session on that repo is stopped, so none can change the repo's config, attributes or the programs they name
+/// between the core's check and git's use of them (#146 gate M3). The checks run again once they are stopped.
+pub trait Quiesce: Send + Sync + std::fmt::Debug {
+    /// Stop every live agent session on the repo with this common dir; they resume when the `Pause` drops.
+    fn pause(&self, common: &Path) -> Pause;
+}
+
+/// Resumes what `Quiesce::pause` stopped, on drop (also on an early `?` return or a panic).
+pub struct Pause(Option<Box<dyn FnOnce() + Send>>);
+
+impl Pause {
+    pub fn new(resume: impl FnOnce() + Send + 'static) -> Pause {
+        Pause(Some(Box::new(resume)))
+    }
+}
+
+impl Drop for Pause {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+/// The live session ids on the repo with this common dir.
+pub type SessionsOnRepo = Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>;
+
+/// The production `Quiesce`: `on_repo` names the live session ids on a repo (common dir), and the supervisor stops
+/// their process groups.
+pub struct SessionQuiesce {
+    pub sup: Arc<crate::sessions::Supervisor>,
+    pub on_repo: SessionsOnRepo,
+}
+
+impl std::fmt::Debug for SessionQuiesce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionQuiesce")
+    }
+}
+
+impl Quiesce for SessionQuiesce {
+    fn pause(&self, common: &Path) -> Pause {
+        let stopped = self.sup.pause(&(self.on_repo)(common));
+        let sup = self.sup.clone();
+        Pause::new(move || sup.resume(&stopped))
+    }
+}
+
+// ------------------------------------------------------------ trusted programs (L4)
+
+/// A program the trusted config runs (a filter, merge driver or diff program), resolved the way git's shell finds it:
+/// git's exec path, then `BASE_PATH`. `at` fingerprints the binary it resolved to; ctime moves on any write, chmod or
+/// rename, and a user can't set it back (#146 gate L4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Program {
+    word: String,
+    at: Option<Fingerprint>,
+}
+
+/// (canonical path, dev, ino, size, mtime, mtime ns, ctime, ctime ns).
+type Fingerprint = (PathBuf, u64, u64, u64, i64, i64, i64, i64);
+
+/// Config keys whose value is a command git may run inside the core's calls.
+fn program_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    let Some((section, rest)) = k.split_once('.') else { return false };
+    let name = rest.rsplit('.').next().unwrap_or("");
+    rest.contains('.') && match section {
+        "filter" => matches!(name, "clean" | "smudge" | "process"),
+        "merge" => name == "driver",
+        "diff" => matches!(name, "textconv" | "command"),
+        _ => false,
+    }
+}
+
+/// The program a shell command runs first: the first word, or a quoted first word.
+fn first_word(cmd: &str) -> Option<String> {
+    let c = cmd.trim_start();
+    let w = match c.chars().next()? {
+        q @ ('"' | '\'') => c[1..].split(q).next()?.to_string(),
+        _ => c.split(|ch: char| ch.is_whitespace() || ";|&<>()`$".contains(ch)).next()?.to_string(),
+    };
+    (!w.is_empty()).then_some(w)
+}
+
+fn fingerprint(p: &Path) -> Option<Fingerprint> {
+    let c = p.canonicalize().ok()?;
+    let m = std::fs::metadata(&c).ok()?;
+    m.is_file().then(|| (c, m.dev(), m.ino(), m.size(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()))
+}
+
 // ------------------------------------------------------------ the repo baseline
 
 #[derive(Clone, Debug)]
@@ -486,6 +582,8 @@ struct Held {
     attributes: FileHash,
     /// `<common>/config.worktree` and every include target of the two config files.
     others: Vec<(PathBuf, FileHash)>,
+    /// The programs the effective trusted config (global baseline plus repo) can run.
+    programs: Vec<Program>,
     /// The baseline config's entries, kept only to name the keys that changed.
     entries: Vec<(String, String)>,
     runs: usize,
@@ -541,7 +639,8 @@ impl RepoBaselines {
         let config = hash_file(&common.join("config"), false);
         let attributes = hash_file(&common.join("info/attributes"), false);
         let others = repo_others(gw, common);
-        if config == h.config && attributes == h.attributes && others == h.others {
+        let programs: Vec<Program> = h.programs.iter().map(|p| gw.program(&p.word)).collect();
+        if config == h.config && attributes == h.attributes && others == h.others && programs == h.programs {
             return Ok(());
         }
         let mut keys = if config == h.config { Vec::new() } else { diff_keys(&h.entries, &read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default()) };
@@ -557,6 +656,11 @@ impl RepoBaselines {
             }
             if paths.iter().any(|p| **p != wt) {
                 keys.push("include.path".into());
+            }
+        }
+        for (now, then) in programs.iter().zip(&h.programs) {
+            if now != then {
+                keys.push(format!("program {}", now.word));
             }
         }
         if keys.is_empty() {
@@ -579,6 +683,7 @@ fn take_repo(gw: &Gitw, common: &Path) -> Held {
         config: hash_file(&common.join("config"), false),
         attributes: hash_file(&common.join("info/attributes"), false),
         others: repo_others(gw, common),
+        programs: gw.programs(common),
         entries: read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default(),
         runs: 0,
     }
@@ -681,20 +786,44 @@ pub struct Gitw {
     pub repos: RepoBaselines,
     /// git 2.40 or later: `GIT_ATTR_SOURCE` is honoured.
     attr_source: bool,
+    /// Where git's shell finds a filter program: git's exec path, then `BASE_PATH`.
+    prog_dirs: Vec<PathBuf>,
+    quiesce: Arc<dyn Quiesce>,
     #[cfg(test)]
     pub checks: std::sync::atomic::AtomicBool,
 }
 
 impl Gitw {
-    /// `check_roots` must have passed.
-    pub fn new(git: PathBuf, home: PathBuf, data: PathBuf, work: PathBuf, global: &GlobalBaseline) -> Self {
+    /// `check_roots` must have passed. `quiesce` stops the other live sessions on a repo during content calls.
+    pub fn new(git: PathBuf, home: PathBuf, data: PathBuf, work: PathBuf, global: &GlobalBaseline, quiesce: Arc<dyn Quiesce>) -> Self {
         let mut g = Gitw {
             git, home, data, work, global: global.copy.clone(), global_sha: Mutex::new(global.sha.clone()), repos: RepoBaselines::default(), attr_source: false,
+            prog_dirs: Vec::new(), quiesce,
             #[cfg(test)]
             checks: std::sync::atomic::AtomicBool::new(true),
         };
         g.attr_source = g.version().is_some_and(|v| v >= (2, 40));
+        let exec = run_process_env(&g.git, &["--exec-path".into()], None, CALL_TIMEOUT, Some(&g.home), None, &[]).ok().map(|o| PathBuf::from(o.stdout.trim()));
+        g.prog_dirs = exec.into_iter().filter(|p| p.is_absolute()).chain(BASE_PATH.iter().map(PathBuf::from)).collect();
         g
+    }
+
+    /// Resolve one program word the way git's shell would, and fingerprint what it finds.
+    fn program(&self, word: &str) -> Program {
+        let found = if word.contains('/') {
+            Path::new(word).is_absolute().then(|| PathBuf::from(word))
+        } else {
+            self.prog_dirs.iter().map(|d| d.join(word)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0))
+        };
+        Program { word: word.to_string(), at: found.as_deref().and_then(fingerprint) }
+    }
+
+    /// The programs the effective config of this repo names (global baseline plus repo config). Config only: no filter
+    /// runs to read it.
+    fn programs(&self, common: &Path) -> Vec<Program> {
+        let Ok(o) = self.run(Call::new(At::Repo(common), &["config", "--list", "-z"])) else { return Vec::new() };
+        let words: BTreeSet<String> = parse_list_z(&o.stdout).into_iter().filter(|(k, _)| program_key(k)).filter_map(|(_, v)| first_word(&v)).collect();
+        words.iter().map(|w| self.program(w)).collect()
     }
 
     fn version(&self) -> Option<(u32, u32)> {
@@ -829,6 +958,8 @@ impl Gitw {
         }
         let repo = self.top_of(repo)?;
         let common = self.common_of(&repo)?;
+        // `worktree add` checks files out: smudge filters can run.
+        let _quiet = self.quiesce.pause(&common);
         self.repos.check(self, &common)?;
         let leaf = if integration { if round == 1 { "integration".to_string() } else { format!("integration-r{round}") } } else { format!("{task}-r{round}") };
         let (work, data) = (self.work.canonicalize().map_err(io)?, self.data.canonicalize().map_err(io)?);
@@ -917,6 +1048,7 @@ impl Gitw {
         if !commits.iter().all(|c| valid_oid(c)) {
             return Err(GitwError::Invalid("commit ids"));
         }
+        let _quiet = self.quiesce.pause(&t.common.path);
         self.preflight(t)?;
         if commits.is_empty() {
             return Ok(());
@@ -1031,6 +1163,7 @@ impl Gitw {
         if worker.is_empty() || worker.len() > 200 || worker.chars().any(|c| c.is_control()) {
             return Err(GitwError::Invalid("worker label"));
         }
+        let _quiet = self.quiesce.pause(&t.common.path);
         // A repo config change makes the finishing ticket tampered (16.6).
         self.preflight(t).map_err(|e| match e {
             GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
@@ -1068,8 +1201,8 @@ impl Gitw {
             return Err(GitwError::CommitFailed { first_line: first_line(&o) });
         }
         let commit = o.stdout.trim().to_string();
-        // Checked again before the ref exists: a change made while `add` ran (another live session on the repo) never
-        // becomes a task ref. The residual is that a filter it planted may already have run inside `add`.
+        // Checked again before the ref exists. Every other live session on the repo has been stopped since before the
+        // first check, so nothing changed while `add` ran; this is the second line.
         self.preflight(t).map_err(|e| match e {
             GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
             e => e,
@@ -1106,6 +1239,7 @@ impl Gitw {
         let r = Self::integration_ref(it);
         vajra_ref(&r)?;
         let branch = r.trim_start_matches("refs/heads/");
+        let _quiet = self.quiesce.pause(&it.common.path);
         self.preflight(it)?;
         self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "-B", branch, base]))?;
         // Refs live in the common dir, which any worker on the repo can write: every step checks where HEAD landed.
@@ -1160,6 +1294,7 @@ impl Gitw {
             return Err(GitwError::Invalid("commit id"));
         }
         vajra_ref(integration_ref)?;
+        let _quiet = self.quiesce.pause(&t.common.path);
         self.preflight(t)?;
         self.walk_rule(t)?;
         let idx = self.fresh_index(t, "capture-index")?;

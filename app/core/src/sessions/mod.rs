@@ -179,6 +179,20 @@ impl Session {
         }
     }
 
+    /// Job control (`SIGSTOP`/`SIGCONT`) for a live session's whole group, under the exit lock like `signal`. It never
+    /// marks the session as asked to stop. True when the session was live and signalled.
+    fn job_signal(&self, sig: libc::c_int) -> bool {
+        let exit = lock(&self.exit);
+        if exit.is_some() {
+            return false;
+        }
+        unsafe {
+            libc::kill(-(self.pid as i32), sig);
+            libc::kill(self.pid as i32, sig);
+        }
+        true
+    }
+
     fn wait_until(&self, deadline: Instant) -> Option<ExitInfo> {
         let mut exit = lock(&self.exit);
         while exit.is_none() {
@@ -450,6 +464,21 @@ impl Supervisor {
     /// Exit status once reaped; `None` if still running after `timeout`.
     pub fn wait(&self, id: &str, timeout: Duration) -> Result<Option<ExitInfo>, SessionError> {
         Ok(self.get(id)?.wait_until(Instant::now() + timeout))
+    }
+
+    /// Stop the process groups of these live sessions (`SIGSTOP`) while the core's git touches a repo they share
+    /// (ADR-16 16.6). Returns the ids it stopped; unknown or exited ids are skipped. Pair with `resume`.
+    pub fn pause(&self, ids: &[String]) -> Vec<String> {
+        ids.iter().filter(|id| self.get(id).is_ok_and(|s| s.job_signal(libc::SIGSTOP))).cloned().collect()
+    }
+
+    /// `SIGCONT` the sessions `pause` stopped.
+    pub fn resume(&self, ids: &[String]) {
+        for id in ids {
+            if let Ok(s) = self.get(id) {
+                s.job_signal(libc::SIGCONT);
+            }
+        }
     }
 
     /// SIGHUP the session's process group, SIGKILL after `KILL_GRACE`.
