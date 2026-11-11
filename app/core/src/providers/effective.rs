@@ -363,13 +363,14 @@ fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duratio
     // counting stops and the rest are listed only (`partial`, `uncounted`).
     let root = open_dir_nofollow(cwd);
     let (start, mut counted, mut read_left) = (Instant::now(), 0usize, TOTAL_READ_CAP);
+    let deadline = start + budget;
     for path in untracked.split(|b| *b == 0).filter(|l| !l.is_empty()) {
         list(&mut diff, path);
         let out_of_bounds = counted >= MAX_UNTRACKED || start.elapsed() >= budget || read_left == 0;
         let n = match (&root, out_of_bounds) {
             (Some(root), false) => {
                 counted += 1;
-                count_new_file_at(root, path, &mut read_left)
+                count_new_file_at(root, path, &mut read_left, deadline)
             }
             _ => None,
         };
@@ -397,7 +398,8 @@ fn open_dir_nofollow(path: &Path) -> Option<File> {
 }
 
 /// The lines a new file adds, matching `git diff --numstat --no-index /dev/null <file>`, or `None` when it was not counted
-/// (the path is refused, a link is in the way, the file is too large, it is not a plain file, or the read cap ran out).
+/// (the path is refused, a link is in the way, the file is too large, it is not a plain file, the read cap ran out, or
+/// `deadline` passed while it was being read).
 ///
 /// `rel` is the path git listed, as bytes, relative to `root`. Every directory part is opened with `O_NOFOLLOW`, so a
 /// symlinked directory partway down is never entered. The last part is looked at with `fstatat(AT_SYMLINK_NOFOLLOW)`:
@@ -405,7 +407,7 @@ fn open_dir_nofollow(path: &Path) -> Option<File> {
 /// - a plain file is reopened with `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat`: its lines are its `\n` count, plus 1
 ///   when it is non-empty and does not end in one; a NUL in its first 8000 bytes means binary, which counts 0;
 /// - a FIFO, socket or device is never opened.
-fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64) -> Option<u64> {
+fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64, deadline: Instant) -> Option<u64> {
     if rel.is_empty() || rel.len() >= libc::PATH_MAX as usize || rel.last() == Some(&b'/') {
         return None;
     }
@@ -435,16 +437,21 @@ fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64) -> Option<u64
             if size > PER_FILE_CAP || size > *read_left {
                 return None;
             }
-            count_lines(&mut f, size, read_left)
+            count_lines(&mut f, size, read_left, deadline)
         }
         _ => None,
     }
 }
 
-fn count_lines(f: &mut File, size: u64, read_left: &mut u64) -> Option<u64> {
+/// `deadline` is checked before every chunk and before the count is accepted, so a slow read cannot outlast the budget:
+/// past it the file is uncounted (`None`), never counted late.
+fn count_lines(f: &mut File, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
     let mut buf = [0u8; 64 * 1024];
     let (mut seen, mut lines, mut last) = (0u64, 0u64, b'\n');
     while seen < size {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let want = buf.len().min((size - seen) as usize);
         let n = f.read(&mut buf[..want]).ok()?;
         if n == 0 {
@@ -462,6 +469,9 @@ fn count_lines(f: &mut File, size: u64, read_left: &mut u64) -> Option<u64> {
         seen += n as u64;
     }
     *read_left = read_left.saturating_sub(seen);
+    if Instant::now() >= deadline {
+        return None;
+    }
     Some(lines + u64::from(seen > 0 && last != b'\n'))
 }
 

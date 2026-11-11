@@ -319,8 +319,13 @@ fn root_of(repo: &Path) -> File {
     open_dir_nofollow(repo).unwrap()
 }
 
+/// A deadline far enough away that it never fires in a test.
+fn far() -> Instant {
+    Instant::now() + Duration::from_secs(3600)
+}
+
 fn count_at(repo: &Path, rel: &[u8]) -> Option<u64> {
-    count_new_file_at(&root_of(repo), rel, &mut TOTAL_READ_CAP.clone())
+    count_new_file_at(&root_of(repo), rel, &mut TOTAL_READ_CAP.clone(), far())
 }
 
 #[test]
@@ -432,9 +437,25 @@ fn a_file_over_the_per_file_cap_or_past_the_total_read_cap_is_uncounted() {
     // The total cap: a read budget of 5 bytes covers the first small file only.
     let root = root_of(&repo);
     let mut left = 5u64;
-    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left), Some(2));
+    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left, far()), Some(2));
     assert_eq!(left, 1);
-    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left), None);
+    assert_eq!(count_new_file_at(&root, b"small.txt", &mut left, far()), None);
+}
+
+#[test]
+fn the_budget_is_enforced_inside_a_file_read() {
+    let repo = tmp();
+    init_repo(&repo);
+    // Several chunks, so the loop's own check has to fire; and a one-chunk file, so the check before accepting does.
+    std::fs::write(repo.join("big.txt"), "x\n".repeat(200_000)).unwrap();
+    std::fs::write(repo.join("one.txt"), "a\nb\n").unwrap();
+    let root = root_of(&repo);
+    let passed = Instant::now();
+    let mut left = TOTAL_READ_CAP;
+    assert_eq!(count_new_file_at(&root, b"big.txt", &mut left, passed), None);
+    assert_eq!(count_new_file_at(&root, b"one.txt", &mut left, passed), None);
+    assert_eq!(left, TOTAL_READ_CAP, "nothing was read once the deadline had passed, or only what was read is charged");
+    assert_eq!(count_new_file_at(&root, b"one.txt", &mut left, far()), Some(2));
 }
 
 #[test]
