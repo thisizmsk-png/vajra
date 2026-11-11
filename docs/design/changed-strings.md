@@ -288,3 +288,20 @@ Worker diff count (PR 6c-0, ADR-16 16.10).
 | ≥ +N lines | worker pane header | a lower bound: some new files were not counted |
 | At least N lines added. U new files were not counted (too many or too large). | accessible label of the `≥` form | "1 new file was not counted" for one |
 | N lines added, M removed, in F files. | accessible label of the exact form | new |
+
+Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a missing or broken CLI shows the vendor's own commands and docs address as text.
+
+| String | Where | Note |
+|---|---|---|
+| Set up | panel title | |
+| Agent CLIs Vajra knows how to find. Install a missing one with its vendor's own steps, then sign in with the CLI itself. Vajra never handles the login. | panel lede | |
+| Looking for agent CLIs / Could not look for the agent CLIs. | loading and error | |
+| This build cannot read the setup check from the core. Update the desktop app. / The setup check answered something this build cannot read. | contract errors | |
+| Installed / Installed. Vajra can't run it as an agent yet. / Broken / Install it yourself | row state | the second is ADR-16 N5 |
+| It is on your PATH but did not report a version. Reinstall it with the vendor's steps. | broken row | Repair in step 1 is the vendor's steps |
+| Run one of these in a terminal. One-click install comes after a security review of each source. | install-it-yourself row | |
+| Homebrew / npm / Vendor script | command labels | |
+| "NAME install steps" | label of the vendor docs address | shown as text, not a link |
+| "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
+| "Sign in: NAME" | terminal tab label | never saved in the tab layout |
+| Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |

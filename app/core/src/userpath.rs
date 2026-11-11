@@ -1,4 +1,4 @@
-//! The user's PATH, resolved once at startup.
+//! The user's PATH, resolved at startup and again on `refresh` (ADR-17 rule 7).
 //!
 //! A macOS app started from Finder, the Dock or `open` gets the minimal GUI PATH (`/usr/bin:/bin:/usr/sbin:/sbin`),
 //! so `claude` and the tools a user installed with an installer, Homebrew or npm are not on it. `init` asks the
@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// How long the login shell gets before it is killed and the fallback is used.
@@ -28,18 +28,69 @@ const OUT_CAP: usize = 64 * 1024;
 /// The PATH the shell itself starts with, so `path_helper` and rc files that call system tools work.
 const BASE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-static CURRENT: OnceLock<Vec<PathBuf>> = OnceLock::new();
+static CURRENT: RwLock<Option<Vec<PathBuf>>> = RwLock::new(None);
 
-/// Resolve the user PATH once. Call from `main` before anything reads it; later calls keep the first answer.
-pub fn init(home: &Path) {
+/// The shortest time between two refreshes: each one runs the user's login shell.
+pub const REFRESH_GAP: Duration = Duration::from_secs(10);
+
+fn resolve(home: &Path) -> Vec<PathBuf> {
     let login = login_shell().and_then(|sh| detect(&sh, home, TIMEOUT));
-    let _ = CURRENT.set(effective(login, &process_path(), home));
+    effective(login, &process_path(), home)
+}
+
+fn set_current(dirs: Vec<PathBuf>) {
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(dirs);
+}
+
+/// Resolve the user PATH. Call from `main` before anything reads it.
+pub fn init(home: &Path) {
+    set_current(resolve(home));
+}
+
+/// One login-shell run at a time, and at most one per `REFRESH_GAP`.
+pub struct Refresh {
+    last: Mutex<Option<Instant>>,
+}
+
+impl Refresh {
+    pub const fn new() -> Self {
+        Self { last: Mutex::new(None) }
+    }
+
+    /// `resolve()`'s answer, or `None` when a refresh is already running or the last one started under a gap ago.
+    pub fn run(&self, now: Instant, resolve: impl FnOnce() -> Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+        let mut last = match self.last.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if last.is_some_and(|t| now.saturating_duration_since(t) < REFRESH_GAP) {
+            return None;
+        }
+        *last = Some(now);
+        Some(resolve())
+    }
+}
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static REFRESH: Refresh = Refresh::new();
+
+/// Resolve the user PATH again (ADR-17 rule 7), so a folder an install created after the app started is found without
+/// a restart. Only the UI asks for it (Settings > Providers > Set up); it is single-flight and runs at most once per
+/// `REFRESH_GAP`. The bridge's fixed PATH (`bridge::BASE_PATH`) never depends on it. `true` when it ran.
+pub fn refresh(home: &Path) -> bool {
+    REFRESH.run(Instant::now(), || resolve(home)).map(set_current).is_some()
 }
 
 /// The resolved dirs. Before `init` (unit tests, `--mcp`) this is the process PATH plus the install dirs; no shell
 /// is ever started here.
 pub fn current() -> Vec<PathBuf> {
-    match CURRENT.get() {
+    match CURRENT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
         Some(d) => d.clone(),
         None => {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -416,5 +467,62 @@ mod tests {
     #[test]
     fn the_script_is_constant_and_quotes_path() {
         assert!(SCRIPT.contains("${PATH}") && !SCRIPT.contains('`') && !SCRIPT.contains("$("));
+    }
+
+    #[test]
+    fn a_folder_created_after_the_first_resolve_is_found_by_a_refresh() {
+        let home = tmp("refresh");
+        let before = effective(None, &[], &home);
+        assert!(!before.contains(&home.join(".local/bin")));
+        // An install creates the folder after the app started.
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let gate = Refresh::new();
+        let after = gate.run(Instant::now(), || effective(None, &[], &home)).expect("the first refresh runs");
+        assert!(after.contains(&home.join(".local/bin")), "{after:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_refresh_runs_at_most_once_per_gap() {
+        let gate = Refresh::new();
+        let t0 = Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let resolve = || {
+            calls.set(calls.get() + 1);
+            vec![PathBuf::from("/usr/bin")]
+        };
+        assert!(gate.run(t0, resolve).is_some());
+        assert!(gate.run(t0 + Duration::from_secs(3), resolve).is_none(), "too soon");
+        assert!(gate.run(t0 + REFRESH_GAP, resolve).is_some());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn a_refresh_while_one_is_running_does_not_start_another() {
+        let gate = std::sync::Arc::new(Refresh::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let g = gate.clone();
+        let h = std::thread::spawn(move || {
+            g.run(Instant::now(), || {
+                tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                vec![]
+            })
+        });
+        rx.recv().unwrap();
+        let called = std::cell::Cell::new(false);
+        assert!(gate.run(Instant::now() + REFRESH_GAP * 2, || { called.set(true); vec![] }).is_none());
+        assert!(!called.get(), "a second login shell never starts while one runs");
+        go_tx.send(()).unwrap();
+        assert!(h.join().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_refresh_never_moves_the_fixed_bridge_path() {
+        // The bridge PATH is a constant, not derived from the user PATH, so no refresh can move it.
+        let gate = Refresh::new();
+        assert!(gate.run(Instant::now(), || vec![PathBuf::from("/tmp/vajra-refresh-test/bin")]).is_some());
+        assert_eq!(crate::vajra::bridge::bridge_path(), std::ffi::OsString::from(crate::vajra::bridge::BASE_PATH.join(":")));
     }
 }

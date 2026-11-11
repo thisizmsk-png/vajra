@@ -748,6 +748,11 @@ impl App {
     /// installed but not runnable yet, broken, or the vendor's own install steps) and the engine-scripts row. Read-only:
     /// it runs `--version` only, installs nothing, and stores no output.
     pub fn setup_list(&self) -> Res {
+        // A folder created since the app started (a new Homebrew or npm bin) is found without a restart. Rate limited and
+        // single-flight in `userpath`; a test that pins `provider_dirs` never runs a login shell.
+        if self.provider_dirs.is_none() {
+            crate::userpath::refresh(&self.home);
+        }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
         serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
     }
