@@ -522,14 +522,15 @@ type PauseCount = (usize, Vec<String>);
 const RESTOP_MS: u64 = 3;
 
 /// The live session ids on the repo with this common dir.
-pub type SessionsOnRepo = Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>;
+pub type SessionsOnRepo = Arc<dyn Fn(&Path) -> Vec<String> + Send + Sync>;
 
 /// The production `Quiesce`: `on_repo` names the live session ids on a repo (common dir), and the supervisor stops
 /// their process groups.
 ///
 /// Pauses are counted per repo (#146 review): two core calls on one repo can overlap (two tickets' snapshots, or a
 /// snapshot and a `merge_deps`), and the sessions must stay stopped until the last of them ends. The first pause on a
-/// repo stops its sessions; each later one also stops any session started since; only the last drop resumes them all.
+/// repo stops its sessions; while any pause is held, sessions started on the repo are stopped too; only the last drop
+/// resumes them all.
 pub struct SessionQuiesce {
     sup: Arc<crate::sessions::Supervisor>,
     on_repo: SessionsOnRepo,
@@ -538,8 +539,8 @@ pub struct SessionQuiesce {
 }
 
 impl SessionQuiesce {
-    pub fn new(sup: Arc<crate::sessions::Supervisor>, on_repo: SessionsOnRepo) -> SessionQuiesce {
-        SessionQuiesce { sup, on_repo, held: Arc::default() }
+    pub fn new(sup: Arc<crate::sessions::Supervisor>, on_repo: impl Fn(&Path) -> Vec<String> + Send + Sync + 'static) -> SessionQuiesce {
+        SessionQuiesce { sup, on_repo: Arc::new(on_repo), held: Arc::default() }
     }
 }
 
@@ -549,42 +550,64 @@ impl std::fmt::Debug for SessionQuiesce {
     }
 }
 
+/// Stop every live session `on_repo` names for `key` that isn't stopped yet, while the repo still has a held pause.
+/// `on_repo` runs outside the `held` lock.
+fn stop_new(sup: &crate::sessions::Supervisor, on_repo: &SessionsOnRepo, held: &Mutex<HashMap<PathBuf, PauseCount>>, key: &Path) -> bool {
+    let ids = on_repo(key);
+    let mut m = crate::lock(held);
+    let Some((_, stopped)) = m.get_mut(key) else { return false };
+    let new: Vec<String> = ids.into_iter().filter(|id| !stopped.contains(id)).collect();
+    stopped.extend(sup.pause(&new));
+    true
+}
+
 impl Quiesce for SessionQuiesce {
     fn pause(&self, common: &Path) -> Pause {
         let key = common.to_path_buf();
         let first = {
             let mut m = crate::lock(&self.held);
-            let (n, stopped) = m.entry(key.clone()).or_default();
+            let (n, _) = m.entry(key.clone()).or_default();
             *n += 1;
-            let new: Vec<String> = (self.on_repo)(common).into_iter().filter(|id| !stopped.contains(id)).collect();
-            stopped.extend(self.sup.pause(&new));
             *n == 1
         };
-        if first {
-            // While the repo is paused, stop its sessions again every few ms: a member that exits while its group is
-            // stopped makes the kernel continue the (orphaned) group. Re-stopping happens under the same lock as the
-            // last drop's resume, so nothing is stopped after it.
+        // The guard owns the increment before anything below can panic (`on_repo`, a thread spawn): an unwind drops it,
+        // so the count never leaks and no session stays stopped for the life of the app (#146 bhishma delta).
+        let guard = {
             let (sup, held, key) = (self.sup.clone(), self.held.clone(), key.clone());
-            std::thread::spawn(move || loop {
+            Pause::new(move || {
+                let mut m = crate::lock(&held);
+                let last = m.get_mut(&key).map(|(n, _)| {
+                    *n -= 1;
+                    *n == 0
+                });
+                if last == Some(true) {
+                    if let Some((_, stopped)) = m.remove(&key) {
+                        sup.resume(&stopped);
+                    }
+                }
+            })
+        };
+        stop_new(&self.sup, &self.on_repo, &self.held, &key);
+        if first {
+            // While the repo is paused, every few ms: stop any session started on it since (a single long pause still
+            // catches it), and stop the stopped ones again, since a group the kernel continued (an exit that leaves it
+            // newly orphaned while stopped) must not run on. Both run under the `held` lock the last drop's resume
+            // takes, so nothing is stopped after the resume.
+            let (sup, held, on_repo) = (self.sup.clone(), self.held.clone(), self.on_repo.clone());
+            let spawned = std::thread::Builder::new().name("vajra-gitw-restop".into()).spawn(move || loop {
                 std::thread::sleep(Duration::from_millis(RESTOP_MS));
+                if !stop_new(&sup, &on_repo, &held, &key) {
+                    break;
+                }
                 let m = crate::lock(&held);
                 let Some((_, stopped)) = m.get(&key) else { break };
                 sup.restop(stopped);
             });
+            // No thread (the system refused one): the sessions stopped above stay stopped for this pause, just without
+            // the re-stop. Never a panic with the count held.
+            drop(spawned);
         }
-        let (sup, held) = (self.sup.clone(), self.held.clone());
-        Pause::new(move || {
-            let mut m = crate::lock(&held);
-            let last = m.get_mut(&key).map(|(n, _)| {
-                *n -= 1;
-                *n == 0
-            });
-            if last == Some(true) {
-                if let Some((_, stopped)) = m.remove(&key) {
-                    sup.resume(&stopped);
-                }
-            }
-        })
+        guard
     }
 }
 

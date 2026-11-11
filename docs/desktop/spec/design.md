@@ -1539,8 +1539,10 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
     - a `setsid` daemon, which has left its session's group;
     - a process left behind by a worker whose session has exited;
     - a Claude worker on another repo, which isn't paused because its session isn't on this repo.
-  - A session's group is an orphaned process group (POSIX). When one of its members exits while the group is stopped, the kernel continues it. While any pause is held, the core stops the repo's sessions again every 3 ms, so such a window lasts a few milliseconds at most.
+  - When an exit leaves a session's group newly orphaned while it is stopped, the kernel sends the group SIGHUP and SIGCONT (POSIX). In practice that exit is a helper in another process group of the same session, which is already in the unstopped class above.
+  - While any pause is held, the core stops the repo's sessions again every 3 ms, so such a window usually lasts a few milliseconds. It can be longer while another repo's pause is stopping a new session, which takes up to 200 ms under the same lock.
   - Overlapping core calls on one repo share one pause, counted per repo. The sessions resume only when the last call ends.
+  - A session that starts on the repo while a pause is held is stopped within one re-stop tick.
   - Mitigations:
     - the guard write-protects the data dir (#148);
     - the tamper and repo-baseline checks run right before each git call, and again after `add`.

@@ -750,7 +750,7 @@ fn other_live_sessions_on_the_repo_are_stopped_during_content_calls() {
     let script = format!("while :; do echo x >> '{}'; sleep 0.02; done", ticks.display());
     let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), codex_home: None };
     sup.spawn("w-live", spec).unwrap();
-    let q = SessionQuiesce::new(sup.clone(), Box::new(|_| vec!["w-live".to_string(), "w-gone".to_string()]));
+    let q = SessionQuiesce::new(sup.clone(), |_| vec!["w-live".to_string(), "w-gone".to_string()]);
     let f = fx_q("quiesce-fx", "[user]\n\tname = U\n\temail = u@e\n", &[], Arc::new(q));
     let size = || std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
     let grows = || {
@@ -952,7 +952,7 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
     let a = ticker("w-a");
     let live = Arc::new(Mutex::new(vec!["w-a".to_string()]));
     let l2 = live.clone();
-    let q = SessionQuiesce::new(sup.clone(), Box::new(move |c| if c == Path::new("/repo-one") { crate::lock(&l2).clone() } else { vec!["w-other".to_string()] }));
+    let q = SessionQuiesce::new(sup.clone(), move |c| if c == Path::new("/repo-one") { crate::lock(&l2).clone() } else { vec!["w-other".to_string()] });
     let other = ticker("w-other");
     assert!(grows(&a) && grows(&other), "both run before");
     let p1 = q.pause(Path::new("/repo-one"));
@@ -967,13 +967,41 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
     assert!(!grows(&a) && !grows(&b), "the first drop resumes nothing while the second call runs");
     drop(p2);
     assert!(grows(&a) && grows(&b), "the last drop resumes both");
+    // A session that starts during a single held pause is stopped too, with no second pause (#146 bhishma delta).
+    let p = q.pause(Path::new("/repo-one"));
+    let c = ticker("w-c");
+    assert!(grows(&c), "it runs until the repo's session list names it");
+    crate::lock(&live).push("w-c".into());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!grows(&c), "stopped while the single pause is held");
+    drop(p);
+    assert!(grows(&c), "resumed by its drop");
     // A fresh pause after both ended stops them again, and its drop resumes them.
     let p3 = q.pause(Path::new("/repo-one"));
     assert!(!grows(&a));
     drop(p3);
     assert!(grows(&a));
-    for id in ["w-a", "w-b", "w-other"] {
+    for id in ["w-a", "w-b", "w-c", "w-other"] {
         sup.kill(id).unwrap();
     }
 }
 
+
+/// #146 bhishma delta: a pause whose `on_repo` panics leaves no count behind, so the repo's sessions are never left
+/// stopped and a later pause still resumes them.
+#[test]
+fn a_pause_that_panics_part_way_leaves_no_count() {
+    use crate::bus::{Bus, Config};
+    let d = tmpdir("panicpause");
+    let bus = Arc::new(Bus::open(&d.join("spill"), Config::default()).unwrap());
+    let sup = Arc::new(crate::sessions::Supervisor::new(bus, None));
+    let boom = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let b2 = boom.clone();
+    let q = SessionQuiesce::new(sup, move |_| if b2.load(Ordering::SeqCst) { panic!("on_repo failed") } else { Vec::new() });
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.pause(Path::new("/repo-p"))));
+    assert!(r.is_err());
+    assert!(crate::lock(&q.held).is_empty(), "the unwind dropped the guard and its count");
+    boom.store(false, Ordering::SeqCst);
+    drop(q.pause(Path::new("/repo-p")));
+    assert!(crate::lock(&q.held).is_empty());
+}
