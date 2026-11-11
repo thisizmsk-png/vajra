@@ -679,3 +679,37 @@ fn a_terminal_running_something_is_busy_and_an_idle_or_ended_one_is_not() {
     t.close(info.id).unwrap();
     assert!(!t.is_busy(info.id), "a closed terminal is not busy");
 }
+
+#[test]
+fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_terminal_env() {
+    use crate::providers::detect::{Out, Probe};
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("signin");
+    let bin = f.dir.join("claude");
+    std::fs::write(&bin, "#!/bin/sh\necho \"ARGS=[$*] PWD=$(pwd) CH=[$CODEX_HOME] CC=[$CLAUDE_CONFIG_DIR] S=[$VAJRA_SIGNIN_SECRET] SIGNIN$((40+2))\"\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    struct At(PathBuf);
+    impl Probe for At {
+        fn find(&self, n: &str) -> Option<PathBuf> {
+            (n == "claude").then(|| self.0.clone())
+        }
+        fn run(&self, _: &Path, _: &[&str]) -> Option<Out> {
+            Some(Out { code: Some(0), stdout: "2.1.322 (Claude Code)".into(), stderr: String::new() })
+        }
+        fn env(&self, _: &str) -> Option<OsString> {
+            None
+        }
+    }
+    // SAFETY: a unique name no other test reads.
+    unsafe { std::env::set_var("VAJRA_SIGNIN_SECRET", "leakme") };
+    let cmd = crate::providers::setup::sign_in("claude", &At(bin)).unwrap();
+    let t = f.terminals();
+    let (s, out) = sink();
+    let info = t.open_sign_in(&cmd, 24, 80, s).unwrap();
+    assert_eq!(info.cwd, cmd.cwd());
+    let seen = out.until("SIGNIN42", 5);
+    assert!(seen.contains("ARGS=[auth login]"), "{seen}");
+    assert!(seen.contains(&format!("PWD={}", cmd.cwd().display())), "{seen}");
+    assert!(seen.contains("CH=[] CC=[] S=[]"), "no Vajra CLI home and nothing secret: {seen}");
+    t.shutdown();
+}

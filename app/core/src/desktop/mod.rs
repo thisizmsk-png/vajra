@@ -744,6 +744,20 @@ impl App {
         Ok(v)
     }
 
+    /// `setup_list` (`vajra.harness_setup/1`): Settings > Providers > Set up. Each catalog harness's state (installed,
+    /// installed but not runnable yet, broken, or the vendor's own install steps) and the engine-scripts row. Read-only:
+    /// it runs `--version` only, installs nothing, and stores no output.
+    pub fn setup_list(&self) -> Res {
+        let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
+        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+    }
+
+    /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
+    /// version. Vajra never sees the token.
+    pub fn setup_sign_in_command(&self, id: &str) -> Result<crate::providers::setup::SignInCommand, Value> {
+        crate::providers::setup::sign_in(id, &self.provider_probe()).map_err(|e| fail(e.code(), e))
+    }
+
     /// `provider_accounts` (`vajra.provider_accounts/1`): one record per way of running agents, each CLI under its own
     /// login, with the billing the CLI reports and a warning when its own config holds an API key setting that would
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.

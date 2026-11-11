@@ -120,7 +120,7 @@ const METAS: [Meta; 2] = [
 ];
 
 /// The first `x.y` or `x.y.z` token in a `--version` line ("2.1.296 (Claude Code)", "codex-cli 0.166.0").
-fn version_of(text: &str) -> Option<(String, (u32, u32))> {
+pub(crate) fn version_of(text: &str) -> Option<(String, (u32, u32))> {
     for tok in text.split_whitespace() {
         let parts: Vec<&str> = tok.split('.').collect();
         if parts.len() >= 2 && parts.len() <= 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit())) {
