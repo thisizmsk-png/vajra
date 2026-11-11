@@ -99,4 +99,32 @@ describe("sign-in tab", () => {
       off();
     }
   });
+
+  it("after a webview reload, a live sign-in comes back as a sign-in tab: never saved, still reports its end, Restart signs in again", async () => {
+    const ended: string[] = [];
+    const off = onSignInEnded((id) => ended.push(id));
+    try {
+      const live = [
+        { id: 3, cwd: "/work/app", root: "/work/app", rows: 24, cols: 80, alive: true },
+        { ...signInInfo, id: 9, sign_in: { id: "codex", name: "Codex CLI" } },
+      ];
+      const f = fakeTerm({ term_list: { terminals: live }, setup_sign_in: () => signInInfo });
+      setTransport(f.transport);
+      render(<TerminalDock defaultPlace={APP} />);
+      expect(await screen.findByRole("tab", { name: "Sign in: Codex CLI", hidden: true })).toBeTruthy();
+      act(() => void fireEvent.keyDown(window, { key: "`", code: "Backquote", ctrlKey: true }));
+      await waitFor(() => expect(f.named("term_attach").map((c) => c.args?.id).sort()).toEqual([3, 9]));
+      const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null");
+      expect(saved.tabs).toEqual([{ cwd: "/work/app", label: "app", kind: "shell" }]);
+      const stream = f.streams.find((s) => s.cmd === "term_attach" && s.id === 9)!;
+      act(() => stream.send({ exit: 0 }));
+      expect(ended).toEqual(["codex"]);
+      fireEvent.click(await screen.findByRole("tab", { name: S.terminal.endedTab("Sign in: Codex CLI") }));
+      fireEvent.click(await screen.findByRole("button", { name: S.terminal.restart }));
+      await waitFor(() => expect(f.named("setup_sign_in").map((c) => c.args?.id)).toEqual(["codex"]));
+      expect(f.named("term_open").length).toBe(0);
+    } finally {
+      off();
+    }
+  });
 });

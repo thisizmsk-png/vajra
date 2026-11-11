@@ -152,12 +152,22 @@ impl std::fmt::Display for SetupError {
 /// nothing else.
 #[derive(Debug)]
 pub struct SignInCommand {
+    id: String,
+    name: String,
     program: PathBuf,
     args: Vec<String>,
     cwd: PathBuf,
 }
 
 impl SignInCommand {
+    /// The catalog harness id.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// The harness's display name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     pub fn program(&self) -> &Path {
         &self.program
     }
@@ -195,7 +205,7 @@ pub fn sign_in(id: &str, p: &dyn Probe) -> Result<SignInCommand, SetupError> {
     if !path.is_absolute() || !real.is_file() {
         return Err(SetupError::NotInstalled);
     }
-    Ok(SignInCommand { program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
+    Ok(SignInCommand { id: h.id.clone(), name: h.name.clone(), program: path, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
 }
 
 #[cfg(test)]

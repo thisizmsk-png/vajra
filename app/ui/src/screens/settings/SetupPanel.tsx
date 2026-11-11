@@ -15,10 +15,12 @@ const C = S.setup;
 
 
 /** The Set up list. Asking for it also re-resolves the user PATH in the core (ADR-17 rule 7), so a page recheck awaits
- * `reload` before the checks that read the PATH. The returned promise never rejects. */
+ * `reload` before the checks that read the PATH. The returned promise never rejects. `settled` turns true once the first
+ * answer (or error) since `on` arrives, so the page can hold its PATH-dependent reads until then. */
 export function useSetup(on = true) {
   const seq = useRef(0);
   const [s, setS] = useState<{ list: SetupList | null; error: string }>({ list: null, error: "" });
+  const [settled, setSettled] = useState(false);
   const reload = useCallback((): Promise<void> => {
     const mine = ++seq.current;
     setS((x) => ({ ...x, error: "" }));
@@ -26,15 +28,19 @@ export function useSetup(on = true) {
       if (mine !== seq.current) return;
       const r = parseSetupList(v);
       setS(r.ok ? { list: r.value, error: "" } : { list: null, error: r.reason === "unsupported_version" ? C.updateNeeded : C.unreadable });
+      setSettled(true);
     }, (e) => {
-      if (mine === seq.current) setS({ list: null, error: problemDetail(e) });
+      if (mine !== seq.current) return;
+      setS({ list: null, error: problemDetail(e) });
+      setSettled(true);
     });
   }, []);
   useEffect(() => {
     if (on) reload();
+    else setSettled(false);
     return () => { ++seq.current; };
   }, [on, reload]);
-  return { ...s, reload };
+  return { ...s, settled, reload };
 }
 
 function Steps({ row }: { row: SetupRow }) {

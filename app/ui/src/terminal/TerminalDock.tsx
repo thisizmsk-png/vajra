@@ -135,7 +135,14 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         const next = tabsRef.current.map((t) => ({ ...t }));
         let first: number | null = null;
         for (const i of r.terminals) {
-          // The core does not know kinds: prefer the plain shell tab, so a returning shell never lands on an agent tab.
+          // A live sign-in comes back as a sign-in tab (never saved, still reports its end), not a shell in its private folder.
+          const si = i.sign_in;
+          if (si && typeof si.id === "string" && typeof si.name === "string" && si.id) {
+            next.push({ key: ++seq, cwd: i.cwd, label: S.setup.signInTab(si.name.slice(0, 200)), kind: "sign_in", signIn: si.id, live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
+            first ??= next[next.length - 1].key;
+            continue;
+          }
+          // The core knows no kinds beyond sign-in: prefer the plain shell tab, so a returning shell never lands on an agent tab.
           const t = next.find((n) => !n.live && n.cwd === i.cwd && n.kind === "shell") ?? next.find((n) => !n.live && n.cwd === i.cwd);
           if (t) Object.assign(t, { live: true, attachId: i.id });
           else next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });

@@ -44,6 +44,7 @@ fn resize_reaches_the_shell_and_is_listed() {
     t.write(info.id, b"stty size\n").unwrap();
     assert!(out.until("40 132", 5).contains("40 132"));
     assert_eq!((t.list()[0].rows, t.list()[0].cols), (40, 132));
+    assert_eq!(t.list()[0].sign_in, None, "a plain shell is not a sign-in");
     assert_eq!(t.resize(info.id, 0, 10), Err(TermError::InvalidSize));
     assert_eq!(t.resize(999, 10, 10), Err(TermError::NotFound));
 }
@@ -707,6 +708,10 @@ fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_term
     let (s, out) = sink();
     let info = t.open_sign_in(&cmd, 24, 80, s).unwrap();
     assert_eq!(info.cwd, cmd.cwd());
+    // The terminal remembers which harness it signs in, so a reloaded webview rebuilds a sign-in tab, not a shell tab.
+    let tag = Some(SignInTag { id: "claude".into(), name: "Claude Code".into() });
+    assert_eq!(info.sign_in, tag);
+    assert_eq!(t.list().iter().find(|i| i.id == info.id).map(|i| i.sign_in.clone()), Some(tag));
     let seen = out.until("SIGNIN42", 5);
     assert!(seen.contains("ARGS=[auth login]"), "{seen}");
     assert!(seen.contains(&format!("PWD={}", cmd.cwd().display())), "{seen}");

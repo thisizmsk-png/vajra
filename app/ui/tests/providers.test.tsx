@@ -173,6 +173,22 @@ describe("Settings > Providers > Set up recheck (ADR-17 rule 7)", () => {
     expect(screen.queryByText(S.setup.state.manual)).toBeNull();
   });
 
+  it("on entering Providers, waits for Set up (the PATH refresh) before the checks, so a CLI in a new bin folder is found by all of them", async () => {
+    let refreshed = false;
+    let answer!: (v: unknown) => void;
+    const f = settings({
+      setup_list: () => new Promise((r) => { answer = (v) => { refreshed = true; r(v); }; }),
+      provider_list: () => (refreshed ? LIST : codexMissing()),
+      preflight: () => (refreshed ? preflight : { rows: [{ name: "codex", ok: false, detail: "", fix: "" }], start_enabled: false }),
+    });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "setup_list")).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(f.calls.filter((c) => ["provider_list", "preflight", "provider_accounts"].includes(c.cmd))).toEqual([]);
+    await act(async () => answer(setupList(true)));
+    expect(await screen.findByText("0.9.0")).toBeTruthy(); // the agent card's Codex version: found on the refreshed PATH
+    expect(screen.queryByText(C.loginState.not_installed)).toBeNull();
+  });
+
   it("refreshes the PATH (setup_list) before the checks that depend on it", async () => {
     const f = settings({ setup_list: () => setupList(false) });
     await screen.findByText(S.setup.state.manual);

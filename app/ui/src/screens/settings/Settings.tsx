@@ -56,10 +56,12 @@ export function Settings() {
   const { project } = useCurrentProject();
   const section: Section = isSection(route.params.section) ? route.params.section : "providers";
   const meta = S.settings.sections[section];
-  const providers = useProviders(section === "providers");
-  const accounts = useAccounts(section === "providers");
+  // Set up answers first: asking for it re-resolves the user PATH, so the reads below wait for it on entry too.
   const setup = useSetup(section === "providers");
-  const checks = useChecks(section === "providers", () => recheck());
+  const ready = section === "providers" && setup.settled;
+  const providers = useProviders(ready);
+  const accounts = useAccounts(ready);
+  const checks = useChecks(ready, () => recheck());
   // Set up first: asking for it re-resolves the user PATH, so a CLI installed into a new bin folder is found by the checks after it.
   const recheck = () => { void setup.reload().then(() => { checks.run(); providers.reload(); accounts.reload(); }); };
   // A finished sign-in changes what detection reports, so detect again without waiting for Check again (ADR-17 rule 6).
