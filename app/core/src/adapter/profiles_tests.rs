@@ -218,6 +218,11 @@ fn a_flag_file_changed_before_the_spawn_refuses_the_launch() {
     assert!(verify_claude_worker_flag(&f).is_err(), "a link to the same bytes");
     std::fs::remove_file(&f.path).unwrap();
     assert!(verify_claude_worker_flag(&f).is_err(), "deleted");
+    // Session end removes the launch's file, and a missing file is fine.
+    let f = write_claude_worker_flag(&data, "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6", &s).unwrap();
+    remove_claude_worker_flag(&f).unwrap();
+    assert!(!f.path.exists());
+    remove_claude_worker_flag(&f).unwrap();
 }
 
 /// A temp HOME with a sentinel "key" in the app's environment and hostile user settings for both harnesses: the
@@ -259,9 +264,8 @@ fn walk(d: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn profiles_refuse_what_is_not_proven() {
-    assert!(profile(Engine::Codex, RoleKind::Worker).supported.is_ok());
-    assert!(profile(Engine::Codex, RoleKind::Verifier).supported.is_ok());
     assert!(profile(Engine::Codex, RoleKind::Worker).supported.is_ok(), "S1 and S3 passed for Codex");
+    assert!(profile(Engine::Codex, RoleKind::Verifier).supported.is_ok());
     for e in [Engine::Codex, Engine::Claude] {
         assert!(profile(e, RoleKind::Lead).supported.is_err());
         assert!(profile(e, RoleKind::DirectorGeneral).supported.is_err());

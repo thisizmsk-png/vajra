@@ -440,8 +440,18 @@ pub fn write_claude_worker_flag(data: &Path, session_id: &str, contents: &str) -
     Ok(FlagFile { path, sha: crate::control::sha256::hex_digest(contents.as_bytes()) })
 }
 
+/// When the launch's session ends: remove its flag file. A file already gone is fine.
+pub fn remove_claude_worker_flag(f: &FlagFile) -> std::io::Result<()> {
+    match std::fs::remove_file(&f.path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Just before the spawn: the flag file still holds exactly the bytes the core wrote, read without following a link.
-/// Anything else refuses the launch with `profile_not_applied`.
+/// Anything else refuses the launch with `profile_not_applied`. This closes the core's own window only: Claude Code
+/// reads the file after the spawn, and what keeps a worker from rewriting it then is the guard's write protection of the
+/// data dir.
 pub fn verify_claude_worker_flag(f: &FlagFile) -> Result<(), NotApplied> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
