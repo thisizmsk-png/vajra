@@ -469,8 +469,11 @@ fn controls_follow_the_harness_profile() {
     assert_eq!((j["message"]["enabled"].as_bool(), j["redirect"]["reason"].as_str()), (Some(false), Some("This worker can't take a message mid-run.")));
     assert_eq!(j["stop"]["note"], "Stop ends this worker at once; its uncommitted work stays in its worktree.");
     let claude = controls(Engine::Claude);
-    // Off until the control hook serves top-level sessions (the engine change): never queued and silently lost.
-    assert_eq!((claude.message, claude.stop), (Some(MESSAGE_NEEDS_UPDATE), StopHow::GroupKill));
+    // On: the installed control hook serves a top-level session keyed by its session id (#148/#150).
+    assert_eq!((claude.message, claude.stop), (None, StopHow::GroupKill));
     let j = claude.to_json();
-    assert_eq!((j["message"]["enabled"].as_bool(), j["message"]["reason"].as_str()), (Some(false), Some("Messages to this worker need a Vajra update that isn't installed yet.")));
+    assert_eq!((j["message"]["enabled"].as_bool(), j["redirect"]["enabled"].as_bool()), (Some(true), Some(true)));
+    let s = steer_brief("0123456789abcdef0123456789abcdef");
+    assert!(s.contains("<vajra-steer nonce=\"0123456789abcdef0123456789abcdef\""), "{s}");
+    assert!(s.contains("never write the nonce"), "{s}");
 }

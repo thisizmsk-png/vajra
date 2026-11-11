@@ -86,8 +86,9 @@ pub const CORE_PREFIX: &str = "core:";
 pub trait CoreWorkers: Send + Sync {
     /// The ticket's run and round while it can still be stopped: `WorkerNotFound`, or `WorkerFinished` once it ended.
     fn live(&self, ticket: &str) -> Result<(String, u32)>;
-    /// Why Message and Redirect are off for the ticket's harness. No harness offers them to a core worker yet.
-    fn message_off(&self, ticket: &str) -> &'static str;
+    /// Where a Message or Redirect for the ticket goes: its harness session id, keyed by which the control hook delivers
+    /// to a top-level session (Claude, design 16.7). Otherwise why its harness takes none (Codex), or none yet.
+    fn message_to(&self, ticket: &str) -> std::result::Result<String, &'static str>;
     /// The profile's stop.
     fn stop(&self, ticket: &str);
 }

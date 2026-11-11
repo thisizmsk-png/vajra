@@ -491,6 +491,13 @@ impl App {
                 std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
             })),
         };
+        // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
+        let steer_control = self.control.clone();
+        let cfg = move || {
+            let mut c = cfg();
+            c.steer.get_or_insert_with(|| Arc::new(move |sid: &str| lock(&steer_control).open_core_session(sid).ok()));
+            c
+        };
         self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
     }
 

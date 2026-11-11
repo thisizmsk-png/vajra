@@ -660,6 +660,7 @@ fn queued_runtime<'a>(t: &Tmp, app: &'a App) -> &'a crate::desktop::workers::Wor
         poll: Duration::from_millis(20),
         clock: None,
         redact: Redactor::default(),
+        steer: None,
         claude_unverified_ok: false,
     })
     .unwrap()
@@ -714,7 +715,8 @@ fn a_core_worker_takes_no_message_with_its_profiles_reason_and_stops_through_a_g
     let m = app.control_message(&format!("core:{codex}"), "hi").unwrap_err();
     assert_eq!((m["error"].as_str(), m["detail"].as_str()), (Some("not_supported_by_harness"), Some("This worker can't take a message mid-run.")));
     let r = app.control_redirect(&format!("core:{claude}"), "do x").unwrap_err();
-    assert_eq!((r["error"].as_str(), r["detail"].as_str()), (Some("not_supported_by_harness"), Some("Messages to this worker need a Vajra update that isn't installed yet.")));
+    // A queued Claude worker has no session yet, so nothing is queued that no session would take.
+    assert_eq!((r["error"].as_str(), r["detail"].as_str()), (Some("not_supported_by_harness"), Some("This worker hasn't started yet. Message it once it's running.")));
 
     let stale = app.act_stop_worker(&env("stop-core-0001", Some(2)), &format!("core:{codex}"), None);
     assert_eq!((state_of(&stale), stale["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")), "{stale}");

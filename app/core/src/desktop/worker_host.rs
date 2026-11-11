@@ -147,9 +147,13 @@ impl CoreWorkers for WorkerHost {
         Ok((v.run, v.round))
     }
 
-    fn message_off(&self, ticket: &str) -> &'static str {
-        let engine = self.rt.get().and_then(|rt| rt.view(ticket)).and_then(|v| launch::harness_of(&v.account));
-        engine.and_then(|e| profiles::controls(e).message).unwrap_or(profiles::NO_MESSAGE)
+    fn message_to(&self, ticket: &str) -> Result<String, &'static str> {
+        let v = self.rt.get().and_then(|rt| rt.view(ticket)).ok_or(profiles::NO_MESSAGE)?;
+        let engine = launch::harness_of(&v.account).ok_or(profiles::NO_MESSAGE)?;
+        if let Some(why) = profiles::controls(engine).message {
+            return Err(why);
+        }
+        v.harness_session.ok_or(profiles::NOT_STARTED)
     }
 
     fn stop(&self, ticket: &str) {

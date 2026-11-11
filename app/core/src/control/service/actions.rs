@@ -78,8 +78,7 @@ impl Service {
         }
         // A core worker's profile decides (16.7): nothing is queued that no channel would deliver.
         if let Some(t) = worker.strip_prefix(CORE_PREFIX) {
-            let c = self.core_ticket(t)?;
-            return Err(ControlError::NotSupportedByHarness(c.core.message_off(t)));
+            return self.enqueue_core(kind, actor, t, &text, expect);
         }
         let (sid, w) = self.resolve(worker)?;
         if let Some(want) = expect {
@@ -133,6 +132,42 @@ impl Service {
         // Record first, publish second: the hook delivers whatever is in the queue the moment it appears, and a
         // delivery cannot be taken back, so the ledger must already know the action. If it cannot record, nothing is
         // published; if publishing then fails, that is recorded too.
+        self.record(&a, State::Queued, extra, now)?;
+        if let Err(e) = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
+        }
+        self.pending.insert(a.id.clone(), a.clone());
+        self.log("control_queued", &[("seq", self.seq)]);
+        Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
+    }
+
+    /// Message or Redirect to `core:<ticket>` (16.7). Its profile decides: Codex has no channel. A Claude worker's
+    /// entry goes into its own control dir, matched exactly `{"session": <its session id>}`, the one match the control
+    /// hook serves to a top-level session. The action's `session_id` is that dir, so the ack watcher settles it there.
+    fn enqueue_core(&mut self, kind: Kind, actor: Actor, ticket: &str, text: &str, expect: Option<u64>) -> Result<Value> {
+        let c = self.core_ticket(ticket)?;
+        if expect.is_some_and(|want| want != u64::from(c.round)) {
+            return Err(ControlError::StaleGeneration(u64::from(c.round)));
+        }
+        let sid = c.core.message_to(ticket).map_err(ControlError::NotSupportedByHarness)?;
+        if !self.core_dirs.contains_key(&sid) {
+            return Err(ControlError::NotSupportedByHarness(crate::adapter::profiles::NOT_STARTED));
+        }
+        let now = SystemTime::now();
+        let mut a = self.new_action(kind, actor, None, now)?;
+        (a.session_id, a.run_id, a.worker) = (sid.clone(), c.run, format!("{CORE_PREFIX}{ticket}"));
+        let entry = json!({
+            "v": 1, "action_id": a.id, "kind": kind.as_str(),
+            "created": time::iso_secs(now), "expires": time::iso_secs(now + self.ttl),
+            "source": actor.source(), "match": {"session": sid}, "text": text,
+        });
+        let dir = SessionDir { root: self.control_root.join(&sid) }.dir("queue");
+        self.seq += 1;
+        let name = format!("{:06}-{}.json", self.seq, a.id);
+        a.state = State::Queued;
+        let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
+        // As for a hook worker: recorded first, published second.
         self.record(&a, State::Queued, extra, now)?;
         if let Err(e) = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes()) {
             let _ = self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now);
@@ -309,6 +344,11 @@ impl Service {
     pub fn core_ticket_ended(&mut self, ticket: &str) {
         let key = format!("{CORE_PREFIX}{ticket}");
         let now = SystemTime::now();
+        // Its undelivered messages expire too: no later session may take them.
+        let queued: Vec<String> = self.pending.values().filter(|a| a.worker == key && a.kind.queued_text() && a.state == State::Queued).map(|a| a.id.clone()).collect();
+        for id in queued {
+            self.expire(&id, now, "worker_finished");
+        }
         let asks: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.state == State::AwaitingHumanConfirm && a.worker == key).cloned().collect();
         for a in asks {
             if self.record(&a, State::Refused, json!({"reason": "worker_finished"}), now).is_ok() {

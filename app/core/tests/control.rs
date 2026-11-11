@@ -21,7 +21,7 @@ use vajra_desktop::control::ledger::Ledger;
 use vajra_desktop::control::mcp::{self, SocketClient};
 use vajra_desktop::control::nonce;
 use vajra_desktop::control::reconcile;
-use vajra_desktop::control::service::{Actor, ControlError, Service, WorkerInfo};
+use vajra_desktop::control::service::{Actor, ControlError, CoreWorkers, Service, WorkerInfo};
 use vajra_desktop::control::socket::{self, MAX_REQUEST};
 use vajra_desktop::crew::tree::{Status, Worker};
 use vajra_desktop::logging::Logger;
@@ -643,6 +643,88 @@ fn queue_entry_matches_hook() {
     s.resume_worker(Actor::Human, AID).unwrap();
     let r = run_hook(&hook, &h.home, &payload("PreToolUse", "Bash", AID, &h.wt("one")));
     assert_eq!(r.code, 0, "{}", r.stderr);
+}
+
+/// The runtime as the control service sees it: ticket `T1` is a running Claude core worker with session `CSID`.
+const CSID: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+struct FakeCore;
+
+impl CoreWorkers for FakeCore {
+    fn live(&self, ticket: &str) -> Result<(String, u32), ControlError> {
+        if ticket == "T1" || ticket == "T2" { Ok((RUN.into(), 1)) } else { Err(ControlError::WorkerNotFound) }
+    }
+    fn message_to(&self, ticket: &str) -> Result<String, &'static str> {
+        if ticket == "T1" { Ok(CSID.into()) } else { Err("This worker can't take a message mid-run.") }
+    }
+    fn stop(&self, _: &str) {}
+}
+
+/// #151 (16.7, after #148/#150): a Message and a Redirect to a Claude core worker land in its own control dir, matched
+/// `{"session": <its id>}`; the REAL hook delivers them to that top-level session with its nonce, never to the run's
+/// lead or another session, and the ack watcher records the delivery.
+#[test]
+fn a_claude_core_worker_takes_message_and_redirect_through_the_real_hook() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let hook = real_hook(&h.home.join("hooks"));
+    let top = |sid: &str, tool: &str| json!({"session_id": sid, "hook_event_name": "PostToolUse", "tool_name": tool, "cwd": h.wt("one"), "tool_input": {"command": "ls"}, "tool_response": {"stdout": "ok"}});
+
+    // Not opened yet (the worker never started): nothing is queued.
+    assert_eq!(s.message_worker(Actor::Human, "core:T1", "hi").unwrap_err().code(), "not_supported_by_harness");
+    assert_eq!(s.message_worker(Actor::Human, "core:T2", "hi").unwrap_err().code(), "not_supported_by_harness", "a Codex worker has no channel");
+    let nonce = s.open_core_session(CSID).unwrap();
+    let dir = h.data().join("control").join(CSID);
+    assert_eq!(mode(&dir), 0o700);
+
+    let m = s.message_worker(Actor::Human, "core:T1", "use the kit Button").unwrap();
+    let id = m["action_id"].as_str().unwrap().to_string();
+    let q: Vec<Value> = files_under(&dir.join("queue")).iter().map(|p| serde_json::from_slice(&fs::read(p).unwrap()).unwrap()).collect();
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0]["match"], json!({"session": CSID}), "{}", q[0]);
+    assert!(files_under(&h.session_dir().join("queue")).is_empty(), "nothing in the run's own dir");
+
+    // The run's lead session and a subagent of the worker's session never take it.
+    let lead = run_hook(&hook, &h.home, &top(SID, "Bash"));
+    assert!(!lead.stdout.contains("kit Button"), "{}", lead.stdout);
+    let sub = run_hook(&hook, &h.home, &payload_for(CSID, "PostToolUse", "Bash", AID, &h.wt("one")));
+    assert!(!sub.stdout.contains("kit Button"), "{}", sub.stdout);
+
+    // The worker's own next tool call takes it, inside a block with its nonce.
+    let r = run_hook(&hook, &h.home, &top(CSID, "Bash"));
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let out: Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    let ctx = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(ctx.contains(&format!("<vajra-steer nonce=\"{nonce}\" source=\"human\" kind=\"message\" id=\"{id}\">")), "{ctx}");
+    assert!(ctx.contains("use the kit Button"), "{ctx}");
+    s.tick();
+    let states: Vec<String> = h.ledger().iter().filter(|r| r["action_id"] == id.as_str()).map(|r| r["state"].as_str().unwrap().to_string()).collect();
+    assert_eq!(states, ["queued", "delivered"]);
+    let rec = h.ledger().into_iter().find(|r| r["action_id"] == id.as_str()).unwrap();
+    assert_eq!((rec["worker"].as_str(), rec["run_id"].as_str()), (Some("core:T1"), Some(RUN)), "{rec}");
+
+    let red = s.redirect_worker(Actor::Lead, "core:T1", "switch to plan B").unwrap();
+    let rid = red["action_id"].as_str().unwrap().to_string();
+    let r = run_hook(&hook, &h.home, &top(CSID, "Read"));
+    assert!(r.stdout.contains("Change of direction from the Lead: switch to plan B"), "{}", r.stdout);
+    s.tick();
+    assert_eq!(h.ledger().iter().rev().find(|r| r["action_id"] == rid.as_str()).unwrap()["state"], "delivered");
+
+    // A ticket that ends takes nothing more: what it didn't take expires.
+    let late = s.message_worker(Actor::Human, "core:T1", "too late").unwrap();
+    s.core_ticket_ended("T1");
+    let lid = late["action_id"].as_str().unwrap();
+    assert_eq!(h.ledger().iter().rev().find(|r| r["action_id"] == lid).unwrap()["state"], "not_delivered");
+    let r = run_hook(&hook, &h.home, &top(CSID, "Bash"));
+    assert!(!r.stdout.contains("too late"), "{}", r.stdout);
+}
+
+fn payload_for(sid: &str, event: &str, tool: &str, agent_id: &str, cwd: &str) -> Value {
+    let mut p = payload(event, tool, agent_id, cwd);
+    p["session_id"] = json!(sid);
+    p
 }
 
 // ---------------------------------------------------------------- ledger

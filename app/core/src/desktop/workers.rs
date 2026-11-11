@@ -72,6 +72,9 @@ pub struct Config {
     pub clock: Option<Arc<dyn Clock + Send + Sync>>,
     /// The nonce set: every nonce the app minted, replaced in summaries.
     pub redact: Redactor,
+    /// Opens a Claude worker's own control dir by its session id, before it starts, and returns its steering nonce
+    /// (the control service's `open_core_session`). `None`: the worker gets no steering channel.
+    pub steer: Option<Steer>,
     /// Tests only: run a Claude worker before spike S4 has passed.
     #[cfg(test)]
     pub claude_unverified_ok: bool,
@@ -85,6 +88,8 @@ pub struct Hooks {
 }
 
 pub type Hook = Box<dyn Fn(&TicketView) + Send + Sync>;
+/// See `Config::steer`.
+pub type Steer = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// One writer task to run.
 #[derive(Clone, Debug)]
@@ -703,7 +708,7 @@ impl WorkerRuntime {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         };
         let sid = format!("core-{seq}-a{n}");
-        let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: self.0.cfg.redact.clone(), extra_env: l.env.clone() };
+        let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: l.redact.clone(), extra_env: l.env.clone() };
         if let Some(f) = &l.flag {
             if profiles::verify_claude_worker_flag(f).is_err() {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
@@ -943,7 +948,14 @@ impl TicketView {
             (State::Ended, _) => (Status::Failed, None),
         };
         let controls = match launch::harness_of(&self.account) {
-            Some(e) => profiles::controls(e).to_json(),
+            Some(e) => {
+                let mut c = profiles::controls(e);
+                // Claude's channel is keyed by its session id: none until the ticket's session exists.
+                if c.message.is_none() && self.harness_session.is_none() {
+                    c.message = Some(profiles::NOT_STARTED);
+                }
+                c.to_json()
+            }
             None => json!({}),
         };
         let diff = self.commit.as_ref().map(|_| {
@@ -1083,6 +1095,8 @@ struct Launch {
     ticket_tmp: PathBuf,
     /// Where the Codex rollout file is read from.
     codex_home: PathBuf,
+    /// The app's nonce set, plus this worker's steering nonce: never shown in its output.
+    redact: Redactor,
 }
 
 impl Launch {
@@ -1103,14 +1117,30 @@ impl Launch {
 
     fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
         let (engine, kind) = Self::supported(cfg, job, seat)?;
-        let brief = match job {
+        // A Claude worker's own session id, chosen here: its control dir and the hook's delivery are keyed by it.
+        let claude_sid = match engine {
+            Engine::Claude => Some(crate::ids::uuid_v4().map_err(|_| "spawn_failed")?),
+            Engine::Codex => None,
+        };
+        // Only a task worker is steered, as in a workflow (a check is the independent gate). Its control dir exists
+        // before it starts, so the first tool call can already take a message.
+        let nonce = match (job, &claude_sid, &cfg.steer) {
+            (Job::Task(_), Some(sid), Some(open)) => open(sid),
+            _ => None,
+        };
+        let mut brief = match job {
             Job::Task(s) => format!("{}\n\n{LEAVE_CHANGES}", s.brief),
             Job::Check(_, s) => s.brief.clone(),
         };
+        let mut redact = cfg.redact.clone();
+        if let Some(n) = &nonce {
+            brief = format!("{brief}\n\n{}", profiles::steer_brief(n));
+            redact.add(Some(n));
+        }
         let wl = WorkerLaunch { kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp };
         let mut l = Launch {
             engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
-            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(),
+            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact,
         };
         match engine {
             Engine::Codex => {
@@ -1140,7 +1170,7 @@ impl Launch {
             }
             Engine::Claude => {
                 let tools = cfg.tools.list(&seat.role).ok_or("harness_unsupported")?.to_string();
-                let sid = crate::ids::uuid_v4().map_err(|_| "spawn_failed")?;
+                let sid = claude_sid.ok_or("spawn_failed")?;
                 let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };

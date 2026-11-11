@@ -95,7 +95,7 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> P
 MODE='{mode}'
 WT=$(pwd -P)
 case "$1" in
-  -p) echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
@@ -177,12 +177,13 @@ struct Opts {
     claude_ok: bool,
     hooks: Hooks,
     spoil: Option<&'static str>,
+    steer: Option<Steer>,
     gate: Option<Arc<Gate>>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None }
+        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None, steer: None }
     }
 }
 
@@ -236,6 +237,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
         poll: Duration::from_millis(20),
         clock: Some(clock.clone()),
         redact: o.redact,
+        steer: o.steer,
         claude_unverified_ok: o.claude_ok,
     };
     let rt = WorkerRuntime::new(cfg, gw.clone(), sup.clone(), bus, o.hooks);
@@ -665,6 +667,32 @@ fn a_claude_worker_is_refused_until_s4_and_runs_through_its_profile_when_allowed
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
 }
 
+/// A Claude task worker's steering channel is opened by its own session id before it starts, and its brief carries
+/// the nonce in the workflow's steering paragraph. A Codex worker gets none.
+#[test]
+fn a_claude_task_worker_gets_its_steering_channel_by_session_id_before_it_starts() {
+    const NONCE: &str = "00112233445566778899aabbccddeeff";
+    let opened: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
+    let (o2, log) = (opened.clone(), Arc::new(Mutex::new(PathBuf::new())));
+    let l2 = log.clone();
+    let steer: Steer = Arc::new(move |sid: &str| {
+        let ran = std::fs::read_to_string(&*crate::lock(&l2)).map(|t| t.lines().count()).unwrap_or(0);
+        crate::lock(&o2).push((sid.to_string(), ran));
+        Some(NONCE.to_string())
+    });
+    let r = rig("steer", Opts { claude_ok: true, steer: Some(steer), ..Opts::default() });
+    *crate::lock(&log) = r.d.join("log");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let got = crate::lock(&opened).clone();
+    assert_eq!(got, vec![(v.harness_session.clone().unwrap(), 0)], "opened once, by the worker's own session id, before it ran");
+    let argv = std::fs::read_to_string(r.d.join("log.argv")).unwrap();
+    assert!(argv.contains(&format!("<vajra-steer nonce=\"{NONCE}\"")), "the brief carries the steering paragraph: {argv}");
+    let c = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    r.done(&c);
+    assert_eq!(crate::lock(&opened).len(), 1, "a Codex worker has no steering channel");
+}
+
 #[test]
 fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
     let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });
@@ -707,7 +735,7 @@ fn a_stop_during_a_retry_backoff_ends_the_ticket_at_once() {
         let cfg = Config {
             home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
             tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
-            redact: Redactor::default(), claude_unverified_ok: false,
+            redact: Redactor::default(), steer: None, claude_unverified_ok: false,
         };
         WorkerRuntime::new(cfg, r.gw.clone(), r.sup.clone(), s.bus.clone(), Hooks::default())
     };

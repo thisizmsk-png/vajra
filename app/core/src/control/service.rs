@@ -89,6 +89,9 @@ pub struct Service {
     seat_policy: Option<Arc<dyn SeatPolicy>>,
     /// `core:<ticket>` workers (6c): `None` until the app hands over its runtime.
     core: Option<Arc<dyn CoreWorkers>>,
+    /// The Claude core workers' own control dirs this app opened (by their session id), with their nonces: a message is
+    /// published only into one of these, where the control hook looks for that session.
+    core_dirs: HashMap<String, String>,
     /// Whether `propose_run` takes `lead`, `workers` and `max_in_flight`. Off until the core route ships (6d).
     seats_enabled: bool,
     /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
@@ -125,6 +128,7 @@ impl Service {
             project_gate: None,
             seat_policy: None,
             core: None,
+            core_dirs: HashMap::new(),
             seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
             bound_project: None,
             pending: HashMap::new(),
@@ -299,6 +303,20 @@ impl Service {
     /// The app's worker runtime, for `core:<ticket>` workers.
     pub fn set_core_workers(&mut self, core: Arc<dyn CoreWorkers>) {
         self.core = Some(core);
+    }
+
+    /// Before a Claude core worker starts: its own control dir `<control>/<session_id>` (0700, as a run's) and its
+    /// steering nonce, which its brief carries and its output redacts. The hook delivers there by session id (16.7).
+    pub fn open_core_session(&mut self, session_id: &str) -> Result<String> {
+        if !queue::valid_session_id(session_id) {
+            return Err(ControlError::InvalidArgs("session_id".into()));
+        }
+        let dir = SessionDir::create(&self.control_root, session_id)?;
+        let n = nonce::rotate(&dir.root)?;
+        dir.sweep_temp();
+        self.seq = self.seq.max(dir.max_seq());
+        self.core_dirs.insert(session_id.to_string(), n.clone());
+        Ok(n)
     }
 
     fn default_session(&self) -> Option<&Session> {
