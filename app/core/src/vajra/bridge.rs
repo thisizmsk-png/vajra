@@ -55,6 +55,8 @@ pub struct Output {
     /// None when the process was killed (timeout) or died on a signal.
     pub code: Option<i32>,
     pub stdout: String,
+    /// The same bytes, unconverted: for output whose names may not be UTF-8 (`git ... -z`).
+    pub stdout_raw: Vec<u8>,
     pub stderr: String,
     pub truncated: bool,
     pub timed_out: bool,
@@ -197,6 +199,10 @@ impl Bridge {
                 argv.push(sub.to_string());
                 if sub == "diff" {
                     argv.extend(["--no-ext-diff".to_string(), "--no-textconv".to_string()]);
+                }
+                // A submodule is never entered: its own config, hooks and filters are not the core's to run (16.6).
+                if sub == "diff" || sub == "status" {
+                    argv.push("--ignore-submodules=all".to_string());
                 }
                 argv.extend(args.iter().skip(1).cloned());
                 (self.git.clone(), argv, Some(cwd.clone()))
@@ -637,6 +643,7 @@ fn run_process_inner(
     Ok(Output {
         code,
         stdout: String::from_utf8_lossy(&so).into_owned(),
+        stdout_raw: so,
         stderr: String::from_utf8_lossy(&se).into_owned(),
         truncated: to || te,
         timed_out,

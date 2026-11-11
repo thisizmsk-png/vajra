@@ -53,6 +53,8 @@ pub enum SessionError {
     InvalidId,
     EmptyArgv,
     NulInArgv,
+    /// `extra_env` names a variable outside `EXTRA_ENV_ALLOW`, twice, or holds a NUL.
+    BadEnv,
     /// cwd is missing or not a directory. (portable-pty would silently fall
     /// back to HOME, which would launch the run in the wrong repo.)
     BadCwd,
@@ -72,6 +74,7 @@ impl std::fmt::Display for SessionError {
             Self::InvalidId => f.write_str("invalid session id"),
             Self::EmptyArgv => f.write_str("argv is empty"),
             Self::NulInArgv => f.write_str("argv contains NUL"),
+            Self::BadEnv => f.write_str("extra environment is not allowed"),
             Self::BadCwd => f.write_str("working directory does not exist"),
             Self::InvalidSize => f.write_str("rows and cols must be non-zero"),
             Self::ShuttingDown => f.write_str("app is quitting"),
@@ -118,9 +121,13 @@ pub struct SpawnSpec {
     /// The steer nonce in the launch prompt (the TUI echoes it): replaced,
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
-    /// A Vajra-owned `CODEX_HOME` (gateway launch). The only variable added to `ENV_ALLOW`; never a key.
-    pub codex_home: Option<PathBuf>,
+    /// Variables added to `ENV_ALLOW` for this launch: only names in `EXTRA_ENV_ALLOW` (a Vajra-owned `CODEX_HOME` or
+    /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
+    pub extra_env: Vec<(&'static str, OsString)>,
 }
+
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
+pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {
@@ -151,6 +158,14 @@ pub fn scrubbed_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str
 
 use crate::lock;
 
+/// Each name at most once, each in `EXTRA_ENV_ALLOW`, each value non-empty with no NUL.
+fn extra_env_ok(env: &[(&'static str, OsString)]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    env.iter().enumerate().all(|(i, (k, v))| {
+        EXTRA_ENV_ALLOW.contains(k) && !v.is_empty() && !v.as_bytes().contains(&0) && !env[..i].iter().any(|(o, _)| o == k)
+    })
+}
+
 struct Session {
     pid: u32,
     master: Mutex<Box<dyn MasterPty + Send>>,
@@ -166,6 +181,20 @@ struct Session {
     stop_asked: AtomicBool,
 }
 
+/// Whether a process shows as stopped (`SSTOP`), from the kernel's process info; `None` where it can't be read.
+#[cfg(target_os = "macos")]
+fn leader_stopped(pid: u32) -> Option<bool> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    (n == size).then_some(info.pbi_status == 4)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn leader_stopped(_pid: u32) -> Option<bool> {
+    None
+}
+
 impl Session {
     fn signal(&self, sig: libc::c_int) {
         self.stop_asked.store(true, Ordering::SeqCst);
@@ -177,6 +206,41 @@ impl Session {
                 libc::kill(self.pid as i32, sig);
             }
         }
+    }
+
+    /// Job control (`SIGSTOP`/`SIGCONT`) for a live session's whole group, under the exit lock like `signal`. It never
+    /// marks the session as asked to stop. True when the session was live and signalled.
+    fn job_signal(&self, sig: libc::c_int) -> bool {
+        let exit = lock(&self.exit);
+        if exit.is_some() {
+            return false;
+        }
+        unsafe {
+            libc::kill(-(self.pid as i32), sig);
+            libc::kill(self.pid as i32, sig);
+        }
+        true
+    }
+
+    /// `SIGSTOP` the live session's group and confirm the leader shows as stopped. A stop sent while the child is still
+    /// starting (between fork and exec) can be lost, so it is sent again, for up to about 200 ms (#146 review: a
+    /// session spawned during a core call is paused too). True when the session was live.
+    fn stop(&self) -> bool {
+        let exit = lock(&self.exit);
+        if exit.is_some() {
+            return false;
+        }
+        for _ in 0..40 {
+            unsafe {
+                libc::kill(-(self.pid as i32), libc::SIGSTOP);
+                libc::kill(self.pid as i32, libc::SIGSTOP);
+            }
+            if leader_stopped(self.pid) != Some(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     fn wait_until(&self, deadline: Instant) -> Option<ExitInfo> {
@@ -278,6 +342,9 @@ impl Supervisor {
         if spec.argv.iter().any(|a| a.contains('\0')) {
             return Err(SessionError::NulInArgv);
         }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
         if !spec.cwd.is_dir() {
             return Err(SessionError::BadCwd);
         }
@@ -308,8 +375,8 @@ impl Supervisor {
         for (k, v) in user_env() {
             cmd.env(k, v);
         }
-        if let Some(home) = &spec.codex_home {
-            cmd.env("CODEX_HOME", home);
+        for (k, v) in &spec.extra_env {
+            cmd.env(k, v);
         }
         cmd.cwd(&spec.cwd);
 
@@ -450,6 +517,32 @@ impl Supervisor {
     /// Exit status once reaped; `None` if still running after `timeout`.
     pub fn wait(&self, id: &str, timeout: Duration) -> Result<Option<ExitInfo>, SessionError> {
         Ok(self.get(id)?.wait_until(Instant::now() + timeout))
+    }
+
+    /// Stop the process groups of these live sessions (`SIGSTOP`) while the core's git touches a repo they share
+    /// (ADR-16 16.6). Returns the ids it stopped; unknown or exited ids are skipped. Pair with `resume`.
+    pub fn pause(&self, ids: &[String]) -> Vec<String> {
+        ids.iter().filter(|id| self.get(id).is_ok_and(|s| s.stop())).cloned().collect()
+    }
+
+    /// `SIGSTOP` these sessions again, without waiting: the kernel continues an orphaned process group when one of its
+    /// members exits while it is stopped (POSIX), and every session leader's group is orphaned. A pause holder calls
+    /// this every few milliseconds while it holds the pause.
+    pub fn restop(&self, ids: &[String]) {
+        for id in ids {
+            if let Ok(s) = self.get(id) {
+                s.job_signal(libc::SIGSTOP);
+            }
+        }
+    }
+
+    /// `SIGCONT` the sessions `pause` stopped.
+    pub fn resume(&self, ids: &[String]) {
+        for id in ids {
+            if let Ok(s) = self.get(id) {
+                s.job_signal(libc::SIGCONT);
+            }
+        }
     }
 
     /// SIGHUP the session's process group, SIGKILL after `KILL_GRACE`.

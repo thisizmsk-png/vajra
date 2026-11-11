@@ -12,8 +12,11 @@ const SLUG = `deliver-${RUN}`;
 
 const n = (id: string, kind: string, title: string, status: string, children: CrewNodeDto[] = [], extra: Partial<CrewNodeDto> = {}): CrewNodeDto =>
   ({ id, kind, title, engine_id: null, role: null, status, overlays: [], children, ...extra });
-const agent = (id: string, role: string, engine: string, status: string, overlays: string[] = [], provider?: unknown) =>
-  n(`agent:${id}`, "worker", role, status, [], { role, engine_id: engine, overlays, ...(provider ? { provider } : {}) });
+const agent = (id: string, role: string, engine: string, status: string, overlays: string[] = [], provider?: unknown, diff?: unknown) =>
+  n(`agent:${id}`, "worker", role, status, [], { role, engine_id: engine, overlays, ...(provider ? { provider } : {}), ...(diff ? { diff } : {}) });
+// A worker's change set (ADR-16 16.10): an exact count, and a lower bound when some new files were not counted.
+const exactDiff = { files_total: 4, files: ["src/middleware/rateLimit.ts", "src/server.ts", "src/lib/bucket.ts", "tests/rateLimit.test.ts"], added: 142, removed: 9, partial: false, uncounted: 0 };
+const partialDiff = { files_total: 6000, files: ["web/generated/a0001.ts"], added: 5000, removed: 0, partial: true, uncounted: 1000 };
 // What each worker ran on (the launch receipt's `effective`), for the run cards, the crew list, the Board and the Crew pane.
 const onClaude = { account: "claude", label: "Claude Code", family: "claude", model: null, model_name: null, billing: "subscription", requested: null, error: null };
 const onGateway = { account: "openrouter", label: "OpenRouter", family: "deepseek", model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", billing: "gateway", requested: null, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } };
@@ -25,8 +28,8 @@ const onHarnessB = { account: "codex", label: "Codex CLI", family: "codex", mode
 const crew = n("lead", "lead", "Lead", "in_progress", [
   n(`run:${RUN}`, "run", "Add per-key rate limiting", "in_progress", [
     n("task:t1", "task", "t1 Design the limiter", "done", [agent("architect", "Architect", "arjuna", "done", [], onClaude)]),
-    n("task:t2", "task", "t2 Token bucket middleware", "in_progress", [agent("backend", "Backend", "bhima", "in_progress", ["activity"], onClaude)]),
-    n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress", [], onGateway)]),
+    n("task:t2", "task", "t2 Token bucket middleware", "in_progress", [agent("backend", "Backend", "bhima", "in_progress", ["activity"], onClaude, exactDiff)]),
+    n("task:t3", "task", "t3 Show limits on the API keys page", "in_progress", [agent("frontend", "Frontend", "nakula", "in_progress", [], onGateway, partialDiff)]),
     n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question", [], onHarnessB)]),
     n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready", [], onGrok)]),
     n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done", [], onRouter)]),

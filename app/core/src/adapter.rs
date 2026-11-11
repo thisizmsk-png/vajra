@@ -9,6 +9,8 @@
 
 use std::ffi::OsString;
 
+pub mod profiles;
+
 use crate::sessions::argv::{self, InvalidInput, RunInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

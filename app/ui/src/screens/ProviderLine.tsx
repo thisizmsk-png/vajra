@@ -2,13 +2,18 @@
 // "Ran on X (asked for Y)" when the harness ran something else, and the provider-error state. All from `effective`.
 import { Badge } from "../../components/ui/base";
 import { S } from "../../strings";
-import { errorText, ranOn, workerLine } from "../workerProvider";
-import type { WorkerProvider } from "../workerProvider";
+import { diffLabel, diffText, errorText, ranOn, workerLine } from "../workerProvider";
+import type { WorkerDiff, WorkerProvider } from "../workerProvider";
 import { ProviderIcon } from "./ProviderIcon";
 import "./providers.css";
 
 const W = S.workerProvider;
 export const iconOf = (p: WorkerProvider) => <ProviderIcon family={p.family} model={p.model} via={p.family !== p.account ? p.account : undefined} />;
+
+/** `+N −M`, or `≥ +N lines` when some new files were not counted. The label says what the short form means. */
+export function DiffCount({ d }: { d: WorkerDiff }) {
+  return <span className="v-wp__diff" data-diff-count aria-label={diffLabel(d)} title={diffLabel(d)}>{diffText(d)}</span>;
+}
 
 /** `compact`: one line (icon, model and provider) for a list row; the billing chip and the notes follow when there is room. `live`: the error is announced. */
 export function ProviderLine({ p, compact, live }: { p: WorkerProvider; compact?: boolean; live?: boolean }) {

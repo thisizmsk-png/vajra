@@ -83,7 +83,7 @@ fn valid_model(m: &str) -> bool {
 
 /// The one fixed shell line of a gateway launch. It only redirects stdin from `/dev/null` and then `exec`s its own
 /// positional arguments, so nothing the user or a model typed is ever parsed as shell text.
-const NULL_STDIN: &str = r#"exec "$@" </dev/null"#;
+pub(crate) const NULL_STDIN: &str = r#"exec "$@" </dev/null"#;
 
 /// The Codex harness on a gateway: `codex exec --json --sandbox workspace-write -m <model>`, the retry and sandbox
 /// overrides, and the ask after `--`. Stdin is `/dev/null` (a gateway run is non-interactive). The core runs the retry
