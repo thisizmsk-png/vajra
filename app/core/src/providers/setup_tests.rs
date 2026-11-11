@@ -225,3 +225,20 @@ fn current_names_the_binary_and_its_version_or_none() {
     assert_eq!(current(h, &Fake::default().with("claude", 1, "")).unwrap().1, None, "broken: a path, no version");
     assert!(current(h, &Fake::default()).is_none());
 }
+
+#[test]
+fn one_click_is_offered_only_for_a_verified_source_that_is_missing_or_broken() {
+    let mut h = catalog::find("claude").unwrap().clone();
+    let none = crate::providers::install::marks::Marks::none();
+    let r = super::row(&h, &Fake::default(), &none);
+    assert!(!r.one_click, "unverified: install it yourself");
+    assert_eq!(r.reason_code.as_deref(), Some("source_not_verified"));
+    h.source_verified_by = Some("owner".into());
+    h.source_verified_on = Some("2026-11-11".into());
+    h.verification_ref = Some("ref".into());
+    let r = super::row(&h, &Fake::default(), &none);
+    assert!(r.one_click);
+    assert_eq!(r.reason_code.as_deref(), Some("not_installed"));
+    assert!(super::row(&h, &Fake::default().with("claude", 1, ""), &none).one_click, "a broken one can be repaired");
+    assert!(!super::row(&h, &Fake::default().with("claude", 0, "2.1.322 (Claude Code)"), &none).one_click, "installed: nothing to do");
+}

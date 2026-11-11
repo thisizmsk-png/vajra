@@ -121,3 +121,116 @@ describe("SetupPanel", () => {
     await waitFor(() => expect(screen.getByText(C.updateNeeded)).toBeTruthy());
   });
 });
+
+// ADR-17 17b: one click, only for a verified source. The sheet shows the exact command and everything it binds; Install
+// asks for a consent token for that plan's hash and runs with it; the token never reaches the page.
+const HASH = "c".repeat(64);
+const PLAN = {
+  schema: "vajra.setup_plan/1",
+  id: "other",
+  plan: {
+    id: "other",
+    method: "npm",
+    command: ["/opt/homebrew/bin/node", "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", "install", "-g", "--ignore-scripts", "--registry=https://registry.npmjs.org/", "<verified tarball>"],
+    tools: [
+      { role: "node", path: "/opt/homebrew/bin/node", label: null, owned_by_you: true },
+      { role: "npm", path: "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", label: null, owned_by_you: true },
+    ],
+    source: "registry.npmjs.org",
+    version: "1.2.3",
+    target: "/opt/homebrew",
+    pin: { kind: "npm", tgz_sha512: "sha512-x" },
+    needs_admin: null,
+    notes: ["npmrc_applies", "owned_by_you"],
+    scope_registry: "https://mirror.example/",
+    deps: [],
+    hash: HASH,
+  },
+};
+const TOKEN = "f".repeat(32);
+const oneClick = { ...LIST, rows: [{ ...LIST.rows[3], one_click: true, reason_code: "not_installed" }, { ...LIST.rows[1], one_click: true }] };
+
+function sheet(plan: unknown = PLAN, run: unknown = { stream: "setup-other", report: { outcome: "installed", reason: null, exit: 0, version: "1.2.3" } }) {
+  const ipc = fakeIpc({
+    setup_list: oneClick,
+    setup_plan: plan,
+    setup_consent: { token: TOKEN },
+    setup_run: run,
+    tail: { lines: [{ seq: 1, text: "added 1 package" }], gap: false, head_seq: 1, spill_start: null, spill_end: null },
+  });
+  setTransport(ipc.transport);
+  render(<SetupPanel />);
+  return ipc;
+}
+
+describe("one-click install", () => {
+  it("is not offered for an unverified source", async () => {
+    panel();
+    await rowOf("Other CLI");
+    expect(screen.queryByRole("button", { name: C.planOneClick("Other CLI") })).toBeNull();
+  });
+
+  it("shows the exact command and what it binds before anything installs", async () => {
+    const ipc = sheet();
+    const r = await rowOf("Other CLI");
+    fireEvent.click(r.getByRole("button", { name: C.planOneClick("Other CLI") }));
+    const s = within(await screen.findByRole("region", { name: C.sheetTitle("Other CLI") }));
+    expect(s.getByText(PLAN.plan.command.join(" "))).toBeTruthy();
+    expect(s.getByText("registry.npmjs.org")).toBeTruthy();
+    expect(s.getByText("1.2.3")).toBeTruthy();
+    expect(s.getByText("/opt/homebrew")).toBeTruthy();
+    expect(s.getAllByText(C.ownedByYou).length).toBe(2);
+    expect(s.getByText("https://mirror.example/")).toBeTruthy();
+    expect(s.getByText(C.note.npmrc_applies)).toBeTruthy();
+    expect(ipc.calls.filter((c) => c.cmd === "setup_plan")).toEqual([{ cmd: "setup_plan", args: { id: "other" } }]);
+    expect(ipc.calls.some((c) => c.cmd === "setup_consent" || c.cmd === "setup_run")).toBe(false);
+  });
+
+  it("asks for consent on the plan's hash, runs with the token, shows the live output and the result", async () => {
+    const ipc = sheet();
+    fireEvent.click((await rowOf("Other CLI")).getByRole("button", { name: C.planOneClick("Other CLI") }));
+    const s = within(await screen.findByRole("region", { name: C.sheetTitle("Other CLI") }));
+    fireEvent.click(s.getByRole("button", { name: C.install("Other CLI") }));
+    await waitFor(() => expect(s.getByText(C.outcome.installed)).toBeTruthy());
+    const cmds = ipc.calls.map((c) => c.cmd).filter((c) => c.startsWith("setup_") && c !== "setup_list");
+    expect(cmds).toEqual(["setup_plan", "setup_consent", "setup_run"]);
+    expect(ipc.calls.find((c) => c.cmd === "setup_consent")!.args).toEqual({ id: "other", hash: HASH });
+    expect(ipc.calls.find((c) => c.cmd === "setup_run")!.args).toEqual({ id: "other", token: TOKEN });
+    expect(document.body.innerHTML).not.toContain(TOKEN);
+    expect(ipc.calls.filter((c) => c.cmd === "setup_list").length).toBeGreaterThan(1);
+  });
+
+  it("names a folder that needs admin and offers no Install", async () => {
+    sheet({ ...PLAN, plan: { ...PLAN.plan, needs_admin: { path: "/usr/local/lib/node_modules", reason: "root_owned" } } });
+    fireEvent.click((await rowOf("Other CLI")).getByRole("button", { name: C.planOneClick("Other CLI") }));
+    const s = within(await screen.findByRole("region", { name: C.sheetTitle("Other CLI") }));
+    expect(s.getByText(C.admin.root_owned)).toBeTruthy();
+    expect(s.getByText("/usr/local/lib/node_modules")).toBeTruthy();
+    expect(s.queryByRole("button", { name: C.install("Other CLI") })).toBeNull();
+  });
+
+  it("says why when the core answers install it yourself", async () => {
+    sheet({ schema: "vajra.setup_plan/1", id: "other", manual: "unpinned_dependency" });
+    fireEvent.click((await rowOf("Other CLI")).getByRole("button", { name: C.planOneClick("Other CLI") }));
+    await waitFor(() => expect(screen.getByText(C.manual.unpinned_dependency)).toBeTruthy());
+    expect(screen.queryByRole("button", { name: C.install("Other CLI") })).toBeNull();
+  });
+
+  it("offers Repair for a broken harness and shows a rollback plainly", async () => {
+    sheet({ ...PLAN, id: "codex", plan: { ...PLAN.plan, id: "codex" } }, { stream: "setup-codex", report: { outcome: "rolled_back", reason: "closure_mismatch", exit: 0, version: null } });
+    fireEvent.click((await rowOf("Codex CLI")).getByRole("button", { name: C.planOneClick("Codex CLI") }));
+    const s = within(await screen.findByRole("region", { name: C.sheetTitle("Codex CLI") }));
+    fireEvent.click(s.getByRole("button", { name: C.repair("Codex CLI") }));
+    await waitFor(() => expect(s.getByText(C.outcome.rolled_back)).toBeTruthy());
+  });
+});
+
+describe("parseSetupPlan", () => {
+  it("refuses a plan without a 64-hex hash or with a non-text command", async () => {
+    const { parseSetupPlan } = await import("../src/setupContract");
+    expect(parseSetupPlan(PLAN).ok).toBe(true);
+    expect(parseSetupPlan({ ...PLAN, plan: { ...PLAN.plan, hash: "x" } }).ok).toBe(false);
+    expect(parseSetupPlan({ ...PLAN, plan: { ...PLAN.plan, command: [1] } }).ok).toBe(false);
+    expect(parseSetupPlan({ ...PLAN, schema: "vajra.setup_plan/2" }).ok).toBe(false);
+  });
+});

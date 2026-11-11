@@ -316,6 +316,12 @@ export const api = {
   setupSignIn: (id: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("setup_sign_in", { id, rows, cols }, onMsg),
   /** `vajra.harness_setup/1`: Settings > Providers > Set up. Parse with `parseSetupList`. */
   setupList: () => call<unknown>("setup_list"),
+  /** `vajra.setup_plan/1`: the one-click plan for a catalog harness. Parse with `parseSetupPlan`. Installs nothing. */
+  setupPlan: (id: string) => call<unknown>("setup_plan", { id }),
+  /** The user's Install click on the plan with `hash`: a single-use consent token. Keep it in a local only. */
+  setupConsent: (id: string, hash: string) => call<{ token: string }>("setup_consent", { id, hash }),
+  /** Run the consented install; output streams on `setup-<id>`. Parse with `parseSetupRun`. */
+  setupRun: (id: string, token: string) => call<unknown>("setup_run", { id, token }),
   recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),

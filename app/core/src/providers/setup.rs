@@ -51,6 +51,8 @@ pub struct SetupRow {
     pub commands: Vec<Command>,
     pub docs_url: String,
     pub can_sign_in: bool,
+    /// A verified catalog source this Mac may install or repair in one click (ADR-17 17b): `setup_plan` shows how.
+    pub one_click: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,10 +108,11 @@ fn row(h: &Harness, p: &dyn Probe, marks: &Marks) -> SetupRow {
         commands,
         docs_url: h.docs_url.clone(),
         can_sign_in: matches!(state, State::Installed | State::Unsupported),
+        one_click: h.verified() && matches!(state, State::Manual | State::Broken),
     };
     match found(h, p) {
-        // Every entry is "Install it yourself" in this step; an unverified source would be so even with one-click.
-        Found::Missing => base(State::Manual, None, None, Some("source_not_verified"), commands(h)),
+        // An unverified source is always "Install it yourself"; a verified one also offers one click (`one_click`).
+        Found::Missing => base(State::Manual, None, None, Some(if h.verified() { "not_installed" } else { "source_not_verified" }), commands(h)),
         Found::Broken(path) => base(State::Broken, None, Some(&path), Some("version_failed"), commands(h)),
         Found::Ok(path, v, mm) => {
             // A failed closure check or rollback holds until a passing check or a different binary or version (condition 1).
