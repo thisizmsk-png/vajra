@@ -1318,3 +1318,35 @@ fn branch_delete_is_paused_and_never_deletes_through_a_symlinked_directory() {
     assert_eq!(*crate::lock(&q.seen), vec![false]);
     no_marker(&f);
 }
+
+/// #146 codex: a shared include reached first at the depth cap (through an inactive chain) and also directly is
+/// expanded at its direct depth, so the file it includes is hashed and a filter a worker adds there refuses content
+/// calls before any filter runs.
+#[test]
+fn an_include_reached_at_the_depth_cap_and_directly_is_expanded() {
+    let f = fx("incdepth");
+    let mark = marker_script(&f.d, &f.marker);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let (a, b) = (f.d.join("a.gitconfig"), f.d.join("b.gitconfig"));
+    std::fs::write(&b, "").unwrap();
+    std::fs::write(&a, format!("[include]\n\tpath = {}\n", b.display())).unwrap();
+    // c1 -> c2 -> ... -> c9 -> a: from the repo config, `a` is at depth 10 that way.
+    for i in 1..=9 {
+        let next = if i == 9 { a.clone() } else { f.d.join(format!("c{}.gitconfig", i + 1)) };
+        std::fs::write(f.d.join(format!("c{i}.gitconfig")), format!("[include]\n\tpath = {}\n", next.display())).unwrap();
+    }
+    // `a` directly first, then the chain behind a condition git finds false.
+    ugit(&f.home, &f.repo, &["config", "include.path", a.to_str().unwrap()]);
+    ugit(&f.home, &f.repo, &["config", "includeIf.gitdir:/vajra-never/.path", f.d.join("c1.gitconfig").to_str().unwrap()]);
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    let (files, partial) = repo_sources(&f.gw, &common);
+    assert_eq!(partial, None);
+    assert!(files.iter().any(|(p, _)| *p == b), "b is hashed");
+    std::fs::write(&b, format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert!(keys.contains(&"include.path".to_string()), "{keys:?}"),
+        other => panic!("{other:?}"),
+    }
+    no_marker(&f);
+}

@@ -465,8 +465,11 @@ const INCLUDE_MAX: usize = 64;
 fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> (Vec<(PathBuf, FileHash)>, Option<String>) {
     let mut out: Vec<(PathBuf, FileHash)> = Vec::new();
     let mut partial = None;
-    let mut queue: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
-    while let Some((p, depth)) = queue.pop() {
+    // Breadth-first from every root: a file is first reached at its shallowest depth, so the visited check never
+    // skips a shorter path git reads (a file first met at the depth cap, unexpanded, and then included directly)
+    // (#146 codex).
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    while let Some((p, depth)) = queue.pop_front() {
         if out.iter().any(|(q, _)| q == &p) {
             continue;
         }
@@ -493,7 +496,7 @@ fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf]
                 continue;
             }
             match include_target(&target, &p, home) {
-                Some(t) => queue.push((t, depth + 1)),
+                Some(t) => queue.push_back((t, depth + 1)),
                 None => partial = Some("a ~user or %(prefix) path Vajra can't resolve".into()),
             }
         }
