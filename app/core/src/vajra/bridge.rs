@@ -200,6 +200,10 @@ impl Bridge {
                 if sub == "diff" {
                     argv.extend(["--no-ext-diff".to_string(), "--no-textconv".to_string()]);
                 }
+                // A submodule is never entered: its own config, hooks and filters are not the core's to run (16.6).
+                if sub == "diff" || sub == "status" {
+                    argv.push("--ignore-submodules=all".to_string());
+                }
                 argv.extend(args.iter().skip(1).cloned());
                 (self.git.clone(), argv, Some(cwd.clone()))
             }
