@@ -37,7 +37,7 @@ use crate::control::receipt::LaunchReceipt;
 use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::providers::effective::{self, Requested};
-use crate::providers::errors::{self, Action, Clock, Ident, Kind};
+use crate::providers::errors::{self, Action, Clock, Ident, Kind, ProviderError};
 use crate::providers::launch;
 use crate::sessions::{ProviderTag, SpawnSpec, Supervisor};
 use crate::vajra::gitw::{self, DepClone, Gitw, GitwError};
@@ -548,9 +548,19 @@ impl WorkerRuntime {
                     last = Some(Ended::Outcome(o, r, receipt));
                     Ok(())
                 }
-                Attempt::Failed(text, receipt) => {
-                    // Retried only on an unchanged tree; any other answer ends the loop here.
-                    match self.0.gw.unchanged(t) {
+                Attempt::Failed(text, session, receipt) => {
+                    // Retried only on an unchanged tree; any other answer ends the loop here. The event is sent once
+                    // that is known, with the action the core takes (#149): `retrying` only when it really retries.
+                    let c = errors::classify(&text);
+                    let ident = Ident { slot: &seat.slot, session_id: &session, account: &seat.account };
+                    let unchanged = self.0.gw.unchanged(t);
+                    let action = match unchanged {
+                        // The policy `run_with_policy` applies to this same failure (its count is `n`).
+                        Ok(true) => errors::decide(c.kind, n, c.retry_after_s).action,
+                        _ => Action::AskingUser,
+                    };
+                    self.0.sup.report(&ProviderError::new(&ident, &c, n, &text, action));
+                    match unchanged {
                         Ok(true) => {
                             last = Some(Ended::Outcome(Outcome::Failed, text.clone(), receipt));
                             Err(text)
@@ -605,7 +615,9 @@ impl WorkerRuntime {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
             }
         }
-        let tag = ProviderTag { slot: seat.slot.clone(), session_id: l.session_id.clone().unwrap_or_else(|| sid.clone()), account: seat.account.clone(), attempt: n };
+        let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
+        // The core is the only one that reports a failure here: it knows whether it will retry (see `attempts`).
+        let tag = ProviderTag { slot: seat.slot.clone(), session_id: session.clone(), account: seat.account.clone(), attempt: n, core_reports: true };
         if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
@@ -661,7 +673,7 @@ impl WorkerRuntime {
         }
         let tail = self.0.sup.last_lines(&sid).unwrap_or_default();
         let (_, text) = errors::classify_exit(Some(x.code), x.signal.as_deref(), &tail);
-        Attempt::Failed(text, receipt)
+        Attempt::Failed(text, session, receipt)
     }
 
     /// After a clean exit: snapshot, diff, outcome.
@@ -779,7 +791,8 @@ impl Clock for TicketClock<'_> {
 enum Attempt {
     Clean(Option<LaunchReceipt>),
     End(Outcome, String, Option<LaunchReceipt>),
-    Failed(String, Option<LaunchReceipt>),
+    /// The failure text and the harness session it ran under.
+    Failed(String, String, Option<LaunchReceipt>),
 }
 
 enum Ended {

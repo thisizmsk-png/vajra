@@ -305,7 +305,9 @@ fn a_504_on_an_unchanged_tree_is_retried_twice_then_needs_the_user() {
     assert_eq!((v.outcome, v.reason.as_deref(), v.attempt), (Some(Outcome::NeedsUser), Some("timeout"), 3), "{v:?}");
     assert_eq!(r.clock.slept(), errors::BACKOFF.to_vec());
     let attempts: Vec<u32> = crate::lock(&r.errors).iter().map(|e| e.attempt).collect();
-    assert_eq!(attempts, vec![1, 2, 3], "each retry carries its own attempt");
+    assert_eq!(attempts, vec![1, 2, 3], "each retry carries its own attempt, reported once (by the core alone)");
+    let actions: Vec<Action> = crate::lock(&r.errors).iter().map(|e| e.action).collect();
+    assert_eq!(actions, vec![Action::Retrying, Action::Retrying, Action::AskingUser]);
 }
 
 #[test]
@@ -314,6 +316,9 @@ fn a_retryable_error_after_an_edit_is_progress() {
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!((v.outcome, v.attempt), (Some(Outcome::Progress), 1), "{v:?}");
     assert!(r.clock.slept().is_empty(), "never retried on a changed tree");
+    // The card agrees with the ticket (#149): one event, and it never says the core is retrying.
+    let ev: Vec<(u32, Action)> = crate::lock(&r.errors).iter().map(|e| (e.attempt, e.action)).collect();
+    assert_eq!(ev, vec![(1, Action::AskingUser)]);
 }
 
 // ---------------------------------------------------------------- dispatch_head, diff, tamper

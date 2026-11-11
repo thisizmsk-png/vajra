@@ -458,7 +458,7 @@ fn error_sink() -> (ErrorSink, Arc<Mutex<Vec<ProviderError>>>) {
 }
 
 fn tag() -> ProviderTag {
-    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into(), attempt: 1 }
+    ProviderTag { slot: "w1".into(), session_id: "s_fixture".into(), account: "gateway-fixture".into(), attempt: 1, core_reports: false }
 }
 
 fn wait_events(got: &Arc<Mutex<Vec<ProviderError>>>, n: usize) -> Vec<ProviderError> {
