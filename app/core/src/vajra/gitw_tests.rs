@@ -1172,3 +1172,58 @@ fn a_symbolic_task_ref_is_refused_and_its_target_is_never_created() {
     assert_eq!(sym.code(), Some(1), "a plain ref now");
     no_marker(&f);
 }
+
+/// #146 codex: include paths resolve the way git's pathname rules do, and the forms that can't are refused.
+#[test]
+fn include_paths_expand_like_git() {
+    let (home, from) = (Path::new("/h"), Path::new("/repo/.git/config"));
+    assert_eq!(include_target("~/x.cfg", from, home), Some(PathBuf::from("/h/x.cfg")));
+    assert_eq!(include_target("~", from, home), Some(PathBuf::from("/h")));
+    assert_eq!(include_target("/abs/x.cfg", from, home), Some(PathBuf::from("/abs/x.cfg")));
+    assert_eq!(include_target("rel/x.cfg", from, home), Some(PathBuf::from("/repo/.git/rel/x.cfg")));
+    assert_eq!(include_target("~vajra-no-such-user-0/x.cfg", from, home), None, "no passwd entry: refused");
+    assert_eq!(include_target("%(prefix)/etc/x.cfg", from, home), None);
+    // A real account resolves through the passwd database (a path only: nothing is read there).
+    let me = unsafe { std::ffi::CStr::from_ptr((*libc::getpwuid(libc::getuid())).pw_name) }.to_str().unwrap().to_string();
+    let got = include_target(&format!("~{me}/x.cfg"), from, home).unwrap();
+    assert!(got.is_absolute() && got.ends_with("x.cfg") && got != Path::new("/repo/.git").join(format!("~{me}/x.cfg")), "{got:?}");
+    USER_HOMES.with(|u| u.borrow_mut().push(("vajra-alice".into(), PathBuf::from("/homes/alice"))));
+    assert_eq!(include_target("~vajra-alice/shared.cfg", from, home), Some(PathBuf::from("/homes/alice/shared.cfg")));
+    assert_eq!(include_target("~vajra-alice", from, home), Some(PathBuf::from("/homes/alice")));
+    USER_HOMES.with(|u| u.borrow_mut().clear());
+}
+
+/// #146 codex: a `~user/` include is hashed at its expanded target, so a filter a worker adds there later is a repo
+/// config change and never runs; a `~user/` that doesn't resolve refuses the repo's content calls. The include sits
+/// behind a condition git finds false, so git never looks the test user up; the core hashes every include whatever its
+/// condition, so this is the path a live one takes.
+#[test]
+fn a_tilde_user_include_is_hashed_where_git_reads_it() {
+    let f = fx("tildeuser");
+    let mark = marker_script(&f.d, &f.marker);
+    let alice = f.d.join("alice");
+    std::fs::create_dir_all(&alice).unwrap();
+    std::fs::write(alice.join("shared.gitconfig"), "").unwrap();
+    USER_HOMES.with(|u| u.borrow_mut().push(("vajra-alice".into(), alice.clone())));
+    let common = f.gw.common_of(&f.repo).unwrap();
+    ugit(&f.home, &f.repo, &["config", "includeIf.gitdir:/vajra-never/.path", "~vajra-alice/shared.gitconfig"]);
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    std::fs::write(alice.join("shared.gitconfig"), format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    match f.gw.snapshot(&t, &globs(), &[], "w m") {
+        Err(GitwError::Tampered { what }) => assert!(what.contains("include.path"), "{what}"),
+        other => panic!("{other:?}"),
+    }
+    // A `~user` with no passwd entry: refused, never hashed at a path git wouldn't read.
+    std::fs::write(alice.join("shared.gitconfig"), "").unwrap();
+    ugit(&f.home, &f.repo, &["config", "includeIf.gitdir:/vajra-never-2/.path", "~vajra-no-such-user-0/x.gitconfig"]);
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t2", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["include.path (a ~user or %(prefix) path Vajra can't resolve)".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    USER_HOMES.with(|u| u.borrow_mut().clear());
+    no_marker(&f);
+}

@@ -460,18 +460,18 @@ const INCLUDE_MAX: usize = 64;
 
 /// The config files and every `include.path` / `includeIf.*.path` target below them (to depth 10), each hashed,
 /// whatever the include condition says. `follow_roots` is false for repo files (opened `O_NOFOLLOW`); include targets
-/// may be a dotfiles link. The flag is false when the graph holds more than `INCLUDE_MAX` files: the list is then
-/// partial, and a caller that trusts it must refuse instead (#146 codex).
-fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> (Vec<(PathBuf, FileHash)>, bool) {
+/// may be a dotfiles link. The second value is why the list is partial: the graph holds more than `INCLUDE_MAX` files,
+/// or an include path `include_target` can't resolve. A caller that trusts the list must then refuse (#146 codex).
+fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> (Vec<(PathBuf, FileHash)>, Option<String>) {
     let mut out: Vec<(PathBuf, FileHash)> = Vec::new();
-    let mut complete = true;
+    let mut partial = None;
     let mut queue: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
     while let Some((p, depth)) = queue.pop() {
         if out.iter().any(|(q, _)| q == &p) {
             continue;
         }
         if out.len() >= INCLUDE_MAX {
-            complete = false;
+            partial = Some(format!("more than {INCLUDE_MAX} config files"));
             break;
         }
         let h = hash_file(&p, depth > 0 || follow_roots);
@@ -483,18 +483,58 @@ fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf]
         let Some(f) = p.to_str() else { continue };
         let Some(o) = config_read(git, home, xdg, &["config", "--file", f, "--no-includes", "--get-regexp", "-z", "^include(if\\..*)?\\.path$"]) else { continue };
         for (_, target) in parse_list_z(&o.stdout) {
-            let t = if let Some(rest) = target.strip_prefix("~/") {
-                home.join(rest)
-            } else if Path::new(&target).is_absolute() {
-                PathBuf::from(&target)
-            } else {
-                p.parent().unwrap_or(Path::new("/")).join(&target)
-            };
-            queue.push((t, depth + 1));
+            match include_target(&target, &p, home) {
+                Some(t) => queue.push((t, depth + 1)),
+                None => partial = Some("a ~user or %(prefix) path Vajra can't resolve".into()),
+            }
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    (out, complete)
+    (out, partial)
+}
+
+/// An include path read the way git's pathname rules read it: `~` and `~/` are HOME, `~user` and `~user/` that user's
+/// home from the passwd database (as git's `getpwnam`), an absolute path is itself, anything else is relative to the
+/// including file. A `~user` with no passwd entry and `%(prefix)/` (git's install prefix) are `None`: the caller
+/// refuses the graph rather than hash a path git wouldn't read (#146 codex).
+fn include_target(target: &str, from: &Path, home: &Path) -> Option<PathBuf> {
+    if let Some(rest) = target.strip_prefix('~') {
+        let (user, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let base = if user.is_empty() { home.to_path_buf() } else { user_home(user)? };
+        return Some(if tail.is_empty() { base } else { base.join(tail) });
+    }
+    if target.starts_with("%(prefix)/") {
+        return None;
+    }
+    Some(if Path::new(target).is_absolute() { PathBuf::from(target) } else { from.parent().unwrap_or(Path::new("/")).join(target) })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: `~user` homes that `user_home` returns instead of the passwd database's (no test touches a real home).
+    pub(crate) static USER_HOMES: std::cell::RefCell<Vec<(String, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A user's home directory from the passwd database.
+fn user_home(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(d) = USER_HOMES.with(|u| u.borrow().iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())) {
+        return Some(d);
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(name).ok()?;
+    // SAFETY: a zeroed `passwd` is a valid out-parameter; `buf` outlives the call and `pw`'s pointers into it, which
+    // are copied out before it drops; `getpwnam_r` is the reentrant form.
+    unsafe {
+        let mut pw: libc::passwd = std::mem::zeroed();
+        let mut buf = vec![0 as libc::c_char; 16 * 1024];
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        if libc::getpwnam_r(c.as_ptr(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut found) != 0 || found.is_null() || pw.pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr(pw.pw_dir).to_bytes();
+        (!dir.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
+    }
 }
 
 // ------------------------------------------------------------ quiescing other sessions (M3)
@@ -681,9 +721,9 @@ fn fingerprint(p: &Path) -> Option<Fingerprint> {
 struct Held {
     config: FileHash,
     attributes: FileHash,
-    /// `<common>/config.worktree` and every include target of the two config files; `None` when the include graph is
-    /// over `INCLUDE_MAX`, which refuses every content call.
-    others: Option<Vec<(PathBuf, FileHash)>>,
+    /// `<common>/config.worktree` and every include target of the two config files; why not, when the include graph
+    /// can't be followed whole (`config_sources`), which refuses every content call.
+    others: Result<Vec<(PathBuf, FileHash)>, String>,
     /// The programs the effective trusted config (global baseline plus repo) can run.
     programs: Vec<Program>,
     /// The config keys naming a program outside `vetted_program`: they may run code from the worktree, so the repo
@@ -761,11 +801,11 @@ impl RepoBaselines {
         if !h.unvetted.is_empty() && !h.programs_accepted {
             return Err(GitwError::RepoConfigChanged { keys: h.unvetted.iter().map(|k| format!("program {k}")).collect() });
         }
-        let too_many = || GitwError::RepoConfigChanged { keys: vec![format!("include.path (more than {INCLUDE_MAX} config files)")] };
-        let held_others = h.others.as_ref().ok_or_else(too_many)?;
+        let partial = |why: &str| GitwError::RepoConfigChanged { keys: vec![format!("include.path ({why})")] };
+        let held_others = h.others.as_ref().map_err(|w| partial(w))?;
         let config = hash_file(&common.join("config"), false);
         let attributes = hash_file(&common.join("info/attributes"), false);
-        let others = repo_others(gw, common).ok_or_else(too_many)?;
+        let others = repo_others(gw, common).map_err(|w| partial(&w))?;
         let programs: Vec<Program> = h.programs.iter().map(|p| gw.program(&p.word)).collect();
         if config == h.config && attributes == h.attributes && others == *held_others && programs == h.programs {
             return Ok(());
@@ -798,16 +838,16 @@ impl RepoBaselines {
 }
 
 /// `config.worktree` and the include targets: everything the repo's config sources but the two files hashed by name.
-/// `None` when the include graph is over `INCLUDE_MAX`.
-fn repo_others(gw: &Gitw, common: &Path) -> Option<Vec<(PathBuf, FileHash)>> {
+/// Why not, when the include graph can't be followed whole.
+fn repo_others(gw: &Gitw, common: &Path) -> Result<Vec<(PathBuf, FileHash)>, String> {
     let config = common.join("config");
-    let (mut v, complete) = repo_sources(gw, common);
+    let (mut v, partial) = repo_sources(gw, common);
     v.retain(|(p, _)| *p != config);
-    complete.then_some(v)
+    partial.map_or(Ok(v), Err)
 }
 
 /// `<common>/config`, `config.worktree` and every file they include, under any condition.
-fn repo_sources(gw: &Gitw, common: &Path) -> (Vec<(PathBuf, FileHash)>, bool) {
+fn repo_sources(gw: &Gitw, common: &Path) -> (Vec<(PathBuf, FileHash)>, Option<String>) {
     config_sources(&gw.git, &gw.home, None, &[common.join("config"), common.join("config.worktree")], false)
 }
 
