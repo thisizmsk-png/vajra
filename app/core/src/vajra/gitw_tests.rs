@@ -1140,3 +1140,35 @@ fn the_pause_holds_through_worktree_removal() {
     assert_eq!(*crate::lock(&q.seen), vec![false], "the only resume came after the tree was gone");
     no_marker(&f);
 }
+
+/// #146 codex: a task ref planted as a dangling symbolic ref to a branch outside `vajra/` is refused, and the target is
+/// never created, either when planted before the snapshot or just before the ref is written.
+#[test]
+fn a_symbolic_task_ref_is_refused_and_its_target_is_never_created() {
+    let f = fx("tasksym");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let plant = |home: &Path, repo: &Path| {
+        ugit(home, repo, &["-c", "core.hooksPath=/dev/null", "symbolic-ref", "refs/heads/vajra/r1/task-t1-r1", "refs/heads/release"]);
+    };
+    let absent = |f: &Fx| {
+        let o = Command::new(GIT).args(["-C", f.repo.to_str().unwrap(), "show-ref", "--verify", "--quiet", "refs/heads/release"]).env_clear().env("HOME", &f.home).env("GIT_CONFIG_NOSYSTEM", "1").status().unwrap();
+        assert!(!o.success(), "release was created");
+    };
+    plant(&f.home, &f.repo);
+    assert_eq!(f.gw.snapshot(&t, &globs(), &[], "w m").unwrap_err(), GitwError::Tampered { what: "the task ref is a symbolic ref".into() });
+    absent(&f);
+    // Planted after the last check: the `--no-deref` write replaces the planted ref itself and never follows it, so
+    // only the task ref moves.
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "symbolic-ref", "--delete", "refs/heads/vajra/r1/task-t1-r1"]);
+    let (home, repo) = (f.home.clone(), f.repo.clone());
+    BEFORE_TASK_REF.with(|b| *b.borrow_mut() = Some(Box::new(move || plant(&home, &repo))));
+    let r = f.gw.snapshot(&t, &globs(), &[], "w m");
+    BEFORE_TASK_REF.with(|b| *b.borrow_mut() = None);
+    let c = r.unwrap().commit.unwrap();
+    absent(&f);
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/task-t1-r1"), c);
+    let sym = Command::new(GIT).args(["-C", f.repo.to_str().unwrap(), "symbolic-ref", "-q", "refs/heads/vajra/r1/task-t1-r1"]).env_clear().env("HOME", &f.home).env("GIT_CONFIG_NOSYSTEM", "1").status().unwrap();
+    assert_eq!(sym.code(), Some(1), "a plain ref now");
+    no_marker(&f);
+}

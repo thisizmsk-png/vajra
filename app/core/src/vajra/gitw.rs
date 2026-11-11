@@ -1343,6 +1343,9 @@ impl Gitw {
         }
         let task_ref = t.task_ref();
         vajra_ref(&task_ref)?;
+        // Refs live in the common dir: a planted `<task ref> -> refs/heads/release` would make the create-only write
+        // create `release` (#146 codex). Refused when symbolic, and written only with `--no-deref`.
+        self.plain_ref(t, &task_ref, "the task ref")?;
         let mut list = files.join("\0").into_bytes();
         #[cfg(test)]
         EXTRA_ADD.with(|e| if let Some(x) = e.borrow().as_ref() { list.extend(b"\0"); list.extend(x.as_bytes()) });
@@ -1371,8 +1374,11 @@ impl Gitw {
             GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
             e => e,
         })?;
+        self.plain_ref(t, &task_ref, "the task ref")?;
+        #[cfg(test)]
+        BEFORE_TASK_REF.with(|b| if let Some(f) = b.borrow().as_ref() { f() });
         let zero = "0".repeat(commit.len());
-        let u = self.run(Call::new(At::Pinned(t), &["update-ref", &task_ref, &commit, &zero]))?;
+        let u = self.run(Call::new(At::Pinned(t), &["update-ref", "--no-deref", "--", &task_ref, &commit, &zero]))?;
         if u.exit() != Some(0) {
             return Err(GitwError::Exists);
         }
@@ -1408,7 +1414,7 @@ impl Gitw {
         // Refs live in the common dir, which any worker on the repo can write. A planted `<r> -> refs/heads/main` would
         // make any write through `r` move main (#146 codex), so `r` is refused when symbolic, written only with
         // `--no-deref`, and never checked out: the merges run on a detached HEAD.
-        self.plain_ref(it, &r)?;
+        self.plain_ref(it, &r, "the integration branch")?;
         self.ok("update-ref", Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, base]))?;
         self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "--detach", base]))?;
         let mut prev = base.to_string();
@@ -1447,18 +1453,18 @@ impl Gitw {
             return Err(tampered("the integration tree's HEAD"));
         }
         // From exactly `base`: a branch a worker moved meanwhile is refused, never overwritten.
-        self.plain_ref(it, &r)?;
+        self.plain_ref(it, &r, "the integration branch")?;
         let u = self.run(Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, &prev, base]))?;
         if u.exit() != Some(0) {
             return Err(tampered("the integration branch"));
         }
-        self.plain_ref(it, &r)?;
+        self.plain_ref(it, &r, "the integration branch")?;
         Ok(prev)
     }
 
-    /// `r` is a plain ref or none: `symbolic-ref -q` exits 1.
-    fn plain_ref(&self, t: &Ticket, r: &str) -> R<()> {
-        if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered("the integration branch is a symbolic ref")) }
+    /// `r` is a plain ref or none: `symbolic-ref -q` exits 1. `what` names it in the tamper reason.
+    fn plain_ref(&self, t: &Ticket, r: &str, what: &str) -> R<()> {
+        if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered(format!("{what} is a symbolic ref"))) }
     }
 
     /// HEAD is detached: `symbolic-ref -q HEAD` exits 1.
@@ -1548,6 +1554,12 @@ thread_local! {
 thread_local! {
     /// Tests: runs before each `integrate` merge (a worker moving the branch in the common dir).
     pub(crate) static BEFORE_MERGE: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: runs right before `snapshot` writes the task ref, after its last check.
+    pub(crate) static BEFORE_TASK_REF: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Names git or an agent harness reads specially. A worktree component that the volume treats as one of these is
