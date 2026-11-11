@@ -801,6 +801,12 @@ impl WorkerRuntime {
                 e.view.mismatch = r.mismatch_event();
                 e.view.provider = r.provider();
             }
+            // A kill recorded before this point decides the outcome, whatever the snapshot or diff found meanwhile:
+            // a Stop accepted during `finish` never ends `done` with an integratable commit (#149 codex P2).
+            let (o, reason) = match e.kill {
+                Some(k) => kill_outcome(k),
+                None => (o, reason),
+            };
             finish_view(&mut e.view, o, reason);
             e.view.summary = Some(summary(&e.view, &self.0.cfg.redact));
             e.session = None;
@@ -1079,7 +1085,18 @@ impl Launch {
                 if argv.get(4).map(String::as_str) == Some("codex") {
                     argv[4] = cfg.codex.to_str().ok_or("invalid_input")?.to_string();
                 }
-                let home = if gateway { Some(crate::providers::codex_home::home_for(&cfg.data, &seat.account).map_err(|_| "engine_missing")?) } else { None };
+                // A gateway account's own `CODEX_HOME`, made (or rewritten) now through the guarded writer: a fresh
+                // account has none yet, and a worker must never start on a missing provider config (#149 codex P1).
+                let home = if gateway {
+                    use crate::providers::codex_home;
+                    let made = codex_home::write(&cfg.data, &seat.account, codex_home::DEFAULT_BASE_URL).map_err(|e| match e {
+                        codex_home::Error::UnknownAccount => "engine_missing",
+                        _ => "profile_not_applied",
+                    })?;
+                    Some(made)
+                } else {
+                    None
+                };
                 if let Some(h) = &home {
                     l.codex_home = h.clone();
                 }
