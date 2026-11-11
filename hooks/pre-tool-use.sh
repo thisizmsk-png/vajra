@@ -847,11 +847,13 @@ fi
 #     $'...' or ${...} could hold or build the path (D=<data>; rm -rf "$D").
 # A command with an "Application ... Support/Vajra..." path (other than VajraWorktrees,
 # the writable <work>) gets the expansion rule too, so Vajra$V is refused as well.
-# bash 3.2 pattern substitution is slow on big strings: tr strips a big command linearly.
-if [ "${#CMD}" -lt 16384 ]; then DRAW="${CMD//[\"\'\\]/}"; else DRAW="$(printf '%s' "$CMD" | LC_ALL=C tr -d "\"'\\\\")"; fi
+# bash 3.2 pattern substitution is quadratic (a 4 KB command took ~600 ms): tr strips linearly.
+DRAW="$CMD"
+case "$CMD" in *[\"\'\\]*) DRAW="$(printf '%s' "$CMD" | LC_ALL=C tr -d "\"'\\\\")" ;; esac
 DNAMED=0 DAPP=0
 for v in "$CMD" "$DRAW"; do
-  [[ "$v" == *vajra* ]] || continue # every form below names "vajra"; skip the costlier patterns otherwise
+  # Every form below holds "vajradesktop" or "support/vajra"; skip the costlier patterns otherwise.
+  [[ "$v" == *vajradesktop* || "$v" == *support/vajra* ]] || continue
   case "$v" in
     */vajradesktop|*/vajradesktop[!a-z0-9_.-]*|*vajradesktop/*|*vajradesktop\\*) DNAMED=1 ;;
   esac
