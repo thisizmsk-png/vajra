@@ -1263,7 +1263,8 @@ impl Gitw {
         }
         let commit = o.stdout.trim().to_string();
         // Checked again before the ref exists. Every other live session on the repo has been stopped since before the
-        // first check, so nothing changed while `add` ran; this is the second line.
+        // first check; a setsid daemon, an exited worker's leftover or another repo's worker can escape that pause
+        // (ADR 16.6, an accepted residual), so this check is the second line.
         self.preflight(t).map_err(|e| match e {
             GitwError::RepoConfigChanged { keys } => tampered(format!("repo config: {}", keys.join(", "))),
             e => e,

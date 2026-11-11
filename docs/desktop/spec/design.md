@@ -1494,7 +1494,7 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 | `worktree_remove(wt)` and `branch_delete(vajra/<run>/task-…)` | `git worktree remove --force <wt>`, `git branch -D` | Only after the **capture check** (Retention, below) passes on a ticket whose commit was integrated, or when the human discards it. `--force` is needed because `snapshot` never moves the worker's HEAD or index, so git always sees the tree as dirty. The capture check is what makes it safe. |
 
 **The trusted git baseline (PR #135 review).** The config files the core's git reads are recorded **before any agent session can have touched them**, and never refreshed from agent-writable files without a human. A baseline taken fresh at each `worktree_add` would not do: task A could change `filter.x.clean` in `~/.gitconfig`, and a later task B would copy that as trusted. If the base commit already gives B's files `filter=x`, the core's `add` would then run A's command, and a smudge filter could even run during B's checkout ([gitattributes, filter](https://git-scm.com/docs/gitattributes#_filter)).
-- **The global baseline.** At app start, before the Director-General or any other agent session is launched, the core writes one flattened copy of the user's global config, with its includes resolved, to `<data>/git-baseline/`. Agents can't write there. Every ticket of every run and project uses this one copy (see "A frozen copy" below).
+- **The global baseline.** At app start, before the Director-General or any other agent session is launched, the core writes one flattened copy of the user's global config, with its includes resolved, to `<control>/git-baseline/` inside the app data dir, with its sha256 anchored beside it. The guard write-protects `<control>`. The core checks the copy against that hash before every git call, and a mismatch is `tampered` until the human re-takes the copy. Every ticket of every run and project uses this one copy (see "A frozen copy" below).
 - **The repo baseline.** At a run's Start, before its lead launches, the core hashes the repo's `<common>/config` and `<common>/info/attributes` for that repo, unless a baseline for it is already held.
   - **Concurrent runs on the same repo share it.** A later run reuses the held baseline and never takes a new one while any run on that repo is live. It is released when the last run on that repo ends.
   - **When no baseline is held,** a new one is taken only when no Vajra agent session is running on that repo.
@@ -1533,6 +1533,16 @@ On `vajra/` refs it also passes **`-c commit.gpgsign=false`** (N10). If the repo
 **What is still not protected.**
 - **The user's own trusted config still applies.** A filter driver the user already configured, such as LFS clean, still runs on `add` for paths that the **commit's own** attributes already assign to it. That is the user's own setup, and the worker can't change which paths it applies to.
 - **`includeIf gitdir:` still matches,** because the worktree's gitdir is inside `<repo>/.git/worktrees`. The included file is hashed.
+- **The pause during content calls can be escaped (accepted risk, owner, 2026-11-10).**
+  - Before a git call that can run a filter or driver, the core stops (`SIGSTOP`) the process group of every other live agent session on the repo.
+  - Three kinds of process aren't stopped, and can still change the repo's config or attributes during the call:
+    - a `setsid` daemon, which has left its session's group;
+    - a process left behind by a worker whose session has exited;
+    - a Claude worker on another repo, which isn't paused because its session isn't on this repo.
+  - Mitigations:
+    - the guard write-protects the data dir (#148);
+    - the tamper and repo-baseline checks run right before each git call, and again after `add`.
+  - Revisit when 6k's Seatbelt layer lands.
 
 **Dependencies (N7).**
 - After `worktree_add`, the core makes APFS clones (`clonefile`) of the project's listed dependency folders into the worktree: `node_modules`, `.venv`, `target` and `vendor`, where they exist and are git-ignored.
