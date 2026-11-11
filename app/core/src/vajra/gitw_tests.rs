@@ -749,7 +749,7 @@ fn other_live_sessions_on_the_repo_are_stopped_during_content_calls() {
     let sup = Arc::new(crate::sessions::Supervisor::new(bus, None));
     let ticks = d.join("ticks");
     let script = format!("while :; do echo x >> '{}'; sleep 0.02; done", ticks.display());
-    let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), codex_home: None };
+    let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: Vec::new() };
     sup.spawn("w-live", spec).unwrap();
     let q = SessionQuiesce::new(sup.clone(), |_| vec!["w-live".to_string(), "w-gone".to_string()]);
     let f = fx_q("quiesce-fx", "[user]\n\tname = U\n\temail = u@e\n", &[], Arc::new(q));
@@ -940,7 +940,7 @@ fn overlapping_pauses_on_one_repo_resume_only_when_the_last_ends() {
     let ticker = |id: &str| {
         let f = d.join(id);
         let script = format!("while :; do echo x >> '{}'; sleep 0.02; done", f.display());
-        let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), codex_home: None };
+        let spec = crate::sessions::SpawnSpec { argv: vec!["sh".into(), "-c".into(), script], cwd: d.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: Vec::new() };
         sup.spawn(id, spec).unwrap();
         f
     };
