@@ -18,7 +18,8 @@
 #
 # PASS needs all of: the flag file's hook runs under -p despite the user's disableAllHooks; the guard's block holds;
 # the init event lists exactly the --tools set; permissionMode is dontAsk; the Write call never writes; the prompt after
-# `--` reaches the model. The project-settings and user-hook lines are recorded for the PR, not part of PASS.
+# `--` reaches the model; the worktree's project-settings hook never runs (`--setting-sources user`: a worker can write
+# that file, and its hook would run outside the guard). The user-hook line is recorded for the PR, not part of PASS.
 # On PASS, set `CLAUDE_WORKER_S4_PASSED = true` in app/core/src/adapter/profiles.rs and update its pinning test.
 set -u
 
@@ -121,7 +122,7 @@ TOOLS=Read,Grep,Glob,Bash
 ( cd "$WT" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
     ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=s4-placeholder-not-a-key DISABLE_AUTOUPDATER=1 \
     perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6 \
-    --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
+    --setting-sources user --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
     < /dev/null > "$SP/events.jsonl" 2> "$SP/stderr" )
 echo "claude exit: $?"
 
@@ -140,13 +141,13 @@ checks = [
     ("an allowed Bash call ran", os.path.exists(m + "/allowed-ran")),
     ("the guard's block held", not os.path.exists(m + "/forbidden-ran")),
     ("the Write call never wrote", not os.path.exists(m + "/write-ran")),
+    ("the worktree's project-settings hook never ran", not os.path.exists(m + "/project-hook")),
 ]
 ok = True
 for name, passed in checks:
     print(("ok    " if passed else "FAIL  ") + name)
     ok &= passed
 print("info  init tools:", init.get("tools"))
-print("info  the worktree's project settings hook ran:", os.path.exists(m + "/project-hook"))
 print("info  the user's own hook ran:", os.path.exists(m + "/user-hook"))
 print("S4 PASS" if ok else "S4 FAIL")
 sys.exit(0 if ok else 1)

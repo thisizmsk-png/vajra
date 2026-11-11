@@ -89,6 +89,7 @@ const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.m
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
     Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker-<session>.json`, fresh per launch and hash-checked before spawn (Read and Edit deny rules, guard hooks, disableAllHooks:false)" },
+    Always { setting: "setting sources", how: "`--setting-sources user`: the user's settings load; the worktree's project and local settings never do, so a hook a worker writes there never runs" },
     Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
     Always { setting: "tools", how: "`--tools` and `--allowedTools`, both the role's list" },
     Always { setting: "model", how: "`--model` when the seat names one" },
@@ -97,8 +98,10 @@ const CLAUDE_WORKER_ALWAYS: &[Always] = &[
 const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "theme", "history", "default model"];
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
-/// `disableAllHooks:false` honoured, does the worktree's project settings file load). The owner runs
-/// `app/bench/spikes/s4-claude-settings.sh`; once it prints PASS, set this to `true` (and update the pinning test).
+/// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
+/// running). The owner runs `app/bench/spikes/s4-claude-settings.sh`; once it prints PASS, set this to `true` (and
+/// update the pinning test). The 2026-11-10 run (claude 2.1.322) predates the project-hook check: rerun before the flip,
+/// and only after the data-dir guard PR is merged and installed.
 pub const CLAUDE_WORKER_S4_PASSED: bool = false;
 
 pub const S4_UNVERIFIED: Unsupported = Unsupported {
@@ -257,7 +260,8 @@ pub struct ClaudeWorker<'a> {
     pub tools: &'a str,
 }
 
-/// A Claude Code worker or verifier: the user's settings load, the flag file outranks them, `--tools` sets the whole
+/// A Claude Code worker or verifier: the user's settings load (`--setting-sources user`; the worktree's project and
+/// local settings never load, since the worker can write them and their hooks run outside the guard), the flag file outranks them, `--tools` sets the whole
 /// tool set (a user allow rule can't widen it) and `--allowedTools` pre-approves the same list. The prompt comes after
 /// `--`, so a variadic flag never swallows it and a prompt starting with `-` is never read as a flag. No bypass flag.
 pub fn claude_worker_argv(l: &WorkerLaunch<'_>, c: &ClaudeWorker<'_>) -> Result<Vec<String>, InvalidInput> {
@@ -278,7 +282,7 @@ pub fn claude_worker_argv(l: &WorkerLaunch<'_>, c: &ClaudeWorker<'_>) -> Result<
     }
     let mut a = vec![
         abs(c.claude, "claude")?, "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(),
-        "--session-id".into(), c.session_id.into(), "--settings".into(), abs(c.settings, "settings")?,
+        "--session-id".into(), c.session_id.into(), "--setting-sources".into(), "user".into(), "--settings".into(), abs(c.settings, "settings")?,
         "--permission-mode".into(), "dontAsk".into(), "--tools".into(), c.tools.into(), "--allowedTools".into(), c.tools.into(),
     ];
     if let Some(m) = l.model {

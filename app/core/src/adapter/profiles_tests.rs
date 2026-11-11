@@ -110,12 +110,15 @@ fn claude_worker_argv_snapshot() {
     let a = claude_worker_argv(&launch(RoleKind::Worker, false), &claude("Read,Grep,Glob,Edit,Write,Bash")).unwrap();
     let want: Vec<String> = [
         "/opt/bin/claude", "-p", "--output-format", "stream-json", "--verbose", "--session-id", "3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6",
-        "--settings", "/d/profiles/claude-worker.json", "--permission-mode", "dontAsk",
+        "--setting-sources", "user", "--settings", "/d/profiles/claude-worker.json", "--permission-mode", "dontAsk",
         "--tools", "Read,Grep,Glob,Edit,Write,Bash", "--allowedTools", "Read,Grep,Glob,Edit,Write,Bash",
         "--model", "vendor/model-a", "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
-    assert!(!a.iter().any(|x| x.contains("bypass") || x == "--setting-sources" || x == "--strict-mcp-config"));
+    assert!(!a.iter().any(|x| x.contains("bypass") || x == "--strict-mcp-config"));
+    // Only the user's own settings load: never the worktree's project or local settings (#147 review).
+    assert_eq!(a.iter().filter(|x| *x == "--setting-sources").count(), 1);
+    assert_eq!(a[a.iter().position(|x| x == "--setting-sources").unwrap() + 1], "user");
 }
 
 #[test]
@@ -390,9 +393,12 @@ fn the_claude_worker_profile_is_refused_until_s4_passes() {
 fn the_s4_owner_script_runs_the_argv_the_builder_makes() {
     let script = include_str!("../../../bench/spikes/s4-claude-settings.sh");
     let a = claude_worker_argv(&launch(RoleKind::Verifier, false), &claude(CHECKER_TOOLS)).unwrap();
-    for flag in ["-p", "--output-format", "stream-json", "--verbose", "--session-id", "--settings", "--permission-mode", "dontAsk", "--tools", "--allowedTools"] {
+    for flag in ["-p", "--output-format", "stream-json", "--verbose", "--session-id", "--settings", "--permission-mode", "dontAsk", "--tools", "--allowedTools", "--setting-sources"] {
         assert!(a.iter().any(|x| x == flag) && script.contains(&format!(" {flag} ")), "{flag}");
     }
+    assert!(a.windows(2).any(|w| w[0] == "--setting-sources" && w[1] == "user") && script.contains(" --setting-sources user "));
+    // The worktree's project-settings hook counts toward PASS (#147 review).
+    assert!(script.contains("(\"the worktree's project-settings hook never ran\", not os.path.exists(m + \"/project-hook\"))"));
     assert!(script.contains(CHECKER_TOOLS));
     for key in ["\"disableAllHooks\":false", "\"disableBypassPermissionsMode\":\"disable\""] {
         assert!(script.contains(key), "{key}");
