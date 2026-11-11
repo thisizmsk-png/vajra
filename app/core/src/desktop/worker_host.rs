@@ -21,28 +21,60 @@ use crate::vajra::gitw::{self, GitwError, Gitw, GlobalBaseline, SessionQuiesce};
 
 /// Every agent launch refused because the startup baseline failed.
 pub const AGENTS_OFF: &str = "agents_off";
+/// The preflight row's action while git is missing: Apple's installer, opened only when the human clicks it.
+pub const INSTALL_DEV_TOOLS: &str = "install_dev_tools";
+const NO_GIT: &str = "Agents are off: git isn't installed. Vajra needs Apple's developer tools for it.";
+
+/// Why agents are off, and the one action that fixes it, if there is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Off {
+    pub why: String,
+    pub action: Option<&'static str>,
+}
+
+/// Where git can come from on macOS: the selected developer dir, then the Command Line Tools, then Xcode. `/usr/bin/git`
+/// is only a shim into one of them; without them, running it opens Apple's install dialog.
+pub fn dev_roots() -> Vec<PathBuf> {
+    let selected = std::fs::read_link("/var/db/xcode_select_link").ok();
+    selected.into_iter().chain(["/Library/Developer/CommandLineTools", "/Applications/Xcode.app/Contents/Developer"].map(PathBuf::from)).collect()
+}
+
+/// A path check only: nothing is run, so a Mac without the tools sees no dialog at launch.
+pub fn git_installed(roots: &[PathBuf]) -> bool {
+    roots.iter().any(|r| r.join("usr/bin/git").is_file())
+}
 
 pub struct WorkerHost {
     git: PathBuf,
     home: PathBuf,
     data: PathBuf,
     work: PathBuf,
-    /// Taken once at open. `Err`: the line that says why agents are off and what to do.
-    baseline: Result<GlobalBaseline, String>,
+    /// Taken once at open. `Err`: why agents are off and what to do.
+    baseline: Result<GlobalBaseline, Off>,
     rt: OnceLock<WorkerRuntime>,
 }
 
 impl WorkerHost {
-    /// The roots check and the baseline, nothing else: no thread starts here.
-    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>) -> WorkerHost {
+    /// The roots check and the baseline, nothing else: no thread starts here. With no git under `dev_roots`, git is never
+    /// run and agents stay off with the install action.
+    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf]) -> WorkerHost {
         let work = gitw::work_root(home);
-        let baseline = gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| why(&e));
+        let baseline = if git_installed(dev_roots) {
+            gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| Off { why: why(&e), action: None })
+        } else {
+            Err(Off { why: NO_GIT.into(), action: Some(INSTALL_DEV_TOOLS) })
+        };
         WorkerHost { git: git.to_path_buf(), home: home.to_path_buf(), data: data.to_path_buf(), work, baseline, rt: OnceLock::new() }
     }
 
     /// `Err`: the line to show where a launch was refused.
     pub fn agents_allowed(&self) -> Result<(), String> {
-        self.baseline.as_ref().map(|_| ()).map_err(Clone::clone)
+        self.baseline.as_ref().map(|_| ()).map_err(|o| o.why.clone())
+    }
+
+    /// While git is missing: the action that opens Apple's installer.
+    pub fn install_action(&self) -> Option<&'static str> {
+        self.baseline.as_ref().err().and_then(|o| o.action)
     }
 
     /// The launch refusal as an IPC error.
@@ -52,13 +84,16 @@ impl WorkerHost {
 
     /// The preflight row while agents are off; `None` when the baseline is held.
     pub fn preflight_row(&self) -> Option<Value> {
-        let why = self.agents_allowed().err()?;
-        Some(json!({"name": "Git settings for agents", "ok": false, "detail": why, "fix": "Restart Vajra. If this keeps happening, check that git works in Terminal."}))
+        let off = self.baseline.as_ref().err()?;
+        Some(match off.action {
+            Some(a) => json!({"name": "Git settings for agents", "ok": false, "detail": off.why, "fix": "", "action": a, "action_label": "Install developer tools", "action_note": "When the install finishes, restart Vajra."}),
+            None => json!({"name": "Git settings for agents", "ok": false, "detail": off.why, "fix": "Restart Vajra. If this keeps happening, check that git works in Terminal."}),
+        })
     }
 
     /// The runtime, built the first time it is asked for (6d dispatches through it). Refused while agents are off.
     pub fn runtime(&self, sup: &Arc<Supervisor>, bus: &Arc<Bus>, on_repo: impl Fn(&Path) -> Vec<String> + Send + Sync + 'static, cfg: impl FnOnce() -> Config) -> Result<&WorkerRuntime, Value> {
-        let g = self.baseline.as_ref().map_err(|why| json!({"error": AGENTS_OFF, "detail": why}))?;
+        let g = self.baseline.as_ref().map_err(|o| json!({"error": AGENTS_OFF, "detail": o.why}))?;
         Ok(self.rt.get_or_init(|| {
             let quiesce = Arc::new(SessionQuiesce::new(sup.clone(), on_repo));
             let gw = Arc::new(Gitw::new(self.git.clone(), self.home.clone(), self.data.clone(), self.work.clone(), g, quiesce));

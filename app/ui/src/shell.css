@@ -44,6 +44,7 @@
 /* The fix hint uses the UI face on Home so the idle window loads no second typeface (idle memory); Settings keeps mono. */
 .v-home__fix { font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 .v-settings .v-home__fix { font-family: var(--font-mono); }
+.v-home__action { display: inline-flex; align-items: center; gap: var(--space-sm); font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 /* Start run shows its key while you are in the form, which is where the key works. */
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }

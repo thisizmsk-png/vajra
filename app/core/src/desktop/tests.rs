@@ -5423,3 +5423,35 @@ fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_l
     let row = pf["rows"].as_array().unwrap().iter().find(|r| r["name"] == "Git settings for agents").cloned().expect("the row");
     assert_eq!((row["ok"].clone(), pf["start_enabled"].clone()), (json!(false), json!(false)), "{pf}");
 }
+
+#[test]
+fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let (data, home) = (t.0.join("data"), t.home());
+    // A git that leaves a mark when it runs: on a Mac without the tools, `/usr/bin/git` would open Apple's dialog.
+    let git = t.0.join("fake-git");
+    fs::write(&git, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", t.0.join("git-ran").display())).unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let none = [t.0.join("no-tools")];
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none);
+    assert!(!t.0.join("git-ran").exists(), "git was never run");
+    assert!(host.agents_allowed().unwrap_err().starts_with("Agents are off: git isn't installed."));
+    assert_eq!(host.install_action(), Some(worker_host::INSTALL_DEV_TOOLS));
+    let row = host.preflight_row().unwrap();
+    assert_eq!((row["action"].as_str(), row["action_label"].as_str()), (Some("install_dev_tools"), Some("Install developer tools")), "{row}");
+    // With the tools there, the same git is run for the take (so the check is what kept it from running above).
+    fs::create_dir_all(t.0.join("tools/usr/bin")).unwrap();
+    fs::write(t.0.join("tools/usr/bin/git"), "").unwrap();
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")]);
+    assert!(t.0.join("git-ran").exists());
+    assert_eq!(host.install_action(), None, "a failed take is not a missing install");
+}
+
+#[test]
+fn install_dev_tools_is_refused_while_git_is_installed() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
+    assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
+}

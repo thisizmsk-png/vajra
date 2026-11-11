@@ -306,7 +306,10 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | Agents are off: the saved copy of your git settings was changed outside Vajra, so it can't be trusted. Re-taking it comes in a later Vajra update. | Start, Director-General and preflight, when a launch is refused | the startup baseline failed closed; the app still opens |
 | Agents are off: the folder for worker copies overlaps the app's data folder. | same | the roots check failed |
 | Agents are off: Vajra couldn't record your git settings at startup (CODE). | same | any other baseline failure |
+| Agents are off: git isn't installed. Vajra needs Apple's developer tools for it. | same, and the preflight row | no developer tools found by path; git is never run, so no install dialog opens at launch |
 | Git settings for agents | preflight row name | shown only while agents are off; Start is disabled |
+| Install developer tools | preflight row button | only while git is missing; opens Apple's installer on click |
+| When the install finishes, restart Vajra. | after that click | announced (status region) |
 | Restart Vajra. If this keeps happening, check that git works in Terminal. | preflight row fix | |
 | This worker can't take a message mid-run. | `core:` worker Message and Redirect | Codex profile |
 | Messages to this worker need a Vajra update that isn't installed yet. | `core:` worker Message and Redirect | Claude profile, until the control hook serves top-level sessions |

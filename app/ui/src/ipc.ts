@@ -78,7 +78,8 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
 }
 
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
-export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string };
+/** `action`: a one-click fix the core offers (today only `install_dev_tools`), with its label and what to do after. */
+export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; action?: "install_dev_tools"; action_label?: string; action_note?: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
@@ -276,6 +277,8 @@ export const api = {
   /** Close every finished worker that loses nothing; the result lists what was kept and why. */
   actCloseFinished: (envelope: Envelope) => call<ActResult<CloseFinishedResult>>("act_close_finished", { envelope }),
   workerDisk: () => call<WorkerDisk>("worker_disk"),
+  /** Opens Apple's developer tools installer; the core refuses it once git is installed. */
+  installDevTools: () => call<{ started: boolean }>("install_dev_tools"),
   actWorkerCleanUp: (envelope: Envelope) => call<ActResult<CleanUpResult>>("act_worker_clean_up", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */

@@ -334,7 +334,7 @@ impl App {
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref()));
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
@@ -482,6 +482,26 @@ impl App {
             live.into_iter().filter(|(_, cwd)| cwd.canonicalize().unwrap_or_else(|_| cwd.clone()).starts_with(&root)).map(|(s, _)| s).collect()
         };
         self.workers.runtime(&self.sup, &self.bus, on_repo, cfg)
+    }
+
+    /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
+    pub fn install_dev_tools(&self) -> Res {
+        if self.workers.install_action().is_none() {
+            return Err(fail("not_needed", "git is already installed"));
+        }
+        let child = std::process::Command::new("/usr/bin/xcode-select")
+            .arg("--install")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| fail("spawn_failed", e))?;
+        // It returns once the dialog is up; reaped off the caller.
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        Ok(json!({"started": true}))
     }
 
     /// Settings: the disk the worker copies use (a walk; builds nothing).
