@@ -341,3 +341,10 @@ fn a_new_file_git_cannot_count_is_listed_and_makes_the_totals_partial() {
     let ok = diff_from_git(&Bridge::new(PathBuf::from("/nonexistent")), &repo, "HEAD").unwrap();
     assert_eq!((ok.added, ok.partial), (2, false));
 }
+
+#[test]
+fn the_profile_read_back_reads_the_same_session_file() {
+    let home = codex_home(ROLLOUT);
+    assert_eq!(codex_rollout(EVENTS, &home).as_deref(), Some(ROLLOUT));
+    assert_eq!(codex_rollout("{}\n", &home), None, "no thread id, no file");
+}
