@@ -452,18 +452,27 @@ fn flatten_global(git: &Path, home: &Path, xdg: Option<&Path>) -> R<String> {
 
 /// `~/.gitconfig`, the XDG file and every include target (following git's path rules, to depth 10), each hashed.
 fn global_sources(git: &Path, home: &Path, xdg: Option<&Path>) -> Vec<(PathBuf, FileHash)> {
-    config_sources(git, home, xdg, &[home.join(".gitconfig"), xdg_config(home, xdg)], true)
+    config_sources(git, home, xdg, &[home.join(".gitconfig"), xdg_config(home, xdg)], true).0
 }
 
-/// The config files and every `include.path` / `includeIf.*.path` target below them (to depth 10, at most 64 files),
-/// each hashed, whatever the include condition says. `follow_roots` is false for repo files (opened `O_NOFOLLOW`);
-/// include targets may be a dotfiles link.
-fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> Vec<(PathBuf, FileHash)> {
+/// At most this many config files in one include graph. A repo graph with more is refused, never trusted in part.
+const INCLUDE_MAX: usize = 64;
+
+/// The config files and every `include.path` / `includeIf.*.path` target below them (to depth 10), each hashed,
+/// whatever the include condition says. `follow_roots` is false for repo files (opened `O_NOFOLLOW`); include targets
+/// may be a dotfiles link. The flag is false when the graph holds more than `INCLUDE_MAX` files: the list is then
+/// partial, and a caller that trusts it must refuse instead (#146 codex).
+fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf], follow_roots: bool) -> (Vec<(PathBuf, FileHash)>, bool) {
     let mut out: Vec<(PathBuf, FileHash)> = Vec::new();
+    let mut complete = true;
     let mut queue: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
     while let Some((p, depth)) = queue.pop() {
-        if out.iter().any(|(q, _)| q == &p) || out.len() >= 64 {
+        if out.iter().any(|(q, _)| q == &p) {
             continue;
+        }
+        if out.len() >= INCLUDE_MAX {
+            complete = false;
+            break;
         }
         let h = hash_file(&p, depth > 0 || follow_roots);
         let present = matches!(h, FileHash::Sha(_));
@@ -485,7 +494,7 @@ fn config_sources(git: &Path, home: &Path, xdg: Option<&Path>, roots: &[PathBuf]
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+    (out, complete)
 }
 
 // ------------------------------------------------------------ quiescing other sessions (M3)
@@ -672,8 +681,9 @@ fn fingerprint(p: &Path) -> Option<Fingerprint> {
 struct Held {
     config: FileHash,
     attributes: FileHash,
-    /// `<common>/config.worktree` and every include target of the two config files.
-    others: Vec<(PathBuf, FileHash)>,
+    /// `<common>/config.worktree` and every include target of the two config files; `None` when the include graph is
+    /// over `INCLUDE_MAX`, which refuses every content call.
+    others: Option<Vec<(PathBuf, FileHash)>>,
     /// The programs the effective trusted config (global baseline plus repo) can run.
     programs: Vec<Program>,
     /// The config keys naming a program outside `vetted_program`: they may run code from the worktree, so the repo
@@ -751,21 +761,23 @@ impl RepoBaselines {
         if !h.unvetted.is_empty() && !h.programs_accepted {
             return Err(GitwError::RepoConfigChanged { keys: h.unvetted.iter().map(|k| format!("program {k}")).collect() });
         }
+        let too_many = || GitwError::RepoConfigChanged { keys: vec![format!("include.path (more than {INCLUDE_MAX} config files)")] };
+        let held_others = h.others.as_ref().ok_or_else(too_many)?;
         let config = hash_file(&common.join("config"), false);
         let attributes = hash_file(&common.join("info/attributes"), false);
-        let others = repo_others(gw, common);
+        let others = repo_others(gw, common).ok_or_else(too_many)?;
         let programs: Vec<Program> = h.programs.iter().map(|p| gw.program(&p.word)).collect();
-        if config == h.config && attributes == h.attributes && others == h.others && programs == h.programs {
+        if config == h.config && attributes == h.attributes && others == *held_others && programs == h.programs {
             return Ok(());
         }
         let mut keys = if config == h.config { Vec::new() } else { diff_keys(&h.entries, &read_config_file(&gw.git, &common.join("config"), &gw.home).unwrap_or_default()) };
         if attributes != h.attributes {
             keys.push("info/attributes".into());
         }
-        if others != h.others {
+        if others != *held_others {
             let wt = common.join("config.worktree");
-            let changed = |p: &PathBuf| others.iter().find(|(q, _)| q == p) != h.others.iter().find(|(q, _)| q == p);
-            let paths: BTreeSet<&PathBuf> = others.iter().chain(&h.others).map(|(p, _)| p).filter(|p| changed(p)).collect();
+            let changed = |p: &PathBuf| others.iter().find(|(q, _)| q == p) != held_others.iter().find(|(q, _)| q == p);
+            let paths: BTreeSet<&PathBuf> = others.iter().chain(held_others).map(|(p, _)| p).filter(|p| changed(p)).collect();
             if paths.contains(&wt) {
                 keys.push("config.worktree".into());
             }
@@ -786,11 +798,17 @@ impl RepoBaselines {
 }
 
 /// `config.worktree` and the include targets: everything the repo's config sources but the two files hashed by name.
-fn repo_others(gw: &Gitw, common: &Path) -> Vec<(PathBuf, FileHash)> {
-    let (config, wt) = (common.join("config"), common.join("config.worktree"));
-    let mut v = config_sources(&gw.git, &gw.home, None, &[config.clone(), wt], false);
+/// `None` when the include graph is over `INCLUDE_MAX`.
+fn repo_others(gw: &Gitw, common: &Path) -> Option<Vec<(PathBuf, FileHash)>> {
+    let config = common.join("config");
+    let (mut v, complete) = repo_sources(gw, common);
     v.retain(|(p, _)| *p != config);
-    v
+    complete.then_some(v)
+}
+
+/// `<common>/config`, `config.worktree` and every file they include, under any condition.
+fn repo_sources(gw: &Gitw, common: &Path) -> (Vec<(PathBuf, FileHash)>, bool) {
+    config_sources(&gw.git, &gw.home, None, &[common.join("config"), common.join("config.worktree")], false)
 }
 
 fn take_repo(gw: &Gitw, common: &Path) -> Held {
@@ -947,7 +965,19 @@ impl Gitw {
             Ok(o) if o.exit() == Some(0) && o.whole() => o,
             _ => return (Vec::new(), vec!["config".into()]),
         };
-        let entries: Vec<(String, String)> = parse_list_z(&o.stdout).into_iter().filter(|(k, _)| program_key(k)).collect();
+        let mut entries: Vec<(String, String)> = parse_list_z(&o.stdout).into_iter().filter(|(k, _)| program_key(k)).collect();
+        // That list evaluates `includeIf` against the common dir. A ticket's calls run with the worktree's own gitdir and
+        // branch, where other conditions hold (`gitdir:.../worktrees/`, `onbranch:`). So every program any repo config
+        // file defines, whatever its include condition, is listed and fingerprinted too (#146 codex).
+        for (f, h) in repo_sources(self, common).0 {
+            if !matches!(h, FileHash::Sha(_)) {
+                continue;
+            }
+            match read_config_file(&self.git, &f, &self.home) {
+                Some(e) => entries.extend(e.into_iter().filter(|(k, _)| program_key(k))),
+                None => return (Vec::new(), vec!["config".into()]),
+            }
+        }
         let words: BTreeSet<String> = entries.iter().filter_map(|(_, v)| first_word(v)).collect();
         let unvetted: BTreeSet<String> = entries.iter().filter(|(_, v)| !vetted_program(v)).map(|(k, _)| k.clone()).collect();
         (words.iter().map(|w| self.program(w)).collect(), unvetted.into_iter().collect())
@@ -1361,8 +1391,9 @@ impl Gitw {
         if t.round == 1 { format!("refs/heads/vajra/{}/integration", t.run) } else { format!("refs/heads/vajra/{}/integration-r{}", t.run, t.round) }
     }
 
-    /// `checkout -B vajra/<run>/integration[-r<n>] <base>`, then `merge --no-ff` each commit, checking before each merge
-    /// that HEAD is exactly that branch. Returns the integration head.
+    /// Refuse a symbolic `vajra/<run>/integration[-r<n>]`, set it to `base` with `update-ref --no-deref`, `merge --no-ff`
+    /// each commit on a detached HEAD (checked before each merge), then move the branch to the result from exactly
+    /// `base`, again with `--no-deref`. Returns the integration head.
     pub fn integrate(&self, it: &Ticket, base: &str, commits: &[String]) -> R<String> {
         if !it.integration {
             return Err(GitwError::Invalid("not an integration tree"));
@@ -1372,13 +1403,16 @@ impl Gitw {
         }
         let r = Self::integration_ref(it);
         vajra_ref(&r)?;
-        let branch = r.trim_start_matches("refs/heads/");
         let _quiet = self.quiesce.pause(&it.common.path);
         self.preflight(it)?;
-        self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "-B", branch, base]))?;
-        // Refs live in the common dir, which any worker on the repo can write: every step checks where HEAD landed.
+        // Refs live in the common dir, which any worker on the repo can write. A planted `<r> -> refs/heads/main` would
+        // make any write through `r` move main (#146 codex), so `r` is refused when symbolic, written only with
+        // `--no-deref`, and never checked out: the merges run on a detached HEAD.
+        self.plain_ref(it, &r)?;
+        self.ok("update-ref", Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, base]))?;
+        self.ok("checkout", Call::new(At::Pinned(it), &["checkout", "-q", "--detach", base]))?;
         let mut prev = base.to_string();
-        if self.head(it)? != prev {
+        if self.detached(it).is_err() || self.head(it)? != prev {
             return Err(tampered("the integration tree's HEAD"));
         }
         let mut cfg = vec![NO_SIGN];
@@ -1387,8 +1421,7 @@ impl Gitw {
             #[cfg(test)]
             BEFORE_MERGE.with(|b| if let Some(f) = b.borrow().as_ref() { f() });
             self.preflight(it)?;
-            let head = self.ok("symbolic-ref", Call::new(At::Pinned(it), &["symbolic-ref", "-q", "HEAD"]))?;
-            if head.stdout.trim() != r || self.head(it)? != prev {
+            if self.detached(it).is_err() || self.head(it)? != prev {
                 return Err(tampered("the integration tree's HEAD"));
             }
             let o = self.run(Call::new(At::Pinned(it), &["merge", "--no-ff", "--no-edit", "--no-verify", "--", c]).config(&cfg))?;
@@ -1410,10 +1443,27 @@ impl Gitw {
             }
             prev = now;
         }
-        if self.head(it)? != prev {
+        if self.detached(it).is_err() || self.head(it)? != prev {
             return Err(tampered("the integration tree's HEAD"));
         }
+        // From exactly `base`: a branch a worker moved meanwhile is refused, never overwritten.
+        self.plain_ref(it, &r)?;
+        let u = self.run(Call::new(At::Pinned(it), &["update-ref", "--no-deref", "-m", "vajra integrate", "--", &r, &prev, base]))?;
+        if u.exit() != Some(0) {
+            return Err(tampered("the integration branch"));
+        }
+        self.plain_ref(it, &r)?;
         Ok(prev)
+    }
+
+    /// `r` is a plain ref or none: `symbolic-ref -q` exits 1.
+    fn plain_ref(&self, t: &Ticket, r: &str) -> R<()> {
+        if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "--", r]))?.exit() == Some(1) { Ok(()) } else { Err(tampered("the integration branch is a symbolic ref")) }
+    }
+
+    /// HEAD is detached: `symbolic-ref -q HEAD` exits 1.
+    fn detached(&self, t: &Ticket) -> R<()> {
+        if self.run(Call::new(At::Pinned(t), &["symbolic-ref", "-q", "HEAD"]))?.exit() == Some(1) { Ok(()) } else { Err(tampered("the integration tree's HEAD")) }
     }
 
     fn head(&self, t: &Ticket) -> R<String> {
@@ -1450,6 +1500,9 @@ impl Gitw {
 
     /// Remove a ticket's worktree once the capture check passes (`--force`: the plumbing snapshot leaves it dirty).
     pub fn worktree_remove(&self, t: &Ticket, commit: &str, integration_ref: &str) -> R<()> {
+        // One pause from the check until the tree is gone: a session resumed in between could write a file the check
+        // never saw, and `--force` would delete it (#146 codex). The check's own pause nests inside this one.
+        let _quiet = self.quiesce.pause(&t.common.path);
         self.capture_check(t, commit, integration_ref)?;
         self.remove(t)
     }

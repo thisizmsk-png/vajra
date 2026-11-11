@@ -705,7 +705,8 @@ fn a_moved_integration_branch_is_tampered() {
     })));
     let r = f.gw.integrate(&it, &f.base, std::slice::from_ref(&c));
     BEFORE_MERGE.with(|b| *b.borrow_mut() = None);
-    assert_eq!(r.unwrap_err(), GitwError::Tampered { what: "the integration tree's HEAD".into() });
+    assert_eq!(r.unwrap_err(), GitwError::Tampered { what: "the integration branch".into() });
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/integration"), evil, "refused, never overwritten");
     no_marker(&f);
 }
 
@@ -1004,4 +1005,138 @@ fn a_pause_that_panics_part_way_leaves_no_count() {
     boom.store(false, Ordering::SeqCst);
     drop(q.pause(Path::new("/repo-p")));
     assert!(crate::lock(&q.held).is_empty());
+}
+
+/// #146 codex: an integration ref planted as a symbolic ref to another branch is refused, and that branch never moves:
+/// with no commits, with commits, and when it is planted between merges.
+#[test]
+fn a_symbolic_integration_ref_is_refused_and_its_target_never_moves() {
+    let f = fx("intsym");
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    // `other` is not a Vajra branch, and sits at a different commit than the integration base.
+    let other = out(ugit(&f.home, &f.repo, &["-c", "user.name=W", "-c", "user.email=w@e", "commit-tree", &format!("{}^{{tree}}", f.base), "-p", &f.base, "-m", "other"]));
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "update-ref", "refs/heads/other", &other]);
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    let plant = |home: &Path, repo: &Path| {
+        ugit(home, repo, &["-c", "core.hooksPath=/dev/null", "symbolic-ref", "refs/heads/vajra/r1/integration", "refs/heads/other"]);
+    };
+    plant(&f.home, &f.repo);
+    for commits in [Vec::new(), vec![c.clone()]] {
+        assert_eq!(f.gw.integrate(&it, &f.base, &commits).unwrap_err(), GitwError::Tampered { what: "the integration branch is a symbolic ref".into() });
+        assert_eq!(rev(&f, "refs/heads/other"), other, "the target never moves");
+    }
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "symbolic-ref", "--delete", "refs/heads/vajra/r1/integration"]);
+    let (home, repo) = (f.home.clone(), f.repo.clone());
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = Some(Box::new(move || plant(&home, &repo))));
+    let r = f.gw.integrate(&it, &f.base, std::slice::from_ref(&c));
+    BEFORE_MERGE.with(|b| *b.borrow_mut() = None);
+    assert_eq!(r.unwrap_err().code(), "tampered");
+    assert_eq!(rev(&f, "refs/heads/other"), other, "planted between merges: the target never moves");
+    // A plain ref again: the run integrates, and only its own branch moved.
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "symbolic-ref", "--delete", "refs/heads/vajra/r1/integration"]);
+    let head = f.gw.integrate(&it, &f.base, std::slice::from_ref(&c)).unwrap();
+    assert_eq!(rev(&f, "refs/heads/vajra/r1/integration"), head);
+    assert_eq!(rev(&f, "refs/heads/other"), other);
+    assert_eq!(rev(&f, "main"), f.base);
+    no_marker(&f);
+}
+
+/// #146 codex: a program defined in an include whose condition holds only in a linked worktree is listed for the human
+/// and refuses the repo's content calls until accepted, so its planted script never runs.
+#[test]
+fn a_program_in_an_include_active_only_in_a_linked_worktree_is_gated() {
+    let f = fx_with("condinc", "[user]\n\tname = U\n\temail = u@e\n", &[("x.dat", "x\n")]);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let inc = f.d.join("wt-only.gitconfig");
+    std::fs::write(&inc, "[filter \"x\"]\n\tclean = sh ./filter.sh\n").unwrap();
+    ugit(&f.home, &f.repo, &["config", "includeIf.gitdir:**/.git/worktrees/**.path", inc.to_str().unwrap()]);
+    // The condition is false in the common dir and true in a linked worktree.
+    let at_common = Command::new(GIT).args(["-C", common.to_str().unwrap(), "config", "--get", "filter.x.clean"]).env_clear().env("HOME", &f.home).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(!at_common.status.success(), "inactive in the common dir");
+    let manual = f.d.join("manual");
+    ugit(&f.home, &f.repo, &["-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "--detach", manual.to_str().unwrap(), &f.base]);
+    assert_eq!(out(ugit(&f.home, &manual, &["config", "--get", "filter.x.clean"])), "sh ./filter.sh", "active in a linked worktree");
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    assert_eq!(f.gw.repos.unvetted_programs(&common), vec!["filter.x.clean".to_string()]);
+    match f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec!["program filter.x.clean".to_string()]),
+        other => panic!("{other:?}"),
+    }
+    no_marker(&f);
+}
+
+/// #146 codex: a repo include graph over the limit is refused, never trusted in part, so a target past the recorded
+/// set that a worker rewrites to define a filter never runs.
+#[test]
+fn a_repo_include_graph_over_the_limit_is_refused() {
+    let f = fx("manyinc");
+    let mark = marker_script(&f.d, &f.marker);
+    let common = f.gw.common_of(&f.repo).unwrap();
+    let mut cfg = std::fs::read_to_string(common.join("config")).unwrap();
+    for i in 0..70 {
+        let p = f.d.join(format!("inc{i}.gitconfig"));
+        std::fs::write(&p, "").unwrap();
+        cfg.push_str(&format!("[include]\n\tpath = {}\n", p.display()));
+    }
+    std::fs::write(common.join("config"), cfg).unwrap();
+    f.gw.repos.accept_new(&f.gw, &common, false).unwrap();
+    f.gw.repos.accept_programs(&common, false).unwrap();
+    let refused = |f: &Fx| match f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base) {
+        Err(GitwError::RepoConfigChanged { keys }) => assert_eq!(keys, vec![format!("include.path (more than {INCLUDE_MAX} config files)")]),
+        other => panic!("{other:?}"),
+    };
+    refused(&f);
+    for i in 0..70 {
+        std::fs::write(f.d.join(format!("inc{i}.gitconfig")), format!("[filter \"x\"]\n\tclean = {}\n", mark.display())).unwrap();
+    }
+    refused(&f);
+    no_marker(&f);
+}
+
+/// Counts pauses the way `SessionQuiesce` does. When the last one ends it records whether `watch` still exists, and
+/// writes into it if so, the way a resumed session would.
+#[derive(Debug, Default)]
+struct Counting {
+    n: Arc<Mutex<usize>>,
+    watch: Arc<Mutex<Option<PathBuf>>>,
+    seen: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Quiesce for Counting {
+    fn pause(&self, _: &Path) -> Pause {
+        *crate::lock(&self.n) += 1;
+        let (n, watch, seen) = (self.n.clone(), self.watch.clone(), self.seen.clone());
+        Pause::new(move || {
+            let mut n = crate::lock(&n);
+            *n -= 1;
+            if *n == 0 {
+                if let Some(w) = crate::lock(&watch).as_ref() {
+                    let there = w.exists();
+                    if there {
+                        let _ = std::fs::write(w.join("late.txt"), "x\n");
+                    }
+                    crate::lock(&seen).push(there);
+                }
+            }
+        })
+    }
+}
+
+/// #146 codex: the repo stays paused from the capture check until the removal ends; no session resumes in between to
+/// write a file that `--force` would delete unseen.
+#[test]
+fn the_pause_holds_through_worktree_removal() {
+    let q = Arc::new(Counting::default());
+    let f = fx_q("rmpause", "[user]\n\tname = U\n\temail = u@e\n", &[], q.clone());
+    let t = f.gw.worktree_add(&f.repo, "p", "r1", "t1", 1, &f.base).unwrap();
+    edit(&t, "src/lib.rs", "x\n");
+    let c = f.gw.snapshot(&t, &globs(), &[], "w m").unwrap().commit.unwrap();
+    let it = f.gw.integration_tree(&f.repo, "p", "r1", 1, &f.base).unwrap();
+    f.gw.integrate(&it, &f.base, std::slice::from_ref(&c)).unwrap();
+    *crate::lock(&q.watch) = Some(t.wt.clone());
+    f.gw.worktree_remove(&t, &c, &Gitw::integration_ref(&it)).unwrap();
+    assert_eq!(*crate::lock(&q.seen), vec![false], "the only resume came after the tree was gone");
+    no_marker(&f);
 }
