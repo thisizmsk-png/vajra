@@ -16,13 +16,17 @@
 #   - the worktree's project settings: allow Bash(*), Write; a hook.
 # The stub asks for: an allowed Bash call, a Bash call the guard blocks, a Write call (not in --tools), then stops.
 #
-# PASS needs all of: the flag file's hook runs under -p despite the user's disableAllHooks; the guard's block holds;
-# the init event lists exactly the --tools set; permissionMode is dontAsk; the Write call never writes; the prompt after
-# `--` reaches the model; the worktree's project-settings hook never runs (`--setting-sources user`: a worker can write
-# that file, and its hook would run outside the guard). The user-hook line is recorded for the PR, not part of PASS.
+# PASS needs all of (s4_check.py, next to this script): claude exits 0 with a successful result and the plan reaches its
+# last turn; the flag file's hook runs under -p despite the user's disableAllHooks; the guard sees the blocked Bash call,
+# which comes back refused and never runs; the Write call comes back refused and never writes; the init event lists
+# exactly the --tools set; permissionMode is dontAsk; the prompt after `--` reaches the model; the worktree's
+# project-settings hook never runs (`--setting-sources user`: a worker can write that file, and its hook would run
+# outside the guard). A run cut short after any probe fails. The user-hook line is recorded for the PR, not part of PASS.
 # On PASS, set `CLAUDE_WORKER_S4_PASSED = true` in app/core/src/adapter/profiles.rs and update its pinning test.
 set -u
 
+HERE=$(cd "$(dirname "$0")" && pwd -P) || exit 2
+[ -f "$HERE/s4_check.py" ] || { echo "FAIL: s4_check.py is not next to this script"; exit 2; }
 CLAUDE=${1:-$(command -v claude || true)}
 if [ -z "$CLAUDE" ] || [ ! -x "$CLAUDE" ]; then echo "FAIL: no claude binary (pass its absolute path)"; exit 2; fi
 case "$CLAUDE" in /*) ;; *) echo "FAIL: pass an absolute path"; exit 2;; esac
@@ -77,8 +81,12 @@ class H(http.server.BaseHTTPRequestHandler):
         tools = [t.get("name") for t in b.get("tools", [])]
         blocks = [c for m in b.get("messages", []) if isinstance(m.get("content"), list) for c in m["content"]]
         k = sum(1 for c in blocks if c.get("type") == "tool_result")
+        def text(c):
+            x = c.get("content")
+            return x if isinstance(x, str) else " ".join(i.get("text", "") for i in x or [] if isinstance(i, dict))
+        results = [{"id": c.get("tool_use_id"), "is_error": c.get("is_error") is True, "text": text(c)[:300]} for c in blocks if c.get("type") == "tool_result"]
         with open(log, "a") as f:
-            f.write(json.dumps({"path": self.path, "tools": tools, "k": k, "body": json.dumps(b.get("messages", []))[:4000]}) + "\n")
+            f.write(json.dumps({"path": self.path, "tools": tools, "k": k, "results": results, "body": json.dumps(b.get("messages", []))[:4000]}) + "\n")
         if "count_tokens" in self.path:
             self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(b'{"input_tokens":1}'); return
         turn = plan[k] if (tools and k < len(plan)) else {"say": "done"}
@@ -124,31 +132,7 @@ TOOLS=Read,Grep,Glob,Bash
     perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6 \
     --setting-sources user --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
     < /dev/null > "$SP/events.jsonl" 2> "$SP/stderr" )
-echo "claude exit: $?"
+STATUS=$?
+echo "claude exit: $STATUS"
+/usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS"
 
-/usr/bin/python3 -I - "$SP" "$M" "$TOOLS" <<'PY'
-import json, os, sys
-sp, m, tools = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
-events = [json.loads(l) for l in open(sp + "/events.jsonl") if l.strip().startswith("{")]
-init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
-log = [json.loads(l) for l in open(sp + "/stub/log")] if os.path.exists(sp + "/stub/log") else []
-got = sorted(t for t in init.get("tools", []) if not t.startswith("mcp__"))
-checks = [
-    ("prompt after -- reaches the model", any("Run the S4 plan" in r["body"] for r in log)),
-    ("init lists exactly the --tools set", got == sorted(tools)),
-    ("permissionMode is dontAsk", init.get("permissionMode") == "dontAsk"),
-    ("the flag file's hook ran despite the user's disableAllHooks", os.path.exists(m + "/guard")),
-    ("an allowed Bash call ran", os.path.exists(m + "/allowed-ran")),
-    ("the guard's block held", not os.path.exists(m + "/forbidden-ran")),
-    ("the Write call never wrote", not os.path.exists(m + "/write-ran")),
-    ("the worktree's project-settings hook never ran", not os.path.exists(m + "/project-hook")),
-]
-ok = True
-for name, passed in checks:
-    print(("ok    " if passed else "FAIL  ") + name)
-    ok &= passed
-print("info  init tools:", init.get("tools"))
-print("info  the user's own hook ran:", os.path.exists(m + "/user-hook"))
-print("S4 PASS" if ok else "S4 FAIL")
-sys.exit(0 if ok else 1)
-PY

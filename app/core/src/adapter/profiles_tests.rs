@@ -401,10 +401,61 @@ fn the_s4_owner_script_runs_the_argv_the_builder_makes() {
         assert!(a.iter().any(|x| x == flag) && script.contains(&format!(" {flag} ")), "{flag}");
     }
     assert!(a.windows(2).any(|w| w[0] == "--setting-sources" && w[1] == "user") && script.contains(" --setting-sources user "));
-    // The worktree's project-settings hook counts toward PASS (#147 review).
-    assert!(script.contains("(\"the worktree's project-settings hook never ran\", not os.path.exists(m + \"/project-hook\"))"));
+    // The verdict is s4_check.py's; the worktree's project-settings hook counts toward PASS (#147 review).
+    assert!(script.contains("/usr/bin/python3 -I \"$HERE/s4_check.py\" \"$SP\" \"$M\" \"$TOOLS\" \"$STATUS\""));
+    assert!(S4_CHECK.contains("(\"the worktree's project-settings hook never ran\", not os.path.exists(m + \"/project-hook\"))"));
     assert!(script.contains(CHECKER_TOOLS));
     for key in ["\"disableAllHooks\":false", "\"disableBypassPermissionsMode\":\"disable\""] {
         assert!(script.contains(key), "{key}");
     }
+}
+
+const S4_CHECK: &str = include_str!("../../../bench/spikes/s4_check.py");
+
+/// A transcript the S4 script could record: the stub served plan steps `0..served` (step k carries the tool results of
+/// the k calls before it), Claude exited with `status`, and `result` says whether it emitted a successful result event.
+/// Returns the checker's exit code and output.
+fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i32>, String) {
+    use serde_json::json;
+    let sp = tmpdir(tag);
+    let m = sp.join("m");
+    std::fs::create_dir_all(sp.join("stub")).unwrap();
+    std::fs::create_dir_all(&m).unwrap();
+    let mut ev = vec![json!({"type": "system", "subtype": "init", "tools": ["Read", "Grep", "Glob", "Bash"], "permissionMode": "dontAsk"})];
+    if result {
+        ev.push(json!({"type": "result", "subtype": "success", "is_error": false}));
+    }
+    std::fs::write(sp.join("events.jsonl"), ev.iter().map(|e| e.to_string() + "\n").collect::<String>()).unwrap();
+    // The allowed call succeeds; the blocked Bash call and the Write call come back as errors.
+    let all = [json!({"id": "tu_0", "is_error": false, "text": ""}), json!({"id": "tu_1", "is_error": true, "text": "blocked by the S4 guard"}), json!({"id": "tu_2", "is_error": true, "text": "No such tool available: Write"})];
+    let log: String = (0..served).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": all[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
+    std::fs::write(sp.join("stub/log"), log).unwrap();
+    // Each call the stub's step k asked for reaches the guard before step k + 1 is requested.
+    let guard: String = ["echo allowed > m/allowed-ran", "echo x > m/forbidden-ran"].iter().take(served.saturating_sub(1)).map(|l| format!("{l}\n")).collect();
+    if served >= 2 {
+        std::fs::write(m.join("guard"), guard).unwrap();
+        std::fs::write(m.join("allowed-ran"), "allowed\n").unwrap();
+    }
+    let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", "main()"))
+        .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status]).output().unwrap();
+    (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// #147 codex: S4 PASS needs every probe to have run to its end. A run cut short after its first call (an error, or the
+/// 180 s alarm), or one that exits 0 without reaching the plan's end, fails, though nothing forbidden happened.
+#[test]
+fn s4_passes_only_when_every_probe_ran_and_was_refused() {
+    let (code, out) = s4_verdict("s4-full", 4, "0", true);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.ends_with("S4 PASS\n"), "{out}");
+    // Interrupted after the first (allowed) call: the alarm killed claude, so no result event and no later probe.
+    let (code, out) = s4_verdict("s4-alarm", 2, "142", false);
+    assert_eq!(code, Some(1), "{out}");
+    for line in ["FAIL  claude exited 0", "FAIL  the plan reached its last turn", "FAIL  the blocked Bash call came back refused", "FAIL  the Write call came back refused", "S4 FAIL"] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    // A clean exit and a result event are not enough on their own.
+    let (code, out) = s4_verdict("s4-short", 3, "0", true);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("FAIL  the Write call came back refused") && out.contains("FAIL  the plan reached its last turn"), "{out}");
 }
