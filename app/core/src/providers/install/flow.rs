@@ -22,12 +22,15 @@ use crate::sessions::Supervisor;
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Reads one of the app's own environment variables.
+pub type EnvGet = Box<dyn Fn(&str) -> Option<OsString> + Send + Sync>;
+
 /// What this machine offers: resolved tools, the user, the bottle tag and the app's own environment.
 pub struct Machine {
     pub tools: Tools,
     pub uid: u32,
     pub tag: Option<String>,
-    pub get: Box<dyn Fn(&str) -> Option<OsString> + Send + Sync>,
+    pub get: EnvGet,
 }
 
 impl Machine {
