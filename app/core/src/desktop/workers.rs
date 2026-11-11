@@ -735,6 +735,12 @@ impl WorkerRuntime {
                 e.view.receipt = serde_json::to_value(r).ok();
                 e.view.mismatch = r.mismatch_event();
             }
+            // A kill recorded before this point decides the outcome, whatever the snapshot or diff found meanwhile:
+            // a Stop accepted during `finish` never ends `done` with an integratable commit (#149 codex P2).
+            let (o, reason) = match e.kill {
+                Some(k) => kill_outcome(k),
+                None => (o, reason),
+            };
             finish_view(&mut e.view, o, reason);
             e.view.summary = Some(summary(&e.view, &self.0.cfg.redact));
             e.session = None;
