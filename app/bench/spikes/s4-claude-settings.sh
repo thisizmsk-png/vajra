@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Spike S4 (ADR-16 16.12): does the Claude Code worker profile hold against hostile user and project settings?
+#
+# OWNER-RUN. An agent session must not run this: it creates Claude settings files (inside a fresh temp dir only), which
+# the Vajra guard rightly refuses from agents.
+#
+#   bash app/bench/spikes/s4-claude-settings.sh [/absolute/path/to/claude]
+#
+# Everything lives in a new mktemp dir: a temp HOME and CLAUDE_CONFIG_DIR (never your real ~/.claude), a temp worktree,
+# and a loopback stub of the Messages API on a free port. The key value is a placeholder: the stub ignores it and nothing
+# leaves 127.0.0.1. Your own Claude login, settings and Keychain are never read.
+#
+# It runs the worker argv `adapter::profiles::claude_worker_argv` builds (verifier tools), with a flag file shaped like
+# `claude_worker_flag` (test guard hook in place of the installed one), against:
+#   - user settings: allow Bash(*), Edit, Write, WebFetch; defaultMode bypassPermissions; disableAllHooks true; a hook;
+#   - the worktree's project settings: allow Bash(*), Write; a hook.
+# The stub asks for: an allowed Bash call, a Bash call the guard blocks, a Write call (not in --tools), then stops.
+#
+# PASS needs all of: the flag file's hook runs under -p despite the user's disableAllHooks; the guard's block holds;
+# the init event lists exactly the --tools set; permissionMode is dontAsk; the Write call never writes; the prompt after
+# `--` reaches the model. The project-settings and user-hook lines are recorded for the PR, not part of PASS.
+# On PASS, set `CLAUDE_WORKER_S4_PASSED = true` in app/core/src/adapter/profiles.rs and update its pinning test.
+set -u
+
+CLAUDE=${1:-$(command -v claude || true)}
+if [ -z "$CLAUDE" ] || [ ! -x "$CLAUDE" ]; then echo "FAIL: no claude binary (pass its absolute path)"; exit 2; fi
+case "$CLAUDE" in /*) ;; *) echo "FAIL: pass an absolute path"; exit 2;; esac
+"$CLAUDE" --version 2>/dev/null | head -1 | sed 's/^/claude: /'
+
+SP=$(mktemp -d "${TMPDIR:-/tmp}/vajra-s4.XXXXXX") || exit 2
+SP=$(cd "$SP" && pwd -P)
+H=$SP/home; CC=$H/.claude; WT=$SP/work/proj/run/t1-r1; M=$SP/m
+mkdir -p "$CC" "$WT/.claude" "$M" "$SP/stub"
+STUB=""
+cleanup() { if [ -n "$STUB" ]; then kill "$STUB" 2>/dev/null; fi; }
+trap cleanup EXIT
+echo "spike dir: $SP"
+
+# The guard stand-in: records every call and blocks any command naming "forbidden".
+cat > "$SP/guard.sh" <<EOF
+#!/bin/sh
+in=\$(cat)
+echo "\$in" | cut -c1-300 >> "$M/guard"
+case "\$in" in *forbidden*) echo "blocked by the S4 guard" >&2; exit 2;; esac
+exit 0
+EOF
+chmod 755 "$SP/guard.sh"
+
+# Hostile user settings.
+cat > "$CC/settings.json" <<EOF
+{"permissions":{"allow":["Bash(*)","Edit","Write","WebFetch"],"defaultMode":"bypassPermissions"},"disableAllHooks":true,
+ "hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo USER >> $M/user-hook"}]}]}}
+EOF
+
+# The worktree's own project settings (a worker could write this in its worktree).
+cat > "$WT/.claude/settings.json" <<EOF
+{"permissions":{"allow":["Bash(*)","Write"]},"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"echo PROJ >> $M/project-hook"}]}]}}
+EOF
+
+# The Vajra flag file, as claude_worker_flag shapes it.
+cat > "$SP/flag.json" <<EOF
+{"disableAllHooks":false,"permissions":{"defaultMode":"dontAsk","disableBypassPermissionsMode":"disable","deny":["Bash(rm:*)","WebFetch"]},
+ "hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"$SP/guard.sh","timeout":10}]}]}}
+EOF
+
+# The stub: the plan step is the number of tool results already in the conversation.
+cat > "$SP/stub/stub.py" <<'PY'
+import http.server, json, sys
+plan, log, portfile = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(b"{}")
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+        tools = [t.get("name") for t in b.get("tools", [])]
+        blocks = [c for m in b.get("messages", []) if isinstance(m.get("content"), list) for c in m["content"]]
+        k = sum(1 for c in blocks if c.get("type") == "tool_result")
+        with open(log, "a") as f:
+            f.write(json.dumps({"path": self.path, "tools": tools, "k": k, "body": json.dumps(b.get("messages", []))[:4000]}) + "\n")
+        if "count_tokens" in self.path:
+            self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(b'{"input_tokens":1}'); return
+        turn = plan[k] if (tools and k < len(plan)) else {"say": "done"}
+        self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
+        def ev(t, d):
+            d["type"] = t; self.wfile.write(f"event: {t}\ndata: {json.dumps(d)}\n\n".encode()); self.wfile.flush()
+        ev("message_start", {"message": {"id": "msg_s4", "type": "message", "role": "assistant", "model": b.get("model", "m"), "content": [], "stop_reason": None, "usage": {"input_tokens": 1, "output_tokens": 1}}})
+        if "tool" in turn:
+            ev("content_block_start", {"index": 0, "content_block": {"type": "tool_use", "id": f"tu_{k}", "name": turn["tool"], "input": {}}})
+            ev("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(turn["input"])}})
+            stop = "tool_use"
+        else:
+            ev("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}})
+            ev("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": turn["say"]}})
+            stop = "end_turn"
+        ev("content_block_stop", {"index": 0})
+        ev("message_delta", {"delta": {"stop_reason": stop}, "usage": {"output_tokens": 1}})
+        ev("message_stop", {})
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+open(portfile, "w").write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+/usr/bin/python3 -I - "$SP" "$M" > "$SP/stub/plan.json" <<'PY'
+import json, sys
+sp, m = sys.argv[1], sys.argv[2]
+print(json.dumps([
+    {"tool": "Bash", "input": {"command": "echo allowed > " + m + "/allowed-ran", "description": "allowed"}},
+    {"tool": "Bash", "input": {"command": "echo x > " + m + "/forbidden-ran", "description": "guard blocks this"}},
+    {"tool": "Write", "input": {"file_path": m + "/write-ran", "content": "x"}},
+    {"say": "done"},
+]))
+PY
+
+/usr/bin/python3 -I "$SP/stub/stub.py" "$SP/stub/plan.json" "$SP/stub/log" "$SP/stub/port" > "$SP/stub/out" 2>&1 &
+STUB=$!
+for _ in $(seq 1 50); do [ -s "$SP/stub/port" ] && break; sleep 0.1; done
+PORT=$(cat "$SP/stub/port" 2>/dev/null)
+if [ -z "$PORT" ]; then echo "FAIL: the stub did not start"; exit 2; fi
+
+TOOLS=Read,Grep,Glob,Bash
+( cd "$WT" && env -i PATH="/usr/bin:/bin:$(dirname "$CLAUDE")" HOME="$H" CLAUDE_CONFIG_DIR="$CC" TERM=dumb \
+    ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT" ANTHROPIC_API_KEY=s4-placeholder-not-a-key DISABLE_AUTOUPDATER=1 \
+    perl -e 'alarm 180; exec @ARGV' "$CLAUDE" -p --output-format stream-json --verbose --session-id 3f1d7e8a-1b2c-4d5e-8f90-a1b2c3d4e5f6 \
+    --settings "$SP/flag.json" --permission-mode dontAsk --tools "$TOOLS" --allowedTools "$TOOLS" -- "Run the S4 plan" \
+    < /dev/null > "$SP/events.jsonl" 2> "$SP/stderr" )
+echo "claude exit: $?"
+
+/usr/bin/python3 -I - "$SP" "$M" "$TOOLS" <<'PY'
+import json, os, sys
+sp, m, tools = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+events = [json.loads(l) for l in open(sp + "/events.jsonl") if l.strip().startswith("{")]
+init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
+log = [json.loads(l) for l in open(sp + "/stub/log")] if os.path.exists(sp + "/stub/log") else []
+got = sorted(t for t in init.get("tools", []) if not t.startswith("mcp__"))
+checks = [
+    ("prompt after -- reaches the model", any("Run the S4 plan" in r["body"] for r in log)),
+    ("init lists exactly the --tools set", got == sorted(tools)),
+    ("permissionMode is dontAsk", init.get("permissionMode") == "dontAsk"),
+    ("the flag file's hook ran despite the user's disableAllHooks", os.path.exists(m + "/guard")),
+    ("an allowed Bash call ran", os.path.exists(m + "/allowed-ran")),
+    ("the guard's block held", not os.path.exists(m + "/forbidden-ran")),
+    ("the Write call never wrote", not os.path.exists(m + "/write-ran")),
+]
+ok = True
+for name, passed in checks:
+    print(("ok    " if passed else "FAIL  ") + name)
+    ok &= passed
+print("info  init tools:", init.get("tools"))
+print("info  the worktree's project settings hook ran:", os.path.exists(m + "/project-hook"))
+print("info  the user's own hook ran:", os.path.exists(m + "/user-hook"))
+print("S4 PASS" if ok else "S4 FAIL")
+sys.exit(0 if ok else 1)
+PY

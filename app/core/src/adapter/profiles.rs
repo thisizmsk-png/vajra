@@ -1,0 +1,513 @@
+//! Harness profiles (ADR-16 16.4): per (harness, role kind), what Vajra always sets for one launch and what stays the
+//! user's, the argv builders, the Claude worker flag file, the card disclosures and the run-time read-back.
+//!
+//! A profile layers Vajra's settings on top of the user's own install with the harness's highest-precedence
+//! per-launch mechanism (`-c` for Codex, `--settings`/`--tools` for Claude Code). Spike S3 (codex 0.166, a temp
+//! `CODEX_HOME` holding hostile settings, a real `codex exec` against a loopback stub) decided the Codex keys:
+//! - `--sandbox`, `approval_policy`, `sandbox_workspace_write.*`, `notify` and `model_provider` given with `-c` win over
+//!   the user's `config.toml`; `writable_roots` replaces the user's list;
+//! - `tools.web_search=false` does NOT hold (the tool is still offered); `web_search="disabled"` does, so it is used;
+//! - the built-in `openai` provider cannot be overridden at all (codex refuses to load), so the login route passes no
+//!   retry keys; Codex's own retry default stays, and the card does not claim otherwise;
+//! - a legacy `profile = ...` key makes codex refuse to start (fails closed); a `<name>.config.toml` profile loads only
+//!   with `--profile`, which Vajra never passes.
+//!
+//! Whatever is missed (a managed config under `/etc/codex`, a renamed key after an update) is caught by the read-back:
+//! `check_codex_applied` reads the session's own `turn_context` and a wider value ends the session (`profile_not_applied`).
+
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+
+use super::Engine;
+use crate::crew::roles::{self, Kind};
+use crate::sessions::argv::{self, InvalidInput};
+
+/// The role kinds of 16.4. `reviewer` and `security_reviewer` seats use `Verifier`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RoleKind {
+    Lead,
+    Worker,
+    Verifier,
+    DirectorGeneral,
+}
+
+impl RoleKind {
+    /// The kind a seat role runs as. `None` for a role that is not a seat role.
+    pub fn of_role(role: &str) -> Option<RoleKind> {
+        Some(match roles::kind_of(role)? {
+            Kind::Writer => RoleKind::Worker,
+            Kind::Checker => RoleKind::Verifier,
+            Kind::Lead => RoleKind::Lead,
+        })
+    }
+}
+
+/// One "always" setting: what it decides and how Vajra overrides the user's value for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Always {
+    pub setting: &'static str,
+    pub how: &'static str,
+}
+
+/// Why a profile can't launch: `launchable` refuses the seat with `harness_unsupported`, carrying `reason` (a stable
+/// code) and `detail` (the card text). Never a silent gap (16.4 rule 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unsupported {
+    pub reason: &'static str,
+    pub detail: &'static str,
+}
+
+/// The data half of a profile. `supported` is `Err` when an override is known not to hold, is not yet proven, or the
+/// builder is not written yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    pub engine: Engine,
+    pub kind: RoleKind,
+    pub always: &'static [Always],
+    pub user: &'static [&'static str],
+    pub supported: Result<(), Unsupported>,
+}
+
+const CODEX_WORKER_ALWAYS: &[Always] = &[
+    Always { setting: "mode", how: "`codex exec --json`, stdin /dev/null" },
+    Always { setting: "sandbox", how: "`--sandbox workspace-write`" },
+    Always { setting: "network", how: "`-c sandbox_workspace_write.network_access=<seat.network>`" },
+    Always { setting: "writable_roots", how: "`-c sandbox_workspace_write.writable_roots=[<ticket tmp>]` (replaces the user's list)" },
+    Always { setting: "tmp", how: "`-c sandbox_workspace_write.exclude_slash_tmp=true`, `exclude_tmpdir_env_var=true`" },
+    Always { setting: "web_search", how: "`-c web_search=\"disabled\"` unless the seat has network" },
+    Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
+    Always { setting: "working_dir", how: "the core's worktree under <work>" },
+    Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` when the seat names them" },
+    Always { setting: "provider_route", how: "gateway: a Vajra-owned CODEX_HOME and zero retries; login: the user's own" },
+];
+
+const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.md", "history", "default model"];
+
+const CLAUDE_WORKER_ALWAYS: &[Always] = &[
+    Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
+    Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker.json` (deny rules, guard hooks, disableAllHooks:false)" },
+    Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
+    Always { setting: "tools", how: "`--tools` and `--allowedTools`, both the role's list" },
+    Always { setting: "model", how: "`--model` when the seat names one" },
+];
+
+const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "theme", "history", "default model"];
+
+/// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
+/// `disableAllHooks:false` honoured, does the worktree's project settings file load). The owner runs
+/// `app/bench/spikes/s4-claude-settings.sh`; once it prints PASS, set this to `true` (and update the pinning test).
+pub const CLAUDE_WORKER_S4_PASSED: bool = false;
+
+pub const S4_UNVERIFIED: Unsupported = Unsupported {
+    reason: "s4_unverified",
+    detail: "Vajra hasn't verified its Claude Code worker settings with this build yet.",
+};
+const LEAD_LATER: Unsupported = Unsupported { reason: "profile_missing", detail: "Vajra can't run this harness as a run lead yet." };
+const DG_OWN: Unsupported = Unsupported { reason: "profile_missing", detail: "The Director-General runs through its own launch (ADR-13)." };
+
+/// The profile for a (harness, role kind). Leads and the Director-General are completed in 6d and 6f.
+pub fn profile(engine: Engine, kind: RoleKind) -> Profile {
+    let claude_worker = if CLAUDE_WORKER_S4_PASSED { Ok(()) } else { Err(S4_UNVERIFIED) };
+    let (always, user, supported): (&'static [Always], &'static [&'static str], Result<(), Unsupported>) = match (engine, kind) {
+        (Engine::Codex, RoleKind::Worker | RoleKind::Verifier) => (CODEX_WORKER_ALWAYS, CODEX_WORKER_USER, Ok(())),
+        (Engine::Claude, RoleKind::Worker | RoleKind::Verifier) => (CLAUDE_WORKER_ALWAYS, CLAUDE_WORKER_USER, claude_worker),
+        (_, RoleKind::Lead) => (&[], &[], Err(LEAD_LATER)),
+        (_, RoleKind::DirectorGeneral) => (&[], &[], Err(DG_OWN)),
+    };
+    Profile { engine, kind, always, user, supported }
+}
+
+/// The card strings for a profile (16.4 "What the cards say"), plus the network note when the seat has internet.
+pub fn disclosures(p: &Profile, network: bool) -> Vec<&'static str> {
+    use crate::desktop::seat_start::{CLAUDE_NOTE, CODEX_WARNING, NETWORK_NOTE};
+    let mut out = vec![match p.engine {
+        Engine::Codex => CODEX_WARNING,
+        Engine::Claude => CLAUDE_NOTE,
+    }];
+    if network && matches!(p.kind, RoleKind::Worker | RoleKind::Verifier) {
+        out.push(NETWORK_NOTE);
+    }
+    out
+}
+
+/// One worker or verifier launch, as the core built it. Every path is absolute and core-built.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkerLaunch<'a> {
+    pub kind: RoleKind,
+    pub prompt: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub network: bool,
+    /// `<work>/<project>/<run>/tmp/<task>-r<n>`: the only writable root besides the worktree, and the `TMPDIR`.
+    pub ticket_tmp: &'a Path,
+}
+
+fn bad(field: &'static str, reason: &'static str) -> InvalidInput {
+    InvalidInput { field, reason }
+}
+
+/// The H8 effort rule: 1 to 16 of `[a-z0-9-]`, so it is inert inside a TOML string.
+fn valid_effort(e: &str) -> bool {
+    (1..=16).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A path that can sit inside a TOML basic string unescaped: absolute, UTF-8, no quote, backslash or control.
+fn toml_path(p: &Path, field: &'static str) -> Result<String, InvalidInput> {
+    match p.to_str() {
+        Some(s) if p.is_absolute() && !s.chars().any(|c| c == '"' || c == '\\' || c.is_control()) => Ok(s.to_string()),
+        _ => Err(bad(field, "must be a plain absolute path")),
+    }
+}
+
+fn worker_kind(l: &WorkerLaunch<'_>) -> Result<(), InvalidInput> {
+    match l.kind {
+        RoleKind::Worker | RoleKind::Verifier => Ok(()),
+        _ => Err(bad("kind", "is not a worker or verifier kind")),
+    }
+}
+
+/// The confinement overrides every Codex worker and verifier gets, in a fixed order. `tmp_excludes` is false only on
+/// the gateway route, whose base argv already excludes `/tmp` and `$TMPDIR`.
+fn codex_confinement(l: &WorkerLaunch<'_>, tmp_excludes: bool) -> Result<Vec<String>, InvalidInput> {
+    worker_kind(l)?;
+    let tmp = toml_path(l.ticket_tmp, "ticket_tmp")?;
+    let mut kv = vec![
+        "approval_policy=\"never\"".to_string(),
+        format!("sandbox_workspace_write.network_access={}", l.network),
+        format!("sandbox_workspace_write.writable_roots=[\"{tmp}\"]"),
+    ];
+    if tmp_excludes {
+        kv.extend(["sandbox_workspace_write.exclude_slash_tmp=true".into(), "sandbox_workspace_write.exclude_tmpdir_env_var=true".into()]);
+    }
+    if !l.network {
+        kv.push("web_search=\"disabled\"".into());
+    }
+    Ok(kv.into_iter().flat_map(|v| ["-c".to_string(), v]).collect())
+}
+
+/// Insert `extra` before the trailing `-- <prompt>` of a Codex exec argv.
+fn before_prompt(mut argv: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    let at = argv.len() - 2;
+    argv.splice(at..at, extra);
+    argv
+}
+
+/// A Codex worker or verifier on the gateway route: `build_gateway_argv` (zero retries, `/tmp` and `$TMPDIR` out of
+/// the sandbox, stdin `/dev/null`) plus the confinement overrides. The caller sets `CODEX_HOME` (the Vajra-owned home
+/// of `providers::codex_home`) and `TMPDIR` through `worker_env`. The gateway route always names a model.
+pub fn codex_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
+    let model = l.model.ok_or(bad("model", "a gateway seat names a model"))?;
+    let base = argv::build_gateway_argv(l.prompt, model, l.effort)?;
+    Ok(before_prompt(base, codex_confinement(l, false)?))
+}
+
+/// A Codex worker or verifier under the user's own Codex login (`~/.codex`). No retry override (S3: the built-in
+/// provider cannot be overridden) and no `CODEX_HOME`.
+pub fn codex_login_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, InvalidInput> {
+    argv::check_ask(l.prompt)?;
+    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write"].map(String::from).into();
+    if let Some(m) = l.model {
+        if !crate::providers::contract::valid_model_id(m) || m.starts_with('-') {
+            return Err(bad("model", "must be a model id"));
+        }
+        a.extend(["-m".into(), m.into()]);
+    }
+    if let Some(e) = l.effort {
+        if !valid_effort(e) {
+            return Err(bad("effort", "must be 1 to 16 of [a-z0-9-]"));
+        }
+        a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
+    }
+    a.extend(codex_confinement(l, true)?);
+    a.extend(["--".into(), l.prompt.into()]);
+    Ok(a)
+}
+
+/// The variables a worker launch adds to `ENV_ALLOW` (all in `sessions::EXTRA_ENV_ALLOW`): `TMPDIR` always, plus a
+/// Vajra-owned harness home when the route has one.
+pub fn worker_env(engine: Engine, l: &WorkerLaunch<'_>, vajra_home: Option<&Path>) -> Vec<(&'static str, OsString)> {
+    let mut env = vec![("TMPDIR", l.ticket_tmp.as_os_str().to_owned())];
+    if let Some(h) = vajra_home {
+        env.push((if engine == Engine::Codex { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" }, h.as_os_str().to_owned()));
+    }
+    env
+}
+
+/// Stubs completed in 6d: the lead profiles are refused by `profile()` until then.
+pub fn codex_lead_argv() -> Result<Vec<String>, InvalidInput> {
+    Err(bad("kind", "the Codex lead profile lands in 6d"))
+}
+
+pub fn claude_lead_argv() -> Result<Vec<String>, InvalidInput> {
+    Err(bad("kind", "the Claude lead profile lands in 6d"))
+}
+
+/// What a Claude worker launch needs beyond the shared fields.
+#[derive(Clone, Copy, Debug)]
+pub struct ClaudeWorker<'a> {
+    /// The absolute claude binary the core resolved.
+    pub claude: &'a Path,
+    pub session_id: &'a str,
+    /// The flag file `write_claude_worker_flag` wrote.
+    pub settings: &'a Path,
+    /// The role's tool list, comma-joined (`WriterTools::list`).
+    pub tools: &'a str,
+}
+
+/// A Claude Code worker or verifier: the user's settings load, the flag file outranks them, `--tools` sets the whole
+/// tool set (a user allow rule can't widen it) and `--allowedTools` pre-approves the same list. The prompt comes after
+/// `--`, so a variadic flag never swallows it and a prompt starting with `-` is never read as a flag. No bypass flag.
+pub fn claude_worker_argv(l: &WorkerLaunch<'_>, c: &ClaudeWorker<'_>) -> Result<Vec<String>, InvalidInput> {
+    worker_kind(l)?;
+    argv::check_ask(l.prompt)?;
+    let abs = |p: &Path, f: &'static str| match p.to_str() {
+        Some(s) if p.is_absolute() => Ok(s.to_string()),
+        _ => Err(bad(f, "must be an absolute path")),
+    };
+    if !crate::ids::valid_session_id(c.session_id) {
+        return Err(bad("session_id", "must be a canonical uuid"));
+    }
+    if c.tools.is_empty() || !c.tools.split(',').all(|t| CLAUDE_TOOLS.contains(&t)) {
+        return Err(bad("tools", "must be known Claude Code tools"));
+    }
+    if l.kind == RoleKind::Verifier && c.tools.split(',').any(|t| EDIT_TOOLS.contains(&t)) {
+        return Err(bad("tools", "a verifier has no edit tools"));
+    }
+    let mut a = vec![
+        abs(c.claude, "claude")?, "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(),
+        "--session-id".into(), c.session_id.into(), "--settings".into(), abs(c.settings, "settings")?,
+        "--permission-mode".into(), "dontAsk".into(), "--tools".into(), c.tools.into(), "--allowedTools".into(), c.tools.into(),
+    ];
+    if let Some(m) = l.model {
+        if !crate::providers::contract::valid_model_id(m) || m.starts_with('-') {
+            return Err(bad("model", "must be a model id"));
+        }
+        a.extend(["--model".into(), m.into()]);
+    }
+    a.extend(["--".into(), l.prompt.into()]);
+    Ok(a)
+}
+
+/// Claude Code tools a role's list may hold. Anything else in a `tools:` line (the `Agent(...)` spawner, web tools) is
+/// dropped: a core worker spawns nothing and has no network unless its seat says so.
+pub const CLAUDE_TOOLS: [&str; 9] = ["Read", "Grep", "Glob", "LS", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// The verifier, reviewer and security reviewer list (16.1): Bash, no edit tools.
+pub const CHECKER_TOOLS: &str = "Read,Grep,Glob,Bash";
+
+/// The writer agent whose `bundled-agents/<writer>.md` gives a writer role its tools.
+fn writer_of(role: &str) -> Option<&'static str> {
+    Some(match role {
+        "backend" => "bhima",
+        "frontend" => "nakula",
+        "tests" => "sepoy-test-1",
+        "docs" => "abhimanyu",
+        "platform" => "hanuman",
+        "numerics" => "karna",
+        "analysis" => "sahadeva",
+        _ => return None,
+    })
+}
+
+/// The largest agent file read for its `tools:` line.
+const AGENT_FILE_MAX: u64 = 64 * 1024;
+
+/// Each writer role's tool list, read once at startup from the bundled agents.
+#[derive(Clone, Debug, Default)]
+pub struct WriterTools(HashMap<&'static str, String>);
+
+impl WriterTools {
+    /// Read `<dir>/<writer>.md` for every writer role. A file that is missing, too large, not a regular file or has no
+    /// usable `tools:` line in its front matter leaves that role out (`list` then refuses it).
+    pub fn load(dir: &Path) -> WriterTools {
+        let mut m = HashMap::new();
+        for (role, kind) in roles::ROLES {
+            if kind != Kind::Writer {
+                continue;
+            }
+            if let Some(list) = writer_of(role).and_then(|w| read_tools(&dir.join(format!("{w}.md")))) {
+                m.insert(role, list);
+            }
+        }
+        WriterTools(m)
+    }
+
+    /// The comma-joined tool list for a seat role: the writer's own for a writer, `CHECKER_TOOLS` for a checker.
+    pub fn list(&self, role: &str) -> Option<&str> {
+        match roles::kind_of(role)? {
+            Kind::Checker => Some(CHECKER_TOOLS),
+            Kind::Writer => self.0.get(role).map(String::as_str),
+            Kind::Lead => None,
+        }
+    }
+}
+
+fn read_tools(p: &Path) -> Option<String> {
+    use std::io::Read;
+    let f = std::fs::File::open(p).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut s = String::new();
+    f.take(AGENT_FILE_MAX + 1).read_to_string(&mut s).ok()?;
+    if s.len() as u64 > AGENT_FILE_MAX {
+        return None;
+    }
+    parse_tools(&s)
+}
+
+/// The `tools:` line of a front matter (`---` ... `---`), filtered to `CLAUDE_TOOLS`, deduped, in file order.
+pub fn parse_tools(md: &str) -> Option<String> {
+    let mut lines = md.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let line = lines.take_while(|l| l.trim() != "---").find_map(|l| l.strip_prefix("tools:"))?;
+    let mut out: Vec<&str> = Vec::new();
+    for t in line.split(',').map(str::trim) {
+        if CLAUDE_TOOLS.contains(&t) && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    (!out.is_empty()).then(|| out.join(","))
+}
+
+/// The Vajra hooks as `scripts/install.sh` registers them: the guard, the observer and the desktop-control queue.
+const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
+
+/// The Claude worker flag file's bytes (16.4 rule 5): the generated deny rules (`lead_settings`'s table, over HOME, the
+/// worktree root, every project repo and the data dir), `defaultMode: dontAsk`, `disableBypassPermissionsMode`,
+/// `disableAllHooks: false` and the Vajra hooks, so a user's `disableAllHooks` or bypass mode can't leave a card saying
+/// "with the guard" while no guard runs.
+pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Path) -> Result<String, String> {
+    let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
+    let deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
+    let hooks: Value = serde_json::from_str::<Value>(HOOKS_JSON).map_err(|e| e.to_string())?["hooks"].clone();
+    if !hooks.is_object() {
+        return Err("hooks/hooks.json has no hooks".into());
+    }
+    let v = json!({
+        "disableAllHooks": false,
+        "permissions": {
+            "defaultMode": "dontAsk",
+            "disableBypassPermissionsMode": "disable",
+            "deny": deny,
+        },
+        "hooks": hooks,
+    });
+    let mut s = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    s.push('\n');
+    Ok(s)
+}
+
+/// Write `<data>/profiles/claude-worker.json` (dir 0700, file 0600, through a temp file and a rename) and return its path.
+pub fn write_claude_worker_flag(data: &Path, contents: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = data.join("profiles");
+    crate::paths::ensure_private_dir(&dir)?;
+    let path = dir.join("claude-worker.json");
+    // A per-call name: two threads writing at once never share the temp file.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(".claude-worker.json.{}.{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    f.write_all(contents.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+// ------------------------------------------------------------ run-time read-back (16.4 rule 4)
+
+/// Why a session's effective settings did not match its profile: the core then ends it with `profile_not_applied`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotApplied(pub String);
+
+pub const PROFILE_NOT_APPLIED: &str = "profile_not_applied";
+
+/// What a Codex worker's `turn_context` must show.
+#[derive(Clone, Debug)]
+pub struct CodexWant {
+    pub cwd: PathBuf,
+    pub ticket_tmp: PathBuf,
+    pub network: bool,
+}
+
+/// Check the first `turn_context` of a rollout against the profile. Anything missing, unknown or wider fails: the
+/// approval policy must be `never`; the sandbox `workspace-write` (or the narrower `read-only`) with network as the
+/// seat says, `/tmp` and `$TMPDIR` excluded, and every writable root, in both the legacy policy and the file-system
+/// policy, the worktree or the ticket temp dir.
+pub fn check_codex_applied(rollout: &str, want: &CodexWant) -> Result<(), NotApplied> {
+    let no = |m: &str| Err(NotApplied(m.into()));
+    let Some(tc) = rollout.lines().take(10_000).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|r| r["type"] == "turn_context") else {
+        return no("no turn_context in the session file");
+    };
+    let p = &tc["payload"];
+    if p["approval_policy"] != "never" {
+        return no("approval policy is not never");
+    }
+    let sp = &p["sandbox_policy"];
+    match sp["type"].as_str() {
+        Some("read-only") => return Ok(()),
+        Some("workspace-write") => {}
+        _ => return no("sandbox is wider than workspace-write"),
+    }
+    if sp["network_access"].as_bool() != Some(false) && !want.network {
+        return no("network is on");
+    }
+    if sp["exclude_slash_tmp"].as_bool() != Some(true) || sp["exclude_tmpdir_env_var"].as_bool() != Some(true) {
+        return no("/tmp or $TMPDIR is writable");
+    }
+    let allowed: Vec<PathBuf> = [&want.cwd, &want.ticket_tmp].iter().flat_map(|p| [p.to_path_buf(), p.canonicalize().unwrap_or_else(|_| p.to_path_buf())]).collect();
+    let ok_path = |s: &str| allowed.iter().any(|a| a == Path::new(s));
+    let roots = sp.get("writable_roots").and_then(Value::as_array).cloned().unwrap_or_default();
+    if !roots.iter().all(|r| r.as_str().is_some_and(ok_path)) {
+        return no("a writable root is outside the worktree and the ticket temp dir");
+    }
+    // The file-system policy lists the effective write entries; it is absent on an older layout, never ignored when
+    // present. A special entry (`slash_tmp`, `tmpdir`, `root`) with write access is wider than the profile.
+    if let Some(entries) = p.pointer("/file_system_sandbox_policy/entries").and_then(Value::as_array) {
+        for e in entries.iter().filter(|e| e["access"] == "write") {
+            match e.pointer("/path/path").and_then(Value::as_str) {
+                Some(s) if ok_path(s) => {}
+                _ => return no("a write entry is outside the worktree and the ticket temp dir"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check a Claude worker's `system`/`init` event: permission mode `dontAsk`, and no built-in tool outside the role's
+/// list (the user's own MCP tools, `mcp__*`, are kept for workers under Q4).
+pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied> {
+    let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
+    let Some(init) = init else { return Err(NotApplied("no init event".into())) };
+    if init["permissionMode"] != "dontAsk" {
+        return Err(NotApplied("permission mode is not dontAsk".into()));
+    }
+    let want: Vec<&str> = tools.split(',').collect();
+    let Some(got) = init["tools"].as_array() else { return Err(NotApplied("no tool list".into())) };
+    for t in got {
+        let t = t.as_str().unwrap_or("");
+        if !t.starts_with("mcp__") && !want.contains(&t) {
+            return Err(NotApplied(format!("tool {t} is outside the role's list")));
+        }
+    }
+    Ok(())
+}
+
+/// End a session whose read-back failed. The process group is killed; the caller records `profile_not_applied`.
+pub fn enforce(sup: &crate::sessions::Supervisor, id: &str, check: Result<(), NotApplied>) -> Result<(), NotApplied> {
+    if check.is_err() {
+        let _ = sup.kill(id);
+    }
+    check
+}
+
+#[cfg(test)]
+#[path = "profiles_tests.rs"]
+mod tests;

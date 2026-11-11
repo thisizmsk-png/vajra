@@ -53,6 +53,8 @@ pub enum SessionError {
     InvalidId,
     EmptyArgv,
     NulInArgv,
+    /// `extra_env` names a variable outside `EXTRA_ENV_ALLOW`, twice, or holds a NUL.
+    BadEnv,
     /// cwd is missing or not a directory. (portable-pty would silently fall
     /// back to HOME, which would launch the run in the wrong repo.)
     BadCwd,
@@ -72,6 +74,7 @@ impl std::fmt::Display for SessionError {
             Self::InvalidId => f.write_str("invalid session id"),
             Self::EmptyArgv => f.write_str("argv is empty"),
             Self::NulInArgv => f.write_str("argv contains NUL"),
+            Self::BadEnv => f.write_str("extra environment is not allowed"),
             Self::BadCwd => f.write_str("working directory does not exist"),
             Self::InvalidSize => f.write_str("rows and cols must be non-zero"),
             Self::ShuttingDown => f.write_str("app is quitting"),
@@ -118,9 +121,13 @@ pub struct SpawnSpec {
     /// The steer nonce in the launch prompt (the TUI echoes it): replaced,
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
-    /// A Vajra-owned `CODEX_HOME` (gateway launch). The only variable added to `ENV_ALLOW`; never a key.
-    pub codex_home: Option<PathBuf>,
+    /// Variables added to `ENV_ALLOW` for this launch: only names in `EXTRA_ENV_ALLOW` (a Vajra-owned `CODEX_HOME` or
+    /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
+    pub extra_env: Vec<(&'static str, OsString)>,
 }
+
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
+pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {
@@ -150,6 +157,14 @@ pub fn scrubbed_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str
 }
 
 use crate::lock;
+
+/// Each name at most once, each in `EXTRA_ENV_ALLOW`, each value non-empty with no NUL.
+fn extra_env_ok(env: &[(&'static str, OsString)]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    env.iter().enumerate().all(|(i, (k, v))| {
+        EXTRA_ENV_ALLOW.contains(k) && !v.is_empty() && !v.as_bytes().contains(&0) && !env[..i].iter().any(|(o, _)| o == k)
+    })
+}
 
 struct Session {
     pid: u32,
@@ -278,6 +293,9 @@ impl Supervisor {
         if spec.argv.iter().any(|a| a.contains('\0')) {
             return Err(SessionError::NulInArgv);
         }
+        if !extra_env_ok(&spec.extra_env) {
+            return Err(SessionError::BadEnv);
+        }
         if !spec.cwd.is_dir() {
             return Err(SessionError::BadCwd);
         }
@@ -308,8 +326,8 @@ impl Supervisor {
         for (k, v) in user_env() {
             cmd.env(k, v);
         }
-        if let Some(home) = &spec.codex_home {
-            cmd.env("CODEX_HOME", home);
+        for (k, v) in &spec.extra_env {
+            cmd.env(k, v);
         }
         cmd.cwd(&spec.cwd);
 
