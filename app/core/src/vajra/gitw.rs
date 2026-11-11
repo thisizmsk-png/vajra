@@ -1462,7 +1462,10 @@ impl Gitw {
         if !self.checks_on() {
             return Ok(());
         }
-        let found = special_files(&t.wt, &t.deps)?;
+        // The clone skip relies on `GIT_ATTR_SOURCE` pinning attributes to `dispatch_head`. Git before 2.40 reads the
+        // worktree's own, so there a clone is walked like any other folder (#149 bhishma M1).
+        let skip: &[String] = if self.attr_source { &t.deps } else { &[] };
+        let found = special_files(&t.wt, skip)?;
         if found.is_empty() {
             return Ok(());
         }
@@ -1876,7 +1879,8 @@ fn git_special(name: &str) -> Option<&'static str> {
 /// `deps` are the top-level dependency clones the core made: a real directory there is not walked. They are untracked
 /// at `dispatch_head` and git-ignored, so an attributes file inside one only names ignored paths no core call stages,
 /// and a worker that un-ignores one makes its files show as changed, where `name_rule` still refuses them (#146
-/// claude: a package that ships `.gitattributes` or a git checkout is not tampering).
+/// claude: a package that ships `.gitattributes` or a git checkout is not tampering). Only where git honours
+/// `GIT_ATTR_SOURCE`: the caller passes no `deps` on older git, where a worktree attributes file would apply.
 fn special_files(wt: &Path, deps: &[String]) -> R<Vec<(String, &'static str)>> {
     const MAX_ENTRIES: usize = 5_000_000;
     let (mut out, mut seen) = (Vec::new(), 0usize);

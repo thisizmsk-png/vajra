@@ -37,7 +37,7 @@ use crate::control::receipt::LaunchReceipt;
 use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::providers::effective::{self, Requested};
-use crate::providers::errors::{self, Action, Clock, Ident, Kind};
+use crate::providers::errors::{self, Action, Clock, Ident, Kind, ProviderError};
 use crate::providers::launch;
 use crate::sessions::{ProviderTag, SpawnSpec, Supervisor};
 use crate::vajra::gitw::{self, DepClone, Gitw, GitwError};
@@ -478,8 +478,12 @@ impl WorkerRuntime {
             e.tree.clone().ok_or(GitwError::Invalid("the ticket has no worktree"))?
         };
         self.0.gw.discard(&t)?;
-        if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+        let view = crate::lock(&self.0.book).tickets.get_mut(id).map(|e| {
             e.view.retention = Some(json!({"state": "discarded"}));
+            e.view.clone()
+        });
+        if let Some(v) = view {
+            self.record(&v, "discarded");
         }
         Ok(())
     }
@@ -589,10 +593,14 @@ impl WorkerRuntime {
             e.view.deps = deps.iter().map(dep_json).collect();
         }
         // 16.5: the tree is clean at `dispatch_head`, just before the spawn (the clones are ignored).
-        if !self.0.gw.unchanged(&t)? {
-            return Err(GitwError::Tampered { what: "the worktree was not clean at dispatch".into() });
-        }
-        Ok(t)
+        // Both failures discard the tree, as the `merge_deps` path does (#149): nothing is left behind.
+        let fail = match self.0.gw.unchanged(&t) {
+            Ok(true) => return Ok(t),
+            Ok(false) => GitwError::Tampered { what: "the worktree was not clean at dispatch".into() },
+            Err(e) => e,
+        };
+        let _ = self.0.gw.discard(&t);
+        Err(fail)
     }
 
     /// Run attempts through the PR 5 policy while the tree stays unchanged since `dispatch_head`.
@@ -613,9 +621,19 @@ impl WorkerRuntime {
                     last = Some(Ended::Outcome(o, r, receipt));
                     Ok(())
                 }
-                Attempt::Failed(text, receipt) => {
-                    // Retried only on an unchanged tree; any other answer ends the loop here.
-                    match self.0.gw.unchanged(t) {
+                Attempt::Failed(text, session, receipt) => {
+                    // Retried only on an unchanged tree; any other answer ends the loop here. The event is sent once
+                    // that is known, with the action the core takes (#149): `retrying` only when it really retries.
+                    let c = errors::classify(&text);
+                    let ident = Ident { slot: &seat.slot, session_id: &session, account: &seat.account };
+                    let unchanged = self.0.gw.unchanged(t);
+                    let action = match unchanged {
+                        // The policy `run_with_policy` applies to this same failure (its count is `n`).
+                        Ok(true) => errors::decide(c.kind, n, c.retry_after_s).action,
+                        _ => Action::AskingUser,
+                    };
+                    self.0.sup.report(&ProviderError::new(&ident, &c, n, &text, action));
+                    match unchanged {
                         Ok(true) => {
                             last = Some(Ended::Outcome(Outcome::Failed, text.clone(), receipt));
                             Err(text)
@@ -670,7 +688,9 @@ impl WorkerRuntime {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
             }
         }
-        let tag = ProviderTag { slot: seat.slot.clone(), session_id: l.session_id.clone().unwrap_or_else(|| sid.clone()), account: seat.account.clone(), attempt: n };
+        let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
+        // The core is the only one that reports a failure here: it knows whether it will retry (see `attempts`).
+        let tag = ProviderTag { slot: seat.slot.clone(), session_id: session.clone(), account: seat.account.clone(), attempt: n, core_reports: true };
         if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
@@ -726,7 +746,7 @@ impl WorkerRuntime {
         }
         let tail = self.0.sup.last_lines(&sid).unwrap_or_default();
         let (_, text) = errors::classify_exit(Some(x.code), x.signal.as_deref(), &tail);
-        Attempt::Failed(text, receipt)
+        Attempt::Failed(text, session, receipt)
     }
 
     /// After a clean exit: snapshot, diff, outcome.
@@ -803,19 +823,44 @@ impl WorkerRuntime {
         self.0.bus.recent(sid, 1 << 20).iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n")
     }
 
-    /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only
-    /// with no-follow (a planted link fails the write), never rewritten.
+    /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only,
+    /// never rewritten. Every step below `<data>` is opened by descriptor with no-follow, so a planted link at `runs`,
+    /// `<run>` or the file fails the write instead of redirecting it (#149 bhishma M2).
     fn record(&self, v: &TicketView, event: &str) {
-        let dir = self.0.cfg.data.join("runs").join(&v.run);
-        if crate::paths::ensure_private_dir(&self.0.cfg.data.join("runs")).and_then(|()| crate::paths::ensure_private_dir(&dir)).is_err() {
-            return;
-        }
         let line = json!({"v": 1, "event": event, "ticket": v});
-        let f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join("tickets.jsonl"));
-        if let Ok(mut f) = f {
+        if let Ok(mut f) = open_record(&self.0.cfg.data, &v.run) {
             let _ = f.write_all(format!("{line}\n").as_bytes());
         }
     }
+}
+
+/// `<data>/runs/<run>/tickets.jsonl`, opened for append. `<data>` is the core's own canonical dir; `runs` and `<run>`
+/// are made (0700) and opened relative to their parent's descriptor with `O_NOFOLLOW | O_DIRECTORY`, and the file
+/// with `O_NOFOLLOW`, so nothing on the way is a link. A run id is one path component.
+fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "run id");
+    if run.is_empty() || run == "." || run == ".." || run.contains('/') {
+        return Err(bad());
+    }
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+    let mut dir = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(data)?;
+    for name in ["runs", run] {
+        let c = std::ffi::CString::new(name).map_err(|_| bad())?;
+        // SAFETY: the fd and C string live for the call.
+        if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), 0o700) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+        }
+        dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
+        // SAFETY: an owned, open descriptor.
+        if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is
@@ -881,7 +926,8 @@ impl TicketView {
 enum Attempt {
     Clean(Option<LaunchReceipt>),
     End(Outcome, String, Option<LaunchReceipt>),
-    Failed(String, Option<LaunchReceipt>),
+    /// The failure text and the harness session it ran under.
+    Failed(String, String, Option<LaunchReceipt>),
 }
 
 enum Ended {
@@ -1046,7 +1092,14 @@ impl Launch {
                 let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };
-                l.argv = profiles::claude_worker_argv(&wl, &c).map_err(|_| "invalid_input")?;
+                l.argv = match profiles::claude_worker_argv(&wl, &c) {
+                    Ok(a) => a,
+                    Err(_) => {
+                        // The flag file is this launch's alone: nothing spawns, so it goes now.
+                        let _ = profiles::remove_claude_worker_flag(&flag);
+                        return Err("invalid_input");
+                    }
+                };
                 l.env = profiles::worker_env(engine, &wl, None);
                 l.flag = Some(flag);
                 l.session_id = Some(sid);

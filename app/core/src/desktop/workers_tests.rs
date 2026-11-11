@@ -21,6 +21,22 @@ impl Quiesce for NoAgents {
     }
 }
 
+/// Writes `file` into every worktree of run `r1` each time the core pauses the repo: the next clean check sees it.
+#[derive(Debug)]
+struct Spoil {
+    run_dir: PathBuf,
+    file: &'static str,
+}
+
+impl Quiesce for Spoil {
+    fn pause(&self, _: &Path) -> Pause {
+        for wt in std::fs::read_dir(&self.run_dir).into_iter().flatten().flatten() {
+            let _ = std::fs::write(wt.path().join(self.file), "spoiled\n");
+        }
+        Pause::new(|| {})
+    }
+}
+
 fn tmpdir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!("vajra-workers-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
@@ -124,11 +140,12 @@ struct Opts {
     redact: Redactor,
     claude_ok: bool,
     hooks: Hooks,
+    spoil: Option<&'static str>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default() }
+        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None }
     }
 }
 
@@ -152,7 +169,11 @@ fn rig(tag: &str, o: Opts) -> Rig {
     let base = ugit(&home, &repo, &["rev-parse", "HEAD"]);
     let g = GlobalBaseline::take_or_load(Path::new(GIT), &data, &home, None).unwrap();
     gitw::check_roots(&data, &work).unwrap();
-    let gw = Arc::new(Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g, Arc::new(NoAgents)));
+    let quiesce: Arc<dyn Quiesce> = match o.spoil {
+        Some(file) => Arc::new(Spoil { run_dir: work.canonicalize().unwrap().join("p/r1"), file }),
+        None => Arc::new(NoAgents),
+    };
+    let gw = Arc::new(Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g, quiesce));
     let common = gw.common_of(&repo).unwrap();
     gw.repos.acquire(&gw, &common, false).unwrap();
     let bus = Arc::new(Bus::open(&d.join("spill"), crate::bus::Config::default()).unwrap());
@@ -305,7 +326,9 @@ fn a_504_on_an_unchanged_tree_is_retried_twice_then_needs_the_user() {
     assert_eq!((v.outcome, v.reason.as_deref(), v.attempt), (Some(Outcome::NeedsUser), Some("timeout"), 3), "{v:?}");
     assert_eq!(r.clock.slept(), errors::BACKOFF.to_vec());
     let attempts: Vec<u32> = crate::lock(&r.errors).iter().map(|e| e.attempt).collect();
-    assert_eq!(attempts, vec![1, 2, 3], "each retry carries its own attempt");
+    assert_eq!(attempts, vec![1, 2, 3], "each retry carries its own attempt, reported once (by the core alone)");
+    let actions: Vec<Action> = crate::lock(&r.errors).iter().map(|e| e.action).collect();
+    assert_eq!(actions, vec![Action::Retrying, Action::Retrying, Action::AskingUser]);
 }
 
 #[test]
@@ -314,6 +337,9 @@ fn a_retryable_error_after_an_edit_is_progress() {
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!((v.outcome, v.attempt), (Some(Outcome::Progress), 1), "{v:?}");
     assert!(r.clock.slept().is_empty(), "never retried on a changed tree");
+    // The card agrees with the ticket (#149): one event, and it never says the core is retrying.
+    let ev: Vec<(u32, Action)> = crate::lock(&r.errors).iter().map(|e| (e.attempt, e.action)).collect();
+    assert_eq!(ev, vec![(1, Action::AskingUser)]);
 }
 
 // ---------------------------------------------------------------- dispatch_head, diff, tamper
@@ -366,6 +392,24 @@ fn a_setsid_grandchild_does_not_hold_the_ticket() {
     let r = rig("setsid", Opts { mode: "setsid_child", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+#[test]
+fn a_failed_clean_check_at_dispatch_discards_the_worktree() {
+    // `stray.rs` makes the check answer "changed"; an untracked `.gitattributes` makes it fail (#149).
+    for file in ["src/stray.rs", "src/.gitattributes"] {
+        let r = rig("dirtyatdispatch", Opts { spoil: Some(file), ..Opts::default() });
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("tampered")), "{file}: {v:?}");
+        assert!(r.log().is_empty(), "{file}: no worker ran");
+        // Only the run's shared `tmp` parent stays, empty: the ticket's own tmp dir went with the tree.
+        let ls = |p: PathBuf| -> Vec<PathBuf> { std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).collect() };
+        let run = r.d.join("work/p/r1");
+        let left: Vec<_> = ls(run.clone()).into_iter().filter(|p| *p != run.join("tmp")).collect();
+        assert!(left.is_empty() && ls(run.join("tmp")).is_empty(), "{file}: the worktree is gone: {left:?} {:?}", ls(run.join("tmp")));
+        let list = ugit(&r.home, &r.repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(list.matches("worktree ").count(), 1, "{file}: git lists only the main tree: {list}");
+    }
 }
 
 // ---------------------------------------------------------------- dependencies and retention
@@ -438,6 +482,33 @@ fn clean_up_removes_only_an_integrated_copy_that_is_now_clean() {
 // ---------------------------------------------------------------- records, summary, hooks, harnesses
 
 #[test]
+fn tickets_jsonl_is_never_written_through_a_planted_link() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    // #149 bhishma M2: a link at `runs`, at `runs/<run>` or at the file fails the open; nothing lands outside.
+    for at in ["runs", "runs/r1", "runs/r1/tickets.jsonl"] {
+        let d = tmpdir("recordlink");
+        let (data, out) = (d.join("data"), d.join("out"));
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(data.join(at).parent().unwrap()).unwrap();
+        let target = if at.ends_with(".jsonl") { out.join("tickets.jsonl") } else { out.clone() };
+        symlink(&target, data.join(at)).unwrap();
+        assert!(open_record(&data, "r1").is_err(), "{at}");
+        assert!(std::fs::read_dir(&out).unwrap().next().is_none(), "{at}: nothing written outside");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = tmpdir("recordok");
+    for bad in ["", ".", "..", "../r1", "a/b"] {
+        assert!(open_record(&d, bad).is_err(), "{bad:?}");
+    }
+    open_record(&d, "r1").unwrap().write_all(b"x\n").unwrap();
+    open_record(&d, "r1").unwrap().write_all(b"y\n").unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("runs/r1/tickets.jsonl")).unwrap(), "x\ny\n", "appended");
+    assert_eq!((mode(&d.join("runs")), mode(&d.join("runs/r1")), mode(&d.join("runs/r1/tickets.jsonl"))), (0o700, 0o700, 0o600));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_redacted_data() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let (s1, s2) = (seen.clone(), seen.clone());
@@ -473,6 +544,31 @@ fn a_claude_worker_is_refused_until_s4_and_runs_through_its_profile_when_allowed
     assert!(v.harness_session.as_deref().is_some_and(crate::ids::valid_session_id), "its own session id, for its message queue");
     let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).unwrap().collect();
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
+}
+
+#[test]
+fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
+    let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });
+    // The model id passes dispatch but not the argv builder, which runs after the flag file is written.
+    let mut s = seat("w1", "claude");
+    s.model = Some("-bad".into());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), s).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Failed), "{v:?}");
+    assert!(r.log().is_empty(), "nothing ran");
+    let flags: Vec<_> = std::fs::read_dir(r.gw.data.join("profiles")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    assert!(flags.is_empty(), "no flag file is left: {flags:?}");
+}
+
+#[test]
+fn a_discard_is_recorded_in_tickets_jsonl() {
+    let r = rig("discardrec", Opts::default());
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let v = r.done(&id);
+    r.rt.discard(&id).unwrap();
+    assert!(!v.worktree.unwrap().exists());
+    let text = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!((last["event"].as_str(), last["ticket"]["retention"]["state"].as_str()), (Some("discarded"), Some("discarded")), "{last}");
 }
 
 #[test]

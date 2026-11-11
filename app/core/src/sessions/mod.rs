@@ -296,6 +296,9 @@ pub struct ProviderTag {
     pub account: String,
     /// 1 for the first launch of a ticket, 2 and 3 for the core's retries (6c).
     pub attempt: u32,
+    /// The core reports this worker's failures itself (6c), after it has decided whether to retry: `report_exit` stays
+    /// quiet, so the card never says "retrying" for a ticket the core ends.
+    pub core_reports: bool,
 }
 
 impl Supervisor {
@@ -311,6 +314,14 @@ impl Supervisor {
 
     pub fn set_error_sink(&self, sink: ErrorSink) {
         *lock(&self.errors) = Some(sink);
+    }
+
+    /// A `provider_error` the core decided itself (a `core_reports` worker), to the same sink.
+    pub fn report(&self, e: &ProviderError) {
+        let sink = lock(&self.errors).clone();
+        if let Some(sink) = sink {
+            sink(e);
+        }
     }
 
     fn log(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -706,6 +717,9 @@ fn read_loop(
 /// those lines. The action comes from the policy; the account is the one the worker was spawned with. A worker never
 /// just disappears.
 fn report_exit(tag: &ProviderTag, sink: &ErrorSink, code: Option<u32>, signal: Option<&str>, tail: &[String]) {
+    if tag.core_reports {
+        return;
+    }
     let (c, text) = errors::classify_exit(code, signal, tail);
     let who = Ident { slot: &tag.slot, session_id: &tag.session_id, account: &tag.account };
     let n = tag.attempt.max(1);
