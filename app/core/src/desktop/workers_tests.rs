@@ -411,6 +411,35 @@ fn a_leftover_outside_the_task_globs_keeps_the_worktree() {
     assert!(a.worktree.unwrap().exists());
 }
 
+#[test]
+fn settings_counts_every_copy_and_clean_up_removes_only_an_integrated_copy_that_is_now_clean() {
+    let r = rig("cleanup", Opts { mode: "scratch_file", ..Opts::default() });
+    let a = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let b = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap());
+    let (wa, wb) = (a.worktree.clone().unwrap(), b.worktree.clone().unwrap());
+    let it = r.gw.integration_tree(&r.repo, "p", "r1", 1, &r.base).unwrap();
+    let iref = Gitw::integration_ref(&it);
+    let commit = a.commit.clone().unwrap();
+    r.gw.integrate(&it, &r.base, std::slice::from_ref(&commit)).unwrap();
+    assert_eq!(r.rt.integrated("r1", std::slice::from_ref(&commit), &iref)[0].retention.as_ref().unwrap()["state"], "kept");
+
+    let use0 = r.rt.disk_use();
+    assert_eq!(use0.copies, 2, "the kept copy and the never-integrated one: {use0:?}");
+    assert!(use0.bytes > 0);
+
+    // The leftover is still there: nothing is removed on a guess.
+    assert!(r.rt.clean_up().removed.is_empty());
+    assert!(wa.exists() && wb.exists());
+
+    // The human deletes the leftover. Now the capture check passes; the never-integrated copy stays.
+    std::fs::remove_file(wa.join("other/scratch.txt")).unwrap();
+    let done = r.rt.clean_up();
+    assert_eq!(done.removed, vec![a.id.clone()], "{done:?}");
+    assert!(!wa.exists() && wb.exists());
+    assert_eq!(r.rt.view(&a.id).unwrap().retention.unwrap()["state"], "removed");
+    assert_eq!(r.rt.disk_use().copies, 1);
+}
+
 // ---------------------------------------------------------------- records, summary, hooks, harnesses
 
 #[test]

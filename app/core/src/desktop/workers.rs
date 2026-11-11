@@ -219,6 +219,8 @@ struct Entry {
     kill: Option<KillReason>,
     session: Option<String>,
     tree: Option<gitw::Ticket>,
+    /// The integration ref the capture check last ran against (Clean up re-runs it there).
+    integration: Option<String>,
 }
 
 #[derive(Default)]
@@ -240,6 +242,54 @@ struct Shared {
 /// The runtime. Cheap to clone.
 #[derive(Clone)]
 pub struct WorkerRuntime(Arc<Shared>);
+
+/// Settings' disk line: how many worker copies are on disk and the space they hold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DiskUse {
+    pub copies: usize,
+    pub bytes: u64,
+}
+
+/// What Clean up removed: the tickets whose copies are gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CleanUp {
+    pub removed: Vec<String>,
+}
+
+/// A ticket picked for the capture check, copied out of the lock.
+struct Pick {
+    id: String,
+    tree: gitw::Ticket,
+    commit: String,
+    integration: String,
+    repo: PathBuf,
+}
+
+fn pick(e: &Entry) -> Option<Pick> {
+    Some(Pick { id: e.view.id.clone(), tree: e.tree.clone()?, commit: e.view.commit.clone()?, integration: e.integration.clone()?, repo: e.job.spec().repo.clone() })
+}
+
+/// A ticket whose worktree was made and not removed or discarded.
+fn has_copy(e: &Entry) -> bool {
+    e.tree.is_some() && !e.view.retention.as_ref().is_some_and(|r| r["state"] == "removed" || r["state"] == "discarded")
+}
+
+/// Allocated bytes under `root`, never following a symlink.
+fn allocated(root: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(m) = p.symlink_metadata() else { continue };
+        total += m.blocks() * 512;
+        if m.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                stack.extend(rd.flatten().map(|d| d.path()));
+            }
+        }
+    }
+    total
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchError {
@@ -290,7 +340,7 @@ impl WorkerRuntime {
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
-        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None });
+        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
         drop(b);
         self.pump();
         Ok(id)
@@ -377,18 +427,54 @@ impl WorkerRuntime {
     /// among them gets the capture check (16.6 Retention). It passes: the worktree is removed and the task branch
     /// deleted. It fails: the tree is kept with the paths that differ. Returns the views after.
     pub fn integrated(&self, run: &str, commits: &[String], integration_ref: &str) -> Vec<TicketView> {
-        let picked: Vec<(String, gitw::Ticket, String, PathBuf)> = {
+        let picked: Vec<Pick> = {
+            let mut b = crate::lock(&self.0.book);
+            b.tickets
+                .values_mut()
+                .filter(|e| e.view.run == run && e.view.outcome == Some(Outcome::Done) && e.view.retention.is_none())
+                .filter(|e| e.view.commit.as_ref().is_some_and(|c| commits.contains(c)))
+                .filter_map(|e| {
+                    e.integration = Some(integration_ref.to_string());
+                    pick(&*e)
+                })
+                .collect()
+        };
+        self.retain(picked)
+    }
+
+    /// Settings: the disk the worker copies use. A walk of each copy still on disk, no git and no lock while it
+    /// walks. Allocated blocks, so a copy-on-write clone counts in full even where it shares its blocks.
+    pub fn disk_use(&self) -> DiskUse {
+        let trees: Vec<PathBuf> = {
+            let b = crate::lock(&self.0.book);
+            b.tickets.values().filter(|e| has_copy(e)).filter_map(|e| Some(e.tree.as_ref()?.wt.clone())).collect()
+        };
+        let trees: Vec<PathBuf> = trees.into_iter().filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir())).collect();
+        DiskUse { copies: trees.len(), bytes: trees.iter().map(|p| allocated(p)).sum() }
+    }
+
+    /// Settings' Clean up: removes only copies that are clean now. That is an integrated copy that was kept, whose
+    /// capture check passes on a fresh run (its leftover was deleted, say). A copy that never integrated, or still
+    /// differs, stays: nothing is removed on a guess. A discarded copy is already gone at `discard`.
+    pub fn clean_up(&self) -> CleanUp {
+        let picked: Vec<Pick> = {
             let b = crate::lock(&self.0.book);
             b.tickets
                 .values()
-                .filter(|e| e.view.run == run && e.view.outcome == Some(Outcome::Done) && e.view.retention.is_none())
-                .filter_map(|e| Some((e.view.id.clone(), e.tree.clone()?, e.view.commit.clone().filter(|c| commits.contains(c))?, e.job.spec().repo.clone())))
+                .filter(|e| e.integration.is_some() && e.view.retention.as_ref().is_some_and(|r| r["state"] == "kept"))
+                .filter_map(pick)
                 .collect()
         };
+        let removed = self.retain(picked).into_iter().filter(|v| v.retention.as_ref().is_some_and(|r| r["state"] == "removed")).map(|v| v.id).collect();
+        CleanUp { removed }
+    }
+
+    /// The capture check and the removal (16.6 Retention) for each pick, outside the lock. Returns the views after.
+    fn retain(&self, picked: Vec<Pick>) -> Vec<TicketView> {
         let mut out = Vec::new();
-        for (id, t, commit, repo) in picked {
-            let retention = match self.0.gw.worktree_remove(&t, &commit, integration_ref) {
-                Ok(()) => match self.0.gw.branch_delete(&repo, &t.task_ref()) {
+        for p in picked {
+            let retention = match self.0.gw.worktree_remove(&p.tree, &p.commit, &p.integration) {
+                Ok(()) => match self.0.gw.branch_delete(&p.repo, &p.tree.task_ref()) {
                     Ok(()) => json!({"state": "removed", "note": "The worktree and its task branch were removed. Ignored files such as dependency copies and build output went with it."}),
                     Err(e) => json!({"state": "removed", "branch_kept": e.code()}),
                 },
@@ -396,7 +482,7 @@ impl WorkerRuntime {
                 Err(e) => json!({"state": "kept", "reason": e.code()}),
             };
             let mut b = crate::lock(&self.0.book);
-            if let Some(e) = b.tickets.get_mut(&id) {
+            if let Some(e) = b.tickets.get_mut(&p.id) {
                 e.view.retention = Some(retention);
                 out.push(e.view.clone());
             }
