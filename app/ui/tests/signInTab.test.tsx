@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import { S } from "../strings";
-import { LAYOUT_KEY, TerminalDock, openSignIn, openTerminalHere } from "../src/terminal/TerminalDock";
+import { LAYOUT_KEY, TerminalDock, onSignInEnded, openSignIn, openTerminalHere } from "../src/terminal/TerminalDock";
 import { FakeXterm, fakeTerm } from "./fakeTerm";
 
 vi.mock("@xterm/xterm", async () => ({ Terminal: (await import("./fakeTerm")).FakeXterm }));
@@ -77,5 +77,26 @@ describe("sign-in tab", () => {
     act(() => openSignIn({ id: "claude", label: "Sign in: Claude Code" }));
     await waitFor(() => expect(f.named("setup_sign_in").length).toBe(1));
     expect(screen.getByRole("button", { name: S.terminal.newTab })).toHaveProperty("disabled", true);
+  });
+
+  it("says which harness finished signing in when its CLI exits, and a plain shell ending says nothing (ADR-17 rule 6)", async () => {
+    const ended: string[] = [];
+    const off = onSignInEnded((id) => ended.push(id));
+    try {
+      const f = fakeTerm({ setup_sign_in: () => signInInfo });
+      setTransport(f.transport);
+      render(<TerminalDock defaultPlace={APP} />);
+      act(() => openTerminalHere(APP));
+      act(() => openSignIn({ id: "codex", label: "Sign in: Codex CLI" }));
+      await waitFor(() => expect(f.streams.length).toBe(2));
+      const shell = f.streams.find((s) => s.cmd === "term_open")!;
+      const signIn = f.streams.find((s) => s.cmd === "setup_sign_in")!;
+      act(() => shell.send({ exit: 0 }));
+      expect(ended).toEqual([]);
+      act(() => signIn.send({ exit: 0 }));
+      expect(ended).toEqual(["codex"]);
+    } finally {
+      off();
+    }
   });
 });

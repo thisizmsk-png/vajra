@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::catalog::{self, Harness};
-use super::detect::{version_of, Probe};
+use super::detect::{is_tested, version_of, Probe};
 
 pub const SETUP_SCHEMA: &str = "vajra.harness_setup/1";
 
@@ -69,14 +69,14 @@ pub struct SetupList {
 enum Found {
     Missing,
     Broken(PathBuf),
-    Ok(PathBuf, String),
+    Ok(PathBuf, String, (u32, u32)),
 }
 
 fn found(h: &Harness, p: &dyn Probe) -> Found {
     let Some(path) = p.find(&h.binary) else { return Found::Missing };
     let args: Vec<&str> = h.detect_args.iter().map(String::as_str).collect();
     match p.run(&path, &args).filter(|o| o.code == Some(0)).and_then(|o| version_of(&o.stdout)) {
-        Some((v, _)) => Found::Ok(path, v),
+        Some((v, mm)) => Found::Ok(path, v, mm),
         None => Found::Broken(path),
     }
 }
@@ -101,8 +101,9 @@ fn row(h: &Harness, p: &dyn Probe) -> SetupRow {
         // Every entry is "Install it yourself" in this step; an unverified source would be so even with one-click.
         Found::Missing => base(State::Manual, None, None, Some("source_not_verified"), commands(h)),
         Found::Broken(path) => base(State::Broken, None, Some(&path), Some("version_failed"), commands(h)),
-        Found::Ok(path, v) => {
-            let state = if h.adapter.is_some() { State::Installed } else { State::Unsupported };
+        Found::Ok(path, v, mm) => {
+            // Runnable only with an adapter tested on this version (ADR-17 rule 9), the same range launch checks.
+            let state = if h.adapter.as_deref().is_some_and(|a| is_tested(a, mm)) { State::Installed } else { State::Unsupported };
             base(state, Some(v), Some(&path), None, Vec::new())
         }
     }
@@ -186,7 +187,7 @@ fn private_dir() -> Result<PathBuf, SetupError> {
 /// The sign-in for `id`: refused unless the harness is installed and reports a version.
 pub fn sign_in(id: &str, p: &dyn Probe) -> Result<SignInCommand, SetupError> {
     let h = catalog::find(id).ok_or(SetupError::Unknown)?;
-    let Found::Ok(path, _) = found(h, p) else { return Err(SetupError::NotInstalled) };
+    let Found::Ok(path, _, _) = found(h, p) else { return Err(SetupError::NotInstalled) };
     let program = path.canonicalize().map_err(|_| SetupError::NotInstalled)?;
     Ok(SignInCommand { program, args: h.sign_in.argv[1..].to_vec(), cwd: private_dir()? })
 }

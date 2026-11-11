@@ -24,6 +24,16 @@ export type SignInRequest = { id: string; label: string };
 /** "Sign in": open (or focus) a tab running that harness's own login. Never saved in the layout. */
 export const openSignIn = (r: SignInRequest) => window.dispatchEvent(new CustomEvent<SignInRequest>(SIGN_IN, { detail: r }));
 
+const SIGN_IN_ENDED = "vajra:setup-sign-in-ended";
+/** A sign-in tab's CLI exited (`id`: its harness id). Published by the dock; detection runs again after it (ADR-17 rule 6). */
+export const signInEnded = (id: string) => window.dispatchEvent(new CustomEvent<string>(SIGN_IN_ENDED, { detail: id }));
+/** Subscribe to `signInEnded`; returns the unsubscribe. */
+export function onSignInEnded(fn: (id: string) => void): () => void {
+  const h = (e: Event) => fn((e as CustomEvent<string>).detail);
+  window.addEventListener(SIGN_IN_ENDED, h);
+  return () => window.removeEventListener(SIGN_IN_ENDED, h);
+}
+
 /** `live` is false for a tab restored from the saved layout: it has no view and no shell until it is first shown. */
 type Tab = { key: number; cwd: string; label: string; kind: Kind; /** A sign-in tab's harness id. */ signIn?: string; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
 let seq = 0;
@@ -226,8 +236,12 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const patch = (key: number, f: (t: Tab) => Tab) => setTabs((all) => all.map((t) => (t.key === key ? f(t) : t)));
   const onState = (key: number) => (s: ViewState) => {
     if (s.status === "busy") return setNote(S.terminal.busy);
+    const tab = tabsRef.current.find((t) => t.key === key);
     patch(key, (t) => ({ ...t, state: s }));
-    if (s.status === "ended") setNote(S.terminal.announceEnded(tabsRef.current.find((t) => t.key === key)?.label ?? S.terminal.region));
+    if (s.status === "ended") {
+      setNote(S.terminal.announceEnded(tab?.label ?? S.terminal.region));
+      if (tab?.kind === "sign_in" && tab.signIn && tab.state.status !== "ended") signInEnded(tab.signIn);
+    }
   };
   // Output in a pane nobody is looking at marks its tab until the tab is shown. (Only the mark: the output itself is
   // kept by the core, newest 256 KiB, and arrives when the pane is shown.)

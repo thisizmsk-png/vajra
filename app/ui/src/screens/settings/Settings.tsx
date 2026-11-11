@@ -1,6 +1,6 @@
 // Settings in the project shell: explicit global defaults and per-project overrides.
 // Provider availability remains a separate check; preferences never grant execution permissions.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Kbd, Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
@@ -17,6 +17,7 @@ import { AccountsPanel } from "../Accounts";
 import { useAccounts } from "../../providerData";
 import { ProjectAgents } from "../ProjectAgents";
 import { SetupPanel, useSetup } from "./SetupPanel";
+import { onSignInEnded } from "../../terminal/TerminalDock";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
@@ -61,6 +62,10 @@ export function Settings() {
   const checks = useChecks(section === "providers", () => recheck());
   // Set up first: asking for it re-resolves the user PATH, so a CLI installed into a new bin folder is found by the checks after it.
   const recheck = () => { void setup.reload().then(() => { checks.run(); providers.reload(); accounts.reload(); }); };
+  // A finished sign-in changes what detection reports, so detect again without waiting for Check again (ADR-17 rule 6).
+  const recheckRef = useRef(recheck);
+  recheckRef.current = recheck;
+  useEffect(() => (section === "providers" ? onSignInEnded(() => recheckRef.current()) : undefined), [section]);
   return (
     <div className="v-screen v-settings">
       <div className="v-settings__grid">

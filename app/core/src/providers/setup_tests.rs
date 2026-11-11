@@ -72,6 +72,18 @@ fn an_installed_harness_with_an_adapter_shows_its_version_and_can_sign_in() {
 }
 
 #[test]
+fn an_installed_harness_outside_its_tested_range_is_set_up_but_not_runnable() {
+    // The same tested-range decision detect::one and launchable_with use: Codex is tested on 0.166 only.
+    let r = |out: &str| {
+        let l = list(&Fake::default().with("codex", 0, out), false);
+        let r = row(&l, "codex");
+        (r.state, r.version.clone(), r.can_sign_in)
+    };
+    assert_eq!(r("codex-cli 0.167.1"), (State::Unsupported, Some("0.167.1".into()), true));
+    assert_eq!(r("codex-cli 0.166.0"), (State::Installed, Some("0.166.0".into()), true));
+}
+
+#[test]
 fn an_installed_harness_without_an_adapter_is_set_up_but_not_runnable() {
     let l = list(&Fake::default().with("gemini", 0, "0.68.0"), false);
     let r = row(&l, "gemini");
