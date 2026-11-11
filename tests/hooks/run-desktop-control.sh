@@ -319,13 +319,23 @@ run "$(raw PreToolUse SubagentHandback AG1 "$(jq -nc --arg n "$NONCE" '{message:
 # Correctness is asserted apart from time. Time is best of 3 (a shared runner adds noise, never subtracts it) with a
 # local limit of 400 ms and a CI limit of 1500 ms (under a third of the 5 s hook timeout, see issue #12), plus a
 # scaling check that does not depend on runner speed: 600 KB must cost under 20x of 60 KB (catches a quadratic path).
+# The payload is built from a file (--rawfile) and fed to the hook from that file, never an argv: Linux caps one
+# argument at 128 KiB, so a 600 KB --arg makes jq fail and the hook gets an empty payload, which exits 0 without
+# reading anything. The size check proves the payload really is that large.
+big_payload() { # bytes out-file -> rc 0 when out-file holds a PostToolUse Read payload larger than bytes
+  head -c "$1" /dev/zero | tr '\0' a > "$2.txt"
+  jq -nc --arg s "$SID" --arg c "$TEST_HOME/other" --rawfile b "$2.txt" '
+    {session_id:$s, transcript_path:"/x", cwd:$c, hook_event_name:"PostToolUse", tool_name:"Read",
+     tool_input:{file_path:"x"}, tool_response:{content:$b}}' > "$2" || return 1
+  [ "$(wc -c < "$2")" -gt "$1" ]
+}
 big_ms() { # bytes -> best-of-3 ms; leaves RC from the last run
-  local b best=999999 s e
-  b="$(head -c "$1" /dev/zero | tr '\0' a)"
+  local best=999999 s e pf="$TEST_HOME/big.json"
+  big_payload "$1" "$pf" || { echo 0; return 1; }
   for _ in 1 2 3; do
     reset_dir
     s=$(python3 -c 'import time;print(time.time())')
-    run "$(raw PostToolUse Read "" '{"file_path":"x"}' "$(jq -nc --arg b "$b" '{content:$b}')")"
+    "$SH" "$HOOK" < "$pf" >"$OUT" 2>"$ERR"; RC=$?
     e=$(python3 -c "import time;print(int((time.time()-$s)*1000))")
     [ "$RC" -eq 0 ] || { echo "$e"; return 1; }
     [ "$e" -lt "$best" ] && best=$e
@@ -461,15 +471,10 @@ post ""; silent && [ -L "$D/queue/000001-CY.json" ] && [ -f "$TEST_HOME/link-q.j
 reset_dir; entry "$TEST_HOME/link-s.json" SY stop "$SM"; ln -s "$TEST_HOME/link-s.json" "$D/stops/sy.json"
 pre ""; silent; ok "symlinked core worker stop does not block" $?
 # Latency: a core worker with a pending entry and a large tool result stays in the same budget as a worker.
-# The payload is built from a file (--rawfile), never an argv: Linux caps one argument at 128 KiB, so a 600 KB --arg
-# makes jq fail and the hook gets an empty payload. The size check proves the hook really read the large payload.
+# The payload comes from big_payload (a file, never an argv; see big_ms).
 core_big_ms() { # bytes -> best-of-3 ms
   local best=999999 s e pf="$TEST_HOME/core-big.json"
-  head -c "$1" /dev/zero | tr '\0' a > "$TEST_HOME/core-big.txt"
-  jq -nc --arg s "$SID" --arg c "$TEST_HOME/other" --rawfile b "$TEST_HOME/core-big.txt" '
-    {session_id:$s, transcript_path:"/x", cwd:$c, hook_event_name:"PostToolUse", tool_name:"Read",
-     tool_input:{file_path:"x"}, tool_response:{content:$b}}' > "$pf" || { echo 0; return 1; }
-  [ "$(wc -c < "$pf")" -gt "$1" ] || { echo 0; return 1; }
+  big_payload "$1" "$pf" || { echo 0; return 1; }
   for _ in 1 2 3; do
     reset_dir; q 000001 CL message "$SM"
     s=$(python3 -c 'import time;print(time.time())')
