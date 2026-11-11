@@ -50,6 +50,9 @@ pub(super) struct Target {
 #[derive(Default)]
 pub(super) struct WorkerDiffs {
     slots: Mutex<HashMap<String, Slot>>,
+    /// The newest `(cwd, repo)` a snapshot has seen for each id. A round that was counting an older one throws its result
+    /// away. Lock order: `slots`, then `latest`.
+    latest: Mutex<HashMap<String, (String, PathBuf)>>,
     busy: AtomicBool,
     /// How many counts ran (tests assert a snapshot does not add to it).
     counts: AtomicU64,
@@ -90,15 +93,22 @@ impl WorkerDiffs {
             }
             let diff = count(bridge, &t.cwd, &t.repo);
             self.counts.fetch_add(1, Ordering::SeqCst);
-            lock(&self.slots).insert(t.id.clone(), Slot { cwd: t.cwd.clone(), repo: t.repo.clone(), checked: Instant::now(), stamp: t.stamp, diff });
+            let mut slots = lock(&self.slots);
+            // The id may have moved to another worktree while this count ran: that result is for the old one.
+            let current = lock(&self.latest).get(&t.id).is_none_or(|(cwd, repo)| *cwd == t.cwd && *repo == t.repo);
+            if current {
+                slots.insert(t.id.clone(), Slot { cwd: t.cwd.clone(), repo: t.repo.clone(), checked: Instant::now(), stamp: t.stamp, diff });
+            }
         }
     }
 
-    /// Drop the count of any worker whose id now names another worktree or repo, so the snapshot built right after this
-    /// shows nothing for it until it has been counted again (memory only, no disk).
+    /// Record what each id names now, and drop the count of any worker whose id now names another worktree or repo, so
+    /// the snapshot built right after this shows nothing for it until it has been counted again (memory only, no disk).
     pub(super) fn forget_moved(&self, targets: &[Target]) {
         let mut slots = lock(&self.slots);
+        let mut latest = lock(&self.latest);
         for t in targets {
+            latest.insert(t.id.clone(), (t.cwd.clone(), t.repo.clone()));
             if slots.get(&t.id).is_some_and(|s| s.cwd != t.cwd || s.repo != t.repo) {
                 slots.remove(&t.id);
             }

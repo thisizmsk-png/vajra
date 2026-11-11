@@ -1240,6 +1240,27 @@ fn an_agent_id_that_comes_back_with_another_worktree_is_counted_again_and_never_
 }
 
 #[test]
+fn a_round_still_counting_an_old_worktree_cannot_attach_its_result_to_the_moved_id() {
+    let t = Tmp::new();
+    let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
+    let wd = &app.worker_diffs;
+    let old = diff_target(&repo, 1); // the round that is still running counts this one
+    let mut new = diff_target(&repo, 1);
+    new.cwd = repo.join(".claude/worktrees/w2").to_string_lossy().into_owned();
+    // A snapshot sees the id at the new worktree while the old round has not finished.
+    wd.forget_moved(&[new.clone()]);
+    // The old round now finishes and offers its (real, non-empty) count.
+    wd.refresh(&app.bridge, std::slice::from_ref(&old));
+    assert_eq!(wd.counts(), 1);
+    assert!(wd.get("aa870dd40540481f0").is_none(), "the old worktree's count was not stored under the id");
+    assert!(wd.due(&new, std::time::Instant::now()), "and it does not delay the new worktree's count");
+    // The same round for the worktree the id still names is stored as before.
+    wd.forget_moved(std::slice::from_ref(&old));
+    wd.refresh(&app.bridge, &[old]);
+    assert_eq!(wd.get("aa870dd40540481f0").unwrap()["added"], 1);
+}
+
+#[test]
 fn a_worker_outside_the_crew_worktrees_gets_no_diff() {
     let t = Tmp::new();
     let (app, repo, _wt) = crew_fixture(&t, &|r| r.join(".claude/worktrees/w1"));
