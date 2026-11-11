@@ -10,6 +10,7 @@ pub mod env;
 pub mod marks;
 pub mod npm;
 pub mod plan;
+pub mod run;
 pub mod script;
 pub mod tar;
 pub mod tools;

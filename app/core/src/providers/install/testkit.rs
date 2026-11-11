@@ -70,8 +70,9 @@ impl FakeNpm {
                  cp {d}/fixture.tgz \"$dest/pkg.tgz\"; [ -f {d}/extra ] && cp {d}/extra \"$dest/extra\"; echo '[{{\"filename\":\"../../elsewhere.tgz\"}}]';;\n\
                  config) case \"$3\" in prefix) echo {prefix};; *registry) echo https://mirror.example/;; esac;;\n\
                  ls) cat {d}/ls.json;;\n\
-                 install) [ -f {d}/install.ls ] && cp {d}/install.ls {d}/ls.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
-                 uninstall) echo '{{\"dependencies\":{{}}}}' > {d}/ls.json;;\n\
+                 install) for a; do last=\"$a\"; done; cp \"$last\" {d}/installed.tgz; ls -ld \"$(dirname \"$last\")\" > {d}/installed.dir; \
+                 [ -f {d}/install.ls ] && cp {d}/install.ls {d}/ls.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
+                 uninstall) [ -f {d}/uninstall.keep ] || echo '{{\"dependencies\":{{}}}}' > {d}/ls.json;;\n\
                  esac\n"
             ),
         );

@@ -179,6 +179,23 @@ pub fn plan(id: &str, allowed: &[String], kind: Kind, m: &catalog::Brew, brew: &
     Ok((p.rehash(), BrewRun { token, kind, brew: brew.clone() }))
 }
 
+/// The version brew reports as installed for `run`'s token, read after the install (bhishma condition 5).
+pub fn installed_version(run: &BrewRun, env: &SetupEnv) -> Option<String> {
+    let mut args: Vec<std::ffi::OsString> = vec!["info".into(), "--json=v2".into()];
+    if run.kind == Kind::Cask {
+        args.push("--cask".into());
+    }
+    args.push(run.token.clone().into());
+    let out = run_process_exact(&run.brew.path, &args, Path::new("/"), INFO_TIMEOUT, env.vars()).ok()?;
+    let info: Value = serde_json::from_str(&out.stdout).ok().filter(|_| out.code == Some(0) && !out.truncated)?;
+    let entry = info.get(if run.kind == Kind::Cask { "casks" } else { "formulae" })?.get(0)?;
+    let installed = entry.get("installed")?;
+    match run.kind {
+        Kind::Cask => installed.as_str().map(str::to_string),
+        Kind::Formula => installed.as_array()?.last()?.get("version")?.as_str().map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 #[path = "brew_tests.rs"]
 mod tests;
