@@ -179,6 +179,8 @@ struct Session {
     reader: Mutex<Option<JoinHandle<()>>>,
     /// Vajra asked this process to stop (`kill`, `shutdown`): its exit is ours, not a failure to report.
     stop_asked: AtomicBool,
+    /// The last `TAIL_LINES` lines (sanitized and redacted), kept once the process is gone for the core's retry rule.
+    tail: Mutex<Vec<String>>,
 }
 
 /// Whether a process shows as stopped (`SSTOP`), from the kernel's process info; `None` where it can't be read.
@@ -292,6 +294,11 @@ pub struct ProviderTag {
     pub slot: String,
     pub session_id: String,
     pub account: String,
+    /// 1 for the first launch of a ticket, 2 and 3 for the core's retries (6c).
+    pub attempt: u32,
+    /// The core reports this worker's failures itself (6c), after it has decided whether to retry: `report_exit` stays
+    /// quiet, so the card never says "retrying" for a ticket the core ends.
+    pub core_reports: bool,
 }
 
 impl Supervisor {
@@ -307,6 +314,14 @@ impl Supervisor {
 
     pub fn set_error_sink(&self, sink: ErrorSink) {
         *lock(&self.errors) = Some(sink);
+    }
+
+    /// A `provider_error` the core decided itself (a `core_reports` worker), to the same sink.
+    pub fn report(&self, e: &ProviderError) {
+        let sink = lock(&self.errors).clone();
+        if let Some(sink) = sink {
+            sink(e);
+        }
     }
 
     fn log(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -414,6 +429,7 @@ impl Supervisor {
             exited: Condvar::new(),
             reader: Mutex::new(None),
             stop_asked: AtomicBool::new(false),
+            tail: Mutex::new(Vec::new()),
         });
         let handle = {
             let session = session.clone();
@@ -512,6 +528,16 @@ impl Supervisor {
 
     pub fn is_running(&self, id: &str) -> Result<bool, SessionError> {
         Ok(lock(&self.get(id)?.exit).is_none())
+    }
+
+    /// The session's last lines, sanitized and redacted, once its process is gone (empty before).
+    pub fn last_lines(&self, id: &str) -> Result<Vec<String>, SessionError> {
+        Ok(lock(&self.get(id)?.tail).clone())
+    }
+
+    /// Whether Vajra asked this session to stop (`kill`): its exit is ours, not the worker's failure.
+    pub fn stop_asked(&self, id: &str) -> Result<bool, SessionError> {
+        Ok(self.get(id)?.stop_asked.load(Ordering::SeqCst))
     }
 
     /// Exit status once reaped; `None` if still running after `timeout`.
@@ -658,6 +684,7 @@ fn read_loop(
                 }
                 let failed = (info.code != 0 || info.signal.is_some()) && !session.stop_asked.load(Ordering::SeqCst);
                 let (code, signal) = (info.code, info.signal.clone());
+                *lock(&session.tail) = tail.iter().cloned().collect();
                 *exit = Some(info);
                 session.exited.notify_all();
                 drop(exit);
@@ -668,6 +695,7 @@ fn read_loop(
             }
             Ok(None) => {}
             Err(_) => {
+                *lock(&session.tail) = tail.iter().cloned().collect();
                 *exit = Some(ExitInfo {
                     code: u32::MAX,
                     signal: None,
@@ -689,7 +717,11 @@ fn read_loop(
 /// those lines. The action comes from the policy; the account is the one the worker was spawned with. A worker never
 /// just disappears.
 fn report_exit(tag: &ProviderTag, sink: &ErrorSink, code: Option<u32>, signal: Option<&str>, tail: &[String]) {
+    if tag.core_reports {
+        return;
+    }
     let (c, text) = errors::classify_exit(code, signal, tail);
     let who = Ident { slot: &tag.slot, session_id: &tag.session_id, account: &tag.account };
-    sink(&ProviderError::new(&who, &c, 1, &text, errors::decide(c.kind, 1, c.retry_after_s).action));
+    let n = tag.attempt.max(1);
+    sink(&ProviderError::new(&who, &c, n, &text, errors::decide(c.kind, n, c.retry_after_s).action));
 }

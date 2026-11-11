@@ -2283,6 +2283,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 }
 
 mod worker_diff;
+pub mod workers;
 mod arrivals;
 mod caps;
 mod closeout;

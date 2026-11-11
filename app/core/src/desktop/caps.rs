@@ -96,6 +96,48 @@ pub fn check(limits: RunLimits, active: &[Active], project: &Path, workers: u32)
     Ok(())
 }
 
+/// Why a task dispatch waits in its seat's queue (16.9, Q7). A dispatch is never refused for a cap, and these words
+/// are not the run-start "held" words: the ticket waits, and starts on its own when a worker frees up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// Every worker of the app-wide ceiling is busy (leads don't count).
+    Ceiling,
+    /// The account has as many live workers as its `agents.account_caps` entry allows.
+    Account { account: String, cap: u32 },
+}
+
+impl Wait {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Wait::Ceiling => "workers_busy",
+            Wait::Account { .. } => "account_busy",
+        }
+    }
+
+    /// The queue card's words.
+    pub fn detail(&self) -> String {
+        match self {
+            Wait::Ceiling => format!("Waiting for a worker: all {WORKER_CEILING} are busy. It starts when one finishes."),
+            Wait::Account { account, cap } => format!("Waiting for {account}: it already runs {cap} workers, the most you set for it. It starts when one finishes."),
+        }
+    }
+}
+
+/// May one more worker start on `account` now? `live` holds the account of every live worker across all runs (never a
+/// lead: `max_runs` bounds those). `account_caps` is the user's `agents.account_caps`; an account with no entry has no
+/// cap of its own (no default, Q7).
+pub fn dispatch_check(live: &[&str], account: &str, account_caps: &std::collections::BTreeMap<String, u32>) -> Result<(), Wait> {
+    if live.len() as u32 >= WORKER_CEILING {
+        return Err(Wait::Ceiling);
+    }
+    if let Some(&cap) = account_caps.get(account) {
+        if live.iter().filter(|a| **a == account).count() as u32 >= cap {
+            return Err(Wait::Account { account: account.to_string(), cap });
+        }
+    }
+    Ok(())
+}
+
 /// The project a run directory belongs to: its git common dir (canonical), so a repo and each of its worktrees map
 /// to the same key. Found by reading `.git` (a dir, or a `gitdir:` file) and a worktree's `commondir` file, walking up
 /// from `cwd`. Nothing is executed. A folder outside any repo is its own project (its canonical path).
@@ -209,6 +251,31 @@ mod tests {
         assert_eq!(e.code, "workers_full");
         assert!(e.detail.contains("to 2 or less"), "{}", e.detail);
         assert!(check(RunLimits::default(), &[act("/r/a/.git", 6)], Path::new("/r/b/.git"), 2).is_ok());
+    }
+
+    #[test]
+    fn a_dispatch_over_a_cap_waits_with_queue_words_never_held_words() {
+        let none = std::collections::BTreeMap::new();
+        let caps: std::collections::BTreeMap<String, u32> = [("codex".to_string(), 2)].into();
+        assert!(dispatch_check(&["codex", "claude"], "codex", &caps).is_ok());
+        let w = dispatch_check(&["codex", "codex"], "codex", &caps).unwrap_err();
+        assert_eq!((w.code(), w.clone()), ("account_busy", Wait::Account { account: "codex".into(), cap: 2 }));
+        assert!(dispatch_check(&["codex", "codex"], "claude", &caps).is_ok(), "a cap is per account");
+        assert!(dispatch_check(&["codex"; 7], "codex", &none).is_ok(), "no default account cap");
+        // Caps hold across mixed providers: the ceiling counts every live worker.
+        let mixed = ["codex", "claude", "gateway-a", "codex", "claude", "gateway-a", "claude", "codex"];
+        assert_eq!(dispatch_check(&mixed, "gateway-b", &none).unwrap_err().code(), "workers_busy");
+        for w in [Wait::Ceiling, Wait::Account { account: "codex".into(), cap: 2 }] {
+            assert!(w.detail().starts_with("Waiting for") && !w.detail().contains("can start"), "{}", w.detail());
+        }
+    }
+
+    #[test]
+    fn two_default_runs_fit_because_leads_are_outside_the_ceiling() {
+        // Two runs of 4 workers each, each with its lead: the second start is not held.
+        assert!(check(RunLimits::default(), &[act("/r/a/.git", 4)], Path::new("/r/b/.git"), 4).is_ok());
+        let e = check(RunLimits::default(), &[act("/r/a/.git", 8)], Path::new("/r/b/.git"), 1).unwrap_err();
+        assert!(e.detail.contains("workers") && !e.detail.contains("lead"), "the held words name only workers: {}", e.detail);
     }
 
     #[test]
