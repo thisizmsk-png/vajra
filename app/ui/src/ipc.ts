@@ -90,7 +90,7 @@ export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_tex
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
@@ -287,7 +287,10 @@ export const api = {
   providerAccounts: () => call<unknown>("provider_accounts"),
   providerUsage: () => call<unknown>("provider_usage"),
   /** Hands the pasted key to the core, which writes it to the Keychain. Nothing answers with it, and nothing here keeps it. */
+  providerKeySaved: (accountId: string) => call<unknown>("provider_key_saved", { accountId }),
   providerKeySave: (accountId: string, key: string) => call<void>("provider_key_save", { accountId, key }),
+  /** Overwrites the stored key. Save refuses a second key, so a saved account's Replace must come here. */
+  providerKeyReplace: (accountId: string, key: string) => call<void>("provider_key_replace", { accountId, key }),
   providerKeyRemove: (accountId: string) => call<void>("provider_key_remove", { accountId }),
   providerBaseUrlSave: (accountId: string, baseUrl: string) => call<void>("provider_base_url_save", { accountId, baseUrl }),
   providerAgents: (projectId: string) => call<unknown>("provider_agents", { projectId }),

@@ -1,5 +1,6 @@
 // @vitest-environment node
 // The marks as the build ships them: same-origin files, never data: URIs (the app's CSP, default-src 'self', blocks data: images).
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { build } from "vite";
 import { describe, expect, it } from "vitest";
@@ -14,7 +15,9 @@ describe("built marks", () => {
     const code = items.filter((i) => i.type === "chunk").map((i) => (i as { code: string }).code).join("\n");
     const files = items.filter((i) => i.type === "asset").map((i) => i.fileName);
     expect(code).not.toMatch(/data:image/);
-    expect(files.filter((f) => f.endsWith(".svg"))).toHaveLength(7); // a file per theme for each of three providers, plus the one Claude spark
-    expect(files.filter((f) => f.endsWith(".ico"))).toHaveLength(1); // the DeepSeek icon, shipped as the file it is
+    const images = files.filter((f) => /\.(svg|png|ico)$/.test(f));
+    const onDisk = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? onDisk(join(d, n)) : [n]));
+    const shipped = onDisk(join(__dirname, "../src/assets/providers")).filter((n) => /\.(svg|png|ico)$/.test(n) && n !== "fallback.svg"); // fallback.svg is inlined as markup
+    expect(images).toHaveLength(shipped.length); // every mark file is its own same-origin asset
   }, 30000);
 });

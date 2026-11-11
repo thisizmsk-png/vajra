@@ -407,6 +407,43 @@ pub fn accounts(p: &dyn Probe) -> AccountList {
     AccountList { schema: ACCOUNTS_SCHEMA.into(), accounts: METAS.iter().map(|m| account_of(m, p)).collect() }
 }
 
+/// An account that takes a pasted key held in the Keychain instead of a CLI login: its id (the Keychain store's own fixed
+/// list, `keychain::KEY_ACCOUNTS`), the name people know it by, and the harness that runs a worker on it. A gateway is a
+/// route, not a harness: the account says which unmodified CLI runs through it.
+struct KeyedMeta {
+    id: &'static str,
+    name: &'static str,
+    harness: Engine,
+}
+
+const KEYED: [KeyedMeta; 1] = [KeyedMeta { id: "openrouter", name: "OpenRouter", harness: Engine::Codex }];
+
+fn keyed_account(m: &KeyedMeta, saved: Option<bool>) -> Account {
+    Account {
+        id: m.id.into(),
+        provider: m.id.into(),
+        harness: m.harness.id().into(),
+        credential: Credential { source: CredentialSource::ApiKey, saved: Some(saved == Some(true)) },
+        billing: AccountBilling { kind: BillingKind::Gateway, account_label: None, override_warning: None },
+        label: m.name.into(),
+        // A Keychain that could not be asked (locked, timed out) is "cannot tell", never a made-up "no key".
+        state: match saved {
+            Some(true) => AccountState::KeySaved,
+            Some(false) => AccountState::KeyMissing,
+            None => AccountState::CannotTell,
+        },
+        models: Vec::new(),
+    }
+}
+
+/// `accounts`, plus each account that holds a stored key. `saved` answers whether a key is stored for an account id (`None`
+/// when the Keychain could not be asked); it never returns the key.
+pub fn accounts_with_keys(p: &dyn Probe, saved: &dyn Fn(&str) -> Option<bool>) -> AccountList {
+    let mut list = accounts(p);
+    list.accounts.extend(KEYED.iter().map(|m| keyed_account(m, saved(m.id))));
+    list
+}
+
 #[cfg(test)]
 #[path = "detect_tests.rs"]
 mod tests;

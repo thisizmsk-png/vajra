@@ -1,0 +1,23 @@
+{
+  "schema": "vajra.provider_accounts/1",
+  "accounts": [
+    {
+      "id": "claude", "provider": "claude", "harness": "claude",
+      "credential": { "source": "cli_login" },
+      "billing": { "kind": "subscription", "account_label": "s…@example.com", "override_warning": null },
+      "label": "Claude Code", "state": "signed_in", "models": []
+    },
+    {
+      "id": "codex", "provider": "codex", "harness": "codex",
+      "credential": { "source": "cli_login" },
+      "billing": { "kind": "subscription", "account_label": "ChatGPT", "override_warning": { "name": "OPENAI_API_KEY", "found_in": "cli_config" } },
+      "label": "Codex CLI", "state": "signed_in", "models": []
+    },
+    {
+      "id": "openrouter", "provider": "openrouter", "harness": "codex",
+      "credential": { "source": "api_key", "saved": true },
+      "billing": { "kind": "gateway", "account_label": null, "override_warning": null },
+      "label": "OpenRouter", "state": "key_saved", "models": []
+    }
+  ]
+}

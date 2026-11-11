@@ -303,6 +303,8 @@ pub struct App {
     board_build_pause: Mutex<Duration>,
     /// `(HEAD, dirty)` of a run repo, from `git rev-parse HEAD` and `git status`; only successful reads are kept.
     worktree_state: Mutex<WorktreeCache>,
+    /// Each worker's `+N −M`, counted off the snapshot path (see `worker_diff`).
+    worker_diffs: Arc<worker_diff::WorkerDiffs>,
     /// Campaigns with an evidence sweep running: a second call (a change event) answers from the cache instead of starting another.
     sweeping: Mutex<std::collections::HashSet<String>>,
     /// ADR-15: the project records under `<data>/projects`.
@@ -388,6 +390,7 @@ impl App {
             #[cfg(test)]
             board_build_pause: Mutex::new(Duration::ZERO),
             worktree_state: Mutex::new(HashMap::new()),
+            worker_diffs: Arc::new(worker_diff::WorkerDiffs::default()),
             sweeping: Mutex::new(std::collections::HashSet::new()),
             transcripts: Mutex::new(HashMap::new()),
             launching: Mutex::new(()),
@@ -676,7 +679,7 @@ impl App {
         let mut nonces = lock(&self.runs).get(&stream).map(|r| r.nonces.clone()).unwrap_or_default();
         nonces.add(Some(&nonce));
         let spawned = argv(&nonce).and_then(|argv| {
-            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), codex_home: None };
+            let spec = SpawnSpec { argv, cwd: cwd.to_path_buf(), rows: PTY_ROWS, cols: PTY_COLS, redact: nonces.clone(), extra_env: Vec::new() };
             self.sup.spawn(&stream, spec).map_err(|e| fail("spawn_failed", e))
         });
         if let Err(e) = spawned {
@@ -745,7 +748,10 @@ impl App {
     /// login, with the billing the CLI reports and a warning when its own config holds an API key setting that would
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
-        serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+        // Each stored-key account says only whether a key is there (the store has no getter); a Keychain that cannot be
+        // asked reads as unknown. This runs when Settings asks, never on the idle path.
+        let list = crate::providers::detect::accounts_with_keys(&self.provider_probe(), &|id| self.keys.saved(id).ok());
+        serde_json::to_value(list).map_err(|e| fail("internal", e))
     }
 
     /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.
@@ -997,7 +1003,24 @@ impl App {
             _ => Signals::default(),
         };
         let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
-        Ok(node_json(&node))
+        // The counts come from the cache; due workers are handed to a background thread, never counted here.
+        if let (true, Some((_, r))) = (running, &run) {
+            let targets = workers
+                .iter()
+                .filter_map(|w| {
+                    let cwd = ctx.get(&w.agent_id)?.0.clone()?;
+                    let stamp = self.bus.tail(&worker_stream(&w.agent_id), u64::MAX, 1).head_seq;
+                    Some(worker_diff::Target { id: w.agent_id.clone(), cwd, repo: r.cwd.clone(), stamp })
+                })
+                .collect();
+            self.refresh_worker_diffs(targets);
+        }
+        Ok(node_json(&node, &|id| self.worker_diffs.get(id)))
+    }
+
+    /// Count the workers that are due on a background thread; returns at once.
+    fn refresh_worker_diffs(&self, targets: Vec<worker_diff::Target>) {
+        self.worker_diffs.refresh_in_background(&self.bridge, targets);
     }
 
     fn publish_workers(&self, session_id: &str, run_id: &str, workers: &[Worker], ctx: &HashMap<String, (Option<String>, Vec<String>)>) {
@@ -2200,8 +2223,8 @@ fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
     lines.iter().map(|l| json!({"seq": l.seq, "text": &*l.text})).collect()
 }
 
-fn node_json(n: &Node) -> Value {
-    json!({
+fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
+    let mut v = json!({
         "id": n.id,
         "kind": format!("{:?}", n.kind).to_lowercase(),
         "title": n.title,
@@ -2211,8 +2234,13 @@ fn node_json(n: &Node) -> Value {
         "status": n.status.as_str(),
         "overlays": n.overlays,
         "provider": n.provider,
-        "children": n.children.iter().map(node_json).collect::<Vec<_>>(),
-    })
+        "children": n.children.iter().map(|c| node_json(c, diff_of)).collect::<Vec<_>>(),
+    });
+    // A worker's change count, once counted; the field is left out (not null) while there is none.
+    if let Some(diff) = n.id.strip_prefix("agent:").and_then(diff_of) {
+        v["diff"] = diff;
+    }
+    v
 }
 
 /// Wait up to `wait` for bus events, coalesce for `COALESCE`, and return the
@@ -2235,6 +2263,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
     Some(json!({"streams": streams, "snapshot_needed": snapshot_needed}))
 }
 
+mod worker_diff;
 mod arrivals;
 mod caps;
 mod closeout;
@@ -2243,7 +2272,7 @@ pub use proposals::StartOptions;
 mod orchestrator;
 mod proposals;
 mod seat_env;
-mod seat_start;
+pub mod seat_start;
 mod inbox;
 mod projects;
 mod wfresult;

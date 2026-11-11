@@ -128,7 +128,7 @@ describe("the proposal card's workers", () => {
     expect(w.getByText("Touches auth; keeps the guard")).toBeTruthy();
     expect(w.getByText("Max plan, s…@gmail.com")).toBeTruthy();
     expect(w.getByText("OpenRouter key")).toBeTruthy();
-    expect(w.getByText(`${P.billingUnknown} · OPENAI_API_KEY in your Codex config`)).toBeTruthy();
+    expect(w.getByText(`${P.billingUnknown} · ${S.accounts.overrideShort({ name: "OPENAI_API_KEY", found_in: "cli_config" })}`)).toBeTruthy();
     expect(w.getAllByText(P.limits)).toHaveLength(2); // the Codex worker and the gateway worker both run on harness B
     expect(w.getAllByText(S.accounts.warn80("Claude Code", S.accounts.window.weekly, 84, "Thu 09:00"))).toHaveLength(1);
     expect(w.getByText(/Billed to your Claude Code plan \(1\), your OpenRouter key \(1\) and your Codex CLI login \(1\)\./)).toBeTruthy();
