@@ -745,7 +745,10 @@ impl App {
     /// login, with the billing the CLI reports and a warning when its own config holds an API key setting that would
     /// bill instead. Read-only; no key, token or config value leaves the machine or this call.
     pub fn provider_accounts(&self) -> Res {
-        serde_json::to_value(crate::providers::detect::accounts(&self.provider_probe())).map_err(|e| fail("internal", e))
+        // Each stored-key account says only whether a key is there (the store has no getter); a Keychain that cannot be
+        // asked reads as unknown. This runs when Settings asks, never on the idle path.
+        let list = crate::providers::detect::accounts_with_keys(&self.provider_probe(), &|id| self.keys.saved(id).ok());
+        serde_json::to_value(list).map_err(|e| fail("internal", e))
     }
 
     /// `provider_key_saved`: whether a key is stored for `account`. The only thing the core can tell about a key.

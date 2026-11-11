@@ -263,7 +263,7 @@ export function installFixture(mode = "") {
       }
       if (cmd === "provider_accounts") return accounts;
       if (cmd === "provider_usage") return USAGE;
-      if (cmd === "provider_key_save") { setKey(String(args?.accountId), true); return null; }
+      if (cmd === "provider_key_save" || cmd === "provider_key_replace") { setKey(String(args?.accountId), true); return null; }
       if (cmd === "provider_key_remove") { setKey(String(args?.accountId), false); return null; }
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;

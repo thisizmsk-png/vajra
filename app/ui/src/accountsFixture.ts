@@ -8,7 +8,7 @@ export const ACCOUNTS = {
     { id: "claude", provider: "claude", harness: "claude", label: "Claude Code", state: "signed_in", efforts: ["low", "medium", "high"],
       credential: { source: "cli_login", saved: null }, billing: { kind: "subscription", account_label: "Max plan, s…@gmail.com", override_warning: null }, models: [] },
     { id: "codex", provider: "codex", harness: "codex", label: "Codex CLI", state: "cannot_tell", efforts: ["low", "medium", "high"],
-      credential: { source: "cli_login", saved: null }, billing: { kind: "unknown", account_label: null, override_warning: "OPENAI_API_KEY in your Codex config" }, models: [] },
+      credential: { source: "cli_login", saved: null }, billing: { kind: "unknown", account_label: null, override_warning: { name: "OPENAI_API_KEY", found_in: "cli_config" } }, models: [] },
     { id: "openrouter", provider: "openrouter", harness: "codex", label: "OpenRouter", state: "key_saved", efforts: ["low", "medium", "high"], base_url: null,
       credential: { source: "api_key", saved: true }, billing: { kind: "gateway", account_label: "OpenRouter key", override_warning: null },
       models: [

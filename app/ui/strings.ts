@@ -579,7 +579,10 @@ export const S = {
     },
     runsOn: (harness: string) => `Runs on ${harness}`,
     harness: { claude: "Claude Code", codex: "Codex CLI" } as Record<string, string>,
-    overrideWarning: (w: string) => `${w}: it bills instead of your plan`,
+    /** Where the CLI's own settings name the key; the CLI differs, so the wording is about "the CLI". */
+    overrideWhere: { cli_env_block: "in the CLI's settings", cli_config: "in the CLI's config file", cli_api_key_helper: "(a key helper) in the CLI's settings" } as Record<string, string>,
+    overrideShort: (w: { name: string; found_in: string }) => `${w.name} ${S.accounts.overrideWhere[w.found_in] ?? S.accounts.overrideWhere.cli_config}`,
+    overrideWarning: (w: { name: string; found_in: string }) => `${S.accounts.overrideShort(w)}: it bills instead of your plan`,
     outsideGuard: "Workers run in Codex's own sandbox, outside the Vajra guard.",
     guarded: "Workers keep the Vajra guard.",
     meters: (name: string) => `${name} usage`,
