@@ -3,10 +3,12 @@
 //! except `run`, which starts only with a fresh consent token for the exact plan the user saw.
 
 pub mod admin;
+pub mod brew;
 pub mod closure;
 pub mod env;
 pub mod npm;
 pub mod plan;
+pub mod script;
 pub mod tar;
 pub mod tools;
 

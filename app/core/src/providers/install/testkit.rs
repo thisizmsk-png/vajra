@@ -89,6 +89,49 @@ impl FakeNpm {
     }
 }
 
+/// A scripted `brew` under `dir`: `info` prints `info.json`, `--prefix` prints `dir/prefix`, `install` copies
+/// `after.json` over `info.json` (the installed version), `log` records calls.
+pub struct FakeBrew {
+    pub dir: PathBuf,
+}
+
+impl FakeBrew {
+    pub fn new(tag: &str, info: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("vajra-brew-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["prefix/bin", "prefix/Cellar", "prefix/Caskroom"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("info.json"), info).unwrap();
+        let d = dir.display();
+        exe(
+            &dir.join("brew/bin/brew"),
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> {d}/log\ncase \"$1\" in\n\
+                 info) cat {d}/info.json;;\n--prefix) echo {d}/prefix;;\n\
+                 install) [ -f {d}/after.json ] && cp {d}/after.json {d}/info.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
+                 esac\n"
+            ),
+        );
+        FakeBrew { dir }
+    }
+
+    pub fn brew(&self) -> Tool {
+        Tool { path: self.dir.join("brew/bin/brew"), label: None, owned_by_you: true }
+    }
+
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("log")).unwrap_or_default()
+    }
+}
+
+impl Drop for FakeBrew {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 impl Drop for FakeNpm {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
