@@ -39,6 +39,7 @@
 .v-wp__line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-wp--compact .v-pt { --tile: 20px; padding: 0; align-items: center; justify-content: center; margin-right: 0; }
 .v-wp--compact .v-pt__via { display: none; }
+.v-wp__diff { flex: none; white-space: nowrap; font: 500 12px/16px var(--font-ui); font-variant-numeric: tabular-nums; color: var(--c-text-secondary); }
 .v-wp__ran { color: var(--c-warning); }
 .v-wp__err { color: var(--c-text-secondary); overflow-wrap: anywhere; }
 .v-wp__err--you { color: var(--c-warning); }
@@ -51,3 +52,6 @@
 .v-prov__title, .v-prov__runon { display: flex; align-items: center; gap: var(--space-sm); }
 .v-sbar__usage { display: inline-flex; align-items: center; gap: 6px; }
 .v-pref__row .v-pt { flex: none; margin-inline-start: auto; margin-inline-end: 8px; }
+
+/* A vendor file whose glyph is dark on a transparent ground sits on a light plate (the file is never recoloured). */
+.v-pt--plate { background: var(--c-mark-plate); }

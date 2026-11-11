@@ -539,6 +539,13 @@ export const S = {
   },
   /** The provider a worker ran on, on run cards, the crew list, the Board and the Crew pane. */
   workerProvider: {
+    /** A worker's change count: `+N −M` when exact; `≥ +N lines` when some new files were not counted (ADR-16 16.10). */
+    diff: {
+      exact: (added: number, removed: number) => `+${added} \u2212${removed}`,
+      atLeast: (added: number) => `\u2265 +${added} lines`,
+      atLeastLabel: (added: number, uncounted: number) => `At least ${added} lines added. ${uncounted} new ${uncounted === 1 ? "file was" : "files were"} not counted (too many or too large).`,
+      exactLabel: (added: number, removed: number, files: number) => `${added} lines added, ${removed} removed, in ${files} ${files === 1 ? "file" : "files"}.`,
+    },
     notReported: "Not reported",
     ranOn: (ran: string, asked: string) => `Ran on ${ran} (asked for ${asked})`,
     billing: { subscription: "Plan", api_key: "API key", gateway: "Gateway key", unknown: "Billing unknown" } as Record<string, string>,
@@ -579,7 +586,10 @@ export const S = {
     },
     runsOn: (harness: string) => `Runs on ${harness}`,
     harness: { claude: "Claude Code", codex: "Codex CLI" } as Record<string, string>,
-    overrideWarning: (w: string) => `${w}: it bills instead of your plan`,
+    /** Where the CLI's own settings name the key; the CLI differs, so the wording is about "the CLI". */
+    overrideWhere: { cli_env_block: "in the CLI's settings", cli_config: "in the CLI's config file", cli_api_key_helper: "(a key helper) in the CLI's settings" } as Record<string, string>,
+    overrideShort: (w: { name: string; found_in: string }) => `${w.name} ${S.accounts.overrideWhere[w.found_in] ?? S.accounts.overrideWhere.cli_config}`,
+    overrideWarning: (w: { name: string; found_in: string }) => `${S.accounts.overrideShort(w)}: it bills instead of your plan`,
     outsideGuard: "Workers run in Codex's own sandbox, outside the Vajra guard.",
     guarded: "Workers keep the Vajra guard.",
     meters: (name: string) => `${name} usage`,

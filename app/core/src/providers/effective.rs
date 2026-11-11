@@ -34,7 +34,15 @@ const MAX_READ: u64 = 1024 * 1024;
 /// Records scanned for the first `turn_context`.
 const MAX_RECORDS: usize = 400;
 /// New files whose lines are counted into a `Diff`; every one is still listed.
-const MAX_UNTRACKED: usize = 500;
+const MAX_UNTRACKED: usize = 5000;
+/// A new file larger than this is listed but not read (its lines are not counted).
+const PER_FILE_CAP: u64 = 8 * 1024 * 1024;
+/// The most bytes read across all new files of one diff.
+const TOTAL_READ_CAP: u64 = 64 * 1024 * 1024;
+/// How many paths a `Diff` lists (`files_total` says how many there were).
+pub const MAX_LISTED: usize = 200;
+/// A NUL in the first bytes of a file marks it binary, as git decides.
+const BINARY_PROBE: usize = 8000;
 /// The most time spent counting new files' lines; past it the totals are marked partial.
 const UNTRACKED_BUDGET: Duration = Duration::from_secs(2);
 
@@ -301,20 +309,26 @@ pub fn read_claude(events: &str) -> Effective {
 /// A worker's change set as git reports it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Diff {
+    /// The first `MAX_LISTED` changed paths (lossy text, for display).
     pub files: Vec<String>,
+    /// How many files changed in all.
+    pub files_total: u64,
     pub added: u64,
     pub removed: u64,
-    /// The new files' line counts stopped early (the time budget or the file cap ran out): `added` is then a lower bound.
-    /// Every file is still listed.
+    /// Some new files' lines were not counted (a bound ran out, a file was too large, or it is not a plain file or path):
+    /// `added` is then a lower bound. Every file is still counted in `files_total`.
     pub partial: bool,
+    /// How many new files were not counted.
+    pub uncounted: u64,
 }
 
 /// The diff of `cwd` (the worker's worktree) against `base`, read through the read-only git bridge: tracked changes
-/// from `git diff --numstat <base>` and new files from `git ls-files --others --exclude-standard` (their lines count as added). `None` when git could
-/// not answer; an empty `Diff` means git saw no change.
+/// from `git diff --numstat <base>` and new files from `git ls-files --others --exclude-standard`. A new file's lines are
+/// counted by reading it directly (no git process per file), and count as added. `None` when git could not answer; an
+/// empty `Diff` means git saw no change.
 ///
-/// This spawns git once per new file (up to `MAX_UNTRACKED`, within `UNTRACKED_BUDGET`), so it is for the one-time receipt
-/// built when a run ends, on a background thread. It must never run on the `project_state` poll path.
+/// It reads files (bounded: `PER_FILE_CAP`, `TOTAL_READ_CAP`, `MAX_UNTRACKED`, `UNTRACKED_BUDGET`), so it is for a receipt
+/// built on a background thread. It must never run on the `project_state` poll path.
 pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
     diff_from_git_within(bridge, cwd, base, UNTRACKED_BUDGET)
 }
@@ -322,17 +336,25 @@ pub fn diff_from_git(bridge: &Bridge, cwd: &Path, base: &str) -> Option<Diff> {
 fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duration) -> Option<Diff> {
     let git = |args: &[&str]| {
         let out = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args: args.iter().map(|a| a.to_string()).collect() }).ok()?;
-        (out.code == Some(0) && out.whole()).then_some(out.stdout)
+        (out.code == Some(0) && out.whole()).then_some(out.stdout_raw)
     };
     // `-z` for both: paths come back NUL-terminated and unquoted, so a name with a space, quote, newline, tab or non-ASCII
-    // character is its real path, and a rename is two plain records instead of `old => new` display text.
-    let tracked = git(&["diff", "--numstat", "-z", base, "--"])?;
+    // character is its real path, and a rename is two plain records. They are split as bytes: a name that is not UTF-8
+    // keeps its exact bytes for the read below (only the listed copy is lossy). A submodule's contents are not diffed.
+    let tracked = git(&["diff", "--numstat", "-z", "--ignore-submodules=all", base, "--"])?;
+    // `git ls-files` has no `--ignore-submodules`; a submodule or nested repository is listed as `dir/` and is not counted.
     let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
     let mut diff = Diff::default();
-    let mut records = tracked.split('\0').filter(|r| !r.is_empty());
+    let list = |diff: &mut Diff, path: &[u8]| {
+        diff.files_total += 1;
+        if diff.files.len() < MAX_LISTED {
+            diff.files.push(String::from_utf8_lossy(path).into_owned());
+        }
+    };
+    let mut records = tracked.split(|b| *b == 0).filter(|r| !r.is_empty());
     while let Some(rec) = records.next() {
         // `added<TAB>removed<TAB>path`; a rename or copy has an empty path there, followed by the old and new paths.
-        let mut f = rec.splitn(3, '\t');
+        let mut f = rec.splitn(3, |b| *b == b'\t');
         let (a, r, path) = (f.next()?, f.next()?, f.next()?);
         match (numstat_count(a), numstat_count(r)) {
             (Some(a), Some(r)) => (diff.added, diff.removed) = (diff.added + a, diff.removed + r),
@@ -341,50 +363,139 @@ fn diff_from_git_within(bridge: &Bridge, cwd: &Path, base: &str, budget: Duratio
         }
         if path.is_empty() {
             let (_old, new) = (records.next()?, records.next()?);
-            diff.files.push(new.into());
+            list(&mut diff, new);
         } else {
-            diff.files.push(path.into());
+            list(&mut diff, path);
         }
     }
-    // A new file is all added lines. Git counts them (`--no-index` against /dev/null, which exits 1 when the file differs,
-    // as it always does here) and does not follow a link: a link counts as one line, its target text. A binary file adds
-    // none. Counting stops at `MAX_UNTRACKED` files or `UNTRACKED_BUDGET`, whichever is first (`partial`).
-    let (start, mut counted) = (Instant::now(), 0);
-    for path in untracked.split('\0').filter(|l| !l.is_empty()) {
-        if counted >= MAX_UNTRACKED || start.elapsed() >= budget {
-            // Out of budget: keep listing, stop counting, and say the total is a lower bound.
-            diff.partial = true;
-        } else {
-            counted += 1;
-            match count_new_file(bridge, cwd, path) {
-                Some((added, removed)) => (diff.added, diff.removed) = (diff.added + added, diff.removed + removed),
-                // The call failed, timed out, was cut short, or answered in a shape we do not know.
-                None => diff.partial = true,
+    // New files: a direct, link-safe read of each. Past `MAX_UNTRACKED` files, `UNTRACKED_BUDGET` or `TOTAL_READ_CAP`
+    // counting stops and the rest are listed only (`partial`, `uncounted`).
+    let root = open_dir_nofollow(cwd);
+    let (start, mut counted, mut read_left) = (Instant::now(), 0usize, TOTAL_READ_CAP);
+    let deadline = start + budget;
+    for path in untracked.split(|b| *b == 0).filter(|l| !l.is_empty()) {
+        list(&mut diff, path);
+        let out_of_bounds = counted >= MAX_UNTRACKED || start.elapsed() >= budget || read_left == 0;
+        let n = match (&root, out_of_bounds) {
+            (Some(root), false) => {
+                counted += 1;
+                count_new_file_at(root, path, &mut read_left, deadline)
             }
+            _ => None,
+        };
+        match n {
+            Some(n) => diff.added += n,
+            None => (diff.partial, diff.uncounted) = (true, diff.uncounted + 1),
         }
-        diff.files.push(path.into());
     }
     Some(diff)
 }
 
 /// One `--numstat` count: a number, or `-` for a binary file (changed, no line counts). Anything else is unreadable.
-fn numstat_count(field: &str) -> Option<u64> {
-    if field == "-" {
+fn numstat_count(field: &[u8]) -> Option<u64> {
+    if field == b"-" {
         return Some(0);
     }
-    (!field.is_empty() && field.bytes().all(|b| b.is_ascii_digit())).then(|| field.parse().ok()).flatten()
-}
-
-/// The lines a new file adds, read from git, or `None` when git could not say (failed, timed out, cut short, odd exit
-/// status, or output that is not a numstat record).
-fn count_new_file(bridge: &Bridge, cwd: &Path, path: &str) -> Option<(u64, u64)> {
-    let args = ["diff", "--numstat", "-z", "--no-index", "--", "/dev/null", path].map(String::from).to_vec();
-    let out = bridge.run(&Request::Git { cwd: cwd.to_path_buf(), args }).ok()?;
-    if !matches!(out.code, Some(0 | 1)) || !out.whole() {
+    if field.is_empty() || !field.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let mut f = out.stdout.split('\0').next()?.splitn(3, '\t');
-    Some((numstat_count(f.next()?)?, numstat_count(f.next()?)?))
+    std::str::from_utf8(field).ok()?.parse().ok()
+}
+
+fn open_dir_nofollow(path: &Path) -> Option<File> {
+    fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path).ok()
+}
+
+/// The lines a new file adds, matching `git diff --numstat --no-index /dev/null <file>`, or `None` when it was not counted
+/// (the path is refused, a link is in the way, the file is too large, it is not a plain file, the read cap ran out, or
+/// `deadline` passed while it was being read).
+///
+/// `rel` is the path git listed, as bytes, relative to `root`. Every directory part is opened with `O_NOFOLLOW`, so a
+/// symlinked directory partway down is never entered. The last part is looked at with `fstatat(AT_SYMLINK_NOFOLLOW)`:
+/// - a symlink is not followed: its target text is counted as git counts the link's blob (a target without a newline is
+///   1 line, one with newlines is more);
+/// - a plain file is reopened with `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat`: its lines are its `\n` count, plus 1
+///   when it is non-empty and does not end in one; a NUL in its first 8000 bytes means binary, which counts 0;
+/// - a FIFO, socket or device is never opened.
+fn count_new_file_at(root: &File, rel: &[u8], read_left: &mut u64, deadline: Instant) -> Option<u64> {
+    if rel.is_empty() || rel.len() >= libc::PATH_MAX as usize || rel.last() == Some(&b'/') {
+        return None;
+    }
+    let parts: Vec<&[u8]> = rel.split(|b| *b == b'/').collect();
+    if parts.iter().any(|p| p.is_empty() || *p == b"." || *p == b".." || p.contains(&0)) {
+        return None;
+    }
+    let (last, dirs) = parts.split_last()?;
+    let mut held: Option<File> = None;
+    for d in dirs {
+        let name = CString::new(*d).ok()?;
+        let next = open_at(held.as_ref().unwrap_or(root), &name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0).ok()?;
+        held = Some(next);
+    }
+    let dir = held.as_ref().unwrap_or(root);
+    let name = CString::new(*last).ok()?;
+    // SAFETY: a valid directory fd, a NUL-terminated name and a zeroed out-struct, all live for this call.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return None;
+    }
+    match st.st_mode & libc::S_IFMT {
+        libc::S_IFLNK => {
+            // Git counts the lines of the link's blob, its target text: read the target (never follow it) and count it
+            // by the same rule as a file, so a target holding newlines is not taken for one line.
+            let mut target = vec![0u8; libc::PATH_MAX as usize + 1];
+            // SAFETY: a valid directory fd, a NUL-terminated name and a buffer of the length passed, all live for this call.
+            let n = unsafe { libc::readlinkat(dir.as_raw_fd(), name.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
+            // A negative result is an error; a full buffer may be a cut target. Neither is counted.
+            let n = usize::try_from(n).ok().filter(|n| *n < target.len())?;
+            count_lines(&mut &target[..n], n as u64, read_left, deadline)
+        }
+        libc::S_IFREG => {
+            let mut f = open_at(dir, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0).ok()?;
+            let size = f.metadata().ok().filter(|m| m.is_file())?.len();
+            if size > PER_FILE_CAP || size > *read_left {
+                return None;
+            }
+            count_lines(&mut f, size, read_left, deadline)
+        }
+        _ => None,
+    }
+}
+
+/// `deadline` is checked before every chunk and again after the read, on every way out (the binary early return too), so
+/// a slow read cannot outlast the budget: past it the file is uncounted (`None`), never counted late.
+fn count_lines(f: &mut impl Read, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
+    let counted = count_chunks(f, size, read_left, deadline)?;
+    (Instant::now() < deadline).then_some(counted)
+}
+
+fn count_chunks(f: &mut impl Read, size: u64, read_left: &mut u64, deadline: Instant) -> Option<u64> {
+    let mut buf = [0u8; 64 * 1024];
+    let (mut seen, mut lines, mut last) = (0u64, 0u64, b'\n');
+    while seen < size {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let want = buf.len().min((size - seen) as usize);
+        let n = f.read(&mut buf[..want]).ok()?;
+        if n == 0 {
+            // The file ended before the size `fstat` gave: it shrank while it was being read, so what was read is not
+            // the file. Uncounted (the diff is partial), never an exact count of a prefix.
+            return None;
+        }
+        let chunk = &buf[..n];
+        // The probe is the first BINARY_PROBE bytes of the file, which may span chunks.
+        let probe_end = BINARY_PROBE.saturating_sub(seen as usize).min(n);
+        if chunk[..probe_end].contains(&0) {
+            *read_left = read_left.saturating_sub(seen + n as u64);
+            return Some(0);
+        }
+        lines += chunk.iter().filter(|b| **b == b'\n').count() as u64;
+        last = chunk[n - 1];
+        seen += n as u64;
+    }
+    *read_left = read_left.saturating_sub(seen);
+    Some(lines + u64::from(seen > 0 && last != b'\n'))
 }
 
 #[cfg(test)]

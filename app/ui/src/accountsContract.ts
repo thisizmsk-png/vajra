@@ -30,7 +30,7 @@ export interface Account {
   label: string;
   state: AccountState;
   credential: { source: "cli_login" | "api_key" | "gateway"; saved: boolean | null };
-  billing: { kind: BillingKind; account_label: string | null; override_warning: string | null };
+  billing: { kind: BillingKind; account_label: string | null; override_warning: OverrideWarning | null };
   /** The efforts this account's harness takes. Empty: it has no effort setting (the receipt says "Not reported", never a guess). */
   efforts: string[];
   /** A gateway's non-secret base URL. */
@@ -59,7 +59,14 @@ export const ROLES = ["architect", "backend", "frontend", "tests", "verifier", "
 
 /** OpenRouter models carry "New" until the soak passes (build brief, PR 8). One switch, so the label comes off in one edit. */
 export const GATEWAY_SOAK_PASSED = false;
+/** The Advanced > base URL box is shown only while the core can save one. The core has no `provider_base_url_save` command yet,
+ *  so the box would be a control that always errors; flip this when the command lands. */
+export const BASE_URL_SAVE_WIRED = false;
 export const WARN_PCT = 80;
+
+/** The core's `override_warning`: the NAME of the setting that would bill an API key, and where it was found. Never a value. */
+export interface OverrideWarning { name: string; found_in: "cli_env_block" | "cli_config" | "cli_api_key_helper" }
+const FOUND_IN = ["cli_env_block", "cli_config", "cli_api_key_helper"] as const;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): v is string => typeof v === "string";
@@ -83,6 +90,13 @@ function model(v: unknown): AccountModel | null {
   return { id: v.id, family: v.family, name, tool_check: known(v.tool_check, CHECKS, "unchecked"), checked_on: optStr(v.checked_on) };
 }
 
+/** `null` when there is none; `"bad"` when something is there that is not the core's `{name, found_in}` (the account then fails). */
+function overrideWarning(v: unknown): OverrideWarning | null | "bad" {
+  if (v === null || v === undefined) return null;
+  if (!isObj(v) || !str(v.name) || !/^[A-Za-z0-9_]{1,64}$/.test(v.name)) return "bad";
+  return { name: v.name, found_in: known(v.found_in, FOUND_IN, "cli_config") };
+}
+
 function account(v: unknown): Account | null {
   if (!isObj(v) || !str(v.id) || !idOk(v.id) || !str(v.provider) || !idOk(v.provider) || !str(v.harness) || !str(v.label) || !label(v.label)) return null;
   const cred = isObj(v.credential) ? v.credential : {};
@@ -93,9 +107,9 @@ function account(v: unknown): Account | null {
     if (!x) return null;
     models.push(x);
   }
-  const warning = optStr(bill.override_warning);
+  const warning = overrideWarning(bill.override_warning);
   const acct = optStr(bill.account_label);
-  if ((warning !== null && !label(warning)) || (acct !== null && !label(acct))) return null;
+  if (warning === "bad" || (acct !== null && !label(acct))) return null;
   return {
     id: v.id, provider: v.provider, harness: v.harness, label: v.label,
     state: known(v.state, STATES, "cannot_tell"),

@@ -3,13 +3,14 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ACCOUNTS as FIXTURE_ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
-import { allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
+import { BASE_URL_SAVE_WIRED, allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
 import type { Account } from "../src/accountsContract";
 import { setTransport } from "../src/ipc";
 import { PreferencesProvider } from "../src/preferences";
 import { DEFAULT_PREFERENCES } from "../src/preferenceContract";
 import { CurrentProject } from "../src/projects/current";
 import { ProviderIcon } from "../src/screens/ProviderIcon";
+import { BaseUrl } from "../src/screens/Accounts";
 import { Settings } from "../src/screens/settings/Settings";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
@@ -41,7 +42,7 @@ function settings(replies: Record<string, unknown> = {}, inProject = true) {
     preflight: { rows: [], start_enabled: true }, provider_list: providerList, preferences_read: view,
     provider_accounts: () => accounts, provider_usage: USAGE, provider_agents: clone(AGENTS),
     provider_key_save: () => { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === "openrouter" ? { ...a, state: "key_saved" } : a) }; return null; },
-    provider_key_remove: () => null, provider_base_url_save: () => null,
+    provider_key_replace: () => null, provider_key_remove: () => null, provider_base_url_save: () => null,
     provider_agents_save: (a?: Record<string, unknown>) => ({ schema: AGENTS.schema, ...(a?.agents as object) }),
     ...replies,
   });
@@ -118,7 +119,7 @@ describe("Settings > Providers > Accounts", () => {
   it("the override warning says the key bills instead of the plan", async () => {
     settings();
     const codex = await account("Codex CLI");
-    expect(within(codex).getByText(C.overrideWarning("OPENAI_API_KEY in your Codex config"))).toBeTruthy();
+    expect(within(codex).getByText(C.overrideWarning({ name: "OPENAI_API_KEY", found_in: "cli_config" }))).toBeTruthy();
     expect(within(await account("Claude Code")).queryByText(/bills instead/)).toBeNull();
   });
 
@@ -195,20 +196,37 @@ describe("the OpenRouter key", () => {
     expect(screen.getByText(C.keyHarness(true))).toBeTruthy();
   });
 
-  it("Save sends the key once, then the field and the page hold no trace of it, and reopening shows an empty field", async () => {
+  it("Replace on a saved account sends the key to provider_key_replace (never Save, which refuses a second key), then the field and the page hold no trace of it", async () => {
     const f = await open();
     const field = screen.getByLabelText(C.keyLabel) as HTMLInputElement;
     fireEvent.change(field, { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.save }));
-    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_save")).toHaveLength(1));
-    expect(f.calls.find((c) => c.cmd === "provider_key_save")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_replace")).toHaveLength(1));
+    expect(f.calls.find((c) => c.cmd === "provider_key_replace")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    expect(f.calls.some((c) => c.cmd === "provider_key_save")).toBe(false);
     await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_accounts").length).toBeGreaterThan(1));
     await waitFor(() => expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe(""));
     expect(document.body.innerHTML).not.toContain(FAKE_KEY);
-    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_save"))).not.toContain(FAKE_KEY);
+    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_replace"))).not.toContain(FAKE_KEY);
     const or = await account("OpenRouter");
     fireEvent.click(within(or).getByRole("button", { name: `${C.replace}: OpenRouter` }));
     expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe("");
+  });
+
+  it("Add on an account with no key sends the key to provider_key_save once, and nothing else carries it", async () => {
+    const none = clone(FIXTURE_ACCOUNTS) as any;
+    none.accounts = none.accounts.map((a: any) => (a.id === "openrouter" ? { ...a, state: "key_missing", credential: { source: "api_key", saved: false } } : a));
+    const f = settings({ provider_accounts: none });
+    const or = await account("OpenRouter");
+    // No key yet: Add, and no Remove.
+    expect(within(or).queryByRole("button", { name: `${C.remove}: OpenRouter` })).toBeNull();
+    fireEvent.click(within(or).getByRole("button", { name: `${C.add}: OpenRouter` }));
+    fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
+    fireEvent.click(screen.getByRole("button", { name: C.save }));
+    await waitFor(() => expect(f.calls.filter((c) => c.cmd === "provider_key_save")).toHaveLength(1));
+    expect(f.calls.find((c) => c.cmd === "provider_key_save")?.args).toEqual({ accountId: "openrouter", key: FAKE_KEY });
+    expect(f.calls.some((c) => c.cmd === "provider_key_replace")).toBe(false);
+    expect(JSON.stringify(f.calls.filter((c) => c.cmd !== "provider_key_save"))).not.toContain(FAKE_KEY);
   });
 
   it("Cancel drops what was typed; Save is off while the field is empty", async () => {
@@ -217,11 +235,11 @@ describe("the OpenRouter key", () => {
     fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.cancel }));
     expect((screen.getByLabelText(C.keyLabel) as HTMLInputElement).value).toBe("");
-    expect(f.calls.some((c) => c.cmd === "provider_key_save")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "provider_key_save" || c.cmd === "provider_key_replace")).toBe(false);
   });
 
-  it("a failed save says so and still never shows the key", async () => {
-    await open({ provider_key_save: new Error("x") });
+  it("a failed replace says so and still never shows the key", async () => {
+    await open({ provider_key_replace: new Error("x") });
     fireEvent.change(screen.getByLabelText(C.keyLabel), { target: { value: FAKE_KEY } });
     fireEvent.click(screen.getByRole("button", { name: C.save }));
     const sheet = screen.getByLabelText(C.keyLabel).closest("dialog") as HTMLElement;
@@ -259,26 +277,31 @@ describe("the OpenRouter key", () => {
 });
 
 describe("advanced: base URL", () => {
-  it("is offered only for gateway (API key) accounts, never for CLI-login accounts", async () => {
-    settings();
-    const or = await account("OpenRouter");
-    expect(within(or).queryByLabelText(C.baseUrlLabel)).not.toBeNull();
-    for (const name of ["Claude Code", "Codex CLI"]) {
+  it("is not offered on any row while the core has no command to save it (no control that always errors)", async () => {
+    const f = settings();
+    for (const name of ["Claude Code", "Codex CLI", "OpenRouter"]) {
       const row = await account(name);
       expect(within(row).queryByText(C.advanced)).toBeNull();
+      expect(within(row).queryByLabelText(C.baseUrlLabel)).toBeNull();
     }
+    expect(BASE_URL_SAVE_WIRED).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "provider_base_url_save")).toBe(false);
   });
 
-  it("refuses a URL with a user name or password in it, and saves a plain one", async () => {
-    const f = settings();
-    const or = await account("OpenRouter");
-    const field = within(or).getByLabelText(C.baseUrlLabel);
+  // The box itself stays tested, so turning BASE_URL_SAVE_WIRED on later is a one-line change.
+  it("the box refuses a URL with a user name or password in it, and saves a plain one", async () => {
+    const f = fakeIpc({ provider_base_url_save: null });
+    setTransport(f.transport);
+    const or = clone(FIXTURE_ACCOUNTS).accounts.find((a) => a.id === "openrouter") as Account;
+    render(<ul><li aria-label="box"><BaseUrl account={or} onSaved={() => {}} /></li></ul>);
+    const box = screen.getByRole("listitem", { name: "box" });
+    const field = within(box).getByLabelText(C.baseUrlLabel);
     fireEvent.change(field, { target: { value: "https://user:hunter2@host/v1" } });
-    fireEvent.click(within(or).getByRole("button", { name: C.baseUrlSave }));
-    expect((await within(or).findByRole("alert")).textContent).toBe(C.baseUrlProblem.credentials);
+    fireEvent.click(within(box).getByRole("button", { name: C.baseUrlSave }));
+    expect((await within(box).findByRole("alert")).textContent).toBe(C.baseUrlProblem.credentials);
     expect(f.calls.some((c) => c.cmd === "provider_base_url_save")).toBe(false);
     fireEvent.change(field, { target: { value: "https://openrouter.ai/api/v1" } });
-    fireEvent.click(within(or).getByRole("button", { name: C.baseUrlSave }));
+    fireEvent.click(within(box).getByRole("button", { name: C.baseUrlSave }));
     await waitFor(() => expect(f.calls.find((c) => c.cmd === "provider_base_url_save")?.args).toEqual({ accountId: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }));
   });
 });

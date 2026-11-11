@@ -91,7 +91,7 @@
 /* One bar, one segment per status, in the status colours (currentColor from the v-status class). */
 .v-crew__meter { display: flex; gap: 2px; height: 6px; margin: var(--space-md) var(--space-lg) var(--space-xs); border-radius: var(--radius-pill); overflow: hidden; }
 .v-crew__meter > span { flex-basis: 0; background: currentColor; }
-.v-crew__panehead { display: flex; align-items: center; gap: 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
+.v-crew__panehead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: var(--space-md) var(--space-lg) 0; min-width: 0; }
 .v-crew__task { min-width: 0; color: var(--c-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .v-crew__pane .v-tablist { padding: 6px var(--space-md) 0; }
 .v-crew__pane .v-tabpanel { padding: var(--space-md) var(--space-lg); }

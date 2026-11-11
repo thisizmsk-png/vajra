@@ -340,3 +340,48 @@ fn the_codex_config_is_read_as_toml_so_comments_and_multiline_strings_are_not_se
     // A file that is not valid TOML finds nothing.
     assert!(!codex_warns("OPENAI_API_KEY = \"x\n"));
 }
+
+// ---- accounts that hold a stored key --------------------------------------------------------------------------------------
+
+#[test]
+fn every_account_the_key_store_can_hold_is_listed_and_nothing_else_is() {
+    // The registry here and the Keychain store's fixed list are one set, so a new key account cannot be stored and then
+    // never shown (or shown and then refused by the store).
+    let mut listed: Vec<&str> = KEYED.iter().map(|m| m.id).collect();
+    let mut stored: Vec<&str> = crate::providers::keychain::KEY_ACCOUNTS.to_vec();
+    listed.sort_unstable();
+    stored.sort_unstable();
+    assert_eq!(listed, stored);
+}
+
+#[test]
+fn a_stored_key_account_is_a_valid_account_record_that_says_only_whether_a_key_is_there() {
+    for (saved, state, flag) in [(Some(true), AccountState::KeySaved, true), (Some(false), AccountState::KeyMissing, false), (None, AccountState::CannotTell, false)] {
+        let l = accounts_with_keys(&both(), &|_| saved);
+        // The CLI accounts are untouched and come first.
+        assert_eq!(l.accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["claude", "codex", "openrouter"]);
+        let a = account(&l, "openrouter");
+        assert_eq!((a.credential.source, a.credential.saved, a.state, a.billing.kind), (CredentialSource::ApiKey, Some(flag), state, BillingKind::Gateway));
+        assert_eq!((a.label.as_str(), a.provider.as_str(), a.harness.as_str()), ("OpenRouter", "openrouter", "codex"));
+        // Round-trips through the real parser (id, text, and the rule that `saved` belongs to a stored-key account).
+        parse_account_list(serde_json::to_string(&l).unwrap().as_bytes()).unwrap();
+    }
+    // No field is named like a secret.
+    let mut names = Vec::new();
+    keys(&serde_json::to_value(accounts_with_keys(&both(), &|_| Some(true))).unwrap(), &mut names);
+    assert!(names.iter().all(|k| !["key", "token", "secret", "password"].contains(&k.as_str())), "{names:?}");
+    // `accounts` alone is still just the CLIs.
+    assert_eq!(accounts(&both()).accounts.len(), 2);
+}
+
+#[test]
+fn the_accounts_answer_is_the_golden_json_the_ui_parser_reads() {
+    // The exact bytes of `provider_accounts` for: Claude signed in, Codex with an API key in its config (an override
+    // warning), and OpenRouter with a key saved. `app/ui/tests/accountsGolden.test.ts` parses the same file, so a field
+    // the core renames or reshapes (the UI once read `override_warning` as a string) fails a test on one side.
+    let mut f = both();
+    f.files.insert(".codex/config.toml", "OPENAI_API_KEY = \"x\"\n");
+    let got = serde_json::to_value(accounts_with_keys(&f, &|_| Some(true))).unwrap();
+    let golden: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/ipc/accounts.json")).unwrap();
+    assert_eq!(got, golden);
+}
