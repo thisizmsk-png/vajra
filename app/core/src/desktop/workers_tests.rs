@@ -21,6 +21,22 @@ impl Quiesce for NoAgents {
     }
 }
 
+/// Writes `file` into every worktree of run `r1` each time the core pauses the repo: the next clean check sees it.
+#[derive(Debug)]
+struct Spoil {
+    run_dir: PathBuf,
+    file: &'static str,
+}
+
+impl Quiesce for Spoil {
+    fn pause(&self, _: &Path) -> Pause {
+        for wt in std::fs::read_dir(&self.run_dir).into_iter().flatten().flatten() {
+            let _ = std::fs::write(wt.path().join(self.file), "spoiled\n");
+        }
+        Pause::new(|| {})
+    }
+}
+
 fn tmpdir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!("vajra-workers-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
@@ -124,11 +140,12 @@ struct Opts {
     redact: Redactor,
     claude_ok: bool,
     hooks: Hooks,
+    spoil: Option<&'static str>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default() }
+        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None }
     }
 }
 
@@ -152,7 +169,11 @@ fn rig(tag: &str, o: Opts) -> Rig {
     let base = ugit(&home, &repo, &["rev-parse", "HEAD"]);
     let g = GlobalBaseline::take_or_load(Path::new(GIT), &data, &home, None).unwrap();
     gitw::check_roots(&data, &work).unwrap();
-    let gw = Arc::new(Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g, Arc::new(NoAgents)));
+    let quiesce: Arc<dyn Quiesce> = match o.spoil {
+        Some(file) => Arc::new(Spoil { run_dir: work.canonicalize().unwrap().join("p/r1"), file }),
+        None => Arc::new(NoAgents),
+    };
+    let gw = Arc::new(Gitw::new(GIT.into(), home.clone(), data.canonicalize().unwrap(), work.canonicalize().unwrap(), &g, quiesce));
     let common = gw.common_of(&repo).unwrap();
     gw.repos.acquire(&gw, &common, false).unwrap();
     let bus = Arc::new(Bus::open(&d.join("spill"), crate::bus::Config::default()).unwrap());
@@ -371,6 +392,24 @@ fn a_setsid_grandchild_does_not_hold_the_ticket() {
     let r = rig("setsid", Opts { mode: "setsid_child", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+#[test]
+fn a_failed_clean_check_at_dispatch_discards_the_worktree() {
+    // `stray.rs` makes the check answer "changed"; an untracked `.gitattributes` makes it fail (#149).
+    for file in ["src/stray.rs", "src/.gitattributes"] {
+        let r = rig("dirtyatdispatch", Opts { spoil: Some(file), ..Opts::default() });
+        let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+        assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("tampered")), "{file}: {v:?}");
+        assert!(r.log().is_empty(), "{file}: no worker ran");
+        // Only the run's shared `tmp` parent stays, empty: the ticket's own tmp dir went with the tree.
+        let ls = |p: PathBuf| -> Vec<PathBuf> { std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).collect() };
+        let run = r.d.join("work/p/r1");
+        let left: Vec<_> = ls(run.clone()).into_iter().filter(|p| *p != run.join("tmp")).collect();
+        assert!(left.is_empty() && ls(run.join("tmp")).is_empty(), "{file}: the worktree is gone: {left:?} {:?}", ls(run.join("tmp")));
+        let list = ugit(&r.home, &r.repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(list.matches("worktree ").count(), 1, "{file}: git lists only the main tree: {list}");
+    }
 }
 
 // ---------------------------------------------------------------- dependencies and retention

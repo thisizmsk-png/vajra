@@ -524,10 +524,14 @@ impl WorkerRuntime {
             e.view.deps = deps.iter().map(dep_json).collect();
         }
         // 16.5: the tree is clean at `dispatch_head`, just before the spawn (the clones are ignored).
-        if !self.0.gw.unchanged(&t)? {
-            return Err(GitwError::Tampered { what: "the worktree was not clean at dispatch".into() });
-        }
-        Ok(t)
+        // Both failures discard the tree, as the `merge_deps` path does (#149): nothing is left behind.
+        let fail = match self.0.gw.unchanged(&t) {
+            Ok(true) => return Ok(t),
+            Ok(false) => GitwError::Tampered { what: "the worktree was not clean at dispatch".into() },
+            Err(e) => e,
+        };
+        let _ = self.0.gw.discard(&t);
+        Err(fail)
     }
 
     /// Run attempts through the PR 5 policy while the tree stays unchanged since `dispatch_head`.
