@@ -458,6 +458,33 @@ fn a_leftover_outside_the_task_globs_keeps_the_worktree() {
 // ---------------------------------------------------------------- records, summary, hooks, harnesses
 
 #[test]
+fn tickets_jsonl_is_never_written_through_a_planted_link() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    // #149 bhishma M2: a link at `runs`, at `runs/<run>` or at the file fails the open; nothing lands outside.
+    for at in ["runs", "runs/r1", "runs/r1/tickets.jsonl"] {
+        let d = tmpdir("recordlink");
+        let (data, out) = (d.join("data"), d.join("out"));
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(data.join(at).parent().unwrap()).unwrap();
+        let target = if at.ends_with(".jsonl") { out.join("tickets.jsonl") } else { out.clone() };
+        symlink(&target, data.join(at)).unwrap();
+        assert!(open_record(&data, "r1").is_err(), "{at}");
+        assert!(std::fs::read_dir(&out).unwrap().next().is_none(), "{at}: nothing written outside");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    let d = tmpdir("recordok");
+    for bad in ["", ".", "..", "../r1", "a/b"] {
+        assert!(open_record(&d, bad).is_err(), "{bad:?}");
+    }
+    open_record(&d, "r1").unwrap().write_all(b"x\n").unwrap();
+    open_record(&d, "r1").unwrap().write_all(b"y\n").unwrap();
+    assert_eq!(std::fs::read_to_string(d.join("runs/r1/tickets.jsonl")).unwrap(), "x\ny\n", "appended");
+    assert_eq!((mode(&d.join("runs")), mode(&d.join("runs/r1")), mode(&d.join("runs/r1/tickets.jsonl"))), (0o700, 0o700, 0o600));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_redacted_data() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let (s1, s2) = (seen.clone(), seen.clone());

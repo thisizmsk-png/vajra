@@ -753,19 +753,44 @@ impl WorkerRuntime {
         self.0.bus.recent(sid, 1 << 20).iter().map(|l| l.text.as_ref()).collect::<Vec<_>>().join("\n")
     }
 
-    /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only
-    /// with no-follow (a planted link fails the write), never rewritten.
+    /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only,
+    /// never rewritten. Every step below `<data>` is opened by descriptor with no-follow, so a planted link at `runs`,
+    /// `<run>` or the file fails the write instead of redirecting it (#149 bhishma M2).
     fn record(&self, v: &TicketView, event: &str) {
-        let dir = self.0.cfg.data.join("runs").join(&v.run);
-        if crate::paths::ensure_private_dir(&self.0.cfg.data.join("runs")).and_then(|()| crate::paths::ensure_private_dir(&dir)).is_err() {
-            return;
-        }
         let line = json!({"v": 1, "event": event, "ticket": v});
-        let f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(dir.join("tickets.jsonl"));
-        if let Ok(mut f) = f {
+        if let Ok(mut f) = open_record(&self.0.cfg.data, &v.run) {
             let _ = f.write_all(format!("{line}\n").as_bytes());
         }
     }
+}
+
+/// `<data>/runs/<run>/tickets.jsonl`, opened for append. `<data>` is the core's own canonical dir; `runs` and `<run>`
+/// are made (0700) and opened relative to their parent's descriptor with `O_NOFOLLOW | O_DIRECTORY`, and the file
+/// with `O_NOFOLLOW`, so nothing on the way is a link. A run id is one path component.
+fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "run id");
+    if run.is_empty() || run == "." || run == ".." || run.contains('/') {
+        return Err(bad());
+    }
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+    let mut dir = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(data)?;
+    for name in ["runs", run] {
+        let c = std::ffi::CString::new(name).map_err(|_| bad())?;
+        // SAFETY: the fd and C string live for the call.
+        if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), 0o700) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+        }
+        dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
+        // SAFETY: an owned, open descriptor.
+        if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is
