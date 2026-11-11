@@ -125,8 +125,11 @@ canon() { # path base -> CANON (absolute, physical, .. collapsed)
       case "$tnd" in
         ""|*[!0-9]*) ;;
         *[!0]*) [[ "$CMD" == *pushd* ]] && block "a ~N dir-stack path cannot be resolved; write the path in full: $p" ;;
-        # ~0, ~+0 and ~-0 always expand to the cwd (bash 3.2, even with no pushd): resolve like ~+.
-        *) p="${base%/}${p#"~$tn"}" ;;
+        # ~0 and ~+0 are always the cwd. ~-0 is the bottom stack entry: the cwd only while the stack has one
+        # entry, so once the command uses pushd it is refused like any other stack entry (#148 review).
+        *)
+          case "$tn" in -*) [[ "$CMD" == *pushd* ]] && block "a ~-N dir-stack path cannot be resolved; write the path in full: $p" ;; esac
+          p="${base%/}${p#"~$tn"}" ;;
       esac
       case "$tn" in
         [A-Za-z_]*) case "$tn" in *[!A-Za-z0-9._-]*) ;; *)

@@ -810,6 +810,8 @@ bash_case BLOCK "R1 ~+0 from cwd HOME"                 "echo x > ~+0/\"$DREL/sea
 bash_case BLOCK "R1 ~-0 from cwd HOME"                 "echo x > ~-0/\"$DREL/seats.json\"" "$H"
 bash_case BLOCK "R1 ~0 after cd ~"                     "cd ~ && echo x > ~0/\"$DREL/seats.json\"" "$PROJ"
 bash_case ALLOW "R1 ~2 in a sentence stays literal"    'echo "about ~2 minutes"' "$PROJ"
+bash_case BLOCK "R1 ~-0 with a populated stack"        "cd \"$DATA\" && pushd /tmp && echo x > ~-0/seats.json" "$PROJ"
+bash_case BLOCK "R1 ~+0 after pushd is still judged"   "pushd \"$DATA\" && echo x > ~+0/seats.json" "$PROJ"
 bash_case BLOCK "R1 ~user of a real account stays"     "echo x > ~$U/x.txt" "$PROJ"
 bash_case BLOCK "R1 dir-stack ~1 after pushd"          'pushd /tmp && pushd ~ && echo x > ~1/a.txt' "$PROJ"
 # (2) The backslash-escaped space is a plain spelling for reads; writes still meet the path analysis.
