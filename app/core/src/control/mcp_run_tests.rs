@@ -147,3 +147,34 @@ fn the_run_client_starts_only_from_a_valid_run_and_a_private_token_file() {
     assert_eq!(c.call("list_workers", &json!({})).unwrap_err()["error"], "app_unavailable");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn at_end_of_input_the_server_waits_only_briefly_for_calls_in_flight() {
+    let slow = Arc::new(Slow::default());
+    *crate::lock(&slow.hold) = true;
+    let started = Instant::now();
+    let _ = run(&[call(1, "await_any", json!({}))], slow.clone());
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    *crate::lock(&slow.hold) = false;
+    slow.released.notify_all();
+}
+
+#[test]
+fn the_run_socket_comes_only_from_its_env_and_must_be_a_socket() {
+    let dir = std::env::temp_dir().join(format!("vajra-runsock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = PathBuf::from(format!("/tmp/vrs-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+    let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let file = dir.join("plain");
+    std::fs::write(&file, "").unwrap();
+    let env = |v: Option<PathBuf>| move |k: &str| (k == "VAJRA_RUN_SOCKET").then(|| v.clone()).flatten().map(Into::into);
+    assert_eq!(run_socket(env(Some(sock.clone()))).unwrap(), sock);
+    assert!(run_socket(env(None)).is_err(), "never derived from HOME or the data dir");
+    assert!(run_socket(env(Some(PathBuf::from("rel.sock")))).is_err());
+    assert!(run_socket(env(Some(file))).is_err());
+    assert!(run_socket(env(Some(dir.join("missing.sock")))).is_err());
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_dir_all(&dir);
+}

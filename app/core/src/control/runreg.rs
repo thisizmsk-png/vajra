@@ -24,19 +24,25 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::{fsx, nonce, sha256};
-use crate::desktop::runproto::{PlanInput, Refusal, RunProtocol};
+use crate::desktop::runproto::{self, PlanInput, Refusal, RunProtocol};
 
 /// The token file's name inside a run's data dir (`<data>/runs/<run>/`).
 pub const TOKEN_FILE: &str = "vajra-run.token";
 /// The env the `--mcp-run` server reads: its run, and the token file's path (never the token).
 pub const RUN_ENV: &str = "VAJRA_RUN";
 pub const TOKEN_FILE_ENV: &str = "VAJRA_RUN_TOKEN_FILE";
+/// The app socket's absolute path. `--mcp-run` never derives it from its own HOME or data dir: a lead may run with
+/// another HOME, and the server must reach this app's socket or fail at once.
+pub const SOCKET_ENV: &str = "VAJRA_RUN_SOCKET";
 /// The request cap for `plan_tasks` (16.5); every other request keeps `socket::MAX_REQUEST`.
 pub const MAX_PLAN_REQUEST: usize = 256 * 1024;
 /// A long wait gets `wait_s` plus this much before the client gives up.
 pub const AWAIT_SLACK: Duration = Duration::from_secs(10);
 /// Calls of one run served at once.
 pub const MAX_RUN_CALLS: usize = 16;
+/// The longest any client wait can be. A lead profile's harness tool timeout must be above it (Codex
+/// `tool_timeout_sec = 130`), or the harness cuts a call the app is still serving.
+pub const MAX_CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub const TOOL_NAMES: [&str; 9] =
     ["plan_tasks", "dispatch_worker", "await_any", "await_worker", "cancel_worker", "integrate", "finish_run", "list_workers", "inspect_worker"];
@@ -61,9 +67,9 @@ pub fn tools() -> Value {
         "properties": {"id": short(32), "criterion": short(1000), "check": short(2000)}});
     let task = json!({"type": "object", "additionalProperties": false, "required": ["id", "title", "owner_role", "files", "brief"],
         "properties": {"id": id, "title": short(300), "owner_role": short(32),
-            "files": {"type": "array", "maxItems": 64, "items": short(300)},
-            "deps": {"type": "array", "maxItems": 8, "items": id},
-            "criteria": {"type": "array", "maxItems": 32, "items": short(32)},
+            "files": {"type": "array", "maxItems": runproto::MAX_TASK_FILES, "items": short(300)},
+            "deps": {"type": "array", "maxItems": runproto::MAX_TASK_DEPS, "items": id},
+            "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": short(32)},
             "brief": short(20_000), "touches_security": {"type": "boolean"}}});
     let pair = |a: &str, b: &str| json!({"type": "object", "additionalProperties": false, "required": [a, b],
         "properties": {a: short(300), b: short(1000)}});
@@ -72,16 +78,16 @@ pub fn tools() -> Value {
         {"name": "plan_tasks",
          "description": "Submit the round's plan. Round 1 defines the criteria (each with a check); later rounds re-plan only the failed tasks.",
          "inputSchema": obj(json!(["round", "tasks"]), json!({"round": {"type": "integer", "minimum": 1, "maximum": 3},
-            "criteria": {"type": "array", "minItems": 1, "maxItems": 32, "items": criterion},
+            "criteria": {"type": "array", "minItems": 1, "maxItems": runproto::MAX_CRITERIA, "items": criterion},
             "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": task},
-            "decisions": {"type": "array", "maxItems": 8, "items": pair("title", "rationale")},
-            "protected_actions": {"type": "array", "maxItems": 8, "items": pair("action", "why")}}))},
+            "decisions": {"type": "array", "maxItems": runproto::MAX_PLAN_DECISIONS, "items": pair("title", "rationale")},
+            "protected_actions": {"type": "array", "maxItems": runproto::MAX_PLAN_PROTECTED, "items": pair("action", "why")}}))},
         {"name": "dispatch_worker",
          "description": "Start a worker on one planned task. Returns a ticket, or not_ready with the reason.",
          "inputSchema": obj(json!(["task_id"]), json!({"task_id": {"type": "string", "pattern": "^t[0-9]{1,2}$"}}))},
         {"name": "await_any",
          "description": "Wait up to wait_s seconds (at most 110) for the first of these tickets to end; call it again until every ticket has ended.",
-         "inputSchema": obj(json!(["tickets", "wait_s"]), json!({"tickets": {"type": "array", "minItems": 1, "maxItems": 64, "items": ticket_prop()}, "wait_s": wait_prop()}))},
+         "inputSchema": obj(json!(["tickets", "wait_s"]), json!({"tickets": {"type": "array", "minItems": 1, "maxItems": runproto::MAX_AWAIT_TICKETS, "items": ticket_prop()}, "wait_s": wait_prop()}))},
         {"name": "await_worker",
          "description": "Wait up to wait_s seconds (at most 110) for one ticket to end.",
          "inputSchema": obj(json!(["ticket", "wait_s"]), json!({"ticket": ticket_prop(), "wait_s": wait_prop()}))},
@@ -95,7 +101,7 @@ pub fn tools() -> Value {
          "description": "End the run with your notes for the human. Vajra computes the run's status; you do not choose it.",
          "inputSchema": obj(json!(["report"]), json!({"report": short(8192)}))},
         {"name": "list_workers",
-         "description": "This run's worker tickets with their task, round, seat and status.",
+         "description": "This run's worker tickets with their task, round, seat and status, and the round tickets of the integrated rounds.",
          "inputSchema": obj(json!([]), json!({}))},
         {"name": "inspect_worker",
          "description": "One worker ticket of this run, with its task, round, seat and status.",
@@ -163,7 +169,7 @@ pub fn call(p: &RunProtocol, tool: &str, args: &Value) -> Result<Value, Value> {
         "cancel_worker" => ok(p.cancel_worker(text(args, "ticket")?).map(|c| json!({"cancelled": c}))),
         "integrate" => ok(p.integrate(round(args)?).map(|t| json!({"round_ticket": t}))),
         "finish_run" => ok(p.finish_run(text(args, "report")?).map(|s| json!({"status": s}))),
-        "list_workers" => Ok(json!({"workers": p.workers(None)})),
+        "list_workers" => Ok(json!({"workers": p.workers(None), "rounds": p.rounds()})),
         "inspect_worker" => {
             let t = text(args, "ticket")?;
             p.workers(Some(t)).pop().ok_or_else(|| json!({"error": "invalid", "reason": "not a worker ticket of this run"}))
@@ -244,6 +250,8 @@ struct Entry {
     proto: RunProtocol,
     token: [u8; 32],
     lead: Option<LeadProc>,
+    /// The current lead's call slots. Each `set_lead` starts a fresh count: a dead lead's parked calls release the old
+    /// one and never crowd out its successor.
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -290,7 +298,11 @@ impl RunRegistry {
         if lead.pid == me || crate::procid::descends_from(me, lead.pid, lead.stamp) {
             return Err(LeadRefused::TooWide);
         }
-        crate::lock(&self.runs).get_mut(run).map(|e| e.lead = Some(lead)).ok_or(LeadRefused::UnknownRun)
+        let mut runs = crate::lock(&self.runs);
+        let e = runs.get_mut(run).ok_or(LeadRefused::UnknownRun)?;
+        e.lead = Some(lead);
+        e.calls = Default::default();
+        Ok(())
     }
 
     /// Is `peer` (still the same process) in the tree of any registered lead? Such a process may call only
@@ -301,10 +313,15 @@ impl RunRegistry {
         !leads.is_empty() && crate::procid::same_process(p.pid, p.stamp) && leads.into_iter().any(|l| (self.descends)(p.pid, l))
     }
 
-    /// The lead process exited: nothing passes until the next `set_lead`.
-    pub fn clear_lead(&self, run: &str) {
-        if let Some(e) = crate::lock(&self.runs).get_mut(run) {
-            e.lead = None;
+    /// The lead process `lead` exited: nothing passes until the next `set_lead`. A late exit of an earlier lead never
+    /// clears its successor. Returns whether it cleared.
+    pub fn clear_lead(&self, run: &str, lead: LeadProc) -> bool {
+        match crate::lock(&self.runs).get_mut(run) {
+            Some(e) if e.lead == Some(lead) => {
+                e.lead = None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -321,7 +338,8 @@ impl RunRegistry {
     fn admit(&self, run: &str, token: &str, peer: Option<Peer>) -> Result<(RunProtocol, CallSlot), Value> {
         use std::sync::atomic::Ordering;
         let runs = crate::lock(&self.runs);
-        let e = runs.get(run).ok_or_else(|| json!({"error": "run_unknown"}))?;
+        // An unknown run has ended (or was never this app's): a terminal answer, so the lead stops instead of retrying.
+        let e = runs.get(run).ok_or_else(|| json!({"error": "run_gone", "reason": "this run has ended; stop and exit"}))?;
         if !same_hash(&sha256::digest(token.as_bytes()), &e.token) {
             return Err(json!({"error": "run_token"}));
         }

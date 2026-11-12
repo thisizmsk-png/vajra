@@ -403,7 +403,10 @@ fn each_dispatch_refusal() {
     r.round_done(&["t3"]);
     r.p.integrate(1).unwrap();
     assert_eq!(code(r.p.dispatch_worker("t2")).1, "round 1 is already integrated");
-    assert_eq!(code(r.p.integrate(1)).1, "round 1 is already integrated", "a second integrate for the round is refused");
+    let again = code(r.p.integrate(1)).1;
+    assert!(again.starts_with("round 1 is already integrated"), "a second integrate for the round is refused: {again}");
+    assert!(again.contains("r1.round.r1"), "and names the round ticket, for a lead whose call timed out: {again}");
+    assert_eq!(r.p.rounds()[0]["status"]["ticket"], "r1.round.r1".to_string(), "the round ticket is listed");
 }
 
 #[test]

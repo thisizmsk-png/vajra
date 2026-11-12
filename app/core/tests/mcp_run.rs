@@ -109,7 +109,8 @@ impl Rig {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.tmp.0.join("h"))
-            .env("VAJRA_DESKTOP_DATA", self.tmp.0.join("d"))
+            // No VAJRA_DESKTOP_DATA, and a HOME that is not the app's: the server must use the socket it is given.
+            .env(runreg::SOCKET_ENV, vajra_desktop::control::socket_path(&self.tmp.0.join("d")))
             .env(runreg::RUN_ENV, RUN)
             .env(runreg::TOKEN_FILE_ENV, &self.token_file)
             .stdin(Stdio::piped())
@@ -165,7 +166,8 @@ fn the_token_never_shows_in_ps_or_argv_and_a_descendant_of_the_lead_is_served() 
     assert_eq!(list["result"]["tools"].as_array().unwrap().len(), runreg::TOOL_NAMES.len());
     let called = ask(&mut stdin, &mut out, json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_workers", "arguments": {}}}));
     assert_eq!(called["result"]["isError"], false, "{called}");
-    assert_eq!(called["result"]["structuredContent"], json!({"workers": []}));
+    assert_eq!(called["result"]["structuredContent"], json!({"workers": [], "rounds": []}));
+    assert!(!r.tmp.0.join("h/Library").exists(), "the server created nothing under its HOME");
 }
 
 #[test]

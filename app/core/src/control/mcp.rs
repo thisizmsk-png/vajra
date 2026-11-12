@@ -298,13 +298,25 @@ impl RunForward for RunClient {
                 Err(v.get_mut("tool_error").map(Value::take).unwrap_or(v))
             }
             // Timed out after sending: the call may have run. The lead checks with await_any or list_workers.
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-                Err(json!({"error": "no_answer", "reason": "the app did not answer in time; the call may have run, so check before calling again"}))
-            }
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => Err(json!({"error": "no_answer", "reason": no_answer_hint(tool)})),
             Err(_) => Err(json!({"error": "app_unavailable"})),
         }
     }
 }
+
+/// What a lead does after a call that may have run: a way to learn its result that works for that tool.
+fn no_answer_hint(tool: &str) -> &'static str {
+    match tool {
+        "integrate" => "the app did not answer in time; the round may be integrated: call list_workers, whose rounds list its round ticket, and await that",
+        "plan_tasks" => "the app did not answer in time; the plan may be accepted: call dispatch_worker for its first task (not_ready says the plan is missing)",
+        "dispatch_worker" => "the app did not answer in time; the worker may be running: call list_workers before dispatching again",
+        _ => "the app did not answer in time; the call may have run: call list_workers before calling again",
+    }
+}
+
+/// How long the server waits at end of input for calls in flight: their replies have no reader any more, and the app
+/// finishes the work regardless.
+const EOF_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One call in flight; released on drop.
 struct InFlight(Arc<AtomicUsize>);
@@ -390,15 +402,33 @@ pub fn serve_run(mut input: impl BufRead, out: Arc<Mutex<dyn Write + Send>>, fwd
             write_line(&mut *out.lock().unwrap_or_else(|e| e.into_inner()), &r)?;
         }
     }
-    while in_flight.load(Ordering::SeqCst) > 0 {
+    let deadline = std::time::Instant::now() + EOF_GRACE;
+    while in_flight.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Ok(())
 }
 
-/// The `--mcp-run` entry point: stdin/stdout, forwarding to `socket_path` for the run the environment names.
-pub fn run_stdio_run(socket_path: &Path) -> io::Result<()> {
-    let client = RunClient::from_env(socket_path, |k| std::env::var_os(k))?;
+/// The socket `--mcp-run` forwards to: `VAJRA_RUN_SOCKET`, an absolute path to an existing socket. Never derived from
+/// HOME or the data dir, which may not be this app's under the lead's environment.
+pub fn run_socket(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> io::Result<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{} {why}", super::runreg::SOCKET_ENV));
+    let p = get(super::runreg::SOCKET_ENV).map(PathBuf::from).ok_or_else(|| bad("is not set"))?;
+    if !p.is_absolute() {
+        return Err(bad("must be an absolute path"));
+    }
+    match std::fs::symlink_metadata(&p) {
+        Ok(m) if m.file_type().is_socket() => Ok(p),
+        _ => Err(bad("does not name the app's socket")),
+    }
+}
+
+/// The `--mcp-run` entry point: stdin/stdout, forwarding to the socket `VAJRA_RUN_SOCKET` names for the run the
+/// environment names. Nothing is created on disk.
+pub fn run_stdio_run() -> io::Result<()> {
+    let get = |k: &str| std::env::var_os(k);
+    let client = RunClient::from_env(&run_socket(get)?, get)?;
     let out: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(io::stdout()));
     serve_run(io::stdin().lock(), out, Arc::new(client))
 }

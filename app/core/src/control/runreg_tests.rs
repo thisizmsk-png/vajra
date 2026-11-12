@@ -176,7 +176,7 @@ fn a_call_with_bad_arguments_is_a_tool_error_not_a_panic() {
     assert_eq!(call(&p, "dispatch_worker", &json!({})).unwrap_err()["error"], "invalid_args");
     assert_eq!(call(&p, "await_any", &json!({"tickets": [1], "wait_s": 1})).unwrap_err()["error"], "invalid_args");
     assert_eq!(call(&p, "integrate", &json!([])).unwrap_err()["error"], "invalid_args");
-    assert_eq!(call(&p, "list_workers", &json!({})).unwrap(), json!({"workers": []}));
+    assert_eq!(call(&p, "list_workers", &json!({})).unwrap(), json!({"workers": [], "rounds": []}));
 }
 
 #[test]
@@ -228,15 +228,15 @@ fn a_token_file_that_is_readable_by_others_or_a_link_is_refused() {
 fn the_gate_refuses_an_unknown_run_a_wrong_token_and_a_run_with_no_lead() {
     let reg = any_tree();
     let token = registered(&reg, proto(), None);
-    assert_eq!(reg.serve(&req("20990101-0000", &token, "list_workers", json!({})), me())["error"], "run_unknown");
+    assert_eq!(reg.serve(&req("20990101-0000", &token, "list_workers", json!({})), me())["error"], "run_gone");
     assert_eq!(reg.serve(&req(RUN, &"0".repeat(64), "list_workers", json!({})), me())["error"], "run_token");
     assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running");
     let (_k, lead) = lead_kid();
     reg.set_lead(RUN, lead).unwrap();
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()), json!({"ok": {"workers": []}}));
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()), json!({"ok": {"workers": [], "rounds": []}}));
     assert_eq!(reg.serve(&req(RUN, &token, "propose_run", json!({})), me())["error"], "unknown_tool");
     assert_eq!(reg.serve(&json!({"vajra_run": RUN, "tool": "list_workers"}), me())["error"], "bad_request");
-    reg.clear_lead(RUN);
+    assert!(reg.clear_lead(RUN, lead));
     assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running", "a lead that exited calls nothing");
 }
 
@@ -307,7 +307,7 @@ fn a_rotated_token_refuses_the_old_one() {
     assert_eq!(reg.serve(&req(RUN, &old, "list_workers", json!({})), me())["error"], "run_token");
     assert!(reg.serve(&req(RUN, &new, "list_workers", json!({})), me()).get("ok").is_some());
     reg.remove(RUN);
-    assert_eq!(reg.serve(&req(RUN, &new, "list_workers", json!({})), me())["error"], "run_unknown");
+    assert_eq!(reg.serve(&req(RUN, &new, "list_workers", json!({})), me())["error"], "run_gone");
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn a_service_request_still_works_beside_the_run_route() {
     let (sock, _svc) = serving(&t, RunRegistry::new());
     let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
     assert!(out.get("ok").is_some() || out.get("error").is_some(), "{out}");
-    assert_ne!(out["error"], "run_unknown", "a request without vajra_run never reaches the registry");
+    assert_ne!(out["error"], "run_gone", "a request without vajra_run never reaches the registry");
     assert_ne!(out["error"], "run_lead_on_service", "no lead is registered");
 }
 
@@ -465,4 +465,48 @@ fn an_app_that_takes_the_call_and_never_answers_is_a_timeout_not_a_refusal() {
     let e = super::super::socket::request_run(&sock, RUN, "t", "integrate", &json!({"round": 1}), Duration::from_millis(200)).unwrap_err();
     assert!(matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut), "{e:?}: the client maps this to no_answer");
     let _ = hold.join();
+}
+
+#[test]
+fn a_late_exit_of_the_old_lead_never_clears_its_successor_and_its_parked_calls_free_no_slot_of_the_new_one() {
+    let reg = Arc::new(any_tree());
+    let (_k1, old) = lead_kid();
+    let (_k2, new) = lead_kid();
+    let p = proto();
+    let (a, _) = two_tickets(&p);
+    let token = registered(&reg, p, Some(old));
+    // The old lead's calls park, filling its slots.
+    let parked: Vec<_> = (0..MAX_RUN_CALLS)
+        .map(|_| {
+            let (reg, token, a) = (reg.clone(), token.clone(), a.clone());
+            std::thread::spawn(move || reg.serve(&req(RUN, &token, "await_any", json!({"tickets": [a], "wait_s": 2})), me()))
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(400));
+    // The restart: the new lead is set before the old lead's exit is handled.
+    reg.set_lead(RUN, new).unwrap();
+    assert!(!reg.clear_lead(RUN, old), "a stale exit leaves the new lead in place");
+    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()).get("ok").is_some(), "the new lead has its own slots");
+    for t in parked {
+        t.join().unwrap();
+    }
+    assert!(reg.clear_lead(RUN, new));
+}
+
+#[test]
+fn the_schema_caps_are_the_protocols_caps() {
+    use crate::desktop::runproto::{MAX_AWAIT_TICKETS, MAX_CRITERIA, MAX_PLAN_DECISIONS, MAX_TASK_DEPS, MAX_TASK_FILES};
+    let t = tools();
+    let tool = |n: &str| t.as_array().unwrap().iter().find(|x| x["name"] == n).unwrap()["inputSchema"]["properties"].clone();
+    let plan = tool("plan_tasks");
+    assert_eq!(plan["criteria"]["maxItems"], MAX_CRITERIA);
+    assert_eq!(plan["decisions"]["maxItems"], MAX_PLAN_DECISIONS);
+    let task = &plan["tasks"]["items"]["properties"];
+    assert_eq!(task["criteria"]["maxItems"], MAX_CRITERIA);
+    assert_eq!(task["deps"]["maxItems"], MAX_TASK_DEPS);
+    assert_eq!(task["files"]["maxItems"], MAX_TASK_FILES);
+    assert_eq!(tool("await_any")["tickets"]["maxItems"], MAX_AWAIT_TICKETS);
+    assert!(client_timeout("await_any", &json!({"wait_s": 110}), Duration::ZERO) <= MAX_CLIENT_TIMEOUT);
+    assert!(client_timeout("integrate", &json!({}), Duration::ZERO) <= MAX_CLIENT_TIMEOUT);
+    assert!(MAX_CLIENT_TIMEOUT < Duration::from_secs(130), "below the Codex lead's tool_timeout_sec");
 }

@@ -636,16 +636,9 @@ fn set_run_limits(app: State<'_, App>, max_runs: u32) -> Res {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let data = match paths::data_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("vajra-desktop: data dir: {e}");
-            std::process::exit(1);
-        }
-    };
     if is_mcp_run(&args) {
-        // Before Tauri: stdout belongs to the MCP protocol.
-        let code = match mcp::run_stdio_run(&control::socket_path(&data)) {
+        // Before Tauri and before the data dir: the run server is told its socket and creates nothing on disk.
+        let code = match mcp::run_stdio_run() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("vajra-desktop --mcp-run: {e}");
@@ -654,6 +647,13 @@ fn main() {
         };
         std::process::exit(code);
     }
+    let data = match paths::data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("vajra-desktop: data dir: {e}");
+            std::process::exit(1);
+        }
+    };
     if is_mcp(&args) {
         // Before Tauri: stdout belongs to the MCP protocol.
         let code = match mcp::run_stdio(&control::socket_path(&data)) {
