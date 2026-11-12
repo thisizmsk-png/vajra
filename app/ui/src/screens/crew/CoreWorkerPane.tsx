@@ -2,7 +2,8 @@ import { useId, useState } from "react";
 import { AlertDialog, Button, Input, Section, StatusDot, Text } from "../../../components/ui/base";
 import type { StatusKey } from "../../../strings";
 import { S } from "../../../strings";
-import { api, errorText } from "../../ipc";
+import { api, errorText, newActionId } from "../../ipc";
+import { useCurrentProject } from "../../projects/current";
 import type { CrewNodeDto } from "../../ipc";
 import { CONTROL, INVISIBLE } from "../../projectContract";
 import { DiffCount, ProviderLine } from "../ProviderLine";
@@ -24,7 +25,13 @@ export function parseCoreControls(v: unknown): CoreControls | null {
   return { message, redirect, stop: { enabled: v.stop.enabled, note: line(v.stop.note) } };
 }
 
-const STATUS_KEYS = ["pending", "ready", "claimed", "in_progress", "done", "blocked", "question", "failed", "unknown"] as const;
+/** A ticket's round from its `core:<run>.<task>.r<n>` id: the generation the core checks a stop against. */
+export const roundOf = (id: string): number | null => {
+  const m = /\.r([1-9][0-9]{0,5})$/.exec(id);
+  return m ? Number(m[1]) : null;
+};
+
+const STATUS_KEYS =["pending", "ready", "claimed", "in_progress", "done", "blocked", "question", "failed", "unknown"] as const;
 const C = S.crew.core;
 
 /** A worker the core runs itself (`core:<ticket>`): its change set and its harness's Message, Redirect and Stop. Every
@@ -38,6 +45,7 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const why = useId();
+  const { project } = useCurrentProject();
   const shape = (STATUS_KEYS as readonly string[]).includes(node.status) ? (node.status as StatusKey) : "unknown";
 
   const send = (kind: "message" | "redirect") => {
@@ -50,10 +58,19 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
       (e) => setNote(C.notSent(errorText(e))),
     ).finally(() => setBusy(false));
   };
+  // Stop is a guarded action like every other destructive click: one action id (a retried call is a replay, not a
+  // second stop), the ticket's round as the generation the human saw, and a receipt the human can find.
   const stop = () => {
     setConfirming(false);
     setBusy(true);
-    void api.controlStop(node.id).then(() => setNote(C.stopped), (e) => setNote(C.notStopped(errorText(e)))).finally(() => setBusy(false));
+    const env = { action_id: newActionId(), project_id: project?.id ?? "global", expect_generation: roundOf(node.id) };
+    void api.actStopWorker(env, node.id).then(
+      (r) => {
+        const ok = !r.error && (r.receipt?.state === "done" || r.receipt?.state === "accepted");
+        setNote(ok ? C.stopped : C.notStopped(r.error ? errorText(r.error) : r.receipt?.detail ?? r.receipt?.reason ?? r.receipt?.state ?? ""));
+      },
+      (e) => setNote(C.notStopped(errorText(e))),
+    ).finally(() => setBusy(false));
   };
   // Message and Redirect share one reason when both are off for the same one (the profile's usual case).
   const off = controls ? [controls.message, controls.redirect].filter((c) => !c.enabled).map((c) => c.reason).filter((r): r is string => !!r) : [];

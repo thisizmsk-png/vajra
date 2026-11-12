@@ -62,15 +62,28 @@ describe("A core worker in the crew view (ADR-16 16.7, #151)", () => {
     await waitFor(() => expect(f.calls.find((c) => c.cmd === "control_redirect")?.args).toEqual({ worker: "core:r1.t1.r1", text: "stop on b.rs" }));
   });
 
-  it("Stop asks first, names what it does, and stops the core: worker", async () => {
-    const f = await open("round 1", { control_stop: { action_id: "s1", state: "done" } });
+  it("Stop asks first, names what it does, and stops the core: worker through the guarded action (a receipt, one action id)", async () => {
+    const f = await open("round 1", { act_stop_worker: { receipt: { state: "done", reason: null, detail: null } } });
     fireEvent.click(await screen.findByRole("button", { name: S.crew.core.stop }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText(STOP_NOTE)).toBeTruthy();
-    expect(f.calls.some((c) => c.cmd === "control_stop")).toBe(false);
+    expect(f.calls.some((c) => c.cmd === "act_stop_worker")).toBe(false);
     fireEvent.click(within(dialog).getByRole("button", { name: S.crew.core.stop }));
     await screen.findByText(S.crew.core.stopped);
-    expect(f.calls.find((c) => c.cmd === "control_stop")?.args).toEqual({ worker: "core:r1.t1.r1", reason: null });
+    const call = f.calls.filter((c) => c.cmd === "act_stop_worker");
+    expect(call).toHaveLength(1);
+    const args = call[0].args as { envelope: { action_id: string; project_id: string; expect_generation: number | null }; worker: string; reason: null };
+    expect(args.worker).toBe("core:r1.t1.r1");
+    expect(args.envelope.expect_generation).toBe(1);
+    expect(args.envelope.action_id).toMatch(/\S/);
+    expect(f.calls.some((c) => c.cmd === "control_stop")).toBe(false);
+  });
+
+  it("a stop the core refuses says why, from its receipt", async () => {
+    await open("round 1", { act_stop_worker: { receipt: { state: "rejected", reason: "stale_generation", detail: null } } });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.core.stop }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: S.crew.core.stop }));
+    expect(await screen.findByText(S.crew.core.notStopped("stale_generation"))).toBeTruthy();
   });
 
   it("a worker its harness can't message shows Message and Redirect off with the core's reason, and sends nothing", async () => {
