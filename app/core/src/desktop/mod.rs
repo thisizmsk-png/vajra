@@ -250,6 +250,8 @@ pub struct App {
     pub bus: Arc<Bus>,
     pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
+    /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
+    _instance: Option<(std::fs::File, std::fs::File)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -336,7 +338,11 @@ impl App {
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
+        // Only the app holding the data folder's and the account's worktree folder's locks sweeps and starts agents: a
+        // second instance (a development build beside the installed app) would take the first one's live workers for
+        // an earlier life's. Held for the app's life.
+        let instance = instance::InstanceLock::take_both(data, home);
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
@@ -375,6 +381,7 @@ impl App {
             lead: lead::LeadState::new(home),
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
+            _instance: instance,
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
@@ -647,7 +654,13 @@ impl App {
     pub fn swept_report(&self) -> Value {
         let s = self.workers.startup_swept();
         let (killed, survived) = self.workers.runtime_swept();
-        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}})
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance()})
+    }
+
+    /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
+    /// starts no agent.
+    pub fn other_instance(&self) -> bool {
+        self._instance.is_none()
     }
 
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
@@ -2427,6 +2440,7 @@ pub fn collect_changes(sub: &Subscriber, wait: Duration) -> Option<Value> {
 mod worker_diff;
 pub mod workers;
 pub mod worker_host;
+mod instance;
 mod arrivals;
 mod caps;
 mod closeout;
