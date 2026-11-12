@@ -40,11 +40,24 @@ pub struct InstanceLock;
 impl InstanceLock {
     /// The held lock, or `None` when another process holds it (or it can't be opened: fail closed, no reconcile).
     pub fn take(data: &Path) -> Option<std::fs::File> {
+        Self::take_file(&data.join("instance.lock"))
+    }
+
+    fn take_file(path: &Path) -> Option<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(data.join("instance.lock")).ok()?;
+        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path).ok()?;
         // SAFETY: the descriptor is open for this call; LOCK_NB never waits.
         (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(f)
+    }
+}
+
+impl InstanceLock {
+    /// The shared worktree folder's lock (`<work>/.instance.lock`): one app per account sweeps and runs workers there.
+    pub fn take_work(home: &Path) -> Option<std::fs::File> {
+        let work = crate::vajra::gitw::work_root(home);
+        crate::control::fsx::private_dir(&work).ok()?;
+        Self::take_file(&work.join(".instance.lock"))
     }
 }
 

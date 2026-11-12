@@ -260,7 +260,7 @@ pub struct App {
     /// What the start-up reconcile did.
     reconciled: recover::Reconciled,
     /// Held for the app's life: this app owns the data folder's agents. `None` when another instance does.
-    _instance: Option<std::fs::File>,
+    _instance: Option<(std::fs::File, std::fs::File)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -349,12 +349,14 @@ impl App {
         let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
         // Only the one app that holds the data folder reconciles, and only it starts agents: a second instance (a
         // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
-        let instance = recover::InstanceLock::take(data);
+        // Two locks: the data folder's (its ledger) and the shared worktree folder's (every app on this account puts its
+        // workers there, whatever its data folder, and the 6c-3 sweep kills what it finds there).
+        let instance = recover::InstanceLock::take(data).and_then(|d| recover::InstanceLock::take_work(home).map(|w| (d, w)));
         let reconciled = if instance.is_some() { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
-        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots(), instance.is_some()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
@@ -445,6 +447,12 @@ impl App {
             issued: Mutex::new(Default::default()),
             log,
         })
+    }
+
+    /// Another app instance holds this data folder or the worktree folder: this one leaves the ledger, the shell
+    /// recovery and every agent to it.
+    pub fn other_instance(&self) -> bool {
+        self.reconciled.other_instance
     }
 
     /// The ownership ledger, shared with the terminals.

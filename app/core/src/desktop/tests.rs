@@ -5435,7 +5435,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     fs::write(&git, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", t.0.join("git-ran").display())).unwrap();
     fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
     let none = [t.0.join("no-tools")];
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none, true);
     assert!(!t.0.join("git-ran").exists(), "git was never run");
     assert!(host.agents_allowed().unwrap_err().starts_with("Agents are off: git isn't installed."));
     assert_eq!(host.install_action(), Some(worker_host::INSTALL_DEV_TOOLS));
@@ -5444,7 +5444,7 @@ fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
     // With the tools there, the same git is run for the take (so the check is what kept it from running above).
     fs::create_dir_all(t.0.join("tools/usr/bin")).unwrap();
     fs::write(t.0.join("tools/usr/bin/git"), "").unwrap();
-    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")]);
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")], true);
     assert!(t.0.join("git-ran").exists());
     assert_eq!(host.install_action(), None, "a failed take is not a missing install");
 }

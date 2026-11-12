@@ -429,7 +429,9 @@ fn term_open(
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -455,7 +457,9 @@ fn setup_sign_in(
     let cmd = app.setup_sign_in_command(&id)?;
     let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
-        let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        if own.record {
+            let _ = own.ledger.record_for(i.id, Owner::shell(i.pid, stamp, i.cwd.clone()));
+        }
     }
     Ok(term_value(&i))
 }
@@ -505,6 +509,8 @@ fn term_list(terms: State<'_, Terminals>) -> Res {
 /// Shells recorded by an earlier session of the app, reconciled once at launch, and what the human did about them.
 struct Ownership {
     ledger: std::sync::Arc<Ledger>,
+    /// False in a second instance: it writes nothing to the ledger.
+    record: bool,
     found: std::sync::Mutex<Vec<Found>>,
     home: String,
 }
@@ -720,9 +726,17 @@ fn main() {
     // start stamp, never a name). Nothing is signalled until the human asks.
     // The App's ledger: one writer for shells, leads and workers alike.
     let owned_ledger = app.owned_ledger();
+    let other_instance = app.other_instance();
     let built = tauri::Builder::default()
         .manage(app)
-        .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
+        // A second instance offers no shell for recovery (the first app's live terminals would look like a crash's) and
+        // records none, so it never writes the other app's ledger.
+        .manage(Ownership {
+            found: std::sync::Mutex::new(if other_instance { Vec::new() } else { owned_ledger.settle() }),
+            ledger: owned_ledger,
+            home: home.display().to_string(),
+            record: !other_instance,
+        })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))
         .setup(move |a| {
             let handle = a.handle().clone();

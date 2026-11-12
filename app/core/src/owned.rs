@@ -230,10 +230,11 @@ impl Ledger {
             let _ = self.forget(o.pid, o.stamp);
             if ended == Ended::Survived {
                 // Tried again at the next start, a few times at most: a record that never ends must not fill the ledger.
-                if o.tries + 1 >= MAX_TRIES {
+                // Saturating: the count is read from the file.
+                if o.tries.saturating_add(1) >= MAX_TRIES {
                     ended = Ended::GivenUp;
                 } else {
-                    let _ = self.record(Owner { tries: o.tries + 1, ..o.clone() });
+                    let _ = self.record(Owner { tries: o.tries.saturating_add(1), ..o.clone() });
                 }
             }
             out.push((o, ended));
