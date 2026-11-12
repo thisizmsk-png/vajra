@@ -122,6 +122,7 @@ case "$MODE" in
   scratch_file) edit; echo scratch > other/scratch.txt ;;
   nonce) echo x > "src/NONCE-abcdef0123456789.rs" ;;
   setsid_child) edit; perl -MPOSIX=setsid -e 'if (fork() == 0) {{ setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 600; }}' '{pids}/setsid.pid' ;;
+  setsid_child_slow) edit; /usr/bin/perl -MPOSIX=setsid -e 'if (fork() == 0) {{ setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; exec "/bin/sleep", "600"; }}' '{pids}/setsid.pid'; sleep 1.2 ;;
   nothing) : ;;
 esac
 echo "end $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
@@ -533,6 +534,51 @@ fn a_setsid_grandchild_does_not_hold_the_ticket() {
     let r = rig("setsid", Opts { mode: "setsid_child", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// 6c-3 (a): a grandchild that left the worker's group with `setsid` (a platform binary, so its environment is hidden
+/// on macOS; it still holds the worker's terminal) does not outlive its ticket: the attempt's sweep kills it.
+#[test]
+fn a_setsid_grandchild_is_swept_when_its_ticket_ends() {
+    let r = rig("sweep", Opts { mode: "setsid_child_slow", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let pid: i32 = std::fs::read_to_string(r.d.join("pids/setsid.pid")).unwrap().trim().parse().unwrap();
+    let gone = (0..100).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        (unsafe { libc::kill(pid, 0) }) != 0
+    });
+    assert!(gone, "the setsid grandchild {pid} outlived its ticket");
+    assert_eq!(r.rt.swept(), (1, 0));
+}
+
+/// 6c-3 (c): quit ends every live ticket, running or queued, `failed`/`abandoned` with detail `app_quit`, each with its
+/// outcome line; nothing new is queued after it, and a second quit is a no-op.
+#[test]
+fn quit_ends_every_live_ticket_with_its_line_and_refuses_new_ones() {
+    let r = rig("quit", Opts { mode: "hang", ..Opts::default() });
+    let a = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let b = r.rt.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap();
+    let c = r.rt.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while [&a, &c].iter().any(|id| r.rt.view(id).unwrap().attempt == 0) {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&b).unwrap().state, State::Queued);
+    let left = r.rt.quit(WAIT);
+    assert!(left.is_empty(), "every ticket ended within the wait: {left:?}");
+    for id in [&a, &b, &c] {
+        let v = r.rt.view(id).unwrap();
+        assert_eq!((v.state, v.outcome, v.reason.as_deref(), v.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_quit")), "{v:?}");
+    }
+    for run in ["r1", "r2"] {
+        let lines = std::fs::read_to_string(r.gw.data.join(format!("runs/{run}/tickets.jsonl"))).unwrap();
+        let outcomes = lines.lines().filter(|l| l.contains(r#""event":"outcome""#) && l.contains("app_quit")).count();
+        assert_eq!(outcomes, if run == "r1" { 2 } else { 1 }, "{run}: {lines}");
+    }
+    assert!(matches!(r.rt.dispatch(r.task("r1", "t3"), seat("w2", "codex")), Err(DispatchError::Closed)));
+    assert!(r.rt.quit(Duration::from_millis(50)).is_empty(), "a second quit is a no-op");
 }
 
 /// 6c-1 follow-up: a stopped worker that never exits (its kill does not land) no longer holds its attempt until the

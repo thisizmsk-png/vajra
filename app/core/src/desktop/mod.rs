@@ -37,6 +37,8 @@ pub use arrivals::EventSink;
 
 /// Bus events coalesce for this long before one `changed` is emitted.
 const COALESCE: Duration = Duration::from_millis(150);
+/// How long quit waits for the core tickets to end (their own kill, line and sweep) before the supervisor kills the rest.
+const QUIT_TICKETS: Duration = Duration::from_secs(4);
 /// Upper bound for one `tail` / `read_spill` page.
 const MAX_PAGE: usize = 64 * 1024;
 /// Most rows and text one `stream_window` call returns: a view shows tens of rows, so this is a ceiling, not a default.
@@ -625,6 +627,23 @@ impl App {
     }
 
     /// The active run groups for diagnostics: stream id and the pid of the group leader.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
+    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
+    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    pub fn quit(&self) {
+        self.shutdown_lead();
+        self.workers.quit(QUIT_TICKETS);
+        self.sup.shutdown();
+    }
+
+    /// The lifecycle report's `swept`: `at_startup` (an earlier app life's workers, killed before any agent could start)
+    /// and `after_attempts` (descendants that left their worker's group, killed when its attempt ended).
+    pub fn swept_report(&self) -> Value {
+        let s = self.workers.startup_swept();
+        let (killed, survived) = self.workers.runtime_swept();
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}})
+    }
+
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
         let mut v: Vec<_> = lock(&self.runs)
             .keys()

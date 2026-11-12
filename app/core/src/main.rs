@@ -495,6 +495,9 @@ fn found_lock(own: &Ownership) -> std::sync::MutexGuard<'_, Vec<Found>> {
 fn lifecycle(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>) -> Res {
     let mut v = serde_json::to_value(vajra_desktop::lifecycle_report::report(&terms.list(), &app.active_run_diags())).map_err(internal)?;
     v["found"] = serde_json::to_value(&*found_lock(&own)).map_err(internal)?;
+    // Disclosed (6c-3): what the startup sweep killed of an earlier app life's workers, and what each attempt's sweep
+    // killed of descendants that left their group.
+    v["swept"] = app.swept_report();
     Ok(v)
 }
 
@@ -848,9 +851,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            let app = handle.state::<App>();
-            app.shutdown_lead();
-            app.sup.shutdown();
+            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
         }

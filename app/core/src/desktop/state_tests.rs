@@ -680,6 +680,35 @@ fn queue(rt: &crate::desktop::workers::WorkerRuntime, t: &Tmp, task: &str, accou
     rt.dispatch(spec, seat).unwrap()
 }
 
+/// 6c-3 (c): `App::quit` (the whole `RunEvent::Exit` path) ends the runtime's tickets before the supervisor goes, each
+/// `abandoned` with detail `app_quit`; nothing new is queued after it, and the lifecycle report's `swept` stays readable.
+#[test]
+fn app_quit_ends_every_core_ticket_before_the_supervisor_and_refuses_new_ones() {
+    let t = Tmp::new();
+    let app = t.app();
+    app.quit(); // an app that never built a runtime quits cleanly
+    let t = Tmp::new();
+    let app = t.app();
+    let rt = queued_runtime(&t, &app);
+    let ids = [queue(rt, &t, "t1", "codex"), queue(rt, &t, "t2", "claude")];
+    app.quit();
+    for id in &ids {
+        let v = rt.view(id).unwrap();
+        assert_eq!((v.outcome, v.reason.as_deref(), v.detail.as_deref()), (Some(crate::desktop::workers::Outcome::Failed), Some("abandoned"), Some("app_quit")), "{v:?}");
+    }
+    let spec = crate::desktop::workers::TaskSpec {
+        project: "p".into(), run: CORE_RUN.into(), repo: t.0.join("repo"), task: "t3".into(), round: 1, from: "0".repeat(40), deps: Vec::new(),
+        globs: vec!["src/**".into()], named: Vec::new(), brief: "Do it.".into(),
+    };
+    let seat = crate::control::service::WorkerSeat {
+        slot: "w-t3".into(), role: "backend".into(), task: "t3".into(), account: "codex".into(), model: None, effort: None, security: false,
+        network: false, why: String::new(), source: "user".into(),
+    };
+    assert!(matches!(rt.dispatch(spec, seat), Err(crate::desktop::workers::DispatchError::Closed)));
+    let s = app.swept_report();
+    assert_eq!((s["at_startup"]["killed"].as_u64(), s["after_attempts"]["killed"].as_u64()), (Some(0), Some(0)), "{s}");
+}
+
 /// #151: the app's crew view shows the runtime's tickets as `core:<ticket>` nodes with their controls, and an app with
 /// no runtime built shows none (and building one is never a side effect of looking).
 #[test]
