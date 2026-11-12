@@ -5422,6 +5422,14 @@ fn a_second_app_on_the_same_data_folder_refuses_every_launch_and_frees_it_when_t
     assert_eq!(code(&second.worker_runtime(|| unreachable!("a second instance builds no runtime")).err().unwrap()), "agents_off");
     assert_eq!(first.workers.agents_allowed(), Ok(()), "the first app keeps its agents");
     drop(second);
+    // bhishma Low: a worker unlinks and replaces lock files in both folders while the first app runs; a third app is
+    // still refused (the locks are on the folders, which stay).
+    let work = crate::vajra::gitw::work_root(&t.home());
+    for f in [t.0.join("data/instance.lock"), work.join(".instance.lock")] {
+        let _ = fs::remove_file(&f);
+        fs::write(&f, "").unwrap();
+    }
+    assert!(t.app().other_instance(), "an unlinked and replaced lock file frees nothing");
     drop(first);
     let next = t.app();
     assert!(!next.other_instance(), "the locks end with the app that held them");
