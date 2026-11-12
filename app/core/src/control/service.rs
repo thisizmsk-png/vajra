@@ -100,7 +100,9 @@ pub struct Service {
     pending: HashMap<String, Action>,
     /// A human's stop of a `core:` worker, by ticket, from the kill until the ticket ends (`core_ticket_ended` settles
     /// it). Kept out of `pending`: a group kill leaves no stop file or hook ack for the watcher to wait on.
-    core_stops: HashMap<String, Action>,
+    /// Every accepted stop is kept: a second one before the ticket ends (a double click, or a Lead's confirmed after
+    /// the human's) is its own action with its own receipt, and all of them settle together (#151 review).
+    core_stops: HashMap<String, Vec<Action>>,
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,

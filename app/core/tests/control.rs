@@ -735,6 +735,40 @@ fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening
     assert_eq!(last(&id)["state"], "done");
 }
 
+/// #151 review: two Stops of one core worker before its ticket ends (a second human click, or a confirmed
+/// Director-General stop) are both settled by the one ticket-ended callback; neither is left queued, now or after reopen.
+#[test]
+fn every_stop_of_a_core_worker_is_settled_when_its_ticket_ends() {
+    let h = Home::new();
+    let last = |id: &str| h.ledger().into_iter().rev().find(|r| r["action_id"] == id).unwrap();
+    let ids: Vec<String> = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        let ids: Vec<String> = (0..2)
+            .map(|_| s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        for id in &ids {
+            assert_eq!(last(id)["state"], "queued");
+        }
+        s.core_ticket_ended("T1");
+        for id in &ids {
+            let r = last(id);
+            assert_eq!((r["state"].as_str(), r["outcome"].as_str()), (Some("done"), Some("stopped")), "{r}");
+        }
+        ids
+    };
+    let n = h.ledger().len();
+    let mut s = h.service();
+    s.ttl = Duration::ZERO;
+    s.tick();
+    assert_eq!(h.ledger().len(), n, "reopening finds nothing left to settle");
+    for id in &ids {
+        assert_eq!(last(id)["state"], "done");
+    }
+}
+
 /// #151 (16.7, after #148/#150): a Message and a Redirect to a Claude core worker land in its own control dir, matched
 /// `{"session": <its id>}`; the REAL hook delivers them to that top-level session with its nonce, never to the run's
 /// lead or another session, and the ack watcher records the delivery.

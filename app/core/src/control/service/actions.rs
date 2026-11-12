@@ -273,10 +273,15 @@ impl Service {
             self.record(&a, State::Queued, json!({}), now)?;
             // Held until the ticket ends: `core_ticket_ended` settles it (the runtime reports that end on another
             // thread once this lock is released, also for a queued ticket the kill ends at once).
-            self.core_stops.insert(t.clone(), a.clone());
+            self.core_stops.entry(t.clone()).or_default().push(a.clone());
             if !c.core.stop(&t) {
-                // It ended on its own between the check and the kill: nothing was stopped.
-                self.core_stops.remove(&t);
+                // It ended on its own between the check and the kill: nothing was stopped by this one.
+                if let Some(v) = self.core_stops.get_mut(&t) {
+                    v.retain(|x| x.id != a.id);
+                    if v.is_empty() {
+                        self.core_stops.remove(&t);
+                    }
+                }
                 self.record(&a, State::Failed, json!({"reason": "worker_finished"}), now)?;
                 return Err(ControlError::WorkerFinished);
             }
@@ -354,9 +359,11 @@ impl Service {
         let key = format!("{CORE_PREFIX}{ticket}");
         let now = SystemTime::now();
         // The human's stop that ended it is done (a group kill has no hook ack to wait for).
-        if let Some(a) = self.core_stops.remove(ticket) {
-            if self.record(&a, State::Done, json!({"outcome": "stopped"}), now).is_err() {
-                self.core_stops.insert(ticket.to_string(), a);
+        // Every stop accepted for it, not only the newest; one whose line can't be written is kept for a later call.
+        if let Some(stops) = self.core_stops.remove(ticket) {
+            let left: Vec<Action> = stops.into_iter().filter(|a| self.record(a, State::Done, json!({"outcome": "stopped"}), now).is_err()).collect();
+            if !left.is_empty() {
+                self.core_stops.insert(ticket.to_string(), left);
             }
         }
         // Its undelivered messages expire too: no later session may take them.
