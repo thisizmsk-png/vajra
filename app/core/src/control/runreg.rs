@@ -72,8 +72,9 @@ pub fn tools() -> Value {
             "deps": {"type": "array", "maxItems": runproto::MAX_TASK_DEPS, "items": id},
             "criteria": {"type": "array", "maxItems": runproto::MAX_CRITERIA, "items": ac},
             "brief": short(20_000), "touches_security": {"type": "boolean"}}});
-    let pair = |a: &str, b: &str| json!({"type": "object", "additionalProperties": false, "required": [a, b],
-        "properties": {a: short(300), b: short(1000)}});
+    // Byte limits: a JSON Schema length counts characters, so an ASCII string at the limit passes both.
+    let pair = |a: &str, an: usize, b: &str, bn: usize| json!({"type": "object", "additionalProperties": false, "required": [a, b],
+        "properties": {a: short(an as u32), b: short(bn as u32)}});
     let obj = |required: Value, props: Value| json!({"type": "object", "additionalProperties": false, "required": required, "properties": props});
     json!([
         {"name": "plan_tasks",
@@ -81,8 +82,8 @@ pub fn tools() -> Value {
          "inputSchema": obj(json!(["round", "tasks"]), json!({"round": {"type": "integer", "minimum": 1, "maximum": 3},
             "criteria": {"type": "array", "minItems": 1, "maxItems": runproto::MAX_CRITERIA, "items": criterion},
             "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": task},
-            "decisions": {"type": "array", "maxItems": runproto::MAX_PLAN_DECISIONS, "items": pair("title", "rationale")},
-            "protected_actions": {"type": "array", "maxItems": runproto::MAX_PLAN_PROTECTED, "items": pair("action", "why")}}))},
+            "decisions": {"type": "array", "maxItems": runproto::MAX_PLAN_DECISIONS, "items": pair("title", runproto::MAX_DECISION_TITLE, "rationale", runproto::MAX_RATIONALE)},
+            "protected_actions": {"type": "array", "maxItems": runproto::MAX_PLAN_PROTECTED, "items": pair("action", runproto::MAX_ACTION, "why", runproto::MAX_ACTION_WHY)}}))},
         {"name": "dispatch_worker",
          "description": "Start a worker on one planned task. Returns a ticket, or not_ready with the reason.",
          "inputSchema": obj(json!(["task_id"]), json!({"task_id": {"type": "string", "pattern": "^t[0-9]{1,2}$"}}))},
