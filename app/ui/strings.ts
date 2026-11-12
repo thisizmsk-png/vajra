@@ -304,7 +304,7 @@ export const S = {
     preflightFailed: "Could not run the checks.",
     start: "Start a run",
     repo: "Repository folder",
-    repoHint: "The absolute path of a git repository.",
+    repoHint: "A git repository. Choose it, or paste its path.",
     ask: "What should the crew do?",
     base: "Base branch or commit",
     baseHint: "Branch name or commit. The run builds on it.",
@@ -424,6 +424,13 @@ export const S = {
     detailTruncated: "The evidence file is too large to show here.",
     exit: (n: number | null) => (n === null ? "no exit code" : `exit ${n}`),
     output: "Output (end of log)", notes: "Verifier notes", writtenBy: "Written by", copyWhat: "command",
+  },
+  /** The system folder picker beside a repository field (D5). */
+  folder: {
+    choose: "Choose…",
+    chooseLabel: "Choose the repository folder",
+    title: "Choose the repository folder",
+    failed: "The folder picker did not open. Paste the folder's path instead.",
   },
   history: {
     title: "History",

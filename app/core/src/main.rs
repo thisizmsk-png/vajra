@@ -700,6 +700,8 @@ fn main() {
     // start stamp, never a name). Nothing is signalled until the human asks.
     let owned_ledger = Ledger::new(vajra_desktop::owned::ledger_path(&data));
     let built = tauri::Builder::default()
+        // The system folder picker for the repository field (D5). The capability grants only `dialog:allow-open`.
+        .plugin(tauri_plugin_dialog::init())
         .manage(app)
         .manage(Ownership { found: std::sync::Mutex::new(owned_ledger.settle()), ledger: owned_ledger, home: home.display().to_string() })
         .manage(Terminals::with(Default::default(), std::sync::Arc::new(UserPathEnv::app(home.clone()))))

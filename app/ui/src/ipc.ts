@@ -385,6 +385,10 @@ export const api = {
   /** Active projects, oldest first; `skipped` counts records that were damaged, foreign or from a newer version. */
   /** The project that owns a folder by the core's identity rules (symlink, linked worktree), else `p_unsorted`. Read only. */
   projectForFolder: (path: string) => call<{ project_id: string }>("project_for_folder", { path }),
+  /** The system folder picker (D5): one folder's absolute path, or null when the person cancels. The dialog plugin's
+   *  `open` is the only plugin command the main window is granted. */
+  chooseFolder: (title: string, defaultPath?: string) =>
+    call<string | null>("plugin:dialog|open", { options: { directory: true, multiple: false, title, ...(defaultPath ? { defaultPath } : {}) } }),
   projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
   /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
   projectAdd: (path: string, confirmNested = false) =>
