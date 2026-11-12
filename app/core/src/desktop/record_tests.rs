@@ -628,6 +628,34 @@ fn a_run_going_on_now_is_never_an_orphan_through_the_ui_commands() {
     assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([{"run_id": run, "campaign": format!("deliver-{run}")}]));
 }
 
+/// claude on #190: a core run that has recorded its plan and has no ticket (before dispatch, during the gate, while
+/// the lead plans) is going on, not an orphan, until its protocol finalizes.
+#[test]
+fn a_core_run_between_tickets_is_never_an_orphan_until_its_protocol_ends() {
+    let t = Tmp::new();
+    let home = t.0.join("home");
+    let scripts = home.join(".claude/skills/vajra/scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let log = t.log();
+    std::fs::write(scripts.join("vajra-campaign.sh"), format!("#!/bin/bash\nprintf '%s ' \"$@\" >> '{}'; printf '\\n' >> '{}'\n[ \"$1\" = show ] && echo '{{\"campaign\": {{\"status\": \"active\"}}}}'\nexit 0\n", log.display(), log.display())).unwrap();
+    std::fs::set_permissions(scripts.join("vajra-campaign.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(scripts.join("vajra_tasks.py"), "import sys\nsys.exit(0)\n").unwrap();
+    let data = t.0.join("data");
+    crate::desktop::test_project(&data, &home, &t.0.join("repo"));
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    let run = "20261112-1400";
+    app.record_run_seats(run, &serde_json::json!({"campaign_slug": format!("deliver-{run}"), "evidence_trust": "guarded"})).unwrap();
+    let rec = app.run_record(run, false).unwrap();
+    rec.plan(&plan()).unwrap();
+    assert!(!app.workers.run_has_live_tickets(run), "the run has no ticket");
+    assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([]), "a run between tickets is no orphan");
+    assert!(app.record_close_orphan(run, &[]).is_err());
+    assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("close "), "no close ran on a live run's campaign");
+    // Its protocol finalized: now it is one.
+    rec.end();
+    assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([{"run_id": run, "campaign": format!("deliver-{run}")}]));
+}
+
 // ---------------------------------------------------------------- the real scripts (S8), when the machine has them
 
 /// The engine's own scripts in a temp HOME, with the scrubbed env and no Claude session. Skipped where the script's
@@ -894,6 +922,33 @@ fn a_ledger_that_cant_be_saved_stops_the_write_and_a_resume_needs_a_matching_led
     let r = CoreRecord::new(t.cfg(false), t.bridge(), store.clone()).unwrap();
     assert!(r.plan(&plan()).is_err());
     assert!(t.calls().is_empty(), "nothing is written without the ledger: {:?}", t.calls());
+    // A write whose final save failed stays unknown in memory: the next save in the session keeps it.
+    let t2 = Tmp::new();
+    let s2 = Arc::new(MemStore::default());
+    let r2 = CoreRecord::new(t2.cfg(false), t2.bridge(), s2.clone()).unwrap();
+    let saves = Arc::new(AtomicUsize::new(0));
+    struct FailSecond(Arc<MemStore>, Arc<AtomicUsize>);
+    impl LedgerStore for FailSecond {
+        fn load(&self) -> Result<Option<Ledger>, String> {
+            self.0.load()
+        }
+        fn save(&self, l: &Ledger) -> Result<(), String> {
+            if self.1.fetch_add(1, Ordering::SeqCst) == 1 { Err("disk full".into()) } else { self.0.save(l) }
+        }
+        fn read_back(&self, s: &str) -> Result<ReadBack, String> {
+            self.0.read_back(s)
+        }
+        fn evidence_sha256(&self, p: &Path) -> Result<String, String> {
+            self.0.evidence_sha256(p)
+        }
+    }
+    drop(r2);
+    let r2 = CoreRecord::new(t2.cfg(false), t2.bridge(), Arc::new(FailSecond(s2.clone(), saves))).unwrap();
+    r2.send(Event::Progress("one".into()));
+    r2.send(Event::Progress("two".into()));
+    r2.flush();
+    let saved = crate::lock(&s2.saved).clone().unwrap();
+    assert!(saved.uncertain.is_some(), "the lost outcome of the first write survives the next save: {saved:?}");
     // A resume finds a campaign that exists, with no read-back that matches: refused.
     t.campaign_script("case \"$1\" in create) echo 'campaign already exists: x' >&2; exit 1 ;; show) printf '%s' '{\"signature_valid\":true,\"campaign\":{\"slug\":\"deliver-20261112-1200\",\"status\":\"active\",\"goal\":\"add a --json flag to export\"},\"features\":[{\"id\":\"ac-1\",\"description\":\"export has --json\",\"passes\":false},{\"id\":\"ac-2\",\"description\":\"docs say so\",\"passes\":false}]}' ;; esac");
     let store = Arc::new(MemStore::default());

@@ -148,8 +148,8 @@ impl Ledger {
                 self.report = Some(unbase64(base64).map_or_else(|| "undecodable".into(), |b| crate::control::sha256::hex_digest(&b)));
             }
             Request::TasksAdd { id, title, owner, deps, files, acceptance, .. } => {
-                // The bridge already sent these as one-line text within the script's caps, so they are stored as sent.
-                let acceptance: Vec<&String> = acceptance.iter().filter(|a| !a.trim().is_empty()).collect();
+                // The bridge refused anything but non-blank idents and one-line text within the script's caps, so the
+                // script stores these as sent.
                 self.task(id).def = serde_json::json!({"title": title, "owner_agent": owner, "deps": deps, "files": files, "acceptance": acceptance});
             }
             Request::TasksClaim { id, worker, .. } => {

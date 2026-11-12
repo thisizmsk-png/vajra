@@ -739,6 +739,7 @@ struct FakeRecord {
     plans: Mutex<Vec<PlanRecord>>,
     events: Mutex<Vec<Event>>,
     fail_plan: Mutex<Option<String>>,
+    ended: std::sync::atomic::AtomicUsize,
 }
 
 impl RunRecord for FakeRecord {
@@ -756,6 +757,9 @@ impl RunRecord for FakeRecord {
         self.card()
     }
     fn flush(&self) {}
+    fn end(&self) {
+        self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn recorded_with(limits: Limits) -> (Rig, Arc<FakeRecord>) {
@@ -789,6 +793,17 @@ fn round_one_registers_the_campaign_and_the_task_graph_with_run_ids_agents_and_c
     assert_eq!(p.tasks[1].deps, ["r1.t1"]);
     assert_eq!(p.tasks[0].branch, "vajra/r1/task-t1-r1");
     assert_eq!(p.tasks[0].criteria, ["ac-1"]);
+}
+
+/// claude on #190: the record learns the run ended only when the protocol finalizes, never while it plans or waits.
+#[test]
+fn the_record_is_told_the_run_ended_only_once_the_protocol_finalizes() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let _ = r.p.card();
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 0, "a planned run with no ticket is going on");
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    assert!(rec.ended.load(std::sync::atomic::Ordering::SeqCst) >= 1, "a finalized run's record is told");
 }
 
 #[test]

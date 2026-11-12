@@ -152,7 +152,9 @@ impl App {
         let cfg = RecordConfig { run: run_id.into(), slug: slug.into(), trust: trust.into(), home: self.home.clone(), resumed };
         let bridge = record_bridge(&self.bridge, &self.data).map_err(|e| format!("the record's folder can't be made: {e}"))?;
         let store = self.ledger_store(slug, &bridge)?;
-        Ok(Arc::new(CoreRecord::new(cfg, bridge, Arc::new(store))?))
+        let rec = Arc::new(CoreRecord::new(cfg, bridge, Arc::new(store))?);
+        super::lock(&self.live_records).insert(run_id.to_string(), Arc::downgrade(&rec));
+        Ok(rec)
     }
 
     fn ledger_store(&self, slug: &str, bridge: &Bridge) -> Result<AppLedgerStore, String> {
@@ -167,6 +169,11 @@ impl App {
         let runs = super::lock(&self.runs).clone();
         let mut live: Vec<String> = runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.run_id.clone()).collect();
         live.extend(self.recorded_runs().into_iter().filter(|r| self.workers.run_has_live_tickets(r)));
+        // A core run whose protocol hasn't finalized is going on, ticket or not (before dispatch, while the gate
+        // runs, while the lead plans the next round). A dropped record (the app restarted) isn't.
+        let mut recs = super::lock(&self.live_records);
+        recs.retain(|_, w| w.upgrade().is_some_and(|r| r.live()));
+        live.extend(recs.keys().cloned());
         live
     }
 

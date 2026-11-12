@@ -148,11 +148,14 @@ fn ledgered(store: &dyn LedgerStore, ledger: &Mutex<Ledger>, req: &Request, run:
     l.pending = None;
     match &r {
         Ok(o) => l.applied(req, &o.stdout, evidence.as_deref()),
-        Err(Fail::Timeout(_)) => l.uncertain = Some(what),
+        Err(Fail::Timeout(_)) => l.uncertain = Some(what.clone()),
         Err(_) => {}
     }
-    // A failed save leaves the saved ledger pending: the record then reads as not verified, never as verified.
-    let _ = store.save(&l);
+    // A failed save leaves the saved ledger pending; the ledger in memory keeps the write unknown too, so a later
+    // save in this session never writes a state that drops it (claude on #190).
+    if store.save(&l).is_err() {
+        l.uncertain.get_or_insert(what);
+    }
     r
 }
 
@@ -166,6 +169,8 @@ pub trait RunRecord: Send + Sync {
     fn repair(&self) -> RecordCard;
     /// Wait until every event sent so far has run.
     fn flush(&self);
+    /// The run's protocol has finalized: from now on its campaign may be listed as an orphan.
+    fn end(&self) {}
 }
 
 enum Msg {
@@ -185,6 +190,7 @@ struct Writer {
 pub struct CoreRecord {
     w: Arc<Writer>,
     tx: Mutex<mpsc::Sender<Msg>>,
+    ended: std::sync::atomic::AtomicBool,
 }
 
 /// The first line of what a failed call said: stderr, else stdout, else its exit.
@@ -395,7 +401,12 @@ impl CoreRecord {
                 }
             })
             .map_err(|e| format!("the run record could not start: {e}"))?;
-        Ok(CoreRecord { w, tx: Mutex::new(tx) })
+        Ok(CoreRecord { w, tx: Mutex::new(tx), ended: std::sync::atomic::AtomicBool::new(false) })
+    }
+
+    /// The run is going on: its protocol hasn't finalized (between tickets too).
+    pub fn live(&self) -> bool {
+        !self.ended.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The record is the core's own: the campaign and task graph read back match every write the core made, and none
@@ -458,6 +469,10 @@ impl RunRecord for CoreRecord {
         if crate::lock(&self.tx).send(Msg::Flush(tx)).is_ok() {
             let _ = rx.recv();
         }
+    }
+
+    fn end(&self) {
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

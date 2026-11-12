@@ -579,9 +579,14 @@ impl RunProtocol {
     /// Drop the lock, then carry out a pending kill and wake every waiter.
     fn release(&self, mut st: MutexGuard<'_, St>) {
         let kill = st.kill.take();
+        let ended = st.status.is_some();
         drop(st);
         if let Some(k) = kill {
             self.0.workers.kill_run(&self.0.cfg.run, k);
+        }
+        // The run has finalized: only now may its campaign be listed as an orphan (claude on #190).
+        if ended && let Some(r) = &self.0.record {
+            r.end();
         }
         self.0.changed.notify_all();
     }
