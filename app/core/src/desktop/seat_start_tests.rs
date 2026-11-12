@@ -71,7 +71,9 @@ impl Store for Empty {
 /// An app with a Director-General session, the CLIs on a temp PATH, the route on, and codex allowed next to claude.
 fn app_for(t: &Tmp, route: bool) -> (App, String) {
     let pid = crate::desktop::test_project(&t.data(), &t.0.join("home"), &t.0.join("repo"));
-    let app = App::open(&t.data(), &t.0.join("home")).unwrap();
+    let mut app = App::open(&t.data(), &t.0.join("home")).unwrap();
+    // Provider CLIs come from the same temp bin, never the machine's real PATH (CI has no claude, #182).
+    app.provider_dirs = Some(vec![t.0.join("bin")]);
     app.orchestrator(&pid, &t.0.join("repo")).unwrap();
     app.seat_env.for_test(vec![t.0.join("bin")], Keys::new(Box::new(Empty)), route);
     let patch: Patch = serde_json::from_value(json!({"agents": {"default": {"account": "claude"}, "roles": {}, "allowed": [{"account": "claude"}, {"account": "codex"}]}})).unwrap();

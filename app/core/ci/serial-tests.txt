@@ -13,6 +13,8 @@ desktop::tests::a_big_untracked_tree_does_not_blow_the_budget
 control::lead_run::tests::cancel_ask_kills_group
 # Two projects' Lead settings written at once.
 desktop::lead::tests::two_projects_asking_at_once_each_get_their_own_settings
+# 20 MB through a PTY, acked chunk by chunk, within 30 s: missed it under the parallel pass on a 3-core runner (#182).
+terminal::tests::output_waits_for_acks_instead_of_queueing_without_bound
 # A PTY redraw nudge observed within a short window.
 terminal::tests_hidden::a_program_still_on_the_alternate_screen_is_nudged_to_redraw_without_a_second_switch
 # The preferences store takes a non-blocking flock; a process another test spawns at that moment can hold it
