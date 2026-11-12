@@ -405,7 +405,68 @@ fn a_vajra_run_connection_serves_one_request_and_a_lead_tree_peer_gets_no_servic
     assert!(got[0].get("ok").is_some());
     // Every peer passes the (faked) ancestry check here, so this test process is "in a lead's tree".
     let svc_call = format!("{}\n", json!({"tool": "list_workers", "args": {}}));
-    assert_eq!(raw(&sock, &svc_call)[0]["error"], "run_lead_on_service");
+    // Refused and closed: two Service calls on one lead connection get one reply.
+    let got = raw(&sock, &format!("{svc_call}{svc_call}"));
+    assert_eq!(got.len(), 1, "a refused lead connection is closed: {got:?}");
+    assert_eq!(got[0]["error"], "run_lead_on_service");
+}
+
+#[test]
+fn a_lead_tree_holds_at_most_its_share_of_the_connections_and_the_apps_clients_still_get_in() {
+    use super::super::socket::{MAX_CONNECTIONS, MAX_LEAD_CONNECTIONS};
+    use std::io::{BufRead, Write};
+    let t = Tmp::new("share");
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    let (sock, _svc) = serving(&t, Arc::new(reg));
+    // Every peer here is in a lead's tree. Each tries to hold a connection with a partial line (a lead trickling bytes).
+    // Whatever order they are accepted in, exactly the ones over the budget are turned away and the rest stay open.
+    const EXTRA: usize = 4;
+    let tries: Vec<_> = (0..MAX_LEAD_CONNECTIONS + EXTRA)
+        .map(|_| {
+            let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            c.write_all(b"{\"vajra_run\"").unwrap();
+            c.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            c
+        })
+        .collect();
+    let (mut held, mut turned_away) = (Vec::new(), 0);
+    for c in tries {
+        let mut line = String::new();
+        let mut r = std::io::BufReader::new(c.try_clone().unwrap());
+        match r.read_line(&mut line) {
+            Ok(n) if n > 0 => {
+                let v: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(v["reason"], "too many run lead connections", "{v}");
+                turned_away += 1;
+            }
+            _ => held.push(c),
+        }
+    }
+    assert_eq!((held.len(), turned_away), (MAX_LEAD_CONNECTIONS, EXTRA), "a lead tree holds exactly its share");
+    let ask = || {
+        let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = c.write_all(format!("{}\n", req(RUN, &token, "list_workers", json!({}))).as_bytes());
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(c).read_line(&mut line);
+        serde_json::from_str::<Value>(&line).unwrap_or(Value::Null)
+    };
+    // With the budget full, one more lead connection is turned away at once.
+    let out = ask();
+    assert_eq!(out["error"], "busy", "a lead tree took more than its share: {out}");
+    assert_eq!(out["reason"], "too many run lead connections", "{out}");
+    const { assert!(MAX_LEAD_CONNECTIONS < MAX_CONNECTIONS, "the rest stay for the app's own clients") };
+    // The held ones give their slots back as they close.
+    drop(held);
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut out = ask();
+    while out.get("ok").is_none() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+        out = ask();
+    }
+    assert!(out.get("ok").is_some(), "{out}");
 }
 
 #[test]
@@ -559,8 +620,12 @@ open(os.path.join(d, "first"), "w").write(f.readline())
 if os.fork() == 0:
     while not os.path.exists(os.path.join(d, "go")):
         time.sleep(0.02)
-    f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
-    open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
+    try:
+        f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+        line = f.readline()
+    except OSError:
+        line = ""  # the app closed the connection
+    open(os.path.join(d, "reply.tmp"), "w").write(line)
     os.rename(os.path.join(d, "reply.tmp"), os.path.join(d, "reply"))
     os._exit(0)
 os._exit(0)
@@ -589,8 +654,218 @@ fn a_connection_handed_on_by_a_lead_tree_peer_that_exited_never_reaches_the_serv
         while !t.0.join("reply").exists() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let out: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("reply")).unwrap()).unwrap();
-        let want = if lead_tree { "run_lead_on_service" } else { "peer_gone" };
-        assert_eq!(out["error"], want, "lead_tree={lead_tree}: {out}");
+        let text = std::fs::read_to_string(t.0.join("reply")).unwrap();
+        if lead_tree {
+            // A refused lead connection is closed: the child reads end of file, never a Service reply.
+            assert!(text.is_empty(), "a lead connection stayed open after its refusal: {text}");
+        } else {
+            let out: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(out["error"], "peer_gone", "{out}");
+        }
     }
+}
+
+#[test]
+fn clients_that_stop_reading_replies_lose_their_slots_and_a_fresh_call_is_served() {
+    use super::super::socket::{request, MAX_CONNECTIONS, WRITE_TIMEOUT};
+    let t = Tmp::new("stall");
+    let (sock, _svc) = serving(&t, RunRegistry::new());
+    // Every slot taken by a client that sends many short bad lines and never reads a reply: each handler ends up
+    // blocked writing a reply nobody reads.
+    let junk = "x\n".repeat(40_000);
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        // Whatever fits at once, without waiting: all 64 are in place well inside the write bound.
+        c.set_nonblocking(true).unwrap();
+        let _ = std::io::Write::write(&mut c, junk.as_bytes());
+        held.push(c);
+    }
+    // Past the cap the server answers `busy` and closes; a client still sending sees that as a broken pipe.
+    let call = || request(&sock, "list_workers", &json!({})).unwrap_or_else(|_| json!({"error": "busy"}));
+    let full = Instant::now() + Duration::from_secs(5);
+    while call()["error"] != "busy" && Instant::now() < full {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(call()["error"], "busy", "every slot is held by a stalled client");
+    // Within the write bound (plus slack) the stalled handlers give up, and their slots come back.
+    let until = Instant::now() + WRITE_TIMEOUT + Duration::from_secs(10);
+    let mut out = call();
+    while out["error"] == "busy" && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+        out = call();
+    }
+    assert_ne!(out["error"], "busy", "a stalled reader cannot hold a slot forever: {out}");
+    drop(held);
+}
+
+/// A real lead (`python3 -I -c LEAD sock dir mode`) whose descendant `D` outlives the link to it, then opens a FRESH
+/// socket and asks the Service route, writing the reply to `<dir>/reply`. Modes: `orphan` (the lead forks an
+/// intermediate that forks `D` and exits: `D` is reparented, the lead lives on), `lead_exits` (`D` is the lead's own
+/// child and the lead exits), `cleared` (as `orphan`'s shape but `D` is a direct child of the lead, which stays alive
+/// while the test clears it). `D` waits for `<dir>/go` before it connects; the lead writes `D`'s pid to `<dir>/d`.
+const LEAD: &str = r#"
+import json, os, socket, sys, time
+sock, d, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+def descendant():
+    open(os.path.join(d, "d"), "w").write(str(os.getpid()))
+    while not os.path.exists(os.path.join(d, "go")):
+        time.sleep(0.02)
+    c = socket.socket(socket.AF_UNIX)
+    c.connect(sock)
+    f = c.makefile("rw")
+    f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+    open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
+    os.rename(os.path.join(d, "reply.tmp"), os.path.join(d, "reply"))
+    os._exit(0)
+if mode == "orphan":
+    if os.fork() == 0:
+        if os.fork() == 0:
+            descendant()
+        os._exit(0)
+    os.wait()
+    time.sleep(60)
+elif mode == "lead_exits":
+    if os.fork() == 0:
+        descendant()
+    time.sleep(0.3)
+    os._exit(0)
+else:
+    if os.fork() == 0:
+        descendant()
+    time.sleep(60)
+"#;
+
+#[test]
+fn a_lead_descendant_that_outlives_its_link_to_the_lead_never_reaches_the_service_on_a_fresh_socket() {
+    for mode in ["orphan", "lead_exits", "cleared"] {
+        let t = Tmp::new(mode);
+        let reg = Arc::new(RunRegistry::default());
+        let mut lead = Kid(Command::new("/usr/bin/python3").args(["-I", "-c", LEAD]).arg(t.0.join("s").join("app.sock")).arg(&t.0).arg(mode).spawn().unwrap());
+        let l = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
+        let _token = registered(&reg, proto(), Some(l));
+        let (_sock, _svc) = serving(&t, reg.clone());
+        let until = Instant::now() + Duration::from_secs(10);
+        while !t.0.join("d").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();
+        match mode {
+            "lead_exits" => {
+                let _ = lead.0.wait();
+                // As the lead's watcher does once it has exited.
+                assert!(reg.clear_lead(RUN, l));
+            }
+            "cleared" => assert!(reg.clear_lead(RUN, l), "cleared while its process still runs"),
+            _ => std::thread::sleep(Duration::from_millis(300)), // the intermediate has exited: D is reparented
+        }
+        std::fs::write(t.0.join("go"), "").unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !t.0.join("reply").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: d is this test's own descendant; it has exited by now or this ends it.
+        unsafe { libc::kill(d, libc::SIGKILL) };
+        let out: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("reply")).unwrap()).unwrap();
+        assert!(out.get("ok").is_none(), "{mode}: a lead's descendant reached the Service: {out}");
+        assert!(["run_lead_on_service", "not_an_app_client"].contains(&out["error"].as_str().unwrap_or("")), "{mode}: {out}");
+    }
+}
+
+#[test]
+fn the_apps_own_client_still_reaches_the_service() {
+    let t = Tmp::new("own");
+    let (sock, _svc) = serving(&t, RunRegistry::new());
+    let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
+    assert_ne!(out["error"], "not_an_app_client", "{out}");
+}
+
+/// An app child (`python3 -I -c CLIENT sock out tool how`) that asks the Service route for `tool`, writing the reply to
+/// `out`: itself (`self`), or from a child it forks (`child`), as a harness's `--mcp` server or a worker's tool does.
+const CLIENT: &str = r#"
+import json, os, socket, sys
+sock, out, tool, how = sys.argv[1:5]
+def ask():
+    c = socket.socket(socket.AF_UNIX)
+    c.connect(sock)
+    f = c.makefile("rw")
+    f.write(json.dumps({"tool": tool, "args": {"worker": "w-1", "message": "stop"}}) + "\n"); f.flush()
+    open(out + ".tmp", "w").write(f.readline())
+    os.rename(out + ".tmp", out)
+if how == "child":
+    if os.fork() == 0:
+        ask()
+        os._exit(0)
+    os.wait()
+else:
+    ask()
+"#;
+
+fn ask_from_app_child(sock: &Path, out: &Path, tool: &str, how: &str, root: Option<&RunRegistry>) -> Value {
+    let mut c = Command::new("/usr/bin/python3");
+    c.args(["-I", "-c", CLIENT]).arg(sock).arg(out).args([tool, how]);
+    // As the app does: a Service root is recorded right after its spawn, before it can call. A worker never is.
+    let mut kid = Kid(c.spawn().unwrap());
+    if let Some(reg) = root {
+        assert!(reg.allow_service(kid.0.id()));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while !out.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = kid.0.wait();
+    serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap()
+}
+
+#[test]
+fn only_recorded_service_roots_reach_the_service_and_a_workers_child_or_a_lead_asked_worker_never_does() {
+    let t = Tmp::new("roots");
+    let reg = Arc::new(RunRegistry::default());
+    // A live lead, as when it has asked a worker to steer another session for it.
+    let mut lead = Kid(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+    let l = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
+    let _token = registered(&reg, proto(), Some(l));
+    let (sock, _svc) = serving(&t, reg.clone());
+    // The recorded root's `--mcp`-like child is served (the gate passed; the tool's own answer is whatever it is).
+    let ok = ask_from_app_child(&sock, &t.0.join("root"), "list_workers", "child", Some(&reg));
+    assert!(!["not_an_app_client", "run_lead_on_service", "peer_gone"].contains(&ok["error"].as_str().unwrap_or("")), "{ok}");
+    // A worker the app spawned, never recorded: its child is refused, and so is the worker asked to redirect another.
+    let child = ask_from_app_child(&sock, &t.0.join("wchild"), "list_workers", "child", None);
+    assert_eq!(child["error"], "not_an_app_client", "a worker's child reached the Service: {child}");
+    let asked = ask_from_app_child(&sock, &t.0.join("asked"), "redirect_worker", "self", None);
+    assert_eq!(asked["error"], "not_an_app_client", "a lead-asked worker steered another session: {asked}");
+    let _ = lead.0.kill();
+    let _ = lead.0.wait();
+}
+
+/// A lead spawned but not yet passed to `start_lead` (the window between `RunLead::spawn` and `set_current`): it is no
+/// recorded Service root, so a Service call it makes then is refused, and a run call gets `lead_not_running`. Neither
+/// is served. Once started, its calls wait for the read-back (`a_starting_leads_call_waits_...`).
+#[test]
+fn a_lead_calling_between_its_spawn_and_start_lead_is_never_served() {
+    let t = Tmp::new("window");
+    let reg = Arc::new(RunRegistry::default());
+    let token = registered(&reg, proto(), None);
+    let (sock, _svc) = serving(&t, reg.clone());
+    let svc = ask_from_app_child(&sock, &t.0.join("svc"), "redirect_worker", "self", None);
+    assert_eq!(svc["error"], "not_an_app_client", "an unregistered lead reached the Service: {svc}");
+    let run = reg.serve(&req(RUN, &token, "list_workers", json!({})), me());
+    assert_eq!(run["error"], "lead_not_running", "{run}");
+    // A replaced lead, starting or confirmed, stays fenced while its process runs.
+    let (_a, first) = lead_kid();
+    let (_b, second) = lead_kid();
+    reg.start_lead(RUN, first).unwrap();
+    reg.start_lead(RUN, second).unwrap();
+    let p = |l: LeadProc| Some(Peer { pid: l.pid, stamp: l.stamp });
+    assert!(reg.in_lead_tree(p(first)) && reg.in_lead_tree(p(second)));
+    reg.remove(RUN);
+    assert!(reg.in_lead_tree(p(second)), "a removed run's starting lead stays fenced");
+}
+
+#[test]
+fn the_app_itself_and_its_ancestors_are_never_recorded_as_service_roots() {
+    let reg = RunRegistry::default();
+    assert!(!reg.allow_service(std::process::id()), "the app as a root admits everything");
+    assert!(!reg.allow_service(std::os::unix::process::parent_id()), "nor its parent");
+    assert!(!reg.allow_service(u32::MAX - 1), "a pid with no process records nothing");
 }
