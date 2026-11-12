@@ -102,7 +102,7 @@ fn a_crash_reconcile_kills_the_earlier_lifes_lead_and_worker_and_writes_them_end
     let l = last_line(&data);
     assert_eq!((l["ticket"]["state"].as_str(), l["ticket"]["outcome"].as_str()), (Some("ended"), Some("failed")));
     assert_eq!((l["ticket"]["reason"].as_str(), l["ticket"]["detail"].as_str()), (Some("abandoned"), Some("app_crashed")));
-    let ended = read(&data.join("runs").join(RUN), ENDED_FILE).unwrap();
+    let ended = read(&run_dir(&data, RUN, false).unwrap(), ENDED_FILE).unwrap();
     assert_eq!((ended["status"].as_str(), ended["reason"].as_str()), (Some("lead_lost"), Some("app_restarted")));
 
     // A second start finds nothing more to do, and the run's end is not rewritten.
@@ -298,4 +298,56 @@ fn a_crashed_ticket_after_a_torn_last_line_is_still_read() {
     std::fs::write(&f, text).unwrap();
     assert!(crate::desktop::workers::record_crashed(&data, RUN, &ticket));
     assert_eq!(last_line(&data)["ticket"]["detail"], "app_crashed");
+}
+
+#[test]
+fn a_record_too_long_to_read_back_refuses_the_spawn_and_kills_its_process() {
+    use crate::sessions::{SessionError, SpawnSpec, Supervisor};
+    let t = Tmp::new("long");
+    let ledger = Arc::new(Ledger::new(t.0.join("owned.jsonl")));
+    // A shell record too: every caller is refused, not only the supervisor.
+    assert!(ledger.record(Owner::shell(4242, 1, PathBuf::from(format!("/{}", "\"".repeat(2100))))).is_err(), "escaping doubles it past the cap");
+    assert!(ledger.load().is_empty());
+
+    let bus = Arc::new(crate::bus::Bus::open(&t.0.join("spill"), crate::bus::Config::default()).unwrap());
+    let sup = Supervisor::new(bus, None);
+    sup.set_ledger(ledger.clone());
+    let marker = t.0.join("ran");
+    let script = format!("sleep 1; echo x > '{}'", marker.display());
+    let spec = SpawnSpec { argv: vec!["/bin/sh".into(), "-c".into(), script], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    let who = crate::sessions::OwnedAs { kind: Some(Kind::Worker), run: Some(RUN.into()), ticket: Some("t".repeat(5000)) };
+    let r = sup.spawn_owned("lead-long", spec, None, who);
+    assert!(matches!(r, Err(SessionError::Ledger(_))), "{r:?}");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!marker.exists(), "the process was killed before it could do anything");
+    assert!(ledger.load().is_empty(), "no record the reader would skip was written");
+}
+
+#[test]
+fn a_survivor_whose_record_cannot_be_written_back_is_reported_unrecorded() {
+    let t = Tmp::new("unrec");
+    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
+    let kept = Ledger::new(t.0.join("owned.jsonl"));
+    assert_eq!(kept.keep_survivor(&o), Ended::Survived);
+    assert_eq!(kept.load()[0].tries, 1, "written back with one more try");
+    let lost = Ledger::new(t.0.join("missing/owned.jsonl"));
+    assert_eq!(lost.keep_survivor(&o), Ended::Unrecorded, "the write failed, and that is said, not dropped");
+    assert_eq!(lost.keep_survivor(&Owner { tries: MAX_TRIES - 1, ..o }), Ended::GivenUp);
+}
+
+#[test]
+fn a_run_folder_swapped_for_a_link_is_never_written_through() {
+    let t = Tmp::new("swap");
+    let data = t.data();
+    let elsewhere = t.0.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    // `runs` itself a link: the walk from the data folder refuses it, for the start, the plan and the end alike.
+    std::os::unix::fs::symlink(&elsewhere, data.join("runs")).unwrap();
+    assert!(record_started(&data, RUN, "p", Path::new("/tmp"), "codex").is_err());
+    assert!(record_plan(&data, RUN, &serde_json::json!({})).is_err());
+    assert!(record_ended(&data, RUN, "lead_lost", "app_restarted").is_err());
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing was made or written through the link");
+    // A run id of more than one component is refused before any folder is opened.
+    assert!(record_started(&data, "../x", "p", Path::new("/tmp"), "codex").is_err());
 }

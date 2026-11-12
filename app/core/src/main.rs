@@ -908,7 +908,8 @@ fn main() {
             // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
-            handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
+            // A clean quit reaped every shell, so there is nothing to recover. A second instance leaves the ledger alone.
+            handle.state::<App>().clear_ledger_on_quit();
         }
         _ => {}
     });

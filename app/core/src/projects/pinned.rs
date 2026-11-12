@@ -69,6 +69,14 @@ impl Pinned {
         Ok(me)
     }
 
+    /// Is there an entry `name` in this folder (of any type, a link counted as itself, never followed)?
+    pub fn exists(&self, name: &str) -> bool {
+        let Ok(n) = cstr(name) else { return false };
+        // SAFETY: valid descriptor and NUL-terminated name; `st` is written by the call before it is read.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstatat(self.0.as_raw_fd(), n.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) == 0 }
+    }
+
     /// Entry names (UTF-8, no `.` or `..`), read from the held descriptor.
     pub fn names(&self) -> io::Result<Vec<String>> {
         crate::control::fsx::DirHandle::from_file(File::from(self.0.try_clone()?)).names()

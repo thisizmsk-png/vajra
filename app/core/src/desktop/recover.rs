@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::control::fsx;
 use crate::owned::{Ended, Kind, Ledger};
+use crate::projects::pinned::Pinned;
 
 pub const CORE_FILE: &str = "core.json";
 pub const PLAN_FILE: &str = "plan.json";
@@ -43,34 +43,38 @@ pub struct Reconciled {
     pub survived: usize,
     /// Records whose pid another process holds now: never signalled.
     pub reused: usize,
+    /// Survivors whose record could not be written back to the ledger: the next start cannot try them again.
+    pub unrecorded: usize,
     /// Worker tickets written `app_crashed`.
     pub tickets: usize,
     /// Core runs written ended `lead_lost`/`app_restarted`.
     pub runs: Vec<String>,
 }
 
-/// `<data>/runs/<run>`, only when it is a real directory (not a link) and `run` is one plain path component.
-fn run_dir(data: &Path, run: &str) -> Option<PathBuf> {
+/// `<data>/runs/<run>`, held open: every step is opened relative to the one before it (O_DIRECTORY | O_NOFOLLOW), as
+/// `workers::open_record` opens `tickets.jsonl`, so a folder swapped for a link after the check cannot redirect a read or
+/// write. `run` must be one plain path component. With `create`, the missing folders are made at 0700.
+fn run_dir(data: &Path, run: &str, create: bool) -> std::io::Result<Pinned> {
     let one = !run.is_empty() && run != "." && run != ".." && !run.contains('/') && !run.contains('\0');
-    let d = data.join("runs").join(run);
-    (one && std::fs::symlink_metadata(&d).is_ok_and(|m| m.is_dir())).then_some(d)
-}
-
-fn read(dir: &Path, name: &str) -> std::io::Result<Value> {
-    let b = fsx::read_nofollow_capped(&dir.join(name), RECORD_CAP)?;
-    serde_json::from_slice(&b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-fn write(data: &Path, run: &str, name: &str, v: &Value) -> std::io::Result<()> {
-    let runs = data.join("runs");
-    fsx::private_dir(&runs)?;
-    let one = !run.is_empty() && run != "." && run != ".." && !run.contains('/');
     if !one {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "run id"));
     }
-    let d = runs.join(run);
-    fsx::private_dir(&d)?;
-    fsx::write_atomic(&d, name, &serde_json::to_vec(v).map_err(std::io::Error::other)?).map(|_| ())
+    Pinned::open(data, false)?.child("runs", create)?.child(run, create)
+}
+
+fn read(dir: &Pinned, name: &str) -> std::io::Result<Value> {
+    let b = dir.read(name, RECORD_CAP)?;
+    serde_json::from_slice(&b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Is `name` in `dir` at all (a file, link or anything else)? Asked of the held folder, never through a path.
+fn present(dir: &Pinned, name: &str) -> bool {
+    dir.exists(name)
+}
+
+fn write(data: &Path, run: &str, name: &str, v: &Value) -> std::io::Result<()> {
+    let d = run_dir(data, run, true)?;
+    d.write_atomic(name, &serde_json::to_vec(v).map_err(std::io::Error::other)?)
 }
 
 /// The run was started: its project, folder and lead account, for the resume check.
@@ -85,10 +89,11 @@ pub fn record_plan(data: &Path, run: &str, plan: &Value) -> std::io::Result<()> 
 
 /// How the run ended. The first end recorded stays: a later one (a crash reconcile after a clean end) changes nothing.
 pub fn record_ended(data: &Path, run: &str, status: &str, reason: &str) -> std::io::Result<bool> {
-    if run_dir(data, run).is_some_and(|d| std::fs::symlink_metadata(d.join(ENDED_FILE)).is_ok()) {
+    let d = run_dir(data, run, true)?;
+    if present(&d, ENDED_FILE) {
         return Ok(false);
     }
-    write(data, run, ENDED_FILE, &json!({"v": 1, "status": status, "reason": reason})).map(|()| true)
+    d.write_atomic(ENDED_FILE, &serde_json::to_vec(&json!({"v": 1, "status": status, "reason": reason})).map_err(std::io::Error::other)?).map(|()| true)
 }
 
 /// At start-up, before any agent of this life starts: end what an earlier life's crash left running.
@@ -101,13 +106,18 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
             Ended::Reused => out.reused += 1,
             Ended::Gone => {}
             Ended::GivenUp => out.given_up += 1,
+            Ended::Unrecorded => {
+                out.survived += 1;
+                out.unrecorded += 1;
+            }
         }
         if ended == Ended::Reused {
             continue;
         }
         // Only a worker killed here was still running: one that had exited is ended by the replay (`app_restarted`).
+        // `record_crashed` opens the run's folder through the same held-descriptor chain.
         if let (Kind::Worker, Ended::Killed, Some(run), Some(t)) = (o.kind, ended, o.run.as_deref(), o.ticket.as_deref()) {
-            if run_dir(data, run).is_some() && super::workers::record_crashed(data, run, t) {
+            if super::workers::record_crashed(data, run, t) {
                 out.tickets += 1;
             }
         }
@@ -115,8 +125,8 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
     // Every core run with a start record and no end did not survive: this runs before any run of this life exists, and a
     // run that ended in an earlier life recorded its end. Its lead was killed above, or had died with the app.
     for run in list_runs(data) {
-        let Some(d) = run_dir(data, &run) else { continue };
-        if d.join(CORE_FILE).is_file() && std::fs::symlink_metadata(d.join(ENDED_FILE)).is_err() && record_ended(data, &run, "lead_lost", "app_restarted").unwrap_or(false) {
+        let Ok(d) = run_dir(data, &run, false) else { continue };
+        if present(&d, CORE_FILE) && !present(&d, ENDED_FILE) && record_ended(data, &run, "lead_lost", "app_restarted").unwrap_or(false) {
             out.runs.push(run);
         }
     }
@@ -126,11 +136,8 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
 }
 
 fn list_runs(data: &Path) -> Vec<String> {
-    let runs = data.join("runs");
-    if !std::fs::symlink_metadata(&runs).is_ok_and(|m| m.is_dir()) {
-        return Vec::new();
-    }
-    let mut v: Vec<String> = std::fs::read_dir(&runs).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    let Ok(runs) = Pinned::open(data, false).and_then(|d| d.child("runs", false)) else { return Vec::new() };
+    let mut v = runs.names().unwrap_or_default();
     v.sort();
     v.reverse(); // newest first: run ids sort by time
     v.truncate(MAX_LISTED);
@@ -152,7 +159,7 @@ pub struct ResumeEnv<'a> {
 pub fn core_runs(data: &Path, env: &ResumeEnv) -> Vec<Value> {
     let mut out = Vec::new();
     for run in list_runs(data) {
-        let Some(d) = run_dir(data, &run) else { continue };
+        let Ok(d) = run_dir(data, &run, false) else { continue };
         let Ok(ended) = read(&d, ENDED_FILE) else { continue };
         let core = read(&d, CORE_FILE).ok();
         let text = |v: &Option<Value>, k: &str| v.as_ref().and_then(|v| v[k].as_str()).map(String::from);
@@ -169,7 +176,7 @@ pub fn core_runs(data: &Path, env: &ResumeEnv) -> Vec<Value> {
     out
 }
 
-fn resume_refusal(d: &Path, run: &str, core: &Option<Value>, env: &ResumeEnv) -> Option<&'static str> {
+fn resume_refusal(d: &Pinned, run: &str, core: &Option<Value>, env: &ResumeEnv) -> Option<&'static str> {
     let Some(core) = core else { return Some(SEATS_UNREADABLE) };
     let cwd = core["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_absolute());
     if !cwd.is_some_and(|c| c.is_dir()) {

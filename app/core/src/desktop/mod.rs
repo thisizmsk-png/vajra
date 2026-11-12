@@ -706,6 +706,15 @@ impl App {
         json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance(), "crash_reconcile": self.reconciled})
     }
 
+    /// After a clean quit: the ledger's shell records are dropped (every shell was reaped, nothing to recover). Only
+    /// the app holding the instance locks does this. A second instance's quit leaves the first app's ledger alone,
+    /// and does not rewrite it in a race with that app's records.
+    pub fn clear_ledger_on_quit(&self) {
+        if !self.other_instance() {
+            self.owned.clear();
+        }
+    }
+
     /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
     /// starts no agent.
     pub fn other_instance(&self) -> bool {

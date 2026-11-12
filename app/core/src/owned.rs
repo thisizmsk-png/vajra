@@ -158,6 +158,10 @@ impl Ledger {
     /// recovered). For a lead or worker a failure refuses the spawn, so a full ledger refuses rather than dropping the
     /// oldest record: no lead or worker runs without one.
     pub fn record(&self, o: Owner) -> std::io::Result<()> {
+        // A line `read` would skip is a record that is not there after a crash: refused, so the spawn is too.
+        if serde_json::to_string(&o).map_err(std::io::Error::other)?.len() > MAX_LINE {
+            return Err(std::io::Error::other("the ownership record is too long"));
+        }
         let _g = lock(&self.guard);
         let mut all = self.read();
         all.retain(|x| !(x.pid == o.pid && x.stamp == o.stamp));
@@ -231,11 +235,7 @@ impl Ledger {
             if ended == Ended::Survived {
                 // Tried again at the next start, a few times at most: a record that never ends must not fill the ledger.
                 // Saturating: the count is read from the file.
-                if o.tries.saturating_add(1) >= MAX_TRIES {
-                    ended = Ended::GivenUp;
-                } else {
-                    let _ = self.record(Owner { tries: o.tries.saturating_add(1), ..o.clone() });
-                }
+                ended = self.keep_survivor(&o);
             }
             out.push((o, ended));
         }
@@ -244,6 +244,18 @@ impl Ledger {
 
     /// A clean quit ended every shell: nothing is left to recover. A lead or worker record still here (one whose
     /// process outlived the quit) stays, so the next start ends it.
+    /// A record whose session outlived the kill: written back with one more try, or given up after `MAX_TRIES`. One
+    /// that cannot be written back is `Unrecorded`, so the reconcile report says the next start cannot try it again.
+    pub(crate) fn keep_survivor(&self, o: &Owner) -> Ended {
+        if o.tries.saturating_add(1) >= MAX_TRIES {
+            Ended::GivenUp
+        } else if self.record(Owner { tries: o.tries.saturating_add(1), ..o.clone() }).is_err() {
+            Ended::Unrecorded
+        } else {
+            Ended::Survived
+        }
+    }
+
     pub fn clear(&self) {
         let _g = lock(&self.guard);
         let agents: Vec<Owner> = self.read().into_iter().filter(|o| o.kind != Kind::Shell).collect();
@@ -456,6 +468,8 @@ pub enum Ended {
     Reused,
     /// It survived `MAX_TRIES` start-ups' kills: the record is dropped.
     GivenUp,
+    /// It survived, and its record could not be written back: the next start cannot try again.
+    Unrecorded,
 }
 
 /// Could `pid` be a lead or worker this app's supervisor started? Each is its own session's leader (the PTY child),
