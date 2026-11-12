@@ -471,6 +471,8 @@ pub fn verify_claude_worker_flag(f: &FlagFile) -> Result<(), NotApplied> {
 pub const NO_MESSAGE: &str = "This worker can't take a message mid-run.";
 /// A Claude core worker takes messages through the control hook once it runs; a queued one has no session yet.
 pub const NOT_STARTED: &str = "This worker hasn't started yet. Message it once it's running.";
+/// Any core worker whose ticket ended (done, failed or stopped): nothing is left to message or stop.
+pub const FINISHED: &str = "This worker has finished.";
 /// A Claude check worker (verify, review, security review, evidence) is the independent gate: never steered.
 pub const CHECK_NOT_STEERED: &str = "This worker checks the work on its own, so it can't take a message.";
 /// A Claude task worker whose control dir couldn't be opened before it started.
@@ -506,20 +508,22 @@ pub struct Controls {
     pub message: Option<&'static str>,
     pub stop: StopHow,
     pub stop_note: &'static str,
+    /// `None`: Stop is on. `Some`: why it's off (the ticket ended).
+    pub stop_off: Option<&'static str>,
 }
 
 impl Controls {
     pub fn to_json(&self) -> Value {
         let msg = json!({"enabled": self.message.is_none(), "reason": self.message});
-        json!({"message": msg, "redirect": msg, "stop": {"enabled": true, "note": self.stop_note}})
+        json!({"message": msg, "redirect": msg, "stop": {"enabled": self.stop_off.is_none(), "reason": self.stop_off, "note": self.stop_note}})
     }
 }
 
 pub fn controls(engine: Engine) -> Controls {
     match engine {
         // Message and Redirect go through the control hook, keyed by the worker's session id (#148/#150).
-        Engine::Claude => Controls { message: None, stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE },
-        Engine::Codex => Controls { message: Some(NO_MESSAGE), stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE },
+        Engine::Claude => Controls { message: None, stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE, stop_off: None },
+        Engine::Codex => Controls { message: Some(NO_MESSAGE), stop: StopHow::GroupKill, stop_note: GROUP_STOP_NOTE, stop_off: None },
     }
 }
 

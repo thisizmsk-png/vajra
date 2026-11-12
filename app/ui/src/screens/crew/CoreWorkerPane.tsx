@@ -11,7 +11,7 @@ import { parseWorkerDiff, parseWorkerProvider } from "../../workerProvider";
 
 /** One control as the core's harness profile allows it: off with the core's reason, or on. */
 export type CoreControl = { enabled: boolean; reason: string | null };
-export type CoreControls = { message: CoreControl; redirect: CoreControl; stop: { enabled: boolean; note: string | null } };
+export type CoreControls = { message: CoreControl; redirect: CoreControl; stop: CoreControl & { note: string | null } };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const line = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" && [...v].length <= 300 && !CONTROL.test(v) && !INVISIBLE.test(v) ? v : null);
@@ -22,7 +22,7 @@ export function parseCoreControls(v: unknown): CoreControls | null {
   if (!isObj(v) || !isObj(v.stop) || typeof v.stop.enabled !== "boolean") return null;
   const message = one(v.message), redirect = one(v.redirect);
   if (!message || !redirect) return null;
-  return { message, redirect, stop: { enabled: v.stop.enabled, note: line(v.stop.note) } };
+  return { message, redirect, stop: { enabled: v.stop.enabled, reason: line(v.stop.reason), note: line(v.stop.note) } };
 }
 
 /** A ticket's round from its `core:<run>.<task>.r<n>` id: the generation the core checks a stop against. */
@@ -72,8 +72,8 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
       (e) => setNote(C.notStopped(errorText(e))),
     ).finally(() => setBusy(false));
   };
-  // Message and Redirect share one reason when both are off for the same one (the profile's usual case).
-  const off = controls ? [controls.message, controls.redirect].filter((c) => !c.enabled).map((c) => c.reason).filter((r): r is string => !!r) : [];
+  // Controls that are off share one line when their reasons match (the profile's usual case, and a finished worker's).
+  const off = controls ? [controls.message, controls.redirect, controls.stop].filter((c) => !c.enabled).map((c) => c.reason).filter((r): r is string => !!r) : [];
   const reasons = [...new Set(off)];
 
   return (
@@ -104,10 +104,10 @@ export function CoreWorkerPane({ node, status }: { node: CrewNodeDto; status: st
               <div className="v-crew__controlrow">
                 <Button size="sm" disabled={!controls.message.enabled || !text.trim()} busy={busy} aria-describedby={controls.message.enabled ? undefined : why} onClick={() => send("message")}>{C.message}</Button>
                 <Button size="sm" disabled={!controls.redirect.enabled || !text.trim()} busy={busy} aria-describedby={controls.redirect.enabled ? undefined : why} onClick={() => send("redirect")}>{C.redirect}</Button>
-                <Button size="sm" variant="danger" disabled={!controls.stop.enabled} busy={busy} onClick={() => setConfirming(true)}>{C.stop}</Button>
+                <Button size="sm" variant="danger" disabled={!controls.stop.enabled} busy={busy} aria-describedby={controls.stop.enabled ? undefined : why} onClick={() => setConfirming(true)}>{C.stop}</Button>
               </div>
               {reasons.length > 0 && <p id={why} className="v-crew__reason">{reasons.join(" ")}</p>}
-              {controls.stop.note && <Text variant="body-sm" muted>{controls.stop.note}</Text>}
+              {controls.stop.enabled && controls.stop.note && <Text variant="body-sm" muted>{controls.stop.note}</Text>}
             </div>
           )}
           {note && <p className="v-crew__reason" role="status">{note}</p>}

@@ -286,23 +286,51 @@ const DISK_WALK_ENTRIES: usize = 1_000_000;
 
 /// Allocated bytes under `root` and whether the walk stopped at `max` entries before the end.
 fn allocated_upto(root: &std::path::Path, max: usize) -> (u64, bool) {
+    let w = walk(root, max);
+    (w.bytes, w.partial)
+}
+
+/// What a disk walk found, and how many directory entries it read to find it (the work its budget bounds).
+#[derive(Debug, PartialEq, Eq)]
+struct Walk {
+    bytes: u64,
+    partial: bool,
+    read: usize,
+}
+
+/// Depth first over open directory iterators: each entry counts against `max` as it is read, so a wide directory is
+/// never listed past the budget (#151 review: listing a level whole first held every name in memory). The stack
+/// holds one open iterator per level of depth, not one path per entry.
+fn walk(root: &std::path::Path, max: usize) -> Walk {
     use std::os::unix::fs::MetadataExt;
-    let (mut total, mut seen) = (0, 0usize);
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(p) = stack.pop() {
-        if seen >= max {
-            return (total, true);
+    let mut w = Walk { bytes: 0, partial: false, read: 0 };
+    // The entry's size; its listing when it is a directory (never followed through a symlink).
+    let visit = |p: &std::path::Path, w: &mut Walk| -> Option<std::fs::ReadDir> {
+        let m = p.symlink_metadata().ok()?;
+        w.bytes += m.blocks() * 512;
+        if m.is_dir() { std::fs::read_dir(p).ok() } else { None }
+    };
+    if max == 0 {
+        w.partial = true;
+        return w;
+    }
+    w.read = 1;
+    let mut stack: Vec<std::fs::ReadDir> = visit(root, &mut w).into_iter().collect();
+    while let Some(level) = stack.last_mut() {
+        let Some(entry) = level.next() else {
+            stack.pop();
+            continue;
+        };
+        if w.read >= max {
+            w.partial = true;
+            return w;
         }
-        seen += 1;
-        let Ok(m) = p.symlink_metadata() else { continue };
-        total += m.blocks() * 512;
-        if m.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(&p) {
-                stack.extend(rd.flatten().map(|d| d.path()));
-            }
+        w.read += 1;
+        if let Some(rd) = entry.ok().and_then(|d| visit(&d.path(), &mut w)) {
+            stack.push(rd);
         }
     }
-    (total, false)
+    w
 }
 
 /// A worker session's entry in the repo's pause set, for one attempt.
@@ -975,6 +1003,9 @@ impl TicketView {
     /// started" until a Claude worker's session exists, then why it has no steering channel.
     pub fn message_off(&self) -> Option<&'static str> {
         let Some(e) = launch::harness_of(&self.account) else { return Some(profiles::NO_MESSAGE) };
+        if self.state == State::Ended {
+            return Some(profiles::FINISHED);
+        }
         profiles::controls(e).message.or_else(|| self.harness_session.is_none().then_some(profiles::NOT_STARTED)).or(self.steer_off)
     }
 
@@ -992,7 +1023,11 @@ impl TicketView {
             (State::Ended, _) => (Status::Failed, None),
         };
         let controls = match launch::harness_of(&self.account) {
-            Some(e) => profiles::Controls { message: self.message_off(), ..profiles::controls(e) }.to_json(),
+            // An ended ticket offers nothing: the control service refuses it as `worker_finished` (#151 review).
+            Some(e) => {
+                let stop_off = (self.state == State::Ended).then_some(profiles::FINISHED);
+                profiles::Controls { message: self.message_off(), stop_off, ..profiles::controls(e) }.to_json()
+            }
             None => json!({}),
         };
         let diff = self.commit.as_ref().map(|_| {

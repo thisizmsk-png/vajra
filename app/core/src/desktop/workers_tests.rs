@@ -382,6 +382,26 @@ fn the_disk_walk_stops_at_its_entry_cap_and_says_the_size_is_partial() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// #151 review: the budget bounds the work, not only the bytes. A wide directory is read entry by entry and the walk
+/// stops at the cap; it never lists the whole level first.
+#[test]
+fn the_disk_walk_reads_no_more_entries_than_its_budget_in_a_wide_directory() {
+    let d = tmpdir("diskwide");
+    let wide = d.join("cache");
+    std::fs::create_dir_all(&wide).unwrap();
+    for i in 0..3000 {
+        std::fs::write(wide.join(format!("f{i}")), b"x").unwrap();
+    }
+    let w = walk(&d, 10);
+    assert_eq!((w.read, w.partial), (10, true), "{w:?}");
+    // Root, `cache` and its 3000 files: an exact budget reads them all and is not partial.
+    let all = walk(&d, 3002);
+    assert_eq!((all.read, all.partial), (3002, false), "{all:?}");
+    assert!(walk(&d, 3001).partial);
+    assert_eq!(walk(&d, 0), Walk { bytes: 0, partial: true, read: 0 });
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 // ---------------------------------------------------------------- controls
 
 #[test]
@@ -698,7 +718,8 @@ fn running(r: &Rig, id: &str) -> TicketView {
     let start = Instant::now();
     loop {
         let v = r.rt.view(id).unwrap();
-        if v.state == State::Running && v.harness_session.is_some() {
+        // `attempt` and a Claude worker's `harness_session` are set together, once its process is spawned.
+        if v.state == State::Running && v.attempt > 0 {
             return v;
         }
         assert!(start.elapsed() < WAIT, "never ran: {v:?}");
@@ -727,6 +748,28 @@ fn a_running_claude_check_worker_shows_message_off_with_its_true_reason() {
         assert_eq!((c[k]["enabled"].as_bool(), c[k]["reason"].as_str()), (Some(false), Some(profiles::CHECK_NOT_STEERED)), "{c}");
     }
     assert_eq!(opened.load(Ordering::SeqCst), 0, "a check never gets a control dir");
+}
+
+/// #151 review: once its ticket ends, a worker's node offers nothing: Message, Redirect and Stop are off with the
+/// finished reason (the control service refuses them as `worker_finished`), for a steered Claude task and for Codex.
+#[test]
+fn an_ended_ticket_offers_no_message_redirect_or_stop() {
+    let steer: Steer = Arc::new(|_: &str| Some("00112233445566778899aabbccddeeff".to_string()));
+    let r = rig("ended-controls", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let claude = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    let codex = running(&r, &r.rt.dispatch(r.task("r2", "t1"), seat("w2", "codex")).unwrap());
+    let on = |v: &TicketView, k: &str| v.core_worker().controls[k]["enabled"].as_bool().unwrap();
+    assert!(on(&claude, "message") && on(&claude, "redirect") && on(&claude, "stop"), "a running steered worker takes all three");
+    assert!(!on(&codex, "message") && on(&codex, "stop"), "a running Codex worker can be stopped");
+    for v in [&claude, &codex] {
+        assert!(r.rt.cancel(&v.id));
+        let ended = r.done(&v.id);
+        assert_eq!(ended.message_off(), Some(profiles::FINISHED), "{ended:?}");
+        let c = ended.core_worker().controls;
+        for k in ["message", "redirect", "stop"] {
+            assert_eq!((c[k]["enabled"].as_bool(), c[k]["reason"].as_str()), (Some(false), Some(profiles::FINISHED)), "{k}: {c}");
+        }
+    }
 }
 
 /// #151: a running Claude task worker whose control dir couldn't be opened says so, and a steered one takes messages.
@@ -811,7 +854,10 @@ fn an_ended_ticket_becomes_a_core_node_with_its_profile_controls_diff_and_provid
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     let c = v.core_worker();
     assert_eq!((c.ticket.as_str(), c.task.as_str(), c.round, c.check, c.status), ("r1.t1.r1", "t1", 1, false, crate::crew::tree::Status::Done));
-    assert_eq!(c.controls["message"]["reason"], profiles::NO_MESSAGE, "Codex: Message is off, with its reason");
+    // Ended: every control is off as finished (a running Codex worker's Message reason is its profile's, see
+    // `an_ended_ticket_offers_no_message_redirect_or_stop`).
+    assert_eq!(c.controls["message"]["reason"], profiles::FINISHED);
+    assert_eq!(c.controls["stop"]["enabled"], false);
     assert_eq!(c.diff.unwrap()["added"], 1);
     assert_eq!(c.provider.unwrap().model, "model-fake-1");
 }

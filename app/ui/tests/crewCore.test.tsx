@@ -20,8 +20,10 @@ afterEach(() => {
 // The shape crew/tree.rs builds for a worker the core runs itself (16.7): `core:<ticket>`, with its controls and diff.
 const STOP_NOTE = "Stop ends this worker at once; its uncommitted work stays in its worktree.";
 const CHECK = "This worker checks the work on its own, so it can't take a message.";
-const on = { message: { enabled: true, reason: null }, redirect: { enabled: true, reason: null }, stop: { enabled: true, note: STOP_NOTE } };
-const off = { message: { enabled: false, reason: CHECK }, redirect: { enabled: false, reason: CHECK }, stop: { enabled: true, note: STOP_NOTE } };
+const on = { message: { enabled: true, reason: null }, redirect: { enabled: true, reason: null }, stop: { enabled: true, reason: null, note: STOP_NOTE } };
+const off = { message: { enabled: false, reason: CHECK }, redirect: { enabled: false, reason: CHECK }, stop: { enabled: true, reason: null, note: STOP_NOTE } };
+const FINISHED = "This worker has finished.";
+const ended = { message: { enabled: false, reason: FINISHED }, redirect: { enabled: false, reason: FINISHED }, stop: { enabled: false, reason: FINISHED, note: STOP_NOTE } };
 const diff = { files_total: 3, files: ["src/a.rs", "src/b.rs"], added: 4, removed: 1, partial: false, uncounted: 0 };
 const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], extra: object = {}) =>
   ({ id, kind, title, engine_id: null, status, overlays: [], children, ...extra });
@@ -97,6 +99,30 @@ describe("A core worker in the crew view (ADR-16 16.7, #151)", () => {
     fireEvent.click(msg);
     expect(f.calls.some((c) => c.cmd === "control_message")).toBe(false);
     expect(screen.getByText(S.crew.core.noDiff)).toBeTruthy();
+  });
+
+  it("when its ticket ends, the refreshed pane offers no Message, Redirect or Stop, and says it finished", async () => {
+    let live = true;
+    const crew = () => node("lead", "lead", "Lead", "in_progress", [
+      node("run:r1", "run", "Run r1", "in_progress", [
+        node("task:t1", "task", "Backend · t1", live ? "in_progress" : "done", [node("core:r1.t1.r1", "round", "round 1", live ? "in_progress" : "done", [], { controls: live ? on : ended, diff })]),
+      ]),
+    ]);
+    await open("round 1", { crew });
+    const stop = await screen.findByRole("button", { name: S.crew.core.stop });
+    expect(stop.getAttribute("aria-disabled")).toBeNull();
+    live = false;
+    // The crew view re-reads on its own cadence.
+    await waitFor(() => expect(screen.getByRole("button", { name: S.crew.core.stop }).getAttribute("aria-disabled")).toBe("true"), { timeout: 4000 });
+    for (const name of [S.crew.core.message, S.crew.core.redirect, S.crew.core.stop]) {
+      const b = screen.getByRole("button", { name });
+      expect(b.getAttribute("aria-disabled")).toBe("true");
+      expect(document.getElementById(b.getAttribute("aria-describedby") ?? "")?.textContent).toBe(FINISHED);
+    }
+    // The Stop note is not shown beside a Stop that can't be used (only the closed confirm dialog still holds it).
+    expect(screen.queryAllByText(STOP_NOTE).filter((el) => !el.closest("dialog"))).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: S.crew.core.stop }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("counts core workers among the run's workers", async () => {

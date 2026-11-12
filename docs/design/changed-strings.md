@@ -315,7 +315,8 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | This worker hasn't started yet. Message it once it's running. | `core:` worker Message and Redirect | Claude profile, while the ticket is queued (it has no session yet); once running, Message and Redirect are on through the control hook (#148/#150) |
 | This worker checks the work on its own, so it can't take a message. | `core:` worker Message and Redirect | a running Claude check ticket (verify, review, security review, evidence): a check is never steered |
 | Vajra couldn't open this worker's message channel. Stop it and run it again to message it. | `core:` worker Message and Redirect | a running Claude task whose control dir couldn't be opened before it started |
-| Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill) |
+| Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill); hidden once Stop is off |
+| This worker has finished. | `core:` worker Message, Redirect and Stop | any profile, once the ticket ended (done, failed or stopped): all three are off |
 | Changes / No changes yet. / and N more file(s) | Crew, `core:` worker pane | its changed files from the core's diff count; at most 200 listed |
 | Controls / Message for this worker / Message / Redirect / Stop | Crew, `core:` worker pane | Message and Redirect are off with the core's reason (above) when its harness can't take one |
 | Sent. It reaches the worker at its next step. / Not sent: WHY | after Message or Redirect | announced (status region) |
