@@ -181,7 +181,8 @@ pub fn security_reviewer(seats: &[WorkerSeat], defaults: &[WorkerSeat], writers:
     let sr = |s: &&WorkerSeat| s.role == roles::SECURITY_REVIEWER;
     let marked: Vec<&WorkerSeat> = seats.iter().filter(sr).filter(|s| s.security).collect();
     let other: Vec<&WorkerSeat> = seats.iter().filter(sr).filter(|s| !s.security && s.source != "role_default").collect();
-    let default: Vec<&WorkerSeat> = seats.iter().chain(defaults).filter(sr).filter(|s| !s.security && s.source == "role_default").collect();
+    // A marked role default on the proposal is already in step 1; one the app resolved is still a seat (bhishma L2).
+    let default: Vec<&WorkerSeat> = seats.iter().filter(|s| !s.security).chain(defaults).filter(sr).filter(|s| s.source == "role_default").collect();
     // An unset model is the harness's default: on another harness, another model.
     let differs = |s: &WorkerSeat| writers.iter().all(|w| harness(w) != harness(s) && (w.model.is_none() || w.model != s.model));
     let step = [marked, other, default].into_iter().find(|step| !step.is_empty())?;

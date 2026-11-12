@@ -296,6 +296,9 @@ fn the_security_reviewer_follows_the_16_1_order_and_prefers_another_harness() {
     assert_eq!(pick(&[seat("v", roles::VERIFIER, "claude")]), None);
     let d = sr("d2", "claude", false, "role_default");
     assert_eq!(security_reviewer(&[], &[d], &writers).map(|(s, _)| s.slot), Some("d2".into()));
+    // bhishma L2: a role default marked `security: true` is still a seat, not "no security reviewer".
+    let marked_default = sr("d3", "claude", true, "role_default");
+    assert_eq!(security_reviewer(&[], &[marked_default], &writers).map(|(s, _)| s.slot), Some("d3".into()));
 }
 
 #[test]

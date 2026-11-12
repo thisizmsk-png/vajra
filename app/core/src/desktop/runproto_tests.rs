@@ -752,6 +752,21 @@ fn the_gate_gets_the_round_with_its_criteria_tasks_flag_and_security_writers() {
     assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1"], "the seats that ran security tasks");
 }
 
+/// bhishma M1: a run flagged by its ask alone has no security task; the reviewer is then compared with every seat
+/// that wrote for the run, so "shares the writer's harness" is never under-reported.
+#[test]
+fn a_run_flagged_by_its_ask_alone_compares_the_reviewer_with_every_writer() {
+    let r = rig_with("fix the auth token check", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert!(i.security);
+    assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1", "w3"], "every writer seat");
+}
+
 #[test]
 fn a_rejected_round_ends_the_run_rejected() {
     let r = rig();

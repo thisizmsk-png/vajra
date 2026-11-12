@@ -1101,7 +1101,10 @@ impl RunProtocol {
         let order = plan::topo(&specs);
         let tasks = order.iter().filter_map(|id| specs.iter().find(|t| &t.id == id).cloned()).collect();
         let mut security_writers: Vec<WorkerSeat> = Vec::new();
-        for (_, _, slot) in st.tasks.iter().filter(|t| t.security).flat_map(|t| &t.tickets) {
+        // The seats that ran security tasks; a run flagged by its ask or a criterion alone has none, so then every seat
+        // that wrote for the run (bhishma M1: the card must not claim an independent review it didn't get).
+        let any_security = st.tasks.iter().any(|t| t.security);
+        for (_, _, slot) in st.tasks.iter().filter(|t| t.security || !any_security).flat_map(|t| &t.tickets) {
             if let Some(s) = self.0.cfg.seats.iter().find(|s| &s.slot == slot) {
                 if !security_writers.iter().any(|w| w.slot == s.slot) {
                     security_writers.push(s.clone());

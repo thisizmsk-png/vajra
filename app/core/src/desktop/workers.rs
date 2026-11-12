@@ -1081,16 +1081,33 @@ enum Ended {
     Outcome(Outcome, String, Option<LaunchReceipt>),
 }
 
-/// The session's final message: the last `result` event (Claude `stream-json`) or `agent_message` item (Codex
-/// `exec --json`) in its output.
-fn final_message(events: &str) -> Option<String> {
-    events.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| match v.get("type").and_then(Value::as_str) {
-        Some("result") => v.get("result").and_then(Value::as_str).map(str::to_string),
-        Some("item.completed") if v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") => {
-            v.pointer("/item/text").and_then(Value::as_str).map(str::to_string)
+/// The session's final message, from its harness's own terminal event: Claude `stream-json`'s `result` (a success, not
+/// an error), or Codex `exec --json`'s `turn.completed` with the last `agent_message` item before it.
+///
+/// The terminal is not the harness's alone: a process the check runs can print on it (bhishma H1). So the stream must
+/// hold exactly one terminal event, and it must be the last JSON line. A forged event printed before or after the
+/// real one leaves no answer, and the check fails closed; it never becomes the answer.
+pub(super) fn final_message(events: &str) -> Option<String> {
+    let evs: Vec<Value> = events.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(Value::is_object).collect();
+    let ty = |v: &Value| v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let terminal = |v: &Value| matches!(ty(v).as_str(), "result" | "turn.completed" | "turn.failed");
+    let (last, before) = evs.split_last()?;
+    if !terminal(last) || before.iter().any(terminal) {
+        return None;
+    }
+    match ty(last).as_str() {
+        "result" => {
+            let ok = last.get("subtype").and_then(Value::as_str) == Some("success") && last.get("is_error").and_then(Value::as_bool) == Some(false);
+            last.get("result").and_then(Value::as_str).filter(|_| ok).map(str::to_string)
         }
+        "turn.completed" => before
+            .iter()
+            .rev()
+            .find(|v| ty(v) == "item.completed" && v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message"))
+            .and_then(|v| v.pointer("/item/text").and_then(Value::as_str))
+            .map(str::to_string),
         _ => None,
-    })
+    }
 }
 
 fn kill_outcome(r: KillReason) -> (Outcome, &'static str) {
