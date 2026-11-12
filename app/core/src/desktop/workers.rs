@@ -1237,6 +1237,8 @@ struct Launch {
     redact: Redactor,
     /// See `TicketView::steer_off`.
     steer_off: Option<&'static str>,
+    /// 6k: the dirs the session's read-back must show as unreadable.
+    deny: Vec<PathBuf>,
 }
 
 impl Launch {
@@ -1283,10 +1285,17 @@ impl Launch {
             brief = format!("{brief}\n\n{}", profiles::steer_brief(n));
             redact.add(Some(n));
         }
-        let wl = WorkerLaunch { kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp };
+        // 6k: a Codex session can't read the Vajra state dir (the signing key, the stores) or the app data dir.
+        let deny = profiles::vajra_deny_dirs(&cfg.home, &cfg.data);
+        // A fresh profile name per launch, so no table in the user's Codex config merges into it.
+        let profile = profiles::codex_profile_name().map_err(|_| "spawn_failed")?;
+        let wl = WorkerLaunch {
+            kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp,
+            worktree: &t.wt, deny: &deny, profile: &profile,
+        };
         let mut l = Launch {
             engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
-            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off,
+            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off, deny: deny.clone(),
         };
         match engine {
             Engine::Codex => {
@@ -1353,7 +1362,7 @@ impl Launch {
                 if !rollout.lines().any(|l| l.contains("\"turn_context\"")) {
                     return None;
                 }
-                let want = CodexWant { cwd: t.wt.clone(), ticket_tmp: self.ticket_tmp.clone(), network: self.network };
+                let want = CodexWant { cwd: t.wt.clone(), ticket_tmp: self.ticket_tmp.clone(), network: self.network, deny: self.deny.clone() };
                 Some(profiles::check_codex_applied(&rollout, &want).map_err(|e| e.0))
             }
             Engine::Claude => {

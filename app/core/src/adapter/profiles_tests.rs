@@ -6,8 +6,46 @@ const WT: &str = "/w/proj/run/t1-r1";
 /// A value that would be a key if one leaked. Never a real key.
 const SENTINEL: &str = "sk-vajra-sentinel-0000";
 
+/// The Vajra dirs a Codex session may not read (6k), as `vajra_deny_dirs` would give them.
+const DENY: [&str; 2] = ["/h/.claude/vajra", "/h/data"];
+
+fn deny() -> &'static [PathBuf] {
+    static D: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    D.get_or_init(|| DENY.iter().map(PathBuf::from).collect())
+}
+
+/// A launch's permission profile name, as `codex_profile_name` would make it.
+const PROFILE: &str = "vajra-0123456789abcdef";
+
 fn launch(kind: RoleKind, network: bool) -> WorkerLaunch<'static> {
-    WorkerLaunch { kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP) }
+    WorkerLaunch {
+        kind, prompt: "Do the task", model: Some("vendor/model-a"), effort: Some("high"), network, ticket_tmp: Path::new(TMP), worktree: Path::new(WT),
+        deny: deny(), profile: PROFILE,
+    }
+}
+
+/// The three profile values every Codex worker gets (S11).
+fn profile_kv(network: bool) -> [String; 3] {
+    [
+        format!("permissions.{PROFILE}.filesystem={{\"/\"=\"read\",\"{}\"=\"none\",\"{}\"=\"none\",\"{WT}\"=\"write\",\"{TMP}\"=\"write\"}}", DENY[0], DENY[1]),
+        format!("permissions.{PROFILE}.network={{enabled={network}}}"),
+        format!("default_permissions=\"{PROFILE}\""),
+    ]
+}
+
+/// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,
+/// and a fixed or malformed name never goes out.
+#[test]
+fn each_launch_gets_a_fresh_profile_name_and_a_guessable_one_is_refused() {
+    let (a, b) = (codex_profile_name().unwrap(), codex_profile_name().unwrap());
+    assert_ne!(a, b);
+    for n in [&a, &b] {
+        assert!(valid_profile_name(n), "{n}");
+        assert!(codex_profile_overrides(n, deny(), &[], false).is_ok());
+    }
+    for n in ["vajra", "default", "vajra-0123", "vajra-0123456789ABCDEF", "vajra-0123456789abcdeg", "x-0123456789abcdef", "vajra-0123456789abcdef0"] {
+        assert_eq!(codex_profile_overrides(n, deny(), &[], false).unwrap_err().field, "profile", "{n}");
+    }
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -24,13 +62,12 @@ fn pairs(a: &[String]) -> Vec<&str> {
 fn codex_gateway_worker_argv_snapshot() {
     let a = codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap();
     let id = crate::providers::codex_home::PROVIDER_ID;
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "vendor/model-a",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
         "-c", &format!("model_providers.{id}.request_max_retries=0"), "-c", &format!("model_providers.{id}.stream_max_retries=0"),
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-        "-c", "approval_policy=\"never\"", "-c", "sandbox_workspace_write.network_access=false",
-        "-c", &format!("sandbox_workspace_write.writable_roots=[\"{TMP}\"]"),
+        "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
         "-c", "web_search=\"disabled\"", "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
@@ -39,12 +76,11 @@ fn codex_gateway_worker_argv_snapshot() {
 #[test]
 fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
     let a = codex_login_worker_argv(&launch(RoleKind::Verifier, false)).unwrap();
+    let [fs, net, dp] = profile_kv(false);
     let want: Vec<String> = [
-        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "vendor/model-a",
+        "/bin/sh", "-c", r#"exec "$@" </dev/null"#, "sh", "codex", "exec", "--json", "-m", "vendor/model-a",
         "-c", "model_reasoning_effort=\"high\"",
-        "-c", "approval_policy=\"never\"", "-c", "sandbox_workspace_write.network_access=false",
-        "-c", &format!("sandbox_workspace_write.writable_roots=[\"{TMP}\"]"),
-        "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "-c", "approval_policy=\"never\"", "-c", &fs, "-c", &net, "-c", &dp,
         "-c", "web_search=\"disabled\"", "--", "Do the task",
     ].map(String::from).into();
     assert_eq!(a, want);
@@ -56,7 +92,7 @@ fn codex_login_worker_argv_snapshot_has_no_builtin_provider_override() {
 fn a_network_seat_turns_network_on_and_leaves_web_search_to_the_user() {
     let a = codex_login_worker_argv(&launch(RoleKind::Worker, true)).unwrap();
     let c = pairs(&a);
-    assert!(c.contains(&"sandbox_workspace_write.network_access=true"));
+    assert!(c.contains(&"permissions.vajra-0123456789abcdef.network={enabled=true}"));
     assert!(!c.iter().any(|x| x.starts_with("web_search")), "{c:?}");
 }
 
@@ -68,11 +104,13 @@ fn a_network_seat_turns_network_on_and_leaves_web_search_to_the_user() {
 fn codex_worker_forces_every_always_setting_and_keeps_the_users_mcp_servers() {
     for a in [codex_worker_argv(&launch(RoleKind::Worker, false)).unwrap(), codex_login_worker_argv(&launch(RoleKind::Worker, false)).unwrap()] {
         let c = pairs(&a);
-        for want in ["approval_policy=\"never\"", "sandbox_workspace_write.network_access=false", "sandbox_workspace_write.exclude_slash_tmp=true", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "web_search=\"disabled\""] {
+        let [fs, net, dp] = profile_kv(false);
+        for want in ["approval_policy=\"never\"", fs.as_str(), net.as_str(), dp.as_str(), "web_search=\"disabled\""] {
             assert!(c.contains(&want), "{want} missing from {c:?}");
         }
-        assert!(c.iter().any(|x| x.starts_with("sandbox_workspace_write.writable_roots=")));
-        assert_eq!(a[7..9], ["--sandbox".to_string(), "workspace-write".into()]);
+        // S11: `--sandbox` would switch the profile off, and the legacy keys are ignored under one.
+        assert!(!a.iter().any(|x| x == "--sandbox"), "{a:?}");
+        assert!(!c.iter().any(|x| x.starts_with("sandbox_workspace_write.")), "{c:?}");
         assert!(!c.iter().any(|x| x.starts_with("mcp_servers") || x.starts_with("notify")), "{c:?}");
         assert!(!a.iter().any(|x| x.contains("danger") || x.contains("bypass")));
         assert_eq!(a[a.len() - 2], "--");
@@ -281,7 +319,9 @@ fn profiles_refuse_what_is_not_proven() {
 
 /// The `turn_context` shape codex 0.166 wrote in spike S3 (paths shortened).
 fn rollout(sandbox: Value, writes: &[&str], approval: &str) -> String {
+    // 6k: the profile's deny entries, as codex 0.166 reports them in S11 (`none` comes back as `deny`).
     let entries: Vec<Value> = std::iter::once(json!({"path": {"type": "special", "value": {"kind": "root"}}, "access": "read"}))
+        .chain(DENY.iter().map(|d| json!({"path": {"type": "path", "path": d}, "access": "deny"})))
         .chain(writes.iter().map(|w| if w.starts_with('/') { json!({"path": {"type": "path", "path": w}, "access": "write"}) } else { json!({"path": {"type": "special", "value": {"kind": w}}, "access": "write"}) }))
         .collect();
     let meta = json!({"type": "session_meta", "payload": {"model_provider": "vajra-openrouter"}});
@@ -294,7 +334,100 @@ fn good_sandbox() -> Value {
 }
 
 fn want() -> CodexWant {
-    CodexWant { cwd: WT.into(), ticket_tmp: TMP.into(), network: false }
+    CodexWant { cwd: WT.into(), ticket_tmp: TMP.into(), network: false, deny: deny().to_vec() }
+}
+
+/// 6k: a session where a Vajra dir is readable never runs: no entry, a `read` entry or a `write` entry all fail.
+#[test]
+fn the_read_back_refuses_a_session_that_can_read_a_vajra_dir() {
+    let good = rollout(good_sandbox(), &[WT, TMP], "never");
+    assert_eq!(check_codex_applied(&good, &want()), Ok(()));
+    let entry = |a: &str| format!("{{\"access\":\"{a}\",\"path\":{{\"path\":\"{}\",\"type\":\"path\"}}}}", DENY[0]);
+    let deny_entry = entry("deny");
+    assert!(good.contains(&deny_entry), "{good}");
+    for (bad, why) in [(good.replace(&format!("{deny_entry},"), ""), "no entry"), (good.replace(&deny_entry, &entry("read")), "read"), (good.replace(&deny_entry, &entry("write")), "write")] {
+        let e = check_codex_applied(&bad, &want()).unwrap_err();
+        assert!(e.0.contains("Vajra dir") || e.0.contains("write entry"), "{why}: {}", e.0);
+    }
+    assert_eq!(check_codex_applied(&good.replace(&deny_entry, &entry("none")), &want()), Ok(()), "none is as good as deny");
+    // An older layout with no file-system entries can't show the dirs are locked.
+    let mut v: Value = serde_json::from_str(good.lines().nth(1).unwrap()).unwrap();
+    v["payload"].as_object_mut().unwrap().remove("file_system_sandbox_policy");
+    assert!(check_codex_applied(&format!("{v}\n"), &want()).is_err());
+}
+
+#[test]
+fn the_deny_dirs_are_the_state_dir_and_the_data_dir_in_written_and_real_form() {
+    let d = tmpdir("deny");
+    let real = d.join("real");
+    std::fs::create_dir_all(real.join(".claude/vajra")).unwrap();
+    std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
+    let home = d.join("link");
+    let got = vajra_deny_dirs(&home, &home.join("data-not-made-yet"));
+    assert_eq!(got, vec![home.join(".claude/vajra"), real.join(".claude/vajra"), home.join("data-not-made-yet"), real.join("data-not-made-yet")]);
+    let flat = vajra_deny_dirs(&real, &real.join("data"));
+    assert_eq!(flat, vec![real.join(".claude/vajra"), real.join("data")], "no duplicate when the path is already real");
+    assert!(codex_profile_overrides(PROFILE, &[], &[], false).is_err(), "a Codex profile never goes out with no Vajra dirs denied");
+    assert_eq!(codex_profile_overrides(PROFILE, &[PathBuf::from("/a\"b")], &[], false).unwrap_err().field, "deny");
+}
+
+/// A `Probe` whose codex answers the launch-time check the way it is told to, and records what it was asked.
+struct FakeCodex {
+    found: bool,
+    answer: Option<(i32, String, String)>,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::providers::detect::Probe for FakeCodex {
+    fn find(&self, name: &str) -> Option<PathBuf> {
+        (self.found && name == "codex").then(|| PathBuf::from("/bin/codex"))
+    }
+    fn run(&self, _path: &Path, args: &[&str]) -> Option<crate::providers::detect::Out> {
+        *self.asked.lock().unwrap() = args.iter().map(|s| s.to_string()).collect();
+        self.answer.clone().map(|(c, stdout, stderr)| crate::providers::detect::Out { code: Some(c), stdout, stderr })
+    }
+    fn env(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+fn out(code: i32, stdout: &str, stderr: &str) -> Option<(i32, String, String)> {
+    Some((code, stdout.into(), stderr.into()))
+}
+
+#[test]
+fn the_launch_time_check_passes_only_when_the_os_refuses_the_listing() {
+    let home = tmpdir("probe");
+    let state = home.join(".claude/vajra");
+    std::fs::create_dir_all(&state).unwrap();
+    let data = home.join("data");
+    let fake = |found: bool, answer| FakeCodex { found, answer, asked: Default::default() };
+    let eperm = format!("ls: {}: Operation not permitted\n", state.display());
+    let ok = fake(true, out(1, "", &eperm));
+    assert!(codex_key_probe(&ok, &home, &data));
+    // It runs `codex sandbox` with the very profile a session gets, then lists the state dir; it never names the key.
+    let asked = ok.asked.lock().unwrap().clone();
+    assert_eq!(asked[0], "sandbox");
+    // The probe makes its own fresh name; the rest of the profile is the one a session gets under that name.
+    let name = asked.iter().find_map(|a| a.strip_prefix("default_permissions=\"")?.strip_suffix('"')).unwrap().to_string();
+    assert!(valid_profile_name(&name), "{name}");
+    let ov = codex_profile_overrides(&name, &vajra_deny_dirs(&home, &data), &[], false).unwrap();
+    for o in &ov {
+        assert!(asked.windows(2).any(|w| w[0] == "-c" && &w[1] == o), "{o} missing from {asked:?}");
+    }
+    assert_eq!(asked[asked.len() - 3..], ["--".to_string(), "/bin/ls".into(), state.to_str().unwrap().into()]);
+    assert!(!asked.iter().any(|a| a.contains("hmac")), "{asked:?}");
+    for (f, why) in [
+        (fake(true, out(0, ".hmac-key\ncampaigns\n", "")), "the listing worked"),
+        (fake(true, out(1, "", "ls: x: No such file or directory\n")), "another error"),
+        (fake(true, out(2, "", "Error: unknown option\n")), "codex refused the profile"),
+        (fake(true, None), "timed out"),
+        (fake(false, out(1, "", &eperm)), "no codex"),
+    ] {
+        assert!(!codex_key_probe(&f, &home, &data), "{why}");
+    }
+    let empty = tmpdir("probe-nostate");
+    assert!(!codex_key_probe(&fake(true, out(1, "", &eperm)), &empty, &data), "no state dir: nothing proven");
 }
 
 #[test]

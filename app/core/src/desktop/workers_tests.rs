@@ -102,7 +102,17 @@ case "$1" in
     mkdir -p "$D"
     NET=false
     [ "$MODE" = wide ] && NET=true
-    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}}}}}}\n' "$WT" "$NET" "$TMPDIR" > "$D/rollout-x-$TID.jsonl"
+    # 6k: like codex 0.166, report each `"<dir>"="none"` of the launch's permission profile as a `deny` entry.
+    ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
+    for a in "$@"; do
+      case "$a" in permissions.vajra-*.filesystem=*)
+        for p in $(printf '%s' "$a" | grep -o '"[^"]*"="none"' | sed 's/"="none"$//; s/^"//'); do
+          ENT="$ENT,{{\"path\":{{\"type\":\"path\",\"path\":\"$p\"}},\"access\":\"deny\"}}"
+        done ;;
+      esac
+    done
+    [ "$MODE" = nodeny ] && ENT='{{"path":{{"type":"path","path":"/"}},"access":"read"}}'
+    printf '{{"type":"turn_context","payload":{{"approval_policy":"never","cwd":"%s","model":"model-fake-1","effort":"medium","sandbox_policy":{{"type":"workspace-write","network_access":%s,"exclude_slash_tmp":true,"exclude_tmpdir_env_var":true,"writable_roots":["%s"]}},"file_system_sandbox_policy":{{"kind":"restricted","entries":[%s]}}}}}}\n' "$WT" "$NET" "$TMPDIR" "$ENT" > "$D/rollout-x-$TID.jsonl"
     echo '{{"type":"thread.started","thread_id":"'$TID'"}}'
     ;;
 esac
@@ -110,7 +120,7 @@ edit() {{ echo "worker line" >> src/lib.rs; }}
 [ -n "$SLOW" ] || SLOW=0
 echo "start $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 case "$MODE" in
-  edit|wide) edit ;;
+  edit|wide|nodeny) edit ;;
   flood) perl -e 'print "x" x 1000, "\n" for 1..400'; edit ;;
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
@@ -525,6 +535,19 @@ fn no_changes_fail_and_a_wider_sandbox_is_killed() {
     let r = rig("wide", Opts { mode: "wide", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "network on, asked off");
+    assert!(v.commit.is_none());
+}
+
+/// 6k: a Codex worker launches under the `vajra` profile with the state dir and the data dir unreadable, and a session
+/// whose policy leaves them readable is killed before its work counts.
+#[test]
+fn a_codex_worker_cannot_read_the_vajra_dirs_or_it_does_not_run() {
+    let r = rig("deny", Opts { mode: "edit", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let r = rig("nodeny", Opts { mode: "nodeny", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some(profiles::PROFILE_NOT_APPLIED)), "a readable Vajra dir");
     assert!(v.commit.is_none());
 }
 

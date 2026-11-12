@@ -21,11 +21,11 @@ pub struct StartOptions {
     pub approve_checker: bool,
 }
 
-pub const CODEX_WARNING: &str = "Runs outside the Vajra guard. Can read your files, including Vajra's signing key. With that key it could fake Vajra's records and approvals, not only test results. It can write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox.";
+pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, in Codex's own sandbox. It can't read Vajra's signing key or records, and it can write only in its worktree. It can read your other files. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox.";
 pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard. Your own Claude Code MCP servers run with it.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
 pub const OUTSIDE_GUARD_CARD: &str = "Final check runs outside the Vajra guard";
-pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself could read the key, so it could have copied it and used it to fake Vajra records and approvals. A coming update stops helpers reading the key. A key already copied stays valid.";
+pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but couldn't confirm the helper itself was kept from the key on this Mac. If it read the key, it could have used it to fake Vajra records and approvals. A key already copied stays valid.";
 pub const APPROVAL_OFFER: &str = "Approve the checker's commands when they're ready, to get plain Verified.";
 
 fn override_invalid(detail: impl Into<String>) -> Value {
@@ -93,10 +93,16 @@ pub(super) fn apply_overrides(seats: &Seats, overrides: &[Value]) -> Result<(Sea
 
 /// Who wrote the final check, and so how far its evidence can be trusted (ADR-16 16.5a). Always the verifier seat: no
 /// agent session runs the evidence, so it never moves to another seat. Fixed at Start, from the harness in effect.
-pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str) -> Value {
+/// 6k: a Codex verifier counts as guarded when `codex_locked`, the launch-time check that a Codex session can't read
+/// the Vajra state dir, passed.
+pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str, codex_locked: bool) -> Value {
     let verifier = seats.first_with_role(roles::VERIFIER);
-    let claude = verifier.is_some_and(|v| harness(&v.account) == Some(Engine::Claude));
-    let trust = match (claude, approve_checker) {
+    let locked = verifier.is_some_and(|v| match harness(&v.account) {
+        Some(Engine::Claude) => true,
+        Some(Engine::Codex) => codex_locked,
+        None => false,
+    });
+    let trust = match (locked, approve_checker) {
         (true, _) => "guarded",
         (false, true) => "guarded_by_approval",
         (false, false) => "outside_guard",
@@ -160,9 +166,9 @@ fn seat_entries(seats: &Seats, user: &BTreeSet<String>) -> Vec<Value> {
 }
 
 /// The guarded `seats.json` document: the seats in effect after overrides, and the evidence seat, trust and campaign slug.
-pub(super) fn seats_doc(run_id: &str, proposal_sha: &str, seats: &Seats, user: &BTreeSet<String>, approve_checker: bool) -> Value {
+pub(super) fn seats_doc(run_id: &str, proposal_sha: &str, seats: &Seats, user: &BTreeSet<String>, approve_checker: bool, codex_locked: bool) -> Value {
     let mut doc = json!({"schema": "vajra.run_seats/1", "run_id": run_id, "proposal_sha256": proposal_sha, "max_in_flight": seats.max_in_flight, "seats": seat_entries(seats, user)});
-    if let (Value::Object(d), Value::Object(e)) = (&mut doc, evidence_of(seats, approve_checker, run_id)) {
+    if let (Value::Object(d), Value::Object(e)) = (&mut doc, evidence_of(seats, approve_checker, run_id, codex_locked)) {
         d.extend(e);
     }
     doc
@@ -174,9 +180,10 @@ pub(super) fn receipt_seats(doc: &Value) -> Vec<Value> {
 }
 
 /// The proposal card's seat section: the seats as proposed, the warnings, and what the run's final check will be called.
-pub(super) fn card(p: &Proposal) -> Option<Value> {
+/// `codex_locked` is the last launch-time check's answer (`SeatEnv::codex_key_locked_hint`); Start checks again.
+pub(super) fn card(p: &Proposal, codex_locked: bool) -> Option<Value> {
     let seats = p.seats.as_ref()?;
-    let ev = evidence_of(seats, false, "<run>");
+    let ev = evidence_of(seats, false, "<run>", codex_locked);
     let outside = ev["evidence_trust"] == "outside_guard";
     let mut v = json!({
         "max_in_flight": seats.max_in_flight,
@@ -211,8 +218,11 @@ impl App {
         if !refusals.is_empty() {
             return Err(Self::worker_unavailable(refusals));
         }
+        // 6k: the launch-time check, run fresh at every Start whose verifier is a Codex seat.
+        let codex_verifier = seats.first_with_role(roles::VERIFIER).is_some_and(|v| harness(&v.account) == Some(Engine::Codex));
+        let codex_locked = codex_verifier && self.seat_env.codex_key_locked();
         let (now, run_id) = self.fresh_run_id(crate::ids::unix_now())?;
-        let doc = seats_doc(&run_id, &p.proposal_sha256, &seats, &user, opts.approve_checker);
+        let doc = seats_doc(&run_id, &p.proposal_sha256, &seats, &user, opts.approve_checker, codex_locked);
         let sha = self.record_run_seats(&run_id, &doc).map_err(|_| fail("io", "could not record the run's seats"))?;
         Ok((run_id, now, doc, sha))
     }

@@ -21,11 +21,13 @@ pub struct SeatEnv {
     keys: Mutex<Arc<Keys>>,
     /// Check 5. This build's value is `launch::CORE_ROUTE_AVAILABLE`; tests turn it on to reach the later checks.
     route: AtomicBool,
+    /// 6k: the last launch-time check's answer, for the proposal card. Start always checks again.
+    locked: Mutex<Option<bool>>,
 }
 
 impl SeatEnv {
     pub fn new(data: &Path, home: &Path, keys: Keys) -> Self {
-        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE) }
+        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE), locked: Mutex::new(None) }
     }
 
     #[cfg(test)]
@@ -37,6 +39,21 @@ impl SeatEnv {
 
     pub fn route(&self) -> bool {
         self.route.load(Ordering::SeqCst)
+    }
+
+    /// 6k's launch-time check, run now: can a Codex session under Vajra's profile be kept from the Vajra state dir?
+    pub fn codex_key_locked(&self) -> bool {
+        let dirs = crate::lock(&self.dirs).clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+        let system = detect::System::new(dirs).with_home(self.home.clone());
+        let ok = crate::adapter::profiles::codex_key_probe(&system, &self.home, &self.data);
+        *crate::lock(&self.locked) = Some(ok);
+        ok
+    }
+
+    /// The last check's answer, or a fresh check the first time. For the card only: it predicts what Start will find.
+    pub fn codex_key_locked_hint(&self) -> bool {
+        let last = *crate::lock(&self.locked);
+        last.unwrap_or_else(|| self.codex_key_locked())
     }
 
     /// The checks of 16.2 for every seat, then the engine once. A project that is not a store id reads the global agents.
