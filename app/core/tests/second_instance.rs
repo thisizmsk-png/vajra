@@ -1,7 +1,7 @@
-//! A second app on the same account never kills the first app's live worker (6d2d): the 6c-3 start-up sweep kills
-//! processes that started before the app, so the second app here is a fresh process (this test binary run again)
-//! that opens after the worker started. Without the worktree folder's instance lock it would sweep that worker.
-//! Temp HOME and data folders only; the worker is killed and reaped at the end whatever happens.
+//! A second app on the same account never kills the first app's live worker (6c-3, from the 6d2d security re-check):
+//! the start-up sweep kills processes that started before the app, so the second app here is a fresh process (this
+//! test binary run again) that opens after the worker started. Without the worktree folder's instance lock it would
+//! sweep that worker. Temp HOME and data folders only; the worker is killed and reaped at the end whatever happens.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,7 +20,7 @@ fn worker_body() {
     }
 }
 
-/// Run as the second app: open on `data` with `home`, report what the start-up did, then hold until killed.
+/// Run as the second app: open on `data` with `home` and report what the start-up did.
 #[test]
 fn second_instance_child() {
     let Some(args) = std::env::var_os(CHILD) else { return };
@@ -77,7 +77,9 @@ fn a_second_app_with_its_own_data_folder_does_not_sweep_the_first_apps_live_work
     assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
     let line = text.lines().find_map(|l| l.split_once("REPORT ").map(|(_, r)| r)).unwrap_or_else(|| panic!("no report from the second app: {text}{}", String::from_utf8_lossy(&out.stderr)));
     let report: serde_json::Value = serde_json::from_str(line).unwrap();
-    assert_eq!(report["crash_reconcile"]["other_instance"], true, "{report}");
+    assert_eq!(report["other_instance"], true, "{report}");
+    assert_eq!(report["crash_reconcile"]["other_instance"], true, "the ledger reconcile did not run either: {report}");
+    assert_eq!(report["at_startup"]["killed"], 0, "{report}");
     assert!(alive, "a running app's worker is not an earlier life's: {report}");
     drop(first);
 }

@@ -30,37 +30,6 @@ pub const LEAD_UNVERIFIED: &str = "lead_unverified";
 pub const SEATS_UNREADABLE: &str = "seats_unreadable";
 pub const PLAN_UNREADABLE: &str = "plan_unreadable";
 
-/// Why a second instance starts no agent.
-pub const OTHER_INSTANCE: &str = "another Vajra Desktop is open on this data folder; quit it to run agents here";
-
-/// The data folder's single-instance lock (`<data>/instance.lock`, 0600, never through a link): an exclusive `flock`
-/// held for the app's life. The kernel drops it when the process ends, however it ends, so a crash never leaves it held.
-pub struct InstanceLock;
-
-impl InstanceLock {
-    /// The held lock, or `None` when another process holds it (or it can't be opened: fail closed, no reconcile).
-    pub fn take(data: &Path) -> Option<std::fs::File> {
-        Self::take_file(&data.join("instance.lock"))
-    }
-
-    fn take_file(path: &Path) -> Option<std::fs::File> {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path).ok()?;
-        // SAFETY: the descriptor is open for this call; LOCK_NB never waits.
-        (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(f)
-    }
-}
-
-impl InstanceLock {
-    /// The shared worktree folder's lock (`<work>/.instance.lock`): one app per account sweeps and runs workers there.
-    pub fn take_work(home: &Path) -> Option<std::fs::File> {
-        let work = crate::vajra::gitw::work_root(home);
-        crate::control::fsx::private_dir(&work).ok()?;
-        Self::take_file(&work.join(".instance.lock"))
-    }
-}
-
 /// What the start-up reconcile did, for the lifecycle report.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Reconciled {

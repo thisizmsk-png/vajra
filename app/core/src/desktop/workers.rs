@@ -990,7 +990,8 @@ impl WorkerRuntime {
             if let (Some(d), Some(since)) = (&tty, spawned_at) {
                 if last_scan.is_none_or(|t| t.elapsed() >= HOLDER_SCAN) {
                     last_scan = Some(Instant::now());
-                    for h in procsweep::holders(d, since) {
+                    let leader = self.0.sup.pid(&sid).unwrap_or(0);
+                    for h in procsweep::holders(d, since, leader) {
                         if !holders.contains(&h) && holders.len() < MAX_HOLDERS {
                             holders.push(h);
                         }

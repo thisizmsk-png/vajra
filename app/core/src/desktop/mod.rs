@@ -259,7 +259,7 @@ pub struct App {
     owned: Arc<crate::owned::Ledger>,
     /// What the start-up reconcile did.
     reconciled: recover::Reconciled,
-    /// Held for the app's life: this app owns the data folder's agents. `None` when another instance does.
+    /// Held for the app's life (data folder, worktree folder). `None`: another app instance holds one of them.
     _instance: Option<(std::fs::File, std::fs::File)>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
@@ -351,8 +351,9 @@ impl App {
         // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
         // Two locks: the data folder's (its ledger) and the shared worktree folder's (every app on this account puts its
         // workers there, whatever its data folder, and the 6c-3 sweep kills what it finds there).
-        let instance = recover::InstanceLock::take(data).and_then(|d| recover::InstanceLock::take_work(home).map(|w| (d, w)));
-        let reconciled = if instance.is_some() { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
+        let instance = instance::InstanceLock::take_both(data, home);
+        let sole = instance.is_some();
+        let reconciled = if sole { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
@@ -375,6 +376,13 @@ impl App {
         svc.set_seat_policy(seat_env.clone());
         svc.set_seats_enabled(seat_env.route());
         svc.set_core_workers(workers.clone());
+        // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
+        // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one. Only
+        // the app holding the instance locks prunes: a second one would remove the first app's live sessions' dirs.
+        if let Some(keep) = instance.as_ref().and_then(|_| control_keep(data)) {
+            svc.prune_control_dirs(&keep);
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             workers,
@@ -389,6 +397,7 @@ impl App {
             lead: lead::LeadState::new(home),
             shown: Mutex::new(HashMap::new()),
             deciding: Mutex::new(Default::default()),
+            _instance: instance,
             bridge: Bridge::new(claude.join("skills/vajra/scripts")).with_home(home.to_path_buf()),
             verify_timeout: LIST_VERIFY_TIMEOUT,
             verify_slots: (Mutex::new(VERIFY_SLOTS), Condvar::new()),
@@ -411,17 +420,16 @@ impl App {
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
             sup: {
                 let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
-                if instance.is_some() {
+                if sole {
                     // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
                     sup.set_ledger(owned.clone());
                 } else {
-                    sup.refuse_spawns(recover::OTHER_INSTANCE);
+                    sup.refuse_spawns(instance::OTHER_INSTANCE);
                 }
                 sup
             },
             owned,
             reconciled,
-            _instance: instance,
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
@@ -447,12 +455,6 @@ impl App {
             issued: Mutex::new(Default::default()),
             log,
         })
-    }
-
-    /// Another app instance holds this data folder or the worktree folder: this one leaves the ledger, the shell
-    /// recovery and every agent to it.
-    pub fn other_instance(&self) -> bool {
-        self.reconciled.other_instance
     }
 
     /// The ownership ledger, shared with the terminals.
@@ -534,8 +536,8 @@ impl App {
             // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
             // thread, since a human Stop ends a queued ticket while it holds the control lock.
             on_outcome: Some(Box::new(move |v: &workers::TicketView| {
-                let (control, id) = (control.clone(), v.id.clone());
-                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+                let (control, id, sid) = (control.clone(), v.id.clone(), v.harness_session.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id, sid.as_deref()));
             })),
         };
         // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
@@ -701,7 +703,13 @@ impl App {
     pub fn swept_report(&self) -> Value {
         let s = self.workers.startup_swept();
         let (killed, survived) = self.workers.runtime_swept();
-        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "crash_reconcile": self.reconciled})
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "other_instance": self.other_instance(), "crash_reconcile": self.reconciled})
+    }
+
+    /// Another app instance holds this data folder or the account's worktree folder: this one sweeps nothing and
+    /// starts no agent.
+    pub fn other_instance(&self) -> bool {
+        self._instance.is_none()
     }
 
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
@@ -2402,6 +2410,34 @@ fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
+/// The largest run index the start-up prune reads whole; a bigger one skips the prune.
+const PRUNE_INDEX_CAP: u64 = 64 << 20;
+
+/// The control session dirs start-up pruning keeps besides the live ones: every session the whole run index names
+/// (launch and Lead sessions), and every Lead session recorded under `<control>/lead/<run>/lead_session`. `None` when
+/// the index can't be read whole: then nothing is pruned (a missed name would remove a dir a resume needs).
+fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut keep = std::collections::HashSet::new();
+    for e in runindex::entries_all(&data.join("runs.jsonl"), PRUNE_INDEX_CAP).ok()? {
+        keep.insert(e.session_id);
+        keep.extend(e.lead_session_id);
+    }
+    let lead = data.join("control").join("lead");
+    match std::fs::read_dir(&lead) {
+        Ok(rd) => {
+            for d in rd.flatten() {
+                let p = d.path().join("lead_session");
+                if let Ok(b) = crate::control::fsx::read_nofollow_capped(&p, 256) {
+                    keep.insert(String::from_utf8_lossy(&b).trim().to_string());
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    Some(keep)
+}
+
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {
     lines.iter().map(|l| json!({"seq": l.seq, "text": &*l.text})).collect()
 }
@@ -2460,6 +2496,7 @@ mod lead_start;
 mod recover;
 pub mod labs;
 pub mod worker_host;
+mod instance;
 mod arrivals;
 mod caps;
 mod closeout;

@@ -5408,6 +5408,27 @@ fn the_app_opens_holding_the_git_baseline_and_builds_no_worker_runtime_until_ask
 }
 
 #[test]
+fn a_second_app_on_the_same_data_folder_refuses_every_launch_and_frees_it_when_the_first_quits() {
+    let t = Tmp::new();
+    let first = t.app();
+    assert!(!first.other_instance());
+    let second = t.app();
+    assert!(second.other_instance());
+    assert_eq!(second.swept_report()["other_instance"], true);
+    let sid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0c";
+    let e = second.launch(sid, "20261105-1230", "c", &t.0.join("repo"), |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!(code(&e), "agents_off", "{e}");
+    assert!(e["detail"].as_str().unwrap().starts_with("Agents are off: another Vajra Desktop is open"), "{e}");
+    assert_eq!(code(&second.worker_runtime(|| unreachable!("a second instance builds no runtime")).err().unwrap()), "agents_off");
+    assert_eq!(first.workers.agents_allowed(), Ok(()), "the first app keeps its agents");
+    drop(second);
+    drop(first);
+    let next = t.app();
+    assert!(!next.other_instance(), "the locks end with the app that held them");
+    assert_eq!(next.workers.agents_allowed(), Ok(()));
+}
+
+#[test]
 fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_line() {
     let t = Tmp::new();
     break_baseline(&t.0.join("data"));
@@ -5527,4 +5548,46 @@ fn a_second_app_on_the_same_data_folder_kills_nothing_and_starts_no_agent() {
     assert_eq!(second.swept_report()["crash_reconcile"]["other_instance"], true);
     let spec = crate::sessions::SpawnSpec { argv: vec!["/bin/true".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
     assert!(matches!(second.sup.spawn("lead-x", spec), Err(crate::sessions::SessionError::Ledger(_))), "and it starts no agent");
+}
+
+/// 6c-3 pruning at app start: a stale control session dir goes; one the run index names (a run that may be resumed,
+/// whatever its harness or folder) and a Lead's recorded session stay. An index that can't be read whole prunes nothing.
+#[test]
+fn app_start_prunes_stale_control_dirs_and_keeps_every_indexed_session() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let (stale, run, lead) = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333");
+    for d in [stale, run, lead] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    fs::create_dir_all(control.join("lead/r1")).unwrap();
+    fs::write(control.join("lead/r1/lead_session"), lead).unwrap();
+    let line = json!({"campaign": "c1", "session_id": run, "run_id": "r1", "cwd": "/nonexistent/gone", "provider": "codex"});
+    fs::write(t.0.join("data/runs.jsonl"), format!("{line}\n")).unwrap();
+    drop(t.app());
+    assert!(!control.join(stale).exists(), "the stale dir went");
+    assert!(control.join(run).is_dir() && control.join(lead).is_dir(), "indexed and Lead sessions stay");
+
+    // An index over the cap (or unreadable) is not read in part: nothing is pruned.
+    fs::create_dir_all(control.join(stale)).unwrap();
+    fs::remove_file(t.0.join("data/runs.jsonl")).unwrap();
+    fs::create_dir_all(t.0.join("data/runs.jsonl")).unwrap();
+    drop(t.app());
+    assert!(control.join(stale).is_dir(), "an index that can't be read prunes nothing");
+}
+
+/// 6c-3 pruning with the instance lock: a second app on the same data folder prunes nothing, since the dir it can't
+/// place may be the first app's live session's. The first app's next start, alone, does prune it.
+#[test]
+fn a_second_app_prunes_no_control_dir() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let first = t.app();
+    let live = "44444444-4444-4444-8444-444444444444";
+    fs::create_dir_all(control.join(live).join("queue")).unwrap();
+    drop(t.app());
+    assert!(control.join(live).is_dir(), "a second app leaves the first app's session dir");
+    drop(first);
+    drop(t.app());
+    assert!(!control.join(live).exists(), "an app holding the folder prunes it");
 }

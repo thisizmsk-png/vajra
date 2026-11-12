@@ -235,10 +235,10 @@ fn a_records_dir_that_is_a_link_is_not_read() {
 #[test]
 fn a_second_holder_of_the_data_folder_gets_no_instance_lock_until_the_first_lets_go() {
     let t = Tmp::new("lock");
-    let first = InstanceLock::take(&t.data()).expect("the first app holds the folder");
-    assert!(InstanceLock::take(&t.data()).is_none(), "a second one does not");
+    let first = crate::desktop::instance::InstanceLock::take(&t.data()).expect("the first app holds the folder");
+    assert!(crate::desktop::instance::InstanceLock::take(&t.data()).is_none(), "a second one does not");
     drop(first);
-    assert!(InstanceLock::take(&t.data()).is_some(), "the lock goes with its holder, however it ends");
+    assert!(crate::desktop::instance::InstanceLock::take(&t.data()).is_some(), "the lock goes with its holder, however it ends");
 }
 
 #[test]

@@ -709,6 +709,31 @@ fn app_quit_ends_every_core_ticket_before_the_supervisor_and_refuses_new_ones() 
     assert_eq!((s["at_startup"]["killed"].as_u64(), s["after_attempts"]["killed"].as_u64()), (Some(0), Some(0)), "{s}");
 }
 
+/// 6c-3 (d) with the instance lock: a second app on the same data folder never replays, so it can't end the first
+/// app's live ticket `app_restarted`. Only the next app that holds the folder does, once the first is gone.
+#[test]
+fn a_second_app_never_replays_the_first_apps_live_tickets() {
+    let t = Tmp::new();
+    let first = t.app();
+    // The first app's running ticket, as its dispatch line records it.
+    let id = format!("{CORE_RUN}.t1.r1");
+    let file = t.0.join(format!("data/runs/{CORE_RUN}/tickets.jsonl"));
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let ticket = json!({"id": id, "run": CORE_RUN, "task": "t1", "round": 1, "kind": "writer", "slot": "w-t1", "account": "codex", "state": "running", "attempt": 1});
+    let lines = format!("{}\n", json!({"v": 1, "event": "dispatch", "ticket": ticket}));
+    fs::write(&file, &lines).unwrap();
+    let second = t.app();
+    assert!(second.other_instance());
+    assert_eq!(second.worker_runtime(|| unreachable!("a second instance builds no runtime")).err().unwrap()["error"], "agents_off");
+    drop(second);
+    assert_eq!(fs::read_to_string(&file).unwrap(), lines, "the first app's live ticket is untouched");
+    // The first app crashes (no quit): the next app to hold the folder replays it.
+    drop(first);
+    let next = t.app();
+    let v = queued_runtime(&t, &next).view(&id).unwrap();
+    assert_eq!(v.detail.as_deref(), Some("app_restarted"), "{v:?}");
+}
+
 /// #151: the app's crew view shows the runtime's tickets as `core:<ticket>` nodes with their controls, and an app with
 /// no runtime built shows none (and building one is never a side effect of looking).
 #[test]

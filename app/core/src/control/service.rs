@@ -103,6 +103,12 @@ pub struct Service {
     /// Every accepted stop is kept: a second one before the ticket ends (a double click, or a Lead's confirmed after
     /// the human's) is its own action with its own receipt, and all of them settle together (#151 review).
     core_stops: HashMap<String, Vec<Action>>,
+    /// Core workers' steering nonces after their ticket ended, newest last, at most `RETIRED_NONCES`: the redactor still
+    /// carries them, because their output may still be shown.
+    retired_nonces: std::collections::VecDeque<String>,
+    /// Control dirs no longer used (an ended core worker's, or a stale one found at start) that are removed once no
+    /// pending action is settled through them (`prune_retired`, every tick).
+    retired_dirs: std::collections::BTreeSet<String>,
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
@@ -138,6 +144,8 @@ impl Service {
             bound_project: None,
             pending: HashMap::new(),
             core_stops: HashMap::new(),
+            retired_nonces: Default::default(),
+            retired_dirs: Default::default(),
             last_stop: HashMap::new(),
             seq: 0,
             last_recorded: None,
@@ -209,6 +217,77 @@ impl Service {
                 self.pending.remove(&a.id);
             }
         }
+    }
+
+    // ------------------------------------------------------------ pruning
+
+    /// A core worker's ticket ended: its steering channel closes (no new message is accepted for it), its nonce moves to
+    /// the bounded retired set the redactor still carries, and its dir is retired for removal.
+    pub(super) fn retire_core_session(&mut self, sid: &str) {
+        let Some(n) = self.core_dirs.remove(sid) else { return };
+        self.retired_nonces.push_back(n);
+        while self.retired_nonces.len() > RETIRED_NONCES {
+            self.retired_nonces.pop_front();
+        }
+        self.retired_dirs.insert(sid.to_string());
+    }
+
+    /// At start, before any agent: every `<control>/<sid>` dir that is not live (a run session or a core worker's),
+    /// not in `keep` (every session an index line names, so a run that may be resumed keeps its dir), is retired, and
+    /// removed now unless a pending action still settles through it. Only names that are session ids (a uuid) and real
+    /// directories are considered: the ledger, `lead/`, `projects/` and anything planted are left alone. Returns how
+    /// many were removed.
+    pub fn prune_control_dirs(&mut self, keep: &std::collections::HashSet<String>) -> usize {
+        let Ok(rd) = fs::read_dir(&self.control_root) else { return 0 };
+        for e in rd.flatten() {
+            let Ok(name) = e.file_name().into_string() else { continue };
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink());
+            if crate::ids::valid_session_id(&name)
+                && is_dir
+                && !keep.contains(&name)
+                && !self.sessions.contains_key(&name)
+                && !self.core_dirs.contains_key(&name)
+            {
+                self.retired_dirs.insert(name);
+            }
+        }
+        self.prune_retired()
+    }
+
+    /// Remove each retired dir that no pending action, live session or core worker uses. `remove_dir_all` does not
+    /// follow links (it opens each level by descriptor, no-follow), and the dir itself is re-checked to be a real dir
+    /// right before. A dir that can't be removed stays retired and is tried again next tick.
+    pub(super) fn prune_retired(&mut self) -> usize {
+        let used: std::collections::HashSet<&str> = self.pending.values().map(|a| a.session_id.as_str()).collect();
+        let ready: Vec<String> = self
+            .retired_dirs
+            .iter()
+            .filter(|s| !used.contains(s.as_str()) && !self.sessions.contains_key(*s) && !self.core_dirs.contains_key(*s))
+            .cloned()
+            .collect();
+        let mut removed = 0;
+        for sid in ready {
+            let p = self.control_root.join(&sid);
+            // (done with it, removed by this call)
+            let (done, did) = match fs::symlink_metadata(&p) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => (true, false),
+                Ok(m) if m.is_dir() => {
+                    let ok = fs::remove_dir_all(&p).is_ok();
+                    (ok, ok)
+                }
+                // A link or a file where a session dir was: not ours to touch, and never followed.
+                Ok(_) => (true, false),
+                Err(_) => (false, false),
+            };
+            if done {
+                self.retired_dirs.remove(&sid);
+            }
+            removed += usize::from(did);
+        }
+        if removed > 0 {
+            self.log("control_dirs_pruned", &[("count", removed as u64)]);
+        }
+        removed
     }
 
     // ------------------------------------------------------------ helpers

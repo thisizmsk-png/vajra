@@ -61,18 +61,22 @@ pub struct WorkerHost {
 impl WorkerHost {
     /// The roots check and the baseline, nothing else: no thread starts here. With no git under `dev_roots`, git is never
     /// run and agents stay off with the install action.
-    /// `sweep`: this app holds the instance locks (6d2d), so the work root's leftover workers are an earlier life's of
-    /// its own, never a running app's. Without them nothing is swept.
-    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf], sweep: bool) -> WorkerHost {
+    ///
+    /// `sole`: this app holds the instance locks (`instance::InstanceLock`), so the work root's leftover workers are an
+    /// earlier life's of its own, never a running app's. Without them nothing is swept, no baseline is taken and every
+    /// agent launch is refused.
+    pub fn open(git: &Path, data: &Path, home: &Path, xdg: Option<&Path>, dev_roots: &[PathBuf], sole: bool) -> WorkerHost {
         let work = gitw::work_root(home);
-        let baseline = if git_installed(dev_roots) {
+        let baseline = if !sole {
+            Err(Off { why: super::instance::OTHER_INSTANCE.into(), fix: super::instance::OTHER_INSTANCE_FIX, action: None })
+        } else if git_installed(dev_roots) {
             gitw::check_roots(data, &work).and_then(|()| GlobalBaseline::take_or_load(git, data, home, xdg)).map_err(|e| Off { why: why(&e), fix: fix(&e), action: None })
         } else {
             Err(Off { why: NO_GIT.into(), fix: "", action: Some(INSTALL_DEV_TOOLS) })
         };
         // Before any agent can start: an earlier app life's workers that a crash left running are killed, each proved by
         // its ticket TMPDIR under this work root and a start before this app (6c-3, disclosed in the lifecycle report).
-        let startup_swept = if sweep && work.is_dir() { crate::procsweep::sweep_earlier_lives(&work) } else { Default::default() };
+        let startup_swept = if sole && work.is_dir() { crate::procsweep::sweep_earlier_lives(&work) } else { Default::default() };
         WorkerHost { git: git.to_path_buf(), home: home.to_path_buf(), data: data.to_path_buf(), work, baseline, rt: OnceLock::new(), startup_swept }
     }
 
