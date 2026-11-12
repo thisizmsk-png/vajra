@@ -107,6 +107,25 @@ describe("Home", () => {
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).toBe("true");
   });
 
+  it("says next to the disabled Start button that the failing check blocks it, and the button points at that reason", async () => {
+    await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
+    const why = await screen.findByText(S.home.startNeedsChecks(1));
+    const start = screen.getByRole("button", { name: S.home.startButton });
+    expect(start.getAttribute("aria-describedby")).toBe(why.id);
+    expect(why.closest("form")).toBe(start.closest("form"));
+  });
+
+  it("gives no such reason when the checks pass, or when a failing check does not block a start", async () => {
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
+    await screen.findByText(S.home.checksSummary(2, 2));
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBeNull();
+    cleanup();
+    await open({ preflight: { ...rows(false), start_enabled: true }, list_campaigns: { campaigns: [] } });
+    await screen.findByText("bash install.sh");
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
+  });
+
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {
     const f = await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
     await screen.findByText("registered");
