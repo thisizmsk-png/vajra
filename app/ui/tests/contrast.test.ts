@@ -84,6 +84,32 @@ describe("a disabled ghost button stays legible", () => {
   });
 });
 
+describe("a disabled danger button stays legible", () => {
+  // Same floor as the ghost button. The label sits on the button's own fill, and the whole button fades into the page.
+  const base = readFileSync(join(HERE, "../components/ui/base/base.css"), "utf8");
+  const opacity = Number(/\.v-button--danger\[aria-disabled="true"\]\s*\{\s*opacity:\s*([\d.]+)/.exec(base)?.[1]);
+  const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const hex = (c: number[]) => `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+  const faded = (fg: string, bg: string, o: number) => hex(rgb(fg).map((v, i) => v * o + rgb(bg)[i] * (1 - o)));
+
+  it("has its own opacity, and it dims the button", () => {
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+  });
+  it("still takes its colours from the tokens this test reads", () => {
+    expect(base).toMatch(/\.v-button--danger\s*\{\s*background:\s*var\(--c-surface-elevated\);\s*color:\s*var\(--c-danger\)/);
+  });
+  it.each(["dark", "light"] as const)("%s: the label reaches 3:1 on its fill over every surface and stays under the enabled label", (theme) => {
+    const t = THEMES[theme];
+    const enabled = ratio(t["c-danger"], t["c-surface-elevated"]);
+    for (const page of ["background", "surface", "surface-elevated", "panel"]) {
+      const got = ratio(faded(t["c-danger"], t[`c-${page}`], opacity), faded(t["c-surface-elevated"], t[`c-${page}`], opacity));
+      expect(got, `disabled danger over ${page}`).toBeGreaterThanOrEqual(3);
+      expect(got, `disabled danger over ${page}`).toBeLessThan(enabled - 1);
+    }
+  });
+});
+
 describe("DESIGN.md contrast tables are reproduced", () => {
   // Rows look like "| text #e6edf3 | 16.02 | 14.64 | 13.70 | 12.88 |" under a "Dark fg on:" or "Light fg on:" header.
   for (const [theme, header] of [["dark", "| Dark fg on:"], ["light", "| Light fg on:"]] as const) {
