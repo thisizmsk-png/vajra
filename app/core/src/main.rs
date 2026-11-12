@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
-use vajra_desktop::control::{self, mcp, service, socket};
+use vajra_desktop::control::{self, mcp};
 use serde_json::Value;
 use vajra_desktop::desktop::{App, Envelope, Res, collect_changes};
 use vajra_desktop::logging;
@@ -670,19 +670,8 @@ fn main() {
     if let Some(l) = &app.log {
         let _ = l.log_cold_start(logging::process_start_time());
     }
-    let _watcher = service::spawn_watcher(app.control.clone(), Duration::from_secs(1));
-    match socket::bind(&control::socket_path(&data)) {
-        Ok(listener) => {
-            let svc = app.control.clone();
-            // SAFETY: getuid has no preconditions and cannot fail.
-            let uid = unsafe { libc::getuid() };
-            std::thread::spawn(move || socket::serve(listener, svc, uid));
-        }
-        Err(e) => {
-            eprintln!("vajra-desktop: control socket: {e}");
-            app.note("control_socket_failed", &[]);
-        }
-    }
+    // Only the app holding the instance locks ticks the control ledger and serves the Lead socket.
+    let _watcher = app.serve_control();
     let sub = app.bus.subscribe();
 
     // Crash reconciliation: shells an earlier session recorded are checked against the live process table now (pid and

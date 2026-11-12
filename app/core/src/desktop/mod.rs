@@ -348,7 +348,8 @@ impl App {
         let control_log = Logger::open(&logs.join("control")).ok();
         let claude = home.join(".claude");
         let bus = Arc::new(Bus::open(&data.join("spill"), Config::default())?);
-        let mut svc = Service::open(data, claude.join("vajra/audit.log"), control_log)?;
+        // A second instance settles nothing in the shared control ledger: its pending stops are the first app's live ones.
+        let mut svc = Service::open_with(data, claude.join("vajra/audit.log"), control_log, instance.is_some())?;
         // A refused projects folder (a symlink, a file) no longer stops the launch (#77 follow-up): the store opens
         // refusing, and preflight and every project command say what is wrong and what to do.
         let projects = Arc::new(crate::projects::store::Store::open(data, home)?);
@@ -662,6 +663,32 @@ impl App {
     /// starts no agent.
     pub fn other_instance(&self) -> bool {
         self._instance.is_none()
+    }
+
+    /// The control watcher and the Lead socket, started only by the app holding the instance locks (#177 review). A
+    /// second app on the same data folder would tick the first app's live pending actions (recording refusals, expiries
+    /// and acks in the shared ledger, twice when both settle the same ack), and binding would unlink the first app's
+    /// socket so its Director-General's tool calls reach a service with none of its sessions. `None`: nothing started,
+    /// the socket left as it was. A bind failure is noted and the watcher still runs.
+    pub fn serve_control(&self) -> Option<crate::control::service::Watcher> {
+        if self.other_instance() {
+            self.note("control_not_served_other_instance", &[]);
+            return None;
+        }
+        let watcher = crate::control::service::spawn_watcher(self.control.clone(), Duration::from_secs(1));
+        match crate::control::socket::bind(&crate::control::socket_path(&self.data)) {
+            Ok(listener) => {
+                let svc = self.control.clone();
+                // SAFETY: getuid has no preconditions and cannot fail.
+                let uid = unsafe { libc::getuid() };
+                std::thread::spawn(move || crate::control::socket::serve(listener, svc, uid));
+            }
+            Err(e) => {
+                eprintln!("vajra-desktop: control socket: {e}");
+                self.note("control_socket_failed", &[]);
+            }
+        }
+        Some(watcher)
     }
 
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
