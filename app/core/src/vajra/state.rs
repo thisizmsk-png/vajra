@@ -335,17 +335,27 @@ mod tests {
         f.write_all(br#"{"tasks":[{"id":"t1","status":"bbbb"}]}"#).unwrap();
         f.set_modified(before).unwrap();
         drop(f);
-        assert_eq!(r.tasks("c1").value.unwrap()["tasks"][0]["status"], "bbbb");
-        assert_eq!(r.parses, 2);
-        // Replaced by rename (how the engine writes): a new inode.
+        // Wait out the settle window first. Read inside it, the window alone forces the read and the signature is
+        // never compared. After it, only the change time tells this file from the cached one: same inode, same
+        // length, same modification time.
         settle();
-        r.tasks("c1");
         let parsed = r.parses;
+        assert_eq!(r.tasks("c1").value.unwrap()["tasks"][0]["status"], "bbbb");
+        assert_eq!(r.parses, parsed + 1, "a same-size in-place rewrite with the old mtime must be seen by its change time");
+        // Settled again and cached.
+        r.tasks("c1");
+        assert_eq!(r.parses, parsed + 1);
+        // Replaced by rename (how the engine writes): a new inode. Same length, and the old mtime put back, so the
+        // inode and the change time are all that differ.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
         let next = file.with_file_name("tasks.json.tmp");
         std::fs::write(&next, r#"{"tasks":[{"id":"t1","status":"cccc"}]}"#).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&next).unwrap().set_modified(before).unwrap();
         std::fs::rename(&next, &file).unwrap();
+        settle();
+        let parsed = r.parses;
         assert_eq!(r.tasks("c1").value.unwrap()["tasks"][0]["status"], "cccc");
-        assert_eq!(r.parses, parsed + 1);
+        assert_eq!(r.parses, parsed + 1, "a file replaced by rename must be read again once it has settled");
     }
 
     #[test]
