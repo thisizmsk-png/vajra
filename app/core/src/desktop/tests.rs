@@ -3396,6 +3396,43 @@ fn two_projects_run_at_once_and_the_app_cap_holds_a_third() {
     }
 }
 
+/// #175 review: a core run (a seated proposal's, under its lead) counts in the run caps beside classic runs. A second
+/// core run, or a classic run, in the same project is held, and so is a core start in a project a classic run holds.
+/// The app-wide cap counts both kinds. The hold is released when the core run ends.
+#[test]
+fn core_and_classic_runs_share_the_run_caps() {
+    let t = Tmp::new();
+    let app = t.app();
+    let r = repos(&t, &["one", "two", "three"]);
+    let id = |repo: &Path| app.launch_project(repo).unwrap().1.id;
+    let (p0, p1) = (id(&r[0]), id(&r[1]));
+    let input = || crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 2, campaign: None, provider: None };
+    let held = |e: Value| (code(&e).to_string(), e["reason"].as_str().unwrap_or_default().to_string());
+    let busy = ("run_held".to_string(), "project_busy".to_string());
+
+    // A live core run in project one.
+    app.hold_core_run("20261112-0900", &p0, 2);
+    assert_eq!(app.active_run_count(), 1);
+    // core/core: a second seated start in the same project is held before anything launches.
+    assert_eq!(held(app.start_lead_run(&p0, input(), r[0].to_str().unwrap(), "20261112-0901").unwrap_err()), busy);
+    // core/classic: a classic start in that project is held too.
+    let classic = |i: usize, repo: &Path| app.launch_kind(SIDS[i], RUNS[i], &format!("c{i}"), repo, sleeper, false, true, Engine::Claude, 2);
+    assert_eq!(held(classic(0, &r[0]).unwrap_err()), busy);
+    // classic/core: a classic run in project two holds a core start there.
+    classic(1, &r[1]).unwrap();
+    assert_eq!(held(app.start_lead_run(&p1, input(), r[1].to_str().unwrap(), "20261112-0902").unwrap_err()), busy);
+    // The app cap (2 by default) counts both kinds: a third project's classic start is held.
+    let third = held(classic(2, &r[2]).unwrap_err());
+    assert_eq!(third, ("run_held".to_string(), "app_runs_full".to_string()));
+    // The core run ends: its hold is released, and project one can start again.
+    app.end_core_run("20261112-0900");
+    assert_eq!(app.active_run_count(), 1);
+    classic(0, &r[0]).unwrap();
+    for s in &SIDS[..2] {
+        app.sup.kill(&format!("run-{s}")).unwrap();
+    }
+}
+
 /// ADR-15 D5: the worker ceiling (8) counts every concurrent run's maxInFlight; a lone run is never held by it.
 #[test]
 fn the_worker_ceiling_holds_a_second_run_that_would_go_over() {
@@ -5486,6 +5523,20 @@ fn install_dev_tools_is_refused_while_git_is_installed() {
     let app = t.app();
     assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
     assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
+}
+
+/// #175 review: a core run's Claude lead and its Claude workers are launched with the resolved claude executable, never
+/// the app's `~/.claude` folder.
+#[test]
+fn a_core_runs_claude_lead_and_workers_get_the_claude_executable_not_the_claude_folder() {
+    let t = Tmp::new();
+    fs::create_dir_all(t.home().join(".claude")).unwrap();
+    let app = t.app();
+    let want = t.fake_clis(&["claude", "codex"]).join("claude");
+    let (lead, workers) = app.core_harness_bins();
+    assert_eq!(lead, want, "the lead's argv[0]");
+    assert_eq!(workers, want, "the workers' claude");
+    assert!(lead.is_file() && !lead.ends_with(".claude"), "{}", lead.display());
 }
 
 #[test]

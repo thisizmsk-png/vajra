@@ -911,7 +911,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            // Director-General asks, then core tickets (with their descendants), then every session: `App::quit`.
+            // The Director-General's asks, every core run's lead, core tickets (with their descendants), then every
+            // session: `App::quit`.
             handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             // A clean quit reaped every shell, so there is nothing to recover. A second instance leaves the ledger alone.
