@@ -350,3 +350,4 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
 | "Sign in: NAME" | terminal tab label | never saved in the tab layout |
 | Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+| Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |

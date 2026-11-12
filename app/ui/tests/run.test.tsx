@@ -260,6 +260,16 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(rows[1].textContent).toContain(`${S.run.waitsFor} t1`);
   });
 
+  it("words every task status in one casing, and keeps a cell for 'waits for' on every row so columns line up", async () => {
+    await openOverview(overview({ graph: { tasks: [gtask("t1", 0, "ready"), gtask("t2", 1, "question", ["r1.t1"]), gtask("t3", 1, "pending"), gtask("t4", 1, "odd_new_state")], waves: 2 } }));
+    const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector(".v-badge")?.textContent)).toEqual([S.status.ready, S.status.question, S.run.taskStatus.pending, "odd_new_state"]);
+    // Wave, task, who, status, waits for, Open: the same six cells whether or not the task waits for anything.
+    expect(rows.map((r) => r.children.length)).toEqual([6, 6, 6, 6]);
+    expect(rows[0].children[4].textContent).toBe("");
+    expect(rows[1].children[4].textContent).toBe(`${S.run.waitsFor} t1`);
+  });
+
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {
     const tasks = Array.from({ length: 200 }, (_, i) => gtask(`t${i}`, i, "pending", i ? [`r1.t${i - 1}`] : []));
     await openOverview(overview({ graph: { tasks, waves: 200 } }));

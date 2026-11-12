@@ -51,6 +51,15 @@
 .v-home__form { display: flex; flex-direction: column; gap: var(--space-md); }
 .v-run__row { display: flex; align-items: center; gap: var(--space-md); height: 100%; border-bottom: 1px solid var(--c-border); }
 .v-run__row > span { flex: 1; }
+.v-run__row > .v-badge { flex: none; }
+/* The task list is a table in all but name: fixed tracks, so wave, task, who, status and "waits for" line up down the list. */
+.v-run__task { display: grid; grid-template-columns: 64px minmax(0, 3fr) minmax(0, 3fr) 96px minmax(0, 2fr) auto; column-gap: var(--space-md); }
+/* A list row is as wide as its content by default; a task row is as wide as the list, or each row would size its own tracks. */
+.v-vrow:has(> .v-run__task) { width: 100%; }
+.v-run__task > * { min-width: 0; }
+.v-run__task > .v-badge { justify-self: start; }
+.v-run__title, .v-run__who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-run__who .v-wp__ran, .v-run__who .v-wp__err { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v-run__cmd { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-xs); margin-bottom: var(--space-sm); }
 .v-run__cmd pre { margin: 0; max-width: 100%; max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); }
 .v-home__report { margin: 0; padding: var(--space-md); max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/16px var(--font-mono); color: var(--c-text-secondary); border: 1px solid var(--c-border); }
