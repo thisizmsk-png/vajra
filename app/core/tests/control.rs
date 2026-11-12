@@ -663,6 +663,29 @@ impl CoreWorkers for FakeCore {
     }
 }
 
+/// #151 review: a Claude core worker's steering nonce is in the shared redaction set. Text that carries it (a message,
+/// a redirect) reaches neither its queue nor the ledger raw, and the redactor every other surface uses (the
+/// Director-General's included) scrubs it too.
+#[test]
+fn a_core_workers_nonce_never_reaches_its_queue_or_the_ledger() {
+    let h = Home::new();
+    let mut s = h.service();
+    s.start_session(SID, RUN).unwrap();
+    s.set_core_workers(Arc::new(FakeCore));
+    let nonce = s.open_core_session(CSID).unwrap();
+    assert_ne!(s.redactor().redact(format!("x {nonce} y")), format!("x {nonce} y"), "the shared redactor knows it");
+    s.message_worker(Actor::Human, "core:T1", &format!("echo {nonce} please")).unwrap();
+    s.redirect_worker(Actor::Human, "core:T1", &format!("now {nonce}")).unwrap();
+    let queued: Vec<String> = files_under(&h.data().join("control").join(CSID).join("queue")).iter().map(|p| fs::read_to_string(p).unwrap()).collect();
+    assert_eq!(queued.len(), 2);
+    for q in &queued {
+        assert!(!q.contains(&nonce), "the queue entry carries the raw nonce: {q}");
+    }
+    let ledger = fs::read_to_string(h.data().join("control/ledger.jsonl")).unwrap();
+    assert!(ledger.contains("please"), "the message was recorded");
+    assert!(!ledger.contains(&nonce), "the ledger carries the raw nonce");
+}
+
 /// #151 codex P2: a human's stop of a core worker is settled when its ticket ends (a group kill leaves no hook ack), so
 /// it never sits queued, and a restart neither resurrects it nor later calls it undelivered. A stop the previous app
 /// recorded but never saw end is settled at once on reopen; a stop that found nothing to kill fails.
