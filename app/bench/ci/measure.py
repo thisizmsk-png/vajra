@@ -1,6 +1,6 @@
 """H0 measurement: idle summed RSS (app + its WebKit helpers + app PTY children) and a growth slope.
 
-usage: measure.py idle APP_BINARY OUT_JSON      (5 launches, median of medians and spread)
+usage: measure.py idle APP_BINARY OUT_JSON      (6 launches: launch 1 is warm-up, the median of the other 5 is gated)
        h0_measure.py growth APP_BINARY OUT_JSON MINUTES
 
 WebKit helpers are XPC services whose parent is launchd, not the app, so they are told apart by diffing the set of
@@ -85,6 +85,27 @@ def helper_detail(pids):
     return rows
 
 
+FOOTPRINT_LINE = re.compile(r"Footprint:\s+(\d+) B")
+
+
+def footprint_mib(proc, before):
+    """Sum of macOS `footprint` over the app, its PTY children and its WebKit helpers: what the processes themselves
+    dirty, without the shared framework pages RSS counts. Reported beside RSS and never gated; None when the tool
+    is missing or refuses (a helper may exit between the pid list and the call)."""
+    rows = ps()
+    pids = descendants(rows, proc.pid) | (webkit_pids(rows) - before)
+    pids &= set(rows)
+    if not pids:
+        return None
+    try:
+        out = subprocess.run(["footprint", "-f", "bytes", "--noCategories"] + [str(p) for p in sorted(pids)],
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = [int(m) for m in FOOTPRINT_LINE.findall(out)]
+    return round(sum(found) / KB / KB, 1) if found else None
+
+
 def stop(proc):
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -100,7 +121,10 @@ def load():
     return os.getloadavg()
 
 
-LAUNCHES = 5
+# Launch 1 is warm-up: it read the highest in almost every CI run (191 to 203 MiB against about 185 for the settled
+# ones), so it is recorded but never gated. The median of the next GATED launches is what the gate judges.
+WARMUP, GATED = 1, 5
+LAUNCHES = WARMUP + GATED
 
 
 def identity_key(macos_build, webkit):
@@ -228,23 +252,34 @@ def idle(binary, out):
         for _ in range(15):
             samples.append(sample(proc, before))
             time.sleep(2)
+        footprint = footprint_mib(proc, before)  # while the app is still running; reported, never gated
         stop(proc)
         ls = launch_summary(samples)
         tot = [x["total_mib"] for x in samples]
-        runs.append({"run": n + 1, "median_mib": ls["median"], "flavour": ls["flavour"], "clean_samples": ls["clean_samples"],
-                     "churn": ls["churn"], "unknown_types": ls["unknown_types"],
-                     "min": min(tot), "max": max(tot),
+        runs.append({"run": n + 1, "warmup": n < WARMUP, "median_mib": ls["median"], "flavour": ls["flavour"],
+                     "clean_samples": ls["clean_samples"], "churn": ls["churn"], "unknown_types": ls["unknown_types"],
+                     "min": min(tot), "max": max(tot), "footprint_mib": footprint,
                      "helpers": sorted({x["helpers"] for x in samples}), "last": samples[-1], "load_avg": load()})
         time.sleep(5)
-    flavour, flavour_median, in_flavour, excluded = flavour_summary(runs)
-    meds = [r["median_mib"] for r in runs if r["median_mib"] is not None]
-    ident = runner_identity()
-    json.dump({"identity": ident["key"], "runner": ident, "flavour": flavour, "launch_flavours": launch_flavours(runs),
-               "flavour_launches": in_flavour, "churn_launches": sum(r["churn"] for r in runs), "excluded_launches": excluded,
-               "unknown_types": sorted({t for r in runs for t in r["unknown_types"]}), "runs": runs,
-               "median_of_medians_mib": flavour_median,
-               "all_launches_median_mib": statistics.median(meds) if meds else None,
-               "spread_mib": [min(meds), max(meds)] if meds else None}, open(out, "w"), indent=1)
+    json.dump(idle_report(runs, runner_identity()), open(out, "w"), indent=1)
+
+
+def idle_report(runs, ident):
+    """The idle.json body. The gated number is the median of the launches after the warm-up. The warm-up is still
+    checked for unknown helper types, an unbaselined flavour and churn, so it can only be left out of the median,
+    never hide a failure."""
+    gated = [r for r in runs if not r["warmup"]]
+    flavour, flavour_median, in_flavour, excluded = flavour_summary(gated)
+    meds = [r["median_mib"] for r in gated if r["median_mib"] is not None]
+    feet = [r["footprint_mib"] for r in gated if r["footprint_mib"] is not None]
+    return {"identity": ident["key"], "runner": ident, "flavour": flavour, "launch_flavours": launch_flavours(runs),
+            "warmup_launches": len(runs) - len(gated), "gated_launches": len(gated),
+            "flavour_launches": in_flavour, "churn_launches": sum(r["churn"] for r in runs), "excluded_launches": excluded,
+            "unknown_types": sorted({t for r in runs for t in r["unknown_types"]}), "runs": runs,
+            "median_of_medians_mib": flavour_median,
+            "all_launches_median_mib": statistics.median(meds) if meds else None,
+            "footprint_median_mib": statistics.median(feet) if feet else None,
+            "spread_mib": [min(meds), max(meds)] if meds else None}
 
 
 def slope(points):  # least squares, MiB per minute
