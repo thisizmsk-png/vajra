@@ -1079,6 +1079,100 @@ NOT_SCRIPTS=" install.sh install-skills.sh generate-manifest.sh "
 # Vajra scripts whose arguments are data (titles, bodies, queries), not paths
 # they write: their text may name protected paths. Output flags stay checked.
 DATA_SCRIPTS=" vajra_kb.py vajra_tasks.py vajra-campaign.sh "
+
+# #190 H1 (4): a campaign that Vajra Desktop's core runs is written only by the core, which runs the scripts as its own
+# children, never in an agent session. Its slug is the one a core seats file records: campaign_slug in
+# <data>/control/lead/<run>/seats.json. Matched by those recorded slugs, never by the deliver- prefix, because the CLI
+# workflow uses that prefix too. A seats file that exists but can't be read stands for both slugs its run could have.
+CORE_SLUGS=" "; CORE_ANY=0; CORE_LOADED=0
+SLUG_LIT='^[a-z0-9][a-z0-9-]*$'
+core_slugs_load() {
+  [ "$CORE_LOADED" = 1 ] && return 0
+  CORE_LOADED=1
+  local ng=0 d f run s
+  shopt -q nullglob && ng=1
+  shopt -s nullglob
+  for d in "$DDATA"/control/lead/*/; do
+    d="${d%/}"; run="${d##*/}"; f="$d/seats.json"
+    [ -e "$f" ] || [ -L "$f" ] || continue   # no seats file: not a core run (the CLI workflow writes its campaign)
+    s=""
+    if [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ]; then
+      if command -v jq >/dev/null 2>&1; then
+        s="$(jq -r '.campaign_slug | if type == "string" then . else empty end' "$f" 2>/dev/null)" || s=""
+      elif [ -x "$PYTHON3" ]; then
+        s="$("$PYTHON3" -I -c 'import json,sys
+v = json.load(open(sys.argv[1], encoding="utf-8")).get("campaign_slug")
+print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
+      fi
+    fi
+    CORE_ANY=1
+    if [[ "$s" =~ $SLUG_LIT ]]; then
+      CORE_SLUGS+="$s "
+    else
+      CORE_SLUGS+="deliver-$run deliver-$run-og "
+    fi
+  done
+  [ "$ng" = 1 ] || shopt -u nullglob
+  return 0
+}
+core_slug_block() { block "campaign $1 is run by Vajra Desktop: only the app writes it, so agents may read it (show, list, verify, status) but never change it"; }
+# A word names a core campaign as written, or as vajra-campaign.sh create would sanitize it.
+core_named() {
+  local s; s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-' | sed 's/^-*//; s/-*$//' | cut -c1-64)"
+  [[ "$CORE_SLUGS" == *" $1 "* || ( -n "$s" && "$CORE_SLUGS" == *" $s "* ) ]]
+}
+# Usage: core_campaign_check <script name> <index of the script word> <segment length>   (reads SEG)
+core_campaign_check() {
+  local sname="$1" si="$2" n="$3" c tok sub="" subi=-1 explicit=0 v
+  for ((c = si + 1; c < n; c++)); do
+    tok="${SEG[$c]}"
+    case "$tok" in ">"|"<"|__DUP__) break ;; -*) ;; *) sub="$tok"; subi=$c; break ;; esac
+  done
+  if [ "$sname" = vajra-campaign.sh ]; then
+    case "$sub" in list|show|active|verify|verify-digest|help|"") return 0 ;; esac
+  else
+    case "$sub" in validate|ready|status|list|waves|graph|check-evidence|"") return 0 ;; esac
+  fi
+  core_slugs_load
+  [ "$CORE_ANY" = 1 ] || return 0
+  local first_pos=1
+  for ((c = subi + 1; c < n; c++)); do
+    tok="${SEG[$c]}"
+    case "$tok" in
+      ">"|"<") c=$((c + 1)); continue ;;
+      __DUP__) c=$((c + 1)); continue ;;
+      --campaign) v="${SEG[$((c + 1))]:-}"; c=$((c + 1)); explicit=1 ;;
+      --campaign=*) v="${tok#--campaign=}"; explicit=1 ;;
+      -*) continue ;;
+      *)
+        v="$tok"
+        # The script's own slug position: create, resume, close, archive-evidence and unlock take the slug first.
+        if [ "$first_pos" = 1 ] && [ "$sname" = vajra-campaign.sh ]; then
+          case "$sub" in create|resume|close|archive-evidence|unlock) explicit=1
+            [ "$sub" = create ] && core_named "$v" && core_slug_block "$v"
+            [[ "$v" =~ $SLUG_LIT ]] || block "while Vajra Desktop runs a campaign, name the campaign slug literally (lowercase letters, digits and -; no variables or globs): $v" ;;
+          esac
+        fi
+        first_pos=0
+        [[ "$CORE_SLUGS" == *" $v "* ]] && core_slug_block "$v"
+        continue ;;
+    esac
+    [[ "$v" =~ $SLUG_LIT ]] || block "while Vajra Desktop runs a campaign, name the campaign slug literally (lowercase letters, digits and -; no variables or globs): $v"
+    [[ "$CORE_SLUGS" == *" $v "* ]] && core_slug_block "$v"
+  done
+  # No slug named: the script writes the repository's active campaign. Refused when any active pointer names a core slug.
+  if [ "$explicit" = 0 ] && [ "$sname" = vajra-campaign.sh ]; then
+    local ng=0 f a
+    shopt -q nullglob && ng=1
+    shopt -s nullglob
+    for f in "$HOME/.claude/vajra/campaigns"/.active-*; do
+      a="$(tr -d ' \r\n' < "$f" 2>/dev/null)"
+      if [ -n "$a" ] && [[ "$CORE_SLUGS" == *" $a "* ]]; then [ "$ng" = 1 ] || shopt -u nullglob; core_slug_block "$a"; fi
+    done
+    [ "$ng" = 1 ] || shopt -u nullglob
+  fi
+  return 0
+}
 GIT_READ=" status log diff show rev-parse ls-files ls-tree cat-file blame grep describe shortlog reflog remote branch tag config "
 SYSROOTS=" /etc /usr /var /bin /sbin /lib /boot /dev /sys /opt /root /home /System /Library /Applications /private /private/etc /private/var /Users /Volumes /usr/local /usr/bin /usr/lib "
 
@@ -1473,6 +1567,7 @@ eval_segment_body() { # uses SEG array
         fi
         script=1; script_i=$cand_i
         [[ "$DATA_SCRIPTS" == *" $sname "* ]] && dscript=1
+        case "$sname" in vajra-campaign.sh|vajra_tasks.py) core_campaign_check "$sname" "$cand_i" "$n" ;; esac
       fi
     fi
   fi

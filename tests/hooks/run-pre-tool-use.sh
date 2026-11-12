@@ -922,6 +922,71 @@ bash_case ALLOW "reading the script is fine"            "cat scripts/generate-ma
 bash_case ALLOW "grep for the name is fine"              "grep -n generate-manifest.sh README.md" "$WT"
 bash_case ALLOW "other worktree scripts still run"       "bash scripts/vajra-doctor.sh" "$WT"
 
+# --- #190 H1 (4): agents never write a campaign Vajra Desktop's core runs ---
+CS="bash ~/.claude/skills/vajra/scripts/vajra-campaign.sh"; TP="python3 ~/.claude/skills/vajra/scripts/vajra_tasks.py"
+# The CLI workflow's own campaign, before any core run exists: every write it makes is allowed.
+bash_case ALLOW "no core run: a CLI pass is allowed"      "$CS pass ac-1 --evidence 'npm test (exit 0)' --campaign deliver-20261112-1900"
+LEAD="$H/Library/Application Support/VajraDesktop/control/lead"
+mkdir -p "$LEAD/20261112-1900" "$LEAD/20261112-1901" "$LEAD/20261112-1902" "$LEAD/20261112-1903"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1900","evidence_trust":"guarded","campaign_slug":"deliver-20261112-1900"}' > "$LEAD/20261112-1900/seats.json"
+echo '{"schema":"vajra.run_seats/1","run_id":"20261112-1901","evidence_trust":"outside_guard","campaign_slug":"deliver-20261112-1901-og"}' > "$LEAD/20261112-1901/seats.json"
+printf '{"campaign_slug": "deliver-2026' > "$LEAD/20261112-1902/seats.json"   # truncated: stands for both slugs of its run
+echo cli > "$LEAD/20261112-1903/provider"                                        # a Lead run with no seats: the CLI workflow's
+C0="deliver-20261112-1900"; COG="deliver-20261112-1901-og"
+bash_case BLOCK "core: pass --campaign"                   "$CS pass ac-1 --evidence 'npm test (exit 0)' --campaign $C0"
+worker    BLOCK "core: a worker's pass --campaign"        "$(bj "$CS pass ac-1 --campaign $C0")"
+bash_case BLOCK "core: pass --revoke"                     "$CS pass ac-1 --revoke --campaign $C0"
+bash_case BLOCK "core: progress --campaign="              "$CS progress 'all good' --campaign=$C0"
+bash_case BLOCK "core: checkpoint"                        "$CS checkpoint 'delivered abc' --campaign $C0"
+bash_case BLOCK "core: close done"                        "$CS close $C0 --status done"
+bash_case BLOCK "core: close an -og campaign"             "$CS close $COG --status done"
+bash_case BLOCK "core: resume"                            "$CS resume $C0"
+bash_case BLOCK "core: unlock"                            "$CS unlock $C0 --if-stale"
+bash_case BLOCK "core: create, sanitized to the core slug" "$CS create ${C0}- --goal g --feature 'a|b'"
+bash_case BLOCK "core: archive-evidence"                  "$CS archive-evidence $C0 data/walkthroughs/$C0 abc '[]'"
+bash_case BLOCK "core: report"                            "$CS report --campaign $C0 --bytes 1 --check 0 --base64 eA=="
+bash_case BLOCK "core tasks: report done"                 "$TP report t1 done --summary ok --campaign $C0"
+bash_case BLOCK "core tasks: close"                       "$TP close t1 --evidence data/walkthroughs/$C0/evidence.json --campaign $C0"
+bash_case BLOCK "core tasks: claim --campaign="           "$TP claim t1 bhima --campaign=$C0"
+bash_case BLOCK "core tasks: add"                         "$TP add t9 --title x --owner bhima --campaign $C0"
+bash_case BLOCK "core: unreadable seats, plain slug"      "$CS pass ac-1 --campaign deliver-20261112-1902"
+bash_case BLOCK "core: unreadable seats, -og slug"        "$CS pass ac-1 --campaign deliver-20261112-1902-og"
+bash_case BLOCK "core: a variable slug while a core run exists" "$CS pass ac-1 --campaign \$S"
+bash_case BLOCK "core: a variable slug for close"         "$CS close \$S --status done"
+bash_case BLOCK "core: nested bash -c"                    "bash -c '$CS pass ac-1 --campaign $C0'"
+bash_case BLOCK "core: chained after a read"              "$CS show $C0 && $CS pass ac-1 --campaign $C0"
+echo "$C0" > "$VS/campaigns/.active-0123456789ab"
+bash_case BLOCK "core: no slug, the active pointer names a core campaign" "$CS pass ac-1 --evidence x"
+bash_case ALLOW "core active: a CLI slug named explicitly"  "$CS pass ac-1 --campaign deliver-20261112-0930"
+bash_case ALLOW "core active: CLI create still works"       "$CS create deliver-20261112-0931 --goal g --feature 'ac-1|x'"
+rm -f "$VS/campaigns/.active-0123456789ab"
+bash_case ALLOW "core: no slug, no core active pointer"   "$CS pass ac-1 --evidence x"
+# Reads of a core campaign stay allowed.
+bash_case ALLOW "core read: show --json"                  "$CS show $C0 --json"
+bash_case ALLOW "core read: list"                         "$CS list"
+bash_case ALLOW "core read: verify"                       "$CS verify $C0"
+bash_case ALLOW "core read: active --brief"               "$CS active --brief"
+bash_case ALLOW "core read: tasks status"                 "$TP status t1 --campaign $C0"
+bash_case ALLOW "core read: tasks ready"                  "$TP ready --campaign $C0"
+bash_case ALLOW "core read: check-evidence"               "$TP check-evidence data/walkthroughs/$C0/evidence.json --head abc"
+# The CLI deliver workflow's own commands, verbatim shapes, while core runs exist: a CLI run id, and a Lead run with no seats.
+for CL in deliver-20261112-0930 deliver-20261112-1903; do
+  bash_case ALLOW "CLI $CL: create"        "$CS create $CL --goal 'Add a --json flag' --feature 'ac-1|export --json prints JSON'"
+  bash_case ALLOW "CLI $CL: pass"          "$CS pass ac-1 --evidence 'npm test -- export (exit 0)' --campaign $CL"
+  bash_case ALLOW "CLI $CL: progress"      "$CS progress 'run 20261112-0930 delivered vajra/x @ abc1234' --campaign $CL"
+  bash_case ALLOW "CLI $CL: checkpoint"    "$CS checkpoint 'delivered abc1234' --campaign $CL"
+  bash_case ALLOW "CLI $CL: close"         "$CS close $CL --status done"
+  bash_case ALLOW "CLI $CL: report"        "$CS report --campaign $CL --bytes 1 --check 0 --base64 eA=="
+  bash_case ALLOW "CLI $CL: archive"       "$CS archive-evidence $CL data/walkthroughs/$CL abc1234 '[\"npm ci\"]'"
+  bash_case ALLOW "CLI $CL: tasks add"     "$TP add t1 --title x --owner bhima --campaign $CL"
+  bash_case ALLOW "CLI $CL: tasks claim"   "$TP claim t1 bhima --stacked --campaign $CL --worktree \"\$PWD\""
+  bash_case ALLOW "CLI $CL: tasks report"  "$TP report t1 in_progress --campaign $CL"
+  bash_case ALLOW "CLI $CL: tasks close"   "$TP close t1 --evidence data/walkthroughs/$CL/evidence.json --head abc --campaign $CL"
+done
+# Fail-closed: the guard's words ignore quotes, so a core slug as any word of a write counts (the CLI never writes one).
+bash_case BLOCK "a core slug as any word of a write is refused" "$CS progress 'see $C0 for context' --campaign deliver-20261112-0930"
+bash_case ALLOW "a slug that only contains a core slug is not one" "$CS progress 'see ${C0}x' --campaign deliver-20261112-0930"
+
 # --- Latency ---------------------------------------------------------------
 LAT_JSON="$(jq -nc --arg d "$PROJ" '{session_id:"t",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:"git commit -m \"wip\" && npm test -- --watch=false 2>&1 | tail -n 20"}}')"
 RUNS=40
