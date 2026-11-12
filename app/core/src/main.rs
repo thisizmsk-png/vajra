@@ -410,6 +410,32 @@ fn term_open(
     Ok(term_value(&i))
 }
 
+/// Settings > Providers > Set up: each catalog harness's state and the vendor's own install steps (ADR-17 step 1).
+#[tauri::command(async)]
+fn setup_list(app: State<'_, App>) -> Res {
+    app.setup_list()
+}
+
+/// A CLI's own sign-in in a user terminal tab. The UI names a catalog harness id, never a program; the core builds the
+/// argv from the compiled catalog and the binary detection found.
+#[tauri::command(async)]
+fn setup_sign_in(
+    app: State<'_, App>,
+    terms: State<'_, Terminals>,
+    own: State<'_, Ownership>,
+    id: String,
+    rows: u16,
+    cols: u16,
+    on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Res {
+    let cmd = app.setup_sign_in_command(&id)?;
+    let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
+        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+    }
+    Ok(term_value(&i))
+}
+
 /// Re-bind a terminal that outlived its view (the webview reloaded, or a hidden dock came back).
 #[tauri::command]
 fn term_attach(terms: State<'_, Terminals>, id: u32, on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> Res {
@@ -724,6 +750,8 @@ fn main() {
             resume_run,
             provider_list,
             provider_accounts,
+            setup_list,
+            setup_sign_in,
             provider_key_saved,
             provider_key_save,
             provider_key_replace,

@@ -93,7 +93,7 @@ export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
 export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
-export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean; /** Set only for a CLI's own sign-in (ADR-17). */ sign_in?: { id: string; name: string } };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
 export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
 export type RunDiag = { stream: string; pid: number };
@@ -320,6 +320,10 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  /** A CLI's own sign-in in a terminal tab (ADR-17). Only a catalog harness id goes over; the core builds the argv. */
+  setupSignIn: (id: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("setup_sign_in", { id, rows, cols }, onMsg),
+  /** `vajra.harness_setup/1`: Settings > Providers > Set up. Parse with `parseSetupList`. */
+  setupList: () => call<unknown>("setup_list"),
   recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),

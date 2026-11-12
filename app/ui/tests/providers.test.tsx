@@ -19,6 +19,7 @@ const fx = (name: string) => JSON.parse(readFileSync(resolve(__dirname, "../../c
 const LIST = fx("providers.v1.json");
 const P = "p_01JC5X8Z3A9K2M4N6P7Q8R9S0T";
 const C = S.providers;
+const SETUP_EMPTY = { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } };
 
 const view = (project: string | null = null, agent: "claude" | "codex" = "claude", rev = 0) => ({
   schema: "vajra.preferences/1", rev, project_id: project, caps: { active_runs: 1, workers_per_run: 16, editable: false },
@@ -38,7 +39,7 @@ afterEach(() => {
 
 function settings(replies: Record<string, unknown>, inProject = true) {
   window.location.hash = "#/settings";
-  const f = fakeIpc({ preflight, provider_list: LIST, preferences_read: (a?: Record<string, unknown>) => view(a?.projectId as string | null), ...replies });
+  const f = fakeIpc({ preflight, provider_list: LIST, setup_list: SETUP_EMPTY, preferences_read: (a?: Record<string, unknown>) => view(a?.projectId as string | null), ...replies });
   setTransport(f.transport);
   render(
     <CurrentProject.Provider value={{ project: inProject ? project : null, campaigns: [], focus: null, runId: null }}>
@@ -150,6 +151,52 @@ describe("Settings > Providers (FG-09)", () => {
     await act(async () => first(LIST));
     expect(screen.getByText(C.loginState.not_installed)).toBeTruthy();
     expect(screen.queryByText(C.loginState.cannot_tell)).toBeNull();
+  });
+});
+
+describe("Settings > Providers > Set up recheck (ADR-17 rule 7)", () => {
+  const row = (installed: boolean) => ({
+    id: "codex", name: "Codex CLI", state: installed ? "installed" : "manual", version: installed ? "0.167.1" : null,
+    path: installed ? "/new/bin/codex" : null, reason_code: installed ? null : "source_not_verified",
+    commands: [{ tool: "brew", command: "brew install --cask codex" }], docs_url: "https://github.com/openai/codex", can_sign_in: installed,
+  });
+  const setupList = (installed: boolean) => ({ ...SETUP_EMPTY, rows: [row(installed)] });
+
+  it("Check again re-reads Set up, so a CLI installed with the vendor's steps gains Sign in without leaving the page", async () => {
+    let n = 0;
+    settings({ setup_list: () => setupList(++n > 1) });
+    await screen.findByText(S.setup.state.manual);
+    expect(screen.queryByRole("button", { name: S.setup.signIn("Codex CLI") })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: S.settings.recheck }));
+    expect(await screen.findByRole("button", { name: S.setup.signIn("Codex CLI") })).toBeTruthy();
+    expect(screen.getByText("/new/bin/codex")).toBeTruthy();
+    expect(screen.queryByText(S.setup.state.manual)).toBeNull();
+  });
+
+  it("on entering Providers, waits for Set up (the PATH refresh) before the checks, so a CLI in a new bin folder is found by all of them", async () => {
+    let refreshed = false;
+    let answer!: (v: unknown) => void;
+    const f = settings({
+      setup_list: () => new Promise((r) => { answer = (v) => { refreshed = true; r(v); }; }),
+      provider_list: () => (refreshed ? LIST : codexMissing()),
+      preflight: () => (refreshed ? preflight : { rows: [{ name: "codex", ok: false, detail: "", fix: "" }], start_enabled: false }),
+    });
+    await waitFor(() => expect(f.calls.some((c) => c.cmd === "setup_list")).toBe(true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(f.calls.filter((c) => ["provider_list", "preflight", "provider_accounts"].includes(c.cmd))).toEqual([]);
+    await act(async () => answer(setupList(true)));
+    expect(await screen.findByText("0.9.0")).toBeTruthy(); // the agent card's Codex version: found on the refreshed PATH
+    expect(screen.queryByText(C.loginState.not_installed)).toBeNull();
+  });
+
+  it("refreshes the PATH (setup_list) before the checks that depend on it", async () => {
+    const f = settings({ setup_list: () => setupList(false) });
+    await screen.findByText(S.setup.state.manual);
+    const from = f.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: S.settings.recheck }));
+    await waitFor(() => expect(f.calls.slice(from).map((c) => c.cmd)).toEqual(expect.arrayContaining(["setup_list", "preflight", "provider_list"])));
+    const order = f.calls.slice(from).map((c) => c.cmd).filter((c) => ["setup_list", "preflight", "provider_list"].includes(c));
+    expect(order[0]).toBe("setup_list");
   });
 });
 

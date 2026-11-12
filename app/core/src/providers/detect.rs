@@ -106,6 +106,18 @@ struct Range {
     text: &'static str,
 }
 
+impl Range {
+    fn holds(&self, mm: (u32, u32)) -> bool {
+        mm >= self.min && mm <= self.max
+    }
+}
+
+/// Whether `adapter` (an engine id) was tested with this (major, minor): the one decision detection, launch and Set up
+/// share. An adapter this build does not know is never tested.
+pub(crate) fn is_tested(adapter: &str, mm: (u32, u32)) -> bool {
+    METAS.iter().any(|m| m.engine.id() == adapter && m.tested.holds(mm))
+}
+
 struct Meta {
     engine: Engine,
     name: &'static str,
@@ -120,7 +132,7 @@ const METAS: [Meta; 2] = [
 ];
 
 /// The first `x.y` or `x.y.z` token in a `--version` line ("2.1.296 (Claude Code)", "codex-cli 0.166.0").
-fn version_of(text: &str) -> Option<(String, (u32, u32))> {
+pub(crate) fn version_of(text: &str) -> Option<(String, (u32, u32))> {
     for tok in text.split_whitespace() {
         let parts: Vec<&str> = tok.split('.').collect();
         if parts.len() >= 2 && parts.len() <= 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit())) {
@@ -246,7 +258,7 @@ fn describe(m: &Meta, p: &dyn Probe) -> ProviderInfo {
     let ver = p.run(&path, &["--version"]).filter(|o| o.code == Some(0)).and_then(|o| version_of(&o.stdout));
     let tested = match &ver {
         None => Tested::Unknown,
-        Some((_, mm)) if *mm >= m.tested.min && *mm <= m.tested.max => Tested::Tested,
+        Some((_, mm)) if m.tested.holds(*mm) => Tested::Tested,
         Some(_) => Tested::Untested,
     };
     let (state, detail) = login_state(m.engine, p.run(&path, m.status));

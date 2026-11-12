@@ -10,7 +10,7 @@ import "./terminal.css";
 
 const TerminalView = lazy(() => import("./TerminalView"));
 
-export type Kind = "shell" | "agent";
+export type Kind = "shell" | "agent" | "sign_in";
 /** `kind` defaults to a plain user shell; an agent terminal is its own tab even in the same folder as a shell. */
 export type Place = { cwd: string; label: string; kind?: Kind };
 
@@ -18,8 +18,24 @@ const HERE = "vajra:terminal-here";
 /** "Terminal here": open (or focus) a terminal in this project folder or worktree. */
 export const openTerminalHere = (place: Place) => window.dispatchEvent(new CustomEvent<Place>(HERE, { detail: place }));
 
+const SIGN_IN = "vajra:setup-sign-in";
+/** A CLI's own sign-in (ADR-17): `id` is a catalog harness id; the core builds the command. */
+export type SignInRequest = { id: string; label: string };
+/** "Sign in": open (or focus) a tab running that harness's own login. Never saved in the layout. */
+export const openSignIn = (r: SignInRequest) => window.dispatchEvent(new CustomEvent<SignInRequest>(SIGN_IN, { detail: r }));
+
+const SIGN_IN_ENDED = "vajra:setup-sign-in-ended";
+/** A sign-in tab's CLI exited (`id`: its harness id). Published by the dock; detection runs again after it (ADR-17 rule 6). */
+export const signInEnded = (id: string) => window.dispatchEvent(new CustomEvent<string>(SIGN_IN_ENDED, { detail: id }));
+/** Subscribe to `signInEnded`; returns the unsubscribe. */
+export function onSignInEnded(fn: (id: string) => void): () => void {
+  const h = (e: Event) => fn((e as CustomEvent<string>).detail);
+  window.addEventListener(SIGN_IN_ENDED, h);
+  return () => window.removeEventListener(SIGN_IN_ENDED, h);
+}
+
 /** `live` is false for a tab restored from the saved layout: it has no view and no shell until it is first shown. */
-type Tab = { key: number; cwd: string; label: string; kind: Kind; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
+type Tab = { key: number; cwd: string; label: string; kind: Kind; /** A sign-in tab's harness id. */ signIn?: string; live: boolean; attachId?: number; gen: number; state: ViewState | { status: "starting" }; /** New output arrived while this tab was not the one in view. */ unread?: boolean };
 let seq = 0;
 
 // ---- durable layout --------------------------------------------------------------------------------------------------
@@ -47,8 +63,10 @@ export function readLayout(): { tabs: Saved[]; cur: number } {
 }
 function writeLayout(tabs: Tab[], cur: number | null) {
   try {
-    const i = tabs.findIndex((t) => t.key === cur);
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: Math.max(i, 0), tabs: tabs.map((t) => ({ cwd: t.cwd, label: t.label, kind: t.kind })) }));
+    // A sign-in tab is never saved: a restart must not run a sign-in again.
+    const kept = tabs.filter((t) => t.kind !== "sign_in");
+    const i = kept.findIndex((t) => t.key === cur);
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ v: 1, cur: Math.max(i, 0), tabs: kept.map((t) => ({ cwd: t.cwd, label: t.label, kind: t.kind })) }));
   } catch {
     // storage full or blocked: the dock works, it just forgets the layout
   }
@@ -92,13 +110,13 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
     if (el instanceof HTMLElement && el.isConnected) el.focus();
   }, []);
   /** Open a tab and select it, or at the cap say so and change nothing (no selection of a tab that does not exist). */
-  const add = useCallback((p: Place, attachId?: number): number | null => {
+  const add = useCallback((p: Place, attachId?: number, signIn?: string): number | null => {
     if (tabsRef.current.length >= MAX_TABS) {
       setNote(S.terminal.errors.too_many_terminals);
       return null;
     }
     const key = ++seq;
-    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", live: true, attachId, gen: 0, state: { status: "starting" } };
+    const tab: Tab = { key, cwd: p.cwd, label: p.label, kind: p.kind ?? "shell", signIn, live: true, attachId, gen: 0, state: { status: "starting" } };
     tabsRef.current = [...tabsRef.current, tab]; // so a second add in the same tick sees the cap too
     setTabs((t) => [...t, tab]);
     setCur(key);
@@ -117,7 +135,14 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         const next = tabsRef.current.map((t) => ({ ...t }));
         let first: number | null = null;
         for (const i of r.terminals) {
-          // The core does not know kinds: prefer the plain shell tab, so a returning shell never lands on an agent tab.
+          // A live sign-in comes back as a sign-in tab (never saved, still reports its end), not a shell in its private folder.
+          const si = i.sign_in;
+          if (si && typeof si.id === "string" && typeof si.name === "string" && si.id) {
+            next.push({ key: ++seq, cwd: i.cwd, label: S.setup.signInTab(si.name.slice(0, 200)), kind: "sign_in", signIn: si.id, live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
+            first ??= next[next.length - 1].key;
+            continue;
+          }
+          // The core knows no kinds beyond sign-in: prefer the plain shell tab, so a returning shell never lands on an agent tab.
           const t = next.find((n) => !n.live && n.cwd === i.cwd && n.kind === "shell") ?? next.find((n) => !n.live && n.cwd === i.cwd);
           if (t) Object.assign(t, { live: true, attachId: i.id });
           else next.push({ key: ++seq, cwd: i.cwd, label: labelOf(i), kind: "shell", live: true, attachId: i.id, gen: 0, state: { status: "starting" } });
@@ -191,11 +216,20 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
       else add(p);
       show();
     };
+    const onSignIn = (e: Event) => {
+      const r = (e as CustomEvent<SignInRequest>).detail;
+      const have = tabsRef.current.find((t) => t.kind === "sign_in" && t.signIn === r.id && t.state.status !== "ended");
+      if (have) setCur(have.key);
+      else add({ cwd: "", label: r.label, kind: "sign_in" }, undefined, r.id);
+      show();
+    };
     window.addEventListener("keydown", onKey, true); // capture: xterm stops the key before the window sees it otherwise
     window.addEventListener(HERE, onHere);
+    window.addEventListener(SIGN_IN, onSignIn);
     return () => {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener(HERE, onHere);
+      window.removeEventListener(SIGN_IN, onSignIn);
     };
   }, [add, hide, show]);
 
@@ -209,8 +243,12 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
   const patch = (key: number, f: (t: Tab) => Tab) => setTabs((all) => all.map((t) => (t.key === key ? f(t) : t)));
   const onState = (key: number) => (s: ViewState) => {
     if (s.status === "busy") return setNote(S.terminal.busy);
+    const tab = tabsRef.current.find((t) => t.key === key);
     patch(key, (t) => ({ ...t, state: s }));
-    if (s.status === "ended") setNote(S.terminal.announceEnded(tabsRef.current.find((t) => t.key === key)?.label ?? S.terminal.region));
+    if (s.status === "ended") {
+      setNote(S.terminal.announceEnded(tab?.label ?? S.terminal.region));
+      if (tab?.kind === "sign_in" && tab.signIn && tab.state.status !== "ended") signInEnded(tab.signIn);
+    }
   };
   // Output in a pane nobody is looking at marks its tab until the tab is shown. (Only the mark: the output itself is
   // kept by the core, newest 256 KiB, and arrives when the pane is shown.)
@@ -235,6 +273,8 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
 
   if (!open && !tabs.length) return null;
   const active = tabs.find((t) => t.key === cur);
+  // "+" opens beside the active tab, except a sign-in tab: its private folder is not a place a shell may open in.
+  const next: Place | undefined = active && active.kind !== "sign_in" ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace;
   return (
     <section className="v-term" aria-label={S.terminal.region} aria-describedby="v-term-hint" hidden={!open}>
       <p id="v-term-hint" className="v-term__sr">{S.terminal.leaveHint}</p>
@@ -251,7 +291,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
             );
           })}
         </div>
-        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!active && !defaultPlace} onClick={() => { add(active ? { cwd: active.cwd, label: base(active.cwd) } : defaultPlace!); setFocusToken((n) => n + 1); }}>+</button>
+        <button className="v-term__add" aria-label={S.terminal.newTab} disabled={!next} onClick={() => { if (next) add(next); setFocusToken((n) => n + 1); }}>+</button>
         <button className="v-term__hide" aria-label={S.terminal.hide} aria-keyshortcuts="Control+Backquote" onClick={hide}>⌄</button>
       </div>
       <LifeLine life={life} refresh={refreshLife} />
@@ -265,7 +305,7 @@ export function TerminalDock({ defaultPlace }: { defaultPlace?: Place }) {
         )}
         <Suspense fallback={<span className="v-term__muted">{S.states.loading}</span>}>
           {tabs.filter((t) => t.live).map((t) => (
-            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} onActivity={onActivity(t.key)} />
+            <TerminalView key={`${t.key}-${t.gen}`} cwd={t.cwd} signIn={t.signIn} attachId={t.attachId} active={open && t.key === cur} focusToken={focusToken} onState={onState(t.key)} onActivity={onActivity(t.key)} />
           ))}
         </Suspense>
         {active?.state.status === "starting" && <p className="v-term__badge v-term__muted">{S.terminal.starting}</p>}
