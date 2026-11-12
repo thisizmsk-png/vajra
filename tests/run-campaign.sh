@@ -418,6 +418,26 @@ C unlock lk >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock without --if-stal
 C unlock "../x" --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock refuses an invalid slug" $?
 C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock with no lock held is a no-op success" $?
 
+# interleave: unlocker A deletes a dead owner's lock and pauses (still inside reclamation); a writer then takes the
+# lock; unlocker B, which saw the same dead owner, must not delete the writer's lock.
+SLOW_UNLOCK="$WORK/slow-unlock.sh"
+awk '{print} /^  release_lock \|\| true/ {print "  sleep 3"}' "$SCRIPT" > "$SLOW_UNLOCK"
+grep -q '^  sleep 3' "$SLOW_UNLOCK"; check "race: the slow-unlock copy was built" $?
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+"$BASH_BIN" "$SLOW_UNLOCK" unlock lk --if-stale >/dev/null 2>&1 & UA=$!
+i=0; while [ -e "$LD/.lock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ ! -e "$LD/.lock" ]; check "race: unlocker A removed the dead owner's lock" $?
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: a writer took the released lock" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "race: unlocker B refuses (the lock is a live writer's)" $?
+wait "$UA" 2>/dev/null
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: the writer's lock and owner record are intact" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+[ ! -e "$LD/.lock.reclaim" ]; check "race: no reclaim mutex is left behind" $?
+mkdir "$LD/.lock.reclaim"; mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "race: a held reclaim mutex blocks removal" $?
+rmdir "$LD/.lock.reclaim"; C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "race: removal works once the mutex is free" $?
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

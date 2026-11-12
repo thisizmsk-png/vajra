@@ -157,6 +157,16 @@ cmd_unlock() {
   [ "$(sanitize_slug "$slug")" = "$slug" ] || die "invalid campaign slug: $slug"
   DIR="${ROOT}/${slug}"; [ -d "$DIR" ] || die "campaign not found: $slug"
   LOCK="$DIR/.lock"
+  # Reclaimers take turns: the owner check and the delete both happen inside this mutex, so a second unlocker
+  # re-reads the lock only after the first has finished, and never deletes a lock a writer took in between. A
+  # writer cannot take .lock while the checked directory exists, so that directory is the one deleted.
+  RECLAIM="$DIR/.lock.reclaim"
+  local i=0
+  while ! mkdir "$RECLAIM" 2>/dev/null; do
+    i=$((i+1)); [ "$i" -ge 100 ] && die "another unlock is running or died holding $RECLAIM; not removed"
+    sleep 0.1
+  done
+  trap 'rmdir "$RECLAIM" 2>/dev/null' EXIT
   [ -e "$LOCK" ] || { echo "no lock held for $slug"; LOCK=""; return 0; }
   { [ -d "$LOCK" ] && [ ! -L "$LOCK" ]; } || die "lock is not a plain directory ($LOCK); not removed"
   [ -f "$LOCK/owner.json" ] && [ ! -L "$LOCK/owner.json" ] || die "lock has no owner record ($LOCK); not removed (remove it yourself if no run is active)"
