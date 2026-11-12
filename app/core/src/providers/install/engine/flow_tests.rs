@@ -395,6 +395,115 @@ fn a_crash_after_the_swap_is_recovered_by_the_next_consented_run() {
     assert!(Place::open(&w.home, &w.data, place::uid()).unwrap().journal().is_none());
 }
 
+/// bhishma M1: the old copy's rename after the swap fails. The run rolls back through the journal: the previous copy
+/// comes back byte for byte, the new copy is gone, nothing is marked Broken and the installer never ran.
+#[test]
+fn a_failed_rename_after_the_swap_restores_the_previous_copy() {
+    let mut w = World::new("m1-fail", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let before = std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap();
+    let ran = w.ran();
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    place::FAULT_AFTER_SWAP.with(|f| f.set(true));
+    let d = w.run(&p);
+    assert_eq!(d.report.outcome, Outcome::Failed, "{:?}", d.report);
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), before, "the previous copy is back");
+    assert_eq!(w.marks().any(ID), None);
+    assert_eq!(w.ran(), ran, "the installer did not run");
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    assert!(place.journal().is_none());
+    assert!(place.strays().is_empty(), "no folder left behind: {:?}", place.strays());
+    assert!(matches!(place.found(), Found::Ours { .. }), "still the app's own copy");
+}
+
+/// bhishma M1: a crash between the swap and the rename (the journal names the old copy's new name, but it still has
+/// the staging name). The next consented run finds it there by identity, recovers it, and installs.
+#[test]
+fn a_crash_between_the_swap_and_the_rename_is_recovered() {
+    let mut w = World::new("m1-crash", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let old = std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap();
+    w.bundle(GOOD, "0.6.3");
+    let p = w.plan();
+    let place = Place::open(&w.home, &w.data, place::uid()).unwrap();
+    let staged = place.stage(&p.engine, &w.pin.sha256).unwrap();
+    place::FAULT_AFTER_SWAP.with(|f| f.set(true));
+    assert!(place.swap_in(&staged, &p.found).is_err(), "stopped between the two renames");
+    assert!(place.journal().is_some(), "the journal stays for recovery");
+    assert_ne!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), old, "the new copy is in place");
+    // Recovery alone puts the previous copy back from under the staging name.
+    assert!(place.recover().unwrap());
+    assert_eq!(std::fs::read_to_string(w.skill().join("scripts/vajra-campaign.sh")).unwrap(), old);
+    assert!(place.journal().is_none());
+    assert!(place.strays().is_empty(), "{:?}", place.strays());
+    // And the next consented run installs cleanly.
+    let p = w.plan();
+    assert_eq!(w.run(&p).report.outcome, Outcome::Installed);
+    assert_eq!(w.marks().any(ID), None);
+}
+
+/// bhishma L2: an existing key that the installer replaces (a new file, or the same file rewritten) marks Broken.
+#[test]
+fn a_key_the_installer_replaced_marks_the_engine_broken() {
+    let w = World::new("l2", "#!/bin/bash\nset -e\nV=\"$HOME/.claude/vajra\"\nrm -f \"$V/.hmac-key\"\nprintf '%064d\\n' 1 > \"$V/.hmac-key\"\nchmod 600 \"$V/.hmac-key\"\necho signed > \"$V/manifest.sig\"\n", "0.6.2");
+    let v = w.vajra();
+    std::fs::create_dir_all(&v).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(v.join(".hmac-key"), format!("{}\n", "a".repeat(64))).unwrap();
+    std::fs::set_permissions(v.join(".hmac-key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let d = w.run(&w.plan());
+    assert_eq!(d.report.outcome, Outcome::Broken, "{:?}", d.report);
+    assert_eq!(d.report.reason, Some("key_rewritten"));
+    assert_eq!(w.marks().any(ID).as_deref(), Some("key_rewritten"));
+}
+
+/// bhishma L1: a previous copy whose files AND manifest were both edited (so it matches its own manifest) is kept as
+/// a backup, because its manifest is not the one the app recorded.
+#[test]
+fn an_edited_copy_that_matches_its_own_edited_manifest_is_still_backed_up() {
+    let mut w = World::new("l1", GOOD, "0.6.2");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let f = w.skill().join("scripts/vajra-campaign.sh");
+    std::fs::write(&f, "my edit").unwrap();
+    let m = w.skill().join("manifest.json");
+    let mut man: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
+    let edited = sha256_hex(b"my edit");
+    fn set(v: &mut serde_json::Value, path: &str, sha: &str) -> bool {
+        match v {
+            serde_json::Value::Object(o) => {
+                if o.get("path").and_then(|p| p.as_str()) == Some(path) {
+                    for k in ["sha256", "hash"] {
+                        if o.contains_key(k) {
+                            o.insert(k.into(), serde_json::Value::String(sha.into()));
+                            return true;
+                        }
+                    }
+                }
+                if let Some(e) = o.get_mut(path) {
+                    if e.is_string() {
+                        *e = serde_json::Value::String(sha.into());
+                        return true;
+                    }
+                }
+                o.values_mut().any(|x| set(x, path, sha))
+            }
+            serde_json::Value::Array(a) => a.iter_mut().any(|x| set(x, path, sha)),
+            _ => false,
+        }
+    }
+    assert!(set(&mut man, "scripts/vajra-campaign.sh", &edited), "manifest shape: {man}");
+    std::fs::write(&m, serde_json::to_vec(&man).unwrap()).unwrap();
+    let root = super::super::fsat::Dir::open_path(&w.skill(), place::uid()).unwrap();
+    assert!(place::unmodified(&root), "the copy matches its own edited manifest");
+    w.bundle(GOOD, "0.6.3");
+    let d = w.run(&w.plan());
+    assert_eq!(d.report.outcome, Outcome::Installed, "{:?}", d.report);
+    let backup = d.backup.expect("kept, since its manifest is not the one the app installed");
+    assert_eq!(std::fs::read_to_string(w.home.join(".claude/.vajra-install").join(backup).join("scripts/vajra-campaign.sh")).unwrap(), "my edit");
+}
+
 #[test]
 fn a_hanging_installer_times_out_and_is_rolled_back() {
     let w = World::new("hang", "#!/bin/bash\nsleep 60\n", "0.6.2");

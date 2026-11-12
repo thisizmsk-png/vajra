@@ -40,6 +40,10 @@ pub struct Record {
     pub tgz_sha256: String,
     pub dev: u64,
     pub ino: u64,
+    /// The sha256 of the installed copy's `manifest.json`, as the app wrote it (bhishma L1). A previous copy is deleted
+    /// only when its manifest still has this hash and every file matches it; an older record without it keeps a backup.
+    #[serde(default)]
+    pub manifest_sha256: Option<String>,
 }
 
 /// What is at `~/.claude/skills/vajra` now.
@@ -236,8 +240,14 @@ impl Place {
                 let prev = format!("previous-{}", random_hex());
                 let j = Journal { phase: Phase::Staged, previous: Some((prev.clone(), *dev, *ino)), staged: (staged.to_string(), sd, si) };
                 self.write_data(JOURNAL, &j)?;
-                // After the swap the old copy has the staging name; then it gets its own name.
+                // After the swap the old copy has the staging name; then it gets its own name. If anything stops
+                // between the two (an error or a crash), the journal stays and `roll_back` finds the old copy under the
+                // staging name by its identity (bhishma M1). The caller rolls back through the journal on an error.
                 self.work.rename(staged, &self.skills, SKILL, Rename::Swap).map_err(|_| Unsafe::Io)?;
+                #[cfg(test)]
+                if FAULT_AFTER_SWAP.with(|f| f.replace(false)) {
+                    return Err(Unsafe::Io);
+                }
                 self.work.rename(staged, &self.work, &prev, Rename::Exclusive).map_err(|_| Unsafe::Io)?;
                 let j = Journal { phase: Phase::Swapped, ..j };
                 self.write_data(JOURNAL, &j)?;
@@ -248,21 +258,40 @@ impl Place {
     }
 
     /// Undo a swap named by `j`: the new copy goes back to the work area and is removed, and the previous copy (if the
-    /// journal names one with that identity) comes back as `vajra`. Only folders the journal names are touched.
+    /// journal names one with that identity) comes back as `vajra`. Only folders the journal names are touched, and
+    /// only when their identity is the journal's. Three states are possible (bhishma M1):
+    /// - nothing was swapped: the staging name still holds the new copy, so only it is removed;
+    /// - swapped, but the old copy still has the staging name (an error or crash between the two renames);
+    /// - swapped and the old copy renamed to its `previous-*` name.
     pub fn roll_back(&self, j: &Journal) -> Result<(), Unsafe> {
         let (staged, sd, si) = &j.staged;
+        let id_of = |d: &Dir, n: &str| -> Result<Option<(u64, u64)>, Unsafe> { Ok(d.stat_at(n).map_err(|_| Unsafe::Io)?.map(|s| (s.dev, s.ino))) };
+        let at_staged = id_of(&self.work, staged)?;
+        if at_staged == Some((*sd, *si)) {
+            // Never swapped in: the target was not touched.
+            self.work.remove_tree(staged).map_err(|_| Unsafe::Io)?;
+            self.clear_journal();
+            return Ok(());
+        }
         let at_target = self.skills.stat_at(SKILL).map_err(|_| Unsafe::Io)?;
         match &j.previous {
             Some((prev, pd, pi)) => {
-                let prev_ok = self.work.stat_at(prev).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi));
-                if !prev_ok {
+                // The old copy, under its own name or still under the staging name.
+                let old = if id_of(&self.work, prev)? == Some((*pd, *pi)) {
+                    prev.as_str()
+                } else if at_staged == Some((*pd, *pi)) {
+                    staged.as_str()
+                } else {
                     return Err(Unsafe::TargetChanged);
-                }
+                };
                 if at_target.is_some_and(|s| (s.dev, s.ino) == (*sd, *si)) {
-                    self.work.rename(prev, &self.skills, SKILL, Rename::Swap).map_err(|_| Unsafe::Io)?;
-                    self.work.remove_tree(prev).map_err(|_| Unsafe::Io)?;
+                    self.work.rename(old, &self.skills, SKILL, Rename::Swap).map_err(|_| Unsafe::Io)?;
+                    // `old` now holds the new copy: remove it only if it is the journal's staged copy.
+                    if id_of(&self.work, old)? == Some((*sd, *si)) {
+                        self.work.remove_tree(old).map_err(|_| Unsafe::Io)?;
+                    }
                 } else if at_target.is_none() {
-                    self.work.rename(prev, &self.skills, SKILL, Rename::Exclusive).map_err(|_| Unsafe::Io)?;
+                    self.work.rename(old, &self.skills, SKILL, Rename::Exclusive).map_err(|_| Unsafe::Io)?;
                 } else {
                     return Err(Unsafe::TargetChanged);
                 }
@@ -288,12 +317,18 @@ impl Place {
     /// byte its own manifest (plus the marker); otherwise it is kept as `backup-<UTC>` and its name returned (C5).
     pub fn commit(&self, j: &Journal, version: &str, tgz_sha256: &str) -> Result<Option<String>, Unsafe> {
         let (dev, ino) = self.identity(&self.skills, SKILL)?;
-        self.write_data(RECORD, &Record { version: version.to_string(), tgz_sha256: tgz_sha256.to_string(), dev, ino })?;
+        // The hash of the manifest the app just installed, and the one it recorded for the previous copy.
+        let old_manifest = self.record().and_then(|r| r.manifest_sha256);
+        let manifest_sha256 = self.skills.open_dir(SKILL).ok().and_then(|d| d.read(super::pack::MANIFEST, 16 << 20).ok()).map(|b| sha256_hex(&b));
+        self.write_data(RECORD, &Record { version: version.to_string(), tgz_sha256: tgz_sha256.to_string(), dev, ino, manifest_sha256 })?;
         let mut kept = None;
         if let Some((prev, pd, pi)) = &j.previous {
             if self.work.stat_at(prev).map_err(|_| Unsafe::Io)?.is_some_and(|s| (s.dev, s.ino) == (*pd, *pi)) {
                 let d = self.work.open_dir(prev).map_err(|_| Unsafe::Io)?;
-                if unmodified(&d) {
+                // Deleted only if it is byte for byte what the app installed: its manifest is the one the app recorded
+                // and every file matches that manifest. Otherwise it is kept as a backup (bhishma L1).
+                let own_manifest = d.read(super::pack::MANIFEST, 16 << 20).ok().map(|b| sha256_hex(&b));
+                if old_manifest.is_some() && own_manifest == old_manifest && unmodified(&d) {
                     self.work.remove_tree(prev).map_err(|_| Unsafe::Io)?;
                 } else {
                     let name = format!("backup-{}", utc_stamp());
@@ -320,6 +355,12 @@ impl Place {
         let named: Vec<String> = self.journal().map(|j| j.previous.into_iter().map(|p| p.0).chain([j.staged.0]).collect()).unwrap_or_default();
         self.work.list().unwrap_or_default().into_iter().filter(|n| !n.starts_with("backup-") && n != "lock" && !named.contains(n)).collect()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test only: make the next `swap_in` stop right after the swap, before the old copy is renamed (bhishma M1).
+    pub static FAULT_AFTER_SWAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The plan's read-only view of the same folders: any that don't exist yet are None, and nothing is created.

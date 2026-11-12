@@ -186,6 +186,12 @@ fn state_safe(home: &Path, uid: u32) -> Result<(), &'static str> {
     }
 }
 
+/// The key file's identity and modification time, from `lstat` only (the key is never opened or read).
+fn key_id(home: &Path) -> Option<(u64, u64, i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(home.join(".claude/vajra").join(KEY)).ok().map(|m| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec()))
+}
+
 /// After the run: the key is a single regular file of the user's, mode 600.
 fn key_safe(home: &Path, uid: u32) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -354,6 +360,7 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
         Err(e) => return fail(e.code()),
     };
     let sig = sig_state(m.home);
+    let key_before = key_id(m.home);
     let staged = match place.stage(&prep.engine, &m.pin.sha256) {
         Ok(s) => s,
         Err(e) => return fail(e.code()),
@@ -361,8 +368,16 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     let journal = match place.swap_in(&staged, &prep.found) {
         Ok(j) => j,
         Err(e) => {
-            let _ = place.work.remove_tree(&staged);
-            place.clear_journal();
+            // bhishma M1: never delete by the staging name, which may hold the old copy after the swap. Roll back
+            // through the journal; if that cannot be confirmed, the engine is Broken and the journal stays for recovery.
+            let undone = match place.journal() {
+                Some(j) => place.roll_back(&j).is_ok(),
+                None => place.work.stat_at(&staged).ok().flatten().is_none() || place.work.remove_tree(&staged).is_ok(),
+            };
+            if !undone {
+                let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "rollback_failed");
+                return done(Report::new(Outcome::Broken, Some("rollback_failed"), None), None);
+            }
             return fail(e.code());
         }
     };
@@ -413,6 +428,11 @@ pub fn run(m: &Machine, ctx: &Ctx, prep: &Prepared, check: &dyn Fn(&Path) -> boo
     if !key_safe(m.home, m.uid) {
         let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "key_unsafe");
         return done(Report::new(Outcome::Broken, Some("key_unsafe"), exit), None);
+    }
+    // bhishma L2: a key that existed before must be the same file, unchanged, after (the key is never opened).
+    if key_before.is_some() && key_id(m.home) != key_before {
+        let _ = ctx.marks.set(ID, &m.home.join(".claude/skills").join(SKILL), None, "key_rewritten");
+        return done(Report::new(Outcome::Broken, Some("key_rewritten"), exit), None);
     }
     match place.commit(&journal, &prep.engine.version, &m.pin.sha256) {
         Ok(backup) => {
