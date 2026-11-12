@@ -323,6 +323,7 @@ export const S = {
     maxInFlight: "Workers at once (1 to 16)",
     advanced: "Advanced",
     startButton: "Start run",
+    startNeedsChecks: (n: number) => n === 1 ? "A run cannot start until the failing check below passes." : "A run cannot start until the failing checks below pass.",
     lede: "The workers build in their own worktrees and report back. This app never pushes.",
     checksSummary: (n: number, m: number) => `${n} of ${m} checks pass`,
     checksAll: "All checks",
