@@ -803,7 +803,68 @@ fn the_record_is_told_the_run_ended_only_once_the_protocol_finalizes() {
     let _ = r.p.card();
     assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 0, "a planned run with no ticket is going on");
     assert_eq!(r.p.stop(), RunStatus::Stopped);
-    assert!(rec.ended.load(std::sync::atomic::Ordering::SeqCst) >= 1, "a finalized run's record is told");
+    r.p.flush_record();
+    assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "a finalized run's record is told, once");
+}
+
+/// codex on #190: a later round's changed definitions, and the retry of a task its last report left in progress,
+/// reach the task graph before the round's claims; an unchanged task is not re-sent.
+#[test]
+fn a_replanned_round_redefines_changed_tasks_and_fails_their_last_attempt_before_its_claims() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t2".to_string(), json!({"x": 1})), ("t3".to_string(), json!({"x": 1}))]) });
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    let before = events(&rec).len();
+    // t2 moves from frontend to backend; t3 gains a dependency on t1.
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![task("t2", "backend", &["web/"], &["t1"], &[]), task("t3", "backend", &["docs/"], &["t1"], &[])], ..PlanInput::default() }).unwrap();
+    let t2 = r.dispatch("t2");
+    r.w.start(&t2);
+    let _ = r.p.await_any(std::slice::from_ref(&t2), Duration::from_millis(10));
+    let ev = events(&rec)[before..].to_vec();
+    let Some(Event::Define(defs)) = ev.first() else { panic!("the definitions come first: {ev:?}") };
+    let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
+    assert_eq!(ids, ["r1.t2", "r1.t3"], "only the changed tasks, in topo order");
+    assert_eq!(defs[0].agent, "bhima", "t2's new role's agent");
+    assert_eq!(defs[0].branch, "vajra/r1/task-t2-r2", "the round's branch");
+    assert_eq!(defs[1].deps, ["r1.t1"]);
+    let fails: Vec<&String> = ev.iter().filter_map(|e| if let Event::Report { task, status: TaskStatus::Failed, .. } = e { Some(task) } else { None }).collect();
+    assert_eq!(fails, ["r1.t2", "r1.t3"], "each reworked task reported done is failed, so the next claim is a retry");
+    let claim = ev.iter().position(|e| matches!(e, Event::Claim { task, .. } if task == "r1.t2")).expect("t2 is claimed");
+    assert!(claim > ev.iter().position(|e| matches!(e, Event::Report { task, status: TaskStatus::Failed, .. } if task == "r1.t2")).unwrap(), "the failure is recorded before the claim: {ev:?}");
+    assert!(matches!(&ev[claim], Event::Claim { agent, .. } if agent == "bhima"));
+}
+
+/// codex on #190: a stop or a timeout with tickets still going records each ticket's terminal outcome exactly once,
+/// with no lead call after the end.
+#[test]
+fn a_stop_or_timeout_with_live_tickets_records_one_terminal_report_per_ticket() {
+    for stop in [true, false] {
+        let (r, rec) = recorded();
+        r.p.plan_tasks(plan1()).unwrap();
+        let t1 = r.dispatch("t1");
+        let t3 = r.dispatch("t3");
+        r.w.start(&t1);
+        if stop {
+            assert_eq!(r.p.stop(), RunStatus::Stopped);
+        } else {
+            r.clock.advance(Limits::default().run_timeout.as_secs() + 1);
+            r.p.tick();
+            assert_eq!(r.status(), Some(RunStatus::TimedOut));
+        }
+        r.p.flush_record();
+        let ev = events(&rec);
+        for (tk, task) in [(&t1, "r1.t1"), (&t3, "r1.t3")] {
+            let n = ev.iter().filter(|e| matches!(e, Event::Report { task: t, .. } if t == task)).count();
+            assert_eq!(n, 1, "{tk}: exactly one terminal report ({}): {ev:?}", if stop { "stop" } else { "timeout" });
+            assert!(ev.iter().any(|e| matches!(e, Event::Claim { task: t, .. } if t == task)), "{tk} is claimed before its report: {ev:?}");
+        }
+        assert_eq!(rec.ended.load(std::sync::atomic::Ordering::SeqCst), 1, "the end is recorded once, after the reports");
+        r.p.flush_record();
+        assert_eq!(events(&rec).len(), ev.len(), "a second flush records nothing new");
+    }
 }
 
 #[test]

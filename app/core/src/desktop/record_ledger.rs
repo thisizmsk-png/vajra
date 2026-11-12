@@ -149,7 +149,10 @@ impl Ledger {
             }
             Request::TasksAdd { id, title, owner, deps, files, acceptance, .. } => {
                 // The bridge refused anything but non-blank idents and one-line text within the script's caps, so the
-                // script stores these as sent.
+                // script stores these as sent. A done task keeps its definition ("exists").
+                if self.tasks.get(id).is_some_and(|t| t.status == "done") {
+                    return;
+                }
                 self.task(id).def = serde_json::json!({"title": title, "owner_agent": owner, "deps": deps, "files": files, "acceptance": acceptance});
             }
             Request::TasksClaim { id, worker, .. } => {

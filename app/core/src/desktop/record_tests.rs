@@ -380,6 +380,26 @@ fn a_timed_out_write_is_never_retried_and_a_broken_signature_is_on_the_card() {
     assert!(r.card().signature_broken);
 }
 
+/// codex on #190: the first attempt exits with an error, the retry times out: verify runs, and its failure is on the card.
+#[test]
+fn a_retry_that_times_out_is_verified_too() {
+    let t = Tmp::new();
+    let n = t.0.join("attempts");
+    t.campaign_script(&format!(
+        "case \"$1\" in progress) if [ -e '{0}' ]; then sleep 30; else : > '{0}'; echo 'deliver: busy' >&2; exit 1; fi ;; verify) echo 'deliver: signature INVALID' >&2; exit 3 ;; esac",
+        n.display()
+    ));
+    let mut b = t.bridge();
+    b.timeout = SHORT;
+    let r = CoreRecord::new(t.cfg(false), b, mem()).unwrap();
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    let kinds: Vec<String> = t.calls().iter().map(|c| c[2].clone()).collect();
+    assert!(kinds.iter().filter(|k| *k == "progress").count() <= 2, "no third attempt: {kinds:?}");
+    assert_eq!(kinds.last().map(String::as_str), Some("verify"), "verify after the timed-out retry: {kinds:?}");
+    assert!(r.card().signature_broken, "the broken signature is on the card");
+}
+
 // ---------------------------------------------------------------- idempotent create
 
 fn show_json(goal: &str, features: &[(&str, &str, bool)], status: &str, sig: bool) -> String {
@@ -739,6 +759,59 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> String {
     let pad = |b: u8| k.iter().map(|x| x ^ b).collect::<Vec<u8>>();
     let inner = crate::control::sha256::digest(&[pad(0x36), msg.to_vec()].concat());
     crate::control::sha256::hex(&crate::control::sha256::digest(&[pad(0x5c), inner.to_vec()].concat()))
+}
+
+/// codex on #190, with the real scripts: round 2 moves t1 to another agent and gives t2 a new dependency. The events the
+/// protocol sends (`Define`, `report failed`, then the new claim) are taken by the engine, and the record still verifies.
+#[test]
+fn the_real_scripts_take_a_replanned_role_and_dependency_and_the_record_verifies() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    let t = Tmp::new();
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let mut b = Bridge::new(scripts.canonicalize().unwrap()).with_home(t.0.join("home"));
+    let key = t.0.join("home/.claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(t.0.join("home/.claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu", "nakula"] {
+        std::fs::write(t.0.join("home/.claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
+    b.timeout = RECORD_TIMEOUT;
+    let store = || {
+        super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, t.0.join("home/.claude/vajra/campaigns"), key.clone(), b.clone()).unwrap()
+    };
+    let r = CoreRecord::new(t.cfg(false), b.clone(), Arc::new(store())).unwrap();
+    r.plan(&plan()).unwrap();
+    let (t1, t2) = (format!("{RUN}.t1"), format!("{RUN}.t2"));
+    // Round 1: t1 by bhima reports done; the round's checks fail.
+    r.send(Event::Claim { task: t1.clone(), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    r.send(Event::Report { task: t1.clone(), status: TaskStatus::Done, summary: "done".into() });
+    // Round 2, as `record_replan` sends it: t1 moves to nakula; t2 now depends on nothing.
+    let p = plan();
+    let mut d1 = p.tasks[0].clone();
+    d1.agent = "nakula".into();
+    d1.branch = format!("vajra/{RUN}/task-t1-r2");
+    let mut d2 = p.tasks[1].clone();
+    d2.deps = vec![];
+    d2.branch = format!("vajra/{RUN}/task-t2-r2");
+    r.send(Event::Define(vec![d1, d2]));
+    r.send(Event::Report { task: t1.clone(), status: TaskStatus::Failed, summary: "round 1's checks failed; re-planned for round 2".into() });
+    r.send(Event::Claim { task: t1.clone(), agent: "nakula".into(), worktree: Some(PathBuf::from("/wt/two")) });
+    r.send(Event::Claim { task: t2.clone(), agent: "abhimanyu".into(), worktree: Some(PathBuf::from("/wt/three")) });
+    r.flush();
+    assert!(r.card().notes.is_empty(), "every write was taken: {:?}", r.card().notes);
+    let back = store().read_back(SLUG).unwrap();
+    let task = |id: &str| back.tasks["tasks"].as_array().unwrap().iter().find(|x| x["id"] == id).unwrap().clone();
+    let j = |v: Value| v;
+    assert_eq!((task(&t1)["claimed_by"].clone(), task(&t1)["status"].clone(), task(&t1)["attempts"].clone()), (j("nakula".into()), j("in_progress".into()), j(2.into())));
+    assert_eq!(task(&t1)["owner_agent"], "nakula");
+    assert_eq!(task(&t2)["deps"], serde_json::json!([]));
+    assert_eq!(task(&t2)["claimed_by"], "abhimanyu", "runnable once its dependency is gone");
+    r.verify_record().unwrap();
 }
 
 /// bhishma on f689ce2: the core's close must reach the ledger as `closed` from the real script's answer, not only

@@ -87,6 +87,8 @@ pub enum Event {
     Report { task: String, status: TaskStatus, summary: String },
     Progress(String),
     Checkpoint(String),
+    /// A re-planned or new task's definition (`add`, which updates an existing one), then `validate` (#190 review).
+    Define(Vec<TaskRecord>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -247,18 +249,19 @@ impl Writer {
 
     /// A best-effort write: one retry after a clean non-zero exit; after a timeout, `verify` instead.
     fn write(&self, req: &Request) -> Result<(), String> {
-        let first = match self.call(req) {
+        let last = match self.call(req) {
             Ok(_) => return Ok(()),
+            Err(Fail::Exit(_)) => match self.call(req) {
+                Ok(_) => return Ok(()),
+                Err(f) => f,
+            },
             Err(f) => f,
         };
-        match first {
-            Fail::Exit(_) => self.call(req).map(|_| ()).map_err(|f| f.why().to_string()),
-            Fail::Timeout(why) => {
-                self.verify();
-                Err(why)
-            }
-            Fail::Never(why) => Err(why),
+        // A timeout on either attempt may have cut the write between the change and its signature: verify, no retry.
+        if let Fail::Timeout(_) = last {
+            self.verify();
         }
+        Err(last.why().to_string())
     }
 
     fn verify(&self) {
@@ -295,6 +298,24 @@ impl Writer {
             }
             Event::Progress(t) => vec![(Request::CampaignProgress { slug, text: bridge_text::one_line(t, PROGRESS_MAX) }, "progress")],
             Event::Checkpoint(l) => vec![(Request::CampaignCheckpoint { slug, label: bridge_text::one_line(l, 200) }, "checkpoint")],
+            Event::Define(tasks) => {
+                let mut out: Vec<(Request, &'static str)> = tasks.iter().map(|t| (self.add(t), "define")).collect();
+                out.push((Request::TasksValidate { slug }, "validate"));
+                out
+            }
+        }
+    }
+
+    fn add(&self, t: &TaskRecord) -> Request {
+        Request::TasksAdd {
+            slug: self.cfg.slug.clone(),
+            id: t.id.clone(),
+            title: bridge_text::one_line(&t.title, TITLE_MAX),
+            owner: t.agent.clone(),
+            deps: t.deps.clone(),
+            files: t.files.clone(),
+            acceptance: t.criteria.clone(),
+            branch: t.branch.clone(),
         }
     }
 
@@ -325,18 +346,8 @@ impl Writer {
         }
         for t in &p.tasks {
             in_time()?;
-            let add = Request::TasksAdd {
-                slug: self.cfg.slug.clone(),
-                id: t.id.clone(),
-                title: bridge_text::one_line(&t.title, TITLE_MAX),
-                owner: t.agent.clone(),
-                deps: t.deps.clone(),
-                files: t.files.clone(),
-                acceptance: t.criteria.clone(),
-                branch: t.branch.clone(),
-            };
             // `add` of the same definition answers "unchanged", so a retry is safe.
-            self.write(&add)?;
+            self.write(&self.add(t))?;
         }
         in_time()?;
         self.write(&Request::TasksValidate { slug: self.cfg.slug.clone() })
