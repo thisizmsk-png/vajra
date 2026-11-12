@@ -14,16 +14,117 @@ use crate::vajra::bridge::Bridge;
 
 /// Make `<data>/record` an empty git dir: `HEAD`, `objects/`, `refs/` and nothing else (no config, no hooks), so the
 /// campaign script's `git rev-parse --git-common-dir` names it and nothing in it runs.
+/// An existing one is used only when it is exactly that: owned by this user, mode 0700, no links, `.git` holding only
+/// `HEAD` (with the fixed text), `objects/` and `refs/`. A planted `config`, `commondir` or `hooks` could change which
+/// active pointer `create` moves, so anything else is refused, never cleaned.
 pub(super) fn record_dir(data: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const HEAD: &[u8] = b"ref: refs/heads/main\n";
     let dir = data.join("record");
     let git = dir.join(".git");
+    let fresh = std::fs::symlink_metadata(&dir).is_err();
     for d in [&dir, &git, &git.join("objects"), &git.join("refs")] {
         fsx::private_dir(d)?;
     }
-    if std::fs::symlink_metadata(git.join("HEAD")).is_err() {
-        fsx::write_atomic(&git, "HEAD", b"ref: refs/heads/main\n")?;
+    if fresh {
+        fsx::write_atomic(&git, "HEAD", HEAD)?;
+    }
+    let refuse = |why: &str| std::io::Error::other(format!("the record's folder {} {why}", dir.display()));
+    let uid = unsafe { libc::getuid() };
+    for d in [&dir, &git, &git.join("objects"), &git.join("refs")] {
+        let m = std::fs::symlink_metadata(d)?;
+        if !m.is_dir() || m.uid() != uid || m.permissions().mode() & 0o777 != 0o700 {
+            return Err(refuse("is not a private directory of this user"));
+        }
+    }
+    let names = |d: &Path| -> std::io::Result<Vec<String>> {
+        let mut v: Vec<String> = std::fs::read_dir(d)?.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+        v.sort();
+        Ok(v)
+    };
+    if names(&dir)? != [".git"] || names(&git)? != ["HEAD", "objects", "refs"] || !names(&git.join("objects"))?.is_empty() || !names(&git.join("refs"))?.is_empty() {
+        return Err(refuse("holds more than an empty git dir"));
+    }
+    let head = std::fs::symlink_metadata(git.join("HEAD"))?;
+    if !head.is_file() || head.uid() != uid || std::fs::read(git.join("HEAD"))? != HEAD {
+        return Err(refuse("has a changed HEAD"));
     }
     Ok(dir)
+}
+
+/// The core's ledger of one campaign (`<data>/control/record-ledgers/<slug>.json`, the app's own, private) and the
+/// campaign read back through the held reader: the bytes are read once, their signature and features definition
+/// checked through the scripts, and the task graph read with `list --json`.
+pub(super) struct AppLedgerStore {
+    dir: PathBuf,
+    slug: String,
+    campaigns: PathBuf,
+    key: PathBuf,
+    bridge: Bridge,
+}
+
+impl AppLedgerStore {
+    pub(super) fn new(data: &Path, slug: &str, campaigns: PathBuf, key: PathBuf, bridge: Bridge) -> Result<Self, String> {
+        crate::vajra::bridge_record::slug(slug).map_err(|e| e.to_string())?;
+        Ok(AppLedgerStore { dir: data.join("control/record-ledgers"), slug: slug.into(), campaigns, key, bridge })
+    }
+
+    fn file(&self) -> String {
+        format!("{}.json", self.slug)
+    }
+}
+
+impl record::LedgerStore for AppLedgerStore {
+    fn load(&self) -> Result<Option<record::Ledger>, String> {
+        match fsx::read_nofollow_capped(&self.dir.join(self.file()), 4 * 1024 * 1024) {
+            Ok(b) => serde_json::from_slice(&b).map(Some).map_err(|_| "the run record's ledger can't be read".into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("the run record's ledger can't be read: {e}")),
+        }
+    }
+
+    fn save(&self, l: &record::Ledger) -> Result<(), String> {
+        let bytes = serde_json::to_vec(l).map_err(|e| e.to_string())?;
+        fsx::private_dir(self.dir.parent().unwrap_or(&self.dir)).map_err(|e| e.to_string())?;
+        fsx::private_dir(&self.dir).map_err(|e| e.to_string())?;
+        fsx::write_atomic(&self.dir, &self.file(), &bytes).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    fn read_back(&self, slug: &str) -> Result<record::ReadBack, String> {
+        use crate::control::sha256::hex_digest;
+        use crate::vajra::bridge::Request;
+        use crate::vajra::held;
+        let unread = |what: &str| format!("the campaign can't be read back ({what})");
+        let h = held::read_campaign(&self.campaigns, slug, &self.key, &|_| {}).map_err(|e| unread(&format!("{e:?}")))?;
+        if !held::json_without_duplicate_keys(&h.campaign) || !held::json_without_duplicate_keys(&h.features) {
+            return Err("the campaign's files aren't the scripts' JSON".into());
+        }
+        let campaign: Value = serde_json::from_slice(&h.campaign).map_err(|_| unread("campaign.json"))?;
+        let features: Value = serde_json::from_slice(&h.features).map_err(|_| unread("features.json"))?;
+        let progress = String::from_utf8(h.progress.clone()).map_err(|_| unread("progress.md"))?;
+        let sig: String = String::from_utf8_lossy(&h.sig).chars().filter(|c| !c.is_whitespace()).collect();
+        if sig.len() != 64 || !sig.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err("the campaign's signature is broken".into());
+        }
+        let input = format!("campaign {}\nfeatures {}\nprogress {}\nsig {}\n", hex_digest(&h.campaign), hex_digest(&h.features), hex_digest(&h.progress), sig);
+        match self.bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+            Ok(o) if o.exit() == Some(0) => {}
+            Ok(o) if o.exit() == Some(3) => return Err("the campaign's signature is broken".into()),
+            Ok(_) | Err(_) => return Err(unread("the signature check didn't run")),
+        }
+        let def = match self.bridge.run(&Request::FeaturesDef { features: h.features.clone() }) {
+            Ok(o) if o.exit() == Some(0) => o.stdout.replace('\n', ""),
+            Ok(_) | Err(_) => return Err(unread("the criteria check didn't run")),
+        };
+        if campaign.get("featuresDefSha256").and_then(Value::as_str) != Some(hex_digest(def.as_bytes()).as_str()) {
+            return Err("the campaign's criteria aren't the signed ones".into());
+        }
+        let tasks = match self.bridge.run(&Request::TasksList { slug: slug.into() }) {
+            Ok(o) if o.exit() == Some(0) && !o.truncated => serde_json::from_str(&o.stdout).map_err(|_| unread("the task graph"))?,
+            Ok(_) | Err(_) => return Err(unread("the task graph")),
+        };
+        Ok(record::ReadBack { campaign, features, progress, tasks })
+    }
 }
 
 /// The bridge the record writes with: the record's cwd and the writes' longer timeout.
@@ -44,7 +145,13 @@ impl App {
         let (Some(slug), Some(trust)) = (slug, trust) else { return Err("the run's seats name no campaign".into()) };
         let cfg = RecordConfig { run: run_id.into(), slug: slug.into(), trust: trust.into(), home: self.home.clone(), resumed };
         let bridge = record_bridge(&self.bridge, &self.data).map_err(|e| format!("the record's folder can't be made: {e}"))?;
-        Ok(Arc::new(CoreRecord::new(cfg, bridge)?))
+        let store = self.ledger_store(slug, &bridge)?;
+        Ok(Arc::new(CoreRecord::new(cfg, bridge, Arc::new(store))?))
+    }
+
+    fn ledger_store(&self, slug: &str, bridge: &Bridge) -> Result<AppLedgerStore, String> {
+        let allow = crate::vajra::allowlist::Allowlist::new(&self.claude, &self.data).map_err(|e| e.to_string())?;
+        AppLedgerStore::new(&self.data, slug, allow.campaigns_dir().to_path_buf(), allow.key_path(), bridge.clone())
     }
 
     /// The runs going on now: a workflow run whose process runs (`active_runs`'s rule), or a core run with a ticket
@@ -83,7 +190,8 @@ impl App {
         };
         let slug = o["campaign"].as_str().unwrap_or_default().to_string();
         let bridge = record_bridge(&self.bridge, &self.data).map_err(|e| json!({"error": "io", "detail": e.to_string()}))?;
-        record::close_abandoned(&bridge, &slug).map_err(|why| json!({"error": "close_failed", "detail": why}))?;
+        let store = self.ledger_store(&slug, &bridge).map_err(|e| json!({"error": "io", "detail": e}))?;
+        record::close_abandoned(&bridge, &slug, &store).map_err(|why| json!({"error": "close_failed", "detail": why}))?;
         Ok(json!({"run_id": run_id, "campaign": slug, "status": "abandoned"}))
     }
 

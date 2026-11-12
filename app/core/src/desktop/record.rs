@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
+pub use super::record_ledger::{Ledger, ReadBack};
 use crate::vajra::bridge::{Bridge, BridgeError, CloseStatus, Feature, Output, Request, TaskStatus};
 use crate::vajra::bridge_record::{self as bridge_text, GOAL_MAX, PROGRESS_MAX, SUMMARY_MAX, TITLE_MAX};
 
@@ -106,6 +107,43 @@ pub struct RecordCard {
     pub lock: Option<LockCard>,
     /// `verify` failed after a write was killed: the record can't be trusted, and the run can't be verified.
     pub signature_broken: bool,
+    /// The record may be called tamper-evident: false for an `outside_guard` run, whose agents could reach the key.
+    pub tamper_evident: bool,
+}
+
+/// Where the core keeps its ledger, and how it reads the campaign back (`record_app.rs`: the app's data dir and the
+/// held reader). Here so this module stays without `std::fs`.
+pub trait LedgerStore: Send + Sync {
+    /// The ledger saved for this campaign, if any.
+    fn load(&self) -> Result<Option<Ledger>, String>;
+    fn save(&self, l: &Ledger) -> Result<(), String>;
+    /// The campaign and task graph as they are now, signature and features definition checked.
+    fn read_back(&self, slug: &str) -> Result<ReadBack, String>;
+}
+
+/// A campaign write through the ledger: marked pending (and saved) before it runs, so a crash mid-write leaves it
+/// unknown; applied after exit 0; unknown for good after a timeout. A ledger that can't be saved stops the write.
+fn ledgered(store: &dyn LedgerStore, ledger: &Mutex<Ledger>, req: &Request, run: impl FnOnce() -> Result<Output, Fail>) -> Result<Output, Fail> {
+    if !req.is_campaign_write() {
+        return run();
+    }
+    let what = format!("{req:?}").split([' ', '{', '(']).next().unwrap_or("write").to_string();
+    {
+        let mut l = crate::lock(ledger);
+        l.pending = Some(what.clone());
+        store.save(&l).map_err(|e| Fail::Never(format!("the run record's ledger could not be saved: {e}")))?;
+    }
+    let r = run();
+    let mut l = crate::lock(ledger);
+    l.pending = None;
+    match &r {
+        Ok(_) => l.apply(req),
+        Err(Fail::Timeout(_)) => l.uncertain = Some(what),
+        Err(_) => {}
+    }
+    // A failed save leaves the saved ledger pending: the record then reads as not verified, never as verified.
+    let _ = store.save(&l);
+    r
 }
 
 /// The record a run writes. `CoreRecord` is the real one; the protocol takes any.
@@ -129,6 +167,8 @@ struct Writer {
     cfg: RecordConfig,
     bridge: Bridge,
     card: Mutex<RecordCard>,
+    ledger: Mutex<Ledger>,
+    store: Arc<dyn LedgerStore>,
 }
 
 /// The record through the bridge, with one writer thread for the events.
@@ -164,6 +204,10 @@ impl Fail {
 
 impl Writer {
     fn call(&self, req: &Request) -> Result<Output, Fail> {
+        ledgered(self.store.as_ref(), &self.ledger, req, || self.run(req))
+    }
+
+    fn run(&self, req: &Request) -> Result<Output, Fail> {
         match self.bridge.run(req) {
             Ok(o) if o.exit() == Some(0) => Ok(o),
             Ok(o) => {
@@ -172,6 +216,11 @@ impl Writer {
                     self.found_lock();
                 } else if o.stderr.contains("tasks.json is locked") {
                     self.note("the task graph is locked by another writer; it clears itself after 2 minutes".into());
+                }
+                // Exit 3 with "signature INVALID" is the campaign script's `require_valid`: the record is broken now.
+                if o.code == Some(3) && o.stderr.contains("signature INVALID") {
+                    crate::lock(&self.card).signature_broken = true;
+                    return Err(Fail::Never(why));
                 }
                 Err(if o.timed_out { Fail::Timeout(why) } else { Fail::Exit(why) })
             }
@@ -291,19 +340,36 @@ impl Writer {
                 && fs.iter().zip(features).all(|(x, f)| x["id"] == f.id.as_str() && x["description"] == f.desc.as_str() && x["passes"] == false)
         });
         let ok = v["signature_valid"] == true && c["slug"] == slug.as_str() && c["status"] == "active" && c["goal"] == goal && same_features;
-        if ok { Ok(()) } else { Err(format!("campaign {slug} already exists and isn't this run's (goal, criteria, status or signature differ)")) }
+        if !ok {
+            return Err(format!("campaign {slug} already exists and isn't this run's (goal, criteria, status or signature differ)"));
+        }
+        // And everything in it is what the core wrote: a write by anyone else since makes it someone else's.
+        self.verify_record().map_err(|why| format!("campaign {slug} already exists and isn't only the core's: {why}"))
+    }
+
+    /// The campaign and task graph read back are exactly what the core's ledger says it wrote.
+    fn verify_record(&self) -> Result<(), String> {
+        let rb = self.store.read_back(&self.cfg.slug)?;
+        crate::lock(&self.ledger).check(&rb)
     }
 }
 
 impl CoreRecord {
-    /// `bridge` runs with the record's cwd and `RECORD_TIMEOUT` (the caller sets both).
-    pub fn new(cfg: RecordConfig, bridge: Bridge) -> Result<Self, String> {
+    /// `bridge` runs with the record's cwd and `RECORD_TIMEOUT` (the caller sets both). `store` keeps this campaign's
+    /// ledger: a resume continues the saved one; a fresh run must find none.
+    pub fn new(cfg: RecordConfig, bridge: Bridge, store: Arc<dyn LedgerStore>) -> Result<Self, String> {
         cfg.check()?;
         if bridge.record_cwd.is_none() {
             return Err("the run record has no working directory".into());
         }
-        let card = RecordCard { campaign: cfg.slug.clone(), ..RecordCard::default() };
-        let w = Arc::new(Writer { cfg, bridge, card: Mutex::new(card) });
+        let ledger = match (store.load()?, cfg.resumed) {
+            (Some(l), true) if l.slug == cfg.slug => l,
+            (Some(_), true) => return Err("the saved run record ledger is for another campaign".into()),
+            (Some(_), false) => return Err(format!("campaign {} already has a run record ledger, and this run didn't write it", cfg.slug)),
+            (None, _) => Ledger::new(&cfg.slug),
+        };
+        let card = RecordCard { campaign: cfg.slug.clone(), tamper_evident: cfg.trust != "outside_guard", ..RecordCard::default() };
+        let w = Arc::new(Writer { cfg, bridge, card: Mutex::new(card), ledger: Mutex::new(ledger), store });
         let (tx, rx) = mpsc::channel::<Msg>();
         let worker = Arc::clone(&w);
         std::thread::Builder::new()
@@ -320,6 +386,12 @@ impl CoreRecord {
             })
             .map_err(|e| format!("the run record could not start: {e}"))?;
         Ok(CoreRecord { w, tx: Mutex::new(tx) })
+    }
+
+    /// The record is the core's own: the campaign and task graph read back match every write the core made, and none
+    /// it didn't. Call after `flush`. `Err`: why not; the run can't be verified on this record.
+    pub fn verify_record(&self) -> Result<(), String> {
+        self.w.verify_record()
     }
 }
 
@@ -371,12 +443,21 @@ impl RunRecord for CoreRecord {
 }
 
 /// Close an orphan: a campaign named in a core run's `seats.json` that is still active after its run ended.
-pub fn close_abandoned(bridge: &Bridge, slug: &str) -> Result<(), String> {
-    match bridge.run(&Request::CampaignClose { slug: slug.to_string(), status: CloseStatus::Abandoned }) {
-        Ok(o) if o.exit() == Some(0) => Ok(()),
-        Ok(o) => Err(first_line(&o)),
-        Err(e) => Err(e.to_string()),
-    }
+/// The close goes through the campaign's ledger when it has one, so the record stays the core's.
+pub fn close_abandoned(bridge: &Bridge, slug: &str, store: &dyn LedgerStore) -> Result<(), String> {
+    let req = Request::CampaignClose { slug: slug.to_string(), status: CloseStatus::Abandoned };
+    let run = || match bridge.run(&req) {
+        Ok(o) if o.exit() == Some(0) => Ok(o),
+        Ok(o) if o.timed_out => Err(Fail::Timeout(first_line(&o))),
+        Ok(o) => Err(Fail::Exit(first_line(&o))),
+        Err(e) => Err(Fail::Never(e.to_string())),
+    };
+    let r = match store.load()? {
+        Some(l) if l.slug == slug => ledgered(store, &Mutex::new(l), &req, run),
+        Some(_) => return Err("the saved run record ledger is for another campaign".into()),
+        None => run(),
+    };
+    r.map(|_| ()).map_err(|f| f.why().to_string())
 }
 
 /// `show <slug> --json`'s status, if the script answers.

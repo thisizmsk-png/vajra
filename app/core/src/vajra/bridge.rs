@@ -46,6 +46,8 @@ pub enum Request {
     TasksAdd { slug: String, id: String, title: String, owner: String, deps: Vec<String>, files: Vec<String>, acceptance: Vec<String>, branch: String },
     TasksDep { slug: String, id: String, dep: String, remove: bool },
     TasksValidate { slug: String },
+    /// `list --campaign <slug> --json`: the task graph read back for the core's ledger check.
+    TasksList { slug: String },
     /// Always `--stacked`: deps close only on evidence, so without it every task with deps gets exit 3.
     TasksClaim { slug: String, id: String, worker: String, worktree: Option<PathBuf> },
     TasksReport { slug: String, id: String, status: TaskStatus, summary: Option<String> },
@@ -167,7 +169,7 @@ impl Bridge {
             // The run record's bridge runs it in the record's own git dir, like its other campaign calls.
             Request::CampaignProgress { slug, text } => (
                 script("vajra-campaign.sh"),
-                vec!["progress".into(), text.clone(), "--campaign".into(), name(slug)?],
+                vec!["progress".into(), super::bridge_record::text(text, super::bridge_record::PROGRESS_MAX, true)?, "--campaign".into(), name(slug)?],
                 self.record_cwd.clone(),
             ),
             Request::CheckEvidence { path, head, archived, repo } => {

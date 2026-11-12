@@ -265,6 +265,11 @@ impl Bridge {
                 tasks(argv, sl, root())
             }
             Request::TasksValidate { slug: sl } => tasks(vec![s("validate")], sl, root()),
+            Request::TasksList { slug: sl } => {
+                let (p, mut argv, cwd) = tasks(vec![s("list")], sl, root())?;
+                argv.push(s("--json"));
+                Ok((p, argv, cwd))
+            }
             Request::TasksClaim { slug: sl, id, worker, worktree } => {
                 // The workflow's order: `claim <id> <owner> --stacked --campaign <slug> --worktree <dir>`.
                 let (p, mut argv, cwd) = tasks(vec![s("claim"), ident(id)?, agent(worker)?, s("--stacked")], sl, root())?;
@@ -325,6 +330,7 @@ impl Request {
                 | Request::TasksAdd { .. }
                 | Request::TasksDep { .. }
                 | Request::TasksValidate { .. }
+                | Request::TasksList { .. }
                 | Request::TasksClaim { .. }
                 | Request::TasksReport { .. }
                 | Request::TasksClose { .. }
@@ -334,7 +340,7 @@ impl Request {
     /// A write to a campaign or its task graph: on its timeout it gets SIGTERM and `KILL_GRACE` before SIGKILL, so the
     /// script's EXIT trap can free its lock (16.5a "Kills and locks"). `CampaignProgress` is a write too.
     pub fn is_campaign_write(&self) -> bool {
-        (self.is_record() && !matches!(self, Request::CampaignShow { .. } | Request::CampaignList | Request::ProcessList | Request::TasksValidate { .. }))
+        (self.is_record() && !matches!(self, Request::CampaignShow { .. } | Request::CampaignList | Request::ProcessList | Request::TasksValidate { .. } | Request::TasksList { .. }))
             || matches!(self, Request::CampaignProgress { .. })
     }
 }

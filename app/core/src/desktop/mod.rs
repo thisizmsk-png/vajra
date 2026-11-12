@@ -2376,6 +2376,7 @@ pub mod workers;
 pub mod plan;
 pub mod record;
 mod record_app;
+pub mod record_ledger;
 pub mod runproto;
 pub mod worker_host;
 mod arrivals;

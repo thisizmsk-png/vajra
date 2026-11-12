@@ -55,7 +55,7 @@ impl Tmp {
         RecordConfig { run: "20261112-1200".into(), slug: "deliver-20261112-1200".into(), trust: "guarded".into(), home: self.0.join("home"), resumed }
     }
     fn record(&self, resumed: bool) -> CoreRecord {
-        CoreRecord::new(self.cfg(resumed), self.bridge()).unwrap()
+        CoreRecord::new(self.cfg(resumed), self.bridge(), mem()).unwrap()
     }
     /// Every call so far: the program kind, then its argv, with the script path shown as its file name.
     fn calls(&self) -> Vec<Vec<String>> {
@@ -77,6 +77,34 @@ impl Drop for Tmp {
         let _ = std::fs::set_permissions(self.0.join("home/.claude/vajra/.hmac-key"), std::fs::Permissions::from_mode(0o600));
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// The ledger in memory; `back` is what a read-back returns (none: the read-back fails).
+#[derive(Default)]
+struct MemStore {
+    saved: Mutex<Option<Ledger>>,
+    back: Mutex<Option<ReadBack>>,
+    no_save: std::sync::atomic::AtomicBool,
+}
+
+impl LedgerStore for MemStore {
+    fn load(&self) -> Result<Option<Ledger>, String> {
+        Ok(crate::lock(&self.saved).clone())
+    }
+    fn save(&self, l: &Ledger) -> Result<(), String> {
+        if self.no_save.load(Ordering::SeqCst) {
+            return Err("disk full".into());
+        }
+        *crate::lock(&self.saved) = Some(l.clone());
+        Ok(())
+    }
+    fn read_back(&self, _: &str) -> Result<ReadBack, String> {
+        crate::lock(&self.back).clone().ok_or_else(|| "no read-back".into())
+    }
+}
+
+fn mem() -> Arc<dyn LedgerStore> {
+    Arc::new(MemStore::default())
 }
 
 fn v(a: &[&str]) -> Vec<String> {
@@ -251,7 +279,7 @@ fn a_campaign_call_with_no_record_cwd_is_refused() {
     let mut b = t.bridge();
     b.record_cwd = None;
     assert!(matches!(b.run(&Request::CampaignShow { slug: SLUG.into() }), Err(BridgeError::Invalid(_))));
-    assert!(CoreRecord::new(t.cfg(false), b).is_err());
+    assert!(CoreRecord::new(t.cfg(false), b, mem()).is_err());
     assert!(t.calls().is_empty());
 }
 
@@ -260,9 +288,11 @@ fn the_slug_must_be_the_one_the_evidence_trust_names() {
     let t = Tmp::new();
     let mut cfg = t.cfg(false);
     cfg.trust = "outside_guard".into();
-    assert!(CoreRecord::new(cfg.clone(), t.bridge()).is_err(), "an outside_guard run never writes an unmarked campaign");
+    assert!(CoreRecord::new(cfg.clone(), t.bridge(), mem()).is_err(), "an outside_guard run never writes an unmarked campaign");
     cfg.slug = format!("{SLUG}-og");
-    assert!(CoreRecord::new(cfg, t.bridge()).is_ok());
+    let og = CoreRecord::new(cfg, t.bridge(), mem()).unwrap();
+    assert!(!og.card().tamper_evident, "an outside_guard record is never called tamper-evident");
+    assert!(t.record(false).card().tamper_evident);
 }
 
 #[test]
@@ -334,11 +364,16 @@ fn a_timed_out_write_is_never_retried_and_a_broken_signature_is_on_the_card() {
     t.campaign_script("case \"$1\" in progress) sleep 30 ;; verify) echo 'deliver: signature INVALID' >&2; exit 3 ;; esac");
     let mut b = t.bridge();
     b.timeout = SHORT;
-    let r = CoreRecord::new(t.cfg(false), b).unwrap();
+    let store = Arc::new(MemStore::default());
+    let r = CoreRecord::new(t.cfg(false), b, store.clone()).unwrap();
     r.send(Event::Progress("p".into()));
     r.flush();
+    let saved = crate::lock(&store.saved).clone().unwrap();
+    assert!(saved.uncertain.is_some() && saved.pending.is_none(), "a timed-out write's outcome is unknown for good: {saved:?}");
     let kinds: Vec<String> = t.calls().iter().map(|c| c[2].clone()).collect();
-    assert_eq!(kinds, v(&["progress", "verify"]), "no retry after a timeout; verify instead");
+    // Under load bash may be killed before it logs its first line, so the one progress call may not show.
+    assert!(kinds.iter().filter(|k| *k == "progress").count() <= 1, "no retry after a timeout: {kinds:?}");
+    assert_eq!(kinds.last().map(String::as_str), Some("verify"), "verify instead: {kinds:?}");
     assert!(r.card().signature_broken);
 }
 
@@ -358,12 +393,27 @@ fn with_existing(t: &Tmp, show: &str) {
     ));
 }
 
+/// The ledger the first run left after its `create`, and the campaign read back as it is: what a resume reuses.
+fn resumable() -> Arc<dyn LedgerStore> {
+    let mut l = Ledger::new(SLUG);
+    l.apply(&Request::CampaignCreate { slug: SLUG.into(), goal: "add a --json flag to export".into(), features: plan().features });
+    let s = MemStore::default();
+    *crate::lock(&s.saved) = Some(l);
+    *crate::lock(&s.back) = Some(ReadBack {
+        campaign: serde_json::json!({"slug": SLUG, "goal": "add a --json flag to export", "status": "active"}),
+        features: serde_json::json!({"features": [{"id": "ac-1", "description": "export has --json", "passes": false}, {"id": "ac-2", "description": "docs say so", "passes": false}]}),
+        progress: "## Progress\n- 2026-11-12T12:00:00Z created with 2 feature(s)\n".into(),
+        tasks: serde_json::json!({"tasks": []}),
+    });
+    Arc::new(s)
+}
+
 #[test]
 fn a_second_create_reuses_the_campaign_only_for_a_resume_that_matches_exactly() {
     let feats = [("ac-1", "export has --json", false), ("ac-2", "docs say so", false)];
     let t = Tmp::new();
     with_existing(&t, &show_json("add a --json flag to export", &feats, "active", true));
-    t.record(true).plan(&plan()).unwrap();
+    CoreRecord::new(t.cfg(true), t.bridge(), resumable()).unwrap().plan(&plan()).unwrap();
     let kinds: Vec<String> = t.calls().iter().map(|c| if c[0] == "campaign" { c[2].clone() } else { c[3].clone() }).collect();
     assert_eq!(kinds, v(&["create", "show", "add", "add", "validate"]), "reused, then the adds (unchanged) and validate");
 
@@ -382,7 +432,7 @@ fn a_second_create_reuses_the_campaign_only_for_a_resume_that_matches_exactly() 
     ] {
         let t = Tmp::new();
         with_existing(&t, &show_json(goal, &feats, status, sig));
-        assert!(t.record(true).plan(&plan()).is_err(), "{goal} {feats:?} {status} {sig}");
+        assert!(CoreRecord::new(t.cfg(true), t.bridge(), resumable()).unwrap().plan(&plan()).is_err(), "{goal} {feats:?} {status} {sig}");
         assert!(!t.calls().iter().any(|c| c.get(3).is_some_and(|a| a == "add")), "nothing is added to a campaign that isn't this run's");
     }
 }
@@ -444,6 +494,56 @@ fn a_read_still_gets_sigkill_at_once() {
     let o = b.run(&Request::CampaignShow { slug: SLUG.into() }).unwrap();
     assert!(o.timed_out);
     assert!(lock.exists(), "show is a read: no grace (and no lock in the real script)");
+}
+
+// ---------------------------------------------------------------- bhishma L2 to L4
+
+#[test]
+fn l2_a_record_dir_holding_anything_but_head_objects_and_refs_is_refused() {
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    assert!(super::super::record_app::record_dir(&data).is_ok(), "a fresh one is made");
+    assert!(super::super::record_app::record_dir(&data).is_ok(), "and reused as it is");
+    for planted in ["config", "commondir", "hooks"] {
+        let t = Tmp::new();
+        let data = t.0.join("data");
+        let git = super::super::record_app::record_dir(&data).unwrap().join(".git");
+        if planted == "hooks" { std::fs::create_dir(git.join(planted)).unwrap() } else { std::fs::write(git.join(planted), "x").unwrap() }
+        assert!(super::super::record_app::record_dir(&data).is_err(), "a planted {planted} is refused");
+    }
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    let dir = super::super::record_app::record_dir(&data).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(super::super::record_app::record_dir(&data).is_ok());
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "an open mode is closed again");
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    let git = super::super::record_app::record_dir(&data).unwrap().join(".git");
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/other\n").unwrap();
+    assert!(super::super::record_app::record_dir(&data).is_err(), "a changed HEAD is refused");
+}
+
+#[test]
+fn l3_a_write_the_script_refuses_for_a_broken_signature_marks_the_card_at_once() {
+    let t = Tmp::new();
+    t.campaign_script("[ \"$1\" = progress ] && { echo \"vajra-campaign: state signature INVALID for 'x' (edited outside vajra-campaign.sh?).\" >&2; exit 3; }");
+    let r = t.record(false);
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    assert!(r.card().signature_broken, "exit 3 / INVALID is a broken record, not just a note");
+    assert_eq!(t.calls().iter().filter(|c| c[2] == "progress").count(), 1, "a broken record isn't retried");
+}
+
+#[test]
+fn l4_the_bridge_checks_progress_text_itself() {
+    let t = Tmp::new();
+    let b = t.bridge();
+    for bad in ["--campaign", "two  spaces", "line\nbreak", "bidi\u{202e}", ""] {
+        assert!(matches!(b.run(&Request::CampaignProgress { slug: SLUG.into(), text: bad.into() }), Err(BridgeError::Invalid(_))), "{bad:?}");
+    }
+    assert!(matches!(b.run(&Request::CampaignProgress { slug: SLUG.into(), text: "x".repeat(301) }), Err(BridgeError::Invalid(_))));
+    assert!(t.calls().is_empty());
 }
 
 // ---------------------------------------------------------------- orphans
@@ -548,7 +648,10 @@ fn the_real_scripts_create_reuse_and_record_from_the_cores_own_cwd() {
     }
     b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
     b.timeout = RECORD_TIMEOUT;
-    let r = CoreRecord::new(t.cfg(false), b.clone()).unwrap();
+    let store = || -> Arc<dyn LedgerStore> {
+        Arc::new(super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, t.0.join("home/.claude/vajra/campaigns"), key.clone(), b.clone()).unwrap())
+    };
+    let r = CoreRecord::new(t.cfg(false), b.clone(), store()).unwrap();
     r.plan(&plan()).unwrap();
     r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
     r.send(Event::Report { task: format!("{RUN}.t1"), status: TaskStatus::Done, summary: "done".into() });
@@ -563,15 +666,106 @@ fn the_real_scripts_create_reuse_and_record_from_the_cores_own_cwd() {
     r.flush();
     assert!(r.card().notes.is_empty(), "a re-dispatch's claim is accepted: {:?}", r.card().notes);
     assert!(matches!(b.run(&Request::CampaignVerify { slug: SLUG.into() }), Ok(o) if o.exit() == Some(0)));
-    // A resumed run reuses it; a fresh one refuses it.
-    assert!(CoreRecord::new(t.cfg(true), b.clone()).unwrap().plan(&plan()).is_ok());
-    assert!(CoreRecord::new(t.cfg(false), b.clone()).unwrap().plan(&plan()).is_err());
+    // The record read back is exactly the core's writes.
+    r.verify_record().unwrap();
+    // A resumed run reuses it; a fresh one refuses it, with its ledger or without.
+    let resumed = CoreRecord::new(t.cfg(true), b.clone(), store()).unwrap();
+    resumed.plan(&plan()).unwrap();
+    resumed.verify_record().unwrap();
+    assert!(CoreRecord::new(t.cfg(false), b.clone(), store()).is_err());
+    assert!(CoreRecord::new(t.cfg(false), b.clone(), mem()).unwrap().plan(&plan()).is_err());
+    // An agent runs the same signed script against the core's campaign: the signature is still valid, but the record
+    // is no longer the core's. It isn't verified, and a resume refuses it.
+    assert!(matches!(b.run(&Request::CampaignProgress { slug: SLUG.into(), text: "all criteria pass".into() }), Ok(o) if o.exit() == Some(0)));
+    assert!(matches!(b.run(&Request::CampaignVerify { slug: SLUG.into() }), Ok(o) if o.exit() == Some(0)));
+    assert!(r.verify_record().unwrap_err().contains("progress line"), "{:?}", r.verify_record());
+    assert!(CoreRecord::new(t.cfg(true), b.clone(), store()).unwrap().plan(&plan()).is_err());
+    // A task report written outside the core is caught the same way, with the progress line gone from the ledger's view.
+    let other = super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, t.0.join("home/.claude/vajra/campaigns"), key.clone(), b.clone()).unwrap();
+    let mut back = other.read_back(SLUG).unwrap();
+    back.progress = back.progress.lines().filter(|l| !l.ends_with("all criteria pass")).map(|l| format!("{l}\n")).collect();
+    let saved = other.load().unwrap().unwrap();
+    saved.check(&back).unwrap();
+    assert!(matches!(b.run(&Request::TasksReport { slug: SLUG.into(), id: format!("{RUN}.t1"), status: TaskStatus::Done, summary: Some("done".into()) }), Ok(o) if o.exit() == Some(0)));
+    let mut back = other.read_back(SLUG).unwrap();
+    back.progress = back.progress.lines().filter(|l| !l.ends_with("all criteria pass")).map(|l| format!("{l}\n")).collect();
+    assert!(saved.check(&back).unwrap_err().contains("task"), "{:?}", saved.check(&back));
     // The pointer `create` set is the record dir's, never the global one or a repo's.
     let campaigns = t.0.join("home/.claude/vajra/campaigns");
     let pointers: Vec<String> = std::fs::read_dir(&campaigns).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.starts_with(".active-")).collect();
     assert_eq!(pointers.len(), 1, "{pointers:?}");
     assert_ne!(pointers[0], ".active-global");
     assert_eq!(campaign_status(&b, SLUG).as_deref(), Some("active"));
-    close_abandoned(&b, SLUG).unwrap();
+    close_abandoned(&b, SLUG, &other).unwrap();
     assert_eq!(campaign_status(&b, SLUG).as_deref(), Some("abandoned"));
+    assert_eq!(other.load().unwrap().unwrap().status, "abandoned", "the close went through the ledger");
+}
+
+// ---------------------------------------------------------------- the core's ledger (bhishma H1)
+
+/// A ledger after the plan and one round, and the read-back the scripts would show for it.
+fn ledger_and_back() -> (Ledger, ReadBack) {
+    let mut l = Ledger::new(SLUG);
+    let p = plan();
+    l.apply(&Request::CampaignCreate { slug: SLUG.into(), goal: "g".into(), features: p.features.clone() });
+    let add = |id: &str| Request::TasksAdd { slug: SLUG.into(), id: id.into(), title: "do".into(), owner: "bhima".into(), deps: vec![], files: v(&["src/"]), acceptance: v(&["ac-1"]), branch: "b".into() };
+    l.apply(&add("t1"));
+    l.apply(&Request::TasksClaim { slug: SLUG.into(), id: "t1".into(), worker: "bhima".into(), worktree: None });
+    l.apply(&Request::TasksReport { slug: SLUG.into(), id: "t1".into(), status: TaskStatus::InProgress, summary: None });
+    l.apply(&Request::CampaignProgress { slug: SLUG.into(), text: "round 1".into() });
+    let task = serde_json::json!({"id": "t1", "status": "in_progress", "attempts": 1, "claimed_by": "bhima", "report": {"status": "in_progress", "summary": ""},
+        "title": "do", "owner_agent": "bhima", "deps": [], "files": ["src/"], "acceptance": ["ac-1"]});
+    let back = ReadBack {
+        campaign: serde_json::json!({"slug": SLUG, "goal": "g", "status": "active"}),
+        features: serde_json::json!({"features": [{"id": "ac-1", "description": "export has --json", "passes": false}, {"id": "ac-2", "description": "docs say so", "passes": false}]}),
+        progress: "# Campaign\nGoal: g\n\n## Progress\n- 2026-11-12T12:00:00Z created with 2 feature(s)\n- 2026-11-12T12:01:00Z round 1\n".into(),
+        tasks: serde_json::json!({"tasks": [task]}),
+    };
+    (l, back)
+}
+
+#[test]
+fn the_ledger_matches_only_the_cores_own_writes() {
+    let (l, back) = ledger_and_back();
+    l.check(&back).unwrap();
+    // An extra pass, progress line or task report, by anyone but the core, is a mismatch.
+    let mut b = back.clone();
+    b.features["features"][0]["passes"] = true.into();
+    b.progress.push_str("- 2026-11-12T12:02:00Z pass: ac-1 (evidence: ok)\n");
+    assert!(l.check(&b).is_err());
+    let mut b = back.clone();
+    b.progress.push_str("- 2026-11-12T12:02:00Z everything passes\n");
+    assert!(l.check(&b).is_err());
+    let mut b = back.clone();
+    b.tasks["tasks"][0]["report"] = serde_json::json!({"status": "done", "summary": "all good"});
+    assert!(l.check(&b).is_err());
+    let mut b = back.clone();
+    b.tasks["tasks"][0]["title"] = "something else".into();
+    assert!(l.check(&b).is_err());
+    let mut b = back.clone();
+    b.campaign["reportSha256"] = "ab".into();
+    assert!(l.check(&b).is_err());
+    // A write whose outcome isn't known never matches.
+    let mut p = l.clone();
+    p.pending = Some("CampaignPass".into());
+    assert!(p.check(&back).is_err());
+    let mut u = l.clone();
+    u.uncertain = Some("CampaignProgress".into());
+    assert!(u.check(&back).is_err());
+}
+
+#[test]
+fn a_ledger_that_cant_be_saved_stops_the_write_and_a_resume_needs_a_matching_ledger() {
+    let t = Tmp::new();
+    let store = Arc::new(MemStore::default());
+    store.no_save.store(true, Ordering::SeqCst);
+    let r = CoreRecord::new(t.cfg(false), t.bridge(), store.clone()).unwrap();
+    assert!(r.plan(&plan()).is_err());
+    assert!(t.calls().is_empty(), "nothing is written without the ledger: {:?}", t.calls());
+    // A resume finds a campaign that exists, with no read-back that matches: refused.
+    t.campaign_script("case \"$1\" in create) echo 'campaign already exists: x' >&2; exit 1 ;; show) printf '%s' '{\"signature_valid\":true,\"campaign\":{\"slug\":\"deliver-20261112-1200\",\"status\":\"active\",\"goal\":\"add a --json flag to export\"},\"features\":[{\"id\":\"ac-1\",\"description\":\"export has --json\",\"passes\":false},{\"id\":\"ac-2\",\"description\":\"docs say so\",\"passes\":false}]}' ;; esac");
+    let store = Arc::new(MemStore::default());
+    *crate::lock(&store.saved) = Some(Ledger::new(SLUG));
+    let err = CoreRecord::new(t.cfg(true), t.bridge(), store).unwrap().plan(&plan()).unwrap_err();
+    assert!(err.contains("isn't only the core's"), "{err}");
 }
