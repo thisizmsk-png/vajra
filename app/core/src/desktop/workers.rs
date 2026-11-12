@@ -906,7 +906,15 @@ impl WorkerRuntime {
         if let Some(h) = &self.0.hooks.on_dispatch {
             h(&view);
         }
-        let launch = match Launch::build(&self.0.cfg, &job, &seat, &t) {
+        // A steering channel opened in `build` is recorded on the ticket at once (`harness_session`), before anything
+        // there can still fail (flags, the gateway home) or the spawn does: every ending then retires it through
+        // `on_outcome`, so a failed launch never leaves its control dir and nonce registered (#179 codex P2).
+        let opened = |sid: &str| {
+            if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| e.view.state != State::Ended) {
+                e.view.harness_session = Some(sid.to_string());
+            }
+        };
+        let launch = match Launch::build(&self.0.cfg, &job, &seat, &t, &opened) {
             Ok(l) => l,
             Err(reason) => return self.end(id, Outcome::Failed, reason, None),
         };
@@ -1660,7 +1668,9 @@ impl Launch {
         supported.map(|()| (engine, kind)).map_err(|u| u.reason)
     }
 
-    fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
+    /// `opened` is called with the worker's session id as soon as its steering channel exists, before any later step
+    /// that can fail.
+    fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket, opened: &dyn Fn(&str)) -> Result<Launch, &'static str> {
         let (engine, kind) = Self::supported(cfg, job, seat)?;
         // A Claude worker's own session id, chosen here: its control dir and the hook's delivery are keyed by it.
         let claude_sid = match engine {
@@ -1674,7 +1684,10 @@ impl Launch {
             (_, None, _) => (None, None),
             (Job::Check(..), Some(_), _) => (None, Some(profiles::CHECK_NOT_STEERED)),
             (Job::Task(_), Some(sid), Some(open)) => match open(sid) {
-                Some(n) => (Some(n), None),
+                Some(n) => {
+                    opened(sid);
+                    (Some(n), None)
+                }
                 None => (None, Some(profiles::NO_STEER_CHANNEL)),
             },
             (Job::Task(_), Some(_), None) => (None, Some(profiles::NO_STEER_CHANNEL)),

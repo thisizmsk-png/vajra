@@ -866,6 +866,28 @@ fn a_claude_task_worker_gets_its_steering_channel_by_session_id_before_it_starts
     assert_eq!(crate::lock(&opened).len(), 1, "a Codex worker has no steering channel");
 }
 
+/// #179 codex P2: a Claude task worker whose steering channel opened but whose spawn then failed still ends with its
+/// session recorded, so `on_outcome` (the app's `core_ticket_ended`) retires the channel: no control dir or nonce is
+/// left registered for the app's life. The spawn fails here because the supervisor is already shutting down.
+#[test]
+fn a_spawn_that_fails_after_the_steering_channel_opened_still_retires_it() {
+    let opened: Arc<Mutex<Vec<String>>> = Arc::default();
+    let retired: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+    let (o2, r2) = (opened.clone(), retired.clone());
+    let steer: Steer = Arc::new(move |sid: &str| {
+        crate::lock(&o2).push(sid.to_string());
+        Some("00112233445566778899aabbccddeeff".into())
+    });
+    let hooks = Hooks { on_dispatch: None, on_outcome: Some(Box::new(move |v| crate::lock(&r2).push(v.harness_session.clone()))) };
+    let r = rig("steer-spawnfail", Opts { claude_ok: true, steer: Some(steer), hooks, ..Opts::default() });
+    r.sup.shutdown();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("spawn_failed")), "{v:?}");
+    let sid = crate::lock(&opened).clone();
+    assert_eq!(sid.len(), 1, "the channel was opened before the spawn");
+    assert_eq!(*crate::lock(&retired), vec![Some(sid[0].clone())], "the ending names the opened session, so it is retired");
+}
+
 /// Waits for a ticket's first attempt to be running, and returns its view then.
 fn running(r: &Rig, id: &str) -> TicketView {
     let start = Instant::now();
