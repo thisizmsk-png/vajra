@@ -6,6 +6,9 @@ import type { ProofLabel, RunProof } from "../../ipc";
 import { useCurrentProject } from "../../projects/current";
 
 const L = S.run.proof;
+/** The Run view's own pending-row poll interval, and a cap (about a minute) so a stuck check stops asking. */
+const RETRY_MS = 1500;
+const RETRY_MAX = 40;
 
 /** One tone per label, matched exhaustively: a new label must choose one here, it can't fall through to "success". */
 export function proofTone(l: ProofLabel): "success" | "warning" | "danger" | "info" | undefined {
@@ -52,14 +55,23 @@ export function Proof({ slug }: { slug: string }) {
     // `run_proof` runs the record check (a script), and `changed` comes in bursts: at most one call is in flight, and
     // any events during it queue a single rerun.
     const mine = ++seq.current;
+    // While a row's check is still running, ask again every RETRY_MS, at most RETRY_MAX times in a row (a `changed`
+    // event starts the count again): a finished sweep updates the core's cache without sending an event.
     let inFlight = false;
     let queued = false;
+    let retries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const load = () => {
       if (inFlight) { queued = true; return; }
+      clearTimeout(timer);
       inFlight = true;
       api.runProof(slug)
         .then(
-          (p) => { if (mine === seq.current) { setProof(p); setErr(""); } },
+          (p) => {
+            if (mine !== seq.current) return;
+            setProof(p); setErr("");
+            if (p.pending && retries < RETRY_MAX && !queued) { retries++; timer = setTimeout(load, RETRY_MS); }
+          },
           (e) => { if (mine === seq.current) setErr(errorText(e)); },
         )
         .finally(() => {
@@ -68,8 +80,8 @@ export function Proof({ slug }: { slug: string }) {
         });
     };
     load();
-    const off = onChanged(load);
-    return () => { seq.current++; off(); };
+    const off = onChanged(() => { retries = 0; load(); });
+    return () => { seq.current++; clearTimeout(timer); off(); };
   }, [slug]);
 
   const finished = proof !== null && proof.label !== "in_progress";

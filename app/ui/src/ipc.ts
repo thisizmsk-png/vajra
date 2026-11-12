@@ -235,6 +235,8 @@ export type RunProof = {
   export: boolean;
   /** The PR comment, exactly as it would be posted. */
   markdown: string;
+  /** A row's check hasn't finished; ask again (a finished sweep sends no `changed` event). */
+  pending?: boolean;
 };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =

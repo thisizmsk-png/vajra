@@ -351,6 +351,8 @@ pub fn proof_json(p: &Proof, markdown_text: &str) -> Value {
         "record_note": record_note(p.label),
         "export": export_allowed(),
         "markdown": markdown_text,
+        // A row whose check hasn't finished: the UI asks again (bounded), since a finished sweep sends no event.
+        "pending": p.rows.iter().any(|r| r.status == "checking"),
     })
 }
 

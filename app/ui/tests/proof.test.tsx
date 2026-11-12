@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { ProofLabel, RunProof } from "../src/ipc";
 import { Proof, parsePr, proofTone } from "../src/screens/run/Proof";
@@ -146,6 +146,43 @@ describe("Proof", () => {
     await act(async () => { pending.shift()!(); });
     expect(runs()).toBe(2);
     expect(await screen.findByText(L.label.verified)).toBeTruthy();
+  });
+
+  it("a proof with checks still running asks again until they finish, with no changed event", async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const ipc = fakeIpc({
+        run_proof: () => (++n < 3 ? proof("not_verified", { pending: true, reason: "not checked yet" }) : proof("verified")),
+      });
+      setTransport(ipc.transport);
+      render(<Proof slug="s1-camp" />);
+      const runs = () => ipc.calls.filter((c) => c.cmd === "run_proof").length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("not checked yet")).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByText(L.label.verified)).toBeTruthy();
+      // Settled: no more asks.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(runs()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a check that never finishes stops asking after the cap", async () => {
+    vi.useFakeTimers();
+    try {
+      const ipc = fakeIpc({ run_proof: proof("not_verified", { pending: true }) });
+      setTransport(ipc.transport);
+      render(<Proof slug="s1-camp" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+      const runs = ipc.calls.filter((c) => c.cmd === "run_proof").length;
+      expect(runs).toBe(41);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an unreadable proof is an error, not an empty state", async () => {

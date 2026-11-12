@@ -211,6 +211,44 @@ fn a_nonce_or_key_shaped_value_in_the_evidence_never_reaches_the_export() {
     }
 }
 
+#[test]
+fn a_nonce_in_a_commit_field_never_reaches_the_export_even_on_an_unverified_row() {
+    let slug = format!("deliver-{RUN}");
+    let nonce = "0badc0de".repeat(4); // 32 hex: shaped exactly like a commit
+    let mut t1 = green("t1", "limits apply");
+    t1["evidence"]["head"] = json!(nonce);
+    // An unverified row (its evidence file was never written), its head the nonce padded to a 40-hex commit.
+    let mut t2 = ev_task(Path::new("/x"), "t2", "done", &["429 body"], "never-written");
+    t2["evidence"]["head"] = json!(format!("{nonce}01234567"));
+    let Some((t, app)) = signed_run(&slug, "g", "done", vec![t1, t2]) else { return };
+    {
+        let mut runs = lock(&app.runs);
+        let mut nonces = crate::crew::redact::Redactor::default();
+        nonces.add(Some(&nonce));
+        runs.insert("s".into(), Run { session_id: "s".into(), run_id: RUN.into(), campaign: slug.clone(), cwd: t.0.join("repo"), nonces });
+    }
+    let p = app.run_proof(&slug).unwrap();
+    let page = fs::read_to_string(app.export_proof_page(&slug).unwrap()["path"].as_str().unwrap()).unwrap();
+    for out in [p.to_string(), page] {
+        assert!(!out.contains(&nonce[..12]), "nonce leaked: {out}");
+    }
+}
+
+#[test]
+fn an_exports_symlink_is_refused_and_its_target_is_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let slug = format!("deliver-{RUN}");
+    let Some((t, app)) = signed_run(&slug, "g", "done", vec![green("t1", "limits apply")]) else { return };
+    let elsewhere = t.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = fs::remove_dir_all(t.0.join("data/exports"));
+    std::os::unix::fs::symlink(&elsewhere, t.0.join("data/exports")).unwrap();
+    assert!(app.export_proof_page(&slug).is_err());
+    assert_eq!(fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777, 0o755, "the target was not chmodded");
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing was written through the link");
+}
+
 /// A fake `gh` that records its argv and stdin, and exits `code`.
 fn fake_gh(t: &Tmp, code: i32) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;

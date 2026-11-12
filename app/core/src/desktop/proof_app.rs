@@ -80,7 +80,8 @@ impl App {
                 criterion: clean(r["criterion"].as_str().unwrap_or("")),
                 task: clean(r["task"].as_str().unwrap_or("")),
                 status: r["status"].as_str().unwrap_or("not_run").to_string(),
-                commit: r["head"].as_str().filter(|h| is_hex(h, 7..=64)).map(str::to_string),
+                // A worker writes `head`: a nonce is hex too, so a value the nonce set would change is dropped, not kept.
+                commit: r["head"].as_str().filter(|h| is_hex(h, 7..=64) && red.clean(h) == *h).map(str::to_string),
                 ran_by: checker.as_deref().or_else(|| r["owner"].as_str()).map(clean),
             })
             .collect();
@@ -147,10 +148,13 @@ impl App {
             return Err(fail("export_unavailable", "exporting the proof is not available in this build"));
         }
         let p = self.gather_proof(slug)?;
+        // The data dir and `exports/` are opened without following a symlink, and the write is relative to the held
+        // folder: an `exports` link, or one swapped in after the open, never sends the page (or a chmod) elsewhere.
+        use crate::projects::pinned::Pinned;
         let dir = self.data.join("exports");
-        crate::paths::ensure_private_dir(&dir).map_err(|e| fail("io_error", e))?;
+        let held = Pinned::open(&self.data, false).and_then(|d| d.child("exports", true)).map_err(|e| fail("io_error", e))?;
         let name = format!("{slug}-proof.html");
-        crate::control::fsx::write_atomic(&dir, &name, proof::page(&p).as_bytes()).map_err(|e| fail("io_error", e))?;
+        held.write_atomic(&name, proof::page(&p).as_bytes()).map_err(|e| fail("io_error", e))?;
         Ok(json!({"slug": slug, "path": dir.join(name).to_string_lossy(), "label": p.label.id()}))
     }
 

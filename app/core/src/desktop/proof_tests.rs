@@ -170,6 +170,14 @@ fn only_a_plain_github_pull_request_link_is_taken() {
 }
 
 #[test]
+fn a_row_still_checking_marks_the_proof_pending() {
+    let p = proof(Label::NotVerified, vec![("c", "pass"), ("d", "checking")]);
+    assert_eq!(proof_json(&p, "")["pending"], true);
+    let p = proof(Label::Verified, vec![("c", "pass")]);
+    assert_eq!(proof_json(&p, "")["pending"], false);
+}
+
+#[test]
 fn the_export_has_one_capability_check() {
     assert!(export_allowed());
 }
