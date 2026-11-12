@@ -56,45 +56,49 @@ if [ "$MODE" = sign ]; then
   # Strict: the slug the core recorded, exactly; no sanitizing here.
   printf '%s' "$SLUG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$' || { echo "vajra-verify-work: invalid slug" >&2; exit 2; }
   printf '%s' "$WANT" | grep -Eq '^[0-9a-f]{64}$' || { echo "vajra-verify-work: --expect-sha256 needs 64 lowercase hex" >&2; exit 2; }
-  [ -x "$PYTHON3" ] || { echo "vajra-verify-work: $PYTHON3 is required to sign" >&2; exit 4; }
+  [ -x "$PYTHON3" ] || { echo "sign refused: no usable key" >&2; echo "vajra-verify-work: /usr/bin/python3 is required to sign" >&2; exit 4; }
   EV="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}/${SLUG}/evidence.json"
   HEAD_NOW="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
   # Every check runs before the key is opened; the key is read last, only to sign.
   PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
 import hashlib, hmac, json, os, re, stat, sys
 path, want, slug, head, keyf = sys.argv[1:6]
-def refuse(why):
-    print("vajra-verify-work: refused to sign: " + why, file=sys.stderr); sys.exit(3)
+# The first stderr line is one fixed "sign refused: <reason>" (the core shows it on the card). No reason holds a path
+# or key material; the slug is already checked to be a plain word.
+def refuse(why, code=3):
+    print("sign refused: " + why, file=sys.stderr); sys.exit(code)
 try:
     st = os.lstat(path)
 except OSError:
     refuse("no evidence.json")
 if not stat.S_ISREG(st.st_mode):
-    refuse("evidence.json is not a regular file")
+    refuse("no evidence.json")
 raw = open(path, "rb").read()
 if hashlib.sha256(raw).hexdigest() != want:
-    refuse("sha256 does not match the recorded one")
+    refuse("sha256 mismatch")
 try:
     ev = json.loads(raw.decode("utf-8"))
 except (UnicodeDecodeError, ValueError):
     refuse("not JSON")
+if isinstance(ev, dict) and "hmac" in ev:
+    refuse("already signed")
 cmds = ev.get("commands") if isinstance(ev, dict) else None
-ok = (isinstance(ev, dict) and "hmac" not in ev and ev.get("slug") == slug
+ok = (isinstance(ev, dict) and ev.get("slug") == slug
       and isinstance(cmds, list) and len(cmds) > 0 and all(isinstance(c, dict) for c in cmds)
       and type(ev.get("commandsTotal")) is int and ev["commandsTotal"] == len(cmds)
       and type(ev.get("commandsFailed")) is int and ev["commandsFailed"] == sum(1 for c in cmds if c.get("exit") != 0)
       and ev.get("allPassed") is (ev["commandsFailed"] == 0)
       and isinstance(ev.get("git"), dict))
 if not ok:
-    refuse("not an unsigned verify-work bundle for " + slug)
+    refuse("not a bundle for " + slug)
 if not head or ev["git"].get("head") != head:
-    refuse("its head is not this checkout\x27s HEAD")
+    refuse("head mismatch")
 try:
     k = open(keyf, encoding="utf-8").read().strip()
 except OSError:
     k = ""
 if not re.fullmatch(r"[0-9a-fA-F]{32,}", k) or len(k) % 2:
-    print("vajra-verify-work: no usable Vajra key", file=sys.stderr); sys.exit(4)
+    refuse("no usable key", 4)
 msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 ev["hmac"] = hmac.new(bytes.fromhex(k), msg, hashlib.sha256).hexdigest()
 tmp = path + ".tmp"
@@ -196,9 +200,9 @@ if [ "$IN_GIT" -eq 1 ]; then
 fi
 
 # --run-only: the evidence goes to fd 3 only, as one line; no evidence.json is left from an earlier run.
-EV_OUT="${DIR}/evidence.json"; JQ_FMT=""
-if [ "$MODE" = run_only ]; then rm -f "$EV_OUT"; EV_OUT="/dev/fd/3"; JQ_FMT="-c"; fi
-if [ "$have_jq" -eq 1 ]; then
+JQ_FMT=""
+if [ "$MODE" = run_only ]; then rm -f "${DIR}/evidence.json"; JQ_FMT="-c"; fi
+ev_json() {
   jq -n $JQ_FMT --arg slug "$SLUG" --arg ts "$TS" --argjson total "$n" --argjson failed "$failed" \
         --argjson cmds "[${entries}]" --arg head "$HEAD_SHA" --arg tree "$TREE" --arg after "$TREE_AFTER" \
         --argjson git "$([ "$IN_GIT" -eq 1 ] && echo true || echo false)" --argjson dirty "$DIRTY" --argjson stable "$STABLE" \
@@ -207,7 +211,17 @@ if [ "$have_jq" -eq 1 ]; then
          {slug:$slug, generatedAt:$ts, commandsTotal:$total, commandsFailed:$failed, allPassed:($failed==0),
           git: (if $git then {head:($head|nz), worktreeTree:($tree|nz), worktreeTreeAfter:($after|nz), treeStable:$stable,
                 diffBase:"HEAD+untracked", uncommittedChanges:$dirty, untrackedFiles:$untracked} else null end),
-          commands:$cmds}' > "$EV_OUT"
+          commands:$cmds}'
+}
+if [ "$MODE" = run_only ]; then
+  # fd 3 gets exactly one line, the compact JSON plus a newline, written once from this script's own memory (no file
+  # a leftover command could rewrite); then fd 3 is closed, so no later write can reach it. A result that isn't one
+  # non-empty line writes nothing: the core reads zero lines and fails closed.
+  EVJ="$(ev_json 3>&-)" || EVJ=""
+  case "$EVJ" in ""|*$'\n'*) ;; *) printf '%s\n' "$EVJ" >&3 ;; esac
+  exec 3>&-
+elif [ "$have_jq" -eq 1 ]; then
+  ev_json > "${DIR}/evidence.json"
 fi
 
 # Sign the evidence (contract: docs/roadmap/v0.6-review-fixes.md, "Signed evidence"):

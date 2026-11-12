@@ -102,6 +102,11 @@ bash "$SCRIPT" --run-only ro "echo hi" "if { : >&3; } 2>/dev/null; then echo FD3
 [ "$ec" -eq 0 ]; check "run-only: all-pass -> exit 0" $?
 [ ! -e "$RO/evidence.json" ]; check "run-only: no evidence.json on disk (a stale one is removed)" $?
 [ "$(wc -l < "$WORK/ro.fd3" | tr -d ' ')" = "1" ]; check "run-only: evidence is one line on fd 3" $?
+[ "$(tail -c 1 "$WORK/ro.fd3" | od -An -c | tr -d ' ')" = '\n' ]; check "run-only: the line ends in a newline" $?
+# A check command's leftover background child can't add a line: fd 3 is closed for it, and the script closes fd 3.
+bash "$SCRIPT" --run-only robg "(sleep 1; echo LATE >&3) 2>/dev/null &" 3> "$WORK/robg.fd3" >/dev/null 2>&1
+sleep 2; [ "$(wc -l < "$WORK/robg.fd3" | tr -d ' ')" = "1" ] && ! grep -qx LATE "$WORK/robg.fd3"
+check "run-only: a leftover child never writes a second line" $?
 jq -e '.slug == "ro" and .commandsTotal == 2 and .allPassed and (has("hmac") | not) and .git.head != null' "$WORK/ro.fd3" >/dev/null
 check "run-only: fd 3 carries the unsigned bundle with its head" $?
 ! grep -qx FD3-OPEN "$RO/cmd-2.log"; check "run-only: fd 3 is closed for every command" $?
@@ -123,27 +128,44 @@ check "run-only: the key unreadable -> still an unsigned bundle" $?
 chmod 600 "$KP"
 
 S="$VAJRA_WALKTHROUGH_DIR/ro/evidence.json"; cp "$WORK/ro.fd3" "$S"; H="$(sha_of "$S")"
-bash "$SCRIPT" --sign ro --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; [ $? -eq 3 ] && [ "$(sha_of "$S")" = "$H" ]
-check "sign: a sha mismatch is refused (exit 3), file untouched" $?
+# sign_as <slug> <sha> <exit> <first stderr line>: the exit code and the fixed first line the core shows (vajra-63).
+sign_as() {
+  local err rc; err="$(bash "$SCRIPT" --sign "$1" --expect-sha256 "$2" 2>&1 >/dev/null)"; rc=$?
+  [ "$rc" -eq "$3" ] && [ "$(printf '%s\n' "$err" | head -n 1)" = "$4" ]
+}
+sum_others() { (cd "$1" && cat diff.patch diff.stat untracked.txt cmd-*.log WALKTHROUGH.md | python3 -I -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'); }
+OTHERS="$(sum_others "$VAJRA_WALKTHROUGH_DIR/ro")"
+sign_as ro 0000000000000000000000000000000000000000000000000000000000000000 3 "sign refused: sha256 mismatch" && [ "$(sha_of "$S")" = "$H" ]
+check "sign: a sha mismatch is refused (exit 3, 'sha256 mismatch'), file untouched" $?
 bash "$SCRIPT" --sign ro --expect-sha256 "$H" >/dev/null 2>&1; [ $? -eq 0 ]; check "sign: the recorded sha -> exit 0" $?
 verify_ev "$S" && [ "$(jq -r '.commandsTotal' "$S")" = "2" ]; check "sign: the signed file verifies, same content" $?
-H2="$(sha_of "$S")"; bash "$SCRIPT" --sign ro --expect-sha256 "$H2" >/dev/null 2>&1; [ $? -eq 3 ]
-check "sign: an already signed file is refused" $?
+[ "$(sum_others "$VAJRA_WALKTHROUGH_DIR/ro")" = "$OTHERS" ]; check "sign: the bundle's other files are untouched" $?
+[ -z "$(find "$VAJRA_WALKTHROUGH_DIR/ro" -name '*.tmp')" ]; check "sign: no temp file is left" $?
+H2="$(sha_of "$S")"; sign_as ro "$H2" 3 "sign refused: already signed"
+check "sign: an already signed file is refused ('already signed')" $?
 jq -c '.commandsFailed=0 | .allPassed=true | del(.hmac)' "$WORK/rored.fd3" > "$WORK/forged.json"
 mkdir -p "$VAJRA_WALKTHROUGH_DIR/rored"; cp "$WORK/forged.json" "$VAJRA_WALKTHROUGH_DIR/rored/evidence.json"
-bash "$SCRIPT" --sign rored --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rored/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
-check "sign: a bundle whose counts don't match its commands is refused" $?
+sign_as rored "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rored/evidence.json")" 3 "sign refused: not a bundle for rored"
+check "sign: counts that don't match its commands are refused ('not a bundle for <slug>')" $?
 jq -c '.slug="other"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/rokey/evidence.json"
-bash "$SCRIPT" --sign rokey --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rokey/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
+sign_as rokey "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rokey/evidence.json")" 3 "sign refused: not a bundle for rokey"
 check "sign: a bundle for another slug is refused" $?
-jq -c '.git.head="'"$(git rev-parse HEAD~1)"'"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json"
-bash "$SCRIPT" --sign rounread --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
-check "sign: a bundle from another head is refused" $?
+jq -c '.slug="rounread" | .git.head="'"$(git rev-parse HEAD~1)"'"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json"
+sign_as rounread "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json")" 3 "sign refused: head mismatch"
+check "sign: a bundle from another head is refused ('head mismatch')" $?
+mkdir -p "$VAJRA_WALKTHROUGH_DIR/nojson"; printf 'not json' > "$VAJRA_WALKTHROUGH_DIR/nojson/evidence.json"
+sign_as nojson "$(sha_of "$VAJRA_WALKTHROUGH_DIR/nojson/evidence.json")" 3 "sign refused: not JSON"; check "sign: not JSON" $?
+mkdir -p "$VAJRA_WALKTHROUGH_DIR/noev"; sign_as noev "$H" 3 "sign refused: no evidence.json"; check "sign: no evidence.json" $?
+ln -s "$S" "$VAJRA_WALKTHROUGH_DIR/noev/evidence.json"
+sign_as noev "$H2" 3 "sign refused: no evidence.json"; check "sign: a symlinked evidence.json counts as none" $?
 mkdir -p "$VAJRA_WALKTHROUGH_DIR/nokey"; jq -c '.slug="nokey"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/nokey/evidence.json"
 mv "$KP" "$WORK/key.saved"
-bash "$SCRIPT" --sign nokey --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/nokey/evidence.json")" >/dev/null 2>&1; [ $? -eq 4 ]
-check "sign: no key -> exit 4" $?
+sign_as nokey "$(sha_of "$VAJRA_WALKTHROUGH_DIR/nokey/evidence.json")" 4 "sign refused: no usable key"
+check "sign: no key -> exit 4 ('no usable key')" $?
 mv "$WORK/key.saved" "$KP"
+# No refusal line names a path or the key.
+for s in ro rored rokey rounread nojson noev; do bash "$SCRIPT" --sign "$s" --expect-sha256 "$H" 2>&1 >/dev/null | head -n 1; done > "$WORK/reasons.txt"
+! grep -qE '/|hmac|key-' "$WORK/reasons.txt"; check "sign: no refusal line holds a path or key material" $?
 bash "$SCRIPT" --sign "../x" --expect-sha256 "$H" >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: a traversal slug is a usage error" $?
 bash "$SCRIPT" --sign ro >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: no --expect-sha256 is a usage error" $?
 cd "$WORK"
