@@ -204,8 +204,9 @@ STATUS2=$?
 echo "claude exit (data-dir run): $STATUS2"
 /usr/bin/python3 -I "$HERE/s4_check.py" "$SP" "$M" "$TOOLS" "$STATUS" "$SP2" "$WT2" "$DATA" "$TOOLS2" "$STATUS2" "$KD" "$TT2"
 VERDICT=$?
-# The pair a PASS proves, for profiles::CLAUDE_WORKER_PROVEN: the exact --version line and this branch's flag shape.
-SHAPE=$(cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- --shape 2>/dev/null)
+# The pair a PASS proves, for profiles::CLAUDE_WORKER_PROVEN: the exact --version line and this branch's flag shape,
+# hashed with the guard scripts this run installed (the repo's).
+SHAPE=$(cargo run -q --manifest-path "$HERE/../../core/Cargo.toml" --example s4_flag -- --shape "$CC/skills/vajra/hooks" 2>/dev/null)
 echo "info  proven pair (add on PASS): (\"$("$CLAUDE" --version 2>/dev/null | head -1)\", \"$SHAPE\")"
 exit "$VERDICT"
 

@@ -115,25 +115,85 @@ pub const CLAUDE_WORKER_S4_PASSED: bool = true;
 pub const CLAUDE_WORKER_PROVEN: &[(&str, &str)] = &[
     // The owner's S4 PASS on batch-3 1f5641f4, 2026-11-12 (the extended run: the guard and the deny rules refused
     // Bash, Write and Edit into the data dir).
-    ("2.1.296 (Claude Code)", "5badf13b1b3ce79c515613171b73fc8a8b82938cf1b2d08b1ca9837945546faa"),
+    // The shape since the argv flags (#186 bhishma) and the guard scripts' bytes (#186 codex) joined it, over the
+    // repo's hooks/: pending the owner's S4 rerun on this branch.
+    ("2.1.296 (Claude Code)", "4151c31fe955b4d746350bc911a9f0b8e58edff18eacf507bf1a92eb9ac12f4c"),
 ];
+
+/// Canary A: a build not on `CLAUDE_WORKER_PROVEN` whose self-test on this Mac failed, timed out or could not run (no
+/// Vajra guard installed). Codex workers are unaffected.
+pub const CLAUDE_SELFTEST_FAILED: Unsupported = Unsupported {
+    reason: "claude_selftest_failed",
+    detail: "This Claude Code version failed Vajra's safety self-test, so Claude workers stay off. Codex workers still run.",
+};
 
 pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
     reason: "claude_unproven",
     detail: "Vajra hasn't verified this Claude Code version with its worker settings yet. Use a verified version, or a Codex worker.",
 };
 
-/// The sha256 of the worker flag file built over fixed placeholder paths: the same on every machine and for every
-/// ticket, and changed by any change to the deny-rule tables, the hooks or the flag's own fields.
-pub fn claude_worker_flag_shape() -> Result<String, String> {
+/// What `claude_worker_flag_shape` hashes: the worker flag file and the worker argv, both built by the real builders
+/// over fixed placeholders (paths, session id, prompt, a writer's full tool list). The same on every machine and for
+/// every ticket, and changed by any change to the deny-rule tables, the hooks, the flag's fields, or the argv flags S4
+/// relies on (`--setting-sources`, `--permission-mode`, `--tools`, `--allowedTools`, ...; #186 bhishma).
+pub fn claude_worker_shape_input() -> Result<String, String> {
     let p = |s: &str| PathBuf::from(format!("/vajra-flag-shape/{s}"));
-    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"), &p("tmp"))?;
-    Ok(crate::control::sha256::hex_digest(body.as_bytes()))
+    let tmp = p("tmp");
+    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"), &tmp)?;
+    let l = WorkerLaunch { kind: RoleKind::Worker, prompt: "vajra flag shape", model: None, effort: None, network: false, ticket_tmp: &tmp };
+    let (claude, settings) = (p("claude"), p("flag.json"));
+    let c = ClaudeWorker { claude: &claude, session_id: "00000000-0000-4000-8000-000000000000", settings: &settings, tools: "Read,Grep,Glob,Bash,Edit,Write" };
+    let argv = claude_worker_argv(&l, &c).map_err(|e| format!("{}: {}", e.field, e.reason))?;
+    Ok(format!("{body}\n{}", serde_json::to_string(&argv).map_err(|e| e.to_string())?))
 }
 
-/// Whether this `claude --version` output, with today's flag shape, is a pair S4 proved.
-pub fn claude_worker_proven(version: &str) -> Result<(), Unsupported> {
-    let shape = claude_worker_flag_shape().map_err(|_| CLAUDE_UNPROVEN)?;
+/// The hook scripts the worker flag file runs (`hooks/hooks.json`'s commands), by file name, sorted and deduped.
+pub fn claude_worker_hook_scripts() -> Result<Vec<String>, String> {
+    let v: Value = serde_json::from_str(HOOKS_JSON).map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = Vec::new();
+    for entries in v["hooks"].as_object().ok_or("hooks/hooks.json has no hooks")?.values() {
+        for h in entries.as_array().into_iter().flatten().filter_map(|e| e["hooks"].as_array()).flatten() {
+            let cmd = h["command"].as_str().unwrap_or("");
+            for part in cmd.split("/hooks/").skip(1) {
+                let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')).collect();
+                if name.ends_with(".sh") && !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("hooks/hooks.json runs no hook scripts".into());
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The sha256 of `claude_worker_shape_input` plus the bytes of every hook script it runs, read from `hooks` (#186
+/// codex: the flag file names the guard but S4 proved its behavior, so a changed guard needs a new proof). At dispatch
+/// `hooks` is the user's installed `~/.claude/skills/vajra/hooks`; the built-in pair is computed over the repo's
+/// `hooks/`. A missing or non-regular (symlinked) script is an error, and so the build is unproven (fail closed).
+pub fn claude_worker_flag_shape(hooks: &Path) -> Result<String, String> {
+    let mut input = claude_worker_shape_input()?.into_bytes();
+    for name in claude_worker_hook_scripts()? {
+        let p = hooks.join(&name);
+        if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+            return Err(format!("hook script {name} is not installed as a regular file"));
+        }
+        let bytes = std::fs::read(&p).map_err(|e| format!("hook script {name}: {e}"))?;
+        input.extend_from_slice(format!("\n{name} {}\n", bytes.len()).as_bytes());
+        input.extend_from_slice(&bytes);
+    }
+    Ok(crate::control::sha256::hex_digest(&input))
+}
+
+/// The installed Vajra hooks under `home`, as the flag file runs them.
+pub fn claude_worker_hooks_dir(home: &Path) -> PathBuf {
+    home.join(".claude/skills/vajra/hooks")
+}
+
+/// Whether this `claude --version` output, with this flag shape, is a pair S4 proved.
+pub fn claude_worker_proven(version: &str, shape: &str) -> Result<(), Unsupported> {
     if CLAUDE_WORKER_PROVEN.iter().any(|(v, s)| *v == version.trim() && *s == shape) {
         Ok(())
     } else {
