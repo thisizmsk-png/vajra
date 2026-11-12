@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import type { ProofLabel, RunProof } from "../src/ipc";
@@ -129,6 +129,23 @@ describe("Proof", () => {
     fireEvent.click(screen.getByRole("button", { name: L.post }));
     fireEvent.click(screen.getByRole("button", { name: L.confirmPost }));
     expect(await screen.findByText(L.postFailed("GitHub CLI (gh) was not found."))).toBeTruthy();
+  });
+
+  it("a burst of changed events runs at most one proof check at a time, then one rerun", async () => {
+    const pending: (() => void)[] = [];
+    const ipc = fakeIpc({ run_proof: () => new Promise((res) => pending.push(() => res(proof("verified")))) });
+    setTransport(ipc.transport);
+    render(<Proof slug="s1-camp" />);
+    const runs = () => ipc.calls.filter((c) => c.cmd === "run_proof").length;
+    await waitFor(() => expect(runs()).toBe(1));
+    act(() => { for (let i = 0; i < 20; i++) ipc.emit("changed", ["s1-camp"]); });
+    expect(runs()).toBe(1);
+    await act(async () => { pending.shift()!(); });
+    await waitFor(() => expect(runs()).toBe(2));
+    // The queued rerun is the only one; nothing more is started until another event.
+    await act(async () => { pending.shift()!(); });
+    expect(runs()).toBe(2);
+    expect(await screen.findByText(L.label.verified)).toBeTruthy();
   });
 
   it("an unreadable proof is an error, not an empty state", async () => {

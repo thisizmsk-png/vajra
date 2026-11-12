@@ -29,16 +29,28 @@ impl App {
     }
 
     fn gather_proof(&self, slug: &str) -> Result<Proof, Value> {
+        self.gather_proof_with(slug, &|| {})
+    }
+
+    /// `between` runs after the held read, before the check (tests swap files there).
+    pub(super) fn gather_proof_with(&self, slug: &str, between: &dyn Fn()) -> Result<Proof, Value> {
         if !bus::valid_stream_id(slug) {
             return Err(invalid("slug", "not a campaign slug"));
         }
-        let summary = self.with_reader(|r| r.campaign(slug).map_err(|e| fail("not_found", e)))?;
-        let (snap, progress) = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default())))?;
-        let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
-        let rejected = super::runview::timeline(&progress, tasks).outcome == super::runview::Outcome::Rejected;
-        // The record check reads the held bytes and asks the script only about their digest (it holds the key).
-        let report = self.read_report(slug)?;
+        // The record check reads the held bytes and asks the script only about their digest (it holds the key). The
+        // label's goal, status, slug and progress come from those same verified bytes, never from a second read: a
+        // file swapped after the check can't change the label. With no verified campaign they are empty, and the label
+        // fails closed (integrity is not `ok` then anyway).
+        self.with_reader(|r| r.campaign(slug).map(drop).map_err(|e| fail("not_found", e)))?;
+        let mut report = self.read_report_with(slug, &|_| {}, between)?;
+        let verified = report.as_object_mut().and_then(|m| m.remove(super::VERIFIED_KEY)).unwrap_or(Value::Null);
         let integrity = report["integrity"].as_str().unwrap_or("unknown").to_string();
+        let field = |k: &str| verified["campaign"][k].as_str().unwrap_or("").to_string();
+        let (goal, status, slug_field) = (field("goal"), field("status"), field("slug"));
+        let progress = verified["progress"].as_str().unwrap_or("");
+        let snap = self.with_reader(|r| Ok(r.tasks(slug)))?;
+        let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
+        let rejected = super::runview::timeline(progress, tasks).outcome == super::runview::Outcome::Rejected;
         // The same bounded check the Run view runs (cached verdicts are reused). A row it couldn't check reads
         // `checking`, which is not a pass, so the label can only come out weaker, never stronger.
         let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
@@ -47,14 +59,14 @@ impl App {
         let statuses: Vec<&str> = rows_json.iter().map(|r| r["status"].as_str().unwrap_or("not_run")).collect();
         let (label, reason) = proof::label(&Input {
             slug,
-            goal: &summary.goal,
-            status: &summary.status,
+            goal: &goal,
+            status: &status,
             integrity: &integrity,
             rows: statuses,
             trust: trust.as_deref(),
             approval_consumed: approval,
             rejected,
-            slug_field: &summary.slug,
+            slug_field: &slug_field,
             ledger: self.ledger_of(slug),
         });
         let red = self.campaign_redactor(slug);
@@ -75,7 +87,7 @@ impl App {
         let report_text = report["text"].as_str().map(|t| t.lines().map(&clean).collect::<Vec<_>>().join("\n"));
         Ok(Proof {
             slug: slug.to_string(),
-            goal: clean(summary.goal.trim_start().strip_prefix(proof::MARKER).unwrap_or(&summary.goal).trim()),
+            goal: clean(goal.trim_start().strip_prefix(proof::MARKER).unwrap_or(&goal).trim()),
             label,
             reason,
             integrity,

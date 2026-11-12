@@ -49,12 +49,23 @@ export function Proof({ slug }: { slug: string }) {
 
   useEffect(() => {
     setProof(null); setErr(""); setNote(""); setWhy(false);
+    // `run_proof` runs the record check (a script), and `changed` comes in bursts: at most one call is in flight, and
+    // any events during it queue a single rerun.
+    const mine = ++seq.current;
+    let inFlight = false;
+    let queued = false;
     const load = () => {
-      const mine = ++seq.current;
-      api.runProof(slug).then(
-        (p) => { if (mine === seq.current) { setProof(p); setErr(""); } },
-        (e) => { if (mine === seq.current) setErr(errorText(e)); },
-      );
+      if (inFlight) { queued = true; return; }
+      inFlight = true;
+      api.runProof(slug)
+        .then(
+          (p) => { if (mine === seq.current) { setProof(p); setErr(""); } },
+          (e) => { if (mine === seq.current) setErr(errorText(e)); },
+        )
+        .finally(() => {
+          inFlight = false;
+          if (queued && mine === seq.current) { queued = false; load(); }
+        });
     };
     load();
     const off = onChanged(load);

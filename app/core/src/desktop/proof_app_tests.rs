@@ -90,6 +90,36 @@ fn with_no_ledger_no_run_reads_verified_and_a_copied_record_is_caught() {
     assert_eq!(p["label"], "not_verified", "{p}");
 }
 
+/// `campaign.json` with the goal marker dropped (the swap a worker would want: outside the guard reads as plain).
+fn unmarked(path: &Path) -> Vec<u8> {
+    let mut c: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let goal = c["goal"].as_str().unwrap().replace(proof::MARKER, "").trim().to_string();
+    c["goal"] = json!(goal);
+    serde_json::to_vec(&c).unwrap()
+}
+
+#[test]
+fn the_label_follows_the_verified_campaign_bytes_never_a_later_read() {
+    let slug = format!("deliver-{RUN}");
+    let goal = format!("{} Add rate limits", proof::MARKER);
+    let Some((t, app)) = signed_run(&slug, &goal, "done", vec![green("t1", "limits apply")]) else { return };
+    seats(&t, "guarded", &slug, false);
+    let file = t.home().join(".claude/vajra/campaigns").join(&slug).join("campaign.json");
+    let genuine = fs::read(&file).unwrap();
+    // Swapped after the held read: the check and the label both stay on the signed bytes.
+    let (f, swap) = (file.clone(), unmarked(&file));
+    let p = app.gather_proof_with(&slug, &move || fs::write(&f, &swap).unwrap()).unwrap();
+    assert_eq!((p.label, p.integrity.as_str(), p.goal.as_str()), (proof::Label::EvidenceUnguarded, "ok", "Add rate limits"));
+    // Tampered before the read, the genuine copy put back while the check runs: the record fails, so does the label.
+    fs::write(&file, unmarked(&file)).unwrap();
+    let (f, g) = (file.clone(), genuine.clone());
+    let p = app.gather_proof_with(&slug, &move || fs::write(&f, &g).unwrap()).unwrap();
+    assert_eq!((p.label, p.integrity.as_str()), (proof::Label::NotVerified, "integrity_failed"));
+    // The verified bytes never reach the UI's own record read.
+    fs::write(&file, &genuine).unwrap();
+    assert!(app.read_report(&slug).unwrap().get(crate::desktop::VERIFIED_KEY).is_none());
+}
+
 #[test]
 fn an_outside_guard_run_is_labelled_from_its_signed_slug_even_when_seats_say_guarded() {
     let slug = format!("deliver-{RUN}-og");
