@@ -40,6 +40,9 @@ pub const MAX_REQUEST: usize = 64 * 1024;
 /// Connections served at once.
 pub const MAX_CONNECTIONS: usize = 64;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most one reply may wait for the client to read it. A client that stops reading loses its connection, and its
+/// slot, instead of holding one of the `MAX_CONNECTIONS` forever.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The uid of the process on the other end, via getpeereid (LOCAL_PEERCRED).
 #[cfg(not(target_os = "linux"))]
@@ -180,6 +183,8 @@ fn within_cap(v: &Value, len: usize) -> bool {
 }
 
 fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowed_uid: u32) -> io::Result<()> {
+    // First, before any reply: every write on this connection is bounded.
+    conn.set_write_timeout(Some(WRITE_TIMEOUT))?;
     match peer_uid(&conn) {
         Ok(uid) if uid == allowed_uid => {}
         _ => return reply(&mut conn, &json!({"error": "peer_uid"})),

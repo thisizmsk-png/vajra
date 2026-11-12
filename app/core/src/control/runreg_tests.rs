@@ -571,3 +571,37 @@ fn a_connection_handed_on_by_a_lead_tree_peer_that_exited_never_reaches_the_serv
         assert_eq!(out["error"], want, "lead_tree={lead_tree}: {out}");
     }
 }
+
+#[test]
+fn clients_that_stop_reading_replies_lose_their_slots_and_a_fresh_call_is_served() {
+    use super::super::socket::{request, MAX_CONNECTIONS, WRITE_TIMEOUT};
+    let t = Tmp::new("stall");
+    let (sock, _svc) = serving(&t, RunRegistry::new());
+    // Every slot taken by a client that sends many short bad lines and never reads a reply: each handler ends up
+    // blocked writing a reply nobody reads.
+    let junk = "x\n".repeat(40_000);
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        // Whatever fits at once, without waiting: all 64 are in place well inside the write bound.
+        c.set_nonblocking(true).unwrap();
+        let _ = std::io::Write::write(&mut c, junk.as_bytes());
+        held.push(c);
+    }
+    // Past the cap the server answers `busy` and closes; a client still sending sees that as a broken pipe.
+    let call = || request(&sock, "list_workers", &json!({})).unwrap_or_else(|_| json!({"error": "busy"}));
+    let full = Instant::now() + Duration::from_secs(5);
+    while call()["error"] != "busy" && Instant::now() < full {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(call()["error"], "busy", "every slot is held by a stalled client");
+    // Within the write bound (plus slack) the stalled handlers give up, and their slots come back.
+    let until = Instant::now() + WRITE_TIMEOUT + Duration::from_secs(10);
+    let mut out = call();
+    while out["error"] == "busy" && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+        out = call();
+    }
+    assert_ne!(out["error"], "busy", "a stalled reader cannot hold a slot forever: {out}");
+    drop(held);
+}
