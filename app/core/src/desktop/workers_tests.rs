@@ -129,7 +129,9 @@ case "$MODE" in
     # A check's final message: <dir>/answer-<kind> holds it as a JSON string (the test writes it).
     A="{dir}/answer-$(basename "$WT" | sed 's/-r[0-9]*$//')"
     [ -f "$A" ] || A="{dir}/answer"
-    if [ "$HARNESS" = claude ]; then
+    # No answer for this worktree: a writer, which edits.
+    if [ ! -f "$A" ]; then edit
+    elif [ "$HARNESS" = claude ]; then
       printf '{{"type":"result","subtype":"success","is_error":false,"result":%s}}\n' "$(cat "$A")"
     else
       printf '{{"type":"item.completed","item":{{"id":"i9","type":"agent_message","text":%s}}}}\n' "$(cat "$A")"
@@ -923,4 +925,46 @@ fn a_checks_final_message_is_kept_after_it_ends_and_a_redo_gets_its_own_ticket()
     r.done(&b);
     let w = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(r.rt.last_message(&w.id), None, "only a check's answer is kept");
+}
+
+#[test]
+fn the_core_gate_runs_a_real_verify_and_review_on_the_integration_and_the_pass_is_not_yet_verified() {
+    use crate::desktop::phases::{CoreGate, GateConfig};
+    use crate::desktop::plan::{Criterion, PlanTask};
+    use crate::desktop::runproto::*;
+    let r = rig("coregate", Opts { mode: "answer", ..Opts::default() });
+    let v = r#"{"results":[{"criterion_id":"ac-1","status":"pass","command":"grep -q worker src/lib.rs","notes":"","exit_code":0,"evidence":"matched"}],"suite_command":"","suite_passes":true,"regressions":[],"setup_cmds":[]}"#;
+    std::fs::write(r.d.join("answer-verify"), serde_json::to_string(v).unwrap()).unwrap();
+    let rv = "```json\n{\"verdict\":\"approve\",\"blocking_issues\":[],\"risks\":[],\"rationale\":\"fine\"}\n```";
+    std::fs::write(r.d.join("answer-review"), serde_json::to_string(rv).unwrap()).unwrap();
+    let role = |slot: &str, role: &str| WorkerSeat { role: role.into(), ..seat(slot, "codex") };
+    let seats = vec![seat("w1", "codex"), role("v1", "verifier"), role("r1", "reviewer")];
+    let cfg = RunConfig {
+        project: "p".into(), run: "r1".into(), repo: r.repo.clone(), base: r.base.clone(), ask: "add a worker line".into(), seats: seats.clone(),
+        max_in_flight: 4, limits: Limits { rounds: 1, ..Limits::default() }, redact: Redactor::default(),
+    };
+    let gate = CoreGate::new(GateConfig { project: "p".into(), repo: r.repo.clone(), seats, defaults: Vec::new(), redact: Redactor::default() }, Arc::new(r.rt.clone()));
+    let workers = Arc::new(CoreWorkers { rt: r.rt.clone(), gw: r.gw.clone() });
+    let p = RunProtocol::new(cfg, workers, Arc::new(gate), Arc::new(SystemClock::default()));
+    let task = PlanTask {
+        id: "t1".into(), title: "add the line".into(), owner_role: "backend".into(), files: vec!["src/**".into()], deps: vec![], criteria: vec!["ac-1".into()],
+        brief: "Add a line to src/lib.rs.".into(), touches_security: false,
+    };
+    let crit = vec![Criterion { id: "ac-1".into(), criterion: "the line is there".into(), check: "grep -q worker src/lib.rs".into() }];
+    p.plan_tasks(PlanInput { round: 1, criteria: Some(crit), tasks: vec![task], ..PlanInput::default() }).unwrap();
+    let Dispatched::Ticket { ticket, .. } = p.dispatch_worker("t1").unwrap() else { panic!("held") };
+    let ended = p.await_any(std::slice::from_ref(&ticket), Duration::from_secs(20)).unwrap().ended.expect("the worker ended");
+    assert_eq!(ended.outcome.as_deref(), Some("done"), "{ended:?}");
+    let round = p.integrate(1).unwrap();
+    p.await_any(&[round], Duration::from_secs(30)).unwrap().ended.expect("the round ended");
+    let card = p.card();
+    assert_eq!(card.status, Some(RunStatus::NotVerified), "{card:?}");
+    assert!(card.reason.as_deref().unwrap().contains("the gate passed in round 1"), "{card:?}");
+    let kinds: Vec<(&str, &str, bool)> = card.checks.iter().map(|c| (c["kind"].as_str().unwrap(), c["slot"].as_str().unwrap(), c["valid"].as_bool().unwrap())).collect();
+    assert_eq!(kinds, [("verify", "v1", true), ("review", "r1", true)]);
+    let checks: Vec<TicketView> = r.rt.list("r1").into_iter().filter(|t| t.kind != "writer").collect();
+    assert_eq!(checks.len(), 2, "one verify and one review, no retry");
+    let head = ugit(&r.home, &r.repo, &["rev-parse", "refs/heads/vajra/r1/integration"]);
+    assert!(checks.iter().all(|t| t.dispatch_head.as_deref() == Some(head.as_str())), "each check starts at the integration commit");
+    assert!(checks.iter().all(|t| t.worktree.as_ref().is_none_or(|w| !w.exists())), "the check worktrees are discarded");
 }
