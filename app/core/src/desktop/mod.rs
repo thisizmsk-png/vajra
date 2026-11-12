@@ -2374,13 +2374,24 @@ fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
         keep.insert(e.session_id);
         keep.extend(e.lead_session_id);
     }
+    // The guarded run records keep their sessions whatever the index says (#179 codex P1): a worker that drops a run
+    // from `runs.jsonl` must not get its control dir, nonce and acknowledged stops deleted. Each run's own session
+    // (`session`, written by `record_run_pinned`) and its Lead's (`lead_session`) are kept. A record that exists but
+    // can't be read whole (a link, an oversized file, an unreadable entry) prunes nothing at all.
     let lead = data.join("control").join("lead");
     match std::fs::read_dir(&lead) {
         Ok(rd) => {
-            for d in rd.flatten() {
-                let p = d.path().join("lead_session");
-                if let Ok(b) = crate::control::fsx::read_nofollow_capped(&p, 256) {
-                    keep.insert(String::from_utf8_lossy(&b).trim().to_string());
+            for d in rd {
+                let d = d.ok()?;
+                for name in ["session", "lead_session"] {
+                    match crate::control::fsx::read_nofollow_capped(&d.path().join(name), 256) {
+                        Ok(b) => {
+                            keep.insert(String::from_utf8_lossy(&b).trim().to_string());
+                        }
+                        // No such record, or the entry is no run dir: nothing to keep from it.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
+                        Err(_) => return None,
+                    }
                 }
             }
         }
