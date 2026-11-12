@@ -587,6 +587,51 @@ fn quit_ends_every_live_ticket_with_its_line_and_refuses_new_ones() {
 
 /// 6c-1 follow-up: a stopped worker that never exits (its kill does not land) no longer holds its attempt until the
 /// 30-minute worker timeout. The attempt ends `stopped` after the bounded wait, and its process group is killed.
+/// #177 codex P1: a ticket held inside its snapshot (no harness a stop could reach) past the quit budget is ended by
+/// `quit` itself, with its `app_quit` outcome line written before `quit` returns. When the snapshot later finishes,
+/// the ticket thread changes nothing and writes no second outcome.
+#[test]
+fn quit_past_its_budget_ends_and_records_a_ticket_held_in_its_snapshot() {
+    let gate = Arc::new(Gate::default());
+    let r = rig("quit-held", Opts { gate: Some(gate.clone()), ..Opts::default() });
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    gate.wait_entered();
+    let left = r.rt.quit(Duration::from_millis(100));
+    assert_eq!(left, vec![id.clone()], "held past the budget");
+    let v = r.rt.view(&id).unwrap();
+    assert_eq!((v.state, v.outcome, v.reason.as_deref(), v.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_quit")), "{v:?}");
+    let outcome_lines = || std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().filter(|l| l.contains(r#""event":"outcome""#)).count();
+    assert_eq!(outcome_lines(), 1, "the outcome is on disk before quit returns");
+    gate.open();
+    std::thread::sleep(Duration::from_millis(500));
+    let after = r.rt.view(&id).unwrap();
+    assert_eq!((after.outcome, after.detail.as_deref(), after.commit.as_deref()), (Some(Outcome::Failed), Some("app_quit"), None), "{after:?}");
+    assert_eq!(outcome_lines(), 1, "the late finish writes nothing more");
+}
+
+/// #177 codex P2: the quit budget includes stop delivery. Each stop here blocks for 1.5 s, as the supervisor's kill does
+/// while a worker that ignores SIGHUP waits out its grace. Two running workers, and `quit(50ms)` still returns within
+/// about its budget: the stops are delivered off its thread, and the tickets are ended and recorded at the deadline.
+#[test]
+fn a_short_quit_returns_on_time_when_stop_delivery_blocks() {
+    let r = rig("quit-slowstop", Opts { mode: "hang", ..Opts::default() });
+    *crate::lock(&r.rt.0.kill_delay) = Some(Duration::from_millis(1500));
+    let ids = [r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap(), r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap()];
+    let t0 = Instant::now();
+    while ids.iter().any(|id| r.rt.view(id).unwrap().attempt == 0) {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let t0 = Instant::now();
+    r.rt.quit(Duration::from_millis(50));
+    let took = t0.elapsed();
+    assert!(took < Duration::from_millis(700), "quit(50ms) took {took:?}");
+    for id in &ids {
+        assert_eq!(r.rt.view(id).unwrap().detail.as_deref(), Some("app_quit"));
+    }
+    *crate::lock(&r.rt.0.kill_delay) = None;
+}
+
 #[test]
 fn a_stopped_worker_that_never_exits_ends_after_a_bounded_wait() {
     let r = rig("killwait", Opts { mode: "hang", ..Opts::default() });
