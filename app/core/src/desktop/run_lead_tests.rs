@@ -19,7 +19,7 @@ struct Held(Mutex<BTreeMap<String, Tick>>);
 impl Workers for Held {
     fn dispatch(&self, spec: TaskSpec, _: WorkerSeat) -> Result<String, DispatchError> {
         let id = format!("{}.{}.r{}", spec.run, spec.task, spec.round);
-        let t = Tick { id: id.clone(), state: TState::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None };
+        let t = Tick { id: id.clone(), state: TState::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, replayed: false };
         crate::lock(&self.0).insert(id.clone(), t);
         Ok(id)
     }

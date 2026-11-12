@@ -975,6 +975,9 @@ fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
     assert_eq!((d.state, d.outcome, d.commit.as_deref()), (State::Ended, Some(Outcome::Done), done.commit.as_deref()));
     let c = life2.view(&id).unwrap();
     assert_eq!((c.state, c.outcome, c.reason.as_deref(), c.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{c:?}");
+    // Both are an earlier life's: the run protocol never integrates them, even the one whose record says done.
+    assert!(life2.from_earlier_life(&done.id) && life2.from_earlier_life(&id));
+    assert!(!r.rt.from_earlier_life(&id), "the life that dispatched it holds it as its own");
     assert!(wt.is_dir(), "its worktree is kept for the user to look at");
     let lines = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
     assert_eq!(lines.matches("app_restarted").count(), 1, "{lines}");

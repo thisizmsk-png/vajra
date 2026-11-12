@@ -65,7 +65,7 @@ impl Workers for FakeWorkers {
         if b.contains_key(&id) {
             return Err(DispatchError::Exists);
         }
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None };
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, replayed: false };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
     }
@@ -637,6 +637,22 @@ fn a_merge_conflict_uses_up_the_round_with_feedback_for_its_task() {
     assert_eq!(fb["t3"]["merge_conflict"], commit_of("r1.t3.r1"));
     assert_eq!(fb.as_object().unwrap().len(), 1);
     assert_eq!(r.status(), Some(RunStatus::NotVerified), "the only round was used up");
+}
+
+/// bhishma (6c-3 replay review): a replayed outcome, an earlier app life's ticket read back from its record, is never
+/// integrable, even when the record says `done` with a commit. The round fails on that task and merges nothing.
+#[test]
+fn a_replayed_done_ticket_is_never_integrated() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    let t2 = "r1.t2.r1";
+    crate::lock(&r.w.tickets).get_mut(t2).unwrap().0.replayed = true;
+    r.p.integrate(1).unwrap();
+    let rt = r.await_round(1);
+    assert_eq!(rt.outcome.as_deref(), Some("failed"), "a replayed done ticket was taken as this life's");
+    assert!(rt.feedback.unwrap()["t2"].is_object(), "the replayed task is what broke the round");
+    assert!(r.w.merges.lock().unwrap().is_empty(), "nothing of a round with a replayed ticket is merged");
 }
 
 #[test]

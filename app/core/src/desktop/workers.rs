@@ -559,6 +559,13 @@ impl WorkerRuntime {
         b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
     }
 
+    /// Is `id` an earlier life's ticket, read back from its record (`replay`) and not dispatched again in this one?
+    /// Its outcome is shown, never integrated: this life holds no worktree or receipt check for it.
+    pub fn from_earlier_life(&self, id: &str) -> bool {
+        let b = crate::lock(&self.0.book);
+        !b.tickets.contains_key(id) && b.past.contains_key(id)
+    }
+
     /// The supervisor session of the ticket's running attempt, if one is running now.
     pub fn session_of(&self, id: &str) -> Option<String> {
         crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone())
