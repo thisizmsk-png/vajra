@@ -510,3 +510,14 @@ fn the_schema_caps_are_the_protocols_caps() {
     assert!(client_timeout("integrate", &json!({}), Duration::ZERO) <= MAX_CLIENT_TIMEOUT);
     assert!(MAX_CLIENT_TIMEOUT < Duration::from_secs(130), "below the Codex lead's tool_timeout_sec");
 }
+
+#[test]
+fn the_schema_text_limits_are_the_protocols_and_a_plan_at_them_is_accepted() {
+    use crate::desktop::runproto::{MAX_ACTION, MAX_ACTION_WHY, MAX_DECISION_TITLE, MAX_RATIONALE};
+    let t = tools();
+    let plan = t.as_array().unwrap().iter().find(|x| x["name"] == "plan_tasks").unwrap()["inputSchema"]["properties"].clone();
+    let action = &plan["protected_actions"]["items"]["properties"];
+    assert_eq!((action["action"]["maxLength"].as_u64(), action["why"]["maxLength"].as_u64()), (Some(MAX_ACTION as u64), Some(MAX_ACTION_WHY as u64)));
+    let decision = &plan["decisions"]["items"]["properties"];
+    assert_eq!((decision["title"]["maxLength"].as_u64(), decision["rationale"]["maxLength"].as_u64()), (Some(MAX_DECISION_TITLE as u64), Some(MAX_RATIONALE as u64)));
+}

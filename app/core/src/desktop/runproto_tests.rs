@@ -724,3 +724,35 @@ fn the_run_timeout_counts_from_the_runs_start_not_the_clocks_origin() {
     p.tick();
     assert_eq!(p.card().status, Some(RunStatus::TimedOut));
 }
+
+#[test]
+fn a_status_query_is_lead_activity_and_restarts_the_stuck_lead_wait() {
+    let r = rig_with("add a --json flag", default_seats(), Limits::default(), true);
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    for query in [0, 1] {
+        r.clock.advance(899);
+        if query == 0 { r.p.workers(None); } else { r.p.rounds(); }
+        r.clock.advance(1);
+        r.p.tick();
+        assert!(r.p.card().questions.is_empty(), "the lead just called a vajra-run tool");
+    }
+    r.clock.advance(900);
+    r.p.tick();
+    assert_eq!(r.p.card().questions, [Question::StuckLead], "with no call at all, the question comes");
+}
+
+#[test]
+fn a_plan_at_the_advertised_text_limits_is_accepted_and_one_byte_over_is_refused() {
+    let at = |extra: usize| PlanInput {
+        decisions: vec![Decision { title: "d".repeat(MAX_DECISION_TITLE), rationale: "r".repeat(MAX_RATIONALE + extra) }],
+        protected_actions: vec![ProtectedAction { action: "a".repeat(MAX_ACTION + extra), why: "w".repeat(MAX_ACTION_WHY) }],
+        ..plan1()
+    };
+    let r = rig();
+    assert!(r.p.plan_tasks(at(0)).is_ok(), "the schema's limits are the protocol's");
+    let r = rig();
+    assert_eq!(code(r.p.plan_tasks(at(1))).0, PLAN_INVALID);
+}

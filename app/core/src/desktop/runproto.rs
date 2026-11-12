@@ -83,6 +83,12 @@ pub const MAX_TASK_DEPS: usize = 8;
 pub const MAX_TASK_FILES: usize = MAX_FILES;
 pub const MAX_PLAN_DECISIONS: usize = MAX_DECISIONS;
 pub const MAX_PLAN_PROTECTED: usize = MAX_PROTECTED;
+/// The plan's text limits, in bytes: a protected action and its why, a decision's title and its rationale. The
+/// `vajra-run` tool schema advertises the same numbers.
+pub const MAX_ACTION: usize = 40;
+pub const MAX_ACTION_WHY: usize = 300;
+pub const MAX_DECISION_TITLE: usize = 300;
+pub const MAX_RATIONALE: usize = 2000;
 pub const MAX_AWAIT_TICKETS: usize = MAX_AWAIT;
 
 /// One run, as the core started it from the vouched proposal.
@@ -642,8 +648,8 @@ impl RunProtocol {
                 return Err(format!("task {}: at most {MAX_FILES} files, {MAX_TASK_DEPS} deps and {MAX_CRITERIA} criteria", plan_id(&t.id)));
             }
         }
-        if p.protected_actions.len() > MAX_PROTECTED || p.protected_actions.iter().any(|a| a.action.len() > 40 || a.why.len() > 300) {
-            return Err(format!("at most {MAX_PROTECTED} protected_actions, each an action of 40 bytes and a why of 300"));
+        if p.protected_actions.len() > MAX_PROTECTED || p.protected_actions.iter().any(|a| a.action.len() > MAX_ACTION || a.why.len() > MAX_ACTION_WHY) {
+            return Err(format!("at most {MAX_PROTECTED} protected_actions, each an action of {MAX_ACTION} bytes and a why of {MAX_ACTION_WHY}"));
         }
         let (criteria, tasks) = if p.round == 1 {
             let Some(c) = &p.criteria else { return Err("round 1 needs the criteria, each with a check".into()) };
@@ -652,7 +658,7 @@ impl RunProtocol {
             if p.decisions.len() > MAX_DECISIONS {
                 return Err(format!("plan may record at most {MAX_DECISIONS} decisions"));
             }
-            if p.decisions.iter().any(|d| d.title.len() > 300 || d.rationale.len() > 2000 || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
+            if p.decisions.iter().any(|d| d.title.len() > MAX_DECISION_TITLE || d.rationale.len() > MAX_RATIONALE || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
                 return Err("every decision needs a title (300 bytes) and a rationale (2000 bytes)".into());
             }
             (c, p.tasks.clone())
@@ -1213,7 +1219,9 @@ impl RunProtocol {
 
     /// The round tickets of every integrated round, with their status: what `list_workers` adds after the workers.
     pub fn rounds(&self) -> Vec<Value> {
-        let st = self.lock();
+        let mut st = self.lock();
+        // A status query is a lead call too (N16): it restarts the stuck-lead wait.
+        self.called(&mut st);
         st.rounds
             .iter()
             .filter(|(_, r)| r.integrated)
@@ -1224,7 +1232,8 @@ impl RunProtocol {
     /// `list_workers` and `inspect_worker` (read-only, this run only): each worker ticket with its task, round, seat
     /// and status, in dispatch order; `only` keeps one ticket.
     pub fn workers(&self, only: Option<&str>) -> Vec<Value> {
-        let st = self.lock();
+        let mut st = self.lock();
+        self.called(&mut st);
         st.tasks
             .iter()
             .flat_map(|t| t.tickets.iter().map(move |tk| (t, tk)))
