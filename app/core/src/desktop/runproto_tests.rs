@@ -702,3 +702,22 @@ fn a_seat_pick_is_dropped_when_a_replan_changes_the_tasks_role() {
     let (_, w) = r.w.spec(&r.dispatch("t1"));
     assert_eq!((w.slot.as_str(), w.role.as_str(), w.source.as_str()), ("w3", "frontend", "user"));
 }
+
+#[test]
+fn the_run_timeout_counts_from_the_runs_start_not_the_clocks_origin() {
+    let w = Arc::new(FakeWorkers::default());
+    let clock = Arc::new(FakeClock::default());
+    clock.advance(5000);
+    let cfg = RunConfig {
+        project: "p".into(), run: "r1".into(), repo: "/nonexistent/repo".into(), base: BASE.into(), ask: "add a --json flag".into(), seats: default_seats(),
+        max_in_flight: 4, limits: Limits { run_timeout: Duration::from_secs(1000), ..Limits::default() }, redact: Redactor::default(),
+    };
+    let p = RunProtocol::new(cfg, w, Arc::new(StubGate), clock.clone());
+    p.plan_tasks(plan1()).expect("a clock already past the timeout uses up nothing of this run");
+    clock.advance(999);
+    p.tick();
+    assert_eq!(p.card().status, None, "the whole configured duration is available");
+    clock.advance(1);
+    p.tick();
+    assert_eq!(p.card().status, Some(RunStatus::TimedOut));
+}

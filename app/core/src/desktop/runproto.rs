@@ -388,6 +388,8 @@ struct St {
     security: bool,
     status: Option<(RunStatus, String)>,
     finish_called: bool,
+    /// The clock when the run started: run time counts from here, not from the clock's origin.
+    started: Duration,
     notes: Option<String>,
     last_call: Duration,
     turns: u32,
@@ -463,7 +465,7 @@ fn neutralise_tags(s: &str) -> String {
 impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
-        let st = St { last_call: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
+        let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
         RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new() }))
     }
 
@@ -506,7 +508,7 @@ impl RunProtocol {
     fn active(&self, st: &St) -> Duration {
         let now = self.now();
         let open = st.paused_at.map_or(Duration::ZERO, |p| now.saturating_sub(p));
-        now.saturating_sub(st.paused + open)
+        now.saturating_sub(st.started + st.paused + open)
     }
 
     /// `run_timeout_s`.
