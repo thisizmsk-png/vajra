@@ -13,6 +13,7 @@ import type { CrewNodeDto } from "../../ipc";
 import { useCommands } from "../../palette";
 import { useRoute } from "../../router";
 import { WorkerPane } from "./WorkerPane";
+import { CoreWorkerPane } from "./CoreWorkerPane";
 
 /** A status or event is re-read at least this often: a tasks.json edit raises no event (AC-2.1.2: within 2 s). */
 const POLL_MS = 2000;
@@ -53,9 +54,12 @@ const taskGroupOf = (n: CrewNodeDto, id: string, task: string | null = null): st
   }
   return undefined;
 };
-/** Every worker in the tree, in tree order. */
+/** A worker the core runs itself (ADR-16 16.7): its id is the full `core:<ticket>` reference its controls act on. */
+const isCore = (id: string) => id.startsWith("core:");
+const isWorker = (id: string) => id.startsWith("agent:") || isCore(id);
+/** Every worker in the tree (a run's subagents and the core's own), in tree order. */
 const agents = (n: CrewNodeDto, out: CrewNodeDto[] = []): CrewNodeDto[] => {
-  if (n.id.startsWith("agent:")) out.push(n);
+  if (isWorker(n.id)) out.push(n);
   n.children.forEach((c) => agents(c, out));
   return out;
 };
@@ -201,7 +205,9 @@ export function Crew() {
             <CrewTree label={S.crew.treeLabel} nodes={[toNode(root)]} selected={selected} onSelect={setSelected} defaultOpen={openIds} />
           )}
         </div>
-        {root && picked && (picked.id.startsWith("agent:") ? (
+        {root && picked && (isCore(picked.id) ? (
+          <CoreWorkerPane key={picked.id} node={picked} status={statusLabel(picked)} />
+        ) : picked.id.startsWith("agent:") ? (
           target && <WorkerPane key={picked.id} node={picked} slug={target.slug} runId={target.runId} taskLocalId={taskGroupOf(root, picked.id) ?? null} status={statusLabel(picked)} />
         ) : (
           <div className="v-crew__pane v-crew__pane--facts">

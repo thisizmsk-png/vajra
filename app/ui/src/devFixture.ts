@@ -22,6 +22,12 @@ const onClaude = { account: "claude", label: "Claude Code", family: "claude", mo
 const onGateway = { account: "openrouter", label: "OpenRouter", family: "deepseek", model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", billing: "gateway", requested: null, error: { kind: "timeout", action: "retrying", attempt: 1, retry_at: "14:05" } };
 const onGrok = { account: "openrouter", label: "OpenRouter", family: "grok", model: "x-ai/grok-4", model_name: "Grok 4", billing: "gateway", requested: null, error: null };
 const onRouter = { account: "openrouter", label: "OpenRouter", family: "openrouter", model: null, model_name: null, billing: "gateway", requested: null, error: null };
+// A core worker's controls, as the core's harness profile builds them (16.7).
+const STOP_NOTE = "Stop ends this worker at once; its uncommitted work stays in its worktree.";
+const coreOn = { message: { enabled: true, reason: null }, redirect: { enabled: true, reason: null }, stop: { enabled: true, note: STOP_NOTE } };
+const CHECK = "This worker checks the work on its own, so it can't take a message.";
+const coreCheck = { message: { enabled: false, reason: CHECK }, redirect: { enabled: false, reason: CHECK }, stop: { enabled: true, note: STOP_NOTE } };
+const coreDiff = { files_total: 2, files: ["src/middleware/bucketStore.ts", "tests/bucketStore.test.ts"], added: 58, removed: 3, partial: false, uncounted: 0 };
 const onHarnessB = { account: "codex", label: "Codex CLI", family: "codex", model: null, model_name: null, billing: "unknown",
   requested: { model: "deepseek/deepseek-v3.2", model_name: "DeepSeek V3.2", label: "OpenRouter" }, error: null };
 
@@ -33,6 +39,9 @@ const crew = n("lead", "lead", "Lead", "in_progress", [
     n("task:t4", "task", "t4 429 body and Retry-After header", "question", [agent("sepoy-backend-1", "Backend worker 1", "sepoy-backend-1", "question", [], onHarnessB)]),
     n("task:t5", "task", "t5 Check AC-1 to AC-5", "ready", [agent("verifier", "Verifier", "vidura", "ready", [], onGrok)]),
     n("task:t6", "task", "t6 Document the limits", "done", [agent("docs", "Docs writer", "nakula", "done", [], onRouter)]),
+    // Workers the core runs itself (ADR-16 16.7): a Claude task worker it can steer, and a check it never steers.
+    n("task:t7", "task", "t7 Cache the bucket state", "in_progress", [n(`core:${RUN}.t7.r1`, "round", "round 1", "in_progress", [], { role: "Backend", provider: onClaude, diff: coreDiff, controls: coreOn })]),
+    n(`verification:${RUN}`, "verification", "Verification", "in_progress", [n(`core:${RUN}.verify.r1`, "worker", "Verify", "in_progress", [], { role: "Verifier", provider: onClaude, controls: coreCheck })]),
   ]),
 ]);
 

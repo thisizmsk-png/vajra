@@ -105,9 +105,17 @@ impl WorkerHost {
     ) -> Result<&WorkerRuntime, Value> {
         let g = self.baseline.as_ref().map_err(|o| json!({"error": AGENTS_OFF, "detail": o.why}))?;
         Ok(self.rt.get_or_init(|| {
+            // The runs `on_repo` names, plus every core worker by its ticket's pinned common dir (#151 codex P1).
+            let sessions = Arc::new(crate::vajra::gitw::RepoSessions::default());
+            let reg = sessions.clone();
+            let on_repo = move |common: &Path| {
+                let mut ids = on_repo(common);
+                ids.extend(reg.on(common));
+                ids
+            };
             let quiesce = Arc::new(SessionQuiesce::new(sup.clone(), on_repo));
             let gw = Arc::new(Gitw::new(self.git.clone(), self.home.clone(), self.data.clone(), self.work.clone(), g, quiesce));
-            WorkerRuntime::new(cfg(), gw, sup.clone(), bus.clone(), hooks())
+            WorkerRuntime::with_sessions(cfg(), gw, sup.clone(), bus.clone(), hooks(), sessions)
         }))
     }
 

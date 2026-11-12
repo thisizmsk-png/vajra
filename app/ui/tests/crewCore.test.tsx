@@ -1,0 +1,98 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { setTransport } from "../src/ipc";
+import { Crew } from "../src/screens/crew/Crew";
+import { parseCoreControls } from "../src/screens/crew/CoreWorkerPane";
+import { S } from "../strings";
+import { fakeIpc } from "./fakeIpc";
+
+// jsdom has no modal dialog: model showModal/close the way browsers do.
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.removeAttribute("open"); };
+});
+afterEach(() => {
+  cleanup();
+  setTransport();
+  window.location.hash = "";
+});
+
+// The shape crew/tree.rs builds for a worker the core runs itself (16.7): `core:<ticket>`, with its controls and diff.
+const STOP_NOTE = "Stop ends this worker at once; its uncommitted work stays in its worktree.";
+const CHECK = "This worker checks the work on its own, so it can't take a message.";
+const on = { message: { enabled: true, reason: null }, redirect: { enabled: true, reason: null }, stop: { enabled: true, note: STOP_NOTE } };
+const off = { message: { enabled: false, reason: CHECK }, redirect: { enabled: false, reason: CHECK }, stop: { enabled: true, note: STOP_NOTE } };
+const diff = { files_total: 3, files: ["src/a.rs", "src/b.rs"], added: 4, removed: 1, partial: false, uncounted: 0 };
+const node = (id: string, kind: string, title: string, status: string, children: unknown[] = [], extra: object = {}) =>
+  ({ id, kind, title, engine_id: null, status, overlays: [], children, ...extra });
+const tree = node("lead", "lead", "Lead", "in_progress", [
+  node("run:r1", "run", "Run r1", "in_progress", [
+    node("task:t1", "task", "Backend · t1", "in_progress", [node("core:r1.t1.r1", "round", "round 1", "in_progress", [], { controls: on, diff })]),
+    node("verification:r1", "verification", "Verification r1", "unknown", [node("core:r1.verify.r1", "worker", "Verify", "in_progress", [], { controls: off })]),
+  ]),
+]);
+
+async function open(pick: string, replies: Record<string, unknown> = {}) {
+  window.location.hash = "#/crew?slug=camp&id=r1";
+  const f = fakeIpc({ active_runs: { count: 0, runs: [] }, crew: tree, ...replies });
+  setTransport(f.transport);
+  render(<Crew />);
+  const t = await screen.findByRole("tree", { name: S.crew.treeLabel });
+  fireEvent.click(within(t).getByText(pick).closest("[role=treeitem]") as HTMLElement);
+  return f;
+}
+
+describe("A core worker in the crew view (ADR-16 16.7, #151)", () => {
+  it("selecting it opens its worker pane with its diff, not the generic facts pane", async () => {
+    await open("round 1");
+    const files = await screen.findByRole("list", { name: S.crew.core.changes });
+    expect(within(files).getAllByRole("listitem").map((l) => l.textContent)).toEqual(["src/a.rs", "src/b.rs"]);
+    expect(screen.getByText(S.crew.core.moreFiles(1))).toBeTruthy();
+    expect(screen.queryByText(S.crew.kind)).toBeNull();
+  });
+
+  it("Message and Redirect send through the full core: reference", async () => {
+    const f = await open("round 1", { control_message: { action_id: "a1", state: "queued" }, control_redirect: { action_id: "a2", state: "queued" } });
+    fireEvent.change(await screen.findByLabelText(S.crew.core.text), { target: { value: "use the new API" } });
+    fireEvent.click(screen.getByRole("button", { name: S.crew.core.message }));
+    await screen.findByText(S.crew.core.sent);
+    expect(f.calls.find((c) => c.cmd === "control_message")?.args).toEqual({ worker: "core:r1.t1.r1", text: "use the new API" });
+    fireEvent.change(screen.getByLabelText(S.crew.core.text), { target: { value: "stop on b.rs" } });
+    fireEvent.click(screen.getByRole("button", { name: S.crew.core.redirect }));
+    await waitFor(() => expect(f.calls.find((c) => c.cmd === "control_redirect")?.args).toEqual({ worker: "core:r1.t1.r1", text: "stop on b.rs" }));
+  });
+
+  it("Stop asks first, names what it does, and stops the core: worker", async () => {
+    const f = await open("round 1", { control_stop: { action_id: "s1", state: "done" } });
+    fireEvent.click(await screen.findByRole("button", { name: S.crew.core.stop }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(STOP_NOTE)).toBeTruthy();
+    expect(f.calls.some((c) => c.cmd === "control_stop")).toBe(false);
+    fireEvent.click(within(dialog).getByRole("button", { name: S.crew.core.stop }));
+    await screen.findByText(S.crew.core.stopped);
+    expect(f.calls.find((c) => c.cmd === "control_stop")?.args).toEqual({ worker: "core:r1.t1.r1", reason: null });
+  });
+
+  it("a worker its harness can't message shows Message and Redirect off with the core's reason, and sends nothing", async () => {
+    const f = await open("Verify");
+    fireEvent.change(await screen.findByLabelText(S.crew.core.text), { target: { value: "hi" } });
+    const msg = screen.getByRole("button", { name: S.crew.core.message });
+    expect(msg.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: S.crew.core.redirect }).getAttribute("aria-disabled")).toBe("true");
+    const why = document.getElementById(msg.getAttribute("aria-describedby") ?? "");
+    expect(why?.textContent).toBe(CHECK);
+    fireEvent.click(msg);
+    expect(f.calls.some((c) => c.cmd === "control_message")).toBe(false);
+    expect(screen.getByText(S.crew.core.noDiff)).toBeTruthy();
+  });
+
+  it("counts core workers among the run's workers", async () => {
+    await open("Run r1");
+    expect(await screen.findByText(S.crew.workersDone(0, 2))).toBeTruthy();
+  });
+
+  it("reads malformed controls as none, so nothing is offered", () => {
+    expect(parseCoreControls({ message: { enabled: "yes" } })).toBeNull();
+    expect(parseCoreControls(on)).toEqual(on);
+  });
+});

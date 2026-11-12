@@ -316,6 +316,12 @@ Worker surfaces (PR 6c-2, ADR-16 16.6, 16.7). Startup baseline, `core:` worker c
 | This worker checks the work on its own, so it can't take a message. | `core:` worker Message and Redirect | a running Claude check ticket (verify, review, security review, evidence): a check is never steered |
 | Vajra couldn't open this worker's message channel. Stop it and run it again to message it. | `core:` worker Message and Redirect | a running Claude task whose control dir couldn't be opened before it started |
 | Stop ends this worker at once; its uncommitted work stays in its worktree. | `core:` worker Stop note | both profiles (group kill) |
+| Changes / No changes yet. / and N more file(s) | Crew, `core:` worker pane | its changed files from the core's diff count; at most 200 listed |
+| Controls / Message for this worker / Message / Redirect / Stop | Crew, `core:` worker pane | Message and Redirect are off with the core's reason (above) when its harness can't take one |
+| Sent. It reaches the worker at its next step. / Not sent: WHY | after Message or Redirect | announced (status region) |
+| Stop this worker? | Stop confirm dialog title | the body is the Stop note |
+| Stopped. / Not stopped: WHY | after Stop | announced (status region) |
+| This worker's controls aren't available. | Crew, `core:` worker pane | the node's controls were missing or malformed: nothing is offered |
 | Worker copies | Settings > General panel title | new |
 | Each worker edits its own copy of your repo. A copy stays until its work is merged, or until you discard it. | panel lede | |
 | N copies, up to SIZE on disk. | panel size line | "1 copy" for one; allocated space |

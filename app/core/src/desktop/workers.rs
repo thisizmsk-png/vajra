@@ -246,6 +246,8 @@ struct Shared {
     sup: Arc<Supervisor>,
     bus: Arc<Bus>,
     hooks: Hooks,
+    /// Every worker session against its ticket's common dir, for the repo pauses (see `with_sessions`).
+    sessions: Arc<gitw::RepoSessions>,
     book: Mutex<Book>,
     changed: Condvar,
 }
@@ -303,6 +305,22 @@ fn allocated_upto(root: &std::path::Path, max: usize) -> (u64, bool) {
     (total, false)
 }
 
+/// A worker session's entry in the repo's pause set, for one attempt.
+struct OnRepo<'a>(&'a gitw::RepoSessions, &'a str);
+
+impl<'a> OnRepo<'a> {
+    fn new(sessions: &'a gitw::RepoSessions, sid: &'a str, common: &std::path::Path) -> Self {
+        sessions.register(sid, common);
+        OnRepo(sessions, sid)
+    }
+}
+
+impl Drop for OnRepo<'_> {
+    fn drop(&mut self) {
+        self.0.unregister(self.1);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchError {
     /// A name or commit the core can't use (nothing was queued).
@@ -313,7 +331,14 @@ pub enum DispatchError {
 
 impl WorkerRuntime {
     pub fn new(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks) -> Self {
-        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, book: Mutex::default(), changed: Condvar::new() }))
+        Self::with_sessions(cfg, gw, sup, bus, hooks, Arc::default())
+    }
+
+    /// As `new`, registering each worker's supervisor session in `sessions` (against its ticket's pinned common dir)
+    /// from before its process starts until its attempt ends: the production repo pause reads it, so a running
+    /// worker is stopped while the core's git works on its repo (#151 codex P1).
+    pub fn with_sessions(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks, sessions: Arc<gitw::RepoSessions>) -> Self {
+        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new() }))
     }
 
     /// Queue a writer task on a seat and return its ticket. It starts when its seat is free and the caps allow.
@@ -359,6 +384,11 @@ impl WorkerRuntime {
     }
 
     /// The ticket's current view.
+    #[cfg(test)]
+    pub(crate) fn gitw(&self) -> &Arc<Gitw> {
+        &self.0.gw
+    }
+
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
         b.tickets.get(id).map(live_view)
@@ -720,6 +750,8 @@ impl WorkerRuntime {
         let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
         // The core is the only one that reports a failure here: it knows whether it will retry (see `attempts`).
         let tag = ProviderTag { slot: seat.slot.clone(), session_id: session.clone(), account: seat.account.clone(), attempt: n, core_reports: true };
+        // Registered before it starts, so a repo pause held now stops it as soon as it exists; dropped on every return.
+        let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
         if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }

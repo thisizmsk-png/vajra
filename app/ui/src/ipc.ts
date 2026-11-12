@@ -91,7 +91,7 @@ export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_tex
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; /** A `core:` worker's Message, Redirect and Stop as its harness allows them; parse with `parseCoreControls`. */ controls?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
 export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean; /** Set only for a CLI's own sign-in (ADR-17). */ sign_in?: { id: string; name: string } };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */

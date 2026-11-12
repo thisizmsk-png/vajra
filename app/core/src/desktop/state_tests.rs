@@ -780,3 +780,81 @@ fn a_pending_lead_stop_is_refused_when_its_ticket_ends() {
     assert_eq!(refused["reason"], "worker_finished", "{refused}");
     assert_eq!(app.confirm_stop(&action).unwrap_err()["error"], "action_not_found", "nothing left to confirm");
 }
+
+/// #151 codex P1: a running core worker is in its repo's pause set. It runs in a linked worktree outside the repo's
+/// folder and is not a run stream, yet the app's repo pause (the first step of every Gitw content call) stops it for as
+/// long as the pause is held, and it runs on once the pause drops.
+#[test]
+fn a_running_core_worker_is_paused_while_the_core_holds_its_repo_and_resumed_after() {
+    use crate::desktop::workers::State as T;
+    let t = Tmp::new();
+    let app = t.app();
+    let (home, repo) = (t.0.join("home"), t.0.join("repo"));
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new(GIT).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(&repo)
+            .env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &home).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    // A Claude worker that starts as one and then just runs.
+    let bin = t.0.join("claude-fake");
+    fs::write(&bin, "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake-1\",\"permissionMode\":\"dontAsk\",\"tools\":[\"Read\",\"Edit\",\"Write\",\"Bash\",\"Grep\",\"Glob\"]}'\nexec sleep 600\n").unwrap();
+    fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let rt = app
+        .worker_runtime(|| crate::desktop::workers::Config {
+            home: home.clone(),
+            data: t.0.join("data").canonicalize().unwrap(),
+            codex: "/nonexistent/vajra-test/codex".into(),
+            claude: bin.clone(),
+            codex_home: t.0.join("codex-home"),
+            tools: crate::adapter::profiles::WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
+            account_caps: Default::default(),
+            worker_timeout: Duration::from_secs(60),
+            poll: Duration::from_millis(20),
+            clock: None,
+            redact: Redactor::default(),
+            steer: None,
+            claude_unverified_ok: true,
+        })
+        .unwrap();
+    let gw = rt.gitw().clone();
+    let common = gw.common_of(&repo).unwrap();
+    gw.repos.acquire(&gw, &common, false).unwrap();
+    let spec = crate::desktop::workers::TaskSpec {
+        project: "p".into(), run: CORE_RUN.into(), repo: repo.canonicalize().unwrap(), task: "t1".into(), round: 1, from: base, deps: Vec::new(),
+        globs: vec!["src/**".into()], named: Vec::new(), brief: "Do it.".into(),
+    };
+    let seat = crate::control::service::WorkerSeat {
+        slot: "w-t1".into(), role: "backend".into(), task: "t1".into(), account: "claude".into(), model: None, effort: None, security: false,
+        network: false, why: String::new(), source: "user".into(),
+    };
+    let id = rt.dispatch(spec, seat).unwrap();
+    // The first ticket's first attempt is supervisor session `core-1-a1`.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let pid = loop {
+        if let (Some(T::Running), Ok(pid)) = (rt.view(&id).map(|v| v.state), app.sup.pid("core-1-a1")) {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ran: {:?}", rt.view(&id));
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stat = || String::from_utf8(std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap().stdout).unwrap();
+    let held = gw.hold_repo(&common);
+    // Over the whole pause, not only at its start.
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(stat().trim_start().starts_with('T'), "the worker runs while the core holds its repo: {:?}", stat());
+    }
+    drop(held);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!stat().trim_start().starts_with('T'), "resumed once the pause dropped: {:?}", stat());
+    assert_eq!(rt.view(&id).unwrap().state, T::Running);
+    assert!(rt.cancel(&id));
+    rt.await_any(&[id], Duration::from_secs(10));
+}

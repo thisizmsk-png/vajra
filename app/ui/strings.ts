@@ -374,6 +374,23 @@ export const S = {
     engineId: "Engine id",
     kind: "Kind",
     status: "Status",
+    /** A worker the core runs itself (ADR-16 16.7): its changes and its harness's Message, Redirect and Stop. */
+    core: {
+      changes: "Changes",
+      noDiff: "No changes yet.",
+      moreFiles: (n: number) => `and ${n} more ${n === 1 ? "file" : "files"}`,
+      controls: "Controls",
+      text: "Message for this worker",
+      message: "Message",
+      redirect: "Redirect",
+      stop: "Stop",
+      sent: "Sent. It reaches the worker at its next step.",
+      notSent: (why: string) => `Not sent: ${why}`,
+      stopTitle: "Stop this worker?",
+      stopped: "Stopped.",
+      notStopped: (why: string) => `Not stopped: ${why}`,
+      noControls: "This worker's controls aren't available.",
+    },
     overlay: {
       "stopped by the human": "Stopped by you",
       "message pending": "Message pending",
