@@ -23,6 +23,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,9 @@ pub const WORKER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const LEAVE_CHANGES: &str = "Leave your changes in the working tree; Vajra commits them.";
 /// How long a gone leader's process group may linger before it is killed.
 const GROUP_GRACE: Duration = Duration::from_secs(2);
+/// How long a worker asked to stop may take to exit (the supervisor's own kill escalates to SIGKILL after 1 s). Past
+/// it the attempt ends with its stop outcome and its process group is killed directly (`wait_group_gone`).
+const KILL_WAIT: Duration = Duration::from_secs(10);
 /// File names a summary lists at most.
 const SUMMARY_FILES: usize = 20;
 /// How much of an attempt's opening output is kept for its startup event (the harness prints it first).
@@ -250,6 +254,12 @@ struct Shared {
     sessions: Arc<gitw::RepoSessions>,
     book: Mutex<Book>,
     changed: Condvar,
+    /// How many `tickets.jsonl` lines could not be written (see `record_failures`).
+    record_failures: AtomicU64,
+    /// Tests only: how long a stopped worker may take to exit, and whether the supervisor's kill is held back (a
+    /// worker that ignores its kill).
+    #[cfg(test)]
+    kill_test: Mutex<Option<(Duration, bool)>>,
 }
 
 /// The runtime. Cheap to clone.
@@ -366,7 +376,40 @@ impl WorkerRuntime {
     /// from before its process starts until its attempt ends: the production repo pause reads it, so a running
     /// worker is stopped while the core's git works on its repo (#151 codex P1).
     pub fn with_sessions(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks, sessions: Arc<gitw::RepoSessions>) -> Self {
-        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new() }))
+        WorkerRuntime(Arc::new(Shared {
+            cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new(), record_failures: AtomicU64::new(0),
+            #[cfg(test)]
+            kill_test: Mutex::default(),
+        }))
+    }
+
+    /// How many `tickets.jsonl` lines this runtime failed to write (the file or a folder on its way could not be
+    /// opened, or the append failed). The ticket's state in memory is unchanged; only its durable line is missing.
+    pub fn record_failures(&self) -> u64 {
+        self.0.record_failures.load(AtomicOrdering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_kill_test(&self, wait: Duration, hold_kill: bool) {
+        *crate::lock(&self.0.kill_test) = Some((wait, hold_kill));
+    }
+
+    /// How long a worker asked to stop may take to exit before its attempt ends anyway.
+    fn kill_wait(&self) -> Duration {
+        #[cfg(test)]
+        if let Some((w, _)) = *crate::lock(&self.0.kill_test) {
+            return w;
+        }
+        KILL_WAIT
+    }
+
+    /// Ask the supervisor to end a worker session (SIGHUP, then SIGKILL after its grace).
+    fn kill_session(&self, sid: &str) {
+        #[cfg(test)]
+        if crate::lock(&self.0.kill_test).is_some_and(|(_, hold)| hold) {
+            return;
+        }
+        let _ = self.0.sup.kill(sid);
     }
 
     /// Queue a writer task on a seat and return its ticket. It starts when its seat is free and the caps allow.
@@ -382,17 +425,27 @@ impl WorkerRuntime {
         self.add(Job::Check(kind, spec), seat)
     }
 
-    fn add(&self, job: Job, seat: WorkerSeat) -> Result<String, DispatchError> {
+    fn add(&self, mut job: Job, seat: WorkerSeat) -> Result<String, DispatchError> {
         let s = job.spec();
         let name_ok = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
         if !name_ok(&s.run) || !name_ok(&s.task) || !name_ok(&seat.slot) || !(1..=99).contains(&s.round) {
             return Err(DispatchError::Invalid("run, task, seat or round"));
         }
-        let id = format!("{}.{}.r{}", s.run, s.task, s.round);
+        let id_of = |s: &TaskSpec, task: &str| format!("{}.{task}.r{}", s.run, s.round);
         let mut b = crate::lock(&self.0.book);
-        if b.tickets.contains_key(&id) {
-            return Err(DispatchError::Exists);
-        }
+        let id = match &mut job {
+            Job::Task(s) if b.tickets.contains_key(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
+            Job::Task(s) => id_of(s, &s.task),
+            // Checks of one kind in one round are numbered, chosen under the book lock: a second Verify of the round
+            // (a later commit, or a re-check) is its own ticket and worktree, `verify-2`, never a refused duplicate.
+            Job::Check(_, s) => {
+                let kind = s.task.clone();
+                let free = (1..=99).map(|n| if n == 1 { kind.clone() } else { format!("{kind}-{n}") }).find(|t| !b.tickets.contains_key(&id_of(s, t)));
+                s.task = free.ok_or(DispatchError::Exists)?;
+                id_of(s, &s.task)
+            }
+        };
+        let s = job.spec();
         b.seq += 1;
         let kind = match &job {
             Job::Task(_) => "writer",
@@ -486,7 +539,7 @@ impl WorkerRuntime {
             }
         }
         for s in sessions {
-            let _ = self.0.sup.kill(&s);
+            self.kill_session(&s);
         }
         self.0.changed.notify_all();
         self.pump();
@@ -791,18 +844,29 @@ impl WorkerRuntime {
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
-            let _ = self.0.sup.kill(&sid);
+            self.kill_session(&sid);
         }
         let start = Instant::now();
         let mut applied: Option<Result<(), String>> = None;
         // The harness's opening lines carry its startup identity; kept once seen, so later output can't push it out.
         let mut opening = String::new();
+        // When the stop was first seen: the wait for the worker to exit after it is bounded (`kill_wait`).
+        let mut stop_seen: Option<Instant> = None;
         let exit = loop {
-            if let Ok(Some(x)) = self.0.sup.wait(&sid, self.0.cfg.poll) {
-                break Some(x);
+            match self.0.sup.wait(&sid, self.0.cfg.poll) {
+                Ok(Some(x)) => break Some(x),
+                Ok(None) => {}
+                // The supervisor no longer knows the session (it shut down): nothing is left to wait on.
+                Err(_) => break None,
             }
             if self.killed(id).is_some() {
-                let _ = self.0.sup.kill(&sid);
+                let first = *stop_seen.get_or_insert_with(Instant::now);
+                if first.elapsed() >= self.kill_wait() {
+                    // Still not reaped (a descendant holds its terminal open, or the kill never landed): the attempt
+                    // ends now with its stop outcome, and `wait_group_gone` below kills the group directly.
+                    break None;
+                }
+                self.kill_session(&sid);
                 continue;
             }
             if start.elapsed() >= self.0.cfg.worker_timeout {
@@ -936,10 +1000,12 @@ impl WorkerRuntime {
     /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only,
     /// never rewritten. Every step below `<data>` is opened by descriptor with no-follow, so a planted link at `runs`,
     /// `<run>` or the file fails the write instead of redirecting it (#149 bhishma M2).
+    /// A line that cannot be written is counted (`record_failures`), never dropped unseen.
     fn record(&self, v: &TicketView, event: &str) {
         let line = json!({"v": 1, "event": event, "ticket": v});
-        if let Ok(mut f) = open_record(&self.0.cfg.data, &v.run) {
-            let _ = f.write_all(format!("{line}\n").as_bytes());
+        let wrote = open_record(&self.0.cfg.data, &v.run).and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
+        if wrote.is_err() {
+            self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 }
