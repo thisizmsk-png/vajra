@@ -659,7 +659,7 @@ impl RunProtocol {
                 return Err(format!("plan may record at most {MAX_DECISIONS} decisions"));
             }
             if p.decisions.iter().any(|d| d.title.len() > MAX_DECISION_TITLE || d.rationale.len() > MAX_RATIONALE || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
-                return Err("every decision needs a title (300 bytes) and a rationale (2000 bytes)".into());
+                return Err(format!("every decision needs a title ({MAX_DECISION_TITLE} bytes) and a rationale ({MAX_RATIONALE} bytes)"));
             }
             (c, p.tasks.clone())
         } else {
@@ -1222,11 +1222,15 @@ impl RunProtocol {
         let mut st = self.lock();
         // A status query is a lead call too (N16): it restarts the stuck-lead wait.
         self.called(&mut st);
-        st.rounds
+        let out = st
+            .rounds
             .iter()
             .filter(|(_, r)| r.integrated)
             .filter_map(|(n, _)| Some(json!({"round": n, "status": self.status_of(&st, &self.round_ticket(*n))?})))
-            .collect()
+            .collect();
+        // The call may have ended the run (its time limit): the kill and the wake-up happen here, as on every call.
+        self.release(st);
+        out
     }
 
     /// `list_workers` and `inspect_worker` (read-only, this run only): each worker ticket with its task, round, seat
@@ -1234,7 +1238,8 @@ impl RunProtocol {
     pub fn workers(&self, only: Option<&str>) -> Vec<Value> {
         let mut st = self.lock();
         self.called(&mut st);
-        st.tasks
+        let out = st
+            .tasks
             .iter()
             .flat_map(|t| t.tickets.iter().map(move |tk| (t, tk)))
             .filter(|(_, (_, id, _))| only.is_none_or(|o| o == id))
@@ -1242,7 +1247,9 @@ impl RunProtocol {
                 let s = self.status_of(&st, id)?;
                 Some(json!({"task": t.spec.id, "round": round, "slot": slot, "status": s}))
             })
-            .collect()
+            .collect();
+        self.release(st);
+        out
     }
 
     /// The accepted plan, as the guarded `plan.json` keeps it for the resume charter (6d2) and memory (6j).
