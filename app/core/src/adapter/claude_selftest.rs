@@ -120,6 +120,7 @@ fn spawn_bounded(argv: &[String], wt: &Path, h: &Path, cc: &Path, tmp: &Path, po
         .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{port}"))
         .env("ANTHROPIC_API_KEY", "vajra-selftest-placeholder-not-a-key")
         .env("DISABLE_AUTOUPDATER", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(std::process::Stdio::null())
@@ -129,21 +130,23 @@ fn spawn_bounded(argv: &[String], wt: &Path, h: &Path, cc: &Path, tmp: &Path, po
     let pid = child.id() as i32;
     let end = Instant::now() + timeout;
     loop {
-        match child.try_wait() {
-            Ok(Some(st)) => {
-                // SAFETY: signalling our own child's process group; anything it left behind goes with it.
-                unsafe { libc::killpg(pid, libc::SIGKILL) };
-                return Ok(st.code().unwrap_or(-1));
-            }
-            Ok(None) if Instant::now() >= end => {
-                // SAFETY: as above.
-                unsafe { libc::killpg(pid, libc::SIGKILL) };
-                let _ = child.wait();
-                return Err("timeout".into());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(format!("wait: {e}")),
+        // Peek with WNOWAIT: the exited child stays a zombie, so its pid (and so its process group id) can't be reused
+        // before the group is killed below.
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter; waitid only writes it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waits on our own child by pid, without reaping it.
+        let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+        let exited = r == 0 && unsafe { info.si_pid() } == pid;
+        if exited || Instant::now() >= end {
+            // SAFETY: signalling our own child's process group while its leader is unreaped.
+            unsafe { libc::killpg(pid, libc::SIGKILL) };
+            let st = child.wait().map_err(|e| format!("wait: {e}"))?;
+            return if exited { Ok(st.code().unwrap_or(-1)) } else { Err("timeout".into()) };
         }
+        if r != 0 {
+            return Err(format!("wait: {}", std::io::Error::last_os_error()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -161,7 +164,7 @@ fn verdict(status: i32, events: &Path, seen: &Seen, ok_file: &Path, data: &Path,
         v.sort();
         v
     });
-    let checks: [(&str, bool); 11] = [
+    let checks: [(&str, bool); 12] = [
         ("claude exited 0", status == 0),
         ("claude reported a successful result", result["subtype"] == "success" && result["is_error"] == false),
         ("the plan reached its last turn", seen.last_step == Some(STEPS)),
@@ -170,6 +173,8 @@ fn verdict(status: i32, events: &Path, seen: &Seen, ok_file: &Path, data: &Path,
         ("a Write into the worktree ran", ok_file.is_file() && seen.results.get("tu_0").is_some_and(|(err, _)| !*err)),
         ("the Vajra guard refused a Bash write into the data dir", refused_by("tu_1", GUARD_REFUSAL)),
         ("the deny rules refused a Write into the data dir", refused_by("tu_2", DENY_REFUSAL)),
+        // #195 bhishma: a build that ignores Read denies would leak the data dir's contents to a worker.
+        ("the deny rules refused a Read in the data dir", refused_by("tu_3", DENY_REFUSAL)),
         ("the deny rules refused an Edit in the data dir", refused_by("tu_4", DENY_REFUSAL)),
         ("the data dir holds only its seed file, unchanged", left.as_deref() == Some(&["seed.json".to_string()][..]) && std::fs::read_to_string(data.join("seed.json")).ok().as_deref() == Some(SEED)),
         ("the worktree's project-settings hook never ran", !m.join("project-hook").exists()),
@@ -228,11 +233,22 @@ impl Stub {
     }
 
     fn stop(mut self) -> Seen {
+        self.halt();
+        std::mem::take(&mut *crate::lock(&self.seen))
+    }
+
+    fn halt(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        std::mem::take(&mut *crate::lock(&self.seen))
+    }
+}
+
+/// #195 bhishma: an early return (a spawn error, a timeout) must not leave the listener thread running.
+impl Drop for Stub {
+    fn drop(&mut self) {
+        self.halt();
     }
 }
 

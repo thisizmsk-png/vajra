@@ -32,6 +32,8 @@ while True:
     if DATA in target:
         if name == "Bash":
             err, text = True, "PreToolUse:Bash hook error: Vajra guard blocked this Bash call: redirect into protected path"
+        elif name == "Read" and MODE == "leaky_read":
+            text = open(inp["file_path"]).read()
         elif name == "Edit" and MODE == "leaky":
             open(inp["file_path"], "w").write("edited\n")
         elif name == "Edit" and MODE == "wrong_reason":
@@ -101,6 +103,16 @@ fn a_build_that_lets_an_edit_into_the_data_dir_fails() {
     let home = home_with_hooks(&d);
     let r = run(&fake_claude(&d, "leaky"), &home, Duration::from_secs(30));
     assert_eq!(r, Err("failed: the deny rules refused an Edit in the data dir".into()));
+}
+
+/// #195 bhishma: a build that ignores Read denies leaks the data dir to a worker, though every write was refused and
+/// the seed is unchanged.
+#[test]
+fn a_build_that_lets_a_read_of_the_data_dir_through_fails() {
+    let d = tmp("leaky-read");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "leaky_read"), &home, Duration::from_secs(30));
+    assert_eq!(r, Err("failed: the deny rules refused a Read in the data dir".into()));
 }
 
 #[test]

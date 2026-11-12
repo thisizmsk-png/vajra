@@ -98,6 +98,8 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path, vers
 MODE='{mode}'
 WT=$(pwd -P)
 [ "$1" = --version ] && {{ if [ -f '{log}.upgraded' ]; then echo '9.9.9 (Claude Code)'; else echo '{version}'; fi; exit 0; }}
+# Run as canary A's self-test (it talks to the loopback stub): this stand-in is no real Claude Code, so it fails.
+[ -n "$ANTHROPIC_BASE_URL" ] && {{ echo selftest >> '{log}.selftest'; exit 1; }}
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
@@ -202,6 +204,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
         std::fs::create_dir_all(p).unwrap();
     }
     std::fs::write(home.join(".gitconfig"), "[user]\n\tname = U\n\temail = u@e\n").unwrap();
+    install_repo_hooks(&home);
     ugit(&home, &repo, &["init", "-q", "-b", "main"]);
     let mut files = vec![("src/lib.rs", "fn a() {}\n"), ("other/x.rs", "x\n"), ("a.txt", "a\n"), (".gitignore", "target/\nnode_modules/\n")];
     files.extend(o.files.iter().copied());
@@ -695,8 +698,8 @@ fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
 }
 
 /// #180 bhishma: S4 proved one Claude Code build, but users auto-update. A build no S4 run proved (with today's flag
-/// shape) and no self-test here proved is refused, before any worktree or flag file exists and before it runs. Here
-/// the self-test can't start (no Vajra guard is installed in this home), so it fails closed.
+/// shape) and no self-test here proved is refused, before any worktree or flag file exists and before it runs as a
+/// worker. Here the self-test runs and the stand-in harness fails it.
 #[test]
 fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() {
     let r = rig("claude-unproven", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
@@ -705,7 +708,8 @@ fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() 
     assert!(v.worktree.is_none() && !r.gw.work.join("p/r1/t1-r1").exists(), "refused before any worktree exists");
     assert!(!r.gw.data.join("control/claude-proven.json").exists(), "nothing was added to this Mac's list");
     assert!(std::fs::read_dir(r.gw.data.join("profiles")).map_or(true, |d| d.count() == 0), "no flag file was written");
-    assert!(!r.d.join("log").exists(), "the harness never ran");
+    assert!(!r.d.join("log").exists(), "the harness never ran as a worker");
+    assert!(r.d.join("log.selftest").exists(), "it ran only as the self-test");
     // A version probe that fails is refused the same way (fail closed).
     let r = rig("claude-noversion", Opts { claude_version: "", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
@@ -727,13 +731,15 @@ fn canary_claude(dir: &Path, leaky: bool) -> PathBuf {
 import json, os, sys, urllib.request
 args = sys.argv[1:]
 if args[:1] == ["--version"]:
-    print("9.9.9 (Claude Code)"); sys.exit(0)
+    print("9.9.10 (Claude Code)" if os.path.exists("{count}.swapped") else "9.9.9 (Claude Code)"); sys.exit(0)
 tools = args[args.index("--tools") + 1].split(",")
 print(json.dumps({{"type": "system", "subtype": "init", "model": "claude-fake-1", "tools": tools, "permissionMode": "dontAsk"}}), flush=True)
 base = os.environ.get("ANTHROPIC_BASE_URL")
 if not base:
     open("src/lib.rs", "a").write("worker line\n"); sys.exit(0)
 open("{count}", "a").write("selftest\n")
+if os.path.exists("{count}.swap"):
+    os.rename("{count}.swap", "{count}.swapped")  # the CLI updates in place while its self-test runs
 msgs = [{{"role": "user", "content": args[-1]}}]
 while True:
     req = urllib.request.Request(base + "/v1/messages", data=json.dumps({{"tools": [{{"name": t}} for t in tools], "messages": msgs}}).encode(), headers={{"content-type": "application/json"}})
@@ -764,17 +770,40 @@ while True:
     p
 }
 
-/// A rig whose Claude is `canary_claude`, with the repo's guard hooks installed where the app installs them.
-fn canary_rig(tag: &str, leaky: bool) -> Rig {
-    let r = rig(tag, Opts { canary: Some(leaky), ..Opts::default() });
-    let hooks = r.home.join(".claude/skills/vajra/hooks");
+/// The repo's guard hooks, installed in `home` where the app installs them, so the built-in proven pair's shape (which
+/// hashes the guard scripts' bytes) matches.
+fn install_repo_hooks(home: &Path) {
+    let hooks = profiles::claude_worker_hooks_dir(home);
     std::fs::create_dir_all(&hooks).unwrap();
     for e in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks")).unwrap().flatten() {
         if e.file_type().unwrap().is_file() {
             std::fs::copy(e.path(), hooks.join(e.file_name())).unwrap();
         }
     }
-    r
+}
+
+/// A rig whose Claude is `canary_claude`.
+fn canary_rig(tag: &str, leaky: bool) -> Rig {
+    rig(tag, Opts { canary: Some(leaky), ..Opts::default() })
+}
+
+/// #186 codex: S4 proved the guard scripts' behavior, so a proven build whose installed guard differs by one byte, or
+/// is missing, is unproven, and is refused before it runs.
+#[test]
+fn a_proven_build_with_a_changed_or_missing_installed_guard_is_refused() {
+    let r = rig("claude-guard-edited", Opts::default());
+    let p = profiles::claude_worker_hooks_dir(&r.home).join("pre-tool-use.sh");
+    let mut b = std::fs::read(&p).unwrap();
+    b.push(b'\n');
+    std::fs::write(&p, b).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness never ran: {v:?}");
+    let r = rig("claude-guard-missing", Opts::default());
+    std::fs::remove_dir_all(profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    assert!(v.worktree.is_none() && !r.d.join("log").exists(), "the harness never ran: {v:?}");
 }
 
 fn selftests(r: &Rig) -> usize {
@@ -790,10 +819,29 @@ fn an_unproven_build_that_passes_its_self_test_here_runs_and_is_not_tested_again
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
     assert_eq!(selftests(&r), 1);
     let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
-    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": profiles::claude_worker_flag_shape().unwrap()}]));
+    let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&r.home)).unwrap();
+    assert_eq!(list["pairs"], json!([{"version": "9.9.9 (Claude Code)", "shape": shape}]));
     let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
     assert_eq!(selftests(&r), 1, "a proven pair is not tested again");
+}
+
+/// #195 bhishma: the CLI updates in place (9.9.9 to 9.9.10) while 9.9.9's self-test runs. The PASS can't be told
+/// apart from a PASS of the new binary, so nothing is recorded and that dispatch is refused; the next one tests
+/// 9.9.10 itself and records 9.9.10, never 9.9.9.
+#[test]
+fn a_self_test_pass_is_recorded_only_if_the_binary_still_says_the_same_version() {
+    let r = canary_rig("canary-swap", false);
+    std::fs::write(r.d.join("selftests.swap"), "").unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
+    assert_eq!(selftests(&r), 1);
+    assert!(!r.gw.data.join("control/claude-proven.json").exists(), "nothing recorded for a binary that changed under its test");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(selftests(&r), 2, "the new build was tested, not refused from memory");
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(r.gw.data.join("control/claude-proven.json")).unwrap()).unwrap();
+    assert_eq!(list["pairs"].as_array().unwrap().iter().map(|p| p["version"].as_str().unwrap()).collect::<Vec<_>>(), ["9.9.10 (Claude Code)"]);
 }
 
 /// Canary A: a build whose self-test fails stays refused with a clear reason, is not added to the list, and is not

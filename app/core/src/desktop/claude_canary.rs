@@ -5,7 +5,7 @@
 //! every worker's deny rules and the guard protect, so a worker can't add itself to it.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -15,12 +15,13 @@ use crate::adapter::{claude_selftest, profiles};
 /// How long a failed self-test keeps the build refused before it is tried again.
 pub const RETRY_AFTER: Duration = Duration::from_secs(600);
 
-/// The failures the self-test remembers: (data dir, version, shape) -> when. Its mutex is the one-at-a-time lock.
-type Failures = HashMap<(PathBuf, String, String), Instant>;
+/// The failures one data dir's self-tests remember: (version, shape) -> when. Its mutex is that data dir's
+/// one-at-a-time lock (the app has one data dir; tests run many side by side, and don't queue on each other).
+type Failures = HashMap<(String, String), Instant>;
 
-fn state() -> &'static Mutex<Failures> {
-    static S: OnceLock<Mutex<Failures>> = OnceLock::new();
-    S.get_or_init(Mutex::default)
+fn state(data: &Path) -> Arc<Mutex<Failures>> {
+    static S: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Failures>>>>> = OnceLock::new();
+    crate::lock(S.get_or_init(Mutex::default)).entry(data.to_path_buf()).or_default().clone()
 }
 
 fn list_path(data: &Path) -> PathBuf {
@@ -52,23 +53,31 @@ fn add_pair(data: &Path, version: &str, shape: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, list_path(data))
 }
 
-/// Whether `version` with today's `shape` is proven here: on this Mac's list, or by a self-test run now.
-pub(super) fn proven_here(claude: &Path, home: &Path, data: &Path, version: &str, shape: &str) -> Result<(), &'static str> {
+/// Whether `version` with today's `shape` is proven here: on this Mac's list, or by a self-test run now. `probe` asks
+/// the binary for its version again; a PASS is recorded only if it still says `version` (#195 bhishma: an update in
+/// place during the test would otherwise record the old version for a test of the new binary).
+pub(super) fn proven_here(claude: &Path, home: &Path, data: &Path, version: &str, shape: &str, probe: &dyn Fn() -> Option<String>) -> Result<(), &'static str> {
     let refused = profiles::CLAUDE_SELFTEST_FAILED.reason;
     let have = |data: &Path| local_pairs(data).iter().any(|(v, s)| v == version && s == shape);
     if have(data) {
         return Ok(());
     }
     // One at a time: a dispatch that waited here finds the pair the one before it proved.
-    let mut failed = crate::lock(state());
+    let state = state(data);
+    let mut failed = crate::lock(&state);
     if have(data) {
         return Ok(());
     }
-    let key = (data.to_path_buf(), version.to_string(), shape.to_string());
+    let key = (version.to_string(), shape.to_string());
     if failed.get(&key).is_some_and(|at| at.elapsed() < RETRY_AFTER) {
         return Err(refused);
     }
     match claude_selftest::run(claude, home, claude_selftest::TIMEOUT) {
+        Ok(()) if probe().as_deref() != Some(version) => {
+            // The binary changed under the test: record nothing, remember nothing; the next dispatch tests it afresh.
+            eprintln!("vajra: Claude Code changed during its worker self-test; Claude workers stay off for now");
+            Err(refused)
+        }
         Ok(()) => {
             failed.remove(&key);
             add_pair(data, version, shape).map_err(|_| refused)

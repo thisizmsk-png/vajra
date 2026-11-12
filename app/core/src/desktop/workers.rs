@@ -1199,16 +1199,21 @@ impl Launch {
         let dir = cfg.claude.parent().ok_or(refused)?;
         let path = std::env::join_paths([dir, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).map_err(|_| refused)?;
         let env = [("PATH", path), ("HOME", cfg.home.clone().into_os_string())];
-        let version = super::lead::claude_version(&cfg.claude, &env).map_err(|_| refused)?;
-        let version = version.trim();
-        if version.is_empty() {
-            return Err(refused);
-        }
-        if profiles::claude_worker_proven(version).is_ok() {
+        let probe = || {
+            let v = super::lead::claude_version(&cfg.claude, &env);
+            let v = v.map_err(|e| eprintln!("vajra: could not ask Claude Code for its version ({e:?}); Claude workers stay off")).ok()?;
+            Some(v.trim().to_string()).filter(|v| !v.is_empty())
+        };
+        let version = probe().ok_or(refused)?;
+        // The installed guard's own bytes are part of the shape: a guard that differs from what S4 proved is unproven.
+        let shape = profiles::claude_worker_flag_shape(&profiles::claude_worker_hooks_dir(&cfg.home)).map_err(|e| {
+            eprintln!("vajra: the installed Vajra guard can't be checked ({e}); Claude workers stay off");
+            refused
+        })?;
+        if profiles::claude_worker_proven(&version, &shape).is_ok() {
             return Ok(());
         }
-        let shape = profiles::claude_worker_flag_shape().map_err(|_| refused)?;
-        super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, version, &shape)
+        super::claude_canary::proven_here(&cfg.claude, &cfg.home, &cfg.data, &version, &shape, &probe)
     }
 
     fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
