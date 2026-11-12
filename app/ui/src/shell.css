@@ -147,6 +147,13 @@
 .v-history__meter > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--c-text-secondary); }
 /* With the report open, Status and Updated give their room to the campaign (the report names its status). */
 .v-history__body--open .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
+/* With a report open the list has about 560 px at 1280. The run name gets what is left, so the count loses its
+   meter and its column shrinks to the count. 64 px holds the sortable "Passing" header and a three-digit count beside
+   16 px of cell padding. Integrity (168) and Actions (140) keep their full widths: they hold "Integrity check failed"
+   and the Report and Verify buttons. */
+.v-history__body--open .v-history__main { padding-inline: var(--space-lg); }
+.v-history__body--open .v-history__meter { display: none; }
+.v-history__body--open .v-table th:nth-child(3) { width: 64px; }
 .v-history__main { padding: var(--space-xl); display: flex; flex-direction: column; gap: var(--space-xl); }
 .v-history__muted { color: var(--c-text-secondary); font-size: 12px; }
 .v-history__acts { display: inline-flex; gap: var(--space-xs); }
