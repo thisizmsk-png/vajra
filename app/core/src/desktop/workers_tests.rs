@@ -535,6 +535,64 @@ fn a_setsid_grandchild_does_not_hold_the_ticket() {
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
 }
 
+/// 6c-1 follow-up: a stopped worker that never exits (its kill does not land) no longer holds its attempt until the
+/// 30-minute worker timeout. The attempt ends `stopped` after the bounded wait, and its process group is killed.
+#[test]
+fn a_stopped_worker_that_never_exits_ends_after_a_bounded_wait() {
+    let r = rig("killwait", Opts { mode: "hang", ..Opts::default() });
+    r.rt.set_kill_test(Duration::from_millis(200), true);
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&id).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = r.sup.pid("core-1-a1").unwrap();
+    assert!(r.rt.cancel(&id));
+    let v = r.done(&id);
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Stopped), Some("stopped")), "{v:?}");
+    // The fallback SIGKILL returns at once; the supervisor's reaper may not have reaped the leader yet (a zombie still
+    // answers `kill(-pid, 0)`), so the group is waited for, boundedly (#160 codex).
+    let t0 = Instant::now();
+    while (unsafe { libc::kill(-(pid as i32), 0) }) == 0 {
+        assert!(t0.elapsed() < WAIT, "the worker's group is still there after {WAIT:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 6c-1 follow-up: two checks of one kind in one round (a later commit, or a re-check) are two tickets with their own
+/// ids and worktrees; the second is not refused as a duplicate.
+#[test]
+fn two_checks_of_one_kind_in_one_round_get_their_own_tickets() {
+    let r = rig("checkids", Opts::default());
+    let a = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap();
+    let b = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap();
+    let c = r.rt.dispatch_check(CheckKind::SecurityReview, r.task("r1", "ignored"), seat("v2", "codex"), &r.base).unwrap();
+    assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("r1.verify.r1", "r1.verify-2.r1", "r1.security-review.r1"));
+    let (va, vb) = (r.done(&a), r.done(&b));
+    assert_eq!((va.kind, va.outcome, vb.kind, vb.outcome), ("verify", Some(Outcome::Done), "verify", Some(Outcome::Done)), "{va:?} {vb:?}");
+    assert_ne!(va.worktree, vb.worktree, "each check has its own worktree");
+    r.done(&c);
+    assert!(r.rt.dispatch(r.task("r1", "verify"), seat("w1", "codex")).is_err(), "a writer task still may not reuse a taken id");
+}
+
+/// 6c-1 follow-up: a `tickets.jsonl` line that cannot be written is counted, not dropped unseen, and the ticket still
+/// ends. A planted link at `<data>/runs` makes every write fail (the folders are opened no-follow).
+#[test]
+fn a_tickets_line_that_cannot_be_written_is_counted() {
+    let ok = rig("recordok", Opts::default());
+    ok.done(&ok.rt.dispatch(ok.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(ok.rt.record_failures(), 0, "a writable data dir loses no line");
+    let r = rig("recordfail", Opts::default());
+    let elsewhere = r.d.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, r.gw.data.join("runs")).unwrap();
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert!(r.rt.record_failures() >= 2, "the dispatch and outcome lines are both counted: {}", r.rt.record_failures());
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing was written through the link");
+}
+
 #[test]
 fn a_failed_clean_check_at_dispatch_discards_the_worktree() {
     // `stray.rs` makes the check answer "changed"; an untracked `.gitattributes` makes it fail (#149).
