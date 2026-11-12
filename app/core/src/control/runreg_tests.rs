@@ -686,3 +686,69 @@ fn the_apps_own_client_still_reaches_the_service() {
     let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
     assert_ne!(out["error"], "not_an_app_client", "{out}");
 }
+
+/// An app child (`python3 -I -c CLIENT sock out tool how`) that asks the Service route for `tool`, writing the reply to
+/// `out`: itself (`self`), or from a child it forks (`child`), as a harness's `--mcp` server or a worker's tool does.
+const CLIENT: &str = r#"
+import json, os, socket, sys
+sock, out, tool, how = sys.argv[1:5]
+def ask():
+    c = socket.socket(socket.AF_UNIX)
+    c.connect(sock)
+    f = c.makefile("rw")
+    f.write(json.dumps({"tool": tool, "args": {"worker": "w-1", "message": "stop"}}) + "\n"); f.flush()
+    open(out + ".tmp", "w").write(f.readline())
+    os.rename(out + ".tmp", out)
+if how == "child":
+    if os.fork() == 0:
+        ask()
+        os._exit(0)
+    os.wait()
+else:
+    ask()
+"#;
+
+fn ask_from_app_child(sock: &Path, out: &Path, tool: &str, how: &str, root: Option<&RunRegistry>) -> Value {
+    let mut c = Command::new("/usr/bin/python3");
+    c.args(["-I", "-c", CLIENT]).arg(sock).arg(out).args([tool, how]);
+    // As the app does: a Service root is recorded right after its spawn, before it can call. A worker never is.
+    let mut kid = Kid(c.spawn().unwrap());
+    if let Some(reg) = root {
+        assert!(reg.allow_service(kid.0.id()));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while !out.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = kid.0.wait();
+    serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap()
+}
+
+#[test]
+fn only_recorded_service_roots_reach_the_service_and_a_workers_child_or_a_lead_asked_worker_never_does() {
+    let t = Tmp::new("roots");
+    let reg = Arc::new(RunRegistry::default());
+    // A live lead, as when it has asked a worker to steer another session for it.
+    let mut lead = Kid(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+    let l = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
+    let _token = registered(&reg, proto(), Some(l));
+    let (sock, _svc) = serving(&t, reg.clone());
+    // The recorded root's `--mcp`-like child is served (the gate passed; the tool's own answer is whatever it is).
+    let ok = ask_from_app_child(&sock, &t.0.join("root"), "list_workers", "child", Some(&reg));
+    assert!(!["not_an_app_client", "run_lead_on_service", "peer_gone"].contains(&ok["error"].as_str().unwrap_or("")), "{ok}");
+    // A worker the app spawned, never recorded: its child is refused, and so is the worker asked to redirect another.
+    let child = ask_from_app_child(&sock, &t.0.join("wchild"), "list_workers", "child", None);
+    assert_eq!(child["error"], "not_an_app_client", "a worker's child reached the Service: {child}");
+    let asked = ask_from_app_child(&sock, &t.0.join("asked"), "redirect_worker", "self", None);
+    assert_eq!(asked["error"], "not_an_app_client", "a lead-asked worker steered another session: {asked}");
+    let _ = lead.0.kill();
+    let _ = lead.0.wait();
+}
+
+#[test]
+fn the_app_itself_and_its_ancestors_are_never_recorded_as_service_roots() {
+    let reg = RunRegistry::default();
+    assert!(!reg.allow_service(std::process::id()), "the app as a root admits everything");
+    assert!(!reg.allow_service(std::os::unix::process::parent_id()), "nor its parent");
+    assert!(!reg.allow_service(u32::MAX - 1), "a pid with no process records nothing");
+}
