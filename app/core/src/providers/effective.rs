@@ -292,6 +292,25 @@ pub fn codex_rollout(events: &str, codex_home: &Path) -> Option<String> {
     Some(text)
 }
 
+/// A Codex session's final answer, from its own session file: `last_agent_message` of the last `task_complete` event.
+/// The file is written by Codex in its home, outside the session's writable roots; the `--json` stream is the session's
+/// terminal, which anything the session runs can print on (#167 H1, vajra-63's residual). The last `MAX_READ` bytes
+/// are read, so a long session's end is never cut off. `None`: no thread id, no file, or no answered turn.
+pub fn codex_last_message(events: &str, codex_home: &Path) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = codex_thread_id(events).and_then(|t| rollout_file(codex_home, &t))?;
+    let len = file.metadata().ok()?.len();
+    let from = len.saturating_sub(MAX_READ);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // From the middle of the file, the first line may be cut: it is skipped.
+    let lines = text.lines().skip(usize::from(from > 0));
+    let done = lines.filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).filter(|e| e["type"] == "event_msg" && e["payload"]["type"] == "task_complete").last()?;
+    done["payload"]["last_agent_message"].as_str().map(String::from)
+}
+
 /// What a Claude worker ran on, from the `system`/`init` event of its stream. Claude has no effort setting here, so the
 /// effective effort is `None`. The stream does not say how the CLI was signed in (plan or API key), so billing stays
 /// unknown.

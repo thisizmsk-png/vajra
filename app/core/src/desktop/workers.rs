@@ -848,7 +848,13 @@ impl WorkerRuntime {
         if x.code == 0 && x.signal.is_none() {
             // A clean exit is committed only once the read-back has passed.
             return match applied.or_else(|| l.read_back(&events, t)) {
-                Some(Ok(())) => Attempt::Clean(receipt),
+                Some(Ok(())) => {
+                    // A check is judged by its typed result (6g): keep its final answer, read where it can't be forged.
+                    if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id).filter(|e| matches!(e.job, Job::Check(..))) {
+                        e.answer = l.final_answer(&events);
+                    }
+                    Attempt::Clean(receipt)
+                }
                 _ => Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), receipt),
             };
         }
@@ -860,12 +866,7 @@ impl WorkerRuntime {
     /// After a clean exit: snapshot, diff, outcome.
     fn finish(&self, id: &str, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket, receipt: Option<LaunchReceipt>) {
         if let Job::Check(..) = job {
-            // A check is judged by its typed result (6g), never by changed files: keep its final message.
-            let sid = crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone());
-            let answer = sid.and_then(|sid| final_message(&self.events(&sid)));
-            if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
-                e.answer = answer;
-            }
+            // A check is judged by its typed result (6g), never by changed files; its answer was kept at the clean exit.
             return self.end(id, Outcome::Done, "exited", receipt);
         }
         let s = job.spec();
@@ -1326,6 +1327,17 @@ impl Launch {
         match self.engine {
             Engine::Codex => text.contains("\"thread.started\""),
             Engine::Claude => text.contains("\"init\""),
+        }
+    }
+
+    /// A clean session's final answer. The stream must end in its single terminal event (`final_message`). For Codex
+    /// the answer is then read from its session file, not the stream: a process the session ran can print a forged
+    /// `agent_message` between the model's last one and `turn.completed` (#167 H1 residual, vajra-63).
+    fn final_answer(&self, events: &str) -> Option<String> {
+        let streamed = final_message(events)?;
+        match self.engine {
+            Engine::Claude => Some(streamed),
+            Engine::Codex => effective::codex_last_message(events, &self.codex_home),
         }
     }
 
