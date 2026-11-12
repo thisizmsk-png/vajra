@@ -788,6 +788,38 @@ fn a_bland_criterion_whose_check_names_a_security_area_flags_the_run() {
     assert!(r.p.card().security, "flagged before redaction");
 }
 
+/// bhishma (vajra-66) M1 on #181: an invisible or control character inside a security word splits it in the raw text,
+/// but the stored, sanitised text reads the word whole. Either matching flags the run.
+#[test]
+fn an_invisible_or_control_character_inside_a_security_word_still_flags_the_run() {
+    for (criterion, check) in [("keep the to\u{200b}kens fresh", "npm test"), ("export has --json", "cargo test au\u{1}th::x"), ("rotate the pass\u{2060}word", "npm test")] {
+        let c = vec![Criterion { id: "ac-1".into(), criterion: criterion.into(), check: check.into() }];
+        let r = rig_with("tidy the export", vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(PlanInput { criteria: Some(c), ..plan1() }).unwrap();
+        assert!(r.p.card().security, "{criterion:?} / {check:?}");
+    }
+}
+
+/// bhishma L2 on #181: the ask has the same gap.
+#[test]
+fn an_invisible_character_inside_a_security_word_of_the_ask_flags_the_run() {
+    for ask in ["rotate the pass\u{200b}word", "fix the lo\u{7}gin page"] {
+        let r = rig_with(ask, vec![seat("w1", "backend", false), seat("w3", "frontend", false)], Limits::default(), false);
+        r.p.plan_tasks(plan1()).unwrap();
+        assert!(r.p.card().security, "{ask:?}");
+    }
+}
+
+/// bhishma L1 on #181: git's output is decoded lossily, so an odd byte inside a path word arrives as U+FFFD and splits
+/// it; the word read whole still flags.
+#[test]
+fn an_odd_byte_inside_a_security_path_word_still_flags_the_run() {
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/to\u{fffd}ken_store.rs".into()]));
+    assert!(flagged);
+    let (_, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/se\u{200b}ssion.rs".into()]));
+    assert!(flagged);
+}
+
 #[test]
 fn a_bland_plan_whose_diff_touches_a_security_path_flags_the_run() {
     let (r, flagged) = flagged_after_round_1(criteria(), Some(vec!["src/auth/session.rs".into(), "docs/x.md".into()]));
