@@ -23,6 +23,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::providers::effective::{self, Requested};
 use crate::providers::errors::{self, Action, Clock, Ident, Kind, ProviderError};
+use crate::procsweep;
 use crate::providers::launch;
 use crate::sessions::{ProviderTag, SpawnSpec, Supervisor};
 use crate::vajra::gitw::{self, DepClone, Gitw, GitwError};
@@ -48,6 +50,14 @@ pub const WORKER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const LEAVE_CHANGES: &str = "Leave your changes in the working tree; Vajra commits them.";
 /// How long a gone leader's process group may linger before it is killed.
 const GROUP_GRACE: Duration = Duration::from_secs(2);
+/// How long a worker asked to stop may take to exit (the supervisor's own kill escalates to SIGKILL after 1 s). Past
+/// it the attempt ends with its stop outcome and its process group is killed directly (`wait_group_gone`).
+const KILL_WAIT: Duration = Duration::from_secs(10);
+/// How often a running worker's terminal holders are listed (a process-table walk; only processes started after the
+/// worker's spawn have their descriptors read).
+const HOLDER_SCAN: Duration = Duration::from_millis(500);
+/// The most terminal holders one attempt remembers.
+const MAX_HOLDERS: usize = 256;
 /// File names a summary lists at most.
 const SUMMARY_FILES: usize = 20;
 /// How much of an attempt's opening output is kept for its startup event (the harness prints it first).
@@ -146,7 +156,7 @@ impl Job {
 }
 
 /// The 16.5 outcomes. A check ticket ends `done` (its typed result is 6g's) or `failed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Done,
@@ -165,7 +175,7 @@ pub enum KillReason {
     Abandoned,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Queued,
@@ -238,6 +248,17 @@ struct Entry {
 struct Book {
     tickets: BTreeMap<String, Entry>,
     seq: u64,
+    /// The app is quitting (`quit`): nothing new is queued or started.
+    closed: bool,
+    /// Earlier app lives' tickets, read back at start (`replay`): ended, shown, never acted on.
+    past: BTreeMap<String, TicketView>,
+}
+
+impl Book {
+    /// Is this ticket id used, by this life or an earlier one (its worktree path and task ref would collide)?
+    fn taken(&self, id: &str) -> bool {
+        self.tickets.contains_key(id) || self.past.contains_key(id)
+    }
 }
 
 struct Shared {
@@ -250,6 +271,17 @@ struct Shared {
     sessions: Arc<gitw::RepoSessions>,
     book: Mutex<Book>,
     changed: Condvar,
+    /// How many `tickets.jsonl` lines could not be written (see `record_failures`).
+    record_failures: AtomicU64,
+    /// Lines the start-up replay could not use (`replay_gaps`).
+    replay_gaps: AtomicU64,
+    /// Descendants the sweep killed after their attempt ended, and ones still running after it (`swept`).
+    swept: AtomicU64,
+    sweep_survived: AtomicU64,
+    /// Tests only: how long a stopped worker may take to exit, and whether the supervisor's kill is held back (a
+    /// worker that ignores its kill).
+    #[cfg(test)]
+    kill_test: Mutex<Option<(Duration, bool)>>,
 }
 
 /// The runtime. Cheap to clone.
@@ -355,6 +387,8 @@ pub enum DispatchError {
     Invalid(&'static str),
     /// The ticket for this task and round already exists.
     Exists,
+    /// The app is quitting: nothing new is queued.
+    Closed,
 }
 
 impl WorkerRuntime {
@@ -366,7 +400,98 @@ impl WorkerRuntime {
     /// from before its process starts until its attempt ends: the production repo pause reads it, so a running
     /// worker is stopped while the core's git works on its repo (#151 codex P1).
     pub fn with_sessions(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks, sessions: Arc<gitw::RepoSessions>) -> Self {
-        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new() }))
+        let rt = WorkerRuntime(Arc::new(Shared {
+            cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new(), record_failures: AtomicU64::new(0),
+            swept: AtomicU64::new(0), sweep_survived: AtomicU64::new(0), replay_gaps: AtomicU64::new(0),
+            #[cfg(test)]
+            kill_test: Mutex::default(),
+        }));
+        rt.replay();
+        rt
+    }
+
+    /// Read back what earlier app lives recorded (`<data>/runs/*/tickets.jsonl`), before any ticket of this life. Each
+    /// ticket takes its last line. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
+    /// with detail `app_restarted`, and that outcome is written, so the next replay reads it ended. Replayed tickets
+    /// are shown and keep their ids taken (a re-dispatch is the next round), but are never started, integrated or
+    /// cleaned up by this life: it holds no worktree handle for them. Their worktrees stay on disk.
+    fn replay(&self) {
+        let data = &self.0.cfg.data;
+        let runs_dir = data.join("runs");
+        // The listing gives names only; each file is then opened by the no-follow descent (`open_record_read`).
+        let real_dir = std::fs::symlink_metadata(&runs_dir).is_ok_and(|m| m.is_dir());
+        let mut runs: Vec<String> = if real_dir {
+            std::fs::read_dir(&runs_dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect()
+        } else {
+            Vec::new()
+        };
+        runs.sort();
+        runs.truncate(REPLAY_MAX_RUNS);
+        let mut gaps = 0;
+        let mut past = BTreeMap::new();
+        for run in &runs {
+            let (views, g) = replay_run(data, run);
+            gaps += g;
+            past.extend(views);
+        }
+        let mut ended = Vec::new();
+        for v in past.values_mut().filter(|v| v.state != State::Ended) {
+            finish_view(v, Outcome::Failed, "abandoned");
+            v.detail = Some("app_restarted".into());
+            v.summary = Some(summary(v, &self.0.cfg.redact));
+            ended.push(v.clone());
+        }
+        for v in &ended {
+            self.record(v, "outcome");
+        }
+        self.0.replay_gaps.store(gaps, AtomicOrdering::Relaxed);
+        let mut b = crate::lock(&self.0.book);
+        b.past = past;
+        // A ticket's `seq` names its supervisor session (`core-<seq>-a<n>`), and the bus keeps a session's output on
+        // disk (`<data>/spill`) across app lives: each life numbers from its start time in milliseconds, so no later
+        // life's worker reads an earlier one's output under the same name.
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        b.seq = b.seq.max(ms.saturating_mul(1000));
+    }
+
+    /// How many `tickets.jsonl` lines the replay at start could not use (a partial last line, a damaged or oversized
+    /// line, a line for another run, or a file over the size cap). Non-zero means an earlier life's view has gaps.
+    pub fn replay_gaps(&self) -> u64 {
+        self.0.replay_gaps.load(AtomicOrdering::Relaxed)
+    }
+
+    /// How many `tickets.jsonl` lines this runtime failed to write (the file or a folder on its way could not be
+    /// opened, or the append failed). The ticket's state in memory is unchanged; only its durable line is missing.
+    pub fn record_failures(&self) -> u64 {
+        self.0.record_failures.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Descendants the sweep killed after their attempt ended, and how many it could not (`(killed, survived)`).
+    pub fn swept(&self) -> (u64, u64) {
+        (self.0.swept.load(AtomicOrdering::Relaxed), self.0.sweep_survived.load(AtomicOrdering::Relaxed))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_kill_test(&self, wait: Duration, hold_kill: bool) {
+        *crate::lock(&self.0.kill_test) = Some((wait, hold_kill));
+    }
+
+    /// How long a worker asked to stop may take to exit before its attempt ends anyway.
+    fn kill_wait(&self) -> Duration {
+        #[cfg(test)]
+        if let Some((w, _)) = *crate::lock(&self.0.kill_test) {
+            return w;
+        }
+        KILL_WAIT
+    }
+
+    /// Ask the supervisor to end a worker session (SIGHUP, then SIGKILL after its grace).
+    fn kill_session(&self, sid: &str) {
+        #[cfg(test)]
+        if crate::lock(&self.0.kill_test).is_some_and(|(_, hold)| hold) {
+            return;
+        }
+        let _ = self.0.sup.kill(sid);
     }
 
     /// Queue a writer task on a seat and return its ticket. It starts when its seat is free and the caps allow.
@@ -382,17 +507,30 @@ impl WorkerRuntime {
         self.add(Job::Check(kind, spec), seat)
     }
 
-    fn add(&self, job: Job, seat: WorkerSeat) -> Result<String, DispatchError> {
+    fn add(&self, mut job: Job, seat: WorkerSeat) -> Result<String, DispatchError> {
         let s = job.spec();
         let name_ok = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
         if !name_ok(&s.run) || !name_ok(&s.task) || !name_ok(&seat.slot) || !(1..=99).contains(&s.round) {
             return Err(DispatchError::Invalid("run, task, seat or round"));
         }
-        let id = format!("{}.{}.r{}", s.run, s.task, s.round);
+        let id_of = |s: &TaskSpec, task: &str| format!("{}.{task}.r{}", s.run, s.round);
         let mut b = crate::lock(&self.0.book);
-        if b.tickets.contains_key(&id) {
-            return Err(DispatchError::Exists);
+        if b.closed {
+            return Err(DispatchError::Closed);
         }
+        let id = match &mut job {
+            Job::Task(s) if b.taken(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
+            Job::Task(s) => id_of(s, &s.task),
+            // Checks of one kind in one round are numbered, chosen under the book lock: a second Verify of the round
+            // (a later commit, or a re-check) is its own ticket and worktree, `verify-2`, never a refused duplicate.
+            Job::Check(_, s) => {
+                let kind = s.task.clone();
+                let free = (1..=99).map(|n| if n == 1 { kind.clone() } else { format!("{kind}-{n}") }).find(|t| !b.taken(&id_of(s, t)));
+                s.task = free.ok_or(DispatchError::Exists)?;
+                id_of(s, &s.task)
+            }
+        };
+        let s = job.spec();
         b.seq += 1;
         let kind = match &job {
             Job::Task(_) => "writer",
@@ -418,15 +556,21 @@ impl WorkerRuntime {
 
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
-        b.tickets.get(id).map(live_view)
+        b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
     }
 
-    /// Every ticket of a run, in dispatch order.
+    /// The supervisor session of the ticket's running attempt, if one is running now.
+    pub fn session_of(&self, id: &str) -> Option<String> {
+        crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone())
+    }
+
+    /// Every ticket of a run: an earlier life's first (by id), then this life's in dispatch order.
     pub fn list(&self, run: &str) -> Vec<TicketView> {
         let b = crate::lock(&self.0.book);
         let mut v: Vec<&Entry> = b.tickets.values().filter(|e| e.view.run == run).collect();
         v.sort_by_key(|e| e.seq);
-        v.into_iter().map(live_view).collect()
+        let past = b.past.values().filter(|p| p.run == run && !b.tickets.contains_key(&p.id)).cloned();
+        past.chain(v.into_iter().map(live_view)).collect()
     }
 
     /// Park until one of `tickets` has ended, or `wait` passes. Returns the first ended one, else `None` (the caller
@@ -437,6 +581,10 @@ impl WorkerRuntime {
         loop {
             if let Some(e) = tickets.iter().filter_map(|t| b.tickets.get(t)).find(|e| e.view.state == State::Ended) {
                 return Some(e.view.clone());
+            }
+            // An earlier life's ticket is always ended: asking about it after a restart answers at once.
+            if let Some(p) = tickets.iter().find_map(|t| b.past.get(t).filter(|_| !b.tickets.contains_key(t))) {
+                return Some(p.clone());
             }
             let now = Instant::now();
             if now >= deadline {
@@ -456,6 +604,34 @@ impl WorkerRuntime {
     /// tickets it ended or asked to end.
     pub fn kill_run_workers(&self, run: &str, reason: KillReason) -> usize {
         self.kill_where(|e| e.view.run == run, reason)
+    }
+
+    /// App quit (6c-3): refuse new tickets, end every live one (`failed`, `abandoned`, detail `app_quit`; queued ones at
+    /// once, running ones by their attempt's own kill and descendant sweep), and wait at most `wait` for them to end.
+    /// Returns the ids still not ended when it gave up: the supervisor's shutdown that follows kills their groups.
+    pub fn quit(&self, wait: Duration) -> Vec<String> {
+        let live: Vec<String> = {
+            let mut b = crate::lock(&self.0.book);
+            b.closed = true;
+            let ids: Vec<String> = b.tickets.values().filter(|e| e.view.state != State::Ended).map(|e| e.view.id.clone()).collect();
+            for id in &ids {
+                if let Some(e) = b.tickets.get_mut(id) {
+                    e.view.detail.get_or_insert_with(|| "app_quit".into());
+                }
+            }
+            ids
+        };
+        self.kill_where(|e| live.contains(&e.view.id), KillReason::Abandoned);
+        let deadline = Instant::now() + wait;
+        let mut b = crate::lock(&self.0.book);
+        loop {
+            let left: Vec<String> = live.iter().filter(|id| b.tickets.get(*id).is_some_and(|e| e.view.state != State::Ended)).cloned().collect();
+            let now = Instant::now();
+            if left.is_empty() || now >= deadline {
+                return left;
+            }
+            b = self.0.changed.wait_timeout(b, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
     }
 
     fn kill_where(&self, pick: impl Fn(&Entry) -> bool, reason: KillReason) -> usize {
@@ -485,7 +661,7 @@ impl WorkerRuntime {
             }
         }
         for s in sessions {
-            let _ = self.0.sup.kill(&s);
+            self.kill_session(&s);
         }
         self.0.changed.notify_all();
         self.pump();
@@ -577,6 +753,9 @@ impl WorkerRuntime {
         let mut start = Vec::new();
         {
             let mut b = crate::lock(&self.0.book);
+            if b.closed {
+                return;
+            }
             let mut live: Vec<String> = b.tickets.values().filter(|e| e.view.state == State::Running).map(|e| e.seat.account.clone()).collect();
             let mut busy: Vec<(String, String)> = b.tickets.values().filter(|e| e.view.state == State::Running).map(|e| (e.view.run.clone(), e.seat.slot.clone())).collect();
             let mut order: Vec<(u64, String)> = b.tickets.values().filter(|e| e.view.state == State::Queued).map(|e| (e.seq, e.view.id.clone())).collect();
@@ -779,9 +958,12 @@ impl WorkerRuntime {
         let tag = ProviderTag { slot: seat.slot.clone(), session_id: session.clone(), account: seat.account.clone(), attempt: n, core_reports: true };
         // Registered before it starts, so a repo pause held now stops it as soon as it exists; dropped on every return.
         let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
+        // Taken before the spawn: every process of this attempt starts at or after it (the sweep's window).
+        let spawned_at = procsweep::now_stamp();
         if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
+        let tty = self.0.sup.tty(&sid).ok().flatten();
         if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
             e.session = Some(sid.clone());
             e.view.attempt = n;
@@ -790,18 +972,43 @@ impl WorkerRuntime {
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
-            let _ = self.0.sup.kill(&sid);
+            self.kill_session(&sid);
         }
         let start = Instant::now();
         let mut applied: Option<Result<(), String>> = None;
         // The harness's opening lines carry its startup identity; kept once seen, so later output can't push it out.
         let mut opening = String::new();
+        // When the stop was first seen: the wait for the worker to exit after it is bounded (`kill_wait`).
+        let mut stop_seen: Option<Instant> = None;
+        // Processes seen holding the worker's terminal while it lives (macOS revokes it when the worker exits), for the
+        // descendant sweep. Scanned at most every `HOLDER_SCAN`.
+        let mut holders: Vec<(u32, u64)> = Vec::new();
+        let mut last_scan: Option<Instant> = None;
         let exit = loop {
-            if let Ok(Some(x)) = self.0.sup.wait(&sid, self.0.cfg.poll) {
-                break Some(x);
+            if let (Some(d), Some(since)) = (&tty, spawned_at) {
+                if last_scan.is_none_or(|t| t.elapsed() >= HOLDER_SCAN) {
+                    last_scan = Some(Instant::now());
+                    for h in procsweep::holders(d, since) {
+                        if !holders.contains(&h) && holders.len() < MAX_HOLDERS {
+                            holders.push(h);
+                        }
+                    }
+                }
+            }
+            match self.0.sup.wait(&sid, self.0.cfg.poll) {
+                Ok(Some(x)) => break Some(x),
+                Ok(None) => {}
+                // The supervisor no longer knows the session (it shut down): nothing is left to wait on.
+                Err(_) => break None,
             }
             if self.killed(id).is_some() {
-                let _ = self.0.sup.kill(&sid);
+                let first = *stop_seen.get_or_insert_with(Instant::now);
+                if first.elapsed() >= self.kill_wait() {
+                    // Still not reaped (a descendant holds its terminal open, or the kill never landed): the attempt
+                    // ends now with its stop outcome, and `wait_group_gone` below kills the group directly.
+                    break None;
+                }
+                self.kill_session(&sid);
                 continue;
             }
             if start.elapsed() >= self.0.cfg.worker_timeout {
@@ -818,6 +1025,15 @@ impl WorkerRuntime {
         };
         let pid = self.0.sup.pid(&sid).unwrap_or(0);
         wait_group_gone(pid);
+        // A descendant that left the group (setsid, a daemon) carries the worker's terminal or TMPDIR: swept here, so
+        // nothing of this attempt outlives it (6c-3).
+        if let Some(since) = spawned_at {
+            let s = procsweep::sweep_ticket(&holders, &t.tmp, since);
+            if s != procsweep::Swept::default() {
+                self.0.swept.fetch_add(s.killed as u64, AtomicOrdering::Relaxed);
+                self.0.sweep_survived.fetch_add(s.survived as u64, AtomicOrdering::Relaxed);
+            }
+        }
         let events = self.attempt_events(&sid, l, &mut opening);
         let receipt = Some(l.receipt(seat, &events, &sid));
         if let Some(r) = self.killed(id) {
@@ -935,10 +1151,12 @@ impl WorkerRuntime {
     /// One line in `<data>/runs/<run>/tickets.jsonl`: core-only state under the guarded data dir, opened append-only,
     /// never rewritten. Every step below `<data>` is opened by descriptor with no-follow, so a planted link at `runs`,
     /// `<run>` or the file fails the write instead of redirecting it (#149 bhishma M2).
+    /// A line that cannot be written is counted (`record_failures`), never dropped unseen.
     fn record(&self, v: &TicketView, event: &str) {
         let line = json!({"v": 1, "event": event, "ticket": v});
-        if let Ok(mut f) = open_record(&self.0.cfg.data, &v.run) {
-            let _ = f.write_all(format!("{line}\n").as_bytes());
+        let wrote = open_record(&self.0.cfg.data, &v.run).and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
+        if wrote.is_err() {
+            self.0.record_failures.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 }
@@ -970,6 +1188,126 @@ fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::Fi
         }
     }
     crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
+}
+
+/// `<data>/runs/<run>/tickets.jsonl` for reading, by the same no-follow descent as `open_record`, creating nothing.
+fn open_record_read(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::File> {
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "run id");
+    if run.is_empty() || run == "." || run == ".." || run.contains('/') {
+        return Err(bad());
+    }
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+    let mut dir = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(data)?;
+    for name in ["runs", run] {
+        let c = std::ffi::CString::new(name).map_err(|_| bad())?;
+        dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
+    }
+    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW, 0)
+}
+
+/// The most of one run's `tickets.jsonl` that replay reads, and the longest line it takes.
+const REPLAY_MAX_FILE: u64 = 16 << 20;
+const REPLAY_MAX_LINE: usize = 256 << 10;
+/// The most runs replay looks at.
+const REPLAY_MAX_RUNS: usize = 4096;
+
+/// One `tickets.jsonl` line as written by `record`. Unknown fields are ignored; a missing one takes its default.
+#[derive(serde::Deserialize)]
+struct StoredLine {
+    v: u32,
+    ticket: StoredTicket,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct StoredTicket {
+    id: String,
+    run: String,
+    task: String,
+    round: u32,
+    kind: String,
+    slot: String,
+    account: String,
+    state: Option<State>,
+    attempt: u32,
+    elapsed_s: u64,
+    dispatch_head: Option<String>,
+    worktree: Option<PathBuf>,
+    deps: Vec<Value>,
+    outcome: Option<Outcome>,
+    reason: Option<String>,
+    detail: Option<String>,
+    harness_session: Option<String>,
+    commit: Option<String>,
+    task_ref: Option<String>,
+    files: Vec<String>,
+    added: u64,
+    removed: u64,
+    leftovers: Vec<String>,
+    receipt: Option<Value>,
+    mismatch: Option<Value>,
+    provider: Option<effective::ProviderTag>,
+    summary: Option<Value>,
+    retention: Option<Value>,
+}
+
+/// The `&'static` kind a stored kind names, or `None` (a line this build does not know is not replayed).
+fn known_kind(k: &str) -> Option<&'static str> {
+    ["writer", "verify", "review", "security_review", "evidence"].into_iter().find(|&x| x == k)
+}
+
+impl StoredTicket {
+    /// The view, if the line is one `record` could have written for `run`: its id is `<run>.<task>.r<round>`.
+    fn into_view(self, run: &str) -> Option<TicketView> {
+        let kind = known_kind(&self.kind)?;
+        let name_ok = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if self.run != run || !name_ok(&self.task) || !(1..=99).contains(&self.round) || self.id != format!("{run}.{}.r{}", self.task, self.round) {
+            return None;
+        }
+        Some(TicketView {
+            id: self.id, run: self.run, task: self.task, round: self.round, kind, slot: self.slot, account: self.account,
+            state: self.state?, queue_position: None, wait: None, attempt: self.attempt, elapsed_s: self.elapsed_s,
+            dispatch_head: self.dispatch_head, worktree: self.worktree, deps: self.deps, outcome: self.outcome, reason: self.reason,
+            detail: self.detail, harness_session: self.harness_session, steer_off: None, commit: self.commit, task_ref: self.task_ref,
+            files: self.files, added: self.added, removed: self.removed, leftovers: self.leftovers, receipt: self.receipt,
+            mismatch: self.mismatch, provider: self.provider, summary: self.summary, retention: self.retention, started: None,
+        })
+    }
+}
+
+/// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.
+fn replay_run(data: &std::path::Path, run: &str) -> (BTreeMap<String, TicketView>, u64) {
+    use std::io::Read;
+    let mut out = BTreeMap::new();
+    let Ok(f) = open_record_read(data, run) else { return (out, 0) };
+    let mut raw = Vec::new();
+    if f.take(REPLAY_MAX_FILE + 1).read_to_end(&mut raw).is_err() {
+        return (out, 1);
+    }
+    let mut gaps = 0;
+    if raw.len() as u64 > REPLAY_MAX_FILE {
+        raw.truncate(REPLAY_MAX_FILE as usize);
+        gaps += 1;
+    }
+    // Only newline-terminated lines are whole: a crash mid-write leaves a partial last line, which is dropped.
+    let whole = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    if whole < raw.len() {
+        gaps += 1;
+    }
+    for line in raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let parsed = (line.len() <= REPLAY_MAX_LINE)
+            .then(|| serde_json::from_slice::<StoredLine>(line).ok())
+            .flatten()
+            .filter(|l| l.v == 1)
+            .and_then(|l| l.ticket.into_view(run));
+        match parsed {
+            Some(v) => {
+                out.insert(v.id.clone(), v);
+            }
+            None => gaps += 1,
+        }
+    }
+    (out, gaps)
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is
