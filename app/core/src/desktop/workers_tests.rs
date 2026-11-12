@@ -1179,22 +1179,27 @@ fn an_oversized_history_is_not_taken_as_complete_and_writes_nothing() {
 }
 
 /// #178 codex P1: a run the replay leaves out past its run cap is not taken as new. Its history is unread, so its ids
-/// and task refs may be taken: it is counted as a gap and takes no dispatch. A run the scan did read, and a new run,
-/// are unaffected.
+/// and task refs may be taken: it is counted as a gap and takes no dispatch. The cap leaves out the oldest runs (ids
+/// sort by time), so the newest run, the one a restart resumes, is read and still dispatches; so does a new run.
 #[test]
 fn a_run_past_the_replay_run_cap_takes_no_dispatch() {
     let r = rig("replay-cap", Opts::default());
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
-    // Runs that sort before `r1` fill the cap, so `r1` is the one left out.
-    for i in 0..REPLAY_MAX_RUNS {
-        std::fs::create_dir_all(r.gw.data.join(format!("runs/a{i:05}"))).unwrap();
+    let newest = r.done(&r.rt.dispatch(r.task("z99999", "t1"), seat("w1", "codex")).unwrap());
+    // Runs that sort after `r1` (and before `z99999`) fill the cap, so `r1`, the oldest, is the one left out.
+    for i in 0..REPLAY_MAX_RUNS - 1 {
+        std::fs::create_dir_all(r.gw.data.join(format!("runs/s{i:05}"))).unwrap();
     }
     let life2 = next_life(&r);
     assert!(life2.replay_gaps() >= 1, "the left-out run is a gap");
     assert!(life2.view(&v.id).is_none(), "its history was not read");
     assert!(matches!(life2.dispatch(r.task("r1", "t1"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "its id is not reused");
     assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
-    let other = r.done_on(&life2, &life2.dispatch(r.task("s1", "t1"), seat("w1", "codex")).unwrap());
+    assert!(life2.view(&newest.id).is_some(), "the newest run's history is read");
+    assert!(matches!(life2.dispatch(r.task("z99999", "t1"), seat("w1", "codex")), Err(DispatchError::Exists)), "and its ids stay taken");
+    let next = r.done_on(&life2, &life2.dispatch(r.task("z99999", "t2"), seat("w1", "codex")).unwrap());
+    assert_eq!(next.outcome, Some(Outcome::Done), "the newest run still dispatches after a restart");
+    let other = r.done_on(&life2, &life2.dispatch(r.task("zz1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(other.outcome, Some(Outcome::Done), "a new run is unaffected");
 }
 

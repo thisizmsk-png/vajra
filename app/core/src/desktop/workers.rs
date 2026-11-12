@@ -456,8 +456,10 @@ impl WorkerRuntime {
             // A link or file in the folder's place, or a stat that fails: what it hides is unknown.
             _ => unlisted = true,
         }
+        // Run ids are time-ordered (`YYYYMMDD-HHMM`) and the folder is never pruned, so the newest runs are kept and the
+        // oldest are the ones left out (#178 review): the runs a restart is likely to resume stay dispatchable.
         runs.sort();
-        let past_cap = runs.split_off(REPLAY_MAX_RUNS.min(runs.len()));
+        let past_cap: Vec<String> = runs.drain(..runs.len().saturating_sub(REPLAY_MAX_RUNS)).collect();
         let mut gaps = past_cap.len() as u64 + u64::from(unlisted);
         let mut past = BTreeMap::new();
         let mut incomplete: std::collections::BTreeSet<String> = past_cap.into_iter().collect();
