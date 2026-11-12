@@ -158,7 +158,7 @@ export function Inbox() {
         </div>
         {i.kind === "plan" && (
           <div className="v-ibx__rej">
-            <input type="text" placeholder={S.inbox.reason} aria-label={S.inbox.reason} value={reason} onChange={(e) => setReasons((m) => ({ ...m, [k]: e.target.value }))} />
+            <input type="text" className="v-input" placeholder={S.inbox.reason} aria-label={S.inbox.reason} value={reason} onChange={(e) => setReasons((m) => ({ ...m, [k]: e.target.value }))} />
             <Button size="sm" variant="ghost" disabled={o?.busy || !i.plan_sha256 || reason.trim().length < 1 || reason.trim().length > 500} onClick={() => reject(i)}>{S.inbox.reject}</Button>
           </div>
         )}
