@@ -75,9 +75,6 @@ pub struct Config {
     /// Opens a Claude worker's own control dir by its session id, before it starts, and returns its steering nonce
     /// (the control service's `open_core_session`). `None`: the worker gets no steering channel.
     pub steer: Option<Steer>,
-    /// Tests only: run a Claude worker before spike S4 has passed.
-    #[cfg(test)]
-    pub claude_unverified_ok: bool,
 }
 
 /// The engine hooks 6h fills (task claims and reports go to the engine there). Called outside the runtime's lock.
@@ -1181,12 +1178,23 @@ impl Launch {
             Job::Check(..) => RoleKind::Verifier,
             Job::Task(_) => RoleKind::of_role(&seat.role).filter(|k| *k == RoleKind::Worker).ok_or("harness_unsupported")?,
         };
-        let supported = profiles::profile(engine, kind).supported;
-        #[cfg(test)]
-        let supported = if cfg.claude_unverified_ok && engine == Engine::Claude { Ok(()) } else { supported };
-        #[cfg(not(test))]
-        let _ = cfg;
-        supported.map(|()| (engine, kind)).map_err(|u| u.reason)
+        profiles::profile(engine, kind).supported.map_err(|u| u.reason)?;
+        if engine == Engine::Claude {
+            Self::claude_proven(cfg)?;
+        }
+        Ok((engine, kind))
+    }
+
+    /// #180 bhishma: the running Claude Code build, asked of the binary on every dispatch (never cached by path, as
+    /// the Lead's self-test does: a CLI updated in place is a new build), must be one S4 proved with today's flag
+    /// shape. A probe that fails, times out or prints anything else is refused (fail closed).
+    fn claude_proven(cfg: &Config) -> Result<(), &'static str> {
+        let refused = profiles::CLAUDE_UNPROVEN.reason;
+        let dir = cfg.claude.parent().ok_or(refused)?;
+        let path = std::env::join_paths([dir, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).map_err(|_| refused)?;
+        let env = [("PATH", path), ("HOME", cfg.home.clone().into_os_string())];
+        let version = super::lead::claude_version(&cfg.claude, &env).map_err(|_| refused)?;
+        profiles::claude_worker_proven(&version).map_err(|u| u.reason)
     }
 
     fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
