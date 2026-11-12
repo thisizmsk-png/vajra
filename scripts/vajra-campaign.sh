@@ -27,6 +27,7 @@
 #   vajra-campaign.sh close [slug] [--status done|abandoned]
 #   vajra-campaign.sh report --campaign slug --bytes N --check FNV32 --base64 B64
 #   vajra-campaign.sh archive-evidence <slug> <evidence-dir> <head> <setup-json>
+#   vajra-campaign.sh unlock <slug> --if-stale
 #
 # Exit codes: 0 ok, 1 error, 2 usage, 3 signature/integrity failure.
 # Bash 3.2 compatible (macOS /bin/bash).
@@ -131,7 +132,63 @@ verify_state() {
   return 0
 }
 
-LOCK=""
+LOCK=""; LOCK_PID=""; LOCK_START=""
+# The process start time, the second half of the owner's identity: a recycled pid has a different start time.
+proc_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
+# owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
+release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; return 0; }
+# Reclamation and a writer's normal exit hand the lock off under one flock on <campaign>/.lock.reclaim, so the lock
+# generation an unlocker checked cannot be released and retaken underneath it. An flock dies with its holder (a SIGKILL
+# or crash frees it), so no stale mutex can strand a campaign. The helper takes the flock; in "release" mode it removes
+# the lock (owner.json first, then the dir), in "unlock" mode it execs the given command with the flock still held.
+RECLAIM_PY='
+import fcntl, json, os, sys, time
+d, wait, mode = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+try:
+    fd = os.open(d + "/.lock.reclaim", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+except OSError:
+    sys.exit(1)
+end = time.time() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.time() >= end:
+            sys.stderr.write("vajra-campaign: another unlock or release is running; not removed\n")
+            sys.exit(1)
+        time.sleep(0.05)
+if mode == "release":
+    # Only the generation this writer took: the helper can outlive a killed writer and wake after the lock was
+    # reclaimed and retaken, and it must then leave the new holder lock alone.
+    lk = d + "/.lock"
+    try:
+        o = json.load(open(lk + "/owner.json"))
+    except (OSError, ValueError):
+        sys.exit(0)
+    if str(o.get("pid")) != sys.argv[4] or o.get("start") != sys.argv[5]:
+        sys.exit(0)
+    try:
+        os.unlink(lk + "/owner.json")
+    except OSError:
+        pass
+    try:
+        os.rmdir(lk)
+    except OSError:
+        pass
+    sys.exit(0)
+os.set_inheritable(fd, True)
+os.environ["VAJRA_RECLAIM_HELD"] = "1"
+os.execv(sys.argv[4], sys.argv[4:])
+'
+# If the helper is unavailable or the flock stays busy the lock is left behind (its owner is gone, so
+# unlock --if-stale can clear it) rather than released unguarded.
+release_lock_serialized() {
+  [ -n "$LOCK" ] || return 0
+  [ -x "$PYTHON3" ] || { release_lock; return 0; }
+  "$PYTHON3" -I -c "$RECLAIM_PY" "${LOCK%/.lock}" 5 release "$LOCK_PID" "$LOCK_START" 2>/dev/null
+  return 0
+}
 lock() {
   local i=0
   LOCK="$1/.lock"
@@ -139,7 +196,42 @@ lock() {
     i=$((i+1)); [ "$i" -ge 100 ] && die "campaign is locked ($LOCK); remove it if no other run is active"
     sleep 0.1
   done
-  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  trap release_lock_serialized EXIT
+  LOCK_PID="$$"; LOCK_START="$(proc_start $$)"
+  jq -n --argjson pid "$LOCK_PID" --arg start "$LOCK_START" '{pid: $pid, start: $start}' > "$LOCK/owner.json" 2>/dev/null || true
+}
+
+# unlock <slug> --if-stale: remove a lock whose recorded owner is gone. A lock with no readable owner.json is never
+# removed (a person decides), and an owner that is still running with the same start time keeps it.
+cmd_unlock() {
+  local slug="" stale=0 pid start cur
+  while [ $# -gt 0 ]; do case "$1" in --if-stale) stale=1; shift ;; -*) die "unknown option: $1" ;; *) slug="$1"; shift ;; esac; done
+  [ -n "$slug" ] && [ "$stale" -eq 1 ] || usage
+  [ "$(sanitize_slug "$slug")" = "$slug" ] || die "invalid campaign slug: $slug"
+  DIR="${ROOT}/${slug}"; [ -d "$DIR" ] || die "campaign not found: $slug"
+  LOCK="$DIR/.lock"
+  # Take the reclaim flock for the whole check-and-delete: the helper re-runs this command with it held.
+  if [ -z "${VAJRA_RECLAIM_HELD:-}" ]; then
+    [ -x "$PYTHON3" ] || die "python3 is required for unlock"
+    exec "$PYTHON3" -I -c "$RECLAIM_PY" "$DIR" 10 unlock "${BASH:-/bin/bash}" "$0" unlock "$slug" --if-stale
+  fi
+  [ -e "$LOCK" ] || { echo "no lock held for $slug"; LOCK=""; return 0; }
+  { [ -d "$LOCK" ] && [ ! -L "$LOCK" ]; } || die "lock is not a plain directory ($LOCK); not removed"
+  [ -f "$LOCK/owner.json" ] && [ ! -L "$LOCK/owner.json" ] || die "lock has no owner record ($LOCK); not removed (remove it yourself if no run is active)"
+  pid="$(jq -r '.pid // empty' "$LOCK/owner.json" 2>/dev/null)"; start="$(jq -r '.start // empty' "$LOCK/owner.json" 2>/dev/null)"
+  case "$pid" in ""|*[!0-9]*) die "lock owner record is unreadable ($LOCK); not removed" ;; esac
+  [ -n "$start" ] || die "lock owner record is unreadable ($LOCK); not removed"
+  cur="$(proc_start "$pid")"
+  if [ -z "$cur" ]; then
+    # ps shows nothing: dead, unless the pid still answers (ps itself failed), which is treated as live.
+    kill -0 "$pid" 2>/dev/null && die "lock owner $pid may still be running; not removed"
+  elif [ "$cur" = "$start" ]; then
+    die "lock owner $pid is still running; not removed"
+  fi
+  release_lock || true
+  [ ! -e "$LOCK" ] || die "lock could not be removed ($LOCK)"
+  echo "stale lock removed for $slug"
+  LOCK=""
 }
 
 active_slug() { [ -f "$ACTIVE_FILE" ] && tr -d ' \r\n' < "$ACTIVE_FILE"; }
@@ -502,6 +594,7 @@ case "$cmd" in
   close)      cmd_close "$@" ;;
   report)     cmd_report "$@" ;;
   archive-evidence) cmd_archive_evidence "$@" ;;
+  unlock)     cmd_unlock "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "vajra-campaign: unknown command: $cmd" >&2; usage ;;
 esac
