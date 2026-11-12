@@ -209,6 +209,27 @@ describe("Shell B frame (FG-03)", () => {
     expect(screen.queryByRole("complementary", { name: /project$/ })).toBeNull();
   });
 
+  it("with no projects yet, Add project puts the cursor in the Repository folder field", async () => {
+    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] } });
+    await screen.findByRole("heading", { name: S.home.start });
+    const repo = screen.getByLabelText(S.home.repo);
+    expect(document.activeElement).not.toBe(repo);
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
+    // Pressed again from the same place, it still lands there.
+    (document.activeElement as HTMLElement).blur();
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
+  });
+
+  it("from inside a project, Add project opens the launcher with the cursor in the Repository folder field", async () => {
+    boot();
+    await screen.findByRole("navigation", { name: S.frame.projects });
+    fireEvent.click(screen.getByRole("button", { name: S.frame.addProject }));
+    await waitFor(() => expect(window.location.hash).toContain("new=1"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText(S.home.repo)));
+  });
+
   it("does not poll while nothing runs (idle cost)", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
