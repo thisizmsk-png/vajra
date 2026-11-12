@@ -1192,6 +1192,16 @@ impl RunProtocol {
     }
 
     /// The human stops the run. After the status is fixed it changes nothing.
+    /// The lead could not run as its profile says (a failed read-back, a launch the core refused): the run is
+    /// `lead_lost` with `why`, and its workers are killed. A run that already ended keeps its status.
+    pub fn lead_refused(&self, why: &str) -> RunStatus {
+        let mut st = self.lock();
+        Self::finalize(&mut st, RunStatus::LeadLost, why);
+        let s = st.status.as_ref().map_or(RunStatus::LeadLost, |(s, _)| *s);
+        self.release(st);
+        s
+    }
+
     pub fn stop(&self) -> RunStatus {
         let mut st = self.lock();
         Self::finalize(&mut st, RunStatus::Stopped, "stopped by the human");

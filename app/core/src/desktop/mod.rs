@@ -2394,6 +2394,7 @@ pub mod workers;
 pub mod plan;
 pub mod runproto;
 pub mod charter;
+pub mod run_lead;
 pub mod labs;
 pub mod worker_host;
 mod arrivals;
