@@ -350,5 +350,8 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
 | "Sign in: NAME" | terminal tab label | never saved in the tab layout |
 | Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+| Phone not connected / Not built yet (removed) | status bar; Settings > Mobile, Notifications, Diagnostics | the button and the three empty sections are hidden until they work; the section titles and ledes stay in strings.ts for their return |
+| "run" for "campaign", "workers" for "crew" (Start a run / What should the workers do? / Runs / Past runs / Workers) | every screen | wording only; code ids, routes and file names keep the old words |
+| Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
 | Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
