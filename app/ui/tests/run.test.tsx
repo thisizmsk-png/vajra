@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setTransport } from "../src/ipc";
@@ -268,6 +270,23 @@ describe("Run view, timeline and task graph (S4c, US-4.1, US-4.2)", () => {
     expect(rows.map((r) => r.children.length)).toEqual([6, 6, 6, 6]);
     expect(rows[0].children[4].textContent).toBe("");
     expect(rows[1].children[4].textContent).toBe(`${S.run.waitsFor} t1`);
+  });
+
+  it("cuts a long 'waits for' list inside its own cell and keeps the whole list in the tooltip", async () => {
+    const deps = ["r1.t1", "r1.t2", "r1.t3", "r1.t4", "r1.t5", "r1.t6", "r1.t7"];
+    await openOverview(overview({ graph: { tasks: [gtask("t1", 0, "ready"), gtask("t8", 1, "pending", deps)], waves: 2 } }));
+    const rows = within(screen.getByRole("list", { name: S.run.graph })).getAllByRole("listitem");
+    const cell = rows[1].children[4];
+    // The class carries the ellipsis rule (see the stylesheet check below); without it the text paints over the Open button.
+    expect(cell.className).toBe("v-run__deps");
+    expect(cell.getAttribute("title")).toBe(`${S.run.waitsFor} t1, t2, t3, t4, t5, t6, t7`);
+    expect(rows[0].children[4].className).toBe("v-run__deps");
+    expect(rows[0].children[4].hasAttribute("title")).toBe(false);
+    const css = readFileSync(resolve(__dirname, "../src/shell.css"), "utf8");
+    const rule = css.split("\n").find((l) => l.includes(".v-run__deps")) ?? "";
+    expect(rule).toContain("overflow: hidden");
+    expect(rule).toContain("text-overflow: ellipsis");
+    expect(rule).toContain("white-space: nowrap");
   });
 
   it("renders only the rows in view for 200 tasks (AC-4.2.2)", async () => {

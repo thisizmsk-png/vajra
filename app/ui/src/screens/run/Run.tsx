@@ -137,14 +137,15 @@ export function Run() {
             renderRow={(i) => {
               const t = overview.graph.tasks[i];
               const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
+              const waits = t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : "";
               return (
                 <div role="listitem" className="v-run__row v-run__task" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
                   <span className="v-run__title" title={t.title ?? undefined}>{t.local} {t.title ?? ""}</span>
                   <span className="v-run__who">{provider(t) ?? t.owner ?? ""}</span>
                   <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{taskStatus(t.status)}</Badge>
-                  {/* Always present, so the columns line up down the list. */}
-                  <Text as="span" variant="body-sm" muted>{t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : ""}</Text>
+                  {/* Always present, so the columns line up down the list. A long list is cut with an ellipsis; the tooltip has all of it. */}
+                  <span className="v-run__deps" title={waits || undefined}><Text as="span" variant="body-sm" muted>{waits}</Text></span>
                   <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
                 </div>
               );
