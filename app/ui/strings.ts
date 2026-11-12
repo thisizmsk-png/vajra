@@ -671,7 +671,7 @@ export const S = {
     enginePlanning: "Checking the bundled engine and your ~/.claude folder",
     engineSheetTitle: "Install the Vajra engine",
     engineVerb: { fresh: "Install the engine", update: "Update the engine", repair: "Repair the engine", downgrade: "Install the bundled engine" } as Record<string, string>,
-    engineField: { change: "Change", installedNow: "Installed now", bundle: "Bundle sha256", workflows: "Workflows it writes", differs: "Files that differ" },
+    engineField: { change: "Change", installedNow: "Current", bundle: "SHA-256", workflows: "Workflows", differs: "Differs" },
     engineCase: {
       fresh: "A fresh install",
       update: "An update to the bundled version",

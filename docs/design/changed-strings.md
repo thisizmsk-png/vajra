@@ -378,9 +378,9 @@ One-click engine install (D7, ADR-17 item 10 step 2). The engine row gets the sa
 | The engine is being installed. Runs start again when it finishes. | engine row while installing | live region |
 | Plan the engine install / Checking the bundled engine and your ~/.claude folder | row button, loading | planning writes nothing |
 | Install the Vajra engine | sheet title | |
-| Change / Installed now / Files that differ / Bundle sha256 / Workflows it writes | sheet fields | beside Command, From, Version and Installs into |
+| Change / Current / Differs / SHA-256 / Workflows | sheet fields | beside Command, From, Version and Installs into; one word each so the label column never wraps. SHA-256 is the bundle's; Workflows are the ones it writes |
 | A fresh install / An update to the bundled version / A repair: the same version, checked again file by file / The installed copy is newer than this app's. This puts the app's version back. | Change field | the plan's case |
-| None. Every file matches the bundle. / 1 file / "N files" | Files that differ | Repair and update only |
+| None. Every file matches the bundle. / 1 file / "N files" | Differs field | Repair and update only |
 | Install the engine / Update the engine / Repair the engine / Install the bundled engine | consent button | by case; the last one is a downgrade |
 | Vajra's guard is not active in Claude Code. Run install.sh in a terminal to turn it on. / Copies the Vajra workflows into ~/.claude/workflows. / Creates a signing key in ~/.claude/vajra. It stays on this Mac, and Vajra Desktop never reads it. / The engine's tamper lock is on. The verified files are signed again, which clears it. / An earlier engine install was interrupted. This finishes or undoes it first. / The Xcode command line tools aren't installed, so the knowledge ledger stays off until they are. / Leftover folders from an earlier install stay in ~/.claude/.vajra-install. Nothing removes them. | sheet notes | the no_hooks wording is the one bhishma asked for |
 | Restart any Claude Code session running in a terminal so it picks up the new engine. | sheet, before and after a successful install | C8 |
