@@ -740,6 +740,7 @@ struct FakeRecord {
     events: Mutex<Vec<Event>>,
     fail_plan: Mutex<Option<String>>,
     ended: std::sync::atomic::AtomicUsize,
+    panic_on_end: std::sync::atomic::AtomicBool,
 }
 
 impl RunRecord for FakeRecord {
@@ -759,6 +760,9 @@ impl RunRecord for FakeRecord {
     fn flush(&self) {}
     fn end(&self) {
         self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.panic_on_end.load(std::sync::atomic::Ordering::SeqCst) {
+            panic!("the record's end failed");
+        }
     }
 }
 
@@ -865,6 +869,22 @@ fn a_stop_or_timeout_with_live_tickets_records_one_terminal_report_per_ticket() 
         r.p.flush_record();
         assert_eq!(events(&rec).len(), ev.len(), "a second flush records nothing new");
     }
+}
+
+/// bhishma on #190: a panic while the run's end is recorded never leaves `flush_record` waiting.
+#[test]
+fn a_panic_while_the_end_is_recorded_never_hangs_the_flush() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    rec.panic_on_end.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(r.p.stop(), RunStatus::Stopped);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = r.p.clone();
+    std::thread::spawn(move || {
+        p.flush_record();
+        let _ = tx.send(());
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "flush_record returned after the end panicked");
 }
 
 #[test]

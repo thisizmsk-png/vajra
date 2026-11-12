@@ -635,17 +635,27 @@ impl RunProtocol {
             // No lead call is due after the run ends, and a kill ends tickets on the runtime's own threads: the
             // record catches up here, apart from the lead.
             let p = self.clone();
-            if std::thread::Builder::new().name("vajra-record-end".into()).spawn(move || p.finish_record()).is_err() {
-                self.finish_record();
+            // No thread: record what has ended now, without waiting, so this caller never blocks (bhishma, #190).
+            if std::thread::Builder::new().name("vajra-record-end".into()).spawn(move || p.finish_record(RECORD_END_WAIT)).is_err() {
+                self.finish_record(Duration::ZERO);
             }
         }
         self.0.changed.notify_all();
     }
 
-    /// The run has finalized: wait (at most `RECORD_END_WAIT`) for its tickets to end, record each one's last outcome
-    /// once, then tell the record the run ended. Only then may its campaign be listed as an orphan (#190 review).
-    fn finish_record(&self) {
-        let deadline = Instant::now() + RECORD_END_WAIT;
+    /// The run has finalized: wait (at most `wait`) for its tickets to end, record each one's last outcome once, then
+    /// tell the record the run ended. Only then may its campaign be listed as an orphan (#190 review). The end is marked
+    /// done even if this panics, so `flush_record` never waits on it for ever.
+    fn finish_record(&self, wait: Duration) {
+        struct Done<'a>(&'a RunProtocol);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                crate::lock(&self.0.0.st).record_done = true;
+                self.0.0.changed.notify_all();
+            }
+        }
+        let _done = Done(self);
+        let deadline = Instant::now() + wait;
         loop {
             let open = {
                 let mut st = self.lock();
@@ -661,8 +671,6 @@ impl RunProtocol {
         if let Some(r) = &self.0.record {
             r.end();
         }
-        self.lock().record_done = true;
-        self.0.changed.notify_all();
     }
 
     /// The run's tickets whose outcome the record doesn't have yet.
@@ -1428,8 +1436,14 @@ impl RunProtocol {
     pub fn flush_record(&self) {
         let mut st = self.lock();
         if st.status.is_some() {
+            // Bounded too: the end's own wait plus slack for its writes.
+            let deadline = Instant::now() + RECORD_END_WAIT + Duration::from_secs(30);
             while !st.record_done {
-                st = self.0.changed.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                st = self.0.changed.wait_timeout(st, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
             }
         } else {
             self.record_sync(&mut st);
