@@ -21,7 +21,8 @@ N="$$"
 cat > "$D/stdin.$N"
 printf '%s\n' "$@" > "$D/argv.$N"
 S=""; for a in "$@"; do [ "$P" = --settings ] && S="$a"; P="$a"; done
-[ -n "$S" ] && cp "$S" "$D/settings-seen.$N"
+# Copy, then rename: a reader never sees a half-written copy.
+[ -n "$S" ] && cp "$S" "$D/tmp-seen.$N" && mv "$D/tmp-seen.$N" "$D/settings-seen.$N"
 cp "$(cat "$D/ledger.path")" "$D/ledger-at-spawn.$N" 2>/dev/null
 if grep -q 'Read the file' "$D/stdin.$N"; then
   echo x >> "$D/selftest.count"

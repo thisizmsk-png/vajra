@@ -555,6 +555,19 @@ fn run_timeout_ends_the_run_timed_out_and_its_workers() {
 }
 
 #[test]
+fn a_status_query_that_finds_the_run_timed_out_kills_its_workers() {
+    for query in [0, 1] {
+        let r = rig();
+        r.p.plan_tasks(plan1()).unwrap();
+        r.dispatch("t1");
+        r.clock.advance(2 * 3600);
+        if query == 0 { r.p.workers(None); } else { r.p.rounds(); }
+        assert_eq!(r.status(), Some(RunStatus::TimedOut));
+        assert_eq!((r.w.running(), r.w.kills.lock().unwrap().clone()), (0, vec![KillReason::Abandoned]), "query {query}");
+    }
+}
+
+#[test]
 fn the_turn_budget_asks_the_human_and_counts_on_the_card() {
     let r = rig_with("add a --json flag", default_seats(), Limits { lead_turn_budget: 3, ..Limits::default() }, false);
     for _ in 0..3 {
