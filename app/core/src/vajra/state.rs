@@ -74,8 +74,16 @@ impl Reader {
 
     /// Campaign directories only. Stray files (the root also holds
     /// `<uuid>.json`) and symlinks that leave the allowlist are skipped.
+    ///
+    /// A machine that has never run a campaign has no campaigns folder yet. That is an empty list, not a failure:
+    /// nothing is read. Only a path that is truly absent counts; a link that is present but leads nowhere, or
+    /// outside the allowlist, is still refused below.
     pub fn campaigns(&self) -> io::Result<Vec<String>> {
-        let root = self.allow.resolve(&self.allow.campaigns_dir())?;
+        let dir = self.allow.campaigns_dir();
+        if matches!(std::fs::symlink_metadata(&dir), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            return Ok(Vec::new());
+        }
+        let root = self.allow.resolve(&dir)?;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
