@@ -24,7 +24,9 @@ import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
 import { preferenceScope, usePreferences } from "../../preferences";
 
-export const SECTIONS = ["providers", "general", "models", "mobile", "notifications", "appearance", "keyboard", "diagnostics"] as const;
+// Only sections that do something are listed. Mobile, Notifications and Diagnostics come back when they are built;
+// an old link to one of them lands on Providers.
+export const SECTIONS = ["providers", "general", "models", "appearance", "keyboard"] as const;
 type Section = (typeof SECTIONS)[number];
 const isSection = (s: string | undefined): s is Section => !!s && (SECTIONS as readonly string[]).includes(s);
 
@@ -72,13 +74,17 @@ export function Settings() {
   return (
     <div className="v-screen v-settings">
       <div className="v-settings__grid">
-        <nav className="v-settings__nav" aria-label={S.settings.sectionsLabel}>
-          {SECTIONS.map((s) => (
-            <a key={s} href={toHash("settings", s === "providers" ? {} : { section: s }, route.project)} className="v-settings__link" aria-current={s === section ? "page" : undefined}>
-              {S.settings.sections[s].title}
-            </a>
-          ))}
-        </nav>
+        <div className="v-settings__side">
+          {/* Settings hides the view tabs and selects no project tab, so this link is the visible way out. */}
+          <a href={toHash("orch", {}, route.project)} className="v-settings__link v-settings__back">{project ? S.settings.backTo(project.name) : S.settings.back}</a>
+          <nav className="v-settings__nav" aria-label={S.settings.sectionsLabel}>
+            {SECTIONS.map((s) => (
+              <a key={s} href={toHash("settings", s === "providers" ? {} : { section: s }, route.project)} className="v-settings__link" aria-current={s === section ? "page" : undefined}>
+                {S.settings.sections[s].title}
+              </a>
+            ))}
+          </nav>
+        </div>
         <div className="v-screen__body">
           <div className="v-settings__col">
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
@@ -119,9 +125,6 @@ export function Settings() {
                   {SHORTCUTS.map((k) => <li key={k.label}><span>{k.label}</span><Kbd keys={k.label === S.settings.keys.palette ? shortcutKeys(prefs.view?.effective.shortcuts.palette ?? DEFAULT_PREFERENCES.shortcuts.palette) : k.label === S.settings.keys.settings ? shortcutKeys(prefs.view?.effective.shortcuts.settings ?? DEFAULT_PREFERENCES.shortcuts.settings) : k.keys} /></li>)}
                 </ul>
               </section>
-            )}
-            {(section === "notifications" || section === "mobile" || section === "diagnostics") && (
-              <p className="v-settings__later">{S.settings.later}</p>
             )}
           </div>
         </div>

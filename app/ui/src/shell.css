@@ -181,6 +181,9 @@
 .v-loading { display: flex; flex-direction: column; gap: 10px; padding: var(--space-xs) 0; }
 .v-loading .v-skeleton { height: 12px; max-width: 420px; }
 .v-loading .v-skeleton:nth-child(2n) { max-width: 300px; }
+/* Loading rows wait 100 ms before they show, so a load that finishes sooner (a view's first open) never flashes them. */
+.v-loading { visibility: hidden; animation: v-loading-show 0s linear 100ms forwards; }
+@keyframes v-loading-show { to { visibility: visible; } }
 .v-crew__state { padding: 48px var(--space-xl); }
 .v-crew__tree--loading { border: 0; padding: 0; max-width: 320px; }
 
