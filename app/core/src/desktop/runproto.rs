@@ -413,6 +413,8 @@ struct St {
     kill: Option<KillReason>,
     /// Worker tickets whose outcome the record has (`report`), so each is sent once.
     reported: std::collections::BTreeSet<String>,
+    /// Worker tickets the task graph has a `claim` for.
+    claimed: std::collections::BTreeSet<String>,
     /// The last clean integration: (round, head), for the record's progress lines.
     last_good: Option<(u32, String)>,
 }
@@ -535,15 +537,25 @@ impl RunProtocol {
         rec.plan(&PlanRecord { goal: self.0.cfg.ask.clone(), features, tasks })
     }
 
-    /// Every ended worker ticket's outcome, sent to the task graph once (`report`).
-    fn record_ended(&self, st: &mut St) {
+    /// The task graph catches up with the tickets, each step once per ticket and in order:
+    /// - `claim` once the ticket's worktree exists (the runtime makes it after dispatch, or later when queued), or
+    ///   once it ended without one;
+    /// - then `report` with its outcome, once it has ended.
+    fn record_sync(&self, st: &mut St) {
         if self.0.record.is_none() {
             return;
         }
-        let ended: Vec<(String, String)> = st.tasks.iter().flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone()))).filter(|(_, tk)| !st.reported.contains(tk)).collect();
-        for (task, tk) in ended {
-            let Some(v) = self.0.workers.view(&tk).filter(|v| v.state == State::Ended) else { continue };
-            let Some(o) = v.outcome else { continue };
+        let open: Vec<(String, String)> = st.tasks.iter().flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone()))).filter(|(_, tk)| !st.reported.contains(tk)).collect();
+        for (task, tk) in open {
+            let Some(v) = self.0.workers.view(&tk) else { continue };
+            let ended = v.state == State::Ended;
+            if !st.claimed.contains(&tk) && (v.worktree.is_some() || ended) {
+                st.claimed.insert(tk.clone());
+                if let Some(agent) = st.task(&task).and_then(|t| roles::agent_of(&t.spec.owner_role)) {
+                    self.send(Event::Claim { task: self.tid(&task), agent: agent.into(), worktree: v.worktree.clone() });
+                }
+            }
+            let Some(o) = v.outcome.filter(|_| ended) else { continue };
             st.reported.insert(tk);
             let status = match o {
                 Outcome::Done => TaskStatus::Done,
@@ -925,14 +937,11 @@ impl RunProtocol {
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
         };
-        let owner = st.task(id).and_then(|t| roles::agent_of(&t.spec.owner_role));
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
         }
-        if let Some(agent) = owner {
-            let worktree = self.0.workers.view(&ticket).and_then(|v| v.worktree);
-            self.send(Event::Claim { task: self.tid(id), agent: agent.into(), worktree });
-        }
+        // The claim waits for the ticket's worktree (`record_sync`).
+        self.record_sync(st);
         Ok(Dispatched::Ticket { ticket, slot })
     }
 
@@ -1016,11 +1025,12 @@ impl RunProtocol {
         let rounds = tickets.iter().any(|t| self.round_of(t).is_some());
         loop {
             let mut st = self.lock();
+            // Each slice: a ticket that got its worktree is claimed, one that ended is reported.
+            self.record_sync(&mut st);
             let all: Vec<TicketStatus> = tickets.iter().filter_map(|t| self.status_of(&st, t)).collect();
             let left = deadline.saturating_duration_since(Instant::now());
             if let Some(i) = all.iter().position(|s| s.state == "ended").or(left.is_zero().then_some(usize::MAX)) {
                 st.last_call = self.now();
-                self.record_ended(&mut st);
                 drop(st);
                 let mut all = all;
                 let ended = (i != usize::MAX).then(|| all.remove(i));
@@ -1133,7 +1143,7 @@ impl RunProtocol {
                 }
             }
         }
-        self.record_ended(st);
+        self.record_sync(st);
         let asks: Vec<&str> = broken
             .keys()
             .filter(|id| st.task(id).and_then(|t| t.tickets.last()).filter(|(tr, _, _)| *tr == r).and_then(|(_, tk, _)| self.0.workers.view(tk)).is_some_and(|v| v.outcome == Some(Outcome::NeedsUser)))

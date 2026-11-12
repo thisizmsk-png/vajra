@@ -47,14 +47,26 @@ impl App {
         Ok(Arc::new(CoreRecord::new(cfg, bridge)?))
     }
 
-    /// Orphans: a campaign a core run's `seats.json` names that is still active though no run of this app life runs
-    /// it. Only slugs the core recorded count; a CLI campaign named `deliver-*` never does.
-    pub fn record_orphans(&self, live: &[String]) -> Value {
+    /// The runs going on now: a workflow run whose process runs (`active_runs`'s rule), or a core run with a ticket
+    /// that hasn't ended. Never an orphan.
+    pub(super) fn live_run_ids(&self) -> Vec<String> {
+        self.reap_runs();
+        let runs = super::lock(&self.runs).clone();
+        let mut live: Vec<String> = runs.iter().filter(|(s, _)| self.sup.is_running(s).unwrap_or(false)).map(|(_, r)| r.run_id.clone()).collect();
+        live.extend(self.recorded_runs().into_iter().filter(|r| self.workers.run_has_live_tickets(r)));
+        live
+    }
+
+    /// Orphans: a campaign a core run's `seats.json` names that is still active though no run is going on now (the
+    /// live runs, and any `extra_live`, are left out). Only slugs the core recorded count; a CLI campaign named
+    /// `deliver-*` never does.
+    pub fn record_orphans(&self, extra_live: &[String]) -> Value {
         let Ok(bridge) = record_bridge(&self.bridge, &self.data) else { return json!({"orphans": []}) };
+        let live = self.live_run_ids();
         let orphans: Vec<Value> = self
             .recorded_runs()
             .into_iter()
-            .filter(|r| !live.contains(r))
+            .filter(|r| !live.contains(r) && !extra_live.contains(r))
             .filter_map(|r| {
                 let slug = self.read_run_seats(&r).ok().flatten()?["campaign_slug"].as_str()?.to_string();
                 (record::campaign_status(&bridge, &slug)? == "active").then(|| json!({"run_id": r, "campaign": slug}))
@@ -75,8 +87,8 @@ impl App {
         Ok(json!({"run_id": run_id, "campaign": slug, "status": "abandoned"}))
     }
 
-    /// "Close as abandoned" through the receipt engine: the human's click only, deduped by its action id. A core run
-    /// doesn't outlive the app life that started it, so at app start every recorded run is ended.
+    /// "Close as abandoned" through the receipt engine: the human's click only, deduped by its action id. The orphan
+    /// is re-listed at the click, so a run that is going on now is refused (`not_found`).
     pub fn act_close_orphan(&self, env: &super::Envelope, run_id: &str) -> Value {
         let target = format!("record:orphan:{run_id}");
         self.act(env, crate::control::receipt::Caller::Ui, true, "close_orphan", &target, None::<u64>, || self.record_close_orphan(run_id, &[]))

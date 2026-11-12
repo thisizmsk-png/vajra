@@ -485,6 +485,46 @@ fn an_orphan_is_a_core_runs_campaign_still_active_and_only_that_closes() {
     assert_eq!(rec.card().campaign, "deliver-20261101-0900-og", "a resume binds to the stored -og slug, never recomputed");
 }
 
+#[test]
+fn a_run_going_on_now_is_never_an_orphan_through_the_ui_commands() {
+    let t = Tmp::new();
+    let home = t.0.join("home");
+    let scripts = home.join(".claude/skills/vajra/scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let log = t.log();
+    std::fs::write(scripts.join("vajra-campaign.sh"), format!("#!/bin/bash\nprintf '%s ' \"$@\" >> '{}'; printf '\\n' >> '{}'\n[ \"$1\" = show ] && echo '{{\"campaign\": {{\"status\": \"active\"}}}}'\nexit 0\n", log.display(), log.display())).unwrap();
+    std::fs::set_permissions(scripts.join("vajra-campaign.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = t.0.join("data");
+    let project = crate::desktop::test_project(&data, &home, &t.0.join("repo"));
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    let run = "20261112-1300";
+    app.record_run_seats(run, &serde_json::json!({"campaign_slug": format!("deliver-{run}"), "evidence_trust": "guarded"})).unwrap();
+    // The run's process is going on now, as `start_run` registers it.
+    let stream = "run-0f8fad5b-d9cb-469f-a165-70867728950e";
+    let spec = crate::sessions::SpawnSpec { argv: vec!["sleep".into(), "30".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: crate::crew::redact::Redactor::default(), extra_env: Vec::new() };
+    app.sup.spawn(stream, spec).unwrap();
+    crate::desktop::lock(&app.runs).insert(
+        stream.into(),
+        crate::desktop::Run { session_id: "0f8fad5b-d9cb-469f-a165-70867728950e".into(), run_id: run.into(), campaign: format!("deliver-{run}"), cwd: t.0.clone(), nonces: crate::crew::redact::Redactor::default() },
+    );
+    // What the Tauri commands call (`record_orphans(&[])`, `record_close_orphan` under `act_close_orphan`).
+    assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([]), "a live run is no orphan");
+    assert!(app.record_close_orphan(run, &[]).is_err(), "closing a live run's campaign is refused");
+    let env = crate::desktop::Envelope { action_id: "4b5d7e1a-6c2f-4d3e-9f80-1a2b3c4d5e6f".into(), project_id: project, expect_generation: None };
+    let r = app.act_close_orphan(&env, run);
+    assert_ne!(r["receipt"]["state"], "done", "{r}");
+    assert!(!std::fs::read_to_string(&log).unwrap_or_default().contains("close "), "no close ran on a live campaign");
+    app.sup.kill(stream).unwrap();
+    // Once it has ended, it is one.
+    for _ in 0..100 {
+        if !app.sup.is_running(stream).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.record_orphans(&[])["orphans"], serde_json::json!([{"run_id": run, "campaign": format!("deliver-{run}")}]));
+}
+
 // ---------------------------------------------------------------- the real scripts (S8), when the machine has them
 
 /// The engine's own scripts in a temp HOME, with the scrubbed env and no Claude session. Skipped where the script's
@@ -516,6 +556,12 @@ fn the_real_scripts_create_reuse_and_record_from_the_cores_own_cwd() {
     r.send(Event::Checkpoint("stuck after 1 rounds".into()));
     r.flush();
     assert!(r.card().notes.is_empty(), "{:?}", r.card().notes);
+    // A later round re-dispatches the task: the real script takes the claim again (reported done, then failed).
+    r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/two")) });
+    r.send(Event::Report { task: format!("{RUN}.t1"), status: TaskStatus::Failed, summary: "round 2 failed".into() });
+    r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/three")) });
+    r.flush();
+    assert!(r.card().notes.is_empty(), "a re-dispatch's claim is accepted: {:?}", r.card().notes);
     assert!(matches!(b.run(&Request::CampaignVerify { slug: SLUG.into() }), Ok(o) if o.exit() == Some(0)));
     // A resumed run reuses it; a fresh one refuses it.
     assert!(CoreRecord::new(t.cfg(true), b.clone()).unwrap().plan(&plan()).is_ok());

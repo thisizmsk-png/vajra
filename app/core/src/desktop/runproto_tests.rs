@@ -34,9 +34,17 @@ struct FakeWorkers {
 
 impl FakeWorkers {
     /// The worker ended: `done` gets a commit named after its ticket.
+    /// The runtime made the ticket's worktree (after dispatch, on its own thread).
+    fn start(&self, id: &str) {
+        let mut b = crate::lock(&self.tickets);
+        b.get_mut(id).unwrap_or_else(|| panic!("no ticket {id}")).0.worktree = Some(PathBuf::from(format!("/wt/{id}")));
+        drop(b);
+        self.changed.notify_all();
+    }
     fn end(&self, id: &str, o: Outcome) {
         let mut b = crate::lock(&self.tickets);
         let t = &mut b.get_mut(id).unwrap_or_else(|| panic!("no ticket {id}")).0;
+        t.worktree.get_or_insert_with(|| PathBuf::from(format!("/wt/{id}")));
         t.state = State::Ended;
         t.outcome = Some(o);
         t.reason = Some(if o == Outcome::Done { "changed".into() } else { "no_changes".into() });
@@ -65,8 +73,8 @@ impl Workers for FakeWorkers {
         if b.contains_key(&id) {
             return Err(DispatchError::Exists);
         }
-        let worktree = Some(PathBuf::from(format!("/wt/{id}")));
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree };
+        // As the real runtime: no worktree at dispatch; `start` (or the end) gives it one.
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree: None };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
     }
@@ -807,10 +815,34 @@ fn dispatch_claims_with_the_worktree_and_each_outcome_is_reported_once() {
         let _ = r.p.await_any(&[t1.clone(), t3.clone()], Duration::from_secs(1)).unwrap();
     }
     let ev = events(&rec);
-    assert_eq!(ev[0], Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) });
-    assert_eq!(ev[1], Event::Claim { task: "r1.t3".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t3}"))) });
+    let claims: Vec<&Event> = ev.iter().filter(|e| matches!(e, Event::Claim { .. })).collect();
+    assert_eq!(claims, [&Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) }, &Event::Claim { task: "r1.t3".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t3}"))) }]);
+    for (i, e) in ev.iter().enumerate() {
+        if let Event::Report { task, .. } = e {
+            assert!(ev[..i].iter().any(|c| matches!(c, Event::Claim { task: ct, .. } if ct == task)), "a report follows its claim: {ev:?}");
+        }
+    }
     let reports: Vec<(String, TaskStatus)> = ev.iter().filter_map(|e| if let Event::Report { task, status, .. } = e { Some((task.clone(), *status)) } else { None }).collect();
     assert_eq!(reports, vec![("r1.t1".into(), TaskStatus::Done), ("r1.t3".into(), TaskStatus::Question)], "each once");
+}
+
+#[test]
+fn the_claim_waits_for_the_worktree_the_runtime_makes_after_dispatch() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    assert!(events(&rec).is_empty(), "no claim before the worktree exists: {:?}", events(&rec));
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(50)).unwrap();
+    assert!(events(&rec).is_empty(), "still none while the ticket is queued");
+    r.w.start(&t1);
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(250)).unwrap();
+    assert_eq!(events(&rec), vec![Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) }], "claimed once, with --worktree");
+    r.w.end(&t1, Outcome::Done);
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(250)).unwrap();
+    let _ = r.p.await_any(std::slice::from_ref(&t1), Duration::from_millis(50)).unwrap();
+    let ev = events(&rec);
+    assert_eq!(ev.len(), 2, "{ev:?}");
+    assert!(matches!(&ev[1], Event::Report { status: TaskStatus::Done, .. }));
 }
 
 #[test]

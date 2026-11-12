@@ -24,8 +24,12 @@ use serde_json::Value;
 use crate::vajra::bridge::{Bridge, BridgeError, CloseStatus, Feature, Output, Request, TaskStatus};
 use crate::vajra::bridge_record::{self as bridge_text, GOAL_MAX, PROGRESS_MAX, SUMMARY_MAX, TITLE_MAX};
 
-/// Campaign and task writes wait up to 10 s for the script's lock, then do their work.
+/// One campaign or task write's timeout: the script waits up to 10 s for its lock, then does its work.
 pub const RECORD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The whole plan-time record (create, every add, validate), which runs under the protocol lock: past this, the
+/// remaining calls aren't started and the run ends before dispatch.
+pub const PLAN_DEADLINE: Duration = Duration::from_secs(180);
 
 /// What the human does with a lock nobody may remove on their behalf (16.5a).
 pub const LOCK_TEXT: &str = "Make sure no Vajra run or terminal command is using this campaign, then delete this folder.";
@@ -245,6 +249,8 @@ impl Writer {
     }
 
     fn plan(&self, p: &PlanRecord) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let in_time = || if started.elapsed() < PLAN_DEADLINE { Ok(()) } else { Err(format!("the run record took longer than {} s", PLAN_DEADLINE.as_secs())) };
         let goal = bridge_text::one_line(&p.goal, GOAL_MAX);
         let create = Request::CampaignCreate { slug: self.cfg.slug.clone(), goal: goal.clone(), features: p.features.clone() };
         match self.call(&create) {
@@ -253,6 +259,7 @@ impl Writer {
             Err(f) => return Err(f.why().to_string()),
         }
         for t in &p.tasks {
+            in_time()?;
             let add = Request::TasksAdd {
                 slug: self.cfg.slug.clone(),
                 id: t.id.clone(),
@@ -266,6 +273,7 @@ impl Writer {
             // `add` of the same definition answers "unchanged", so a retry is safe.
             self.write(&add)?;
         }
+        in_time()?;
         self.write(&Request::TasksValidate { slug: self.cfg.slug.clone() })
     }
 
