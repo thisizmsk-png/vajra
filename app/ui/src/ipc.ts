@@ -7,6 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { ProviderList, UsageList } from "./providerContract";
 import type { ProposalOverride } from "./accountsContract";
 import type { AppInfo, Project, Session } from "./projectContract";
+import { S } from "../strings";
 
 /** What a failed command rejects with: `{error: code, detail?}` from the core (a control error adds its own fields). */
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
@@ -24,6 +25,12 @@ export function errorText(e: unknown): string {
   // The Director-General's guard preconditions, its turn cap and the project-store refusals (FG-02c) already carry a
   // one-line "why and what to do" (for example the sandbox one), so they are shown as they are, without the code.
   if (isIpcError(e) && PLAIN.has(e.error) && e.detail) return e.detail;
+  // A start refused because of the engine (check 6): say so plainly and point to Set up, not a shell command (D7).
+  if (isIpcError(e) && e.error === "worker_unavailable" && Array.isArray(e.refusals)) {
+    const eng = (e.refusals as unknown[]).find((r): r is { seat: string; code: string } => typeof r === "object" && r !== null && (r as { seat?: unknown }).seat === "engine" && typeof (r as { code?: unknown }).code === "string");
+    const words = eng && S.setup.engineStart[eng.code];
+    if (words) return words;
+  }
   if (isIpcError(e)) return e.detail ? `${e.error}: ${e.detail}` : e.error;
   return "unexpected error";
 }
