@@ -812,15 +812,16 @@ fn an_unproven_build_that_fails_its_self_test_stays_refused_and_codex_still_runs
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
 }
 
-/// #186 bhishma: a retry, after its backoff, asks the binary again. The CLI updated in place during the backoff to a
-/// build that is not proven (and can't be self-tested here: no guard installed), so the retry never starts.
+/// #186 codex: the CLI updates in place during the first attempt (proven 2.1.296, then 9.9.9). The retry, after its
+/// backoff, asks the binary again before it spawns, so the second process never launches. The new build is not on any
+/// list, and its self-test can't pass here (the stand-in harness isn't a real Claude Code).
 #[test]
-fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_backoff_is_refused() {
+fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_attempt_is_refused() {
     let r = rig("claude-reprobe", Opts { mode: "504_upgrade", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_selftest_failed")), "{v:?}");
     let starts = std::fs::read_to_string(r.d.join("log")).unwrap().lines().filter(|l| l.starts_with("start ")).count();
-    assert_eq!(starts, 1, "the second attempt never ran");
+    assert_eq!(starts, 1, "the second attempt never launched");
     assert_eq!(r.clock.slept(), vec![errors::BACKOFF[0]], "it was a retry, after the first backoff");
 }
 

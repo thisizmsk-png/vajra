@@ -771,12 +771,10 @@ impl WorkerRuntime {
             if profiles::verify_claude_worker_flag(f).is_err() {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
             }
-            // #186 bhishma: a retry runs after a 30 or 120 s backoff, long enough for the CLI to update in place, so
-            // it asks the binary again rather than trusting the first attempt's answer.
-            if n > 1 {
-                if let Err(reason) = Launch::claude_proven(&self.0.cfg) {
-                    return Attempt::End(Outcome::Failed, reason.into(), None);
-                }
+            // #186 codex: the same Launch serves every attempt, and the CLI can update in place during an attempt or
+            // the retry backoff, so the binary is asked again right before each spawn.
+            if let Err(reason) = Launch::claude_proven(&self.0.cfg) {
+                return Attempt::End(Outcome::Failed, reason.into(), None);
             }
         }
         let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
