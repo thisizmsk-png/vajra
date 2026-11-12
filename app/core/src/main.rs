@@ -879,9 +879,8 @@ fn main() {
             }
         }
         RunEvent::Exit => {
-            let app = handle.state::<App>();
-            app.shutdown_lead();
-            app.sup.shutdown();
+            // The Director-General's asks, then every core run's lead, then every session: `App::quit`.
+            handle.state::<App>().quit();
             handle.state::<Terminals>().shutdown();
             handle.state::<Ownership>().ledger.clear(); // a clean quit reaped every shell: nothing to recover
         }

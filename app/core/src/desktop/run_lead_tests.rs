@@ -223,6 +223,42 @@ fn shutdown_kills_the_lead_within_its_wait_and_never_restarts_it() {
     assert_eq!(r.reg.serve(&json!({"vajra_run": RUN, "token": token(&r), "tool": "list_workers", "args": {}}), None)["error"], "lead_not_running");
 }
 
+/// The app's quit with a live core run (a dispatched worker, so an ordinary exit would restart the lead): the lead is
+/// stopped by the quit's lead step, never restarted, and admits no call once `quit` has begun.
+#[test]
+fn the_apps_quit_stops_a_live_core_runs_lead_and_never_restarts_it() {
+    let r = rig("appquit", "hang", Duration::from_secs(10));
+    plan(r.lead.proto());
+    r.lead.start().unwrap();
+    let w = r.lead.clone();
+    let watch = std::thread::spawn(move || w.watch());
+    wait_launched(&r);
+    let call = || r.reg.serve(&json!({"vajra_run": RUN, "token": token(&r), "tool": "list_workers", "args": {}}), None);
+    // A call with no peer reaches the lead check while the lead is live (`peer_not_lead`), and stops short of it once
+    // no lead is running (`lead_not_running`).
+    assert_eq!(call()["error"], "peer_not_lead", "the lead is live before the quit");
+
+    let (data, home) = (r.d.join("app-data"), r.d.join("app-home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    app.adopt_lead_run(RUN, r.lead.clone());
+    app.quit();
+    // The watch ended on the quit's stop, not on an exit it would restart from (bounded: a quit that left the lead
+    // running fails here instead of hanging).
+    let until = Instant::now() + Duration::from_secs(10);
+    while !watch.is_finished() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(watch.is_finished(), "the quit left the core run's lead running");
+    watch.join().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(launches(&r), 1, "the quit restarted the lead");
+    assert_eq!(call()["error"], "lead_not_running", "a call was admitted after the quit began");
+    assert_eq!(r.lead.shutdown(SHUTDOWN_WAIT), Shutdown::NotRunning, "the quit already stopped it");
+    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
+    assert_eq!(app.start_lead_run("p", input, "/tmp", "20261112-0931").unwrap_err()["error"], "quitting");
+}
+
 #[test]
 fn a_run_that_ends_stops_its_lead() {
     let r = rig("end", "hang", Duration::from_secs(10));

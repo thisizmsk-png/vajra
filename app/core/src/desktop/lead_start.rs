@@ -26,7 +26,24 @@ pub struct LeadRuns(std::sync::Mutex<Leads>);
 #[derive(Default)]
 pub struct Leads {
     runs: HashMap<String, RunLead>,
+    /// What each live core run counts as for the run caps (ADR-15 D5): its project and worker ceiling. Taken under
+    /// `App::launching` before the lead starts, and dropped exactly when the run leaves `runs`.
+    held: HashMap<String, super::caps::Active>,
     closing: bool,
+}
+
+impl Leads {
+    fn forget(&mut self, run: &str) {
+        self.runs.remove(run);
+        self.held.remove(run);
+    }
+}
+
+impl LeadRuns {
+    /// The live core runs, as the run caps count them beside classic runs.
+    pub(super) fn active(&self) -> Vec<super::caps::Active> {
+        lock(&self.0).held.values().cloned().collect()
+    }
 }
 
 /// What `shutdown_leads` did: `ended` leads are gone (stopped within the wait, or already exited); `left` holds the
@@ -84,12 +101,20 @@ impl App {
         crate::vajra::preflight::find_on_path("codex", &dirs).unwrap_or_else(|| PathBuf::from("codex"))
     }
 
+    /// The absolute claude binary, resolved as the Director-General's is (`lead::resolve_claude`: PATH or the test dirs,
+    /// then the installers' places). Never `self.claude`, which is the `~/.claude` folder. Not found is the bare name,
+    /// so a launch fails as "not found" instead of trying to run a folder.
+    fn claude_bin(&self) -> PathBuf {
+        let dirs = self.provider_dirs.clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+        super::lead::resolve_claude(&self.home, &dirs).unwrap_or_else(|| PathBuf::from("claude"))
+    }
+
     /// The worker runtime for core runs, built once (the first core run's project gives the account caps).
     fn core_runtime(&self, project: &str) -> Result<workers::WorkerRuntime, Value> {
         use crate::control::service::SeatPolicy;
         let (data, home) = (self.data.clone(), self.home.clone());
         let codex = self.codex_bin();
-        let claude = self.claude.clone();
+        let claude = self.claude_bin();
         let caps = self.seat_env.agents(project).map(|a| a.account_caps).unwrap_or_default();
         let rt = self.worker_runtime(move || workers::Config {
             tools: profiles::WriterTools::load(&home.join(".claude/skills/vajra/bundled-agents")),
@@ -110,6 +135,23 @@ impl App {
         Ok(rt.clone())
     }
 
+    /// What a core run's lead is launched with: the harness binaries are the resolved executables.
+    fn lead_env(&self, project: &str, repo: &std::path::Path) -> Result<LeadEnv, Value> {
+        Ok(LeadEnv {
+            data: self.data.clone(), home: self.home.clone(), exe: std::env::current_exe().map_err(|e| fail("io", e))?,
+            socket: crate::control::socket_path(&self.data), codex: self.codex_bin(),
+            claude: self.claude_bin(), user_codex_home: self.home.join(".codex"), repos: vec![repo.to_path_buf()], others: self.other_roots(project),
+            read_back_timeout: READ_BACK_TIMEOUT,
+        })
+    }
+
+    /// Test hook: the binaries a core run's lead and its workers would be given.
+    #[cfg(test)]
+    pub(super) fn core_harness_bins(&self) -> (PathBuf, PathBuf) {
+        let env = self.lead_env("p", std::path::Path::new("/tmp")).unwrap();
+        (env.claude, self.claude_bin())
+    }
+
     /// Every other project's folder, denied wholesale in a Claude lead's flag file.
     fn other_roots(&self, own: &str) -> Vec<PathBuf> {
         self.projects.list(true).map(|l| l.projects.into_iter().filter(|p| p.id != own).map(|p| PathBuf::from(p.root)).collect()).unwrap_or_default()
@@ -121,6 +163,10 @@ impl App {
             return Err(quitting());
         }
         self.projects_usable()?;
+        // ADR-15 D5, as for a classic start (`launch_kind`): one launch at a time, and the caps checked (one run per
+        // project, `max_runs`, the worker ceiling) over classic and core runs together. Held until this run is counted.
+        let _one = lock(&self.launching);
+        self.within_caps(project, input.max_in_flight)?;
         let repo = super::repo_dir(cwd)?;
         let base = self.resolve_base(&repo, &input.base)?;
         let doc = self.read_run_seats(run).ok().flatten().ok_or_else(|| fail("io", "the run's seats were not recorded"))?;
@@ -139,12 +185,7 @@ impl App {
         let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), Arc::new(StubGate), Arc::new(SystemClock::default()));
         // The first launch writes the run's token and rotates this placeholder, which no client holds.
         self.run_leads.register(run, proto.clone(), crate::control::sha256::digest(crate::control::nonce::random_hex(32).map_err(|e| fail("io", e))?.as_bytes()));
-        let env = LeadEnv {
-            data: self.data.clone(), home: self.home.clone(), exe: std::env::current_exe().map_err(|e| fail("io", e))?,
-            socket: crate::control::socket_path(&self.data), codex: self.codex_bin(),
-            claude: self.claude.clone(), user_codex_home: self.home.join(".codex"), repos: vec![repo.clone()], others: self.other_roots(project),
-            read_back_timeout: READ_BACK_TIMEOUT,
-        };
+        let env = self.lead_env(project, &repo)?;
         let root = repo.to_str().ok_or_else(|| fail("not_found", "the project's folder is not a UTF-8 path"))?.to_string();
         let lead = RunLead::new(run, &root, &input.ask, input.max_rounds, roles, lead_seat, env, proto, self.run_leads.clone(), self.sup.clone(), self.bus.clone())
             .map_err(|e| fail("harness_unsupported", e.0))?;
@@ -162,19 +203,20 @@ impl App {
                 return Err(quitting());
             }
             l.runs.insert(run.to_string(), lead.clone());
+            l.held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers: input.max_in_flight });
         }
         let (reg, id, runs, w) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle(), lead.clone());
         let watching = std::thread::Builder::new().name(format!("lead-{run}")).spawn(move || {
             w.watch();
             reg.remove(&id);
             if let Some(r) = runs.upgrade() {
-                lock(&r.0).runs.remove(&id);
+                lock(&r.0).forget(&id);
             }
         });
         if let Err(e) = watching {
             // No watch means no read-back and no N9: the lead does not run unwatched.
             lead.shutdown(SHUTDOWN_WAIT);
-            lock(&self.lead_runs.0).runs.remove(run);
+            lock(&self.lead_runs.0).forget(run);
             self.run_leads.remove(run);
             return Err(fail("io", e));
         }
@@ -208,6 +250,25 @@ impl App {
         }
         out.left.sort();
         out
+    }
+
+    /// Test hook: `lead` joins the live run leads as `start_lead_run` adds one, so the quit sequence can be tested
+    /// against a rig's lead.
+    #[cfg(test)]
+    pub(super) fn adopt_lead_run(&self, run: &str, lead: RunLead) {
+        lock(&self.lead_runs.0).runs.insert(run.to_string(), lead);
+    }
+
+    /// Test hook: a live core run for `project` with `workers`, as the run caps count it, until `end_core_run`.
+    #[cfg(test)]
+    pub(super) fn hold_core_run(&self, run: &str, project: &str, workers: u32) {
+        lock(&self.lead_runs.0).held.insert(run.to_string(), super::caps::Active { project: PathBuf::from(project), workers });
+    }
+
+    /// Test hook: the core run ended, as its watch thread forgets it.
+    #[cfg(test)]
+    pub(super) fn end_core_run(&self, run: &str) {
+        lock(&self.lead_runs.0).forget(run);
     }
 
     /// The default wait for `shutdown_leads`.

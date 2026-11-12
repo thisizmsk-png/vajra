@@ -624,6 +624,8 @@ impl App {
             }
             v
         };
+        // Core runs (a seated proposal's, under its lead) count beside classic runs, so neither kind can start over the other.
+        let active: Vec<caps::Active> = active.into_iter().chain(self.lead_runs.active()).collect();
         let limits = *lock(&self.limits);
         caps::check(limits, &active, Path::new(project), workers).map_err(|h| h.to_json())
     }
@@ -640,9 +642,18 @@ impl App {
         Ok(l.to_json())
     }
 
-    /// Runs whose PTY is still open.
+    /// Runs in progress: classic runs whose PTY is still open, and core runs whose lead is still watched.
     pub fn active_run_count(&self) -> usize {
-        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count()
+        lock(&self.runs).keys().filter(|s| self.sup.is_running(s).unwrap_or(false)).count() + self.lead_runs.active().len()
+    }
+
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`), before anything else is torn down; then every supervisor
+    /// session is killed and reaped. Bounded: a lead not gone within `LEAD_SHUTDOWN_WAIT` is left to the supervisor's kill.
+    pub fn quit(&self) {
+        self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
+        self.sup.shutdown();
     }
 
     /// The active run groups for diagnostics: stream id and the pid of the group leader.
