@@ -24,6 +24,17 @@ pub enum Pin {
     /// bottle's sha256 for a formula), so a change between plan and run needs a new consent.
     Brew { token: String, sha256: String, url: String },
     Script { sha256: String },
+    /// The engine bundled with the app (D7): its tgz sha256, whether the build is a release, and every fact about the
+    /// target the plan relied on (bhishma C7), so any of them changing between plan and run needs a new consent.
+    Engine {
+        tgz_sha256: String,
+        build: &'static str,
+        case: &'static str,
+        old_version: Option<String>,
+        old_root: Option<(u64, u64)>,
+        workflows: Vec<String>,
+        home: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

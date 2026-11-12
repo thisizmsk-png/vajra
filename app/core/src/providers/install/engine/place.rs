@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::bundle::Engine;
 use super::fsat::{self, Dir, Kind, Rename};
 use super::pack::sha256_hex;
+use super::workflows;
 
 /// The skill folder's name under `~/.claude/skills`.
 pub const SKILL: &str = "vajra";
@@ -118,22 +119,37 @@ impl Place {
         Ok(Place { claude, skills, work, data: data.to_path_buf() })
     }
 
+    /// For a read-only plan: like `open`, but creates nothing. A folder that doesn't exist yet counts as fine (the run
+    /// creates it); one that exists must be a private folder of the user's.
+    pub fn open_existing(home: &Path, data: &Path, uid: u32) -> Result<PlanView, Unsafe> {
+        let home_dir = Dir::open_path(home, uid).map_err(|_| Unsafe::NotPrivate)?;
+        let check = |parent: &Dir, name: &str, strict: bool| -> Result<Option<Dir>, Unsafe> {
+            match parent.stat_at(name).map_err(|_| Unsafe::Io)? {
+                None => Ok(None),
+                Some(s) if s.private_dir(uid) && (!strict || s.mode & 0o077 == 0) => parent.open_dir(name).map(Some).map_err(|_| Unsafe::NotPrivate),
+                Some(_) => Err(Unsafe::NotPrivate),
+            }
+        };
+        let claude = check(&home_dir, ".claude", false)?;
+        let (skills, work) = match &claude {
+            Some(c) => (check(c, "skills", false)?, check(c, WORK, true)?),
+            None => (None, None),
+        };
+        if let Some(c) = &claude {
+            check(c, workflows::DIR, false)?;
+        }
+        Ok(PlanView { home: home_dir, claude, skills, work, data: data.to_path_buf() })
+    }
+
+    /// `~/.claude/workflows`, opened (or created) under the held `~/.claude`.
+    pub fn workflows_dir(&self, uid: u32) -> Result<Dir, &'static str> {
+        workflows::open(&self.claude, uid).map_err(|e| e.code())
+    }
+
     /// Whose copy is at the target: never touched unless it is provably the app's own.
     pub fn found(&self) -> Found {
-        let Ok(Some(s)) = self.skills.stat_at(SKILL) else { return Found::Absent };
-        if s.kind != Kind::Dir {
-            return Found::UserCopy;
-        }
-        let Ok(root) = self.skills.open_dir(SKILL) else { return Found::UserCopy };
         // A `.git` of any kind (a worktree has a `.git` file) means a checkout.
-        if !matches!(root.stat_at(".git"), Ok(None)) {
-            return Found::UserCopy;
-        }
-        let marker: Option<Marker> = root.read(MARKER, 4096).ok().and_then(|b| serde_json::from_slice(&b).ok());
-        match (marker, self.record()) {
-            (Some(m), Some(r)) if m.version == r.version && m.tgz_sha256 == r.tgz_sha256 && (r.dev, r.ino) == (s.dev, s.ino) => Found::Ours { version: r.version, dev: s.dev, ino: s.ino },
-            _ => Found::UserCopy,
-        }
+        classify(&self.skills, self.record())
     }
 
     pub fn record(&self) -> Option<Record> {
@@ -303,6 +319,88 @@ impl Place {
     pub fn strays(&self) -> Vec<String> {
         let named: Vec<String> = self.journal().map(|j| j.previous.into_iter().map(|p| p.0).chain([j.staged.0]).collect()).unwrap_or_default();
         self.work.list().unwrap_or_default().into_iter().filter(|n| !n.starts_with("backup-") && n != "lock" && !named.contains(n)).collect()
+    }
+}
+
+/// The plan's read-only view of the same folders: any that don't exist yet are None, and nothing is created.
+pub struct PlanView {
+    pub home: Dir,
+    pub claude: Option<Dir>,
+    pub skills: Option<Dir>,
+    pub work: Option<Dir>,
+    pub data: PathBuf,
+}
+
+impl PlanView {
+    /// Whose copy it is, as the run will see it: when a journal is pending, the run recovers first, so the plan
+    /// classifies what will be there after recovery (the journal's previous copy, or nothing) instead of the
+    /// half-installed copy at the target. Only a target whose identity is the journal's staged copy counts.
+    pub fn found(&self) -> Found {
+        let Some(skills) = &self.skills else { return Found::Absent };
+        if let Some(j) = self.journal() {
+            let at = skills.stat_at(SKILL).ok().flatten();
+            let (_, sd, si) = &j.staged;
+            let target_is_staged = at.is_some_and(|s| (s.dev, s.ino) == (*sd, *si));
+            return match (&j.previous, at) {
+                (None, None) => Found::Absent,
+                (None, Some(_)) if target_is_staged => Found::Absent,
+                (Some((_, pd, pi)), Some(_)) if target_is_staged => match self.record() {
+                    Some(r) if (r.dev, r.ino) == (*pd, *pi) => Found::Ours { version: r.version, dev: *pd, ino: *pi },
+                    _ => Found::UserCopy,
+                },
+                _ => Found::UserCopy,
+            };
+        }
+        classify(skills, self.record())
+    }
+
+    pub fn record(&self) -> Option<Record> {
+        std::fs::read(self.data.join(RECORD)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    pub fn journal(&self) -> Option<Journal> {
+        std::fs::read(self.data.join(JOURNAL)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    pub fn has_space(&self, unpacked: u64) -> bool {
+        self.home.free_bytes().is_ok_and(|b| b >= unpacked.saturating_mul(3))
+    }
+
+    /// Folders in the work area that no journal names.
+    pub fn strays(&self) -> Vec<String> {
+        let Some(work) = &self.work else { return Vec::new() };
+        let named: Vec<String> = self.journal().map(|j| j.previous.into_iter().map(|p| p.0).chain([j.staged.0]).collect()).unwrap_or_default();
+        work.list().unwrap_or_default().into_iter().filter(|n| !n.starts_with("backup-") && n != "lock" && !named.contains(n)).collect()
+    }
+
+    /// The workflows snapshot, read-only (an absent folder holds nothing).
+    pub fn workflows_snapshot(&self, names: impl IntoIterator<Item = String>) -> Result<workflows::Snapshot, &'static str> {
+        let names: Vec<String> = names.into_iter().collect();
+        let Some(claude) = &self.claude else { return Ok(workflows::Snapshot(names.into_iter().map(|n| (n, None)).collect())) };
+        match claude.stat_at(workflows::DIR).map_err(|_| "io")? {
+            None => Ok(workflows::Snapshot(names.into_iter().map(|n| (n, None)).collect())),
+            Some(_) => {
+                let d = claude.open_dir(workflows::DIR).map_err(|_| "not_writable")?;
+                workflows::snapshot(&d, names).map_err(|e| e.code())
+            }
+        }
+    }
+}
+
+/// Whose copy is at `skills/vajra`: shared by the plan's view and the run's place.
+fn classify(skills: &Dir, record: Option<Record>) -> Found {
+    let Ok(Some(s)) = skills.stat_at(SKILL) else { return Found::Absent };
+    if s.kind != Kind::Dir {
+        return Found::UserCopy;
+    }
+    let Ok(root) = skills.open_dir(SKILL) else { return Found::UserCopy };
+    if !matches!(root.stat_at(".git"), Ok(None)) {
+        return Found::UserCopy;
+    }
+    let marker: Option<Marker> = root.read(MARKER, 4096).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    match (marker, record) {
+        (Some(m), Some(r)) if m.version == r.version && m.tgz_sha256 == r.tgz_sha256 && (r.dev, r.ino) == (s.dev, s.ino) => Found::Ours { version: r.version, dev: s.dev, ino: s.ino },
+        _ => Found::UserCopy,
     }
 }
 

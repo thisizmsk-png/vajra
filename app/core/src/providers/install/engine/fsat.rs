@@ -116,6 +116,18 @@ impl Dir {
         Ok(Dir { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
     }
 
+    /// Open `parts` below this directory, one component at a time, never following a link. An empty list is this
+    /// directory again.
+    pub fn open_dir_path(&self, parts: &[&str]) -> io::Result<Dir> {
+        // SAFETY: dup of a valid fd; owned below.
+        let dup = check(unsafe { libc::fcntl(self.raw(), libc::F_DUPFD_CLOEXEC, 0) })?;
+        let mut cur = Dir { fd: unsafe { OwnedFd::from_raw_fd(dup) } };
+        for p in parts {
+            cur = cur.open_dir(p)?;
+        }
+        Ok(cur)
+    }
+
     /// Create the subdirectory `name` with `mode` (fails if anything is already there), and open it.
     pub fn make_dir(&self, name: &str, mode: u32) -> io::Result<Dir> {
         let n = c(name)?;
