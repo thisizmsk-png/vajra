@@ -75,14 +75,57 @@ impl Mark<'_> {
 
 /// The processes of this user, started at or after `since`, that hold `tty` open now: `(pid, start stamp)`. Read while
 /// the worker lives: macOS revokes a terminal when its session leader exits, and its descriptors then no longer name it.
-pub fn holders(tty: &Path, since: u64) -> Vec<(u32, u64)> {
+///
+/// A holder must also descend from the worker (`worker`, its leader's pid) or have left every app process behind: its
+/// parent chain passes through `worker`, or reaches launchd without passing through this app. A process this app
+/// spawned while the terminal was open (git, another worker) can inherit it for an instant; it still has the app in its
+/// chain, so it is never taken.
+pub fn holders(tty: &Path, since: u64, worker: u32) -> Vec<(u32, u64)> {
     let me = std::process::id();
     all_pids()
         .into_iter()
         .filter(|&p| p != me && p > 1 && same_user(p))
         .filter_map(|p| Some((p, start_stamp(p)?)))
-        .filter(|&(p, s)| s >= since && open_paths(p).iter().any(|o| o == tty) && start_stamp(p) == Some(s))
+        .filter(|&(p, s)| s >= since && open_paths(p).iter().any(|o| o == tty) && detached_from_app(p, worker, me) && start_stamp(p) == Some(s))
         .collect()
+}
+
+/// Walk `pid`'s parents: true if `worker` is met before `app`, or launchd is reached without meeting `app`.
+fn detached_from_app(pid: u32, worker: u32, app: u32) -> bool {
+    if pid == worker {
+        return true;
+    }
+    let mut p = pid;
+    for _ in 0..64 {
+        match ppid_of(p) {
+            Some(q) if q == worker => return true,
+            Some(q) if q == app => return false,
+            Some(q) if q <= 1 => return true,
+            Some(q) => p = q,
+            None => return false,
+        }
+    }
+    false
+}
+
+fn ppid_of(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+        (got == size).then_some(info.pbi_ppid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// A stamp for "now" in `procid::start_stamp`'s units, a little early, so a process spawned right after it is never
@@ -395,8 +438,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(env_var(c.id(), "TMPDIR"), None, "a platform binary's environment is hidden on macOS");
-        let seen = holders(&dev, floor);
+        let seen = holders(&dev, floor, c.id());
         assert_eq!(seen.iter().map(|h| h.0).collect::<Vec<_>>(), vec![c.id()], "the one holder, this user's, after the floor");
+        // Named as anyone but itself, a process this app spawned (its parent is this test process) is never a holder:
+        // an app child that inherited the descriptor for an instant is not a worker's descendant.
+        assert!(holders(&dev, floor, 0).is_empty());
         assert_eq!(sweep_ticket(&seen,&d.join("not-its-tmp"), floor), Swept { killed: 1, survived: 0 });
         std::thread::sleep(Duration::from_millis(20));
         assert!(!alive(&mut c));
@@ -411,7 +457,7 @@ mod tests {
         wait_readable(&stranger, &other);
         let after = now_stamp().unwrap() + 5_000_000;
         assert_eq!(sweep_ticket(&[], &d, after), Swept::default(), "started before the worker: not its descendant");
-        assert_eq!(sweep_ticket(&holders(&d.join("no-such-tty"), 0), &d.join("sub"), 0), Swept::default(), "another TMPDIR never matches");
+        assert_eq!(sweep_ticket(&holders(&d.join("no-such-tty"), 0, 0), &d.join("sub"), 0), Swept::default(), "another TMPDIR never matches");
         assert!(alive(&mut older) && alive(&mut stranger));
         for c in [&mut older, &mut stranger] {
             let _ = c.kill();
