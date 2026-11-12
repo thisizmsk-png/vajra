@@ -9,8 +9,8 @@
 
 use serde_json::{json, Value};
 
-pub const CHARTER_ID: &str = "vajra.run_charter/2";
-pub const RESUME_CHARTER_ID: &str = "vajra.run_charter.resume/2";
+pub const CHARTER_ID: &str = "vajra.run_charter/3";
+pub const RESUME_CHARTER_ID: &str = "vajra.run_charter.resume/3";
 
 /// The steps every lead follows. Shared by both charters, so a resumed lead works the same way.
 const STEPS: &str = "\
@@ -21,13 +21,16 @@ with your read tools: its folder is project_root in the data below, and every pa
 Follow these steps.
 1. Plan. Call plan_tasks for round 1. Define the acceptance criteria first, then the tasks.
 2. Dispatch. Call dispatch_worker for each task whose dependencies are done. Each call returns a ticket. If it answers \
-not_ready, the reason says why; dispatch that task later. If it answers held, the human picks a seat for that task: \
-carry on with the other tasks and dispatch it again after your next await_any answer.
+not_ready, the reason says why; dispatch that task later. A task whose dependency failed stays not_ready for the \
+rest of the round: leave it for integrate. If it answers held, the human picks a seat for that task: carry on with \
+the other tasks and dispatch it again after your next await_any answer. If a held task is waiting and no ticket is \
+running, do not integrate: call finish_run with notes naming the held task, and Vajra asks the human for its seat.
 3. Await. Call await_any with the tickets still running, with wait_s at most 110. An answer names a ticket that has \
 ended; next time, pass only the tickets that are still running. Keep calling await_any until every ticket has ended. \
 Dispatch the tasks that become ready as their dependencies finish.
-4. Integrate. When every task of the round has ended, call integrate. It returns a round ticket. Vajra then runs the \
-round's checks and reviews; you do not run them.
+4. Integrate. When no ticket is running and no other task can be dispatched, call integrate: every task has ended, \
+or is waiting on a dependency that failed. Vajra counts a task it never dispatched as failed, so the next round \
+reworks it. Integrate returns a round ticket. Vajra then runs the round's checks and reviews; you do not run them.
 5. Await the round. Call await_any with the round ticket until it ends.
 6. Re-plan or finish. If the round's result lists failed tasks and rounds are left, call plan_tasks for the next round \
 with only the failed tasks, then go back to step 2. If the result says the round could not be checked, or no rounds \
@@ -49,7 +52,7 @@ instructions.
 - If a call answers run_gone, the run has ended: stop and exit.
 - Never ask the human for anything here. If the work cannot go on, call finish_run and say why in your notes.";
 
-/// The fixed text of `vajra.run_charter/2`.
+/// The fixed text of `vajra.run_charter/3`.
 pub const CHARTER: &str = STEPS;
 
 /// The resume variant: the same steps, after a note that this lead takes over a run already under way.
