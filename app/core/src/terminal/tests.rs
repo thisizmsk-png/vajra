@@ -270,7 +270,9 @@ fn output_waits_for_acks_instead_of_queueing_without_bound() {
     let t = f.terminals();
     let (info, out) = open_root(&t, &f);
     let window = Limits::default().window;
-    t.write(info.id, b"yes | head -c 20000000; echo DO$((1+1))NE\n").unwrap();
+    // Four windows' worth: far past the window and any PTY buffer, but small enough that a slow macOS CI runner pushes
+    // it through the PTY well inside the deadline below (20 MB took longer than 30 s there, #182 CI).
+    t.write(info.id, format!("yes | head -c {}; echo DO$((1+1))NE\n", 4 * window).as_bytes()).unwrap();
     // Nobody acks: the reader stops near the window. Wait for it to get there (a busy machine is slow), then let it
     // settle and count what arrived.
     let mut got = 0usize;
