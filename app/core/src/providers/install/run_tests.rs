@@ -107,6 +107,18 @@ fn a_rollback_that_leaves_it_installed_marks_it_broken() {
 }
 
 #[test]
+fn a_rollback_whose_check_cannot_be_read_is_not_called_done() {
+    for (tag, after) in [("rb-bad", "npm ERR! something broke"), ("rb-err", r#"{"error":{"code":"EJSONPARSE","summary":"bad"}}"#)] {
+        let w = world(tag, NOT_INSTALLED);
+        std::fs::write(w.f.dir.join("install.ls"), EXTRA).unwrap();
+        std::fs::write(w.f.dir.join("uninstall.ls"), after).unwrap();
+        let r = w.run();
+        assert_eq!((r.outcome, r.reason), (Outcome::Broken, Some("rollback_failed")), "{after}");
+        assert_eq!(w.marked().as_deref(), Some("rollback_failed"), "{after}");
+    }
+}
+
+#[test]
 fn a_failed_upgrade_that_changed_the_install_marks_it_broken_and_a_clean_one_clears_it() {
     let w = world("upgrade", r#"{"dependencies":{"x":{"version":"0.9.0"}}}"#);
     std::fs::write(w.f.dir.join("install.ls"), EXTRA).unwrap();
@@ -149,8 +161,21 @@ mod brew_run {
         )
     }
 
+    /// What Set up's detection sees after the run: the program and its version (None: it doesn't run), or nothing.
+    type Seen = Option<(PathBuf, Option<String>)>;
+
+    fn working() -> Seen {
+        Some((PathBuf::from("/opt/homebrew/bin/codex"), Some("0.168.0".into())))
+    }
+
     fn go(tag: &str, after: Option<&str>, fail: bool) -> (Report, String, String) {
-        let f = FakeBrew::new(&format!("run-{tag}"), &cask("null"));
+        let (r, audit, log, _) = go_with(tag, "null", after, fail, working());
+        (r, audit, log)
+    }
+
+    /// Plan with brew recording `before` as installed, run, and return the report, audit, brew log and Broken mark.
+    fn go_with(tag: &str, before: &str, after: Option<&str>, fail: bool, seen: Seen) -> (Report, String, String, Option<String>) {
+        let f = FakeBrew::new(&format!("run-{tag}"), &cask(before));
         if let Some(a) = after {
             std::fs::write(f.dir.join("after.json"), a).unwrap();
         }
@@ -164,10 +189,13 @@ mod brew_run {
         let env = setup_env(&[], |_| None);
         let m = catalog::Brew { package: "codex".into(), tap: Some("homebrew/cask".into()), cask_url_hosts: vec!["github.com".into()], command: "brew install --cask codex".into() };
         let (p, r) = brew::plan("codex", &["codex".into()], Kind::Cask, &m, &f.brew(), &env, "arm64_sequoia", me()).unwrap();
-        let current = || None;
-        let ctx = Ctx { sup: &sup, env: &env, marks: &Marks::at(&data), audit: &data.join("audit.log"), timeout: Duration::from_secs(20), current: &current };
+        let path = seen.as_ref().map(|(p, _)| p.clone());
+        let current = move || seen.clone();
+        let marks = Marks::at(&data);
+        let ctx = Ctx { sup: &sup, env: &env, marks: &marks, audit: &data.join("audit.log"), timeout: Duration::from_secs(20), current: &current };
         let rep = run_brew(&ctx, &p, &r);
-        (rep, std::fs::read_to_string(data.join("audit.log")).unwrap_or_default(), f.log())
+        let mark = path.and_then(|p| marks.active("codex", &p, None));
+        (rep, std::fs::read_to_string(data.join("audit.log")).unwrap_or_default(), f.log(), mark)
     }
 
     #[test]
@@ -183,6 +211,24 @@ mod brew_run {
         assert_eq!(go("fail", None, true).0.outcome, Outcome::Failed);
         let (r, _, _) = go("none", None, false);
         assert_eq!((r.outcome, r.reason), (Outcome::Failed, Some("not_installed")));
+    }
+
+    #[test]
+    fn a_repair_of_a_registered_package_reinstalls_it() {
+        let (r, _, log, _) = go_with("repair", "\"0.167.1\"", Some(&cask("\"0.168.0\"")), false, working());
+        assert_eq!(r.outcome, Outcome::Installed, "{log}");
+        assert!(log.contains("reinstall --cask homebrew/cask/codex"), "{log}");
+    }
+
+    #[test]
+    fn brew_saying_installed_is_not_enough_the_program_must_run() {
+        let broken = Some((PathBuf::from("/opt/homebrew/bin/codex"), None));
+        let (r, audit, _, mark) = go_with("still-broken", "\"0.167.1\"", None, false, broken);
+        assert_eq!((r.outcome, r.reason), (Outcome::Broken, Some("not_working")), "registered, exit 0, but detection fails");
+        assert_eq!(mark.as_deref(), Some("not_working"), "the Broken mark stays");
+        assert!(audit.contains("result=broken"), "{audit}");
+        let (r, _, _, _) = go_with("gone", "\"0.167.1\"", None, false, None);
+        assert_eq!((r.outcome, r.reason), (Outcome::Failed, Some("not_detected")));
     }
 }
 

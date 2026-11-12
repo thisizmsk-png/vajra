@@ -92,6 +92,15 @@ fn the_snapshot_records_what_is_installed_now() {
 }
 
 #[test]
+fn an_unreadable_npm_ls_stops_the_plan_instead_of_calling_it_a_fresh_install() {
+    let bytes = clean();
+    for (tag, ls) in [("ls-bad", "npm ERR! something broke"), ("ls-err", r#"{"error":{"code":"EJSONPARSE","summary":"bad"}}"#)] {
+        let f = FakeNpm::new(tag, &bytes, ls, None);
+        assert_eq!(plan("x", "x", &method("x", &bytes), &f.npm(), &env(&f), me()).unwrap_err(), "npm_ls_failed", "{ls}");
+    }
+}
+
+#[test]
 fn npm_runs_with_the_setup_env_only() {
     let bytes = clean();
     let f = FakeNpm::new("env", &bytes, NOT_INSTALLED, None);

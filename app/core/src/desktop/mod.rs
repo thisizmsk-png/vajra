@@ -799,8 +799,12 @@ impl App {
         if !h.verified() {
             return Err(fail("source_not_verified", "this harness is Install it yourself"));
         }
-        let probe = self.provider_probe();
-        let current = || crate::providers::setup::current(h, &probe);
+        // Read after the install too (a repair counts only if the program runs), so the PATH is refreshed first and
+        // the probe is built fresh: a newly linked binary must be found.
+        let current = || {
+            crate::userpath::refresh(&self.home);
+            crate::providers::setup::current(h, &self.provider_probe())
+        };
         let audit = self.claude.join("vajra/audit.log");
         let paths = flow::Paths { data: &self.data, audit: &audit };
         let r = flow::run(h, &flow::Machine::this(&self.home), &self.consents, token, &self.sup, paths, &current).map_err(|c| fail(c, "setup refused"))?;

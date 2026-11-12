@@ -93,11 +93,12 @@ function useOutput(stream: string, on: boolean) {
 
 /** ADR-17 17b: the one-click sheet. Shows the exact command and everything it binds; Install asks the core for a
  * consent token on that plan's hash and runs with it. The token lives only in this click's local. */
-function OneClick({ row, reload }: { row: SetupRow; reload: () => Promise<void> }) {
+function OneClick({ row, reload, opened }: { row: SetupRow; reload: () => Promise<void>; opened: () => void }) {
   const [s, setS] = useState<Sheet>({ at: "idle" });
   const titleId = useId();
   const out = useOutput(`setup-${row.id}`, s.at === "running");
   const plan = () => {
+    opened();
     setS({ at: "planning" });
     api.setupPlan(row.id).then((v) => {
       const r = parseSetupPlan(v);
@@ -169,6 +170,10 @@ function OneClick({ row, reload }: { row: SetupRow; reload: () => Promise<void> 
 function Row({ row, reload }: { row: SetupRow; reload: () => Promise<void> }) {
   const id = useId();
   const installed = row.state === "installed" || row.state === "unsupported";
+  // Once opened, the sheet stays: a successful install turns the row Installed, which is no longer offered one-click,
+  // and the report and output must not vanish with it.
+  const [opened, setOpened] = useState(false);
+  const open = useCallback(() => setOpened(true), []);
   return (
     <section className="v-prov v-setup__row" aria-labelledby={id}>
       <h3 id={id} className="v-prov__title"><ProviderIcon family={row.id} />{row.name}</h3>
@@ -181,7 +186,7 @@ function Row({ row, reload }: { row: SetupRow; reload: () => Promise<void> }) {
         {row.path && <><dt>{S.providers.path}</dt><dd><code className="v-prov__path">{row.path}</code></dd></>}
       </dl>
       {!installed && <Steps row={row} />}
-      {row.one_click && <OneClick row={row} reload={reload} />}
+      {(row.one_click || opened) && <OneClick row={row} reload={reload} opened={open} />}
       {row.can_sign_in && (
         <div className="v-setup__actions">
           <Button size="sm" variant="ghost" onClick={() => openSignIn({ id: row.id, label: C.signInTab(row.name) })}>{C.signIn(row.name)}</Button>

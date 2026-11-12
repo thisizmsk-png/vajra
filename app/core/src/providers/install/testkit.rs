@@ -72,7 +72,8 @@ impl FakeNpm {
                  ls) cat {d}/ls.json;;\n\
                  install) for a; do last=\"$a\"; done; cp \"$last\" {d}/installed.tgz; ls -ld \"$(dirname \"$last\")\" > {d}/installed.dir; \
                  [ -f {d}/install.ls ] && cp {d}/install.ls {d}/ls.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
-                 uninstall) [ -f {d}/uninstall.keep ] || echo '{{\"dependencies\":{{}}}}' > {d}/ls.json;;\n\
+                 uninstall) if [ -f {d}/uninstall.ls ]; then cp {d}/uninstall.ls {d}/ls.json; \
+                 elif [ ! -f {d}/uninstall.keep ]; then echo '{{\"dependencies\":{{}}}}' > {d}/ls.json; fi;;\n\
                  esac\n"
             ),
         );
@@ -111,7 +112,7 @@ impl FakeBrew {
             &format!(
                 "#!/bin/sh\necho \"$*\" >> {d}/log\ncase \"$1\" in\n\
                  info) cat {d}/info.json;;\n--prefix) echo {d}/prefix;;\n\
-                 install) [ -f {d}/after.json ] && cp {d}/after.json {d}/info.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
+                 install|reinstall) [ -f {d}/after.json ] && cp {d}/after.json {d}/info.json; [ -f {d}/install.fail ] && exit 1; true;;\n\
                  esac\n"
             ),
         );

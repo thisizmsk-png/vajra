@@ -177,15 +177,23 @@ fn npm_in(ctx: &Ctx, dir: &Path, plan: &Plan, run: &NpmRun) -> Report {
 }
 
 /// Run the Homebrew install of `plan`: exactly the shown command. The audit records the version brew reports
-/// installed afterwards, not the one planned (brew installs the current version; it can't be pinned).
+/// installed afterwards, not the one planned (brew installs the current version; it can't be pinned). Brew's record is
+/// not enough: Installed (which clears a Broken mark) also needs Set up to find the program and get its version.
 pub fn run_brew(ctx: &Ctx, plan: &Plan, run: &BrewRun) -> Report {
     let r = match spawn_wait(ctx, &plan.id, plan.command.clone(), Path::new("/")) {
         Err(e) => Report::new(Outcome::Failed, Some(e), None),
         Ok(exit) => match (exit, installed_version(run, ctx.env)) {
-            (Some(0), Some(v)) => {
-                let _ = ctx.marks.clear(&plan.id);
-                Report { version: Some(v), ..Report::new(Outcome::Installed, None, exit) }
-            }
+            (Some(0), Some(v)) => match (ctx.current)() {
+                Some((_, Some(_))) => {
+                    let _ = ctx.marks.clear(&plan.id);
+                    Report { version: Some(v), ..Report::new(Outcome::Installed, None, exit) }
+                }
+                Some((path, None)) => {
+                    let _ = ctx.marks.set(&plan.id, &path, None, "not_working");
+                    Report { version: Some(v), ..Report::new(Outcome::Broken, Some("not_working"), exit) }
+                }
+                None => Report { version: Some(v), ..Report::new(Outcome::Failed, Some("not_detected"), exit) },
+            },
             (Some(0), None) => Report::new(Outcome::Failed, Some("not_installed"), exit),
             (Some(_), _) => Report::new(Outcome::Failed, Some("install_failed"), exit),
             (None, _) => Report::new(Outcome::Failed, Some("install_timeout"), exit),

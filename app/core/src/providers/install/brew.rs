@@ -162,7 +162,10 @@ pub fn plan(id: &str, allowed: &[String], kind: Kind, m: &catalog::Brew, brew: &
     let targets = Targets { dirs: vec![prefix.clone(), prefix.join(store), prefix.join("bin")], trees: vec![], files: allowed.iter().map(|b| prefix.join("bin").join(b)).collect() };
     let blocker = admin::check(&targets, uid, 1);
 
-    let mut command = vec![brew.path.display().to_string(), "install".into()];
+    // Already registered (a Repair): `install` would skip it and replace nothing, so the plan reinstalls. The verb is
+    // in the command, so it is in the hash the user consents to.
+    let verb = if installed_of(entry, kind).is_some() { "reinstall" } else { "install" };
+    let mut command = vec![brew.path.display().to_string(), verb.into()];
     if kind == Kind::Cask {
         command.push("--cask".into());
     }
@@ -188,9 +191,13 @@ pub fn installed_version(run: &BrewRun, env: &SetupEnv) -> Option<String> {
     args.push(run.token.clone().into());
     let out = run_process_exact(&run.brew.path, &args, Path::new("/"), INFO_TIMEOUT, env.vars()).ok()?;
     let info: Value = serde_json::from_str(&out.stdout).ok().filter(|_| out.code == Some(0) && !out.truncated)?;
-    let entry = info.get(if run.kind == Kind::Cask { "casks" } else { "formulae" })?.get(0)?;
+    installed_of(info.get(if run.kind == Kind::Cask { "casks" } else { "formulae" })?.get(0)?, run.kind)
+}
+
+/// The version a `brew info --json=v2` entry records as installed; None when it is not installed.
+fn installed_of(entry: &Value, kind: Kind) -> Option<String> {
     let installed = entry.get("installed")?;
-    match run.kind {
+    match kind {
         Kind::Cask => installed.as_str().map(str::to_string),
         Kind::Formula => installed.as_array()?.last()?.get("version")?.as_str().map(str::to_string),
     }

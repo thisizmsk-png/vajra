@@ -200,6 +200,31 @@ describe("one-click install", () => {
     expect(ipc.calls.filter((c) => c.cmd === "setup_list").length).toBeGreaterThan(1);
   });
 
+  it("keeps the report and output once detection shows the row installed and no longer one-click", async () => {
+    let ran = false;
+    const after = { ...oneClick, rows: [{ ...oneClick.rows[0], state: "installed", version: "1.2.3", path: "/opt/homebrew/bin/other", reason_code: null, one_click: false, can_sign_in: true }, oneClick.rows[1]] };
+    const ipc = fakeIpc({
+      setup_list: () => (ran ? after : oneClick),
+      setup_plan: PLAN,
+      setup_consent: { token: TOKEN },
+      setup_run: () => { ran = true; return { stream: "setup-other", report: { outcome: "installed", reason: null, exit: 0, version: "1.2.3" } }; },
+      tail: { lines: [{ seq: 1, text: "added 1 package" }], gap: false, head_seq: 1, spill_start: null, spill_end: null },
+    });
+    setTransport(ipc.transport);
+    render(<SetupPanel />);
+    fireEvent.click((await rowOf("Other CLI")).getByRole("button", { name: C.planOneClick("Other CLI") }));
+    const s = within(await screen.findByRole("region", { name: C.sheetTitle("Other CLI") }));
+    fireEvent.click(s.getByRole("button", { name: C.install("Other CLI") }));
+    const r = await rowOf("Other CLI");
+    // The reloaded row: Installed, with its path, and not offered one-click any more.
+    await waitFor(() => expect(r.getByText("/opt/homebrew/bin/other")).toBeTruthy());
+    expect(ipc.calls.filter((c) => c.cmd === "setup_list").length).toBeGreaterThan(1);
+    const done = within(screen.getByRole("region", { name: C.sheetTitle("Other CLI") }));
+    expect(done.getByText(C.outcome.installed)).toBeTruthy();
+    expect(done.getByLabelText(C.output("Other CLI")).textContent).toContain("added 1 package");
+    expect(r.getByRole("button", { name: C.signIn("Other CLI") })).toBeTruthy();
+  });
+
   it("names a folder that needs admin and offers no Install", async () => {
     sheet({ ...PLAN, plan: { ...PLAN.plan, needs_admin: { path: "/usr/local/lib/node_modules", reason: "root_owned" } } });
     fireEvent.click((await rowOf("Other CLI")).getByRole("button", { name: C.planOneClick("Other CLI") }));

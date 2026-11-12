@@ -59,6 +59,18 @@ fn a_clean_official_cask_gives_a_plan_with_the_fully_qualified_command() {
 }
 
 #[test]
+fn a_package_brew_already_records_is_reinstalled_and_the_verb_is_in_the_hash() {
+    let fresh = cask(&cask_json("")).unwrap().0;
+    let (repair, _) = cask(&cask_json(r#","installed":"0.167.1""#)).unwrap();
+    assert_eq!(repair.command[1..], ["reinstall", "--cask", "homebrew/cask/codex"], "install would skip it and repair nothing");
+    let mut swapped = fresh.clone();
+    swapped.command[1] = "reinstall".into();
+    assert_ne!(swapped.rehash().hash, fresh.hash, "a consent to install is not a consent to reinstall");
+    let none = cask(&cask_json(r#","installed":null"#)).unwrap().0;
+    assert_eq!(none.command[1], "install");
+}
+
+#[test]
 fn a_no_check_cask_is_refused() {
     let info = cask_json("").replace(&"a".repeat(64), "no_check");
     assert_eq!(cask(&info).unwrap_err(), "cask_no_check");

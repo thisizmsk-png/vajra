@@ -45,7 +45,7 @@ pub(crate) fn installed_now(npm: &tools::Npm, package: &str, cwd: &Path, env: &S
     if out.timed_out || out.truncated {
         return Err("npm_ls_failed");
     }
-    Ok(closure::installed(&out.stdout, package))
+    closure::installed(&out.stdout, package)
 }
 
 /// Plan the npm install of `m` for harness `id` (whose program is `binary`), as user `uid`.
