@@ -135,7 +135,7 @@ const S = {
     in_scope: STRS, out_of_scope: STRS, assumptions: STRS,
     blocking_question: STR, touches_security: BOOL, deploy_requested: BOOL,
   }),
-  CampaignState: obj({ found: BOOL, signature_valid: BOOL, status: STR, goal: STR,
+  CampaignState: obj({ found: BOOL, signature_valid: BOOL, evidence_outside_guard: BOOL, status: STR, goal: STR,
     features: arr(obj({ id: STR, description: STR, passes: BOOL })), progress_tail: STR }),
   Preflight: obj({ head: STR, current_branch: STR, dirty: BOOL, base: STR, campaign_ok: BOOL, campaign_output: STR }),
   Plan: obj({
@@ -376,12 +376,13 @@ let resumed = null
 // text, the closing progress line, the checkpoint label and the report's first line. Every cut is from the end, so the
 // marker is never the part that is cut.
 const OG_MARK = '[evidence ran outside the Vajra guard]'
-let OG = false
+// The slug check covers a fresh run too: a run_id ending -og names a Desktop -og campaign (bhishma #183 F1).
+let OG = CAMPAIGN.endsWith('-og')
 const og = (s) => (OG ? `${OG_MARK} ${s}` : s)
 if (RESUME) {
   const r = await step('campaign.load', 'abhimanyu',
     `Run exactly this command and nothing else: ${CAMPAIGN_SH} show ${RESUME} --json\n` +
-    'Copy its JSON into the output fields (features, goal, status, progress_tail, signature_valid). ' +
+    'Copy its JSON into the output fields (features, goal, status, progress_tail, signature_valid, evidence_outside_guard). ' +
     'If the command fails because the campaign does not exist, return found=false with empty fields. Do not edit any file.',
     S.CampaignState, 'Understand')
   if (!r.ok) return failed(r, {})
@@ -396,7 +397,8 @@ if (RESUME) {
   // N17: Vajra Desktop marked this campaign because its evidence ran outside the Vajra guard (the slug ends -og, or the
   // goal starts with the marker). The marker is never part of the ask.
   const goal = clean(resumed.goal)
-  OG = RESUME.endsWith('-og') || goal.startsWith(OG_MARK)
+  // The script's own answer counts too, so a goal the agent didn't copy exactly can't drop the label (bhishma #183 F2).
+  OG = OG || goal.startsWith(OG_MARK) || resumed.evidence_outside_guard === true
   if (ASK.length < 10) ASK = clean(goal.startsWith(OG_MARK) ? goal.slice(OG_MARK.length) : goal)
   if (ASK.length < 10) return { status: 'error', node: 'campaign.load', error: `campaign ${RESUME} has no goal; relaunch with the ask`, artifacts: {} }
 }

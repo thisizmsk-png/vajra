@@ -292,7 +292,7 @@ await scenario('dirty working tree is surfaced as a risk', async () => {
   assert.match(r.result.report, /uncommitted changes/)
 })
 await scenario('resume: campaign features become the criteria', async () => {
-  const camp = { found: true, signature_valid: true, status: 'active', goal: 'g', features: [{ id: 'ac-1', description: 'export --json prints valid JSON', passes: true }, { id: 'ac-2', description: 'docs mention --json', passes: false }], progress_tail: '- created' }
+  const camp = { found: true, signature_valid: true, evidence_outside_guard: false, status: 'active', goal: 'g', features: [{ id: 'ac-1', description: 'export --json prints valid JSON', passes: true }, { id: 'ac-2', description: 'docs mention --json', passes: false }], progress_tail: '- created' }
   const r = await go({ ...ARGS, campaign: 'deliver-old1' }, { 'campaign.load': camp })
   assert.equal(r.result.status, 'done')
   assert.equal(call(r, 'campaign.load').agentType, 'abhimanyu')
@@ -303,7 +303,7 @@ await scenario('resume: campaign features become the criteria', async () => {
   assert.equal(mism.result.status, 'error'); assert.match(mism.result.error, /must match the campaign/)
 })
 await scenario('resume: tampered campaign -> need_input; missing -> error', async () => {
-  const bad = { found: true, signature_valid: false, status: 'active', goal: '', features: [], progress_tail: '' }
+  const bad = { found: true, signature_valid: false, evidence_outside_guard: false, status: 'active', goal: '', features: [], progress_tail: '' }
   const r = await go({ ...ARGS, campaign: 'deliver-old1' }, { 'campaign.load': bad })
   assert.equal(r.result.status, 'need_input'); assert.match(r.result.question, /signature/)
   const m = await go({ ...ARGS, campaign: 'deliver-old1' }, { 'campaign.load': { ...bad, found: false } })
@@ -333,7 +333,7 @@ await scenario('router args shape {ask, hints, campaign} is accepted; hints reac
     assert.match(call(r, 'understand').prompt, /<artifact from="router_hints">[\s\S]*api-design/)
     assert.match(call(r, 'plan.1').prompt, /<artifact from="router_hints">[\s\S]*feature-build/)
   }
-  const s = await go(JSON.stringify({ ask: ASK, hints, campaign: 'deliver-old1' }), { 'campaign.load': { found: false, signature_valid: false, status: '', goal: '', features: [], progress_tail: '' } })
+  const s = await go(JSON.stringify({ ask: ASK, hints, campaign: 'deliver-old1' }), { 'campaign.load': { found: false, signature_valid: false, evidence_outside_guard: false, status: '', goal: '', features: [], progress_tail: '' } })
   assert.equal(s.result.node, 'campaign.load')
 })
 
@@ -406,7 +406,7 @@ await scenario('campaign progress records the integration so a resume can build 
 })
 const PREV = 'e333333' + '0'.repeat(33)
 const resumeCamp = {
-  found: true, signature_valid: true, status: 'active', goal: 'Export command gains a --json flag',
+  found: true, signature_valid: true, evidence_outside_guard: false, status: 'active', goal: 'Export command gains a --json flag',
   features: [{ id: 'ac-1', description: 'export --json prints valid JSON', passes: false }, { id: 'ac-2', description: 'docs mention --json', passes: false }],
   progress_tail: `- 2026-10-10T09:00:00Z run 20261010-0900 round 3: 1/2 criteria passing; integration vajra/20261010-0900/integration-r3 @ e333333 from ${HEAD}\n` +
     `- 2026-10-10T09:05:00Z run 20261010-0900: no verified delivery after 3 round(s); integration vajra/20261010-0900/integration-r3 @ e333333 from ${HEAD}`,
@@ -451,9 +451,17 @@ await scenario('resume of a campaign whose evidence ran outside the guard carrie
   const u = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': resumeCamp, preflight: { ...base.preflight, base: PREV } })
   assert.equal(u.result.artifacts.evidence_outside_guard, false)
   assert.ok(!/outside the (Vajra )?guard/.test(u.result.report + deliverOf(u)))
-  // A fresh run is never marked by the CLI.
+  // The script's evidence_outside_guard alone marks it, even when the goal came back without the marker.
+  const j = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': { ...resumeCamp, evidence_outside_guard: true }, preflight: { ...base.preflight, base: PREV } })
+  marked(j)
+  // A fresh run is never marked by the CLI on its own...
   const f = await go(ARGS)
   assert.equal(f.result.artifacts.evidence_outside_guard, false)
+  // ...but a fresh run whose run_id names an -og campaign carries the label.
+  const o = await go({ ...ARGS, run_id: `${RUN}-og` })
+  assert.equal(o.result.artifacts.campaign, `deliver-${RUN}-og`)
+  assert.equal(o.result.artifacts.evidence_outside_guard, true)
+  assert.ok(o.result.report.startsWith(`${MARK} # Delivery:`))
 })
 await scenario('resume: recorded base missing from the repo -> error; explicit args.base wins', async () => {
   const miss = await go({ campaign: 'deliver-20261010-0900', run_id: RUN }, { 'campaign.load': resumeCamp, preflight: { ...base.preflight, base: '' } })
