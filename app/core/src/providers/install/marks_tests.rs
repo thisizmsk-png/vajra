@@ -54,6 +54,37 @@ fn a_passing_closure_check_clears_it() {
 }
 
 #[test]
+fn concurrent_runs_with_their_own_marks_never_lose_each_others_marks() {
+    // Each run builds its own Marks for the same file (as flow::run does). Unlocked, these read the same state and
+    // overwrite each other, or one unlinks the other's temp file; every mark set must survive, and only the clears go.
+    let d = tmp("race");
+    let bin = d.join("bin/codex");
+    let ids: Vec<String> = (0..24).map(|i| format!("h{i}")).collect();
+    for round in 0..5 {
+        std::thread::scope(|s| {
+            for (i, id) in ids.iter().enumerate() {
+                let (d, bin) = (&d, &bin);
+                s.spawn(move || {
+                    let m = Marks::at(d);
+                    if i % 3 == 0 {
+                        m.clear(id).unwrap();
+                    } else {
+                        m.set(id, bin, Some("1.0.0"), "closure_mismatch").unwrap();
+                    }
+                });
+            }
+        });
+        let m = Marks::at(&d);
+        for (i, id) in ids.iter().enumerate() {
+            let want = (i % 3 != 0).then_some("closure_mismatch");
+            assert_eq!(m.active(id, &bin, Some("1.0.0")).as_deref(), want, "round {round}: {id}");
+        }
+    }
+    let left: Vec<_> = std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.ends_with(".tmp")).collect();
+    assert!(left.is_empty(), "no temp files left behind: {left:?}");
+}
+
+#[test]
 fn an_unreadable_state_file_marks_nothing_and_is_private() {
     let d = tmp("bad");
     std::fs::write(d.join(FILE), b"{not json").unwrap();
