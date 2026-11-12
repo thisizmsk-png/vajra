@@ -137,16 +137,50 @@ LOCK=""
 proc_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
 # owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
 release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; return 0; }
-# A writer's normal exit hands the lock off under the same mutex that unlock --if-stale holds while it checks and
-# deletes, so the lock generation an unlocker checked cannot be released and retaken underneath it. If the mutex stays
-# busy the lock is left behind (its owner is gone, so unlock --if-stale can clear it) rather than released unguarded.
+# Reclamation and a writer's normal exit hand the lock off under one flock on <campaign>/.lock.reclaim, so the lock
+# generation an unlocker checked cannot be released and retaken underneath it. An flock dies with its holder (a SIGKILL
+# or crash frees it), so no stale mutex can strand a campaign. The helper takes the flock; in "release" mode it removes
+# the lock (owner.json first, then the dir), in "unlock" mode it execs the given command with the flock still held.
+RECLAIM_PY='
+import fcntl, os, sys, time
+d, wait, mode = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+try:
+    fd = os.open(d + "/.lock.reclaim", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+except OSError:
+    sys.exit(1)
+end = time.time() + wait
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.time() >= end:
+            sys.stderr.write("vajra-campaign: another unlock or release is running; not removed\n")
+            sys.exit(1)
+        time.sleep(0.05)
+if mode == "release":
+    lk = d + "/.lock"
+    for f in (lk + "/owner.json", ):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+    try:
+        os.rmdir(lk)
+    except OSError:
+        pass
+    sys.exit(0)
+os.set_inheritable(fd, True)
+os.environ["VAJRA_RECLAIM_HELD"] = "1"
+os.execv(sys.argv[4], sys.argv[4:])
+'
+# If the helper is unavailable or the flock stays busy the lock is left behind (its owner is gone, so
+# unlock --if-stale can clear it) rather than released unguarded.
 release_lock_serialized() {
-  local rm i=0; rm="${LOCK%/.lock}/.lock.reclaim"
-  while ! mkdir "$rm" 2>/dev/null; do
-    i=$((i+1)); [ "$i" -ge 50 ] && return 0
-    sleep 0.1
-  done
-  release_lock; rmdir "$rm" 2>/dev/null; return 0
+  [ -n "$LOCK" ] || return 0
+  [ -x "$PYTHON3" ] || { release_lock; return 0; }
+  "$PYTHON3" -I -c "$RECLAIM_PY" "${LOCK%/.lock}" 5 release 2>/dev/null
+  return 0
 }
 lock() {
   local i=0
@@ -168,16 +202,11 @@ cmd_unlock() {
   [ "$(sanitize_slug "$slug")" = "$slug" ] || die "invalid campaign slug: $slug"
   DIR="${ROOT}/${slug}"; [ -d "$DIR" ] || die "campaign not found: $slug"
   LOCK="$DIR/.lock"
-  # Reclaimers take turns: the owner check and the delete both happen inside this mutex, so a second unlocker
-  # re-reads the lock only after the first has finished, and never deletes a lock a writer took in between. A
-  # writer cannot take .lock while the checked directory exists, so that directory is the one deleted.
-  RECLAIM="$DIR/.lock.reclaim"
-  local i=0
-  while ! mkdir "$RECLAIM" 2>/dev/null; do
-    i=$((i+1)); [ "$i" -ge 100 ] && die "another unlock is running or died holding $RECLAIM; not removed"
-    sleep 0.1
-  done
-  trap 'rmdir "$RECLAIM" 2>/dev/null' EXIT
+  # Take the reclaim flock for the whole check-and-delete: the helper re-runs this command with it held.
+  if [ -z "${VAJRA_RECLAIM_HELD:-}" ]; then
+    [ -x "$PYTHON3" ] || die "python3 is required for unlock"
+    exec "$PYTHON3" -I -c "$RECLAIM_PY" "$DIR" 10 unlock "${BASH:-/bin/bash}" "$0" unlock "$slug" --if-stale
+  fi
   [ -e "$LOCK" ] || { echo "no lock held for $slug"; LOCK=""; return 0; }
   { [ -d "$LOCK" ] && [ ! -L "$LOCK" ]; } || die "lock is not a plain directory ($LOCK); not removed"
   [ -f "$LOCK/owner.json" ] && [ ! -L "$LOCK/owner.json" ] || die "lock has no owner record ($LOCK); not removed (remove it yourself if no run is active)"

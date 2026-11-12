@@ -439,7 +439,6 @@ C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "race: unlocker B re
 wait "$UA" 2>/dev/null
 [ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: the writer's lock and owner record are intact" $?
 kill_holder; C unlock lk --if-stale >/dev/null 2>&1
-[ ! -e "$LD/.lock.reclaim" ]; check "race: no reclaim mutex is left behind" $?
 # handoff: unlocker U reads writer A's record and pauses; A finishes; writer B wants the lock; U resumes. U must not
 # delete B's lock (A's release waits for U, so the lock generation U checked stays put until U is done).
 SHORT_A="$WORK/short-a.sh"; PAUSE_U="$WORK/pause-u.sh"
@@ -457,10 +456,25 @@ i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ 
 [ "$URC" -ne 0 ]; check "handoff: the unlocker refused (it never saw A as gone)" $?
 [ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "handoff: writer B holds an intact lock" $?
 kill_holder; C unlock lk --if-stale >/dev/null 2>&1
-[ ! -e "$LD/.lock" ] && [ ! -e "$LD/.lock.reclaim" ]; check "handoff: nothing is left behind" $?
-mkdir "$LD/.lock.reclaim"; mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
-C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "race: a held reclaim mutex blocks removal" $?
-rmdir "$LD/.lock.reclaim"; C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "race: removal works once the mutex is free" $?
+[ ! -e "$LD/.lock" ]; check "handoff: nothing is left behind" $?
+# a reclaim-flock holder killed with SIGKILL must not strand the campaign: the next unlock recovers on its own
+PYH="$WORK/flock-holder.py"
+cat > "$PYH" <<'PYEOF'
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1] + "/.lock.reclaim", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("held")
+time.sleep(60)
+PYEOF
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ -f "$WORK/held" ]; check "mutex: a flock holder is running" $?
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+[ -e "$LD/.lock.reclaim" ]; check "mutex: the killed holder left its flock file behind" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "mutex: unlock recovers after the holder was SIGKILLed, no manual cleanup" $?
+C pass f1 --campaign lk >/dev/null 2>&1 && [ ! -e "$LD/.lock" ]; check "mutex: a later writer still releases its lock normally" $?
 
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
