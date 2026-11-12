@@ -21,11 +21,12 @@ pub struct SeatEnv {
     keys: Mutex<Arc<Keys>>,
     /// Check 5. This build's value is `launch::CORE_ROUTE_AVAILABLE`; tests turn it on to reach the later checks.
     route: AtomicBool,
+    labs: super::labs::Labs,
 }
 
 impl SeatEnv {
     pub fn new(data: &Path, home: &Path, keys: Keys) -> Self {
-        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE) }
+        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE), labs: super::labs::Labs::new(data) }
     }
 
     #[cfg(test)]
@@ -37,6 +38,15 @@ impl SeatEnv {
 
     pub fn route(&self) -> bool {
         self.route.load(Ordering::SeqCst)
+    }
+
+    /// Check 5 for one project: the build's core route, or Labs on for it (developer builds only).
+    pub fn route_for(&self, project: &str) -> bool {
+        self.route() || self.labs.on(project)
+    }
+
+    pub fn labs(&self) -> &super::labs::Labs {
+        &self.labs
     }
 
     /// The checks of 16.2 for every seat, then the engine once. A project that is not a store id reads the global agents.
@@ -51,7 +61,7 @@ impl SeatEnv {
         let keys = crate::lock(&self.keys).clone();
         let mut out: Vec<(String, Refused)> = seats
             .iter()
-            .filter_map(|s| launch::launchable_with(self.route(), &s.choice, s.kind, &agents, &probe, &keys).err().map(|r| (s.seat.clone(), r)))
+            .filter_map(|s| launch::launchable_with(self.route_for(project), &s.choice, s.kind, &agents, &probe, &keys).err().map(|r| (s.seat.clone(), r)))
             .collect();
         if let Err(r) = launch::engine_ready(&self.home) {
             out.push(("engine".into(), r));
@@ -68,6 +78,9 @@ impl SeatPolicy for SeatEnv {
     }
     fn check(&self, project: &str, seats: &[SeatCheck]) -> Vec<(String, Refused)> {
         self.refusals(project, seats)
+    }
+    fn seats_on(&self, project: &str) -> bool {
+        self.route_for(project)
     }
 }
 

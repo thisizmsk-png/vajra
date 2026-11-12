@@ -1406,6 +1406,7 @@ impl App {
                 "VAJRA_DESKTOP_DATA": self.data.to_string_lossy(),
                 crate::control::mcp::PROJECT_ENV: project,
                 crate::control::mcp::GEN_ENV: generation.to_string(),
+                crate::control::mcp::SEATS_ENV: if self.seat_env.route_for(project) { "1" } else { "0" },
             },
         }}});
         let mcp = mcp.to_string();

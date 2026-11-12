@@ -504,6 +504,21 @@ impl App {
         self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
     }
 
+    /// Labs for `project`: `{"available": <developer build>, "on": <on for this project>}`.
+    pub fn labs_get(&self, project: &str) -> Res {
+        let labs = self.seat_env.labs();
+        Ok(json!({"available": labs::LABS_BUILD, "on": labs.on(project)}))
+    }
+
+    /// The human's Labs switch for `project`. Takes effect for the Director-General's next conversation's tool list,
+    /// and at once for the seat checks.
+    pub fn labs_set(&self, project: &str, on: bool) -> Res {
+        self.active_project(project).map_err(|e| e.to_json())?;
+        self.seat_env.labs().set(project, on).map_err(|code| fail(code, "Labs can't be changed for this project"))?;
+        self.note(if on { "labs_on" } else { "labs_off" }, &[]);
+        self.labs_get(project)
+    }
+
     /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
     pub fn install_dev_tools(&self) -> Res {
         if self.workers.install_action().is_none() {
@@ -2379,6 +2394,7 @@ pub mod workers;
 pub mod plan;
 pub mod runproto;
 pub mod charter;
+pub mod labs;
 pub mod worker_host;
 mod arrivals;
 mod caps;
