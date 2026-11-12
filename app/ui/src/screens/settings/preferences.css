@@ -9,3 +9,6 @@
 .v-pref__actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); padding-top: var(--space-sm); }
 .v-pref-scope { padding: var(--space-sm) 0; font: 400 13px/20px var(--font-ui); }
 .v-pref-scope select { margin-left: var(--space-sm); }
+.v-copies { display: flex; flex-direction: column; gap: var(--space-sm); }
+.v-copies__act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); padding-top: var(--space-xs); }
+.v-copies__note { margin: 0; font: 400 13px/20px var(--font-ui); color: var(--c-text-secondary); }
