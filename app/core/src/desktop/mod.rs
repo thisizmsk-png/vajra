@@ -689,11 +689,14 @@ impl App {
     }
 
     /// The active run groups for diagnostics: stream id and the pid of the group leader.
-    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end, every core ticket ends `abandoned`
-    /// (`app_quit`) with its line written and its descendants swept, then every supervisor session is killed and
-    /// reaped. Bounded: a ticket that is not done within `QUIT_TICKETS` is left to the supervisor's kill.
+    /// App quit (`RunEvent::Exit`), in order: the Director-General's asks end; every core run's lead is refused new
+    /// runs, killed and never restarted (`shutdown_leads`), so no lead calls `dispatch_worker` or `integrate` while its
+    /// tickets end; every core ticket ends `abandoned` (`app_quit`) with its line written and its descendants swept;
+    /// then every supervisor session is killed and reaped. Bounded: a lead not gone within `LEAD_SHUTDOWN_WAIT`, or a
+    /// ticket not done within `QUIT_TICKETS`, is left to the supervisor's kill.
     pub fn quit(&self) {
         self.shutdown_lead();
+        self.shutdown_leads(Self::LEAD_SHUTDOWN_WAIT);
         self.workers.quit(QUIT_TICKETS);
         self.sup.shutdown();
     }

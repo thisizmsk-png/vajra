@@ -231,6 +231,13 @@ impl App {
         Ok(json!({"runs": super::recover::core_runs(&self.data, &env)}))
     }
 
+    /// Test hook: `lead` joins the live run leads as `start_lead_run` adds one, so the quit sequence can be tested
+    /// against a rig's lead.
+    #[cfg(test)]
+    pub(super) fn adopt_lead_run(&self, run: &str, lead: RunLead) {
+        lock(&self.lead_runs.0).runs.insert(run.to_string(), lead);
+    }
+
     /// The default wait for `shutdown_leads`.
     pub const LEAD_SHUTDOWN_WAIT: Duration = SHUTDOWN_WAIT;
 }
