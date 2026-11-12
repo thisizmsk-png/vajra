@@ -102,6 +102,17 @@ function Frame() {
     document.title = S.shell.title(project ? `${view}, ${project.name}` : view);
   }, [route.screen, project, workerTabs, wParam]);
 
+  // Add project opens the launcher for a new folder and puts the cursor in its Repository folder field. On a first run
+  // the launcher is already on screen, so without the focus the button did nothing you could see.
+  const [adding, setAdding] = useState(false);
+  const addProject = () => { go("orch", { new: "1" }, null); setAdding(true); };
+  const onLauncher = route.screen === "orch" && !!route.params.new;
+  useEffect(() => {
+    if (!adding || !onLauncher) return;
+    const field = main.current?.querySelector<HTMLElement>(".v-launch__repo input");
+    if (field) { field.focus(); setAdding(false); }
+  }, [adding, onLauncher]);
+
   const goProject = (id: string) => go(PORTABLE.has(route.screen) ? route.screen : "orch", route.screen === "settings" ? route.params : {}, id);
   const openSettings = (params: Record<string, string> = {}) => go("settings", params, pid);
   const showColumn = !!project && !compact;
@@ -137,7 +148,7 @@ function Frame() {
     ...(project ? [{ id: "column", label: compact ? S.frame.showColumn : S.frame.hideColumn, keys: ["⌘", "B"], run: () => setCompact((c) => !c) }] : []),
     ...(inspectable ? [{ id: "inspector", label: inspector ? S.frame.hideInspector : S.frame.showInspector, keys: ["⌘", "I"], run: () => setInspector((x) => !x) }] : []),
     ...(route.screen === "settings" ? [] : [{ id: "settings", label: S.frame.openSettings, keys: ["⌘", ","], run: () => openSettings() }]),
-    { id: "add", label: S.frame.addProject, run: () => go("orch", { new: "1" }, null) },
+    { id: "add", label: S.frame.addProject, run: addProject },
   ];
 
   const skip = () => {
@@ -158,12 +169,12 @@ function Frame() {
           <a className="v-skip" href="#v-main" onClick={(e) => { e.preventDefault(); skip(); }}>{S.shell.skip}</a>
           <header className="v-tb" data-tauri-drag-region>
             {P.projects.length > 0 ? (
-              <ProjectTabs projects={P.projects} summaries={P.summaries} current={pid} view={route.screen} onAdd={() => go("orch", { new: "1" }, null)} />
+              <ProjectTabs projects={P.projects} summaries={P.summaries} current={pid} view={route.screen} onAdd={addProject} />
             ) : (
               <>
                 <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? S.frame.noProjects : ""}</span>
                 {P.state === "error" && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
-                <button type="button" className="v-tb__add" onClick={() => go("orch", { new: "1" }, null)}><Icon name="plus" size={12} />{S.frame.addProject}</button>
+                <button type="button" className="v-tb__add" onClick={addProject}><Icon name="plus" size={12} />{S.frame.addProject}</button>
               </>
             )}
             <Search />
