@@ -515,7 +515,18 @@ pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Pa
         Some(s) if ticket_tmp.is_absolute() && !s.contains(['\n', '\r', '\0']) => s.trim_end_matches('/').to_string(),
         _ => return Err("the ticket tmp is not a plain absolute path".into()),
     };
-    if locked.iter().any(|l| tmp == *l || tmp.starts_with(&format!("{l}/")) || l.starts_with(&format!("{tmp}/"))) {
+    // Compare realpaths too (#212 bhishma Low): `locked` holds each folder's given and realpath forms, and a ticket tmp
+    // that is, or passes through, a link into a locked folder is caught by its own realpath. A tmp that doesn't exist
+    // yet has only its given form.
+    let mut tmp_forms = vec![tmp.clone()];
+    if let Ok(real) = std::fs::canonicalize(ticket_tmp) {
+        let real = real.to_str().ok_or("the ticket tmp's realpath is not UTF-8")?.trim_end_matches('/').to_string();
+        if real != tmp {
+            tmp_forms.push(real);
+        }
+    }
+    let overlaps = |t: &String, l: &String| t == l || t.starts_with(&format!("{l}/")) || l.starts_with(&format!("{t}/"));
+    if tmp_forms.iter().any(|t| locked.iter().any(|l| overlaps(t, l))) {
         return Err("the ticket tmp overlaps a locked folder".into());
     }
     let hooks: Value = serde_json::from_str::<Value>(HOOKS_JSON).map_err(|e| e.to_string())?["hooks"].clone();

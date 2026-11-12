@@ -228,6 +228,15 @@ fn the_flag_file_turns_the_os_sandbox_on_around_the_key_folder_and_data_dir() {
     for bad in [PathBuf::from("rel/tmp"), data.join("t"), home.join(".claude/vajra/t"), home.clone(), d.clone()] {
         assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
     }
+    // #212 bhishma Low: a ticket tmp that is a link into a locked folder, or passes through one, is caught by realpath.
+    std::fs::create_dir_all(data.join("inner")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("tmp-link")).unwrap();
+    std::fs::create_dir_all(d.join("via")).unwrap();
+    std::os::unix::fs::symlink(&data, d.join("via/up")).unwrap();
+    for bad in [d.join("tmp-link"), d.join("via/up/inner")] {
+        assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &bad).is_err(), "{}", bad.display());
+    }
+    assert!(claude_worker_flag(&home, &work, std::slice::from_ref(&repo), &data, &tmp).is_ok(), "a plain ticket tmp still works");
 }
 
 /// A Claude worker's build caches live in its ticket tmp: the sandbox leaves HOME read-only and rewrites TMPDIR.
