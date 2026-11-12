@@ -173,8 +173,12 @@
 
 /* Under 1200 px (UX.md section 3): Crew narrows its columns; History hides Status and Updated, and an open report takes the screen. */
 @media (max-width: 1199px) {
-  .v-crew__body { grid-template-columns: 240px minmax(0, 1fr) 220px; }
-  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 240px minmax(0, 1fr); }
+  /* 260 leaves the middle its 480 px minimum at 960 with the details column open. A worker row sits four levels in and
+     has no chevron, so it drops the empty chevron slot: its icon takes that column. Together that is the room
+     "In progress" needs beside a worker's name. A longer status still clips, and the tree gives it a tooltip. */
+  .v-crew__body { grid-template-columns: 260px minmax(0, 1fr) 220px; }
+  .v-crew__body:not(:has(.v-crew__aside)) { grid-template-columns: 260px minmax(0, 1fr); }
+  .v-crew__tree .v-tree__twisty:empty { display: none; }
   .v-crew__head { padding: 0 var(--space-md); }
   .v-history .v-table :is(th, td):is(:nth-child(2), :nth-child(4)) { display: none; }
   .v-history__body--open { grid-template-columns: minmax(0, 1fr); }
