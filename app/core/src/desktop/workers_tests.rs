@@ -1178,6 +1178,47 @@ fn an_oversized_history_is_not_taken_as_complete_and_writes_nothing() {
     assert_eq!(std::fs::read(tickets_file(&r, "r1")).unwrap(), body.as_bytes(), "a third life writes nothing either");
 }
 
+/// #178 codex P1: a run the replay leaves out past its run cap is not taken as new. Its history is unread, so its ids
+/// and task refs may be taken: it is counted as a gap and takes no dispatch. A run the scan did read, and a new run,
+/// are unaffected.
+#[test]
+fn a_run_past_the_replay_run_cap_takes_no_dispatch() {
+    let r = rig("replay-cap", Opts::default());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    // Runs that sort before `r1` fill the cap, so `r1` is the one left out.
+    for i in 0..REPLAY_MAX_RUNS {
+        std::fs::create_dir_all(r.gw.data.join(format!("runs/a{i:05}"))).unwrap();
+    }
+    let life2 = next_life(&r);
+    assert!(life2.replay_gaps() >= 1, "the left-out run is a gap");
+    assert!(life2.view(&v.id).is_none(), "its history was not read");
+    assert!(matches!(life2.dispatch(r.task("r1", "t1"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "its id is not reused");
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
+    let other = r.done_on(&life2, &life2.dispatch(r.task("s1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(other.outcome, Some(Outcome::Done), "a new run is unaffected");
+}
+
+/// #178 codex P1: a runs folder that can't be listed may hide any run's history, so that life takes no dispatch at
+/// all, and counts it as a gap.
+#[test]
+fn a_runs_folder_that_cannot_be_listed_takes_no_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig("replay-unlisted", Opts::default());
+    r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let runs = r.gw.data.join("runs");
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let life2 = next_life(&r);
+    std::fs::set_permissions(&runs, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(life2.replay_gaps() >= 1);
+    for run in ["r1", "r2"] {
+        assert!(matches!(life2.dispatch(r.task(run, "t9"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)), "{run}");
+    }
+    // The next life lists it again and dispatches as usual.
+    let life3 = next_life(&r);
+    let v = r.done_on(&life3, &life3.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done));
+}
+
 /// #178 codex P2: a ticket held in its seat's queue (behind a running one) when the app crashes has a line. The next
 /// life replays it, ends it `app_restarted`, and keeps its id taken.
 #[test]

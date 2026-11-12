@@ -255,6 +255,9 @@ struct Book {
     /// Runs whose history replay could not read whole (over a size budget): their ticket ids past what was read are
     /// unknown, so nothing new is dispatched into them (#178 codex P2).
     incomplete: std::collections::BTreeSet<String>,
+    /// The runs folder itself could not be listed whole at start (#178 codex): which runs have history is unknown, so
+    /// no run takes a dispatch this life.
+    unlisted: bool,
 }
 
 impl Book {
@@ -395,8 +398,9 @@ pub enum DispatchError {
     Exists,
     /// The app is quitting: nothing new is queued.
     Closed,
-    /// This run's recorded history is too large to read whole at start, so which ticket ids it used is unknown: nothing
-    /// new is dispatched into it (a new run is unaffected).
+    /// This run's recorded history was not read whole at start (too large, or past the run cap), so which ticket ids it
+    /// used is unknown: nothing new is dispatched into it (a new run is unaffected). When the runs folder itself could
+    /// not be listed, every run answers this.
     HistoryIncomplete,
 }
 
@@ -430,17 +434,33 @@ impl WorkerRuntime {
         let data = &self.0.cfg.data;
         let runs_dir = data.join("runs");
         // The listing gives names only; each file is then opened by the no-follow descent (`open_record_read`).
-        let real_dir = std::fs::symlink_metadata(&runs_dir).is_ok_and(|m| m.is_dir());
-        let mut runs: Vec<String> = if real_dir {
-            std::fs::read_dir(&runs_dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect()
-        } else {
-            Vec::new()
-        };
+        // A run the scan leaves out must not look new (#178 codex P1): its ticket ids and task refs may be taken. A
+        // listing that fails, or fails on an entry, may have dropped any run, so every dispatch is refused; a run past
+        // the run cap is counted as a gap and refused like an oversized history. A missing folder means no history.
+        let mut unlisted = false;
+        let mut runs: Vec<String> = Vec::new();
+        match std::fs::symlink_metadata(&runs_dir) {
+            Ok(m) if m.is_dir() => match std::fs::read_dir(&runs_dir) {
+                Ok(rd) => {
+                    for e in rd {
+                        match e {
+                            // A name that isn't UTF-8 is no run id a dispatch can name.
+                            Ok(e) => runs.extend(e.file_name().into_string().ok()),
+                            Err(_) => unlisted = true,
+                        }
+                    }
+                }
+                Err(_) => unlisted = true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A link or file in the folder's place, or a stat that fails: what it hides is unknown.
+            _ => unlisted = true,
+        }
         runs.sort();
-        runs.truncate(REPLAY_MAX_RUNS);
-        let mut gaps = 0;
+        let past_cap = runs.split_off(REPLAY_MAX_RUNS.min(runs.len()));
+        let mut gaps = past_cap.len() as u64 + u64::from(unlisted);
         let mut past = BTreeMap::new();
-        let mut incomplete = std::collections::BTreeSet::new();
+        let mut incomplete: std::collections::BTreeSet<String> = past_cap.into_iter().collect();
         for run in &runs {
             let r = replay_run(data, run);
             gaps += r.gaps;
@@ -467,6 +487,7 @@ impl WorkerRuntime {
         let mut b = crate::lock(&self.0.book);
         b.past = past;
         b.incomplete = incomplete;
+        b.unlisted = unlisted;
         // A ticket's `seq` names its supervisor session (`core-<seq>-a<n>`), and the bus keeps a session's output on
         // disk (`<data>/spill`) across app lives: each life numbers from its start time in milliseconds, so no later
         // life's worker reads an earlier one's output under the same name.
@@ -475,7 +496,8 @@ impl WorkerRuntime {
     }
 
     /// How many `tickets.jsonl` lines the replay at start could not use (a partial last line, a damaged or oversized
-    /// line, a line for another run, or a file over the size cap). Non-zero means an earlier life's view has gaps.
+    /// line, a line for another run, or a file over the size cap), plus one per run left out past the run cap and one
+    /// for a runs folder that could not be listed whole. Non-zero means an earlier life's view has gaps.
     pub fn replay_gaps(&self) -> u64 {
         self.0.replay_gaps.load(AtomicOrdering::Relaxed)
     }
@@ -543,7 +565,7 @@ impl WorkerRuntime {
         if b.closed {
             return Err(DispatchError::Closed);
         }
-        if b.incomplete.contains(&job.spec().run) {
+        if b.unlisted || b.incomplete.contains(&job.spec().run) {
             return Err(DispatchError::HistoryIncomplete);
         }
         let id = match &mut job {
