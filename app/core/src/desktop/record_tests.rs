@@ -1,0 +1,531 @@
+//! 6h acceptance tests: fake engine scripts in a temp dir record their argv (one call per line, arguments separated by
+//! the unit separator), in a temp HOME with a fake key the app can't read. Nothing touches the owner's home.
+
+use super::*;
+use crate::vajra::bridge::{KILL_GRACE, fnv32};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static N: AtomicUsize = AtomicUsize::new(0);
+
+struct Tmp(PathBuf);
+
+impl Tmp {
+    fn new() -> Self {
+        let d = std::env::temp_dir().join(format!("vajra-record-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&d);
+        for sub in ["scripts", "home/.claude/vajra/campaigns", "data", "cwd/.git/objects", "cwd/.git/refs"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        let d = d.canonicalize().unwrap();
+        // A fake key the app process could not open even if it tried.
+        let key = d.join("home/.claude/vajra/.hmac-key");
+        std::fs::write(&key, "fake").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let t = Tmp(d);
+        t.campaign_script("");
+        t.python_script("");
+        t
+    }
+    fn log(&self) -> PathBuf {
+        self.0.join("calls.log")
+    }
+    /// A fake `vajra-campaign.sh`: logs `cwd` and its argv, then runs `body` (which may print and `exit`).
+    fn campaign_script(&self, body: &str) {
+        self.script("scripts/vajra-campaign.sh", &format!("printf 'campaign\\037%s' \"$PWD\" >> '{log}'\nfor a in \"$@\"; do printf '\\037%s' \"$a\" >> '{log}'; done\nprintf '\\n' >> '{log}'\n{body}\n", log = self.log().display()));
+    }
+    /// A fake python: logs its argv (the first is `-I`, then the script path), then runs `body`.
+    fn python_script(&self, body: &str) {
+        self.script("python", &format!("printf 'python' >> '{log}'\nfor a in \"$@\"; do printf '\\037%s' \"$a\" >> '{log}'; done\nprintf '\\n' >> '{log}'\n{body}\n", log = self.log().display()));
+    }
+    fn script(&self, rel: &str, body: &str) {
+        let p = self.0.join(rel);
+        std::fs::write(&p, format!("#!/bin/bash\n{body}\nexit 0\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fn bridge(&self) -> Bridge {
+        let mut b = Bridge::new(self.0.join("scripts")).with_home(self.0.join("home"));
+        b.python = self.0.join("python");
+        b.record_cwd = Some(self.0.join("cwd"));
+        b.timeout = Duration::from_secs(10);
+        b
+    }
+    fn cfg(&self, resumed: bool) -> RecordConfig {
+        RecordConfig { run: "20261112-1200".into(), slug: "deliver-20261112-1200".into(), trust: "guarded".into(), home: self.0.join("home"), resumed }
+    }
+    fn record(&self, resumed: bool) -> CoreRecord {
+        CoreRecord::new(self.cfg(resumed), self.bridge()).unwrap()
+    }
+    /// Every call so far: the program kind, then its argv, with the script path shown as its file name.
+    fn calls(&self) -> Vec<Vec<String>> {
+        let s = std::fs::read_to_string(self.log()).unwrap_or_default();
+        let scripts = self.0.join("scripts");
+        s.lines()
+            .map(|l| {
+                l.split('\u{1f}')
+                    .map(|a| a.strip_prefix(&format!("{}/", scripts.display())).unwrap_or(a).to_string())
+                    .map(|a| if a == self.0.join("cwd").display().to_string() { "<record cwd>".into() } else { a })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(self.0.join("home/.claude/vajra/.hmac-key"), std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn v(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| s.to_string()).collect()
+}
+
+const RUN: &str = "20261112-1200";
+/// Long enough for bash to start and log under the OS sandbox; short next to the scripts' `sleep 30`.
+const SHORT: Duration = Duration::from_secs(2);
+const SLUG: &str = "deliver-20261112-1200";
+
+fn plan() -> PlanRecord {
+    PlanRecord {
+        goal: "add a --json flag\nto export".into(),
+        features: vec![Feature { id: "ac-1".into(), desc: "export has --json".into() }, Feature { id: "ac-2".into(), desc: "docs say so".into() }],
+        tasks: vec![
+            TaskRecord { id: format!("{RUN}.t1"), title: "do t1".into(), agent: "bhima".into(), deps: vec![], files: v(&["src/a/", "src/*.rs"]), criteria: v(&["ac-1"]), branch: format!("vajra/{RUN}/task-t1-r1") },
+            TaskRecord { id: format!("{RUN}.t2"), title: "do t2".into(), agent: "abhimanyu".into(), deps: vec![format!("{RUN}.t1")], files: v(&["docs/"]), criteria: v(&["ac-2"]), branch: format!("vajra/{RUN}/task-t2-r1") },
+        ],
+    }
+}
+
+// ---------------------------------------------------------------- argv, in the workflow's order
+
+#[test]
+fn the_plan_creates_adds_and_validates_with_exactly_the_scripts_argv() {
+    let t = Tmp::new();
+    t.record(false).plan(&plan()).unwrap();
+    let c = t.calls();
+    assert_eq!(c[0], v(&["campaign", "<record cwd>", "create", SLUG, "--goal", "add a --json flag to export", "--feature", "ac-1|export has --json", "--feature", "ac-2|docs say so"]));
+    let t1 = format!("{RUN}.t1");
+    let t2 = format!("{RUN}.t2");
+    let b1 = format!("vajra/{RUN}/task-t1-r1");
+    let b2 = format!("vajra/{RUN}/task-t2-r1");
+    assert_eq!(c[1], v(&["python", "-I", "vajra_tasks.py", "add", &t1, "--title", "do t1", "--owner", "bhima", "--files", "src/a/,src/*.rs", "--acceptance", "ac-1", "--branch", &b1, "--campaign", SLUG]));
+    assert_eq!(c[2], v(&["python", "-I", "vajra_tasks.py", "add", &t2, "--title", "do t2", "--owner", "abhimanyu", "--deps", &t1, "--files", "docs/", "--acceptance", "ac-2", "--branch", &b2, "--campaign", SLUG]));
+    assert_eq!(c[3], v(&["python", "-I", "vajra_tasks.py", "validate", "--campaign", SLUG]));
+    assert_eq!(c.len(), 4);
+}
+
+#[test]
+fn events_run_in_order_with_exactly_the_scripts_argv() {
+    let t = Tmp::new();
+    let r = t.record(false);
+    let id = format!("{RUN}.t1");
+    r.send(Event::Claim { task: id.clone(), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    r.send(Event::Report { task: id.clone(), status: TaskStatus::Question, summary: "which\tformat?".into() });
+    r.send(Event::Progress(format!("run {RUN} round 1: waiting for the user on t1; no integration yet")));
+    r.send(Event::Checkpoint("stuck after 3 rounds".into()));
+    r.flush();
+    let c = t.calls();
+    assert_eq!(c[0], v(&["python", "-I", "vajra_tasks.py", "claim", &id, "bhima", "--stacked", "--campaign", SLUG, "--worktree", "/wt/one"]));
+    assert_eq!(c[1], v(&["python", "-I", "vajra_tasks.py", "report", &id, "in_progress", "--campaign", SLUG]));
+    assert_eq!(c[2], v(&["python", "-I", "vajra_tasks.py", "report", &id, "question", "--campaign", SLUG, "--summary", "which format?"]));
+    let line = format!("run {RUN} round 1: waiting for the user on t1; no integration yet");
+    assert_eq!(c[3], v(&["campaign", "<record cwd>", "progress", &line, "--campaign", SLUG]));
+    assert_eq!(c[4], v(&["campaign", "<record cwd>", "checkpoint", "stuck after 3 rounds", "--campaign", SLUG]));
+    assert!(r.card().notes.is_empty(), "{:?}", r.card().notes);
+}
+
+#[test]
+fn the_six_i_variants_build_the_workflows_argv() {
+    let t = Tmp::new();
+    let b = t.bridge();
+    let plan_of = |r: Request| {
+        let (p, a, cwd) = b.plan(&r).unwrap();
+        (p.file_name().unwrap().to_string_lossy().into_owned(), a.into_iter().map(|x| x.replace(&format!("{}/", t.0.join("scripts").display()), "")).collect::<Vec<_>>(), cwd)
+    };
+    let (p, a, cwd) = plan_of(Request::CampaignPass { slug: SLUG.into(), feature: "ac-1".into(), evidence: "cargo test (exit 0)".into() });
+    assert_eq!((p.as_str(), a, cwd), ("vajra-campaign.sh", v(&["pass", "ac-1", "--evidence", "cargo test (exit 0)", "--campaign", SLUG]), Some(t.0.join("cwd"))));
+    assert_eq!(plan_of(Request::CampaignClose { slug: SLUG.into(), status: CloseStatus::Done }).1, v(&["close", SLUG, "--status", "done"]));
+    let b64 = "IyByZXBvcnQK";
+    let (_, a, _) = plan_of(Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32(b64), base64: b64.into() });
+    assert_eq!(a, v(&["report", "--campaign", SLUG, "--bytes", "9", "--check", &fnv32(b64), "--base64", b64]));
+    assert_eq!(plan_of(Request::CampaignUnlockStale { slug: SLUG.into() }).1, v(&["unlock", SLUG, "--if-stale"]));
+    let h = "a".repeat(40);
+    let (_, a, cwd) = plan_of(Request::TasksClose {
+        slug: SLUG.into(),
+        id: format!("{RUN}.t1"),
+        evidence: PathBuf::from("/data/walkthroughs/x/evidence.json"),
+        head: h.clone(),
+        commit: "b".repeat(40),
+        branch: format!("vajra/{RUN}/task-t1-r1"),
+        base_commit: "c".repeat(40),
+        changed: v(&["src/a.rs", "src/b c.rs"]),
+        repo: PathBuf::from("/repo"),
+    });
+    let id = format!("{RUN}.t1");
+    let br = format!("vajra/{RUN}/task-t1-r1");
+    let (bb, cc) = ("b".repeat(40), "c".repeat(40));
+    assert_eq!(a, v(&["-I", "vajra_tasks.py", "close", &id, "--evidence", "/data/walkthroughs/x/evidence.json", "--head", &h, "--commit", &bb, "--branch", &br, "--base-commit", &cc, "--changed", "src/a.rs,src/b c.rs", "--campaign", SLUG]));
+    assert_eq!(cwd, Some(PathBuf::from("/repo")), "close runs in the repository, as write-back does");
+    assert_eq!(plan_of(Request::TasksDep { slug: SLUG.into(), id: id.clone(), dep: format!("{RUN}.t0"), remove: true }).1, v(&["-I", "vajra_tasks.py", "dep", &id, &format!("{RUN}.t0"), "--remove", "--campaign", SLUG]));
+}
+
+#[test]
+fn fnv32_matches_the_workflow_and_the_script() {
+    // fnv("") and fnv("a") from the FNV-1a 32 reference.
+    assert_eq!(fnv32(""), "811c9dc5");
+    assert_eq!(fnv32("a"), "e40c292c");
+}
+
+// ---------------------------------------------------------------- refusals: nothing is spawned
+
+#[test]
+fn every_variant_refuses_a_value_outside_its_regex_or_cap_and_spawns_nothing() {
+    let t = Tmp::new();
+    let b = t.bridge();
+    let id = format!("{RUN}.t1");
+    let add = |f: &dyn Fn(&mut Request)| {
+        let mut r = Request::TasksAdd { slug: SLUG.into(), id: id.clone(), title: "t".into(), owner: "bhima".into(), deps: vec![], files: v(&["src/"]), acceptance: vec![], branch: "vajra/x".into() };
+        f(&mut r);
+        r
+    };
+    let mut bad: Vec<Request> = vec![
+        Request::CampaignCreate { slug: "Deliver-1".into(), goal: "g".into(), features: vec![Feature { id: "a".into(), desc: "d".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "--goal".into(), features: vec![Feature { id: "a".into(), desc: "d".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g".repeat(1001), features: vec![Feature { id: "a".into(), desc: "d".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g".into(), features: vec![] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g".into(), features: vec![Feature { id: "-a".into(), desc: "d".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g".into(), features: vec![Feature { id: "a".into(), desc: "line\nbreak".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g\u{202e}".into(), features: vec![Feature { id: "a".into(), desc: "d".into() }] },
+        Request::CampaignCreate { slug: SLUG.into(), goal: "g\u{85}".into(), features: vec![Feature { id: "a".into(), desc: "d".into() }] },
+        Request::CampaignShow { slug: "../x".into() },
+        Request::CampaignPass { slug: SLUG.into(), feature: "a b".into(), evidence: "e".into() },
+        Request::CampaignPass { slug: SLUG.into(), feature: "a".into(), evidence: "e".repeat(301) },
+        Request::CampaignCheckpoint { slug: SLUG.into(), label: "".into() },
+        Request::CampaignCheckpoint { slug: SLUG.into(), label: "--campaign".into() },
+        Request::CampaignClose { slug: "".into(), status: CloseStatus::Done },
+        Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: "00000000".into(), base64: "IyByZXBvcnQK".into() },
+        Request::CampaignReport { slug: SLUG.into(), bytes: 0, check: fnv32("IyByZXBvcnQK"), base64: "IyByZXBvcnQK".into() },
+        Request::CampaignReport { slug: SLUG.into(), bytes: 9, check: fnv32("not base64!"), base64: "not base64!".into() },
+        Request::CampaignUnlockStale { slug: "a/b".into() },
+        add(&|r| if let Request::TasksAdd { owner, .. } = r { *owner = "Bhima".into() }),
+        add(&|r| if let Request::TasksAdd { id, .. } = r { *id = "x".repeat(65) }),
+        add(&|r| if let Request::TasksAdd { files, .. } = r { *files = v(&["../etc"]) }),
+        add(&|r| if let Request::TasksAdd { files, .. } = r { *files = v(&["/abs"]) }),
+        add(&|r| if let Request::TasksAdd { files, .. } = r { *files = v(&["a,b"]) }),
+        add(&|r| if let Request::TasksAdd { files, .. } = r { *files = vec![] }),
+        add(&|r| if let Request::TasksAdd { deps, .. } = r { *deps = v(&["a,b"]) }),
+        add(&|r| if let Request::TasksAdd { branch, .. } = r { *branch = "-b".into() }),
+        add(&|r| if let Request::TasksAdd { title, .. } = r { *title = "two  spaces".into() }),
+        add(&|r| if let Request::TasksAdd { acceptance, .. } = r { *acceptance = v(&["c 1"]) }),
+        Request::TasksDep { slug: SLUG.into(), id: id.clone(), dep: "--remove".into(), remove: false },
+        Request::TasksValidate { slug: "UPPER".into() },
+        Request::TasksClaim { slug: SLUG.into(), id: id.clone(), worker: "w1 seat".into(), worktree: None },
+        Request::TasksClaim { slug: SLUG.into(), id: id.clone(), worker: "bhima".into(), worktree: Some(PathBuf::from("relative/wt")) },
+        Request::TasksReport { slug: SLUG.into(), id: id.clone(), status: TaskStatus::Done, summary: Some("s".repeat(501)) },
+        Request::TasksReport { slug: SLUG.into(), id: "".into(), status: TaskStatus::Done, summary: None },
+    ];
+    let close = |f: &dyn Fn(&mut Request)| {
+        let mut r = Request::TasksClose {
+            slug: SLUG.into(), id: id.clone(), evidence: "/e.json".into(), head: "a".repeat(40), commit: "b".repeat(40), branch: "vajra/x".into(), base_commit: "c".repeat(40), changed: vec![], repo: "/repo".into(),
+        };
+        f(&mut r);
+        r
+    };
+    bad.push(close(&|r| if let Request::TasksClose { head, .. } = r { *head = "a".repeat(39) }));
+    bad.push(close(&|r| if let Request::TasksClose { commit, .. } = r { *commit = "XYZ1234".into() }));
+    bad.push(close(&|r| if let Request::TasksClose { evidence, .. } = r { *evidence = "e.json".into() }));
+    bad.push(close(&|r| if let Request::TasksClose { changed, .. } = r { *changed = v(&["a,b"]) }));
+    bad.push(close(&|r| if let Request::TasksClose { repo, .. } = r { *repo = "repo".into() }));
+    for r in &bad {
+        assert!(matches!(b.run(r), Err(BridgeError::Invalid(_))), "accepted {r:?}");
+    }
+    assert!(t.calls().is_empty(), "a refused request spawns nothing: {:?}", t.calls());
+}
+
+#[test]
+fn a_campaign_call_with_no_record_cwd_is_refused() {
+    let t = Tmp::new();
+    let mut b = t.bridge();
+    b.record_cwd = None;
+    assert!(matches!(b.run(&Request::CampaignShow { slug: SLUG.into() }), Err(BridgeError::Invalid(_))));
+    assert!(CoreRecord::new(t.cfg(false), b).is_err());
+    assert!(t.calls().is_empty());
+}
+
+#[test]
+fn the_slug_must_be_the_one_the_evidence_trust_names() {
+    let t = Tmp::new();
+    let mut cfg = t.cfg(false);
+    cfg.trust = "outside_guard".into();
+    assert!(CoreRecord::new(cfg.clone(), t.bridge()).is_err(), "an outside_guard run never writes an unmarked campaign");
+    cfg.slug = format!("{SLUG}-og");
+    assert!(CoreRecord::new(cfg, t.bridge()).is_ok());
+}
+
+#[test]
+fn the_cleaner_gives_what_the_checker_accepts() {
+    for s in ["  --lead\ttext\r\nwith\u{202e} odd\u{85}  bits  ", "-", "", &"é".repeat(400)] {
+        let c = bridge_text::one_line(s, 200);
+        assert!(bridge_text::text(&c, 200, false).is_ok(), "{s:?} → {c:?}");
+    }
+    assert_eq!(bridge_text::one_line("  --lead\ttext ", 200), "lead text");
+}
+
+// ---------------------------------------------------------------- the key and the store files
+
+#[test]
+fn the_record_works_with_a_key_file_the_app_cannot_read() {
+    let t = Tmp::new();
+    let key = t.0.join("home/.claude/vajra/.hmac-key");
+    assert!(std::fs::read(&key).is_err() || unsafe { libc::geteuid() } == 0, "the fake key is unreadable to this process");
+    let r = t.record(false);
+    r.plan(&plan()).unwrap();
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    assert!(r.card().notes.is_empty());
+    assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0, "nothing changed the key's mode");
+}
+
+#[test]
+fn the_record_modules_open_no_file_themselves() {
+    for (name, src) in [("desktop/record.rs", include_str!("record.rs")), ("vajra/bridge_record.rs", include_str!("../vajra/bridge_record.rs"))] {
+        let code: String = src.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        for banned in ["std::fs", "File::", "OpenOptions", "read_to_string", "hmac-key", ".claude/vajra/.", "campaign.json", "tasks.json\""] {
+            assert!(!code.contains(banned), "{name} uses {banned}: the record reaches the store only through the scripts");
+        }
+    }
+}
+
+// ---------------------------------------------------------------- failure table rows
+
+#[test]
+fn a_failed_create_add_or_validate_fails_the_plan_with_the_first_error_line() {
+    for (campaign, python, want) in [
+        ("[ \"$1\" = create ] && { echo 'vajra-campaign: cannot create dir' >&2; exit 1; }", "", "vajra-campaign: cannot create dir"),
+        ("", "[ \"$3\" = add ] && { echo 'vajra_tasks: invalid owner agent' >&2; exit 2; }", "vajra_tasks: invalid owner agent"),
+        ("", "[ \"$3\" = validate ] && { echo 'vajra_tasks: task x: unknown agent bhima (not in ~/.claude/agents)' >&2; exit 2; }", "unknown agent bhima"),
+    ] {
+        let t = Tmp::new();
+        t.campaign_script(campaign);
+        t.python_script(python);
+        let err = t.record(false).plan(&plan()).unwrap_err();
+        assert!(err.contains(want), "{err}");
+    }
+}
+
+#[test]
+fn a_best_effort_write_is_retried_once_then_noted() {
+    let t = Tmp::new();
+    t.python_script("[ \"$3\" = claim ] && { echo 'vajra_tasks: task x is pending, not ready' >&2; exit 3; }");
+    let r = t.record(false);
+    r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: None });
+    r.flush();
+    let claims = t.calls().iter().filter(|c| c.get(3).is_some_and(|a| a == "claim")).count();
+    assert_eq!(claims, 2, "one retry");
+    assert_eq!(r.card().notes, vec!["the run record's claim failed: vajra_tasks: task x is pending, not ready".to_string()]);
+}
+
+#[test]
+fn a_timed_out_write_is_never_retried_and_a_broken_signature_is_on_the_card() {
+    let t = Tmp::new();
+    t.campaign_script("case \"$1\" in progress) sleep 30 ;; verify) echo 'deliver: signature INVALID' >&2; exit 3 ;; esac");
+    let mut b = t.bridge();
+    b.timeout = SHORT;
+    let r = CoreRecord::new(t.cfg(false), b).unwrap();
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    let kinds: Vec<String> = t.calls().iter().map(|c| c[2].clone()).collect();
+    assert_eq!(kinds, v(&["progress", "verify"]), "no retry after a timeout; verify instead");
+    assert!(r.card().signature_broken);
+}
+
+// ---------------------------------------------------------------- idempotent create
+
+fn show_json(goal: &str, features: &[(&str, &str, bool)], status: &str, sig: bool) -> String {
+    let f: Vec<Value> = features.iter().map(|(i, d, p)| serde_json::json!({"id": i, "description": d, "passes": p})).collect();
+    serde_json::json!({"campaign": {"slug": SLUG, "goal": goal, "status": status}, "features": f, "signature_valid": sig}).to_string()
+}
+
+fn with_existing(t: &Tmp, show: &str) {
+    let file = t.0.join("show.json");
+    std::fs::write(&file, show).unwrap();
+    t.campaign_script(&format!(
+        "case \"$1\" in create) echo \"vajra-campaign: campaign already exists: $2\" >&2; exit 1 ;; show) cat '{}' ;; esac",
+        file.display()
+    ));
+}
+
+#[test]
+fn a_second_create_reuses_the_campaign_only_for_a_resume_that_matches_exactly() {
+    let feats = [("ac-1", "export has --json", false), ("ac-2", "docs say so", false)];
+    let t = Tmp::new();
+    with_existing(&t, &show_json("add a --json flag to export", &feats, "active", true));
+    t.record(true).plan(&plan()).unwrap();
+    let kinds: Vec<String> = t.calls().iter().map(|c| if c[0] == "campaign" { c[2].clone() } else { c[3].clone() }).collect();
+    assert_eq!(kinds, v(&["create", "show", "add", "add", "validate"]), "reused, then the adds (unchanged) and validate");
+
+    let t = Tmp::new();
+    with_existing(&t, &show_json("add a --json flag to export", &feats, "active", true));
+    let err = t.record(false).plan(&plan()).unwrap_err();
+    assert!(err.contains("didn't create it"), "a fresh run never adopts an existing campaign: {err}");
+
+    for (goal, feats, status, sig) in [
+        ("another goal", feats.to_vec(), "active", true),
+        ("add a --json flag to export", vec![feats[1], feats[0]], "active", true),
+        ("add a --json flag to export", vec![feats[0]], "active", true),
+        ("add a --json flag to export", vec![feats[0], ("ac-2", "docs say so", true)], "active", true),
+        ("add a --json flag to export", feats.to_vec(), "done", true),
+        ("add a --json flag to export", feats.to_vec(), "active", false),
+    ] {
+        let t = Tmp::new();
+        with_existing(&t, &show_json(goal, &feats, status, sig));
+        assert!(t.record(true).plan(&plan()).is_err(), "{goal} {feats:?} {status} {sig}");
+        assert!(!t.calls().iter().any(|c| c.get(3).is_some_and(|a| a == "add")), "nothing is added to a campaign that isn't this run's");
+    }
+}
+
+// ---------------------------------------------------------------- locks
+
+#[test]
+fn a_held_lock_shows_its_path_and_repair_and_the_core_never_removes_it() {
+    let t = Tmp::new();
+    let lock = t.0.join("home/.claude/vajra/campaigns").join(SLUG).join(".lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    t.campaign_script("case \"$1\" in progress) echo \"vajra-campaign: campaign is locked (/elsewhere/.lock); remove it if no other run is active\" >&2; exit 1 ;; unlock) exit 2 ;; esac");
+    let r = t.record(false);
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    let card = r.card().lock.expect("a lock card");
+    assert_eq!(card.path, lock.display().to_string(), "the path comes from HOME and the stored slug, never from script output");
+    assert_eq!(card.text, LOCK_TEXT);
+    assert!(card.repair);
+    assert!(lock.is_dir(), "the core never removes a lock");
+    let after = r.repair();
+    assert!(!after.lock.unwrap().repair, "an engine without unlock --if-stale (usage error) keeps the manual text");
+    assert!(t.calls().iter().any(|c| c[2..] == v(&["unlock", SLUG, "--if-stale"])));
+    assert!(lock.is_dir());
+}
+
+#[test]
+fn repair_clears_the_card_when_the_script_removed_a_stale_lock() {
+    let t = Tmp::new();
+    t.campaign_script("case \"$1\" in progress) echo 'vajra-campaign: campaign is locked (x)' >&2; exit 1 ;; esac");
+    let r = t.record(false);
+    r.send(Event::Progress("p".into()));
+    r.flush();
+    assert!(r.card().lock.is_some());
+    assert!(r.repair().lock.is_none());
+}
+
+#[test]
+fn a_sigtermed_campaign_write_frees_its_lock_in_the_grace_period() {
+    let t = Tmp::new();
+    let lock = t.0.join("lockdir");
+    t.campaign_script(&format!("mkdir '{l}'; trap 'rmdir \"{l}\"' EXIT; sleep 30 & wait", l = lock.display()));
+    let mut b = t.bridge();
+    b.timeout = SHORT;
+    let started = std::time::Instant::now();
+    let o = b.run(&Request::CampaignProgress { slug: SLUG.into(), text: "p".into() }).unwrap();
+    assert!(o.timed_out);
+    assert!(!lock.exists(), "the EXIT trap ran: SIGTERM before SIGKILL");
+    assert!(started.elapsed() < SHORT + KILL_GRACE, "a script that exits on SIGTERM doesn't wait out the grace");
+}
+
+#[test]
+fn a_read_still_gets_sigkill_at_once() {
+    let t = Tmp::new();
+    let lock = t.0.join("lockdir");
+    t.campaign_script(&format!("mkdir '{l}'; trap 'rmdir \"{l}\"' EXIT; sleep 30 & wait", l = lock.display()));
+    let mut b = t.bridge();
+    b.timeout = SHORT;
+    let o = b.run(&Request::CampaignShow { slug: SLUG.into() }).unwrap();
+    assert!(o.timed_out);
+    assert!(lock.exists(), "show is a read: no grace (and no lock in the real script)");
+}
+
+// ---------------------------------------------------------------- orphans
+
+#[test]
+fn an_orphan_is_a_core_runs_campaign_still_active_and_only_that_closes() {
+    let t = Tmp::new();
+    let home = t.0.join("home");
+    let scripts = home.join(".claude/skills/vajra/scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let log = t.log();
+    // `show` answers active for the -og run's campaign and done for the other; every call is logged.
+    std::fs::write(
+        scripts.join("vajra-campaign.sh"),
+        format!(
+            "#!/bin/bash\nprintf '%s\\037' \"$@\" >> '{}'; printf '\\n' >> '{}'\ncase \"$1 $2\" in\n  'show deliver-20261101-0900-og') echo '{{\"campaign\": {{\"status\": \"active\"}}}}' ;;\n  'show deliver-20261101-1000') echo '{{\"campaign\": {{\"status\": \"done\"}}}}' ;;\nesac\nexit 0\n",
+            log.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(scripts.join("vajra-campaign.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = t.0.join("data");
+    crate::desktop::test_project(&data, &home, &t.0.join("repo"));
+    let app = crate::desktop::App::open(&data, &home).unwrap();
+    for (run, slug, trust) in [("20261101-0900", "deliver-20261101-0900-og", "outside_guard"), ("20261101-1000", "deliver-20261101-1000", "guarded")] {
+        app.record_run_seats(run, &serde_json::json!({"campaign_slug": slug, "evidence_trust": trust})).unwrap();
+    }
+    let o = app.record_orphans(&[]);
+    assert_eq!(o["orphans"], serde_json::json!([{"run_id": "20261101-0900", "campaign": "deliver-20261101-0900-og"}]));
+    assert_eq!(app.record_orphans(&["20261101-0900".into()])["orphans"], serde_json::json!([]), "a live run is no orphan");
+    let shown: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().filter(|l| l.starts_with("show")).map(str::to_string).collect();
+    assert!(shown.iter().all(|l| l.contains("deliver-20261101-0900-og") || l.contains("deliver-20261101-1000")), "only slugs a core run recorded: {shown:?}");
+    assert!(app.record_close_orphan("20261101-1000", &[]).is_err(), "a done campaign isn't an orphan");
+    assert!(app.record_close_orphan("20261101-0900", &[]).is_ok());
+    let closes: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().filter(|l| l.starts_with("close")).map(str::to_string).collect();
+    assert_eq!(closes, vec!["close\u{1f}deliver-20261101-0900-og\u{1f}--status\u{1f}abandoned\u{1f}".to_string()]);
+    let rec = app.run_record("20261101-0900", true).unwrap();
+    assert_eq!(rec.card().campaign, "deliver-20261101-0900-og", "a resume binds to the stored -og slug, never recomputed");
+}
+
+// ---------------------------------------------------------------- the real scripts (S8), when the machine has them
+
+/// The engine's own scripts in a temp HOME, with the scrubbed env and no Claude session. Skipped where the script's
+/// tools are missing (`/usr/bin/jq` and `/usr/bin/openssl`).
+#[test]
+fn the_real_scripts_create_reuse_and_record_from_the_cores_own_cwd() {
+    if !Path::new("/usr/bin/jq").is_file() || !Path::new("/usr/bin/openssl").is_file() || !Path::new("/usr/bin/python3").is_file() {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl and /usr/bin/python3");
+        return;
+    }
+    let t = Tmp::new();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let mut b = Bridge::new(repo.canonicalize().unwrap()).with_home(t.0.join("home"));
+    // The real scripts read and make the key: a readable fake one in the temp HOME.
+    let key = t.0.join("home/.claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(t.0.join("home/.claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu"] {
+        std::fs::write(t.0.join("home/.claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
+    b.timeout = RECORD_TIMEOUT;
+    let r = CoreRecord::new(t.cfg(false), b.clone()).unwrap();
+    r.plan(&plan()).unwrap();
+    r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    r.send(Event::Report { task: format!("{RUN}.t1"), status: TaskStatus::Done, summary: "done".into() });
+    r.send(Event::Progress(format!("run {RUN} round 1: 1/2 criteria passing; no integration yet")));
+    r.send(Event::Checkpoint("stuck after 1 rounds".into()));
+    r.flush();
+    assert!(r.card().notes.is_empty(), "{:?}", r.card().notes);
+    assert!(matches!(b.run(&Request::CampaignVerify { slug: SLUG.into() }), Ok(o) if o.exit() == Some(0)));
+    // A resumed run reuses it; a fresh one refuses it.
+    assert!(CoreRecord::new(t.cfg(true), b.clone()).unwrap().plan(&plan()).is_ok());
+    assert!(CoreRecord::new(t.cfg(false), b.clone()).unwrap().plan(&plan()).is_err());
+    // The pointer `create` set is the record dir's, never the global one or a repo's.
+    let campaigns = t.0.join("home/.claude/vajra/campaigns");
+    let pointers: Vec<String> = std::fs::read_dir(&campaigns).unwrap().filter_map(|e| e.ok()?.file_name().into_string().ok()).filter(|n| n.starts_with(".active-")).collect();
+    assert_eq!(pointers.len(), 1, "{pointers:?}");
+    assert_ne!(pointers[0], ".active-global");
+    assert_eq!(campaign_status(&b, SLUG).as_deref(), Some("active"));
+    close_abandoned(&b, SLUG).unwrap();
+    assert_eq!(campaign_status(&b, SLUG).as_deref(), Some("abandoned"));
+}

@@ -120,6 +120,17 @@ fn act_worker_clean_up(app: State<'_, App>, envelope: Envelope) -> Value {
     app.act_worker_clean_up(&envelope)
 }
 
+/// Core runs whose signed record is still open after the app life that ran them (PR 6h).
+#[tauri::command(async)]
+fn record_orphans(app: State<'_, App>) -> Value {
+    app.record_orphans(&[])
+}
+
+#[tauri::command(async)]
+fn act_close_orphan(app: State<'_, App>, envelope: Envelope, run_id: String) -> Value {
+    app.act_close_orphan(&envelope, &run_id)
+}
+
 #[tauri::command(async)]
 fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
     app.act_close_finished(&envelope, &WorktreeTerms(&terms, &own))
@@ -810,6 +821,8 @@ fn main() {
             worker_disk,
             install_dev_tools,
             act_worker_clean_up,
+            record_orphans,
+            act_close_orphan,
             closeout_status,
             act_start_run,
             act_ask_lead,

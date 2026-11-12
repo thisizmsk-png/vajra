@@ -65,7 +65,8 @@ impl Workers for FakeWorkers {
         if b.contains_key(&id) {
             return Err(DispatchError::Exists);
         }
-        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None };
+        let worktree = Some(PathBuf::from(format!("/wt/{id}")));
+        let t = Tick { id: id.clone(), state: State::Running, outcome: None, reason: None, commit: None, attempt: 1, elapsed_s: 0, queue_position: None, worktree };
         b.insert(id.clone(), (t, spec, seat));
         Ok(id)
     }
@@ -720,4 +721,146 @@ fn the_run_timeout_counts_from_the_runs_start_not_the_clocks_origin() {
     clock.advance(1);
     p.tick();
     assert_eq!(p.card().status, Some(RunStatus::TimedOut));
+}
+
+// ---------------------------------------------------------------- the signed run record (6h)
+
+/// Records what the protocol asks of the run record, in order.
+#[derive(Default)]
+struct FakeRecord {
+    plans: Mutex<Vec<PlanRecord>>,
+    events: Mutex<Vec<Event>>,
+    fail_plan: Mutex<Option<String>>,
+}
+
+impl RunRecord for FakeRecord {
+    fn plan(&self, p: &PlanRecord) -> Result<(), String> {
+        crate::lock(&self.plans).push(p.clone());
+        crate::lock(&self.fail_plan).clone().map_or(Ok(()), Err)
+    }
+    fn send(&self, e: Event) {
+        crate::lock(&self.events).push(e);
+    }
+    fn card(&self) -> RecordCard {
+        RecordCard { campaign: "deliver-r1".into(), ..RecordCard::default() }
+    }
+    fn repair(&self) -> RecordCard {
+        self.card()
+    }
+    fn flush(&self) {}
+}
+
+fn recorded_with(limits: Limits) -> (Rig, Arc<FakeRecord>) {
+    let mut r = rig_with("add a --json flag to the export command", default_seats(), limits, false);
+    let rec = Arc::new(FakeRecord::default());
+    let placeholder = rig().p;
+    r.p = std::mem::replace(&mut r.p, placeholder).with_record(rec.clone());
+    (r, rec)
+}
+
+fn recorded() -> (Rig, Arc<FakeRecord>) {
+    recorded_with(Limits::default())
+}
+
+fn events(rec: &FakeRecord) -> Vec<Event> {
+    crate::lock(&rec.events).clone()
+}
+
+#[test]
+fn round_one_registers_the_campaign_and_the_task_graph_with_run_ids_agents_and_core_branches() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let plans = crate::lock(&rec.plans).clone();
+    assert_eq!(plans.len(), 1);
+    let p = &plans[0];
+    assert_eq!(p.goal, "add a --json flag to the export command");
+    assert_eq!(p.features, vec![Feature { id: "ac-1".into(), desc: "export has --json".into() }]);
+    let ids: Vec<&str> = p.tasks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["r1.t1", "r1.t2", "r1.t3"], "the workflow's order (topo), ids `<run>.<id>`");
+    assert_eq!(p.tasks[1].agent, "nakula", "the role's agent, never the seat");
+    assert_eq!(p.tasks[1].deps, ["r1.t1"]);
+    assert_eq!(p.tasks[0].branch, "vajra/r1/task-t1-r1");
+    assert_eq!(p.tasks[0].criteria, ["ac-1"]);
+}
+
+#[test]
+fn a_failed_record_at_plan_time_ends_the_run_before_dispatch() {
+    let (r, rec) = recorded();
+    *crate::lock(&rec.fail_plan) = Some("vajra_tasks: task r1.t1: unknown agent bhima".into());
+    let (c, why) = code(r.p.plan_tasks(plan1()));
+    assert_eq!(c, RECORD_FAILED, "{why}");
+    assert!(why.contains("unknown agent bhima"), "the first error line is the reason: {why}");
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert_eq!(code(r.p.dispatch_worker("t1")).0, RUN_ENDED);
+    assert_eq!(r.w.running(), 0, "nothing was dispatched");
+}
+
+#[test]
+fn dispatch_claims_with_the_worktree_and_each_outcome_is_reported_once() {
+    let (r, rec) = recorded();
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    let t3 = r.dispatch("t3");
+    r.w.end(&t1, Outcome::Done);
+    r.w.end(&t3, Outcome::NeedsUser);
+    for _ in 0..2 {
+        let _ = r.p.await_any(&[t1.clone(), t3.clone()], Duration::from_secs(1)).unwrap();
+    }
+    let ev = events(&rec);
+    assert_eq!(ev[0], Event::Claim { task: "r1.t1".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t1}"))) });
+    assert_eq!(ev[1], Event::Claim { task: "r1.t3".into(), agent: "bhima".into(), worktree: Some(PathBuf::from(format!("/wt/{t3}"))) });
+    let reports: Vec<(String, TaskStatus)> = ev.iter().filter_map(|e| if let Event::Report { task, status, .. } = e { Some((task.clone(), *status)) } else { None }).collect();
+    assert_eq!(reports, vec![("r1.t1".into(), TaskStatus::Done), ("r1.t3".into(), TaskStatus::Question)], "each once");
+}
+
+#[test]
+fn the_outcome_map_matches_the_workflow() {
+    for (o, want) in [
+        (Outcome::Done, TaskStatus::Done),
+        (Outcome::Progress, TaskStatus::Progress),
+        (Outcome::Failed, TaskStatus::Failed),
+        (Outcome::NeedsUser, TaskStatus::Question),
+        (Outcome::Stopped, TaskStatus::Blocked),
+    ] {
+        let (r, rec) = recorded();
+        r.p.plan_tasks(plan1()).unwrap();
+        let t = r.dispatch("t1");
+        r.w.end(&t, o);
+        let _ = r.p.await_any(&[t], Duration::from_secs(1)).unwrap();
+        let got = events(&rec).iter().find_map(|e| if let Event::Report { status, .. } = e { Some(*status) } else { None });
+        assert_eq!(got, Some(want), "{o:?}");
+    }
+}
+
+#[test]
+fn a_waiting_round_and_the_last_failed_round_write_the_workflow_texts() {
+    let (r, rec) = recorded_with(Limits { rounds: 1, ..Limits::default() });
+    r.p.plan_tasks(plan1()).unwrap();
+    let t1 = r.dispatch("t1");
+    let t3 = r.dispatch("t3");
+    r.w.end(&t1, Outcome::Done);
+    r.w.end(&t3, Outcome::NeedsUser);
+    r.p.integrate(1).unwrap();
+    let lines: Vec<Event> = events(&rec).into_iter().filter(|e| matches!(e, Event::Progress(_) | Event::Checkpoint(_))).collect();
+    assert_eq!(
+        lines,
+        vec![
+            Event::Progress("run r1 round 1: waiting for the user on t3; no integration yet".into()),
+            Event::Progress("run r1: no verified delivery after 1 round(s); no integration yet".into()),
+            Event::Checkpoint("stuck after 1 rounds".into()),
+        ]
+    );
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+}
+
+#[test]
+fn a_clean_integration_is_named_in_later_progress() {
+    let (r, rec) = recorded_with(Limits { rounds: 1, ..Limits::default() });
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t3", "t2"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::from([("t1".to_string(), json!({"x": 1}))]) });
+    let _ = r.await_round(1);
+    let want = format!("run r1: no verified delivery after 1 round(s); integration vajra/r1/integration @ {:f>40} from {BASE}", 1);
+    assert!(events(&rec).contains(&Event::Progress(want.clone())), "{want} in {:?}", events(&rec));
 }

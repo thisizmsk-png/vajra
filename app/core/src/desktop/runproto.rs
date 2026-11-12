@@ -29,6 +29,9 @@ use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::crew::roles::{self, Kind};
 use crate::crew::security;
+use super::record::{Event, PlanRecord, RecordCard, RunRecord, TaskRecord};
+use crate::vajra::bridge::{Feature, TaskStatus};
+use crate::vajra::bridge_record::{FEATURE_MAX, one_line};
 use crate::vajra::gitw::{Gitw, GitwError};
 
 // ---------------------------------------------------------------- limits
@@ -104,11 +107,13 @@ pub struct Tick {
     pub attempt: u32,
     pub elapsed_s: u64,
     pub queue_position: Option<u32>,
+    /// The ticket's worktree once it has one (the task graph's `claim --worktree`).
+    pub worktree: Option<PathBuf>,
 }
 
 impl From<TicketView> for Tick {
     fn from(v: TicketView) -> Self {
-        Tick { id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s, queue_position: v.queue_position }
+        Tick { id: v.id, state: v.state, outcome: v.outcome, reason: v.reason, commit: v.commit, attempt: v.attempt, elapsed_s: v.elapsed_s, queue_position: v.queue_position, worktree: v.worktree }
     }
 }
 
@@ -234,6 +239,8 @@ pub const RUN_ENDED: &str = "run_ended";
 pub const INVALID: &str = "invalid";
 pub const PLAN_INVALID: &str = "plan_invalid";
 pub const PLAN_REFUSED: &str = "plan_refused";
+/// The signed run record (6h) could not be written at plan time: the run ended before dispatch.
+pub const RECORD_FAILED: &str = "record_failed";
 
 fn refuse<T>(code: &'static str, reason: impl Into<String>) -> Result<T, Refusal> {
     Err(Refusal { code, reason: reason.into() })
@@ -344,6 +351,8 @@ pub struct RunCard {
     pub questions: Vec<Question>,
     /// "The lead's notes": plain text, redacted; never in the signed record.
     pub lead_notes: Option<String>,
+    /// The signed run record: its notes, a held lock, a broken signature (6h).
+    pub record: Option<RecordCard>,
 }
 
 // ---------------------------------------------------------------- state
@@ -402,6 +411,10 @@ struct St {
     retries: u32,
     /// Set by `finalize`, carried out once the lock is released.
     kill: Option<KillReason>,
+    /// Worker tickets whose outcome the record has (`report`), so each is sent once.
+    reported: std::collections::BTreeSet<String>,
+    /// The last clean integration: (round, head), for the record's progress lines.
+    last_good: Option<(u32, String)>,
 }
 
 impl St {
@@ -426,6 +439,8 @@ struct Inner {
     clock: Arc<dyn RunClock>,
     st: Mutex<St>,
     changed: Condvar,
+    /// The signed run record (6h). `None` only in tests of the rules alone.
+    record: Option<Arc<dyn RunRecord>>,
 }
 
 /// One run's protocol. Cheap to clone.
@@ -466,7 +481,79 @@ impl RunProtocol {
     pub fn new(cfg: RunConfig, workers: Arc<dyn Workers>, gate: Arc<dyn RoundGate>, clock: Arc<dyn RunClock>) -> Self {
         let now = clock.now();
         let st = St { last_call: now, started: now, next_turn_ask: cfg.limits.lead_turn_budget, ..St::default() };
-        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new() }))
+        RunProtocol(Arc::new(Inner { cfg, workers, gate, clock, st: Mutex::new(st), changed: Condvar::new(), record: None }))
+    }
+
+    /// The run with its signed record (6h). Called once, before the protocol is shared.
+    pub fn with_record(self, record: Arc<dyn RunRecord>) -> Self {
+        let mut inner = Arc::try_unwrap(self.0).unwrap_or_else(|_| panic!("with_record is called before the protocol is shared"));
+        inner.record = Some(record);
+        RunProtocol(Arc::new(inner))
+    }
+
+    fn send(&self, e: Event) {
+        if let Some(r) = &self.0.record {
+            r.send(e);
+        }
+    }
+
+    /// The task graph id of a plan task (`TID` in the workflow).
+    fn tid(&self, id: &str) -> String {
+        format!("{}.{id}", self.0.cfg.run)
+    }
+
+    /// The workflow's `integrationNote()`, with the branch the core really makes.
+    fn integration_note(&self, st: &St) -> String {
+        match &st.last_good {
+            Some((r, head)) => {
+                let suffix = if *r == 1 { String::new() } else { format!("-r{r}") };
+                format!("integration vajra/{}/integration{suffix} @ {head} from {}", self.0.cfg.run, self.0.cfg.base)
+            }
+            None => "no integration yet".into(),
+        }
+    }
+
+    /// Round 1's campaign and task graph, from the plan as the core stored it.
+    fn record_plan(&self, st: &St) -> Result<(), String> {
+        let Some(rec) = &self.0.record else { return Ok(()) };
+        let features = st.criteria.iter().map(|c| Feature { id: c.id.clone(), desc: one_line(&c.criterion, FEATURE_MAX) }).collect();
+        let mut tasks = Vec::new();
+        for id in plan::topo(&st.specs()) {
+            let Some(t) = st.task(&id) else { continue };
+            let agent = roles::agent_of(&t.spec.owner_role).ok_or_else(|| format!("task {id}'s role {} has no agent", t.spec.owner_role))?;
+            tasks.push(TaskRecord {
+                id: self.tid(&id),
+                title: t.spec.title.clone(),
+                agent: agent.into(),
+                deps: t.spec.deps.iter().map(|d| self.tid(d)).collect(),
+                files: t.spec.files.clone(),
+                criteria: t.spec.criteria.clone(),
+                // The branch the core's git writer makes for the task's first ticket (`gitw.rs`).
+                branch: format!("vajra/{}/task-{id}-r1", self.0.cfg.run),
+            });
+        }
+        rec.plan(&PlanRecord { goal: self.0.cfg.ask.clone(), features, tasks })
+    }
+
+    /// Every ended worker ticket's outcome, sent to the task graph once (`report`).
+    fn record_ended(&self, st: &mut St) {
+        if self.0.record.is_none() {
+            return;
+        }
+        let ended: Vec<(String, String)> = st.tasks.iter().flat_map(|t| t.tickets.iter().map(move |(_, tk, _)| (t.spec.id.clone(), tk.clone()))).filter(|(_, tk)| !st.reported.contains(tk)).collect();
+        for (task, tk) in ended {
+            let Some(v) = self.0.workers.view(&tk).filter(|v| v.state == State::Ended) else { continue };
+            let Some(o) = v.outcome else { continue };
+            st.reported.insert(tk);
+            let status = match o {
+                Outcome::Done => TaskStatus::Done,
+                Outcome::Progress => TaskStatus::Progress,
+                Outcome::Failed => TaskStatus::Failed,
+                Outcome::NeedsUser => TaskStatus::Question,
+                Outcome::Stopped => TaskStatus::Blocked,
+            };
+            self.send(Event::Report { task: self.tid(&task), status, summary: self.text(&v.reason.unwrap_or_default()) });
+        }
     }
 
     fn now(&self) -> Duration {
@@ -612,7 +699,18 @@ impl RunProtocol {
             return refuse(NOT_READY, format!("this run has {} rounds", self.0.cfg.limits.rounds));
         }
         match self.check_plan(st, &input) {
-            Ok(accepted) => Ok(self.accept(st, input, accepted)),
+            Ok(accepted) => {
+                let out = self.accept(st, input, accepted);
+                // Round 1 registers the campaign and the task graph before anything is dispatched. It runs under the
+                // protocol lock: no worker exists yet, so only the lead's own calls wait. A failure ends the run here.
+                if r == 1
+                    && let Err(why) = self.record_plan(st)
+                {
+                    Self::finalize(st, RunStatus::NotVerified, format!("the signed run record failed: {why}"));
+                    return refuse(RECORD_FAILED, format!("the signed run record failed, so the run has ended: {why}"));
+                }
+                Ok(out)
+            }
             Err(why) => {
                 let round = st.rounds.entry(r).or_default();
                 round.refusals += 1;
@@ -827,8 +925,13 @@ impl RunProtocol {
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
         };
+        let owner = st.task(id).and_then(|t| roles::agent_of(&t.spec.owner_role));
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
+        }
+        if let Some(agent) = owner {
+            let worktree = self.0.workers.view(&ticket).and_then(|v| v.worktree);
+            self.send(Event::Claim { task: self.tid(id), agent: agent.into(), worktree });
         }
         Ok(Dispatched::Ticket { ticket, slot })
     }
@@ -917,6 +1020,7 @@ impl RunProtocol {
             let left = deadline.saturating_duration_since(Instant::now());
             if let Some(i) = all.iter().position(|s| s.state == "ended").or(left.is_zero().then_some(usize::MAX)) {
                 st.last_call = self.now();
+                self.record_ended(&mut st);
                 drop(st);
                 let mut all = all;
                 let ended = (i != usize::MAX).then(|| all.remove(i));
@@ -971,6 +1075,7 @@ impl RunProtocol {
         let mut st = self.lock();
         match merged {
             Ok(head) => {
+                st.last_good = Some((r, head.clone()));
                 drop(st);
                 let (p, tasks) = (self.clone(), order.clone());
                 let spawned = std::thread::Builder::new().name(format!("vajra-round-{r}")).spawn(move || {
@@ -1028,6 +1133,16 @@ impl RunProtocol {
                 }
             }
         }
+        self.record_ended(st);
+        let asks: Vec<&str> = broken
+            .keys()
+            .filter(|id| st.task(id).and_then(|t| t.tickets.last()).filter(|(tr, _, _)| *tr == r).and_then(|(_, tk, _)| self.0.workers.view(tk)).is_some_and(|v| v.outcome == Some(Outcome::NeedsUser)))
+            .map(String::as_str)
+            .collect();
+        if !asks.is_empty() {
+            let line = format!("run {} round {r}: waiting for the user on {}; {}", self.0.cfg.run, asks.join(", "), self.integration_note(st));
+            self.send(Event::Progress(line));
+        }
         let round = st.rounds.entry(r).or_default();
         round.integrated = true;
         if !broken.is_empty() {
@@ -1046,6 +1161,9 @@ impl RunProtocol {
         round.feedback = feedback;
         if r >= self.0.cfg.limits.rounds {
             Self::finalize(st, RunStatus::NotVerified, format!("no round passed in {r} round(s)"));
+            let n = self.0.cfg.limits.rounds;
+            self.send(Event::Progress(format!("run {}: no verified delivery after {n} round(s); {}", self.0.cfg.run, self.integration_note(st))));
+            self.send(Event::Checkpoint(format!("stuck after {n} rounds")));
         }
     }
 
@@ -1200,6 +1318,19 @@ impl RunProtocol {
             tickets_per_task: st.tasks.iter().map(|t| (t.spec.id.clone(), t.tickets.len() as u32)).collect(),
             questions: st.questions.clone(),
             lead_notes: st.notes.clone(),
+            record: self.0.record.as_ref().map(|r| r.card()),
+        }
+    }
+
+    /// The record's lock card: Repair (`unlock --if-stale`). The core never removes a lock itself.
+    pub fn repair_record_lock(&self) -> Option<RecordCard> {
+        self.0.record.as_ref().map(|r| r.repair())
+    }
+
+    /// Wait for the record's queued writes (the run's end, and tests).
+    pub fn flush_record(&self) {
+        if let Some(r) = &self.0.record {
+            r.flush();
         }
     }
 

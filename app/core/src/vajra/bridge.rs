@@ -30,7 +30,33 @@ pub enum Request {
     Doctor,
     /// `args` starts with a read-only subcommand.
     Git { cwd: PathBuf, args: Vec<String> },
+    // The run record (PR 6h, `bridge_record.rs`): fixed argv, every value checked against the script's own parser.
+    CampaignCreate { slug: String, goal: String, features: Vec<Feature> },
+    CampaignShow { slug: String },
+    CampaignList,
+    /// `/bin/ps -A -o command=`: the lock card asks only whether any `vajra-campaign.sh` runs now.
+    ProcessList,
+    CampaignPass { slug: String, feature: String, evidence: String },
+    CampaignCheckpoint { slug: String, label: String },
+    CampaignClose { slug: String, status: CloseStatus },
+    /// `check` is the FNV-1a 32 of `base64` (`vajra-deliver.js` `fnv()`); the core recomputes it before spawning.
+    CampaignReport { slug: String, bytes: usize, check: String, base64: String },
+    /// `unlock <slug> --if-stale` (6h-e): the lock card's Repair.
+    CampaignUnlockStale { slug: String },
+    TasksAdd { slug: String, id: String, title: String, owner: String, deps: Vec<String>, files: Vec<String>, acceptance: Vec<String>, branch: String },
+    TasksDep { slug: String, id: String, dep: String, remove: bool },
+    TasksValidate { slug: String },
+    /// Always `--stacked`: deps close only on evidence, so without it every task with deps gets exit 3.
+    TasksClaim { slug: String, id: String, worker: String, worktree: Option<PathBuf> },
+    TasksReport { slug: String, id: String, status: TaskStatus, summary: Option<String> },
+    /// Run in `repo`, as the workflow's write-back does.
+    TasksClose { slug: String, id: String, evidence: PathBuf, head: String, commit: String, branch: String, base_commit: String, changed: Vec<String>, repo: PathBuf },
 }
+
+pub use super::bridge_record::{CloseStatus, Feature, TaskStatus, fnv32};
+
+/// How long a campaign write gets after SIGTERM before SIGKILL (16.5a).
+pub const KILL_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum BridgeError {
@@ -91,6 +117,9 @@ pub struct Bridge {
     pub home: Option<PathBuf>,
     /// Where `jq` is looked for (the first that is a file). A field so a test can say "no jq on this machine".
     pub jq_candidates: Vec<PathBuf>,
+    /// The cwd of the run record's campaign calls: the core's own empty git dir (`record::record_dir`), so the
+    /// active pointer `create` sets is one no user session reads. A record campaign call is refused without it.
+    pub record_cwd: Option<PathBuf>,
 }
 
 const GIT_READ_ONLY: [&str; 7] = ["--version", "rev-parse", "merge-base", "status", "log", "diff", "ls-files"];
@@ -105,6 +134,7 @@ impl Bridge {
             timeout: DEFAULT_TIMEOUT,
             home: None,
             jq_candidates: ["/usr/bin/jq", "/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/bin/jq"].iter().map(PathBuf::from).collect(),
+            record_cwd: None,
         }
     }
 
@@ -120,6 +150,9 @@ impl Bridge {
 
     /// Build `(program, argv, cwd)` for a request, or refuse it.
     pub fn plan(&self, req: &Request) -> Result<(PathBuf, Vec<String>, Option<PathBuf>), BridgeError> {
+        if let Some(planned) = self.plan_record(req) {
+            return planned;
+        }
         let script = |n: &str| self.scripts_dir.join(n);
         Ok(match req {
             Request::CampaignVerify { slug } => {
@@ -131,10 +164,11 @@ impl Bridge {
                 vec!["-cS".into(), "[.features[] | {id, description}]".into()],
                 None,
             ),
+            // The run record's bridge runs it in the record's own git dir, like its other campaign calls.
             Request::CampaignProgress { slug, text } => (
                 script("vajra-campaign.sh"),
                 vec!["progress".into(), text.clone(), "--campaign".into(), name(slug)?],
-                None,
+                self.record_cwd.clone(),
             ),
             Request::CheckEvidence { path, head, archived, repo } => {
                 if !path.is_absolute() {
@@ -145,7 +179,9 @@ impl Bridge {
                 if archived.is_some() && !head.as_deref().is_some_and(crate::sessions::argv::is_full_sha) {
                     return Err(BridgeError::Invalid("an archived evidence check needs a full 40-hex head".into()));
                 }
+                // `-I`: no user site-packages or `.pth` (HOME is passed in) runs inside a script that reads the key.
                 let mut argv = vec![
+                    "-I".into(),
                     script("vajra_tasks.py").to_string_lossy().into_owned(),
                     "check-evidence".into(),
                     path.to_string_lossy().into_owned(),
@@ -169,6 +205,7 @@ impl Bridge {
                 (
                     self.python.clone(),
                     vec![
+                        "-I".into(),
                         script("vajra_kb.py").to_string_lossy().into_owned(),
                         "search".into(),
                         "--format".into(),
@@ -207,6 +244,7 @@ impl Bridge {
                 argv.extend(args.iter().skip(1).cloned());
                 (self.git.clone(), argv, Some(cwd.clone()))
             }
+            _ => unreachable!("plan_record answers every record request"),
         })
     }
 
@@ -217,7 +255,8 @@ impl Bridge {
             Request::FeaturesDef { features } => Some(features.as_slice()),
             _ => None,
         };
-        run_process_full(&program, &argv, cwd.as_deref(), self.timeout, self.home.as_deref(), stdin)
+        let grace = req.is_campaign_write().then_some(KILL_GRACE);
+        run_process_inner(&program, &argv, cwd.as_deref(), self.timeout, self.home.as_deref(), stdin, &[], bridge_path(), grace)
     }
 }
 
@@ -569,7 +608,7 @@ pub fn run_process_env(
     env: &[(&str, &Path)],
 ) -> Result<Output, BridgeError> {
     // The fixed system PATH only: every `Request` (the key-holding campaign script among them) runs through here.
-    run_process_inner(program, argv, cwd, timeout, home, stdin, env, bridge_path())
+    run_process_inner(program, argv, cwd, timeout, home, stdin, env, bridge_path(), None)
 }
 
 /// As `run_process`, on `probe_path(path)`: the user's dirs in their runtime order, then the system dirs. For the
@@ -582,9 +621,10 @@ pub fn run_process_on_path(
     timeout: Duration,
     path: &[PathBuf],
 ) -> Result<Output, BridgeError> {
-    run_process_inner(program, argv, cwd, timeout, None, None, &[], probe_path(path))
+    run_process_inner(program, argv, cwd, timeout, None, None, &[], probe_path(path), None)
 }
 
+/// `grace`: on timeout, SIGTERM the group and wait this long before the SIGKILL (a campaign write's lock trap).
 #[allow(clippy::too_many_arguments)]
 fn run_process_inner(
     program: &Path,
@@ -595,6 +635,7 @@ fn run_process_inner(
     stdin: Option<&[u8]>,
     env: &[(&str, &Path)],
     path: std::ffi::OsString,
+    grace: Option<Duration>,
 ) -> Result<Output, BridgeError> {
     let mut cmd = Command::new(program);
     cmd.args(argv).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -629,6 +670,14 @@ fn run_process_inner(
             }
             Ok(None) if start.elapsed() >= timeout => {
                 timed_out = true;
+                if let Some(g) = grace {
+                    // SAFETY: killpg on a pgid this process created; failure (ESRCH) is fine.
+                    unsafe { libc::killpg(pid as i32, libc::SIGTERM) };
+                    let t = Instant::now();
+                    while t.elapsed() < g && matches!(child.try_wait(), Ok(None)) {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
                 break;
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
