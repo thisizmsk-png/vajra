@@ -163,10 +163,8 @@ impl CoreWorkers for WorkerHost {
         v.harness_session.ok_or(profiles::NOT_STARTED)
     }
 
-    fn stop(&self, ticket: &str) {
-        if let Some(rt) = self.rt.get() {
-            rt.cancel(ticket);
-        }
+    fn stop(&self, ticket: &str) -> bool {
+        self.rt.get().is_some_and(|rt| rt.cancel(ticket))
     }
 }
 

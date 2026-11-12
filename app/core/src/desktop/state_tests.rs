@@ -725,6 +725,17 @@ fn a_core_worker_takes_no_message_with_its_profiles_reason_and_stops_through_a_g
     assert_eq!(state_of(&ok), "done", "{ok}");
     let v = rt.view(&codex).unwrap();
     assert_eq!((v.state, v.outcome), (T::Ended, Some(Outcome::Stopped)));
+    // The ticket's end (reported by the runtime) settles the stop: it doesn't stay queued in the ledger (#151 codex P2).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let l = app.ledger().unwrap();
+        let last = l["records"].as_array().unwrap().iter().rev().find(|r| r["kind"] == "stop" && r["worker"] == format!("core:{codex}")).cloned();
+        if last.as_ref().is_some_and(|r| r["state"] == "done") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the stop stays {last:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert_eq!(app.control_stop(&format!("core:{codex}"), None).unwrap_err()["error"], "worker_finished");
     assert_eq!(rt.view(&claude).unwrap().state, T::Queued, "the other ticket is untouched");
     let l = app.ledger().unwrap();

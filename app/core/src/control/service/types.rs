@@ -89,8 +89,9 @@ pub trait CoreWorkers: Send + Sync {
     /// Where a Message or Redirect for the ticket goes: its harness session id, keyed by which the control hook delivers
     /// to a top-level session (Claude, design 16.7). Otherwise why its harness takes none (Codex), or none yet.
     fn message_to(&self, ticket: &str) -> std::result::Result<String, &'static str>;
-    /// The profile's stop.
-    fn stop(&self, ticket: &str);
+    /// The profile's stop. True when it ended the ticket or asked it to end (its end is then reported through
+    /// `Service::core_ticket_ended`); false when there was nothing left to stop.
+    fn stop(&self, ticket: &str) -> bool;
 }
 
 impl ControlError {

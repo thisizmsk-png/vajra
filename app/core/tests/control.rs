@@ -652,12 +652,64 @@ struct FakeCore;
 
 impl CoreWorkers for FakeCore {
     fn live(&self, ticket: &str) -> Result<(String, u32), ControlError> {
-        if ticket == "T1" || ticket == "T2" { Ok((RUN.into(), 1)) } else { Err(ControlError::WorkerNotFound) }
+        if ["T1", "T2", "T3"].contains(&ticket) { Ok((RUN.into(), 1)) } else { Err(ControlError::WorkerNotFound) }
     }
     fn message_to(&self, ticket: &str) -> Result<String, &'static str> {
         if ticket == "T1" { Ok(CSID.into()) } else { Err("This worker can't take a message mid-run.") }
     }
-    fn stop(&self, _: &str) {}
+    /// `T3` ends on its own between the live check and the kill: nothing is left to stop.
+    fn stop(&self, ticket: &str) -> bool {
+        ticket != "T3"
+    }
+}
+
+/// #151 codex P2: a human's stop of a core worker is settled when its ticket ends (a group kill leaves no hook ack), so
+/// it never sits queued, and a restart neither resurrects it nor later calls it undelivered. A stop the previous app
+/// recorded but never saw end is settled at once on reopen; a stop that found nothing to kill fails.
+#[test]
+fn a_core_stop_is_settled_when_its_ticket_ends_and_stays_settled_after_reopening() {
+    let h = Home::new();
+    let last = |id: &str| h.ledger().into_iter().rev().find(|r| r["action_id"] == id).unwrap();
+    let id = {
+        let mut s = h.service();
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        s.ttl = Duration::ZERO;
+        let st = s.stop_worker(Actor::Human, "core:T1", None).unwrap();
+        let id = st["action_id"].as_str().unwrap().to_string();
+        assert_eq!(st["state"], "queued");
+        s.tick();
+        assert_eq!(last(&id)["state"], "queued", "the watcher has no stop file to wait for: it leaves a core stop alone");
+        s.core_ticket_ended("T1");
+        let done = last(&id);
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(done["outcome"], "stopped", "{done}");
+
+        let refused = s.stop_worker(Actor::Human, "core:T3", None).unwrap_err();
+        assert_eq!(refused.code(), "worker_finished");
+        let failed = h.ledger().into_iter().rev().find(|r| r["worker"] == "core:T3").unwrap();
+        assert_eq!((failed["state"].as_str(), failed["reason"].as_str()), (Some("failed"), Some("worker_finished")), "{failed}");
+        id
+    };
+    let n = h.ledger().len();
+    let leftover = {
+        let mut s = h.service();
+        s.ttl = Duration::ZERO;
+        s.tick();
+        assert_eq!(h.ledger().len(), n, "reopening adds nothing for a settled stop");
+        assert_eq!(last(&id)["state"], "done");
+        s.start_session(SID, RUN).unwrap();
+        s.set_core_workers(Arc::new(FakeCore));
+        // This app ends before it sees the ticket end.
+        s.stop_worker(Actor::Human, "core:T1", None).unwrap()["action_id"].as_str().unwrap().to_string()
+    };
+    let mut s = h.service();
+    let r = last(&leftover);
+    assert_eq!((r["state"].as_str(), r["reason"].as_str()), (Some("delivery_unknown"), Some("app_restarted")), "settled at open: {r}");
+    s.ttl = Duration::ZERO;
+    s.tick();
+    assert_eq!(last(&leftover)["state"], "delivery_unknown", "and never re-judged as stop_file_missing");
+    assert_eq!(last(&id)["state"], "done");
 }
 
 /// #151 (16.7, after #148/#150): a Message and a Redirect to a Claude core worker land in its own control dir, matched

@@ -271,7 +271,15 @@ impl Service {
             a.actor = Actor::Human;
             a.state = State::Queued;
             self.record(&a, State::Queued, json!({}), now)?;
-            c.core.stop(&t);
+            // Held until the ticket ends: `core_ticket_ended` settles it (the runtime reports that end on another
+            // thread once this lock is released, also for a queued ticket the kill ends at once).
+            self.core_stops.insert(t.clone(), a.clone());
+            if !c.core.stop(&t) {
+                // It ended on its own between the check and the kill: nothing was stopped.
+                self.core_stops.remove(&t);
+                self.record(&a, State::Failed, json!({"reason": "worker_finished"}), now)?;
+                return Err(ControlError::WorkerFinished);
+            }
             return Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}));
         }
         // Into the session the stop was asked for, never whichever session happens to be live now.
@@ -345,6 +353,12 @@ impl Service {
     pub fn core_ticket_ended(&mut self, ticket: &str) {
         let key = format!("{CORE_PREFIX}{ticket}");
         let now = SystemTime::now();
+        // The human's stop that ended it is done (a group kill has no hook ack to wait for).
+        if let Some(a) = self.core_stops.remove(ticket) {
+            if self.record(&a, State::Done, json!({"outcome": "stopped"}), now).is_err() {
+                self.core_stops.insert(ticket.to_string(), a);
+            }
+        }
         // Its undelivered messages expire too: no later session may take them.
         let queued: Vec<String> = self.pending.values().filter(|a| a.worker == key && a.kind.queued_text() && a.state == State::Queued).map(|a| a.id.clone()).collect();
         for id in queued {

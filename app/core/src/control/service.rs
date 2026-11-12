@@ -98,6 +98,9 @@ pub struct Service {
     bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
+    /// A human's stop of a `core:` worker, by ticket, from the kill until the ticket ends (`core_ticket_ended` settles
+    /// it). Kept out of `pending`: a group kill leaves no stop file or hook ack for the watcher to wait on.
+    core_stops: HashMap<String, Action>,
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
@@ -132,12 +135,14 @@ impl Service {
             seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
             bound_project: None,
             pending: HashMap::new(),
+            core_stops: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
             last_recorded: None,
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
+        svc.settle_core_after_restart(SystemTime::now());
         Ok(svc)
     }
 
@@ -189,6 +194,19 @@ impl Service {
             }
         }
         self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
+    }
+
+    /// The previous app's `core:` workers did not outlive it, and their tickets are gone with its runtime. A stop it
+    /// recorded but never saw end is settled now, as unknown (this app can't tell how it ended); a Lead's stop still
+    /// waiting for the human is refused. Neither is left for the watcher, which would wait for a stop file.
+    fn settle_core_after_restart(&mut self, now: SystemTime) {
+        let left: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.worker.starts_with(CORE_PREFIX)).cloned().collect();
+        for a in left {
+            let (state, reason) = if a.state == State::AwaitingHumanConfirm { (State::Refused, "worker_finished") } else { (State::DeliveryUnknown, "app_restarted") };
+            if self.record(&a, state, json!({"reason": reason}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
     }
 
     // ------------------------------------------------------------ helpers
