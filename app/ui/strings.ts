@@ -730,6 +730,8 @@ export const S = {
     lede: "Choose global defaults or override them for this project.",
     barLabel: "Actions on Settings",
     sectionsLabel: "Settings sections",
+    back: "Back",
+    backTo: (project: string) => `Back to ${project}`,
     sections: {
       general: { title: "General", lede: "Behaviour that applies across your work." },
       providers: { title: "Providers", lede: "Vajra runs the agent CLIs you already use and pay for. These checks decide whether a run can start." },
