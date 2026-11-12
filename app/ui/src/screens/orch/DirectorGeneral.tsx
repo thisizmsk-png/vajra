@@ -49,7 +49,7 @@ export function DirectorGeneral() {
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const end = useRef<HTMLDivElement>(null);
-  const col = useRef<HTMLDivElement>(null);
+  const watch = useRef<ResizeObserver | null>(null);
   const atEnd = useRef(true);
   const lastTop = useRef(0);
 
@@ -132,12 +132,17 @@ export function DirectorGeneral() {
   useEffect(() => { end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
   // A proposal's worker table and a long answer arrive after that scroll and push the newest turn (and Start run) below
   // the fold. While the reader is at the end, growth keeps them there; once they scroll up, nothing moves them.
-  useEffect(() => {
-    const el = col.current;
+  // A callback ref, not a mount effect: the column only exists once there is a project with a run, which can be long
+  // after this view first renders. Each column that appears is watched, and starts pinned to its end.
+  const col = useCallback((el: HTMLDivElement | null) => {
+    watch.current?.disconnect();
+    watch.current = null;
     if (!el || typeof ResizeObserver === "undefined") return;
+    atEnd.current = true;
+    lastTop.current = 0;
     const ro = new ResizeObserver(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); });
     ro.observe(el);
-    return () => ro.disconnect();
+    watch.current = ro;
   }, []);
   // Growth never moves the scroll position up, so only an upward scroll means the reader left the end. (Judging every
   // scroll event by its distance from the end would unpin on our own scroll when more content lands before the event.)

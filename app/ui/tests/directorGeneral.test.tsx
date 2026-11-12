@@ -312,6 +312,42 @@ describe("Director-General conversation", () => {
     }
   });
 
+  it("Given the view opened before the project had a run, When a run starts and its conversation grows, Then the newest turn is brought into view", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = { scroll: proto.scrollIntoView, ro: g.ResizeObserver };
+    const made: { grew: () => void; on: Element[]; off: boolean }[] = [];
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    g.ResizeObserver = class {
+      me: (typeof made)[number];
+      constructor(cb: () => void) { this.me = { grew: cb, on: [], off: false }; made.push(this.me); }
+      observe(el: Element) { this.me.on.push(el); }
+      disconnect() { this.me.off = true; }
+    };
+    try {
+      const r = mount({}, cur({ dgRun: null }));
+      expect(screen.getByText(S.dg.noRun)).toBeTruthy();
+      expect(made).toEqual([]);
+
+      r.rerender(<CurrentProject.Provider value={cur()}><DirectorGeneral /></CurrentProject.Provider>);
+      await screen.findByText("What is left?");
+      expect(made.length).toBe(1);
+      expect(made[0].on).toEqual([r.container.querySelector(".v-dgv__col")]);
+      const before = scrolls;
+      made[0].grew();
+      expect(scrolls).toBe(before + 1);
+
+      // The run goes away: the column is gone, and so is its observer.
+      r.rerender(<CurrentProject.Provider value={cur({ dgRun: null })}><DirectorGeneral /></CurrentProject.Provider>);
+      expect(made[0].off).toBe(true);
+      expect(made.length).toBe(1);
+    } finally {
+      proto.scrollIntoView = was.scroll;
+      g.ResizeObserver = was.ro;
+    }
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();
