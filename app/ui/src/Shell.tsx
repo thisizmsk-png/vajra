@@ -12,6 +12,7 @@ import { CurrentProject } from "./projects/current";
 import type { Current } from "./projects/current";
 import { ProjectTabs, stateText } from "./shell/ProjectTabs";
 import { ProjectColumn } from "./shell/ProjectColumn";
+import { FindRepos } from "./shell/FindRepos";
 import { ViewTabs, inboxBadge } from "./shell/ViewTabs";
 import type { WorkerTab } from "./shell/ViewTabs";
 import { Inspector } from "./shell/Inspector";
@@ -174,6 +175,7 @@ function Frame() {
               <>
                 <span className="v-tb__empty">{P.state === "error" ? S.frame.loadFailed : P.state === "ok" ? S.frame.noProjects : ""}</span>
                 {P.state === "error" && <button type="button" className="v-sb-btn" onClick={P.reload}>{S.states.retry}</button>}
+                {P.state === "ok" && <FindRepos onAdded={P.reload} />}
                 <button type="button" className="v-tb__add" onClick={addProject}><Icon name="plus" size={12} />{S.frame.addProject}</button>
               </>
             )}
