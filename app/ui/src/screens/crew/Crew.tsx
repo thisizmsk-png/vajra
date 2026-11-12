@@ -215,7 +215,6 @@ export function Crew() {
               <dl className="v-crew__facts" aria-label={S.crew.details}>
                 <dt>{S.crew.status}</dt><dd>{statusLabel(picked)}</dd>
                 <dt>{S.crew.kind}</dt><dd>{picked.kind}</dd>
-                {picked.engine_id && (<><dt>{S.crew.engineId}</dt><dd>{picked.engine_id}</dd></>)}
               </dl>
             </Section>
             {(() => {
