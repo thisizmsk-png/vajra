@@ -5456,3 +5456,13 @@ fn install_dev_tools_is_refused_while_git_is_installed() {
     assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
     assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
 }
+
+#[test]
+fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.shutdown_leads(Duration::from_millis(100)), super::lead_start::LeadShutdown::default());
+    let input = crate::sessions::argv::RunInput { ask: "x".into(), max_rounds: 1, base: "main".into(), max_in_flight: 1, campaign: None, provider: None };
+    let e = app.start_lead_run("p", input, t.0.to_str().unwrap(), "20261112-0930").unwrap_err();
+    assert_eq!(e["error"], "quitting", "a quitting app refuses before it reads anything: {e}");
+}

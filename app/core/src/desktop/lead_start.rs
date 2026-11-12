@@ -18,9 +18,28 @@ use crate::control::service::WorkerSeat;
 use crate::crew::redact::Redactor;
 use crate::sessions::argv::RunInput;
 
-/// The live run leads, by run id.
+/// The live run leads, by run id. `closing` is set, under the map's lock, when the app starts to quit: from then on
+/// no lead is added.
 #[derive(Default)]
-pub struct LeadRuns(std::sync::Mutex<HashMap<String, RunLead>>);
+pub struct LeadRuns(std::sync::Mutex<Leads>);
+
+#[derive(Default)]
+pub struct Leads {
+    runs: HashMap<String, RunLead>,
+    closing: bool,
+}
+
+/// What `shutdown_leads` did: `ended` leads are gone (stopped within the wait, or already exited); `left` holds the
+/// run ids whose lead was killed but still live at the deadline.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LeadShutdown {
+    pub ended: usize,
+    pub left: Vec<String>,
+}
+
+fn quitting() -> Value {
+    fail("quitting", "the app is quitting; no new run starts")
+}
 
 /// The recorded lead seat and worker seats of a run, as `seats.json` holds them.
 fn seats_of(doc: &Value) -> Result<(LeadSeat, Vec<WorkerSeat>), Value> {
@@ -98,6 +117,9 @@ impl App {
 
     /// Start a seated proposal's run: `run` is the id `prepare_seats` took, its seats already recorded.
     pub(super) fn start_lead_run(&self, project: &str, input: RunInput, cwd: &str, run: &str) -> Result<Value, Value> {
+        if lock(&self.lead_runs.0).closing {
+            return Err(quitting());
+        }
         self.projects_usable()?;
         let repo = super::repo_dir(cwd)?;
         let base = self.resolve_base(&repo, &input.base)?;
@@ -130,7 +152,17 @@ impl App {
             self.run_leads.remove(run);
             return Err(fail("lead_failed", e.0));
         }
-        lock(&self.lead_runs.0).insert(run.to_string(), lead.clone());
+        {
+            let mut l = lock(&self.lead_runs.0);
+            if l.closing {
+                // The quit began while this lead launched: it never joins the map, so it is stopped here.
+                drop(l);
+                lead.shutdown(SHUTDOWN_WAIT);
+                self.run_leads.remove(run);
+                return Err(quitting());
+            }
+            l.runs.insert(run.to_string(), lead.clone());
+        }
         let (reg, id, runs) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle());
         std::thread::Builder::new()
             .name(format!("lead-{run}"))
@@ -138,7 +170,7 @@ impl App {
                 lead.watch();
                 reg.remove(&id);
                 if let Some(r) = runs.upgrade() {
-                    lock(&r.0).remove(&id);
+                    lock(&r.0).runs.remove(&id);
                 }
             })
             .map_err(|e| fail("io", e))?;
@@ -149,18 +181,31 @@ impl App {
         Arc::downgrade(&self.lead_runs)
     }
 
-    /// The quit sequence's lead step (agreed with the quit owner): every run lead's process group is killed at once,
-    /// with at most `wait` in total for them to go. Each is cleared from the registry and never restarted. Workers are
-    /// not touched here; the worker runtime's own kill ends them.
-    pub fn shutdown_run_leads(&self, wait: Duration) -> Vec<(String, Shutdown)> {
-        let leads: Vec<(String, RunLead)> = lock(&self.lead_runs.0).iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    /// The quit sequence's lead step (agreed with the quit owner): refuse new runs, then kill every run lead's
+    /// process group at once and wait at most `wait` in total for them to go. Each is cleared from the registry and
+    /// never restarted. Workers are not touched here; the worker runtime's own quit ends them.
+    pub fn shutdown_leads(&self, wait: Duration) -> LeadShutdown {
+        let leads: Vec<(String, RunLead)> = {
+            let mut l = lock(&self.lead_runs.0);
+            l.closing = true;
+            l.runs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
         // Side by side, so the whole step takes at most `wait`, however many leads there are.
-        std::thread::scope(|s| {
+        let results: Vec<(String, Shutdown)> = std::thread::scope(|s| {
             let waits: Vec<_> = leads.iter().map(|(run, l)| (run.clone(), s.spawn(move || l.shutdown(wait)))).collect();
             waits.into_iter().map(|(run, h)| (run, h.join().unwrap_or(Shutdown::StillRunning))).collect()
-        })
+        });
+        let mut out = LeadShutdown::default();
+        for (run, r) in results {
+            match r {
+                Shutdown::StillRunning => out.left.push(run),
+                Shutdown::Stopped | Shutdown::NotRunning => out.ended += 1,
+            }
+        }
+        out.left.sort();
+        out
     }
 
-    /// The default wait for `shutdown_run_leads`.
+    /// The default wait for `shutdown_leads`.
     pub const LEAD_SHUTDOWN_WAIT: Duration = SHUTDOWN_WAIT;
 }
