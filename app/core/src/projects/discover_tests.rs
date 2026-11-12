@@ -1,0 +1,105 @@
+use std::os::unix::fs::symlink;
+
+use super::*;
+
+struct Tmp(PathBuf);
+impl Tmp {
+    fn new(name: &str) -> Self {
+        let d = std::env::temp_dir().join(format!("vajra-discover-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("home/.claude")).unwrap();
+        Self(fs::canonicalize(&d).unwrap())
+    }
+    fn guard(&self) -> Guard {
+        Guard { home: self.0.join("home"), data: self.0.join("home/Library/Data") }
+    }
+    fn repo(&self, rel: &str) -> PathBuf {
+        let p = self.0.join("home").join(rel);
+        fs::create_dir_all(p.join(".git/objects")).unwrap();
+        fs::write(p.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::canonicalize(&p).unwrap()
+    }
+    /// A real linked worktree of `main` at `rel`, with git's back-link intact.
+    fn worktree(&self, main: &Path, name: &str, rel: &str) -> PathBuf {
+        let wt = self.0.join("home").join(rel);
+        fs::create_dir_all(&wt).unwrap();
+        let wt = fs::canonicalize(&wt).unwrap();
+        let gd = main.join(".git/worktrees").join(name);
+        fs::create_dir_all(&gd).unwrap();
+        fs::write(gd.join("commondir"), "../..\n").unwrap();
+        fs::write(gd.join("gitdir"), format!("{}\n", wt.join(".git").display())).unwrap();
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+        wt
+    }
+}
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn none(_: &Path) -> bool {
+    false
+}
+
+#[test]
+fn finds_repos_in_common_folders_and_counts_worktrees_under_the_main_repo() {
+    let t = Tmp::new("basic");
+    let a = t.repo("Development/alpha");
+    t.repo("Projects/beta");
+    t.worktree(&a, "feat", "Development/alpha-feat");
+    let d = discover(&t.guard(), &[], &none);
+    let names: Vec<_> = d.found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["alpha", "beta"]);
+    assert_eq!(d.found[0].worktrees, 1);
+    assert_eq!(d.found[1].worktrees, 0);
+    assert!(!d.truncated);
+}
+
+#[test]
+fn skips_owned_hidden_build_and_symlinked_folders_and_does_not_enter_repos() {
+    let t = Tmp::new("skip");
+    let a = t.repo("Code/owned");
+    t.repo("Code/keep");
+    t.repo("Code/.hidden/x");
+    t.repo("Code/node_modules/y");
+    t.repo("Code/keep/inner"); // inside a repo: never looked at
+    let elsewhere = t.repo("elsewhere/z");
+    symlink(&elsewhere, t.0.join("home/Code/link")).unwrap();
+    let a2 = a.clone();
+    let d = discover(&t.guard(), &[], &move |p| p == a2);
+    let names: Vec<_> = d.found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["keep"]);
+}
+
+#[test]
+fn an_extra_folder_is_scanned_and_missing_ones_are_ignored() {
+    let t = Tmp::new("extra");
+    t.repo("odd/place/r");
+    let d = discover(&t.guard(), &[t.0.join("home/odd"), t.0.join("home/nope")], &none);
+    assert_eq!(d.found.len(), 1);
+    assert_eq!(d.found[0].name, "r");
+}
+
+#[test]
+fn a_fake_dot_git_file_pointing_elsewhere_is_not_folded_into_another_repo() {
+    let t = Tmp::new("fake");
+    let real = t.repo("Code/real");
+    let fake = t.0.join("home/Code/fake");
+    fs::create_dir_all(&fake).unwrap();
+    fs::write(fake.join(".git"), format!("gitdir: {}\n", real.join(".git").display())).unwrap();
+    let d = discover(&t.guard(), &[], &none);
+    assert_eq!(d.found.len(), 2); // fake is its own entry (no git claim honoured), real is unaffected
+    assert!(d.found.iter().all(|f| f.worktrees == 0));
+}
+
+#[test]
+fn stops_at_the_repository_cap() {
+    let t = Tmp::new("cap");
+    for i in 0..(MAX_FOUND + 5) {
+        t.repo(&format!("Code/r{i:04}"));
+    }
+    let d = discover(&t.guard(), &[], &none);
+    assert_eq!(d.found.len(), MAX_FOUND);
+    assert!(d.truncated);
+}
