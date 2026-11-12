@@ -7,6 +7,7 @@
 // lands the core addresses these by a run of the project (`runId`), so a project with no run yet cannot be asked; the
 // view says so.
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { UIEvent } from "react";
 import type { KeyboardEvent } from "react";
 import { Badge, Button, Icon, Kbd, ariaShortcut } from "../../../components/ui/base";
 import { S } from "../../../strings";
@@ -25,6 +26,8 @@ import "./dg.css";
 
 // The per-worker provider editor loads only for a proposal that carries workers (it brings the accounts and pickers with it).
 const ProposalWorkers = lazy(() => import("./ProposalWorkers"));
+/** How far from the end still counts as "at the end": a line of text, so a pixel of rounding never unpins the view. */
+const END_SLACK_PX = 24;
 
 const WINDOW_ROWS = 400;
 const BUSY_POLL_MS = 2000;
@@ -46,6 +49,9 @@ export function DirectorGeneral() {
   const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const end = useRef<HTMLDivElement>(null);
+  const col = useRef<HTMLDivElement>(null);
+  const atEnd = useRef(true);
+  const lastTop = useRef(0);
 
   // What the view is showing, so nothing that was asked earlier can bring an older state back:
   // - `active` is the stream the transcript belongs to;
@@ -124,6 +130,23 @@ export function DirectorGeneral() {
   const lastYou = [...shown].reverse().find((t) => t.role === "you");
   const showEcho = echo !== null && lastYou?.text !== echo;
   useEffect(() => { end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
+  // A proposal's worker table and a long answer arrive after that scroll and push the newest turn (and Start run) below
+  // the fold. While the reader is at the end, growth keeps them there; once they scroll up, nothing moves them.
+  useEffect(() => {
+    const el = col.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // Growth never moves the scroll position up, so only an upward scroll means the reader left the end. (Judging every
+  // scroll event by its distance from the end would unpin on our own scroll when more content lands before the event.)
+  const onScroll = (e: UIEvent<HTMLDivElement>) => {
+    const s = e.currentTarget;
+    if (s.scrollHeight - s.scrollTop - s.clientHeight <= END_SLACK_PX) atEnd.current = true;
+    else if (s.scrollTop < lastTop.current) atEnd.current = false;
+    lastTop.current = s.scrollTop;
+  };
 
   const available = st?.available === true;
   const canAsk = available && !busy && !sending;
@@ -211,8 +234,8 @@ export function DirectorGeneral() {
 
       {loadErr && !st && <div className="v-dgv__state"><Problem title={S.dg.loadFailed} detail={loadErr} retry={() => void readStatus()} /></div>}
 
-      <div className="v-dgv__scroll">
-        <div className="v-dgv__col">
+      <div className="v-dgv__scroll" onScroll={onScroll}>
+        <div className="v-dgv__col" ref={col}>
           <div role="log" aria-label={S.dg.transcript} aria-live="polite" className="v-dgv__log">
             {shown.length === 0 && !showEcho && st && (
               <div className="v-dgv__empty"><p className="v-dgv__empty-t">{S.dg.empty}</p><p>{S.dg.emptyHint}</p></div>

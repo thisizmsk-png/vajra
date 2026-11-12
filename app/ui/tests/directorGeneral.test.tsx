@@ -273,6 +273,45 @@ describe("Director-General conversation", () => {
     expect(screen.queryByText("An old answer.")).toBeNull();
   });
 
+  it("Given the reader is at the end, When the conversation grows, Then the newest turn stays in view; after they scroll up, nothing moves them", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const g = globalThis as { ResizeObserver?: unknown };
+    const was = { scroll: proto.scrollIntoView, ro: g.ResizeObserver };
+    let grew: () => void = () => {};
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    g.ResizeObserver = class { constructor(cb: () => void) { grew = cb; } observe() {} disconnect() {} };
+    try {
+      const { container } = mount({});
+      await screen.findByText("What is left?");
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      const at = (top: number, height = 1000) => { for (const [k, v] of Object.entries({ scrollHeight: height, clientHeight: 400, scrollTop: top })) Object.defineProperty(pane, k, { value: v, configurable: true }); fireEvent.scroll(pane); };
+
+      at(600);
+      let before = scrolls;
+      grew();
+      expect(scrolls).toBe(before + 1);
+
+      // Our own scroll's event lands after more content arrived: far from the end, but not a scroll up. Still pinned.
+      at(600, 1500);
+      before = scrolls;
+      grew();
+      expect(scrolls).toBe(before + 1);
+
+      at(200, 1500);
+      before = scrolls;
+      grew();
+      expect(scrolls).toBe(before);
+
+      at(1090, 1500);
+      grew();
+      expect(scrolls).toBe(before + 1);
+    } finally {
+      proto.scrollIntoView = was.scroll;
+      g.ResizeObserver = was.ro;
+    }
+  });
+
   it("Given it cannot be asked, Then the reason shows and the composer is off", async () => {
     mount({ lead_status: { available: false, busy: false, name: "Director-General", read_only_reason: "Asking the Director-General needs the Claude Code sandbox." } });
     expect(await screen.findByText(/needs the Claude Code sandbox/)).toBeTruthy();
