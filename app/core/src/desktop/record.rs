@@ -403,6 +403,15 @@ impl CoreRecord {
     pub fn verify_record(&self) -> Result<(), String> {
         self.w.verify_record()
     }
+
+    /// A task's close now, through the ledger (6i calls it when a task's evidence is green). Call after `flush`, so
+    /// the queued events ran first. Anything but a close on this run's campaign is refused.
+    pub fn write(&self, req: &Request) -> Result<(), String> {
+        if !matches!(req, Request::TasksClose { slug, .. } if *slug == self.w.cfg.slug) {
+            return Err("not a task close on this run's record".into());
+        }
+        self.w.call(req).map(|_| ()).map_err(|f| f.why().to_string())
+    }
 }
 
 impl RunRecord for CoreRecord {

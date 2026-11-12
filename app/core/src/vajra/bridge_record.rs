@@ -305,6 +305,8 @@ impl Bridge {
                     sha(base_commit, false)?,
                     s("--changed"),
                     changed,
+                    // The ledger reads `result` (`closed` or `already done`) from the JSON answer (bhishma, #190).
+                    s("--json"),
                 ];
                 tasks(argv, sl, repo.clone())
             }

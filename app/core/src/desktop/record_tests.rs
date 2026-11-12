@@ -198,7 +198,7 @@ fn the_six_i_variants_build_the_workflows_argv() {
     let id = format!("{RUN}.t1");
     let br = format!("vajra/{RUN}/task-t1-r1");
     let (bb, cc) = ("b".repeat(40), "c".repeat(40));
-    assert_eq!(a, v(&["-I", "vajra_tasks.py", "close", &id, "--evidence", "/data/walkthroughs/x/evidence.json", "--head", &h, "--commit", &bb, "--branch", &br, "--base-commit", &cc, "--changed", "src/a.rs,src/b c.rs", "--campaign", SLUG]));
+    assert_eq!(a, v(&["-I", "vajra_tasks.py", "close", &id, "--evidence", "/data/walkthroughs/x/evidence.json", "--head", &h, "--commit", &bb, "--branch", &br, "--base-commit", &cc, "--changed", "src/a.rs,src/b c.rs", "--json", "--campaign", SLUG]));
     assert_eq!(cwd, Some(PathBuf::from("/repo")), "close runs in the repository, as write-back does");
     assert_eq!(plan_of(Request::TasksDep { slug: SLUG.into(), id: id.clone(), dep: format!("{RUN}.t0"), remove: true }).1, v(&["-I", "vajra_tasks.py", "dep", &id, &format!("{RUN}.t0"), "--remove", "--campaign", SLUG]));
 }
@@ -702,6 +702,85 @@ fn the_real_scripts_create_reuse_and_record_from_the_cores_own_cwd() {
     close_abandoned(&b, SLUG, &other).unwrap();
     assert_eq!(campaign_status(&b, SLUG).as_deref(), Some("abandoned"));
     assert_eq!(other.load().unwrap().unwrap().status, "abandoned", "the close went through the ledger");
+}
+
+/// HMAC-SHA256 (RFC 2104) over the crate's sha256: what the engine signs evidence with.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> String {
+    let mut k = [0u8; 64];
+    k[..key.len()].copy_from_slice(key);
+    let pad = |b: u8| k.iter().map(|x| x ^ b).collect::<Vec<u8>>();
+    let inner = crate::control::sha256::digest(&[pad(0x36), msg.to_vec()].concat());
+    crate::control::sha256::hex(&crate::control::sha256::digest(&[pad(0x5c), inner.to_vec()].concat()))
+}
+
+/// bhishma on f689ce2: the core's close must reach the ledger as `closed` from the real script's answer, not only
+/// from JSON a test hands in. Green signed evidence in a temp repo, the temp HOME's test key, no injected output.
+#[test]
+fn the_real_scripts_close_is_read_as_the_cores_own_and_the_record_verifies() {
+    if ["/usr/bin/jq", "/usr/bin/openssl", "/usr/bin/python3", "/usr/bin/git"].iter().any(|p| !Path::new(p).is_file()) {
+        eprintln!("skipped: the engine needs /usr/bin/jq, /usr/bin/openssl, /usr/bin/python3 and /usr/bin/git");
+        return;
+    }
+    let t = Tmp::new();
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let mut b = Bridge::new(scripts.canonicalize().unwrap()).with_home(t.0.join("home"));
+    let key = t.0.join("home/.claude/vajra/.hmac-key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    std::fs::create_dir_all(t.0.join("home/.claude/agents")).unwrap();
+    for a in ["bhima", "abhimanyu"] {
+        std::fs::write(t.0.join("home/.claude/agents").join(format!("{a}.md")), "---\nname: x\n---\n").unwrap();
+    }
+    b.record_cwd = Some(super::super::record_app::record_dir(&t.0.join("data")).unwrap());
+    b.timeout = RECORD_TIMEOUT;
+    let store = super::super::record_app::AppLedgerStore::new(&t.0.join("data"), SLUG, t.0.join("home/.claude/vajra/campaigns"), key.clone(), b.clone()).unwrap();
+    let r = CoreRecord::new(t.cfg(false), b.clone(), Arc::new(store)).unwrap();
+    r.plan(&plan()).unwrap();
+    r.send(Event::Claim { task: format!("{RUN}.t1"), agent: "bhima".into(), worktree: Some(PathBuf::from("/wt/one")) });
+    r.flush();
+    // The task's repository, with one commit; git sees only the temp HOME.
+    let repo = t.0.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repo = repo.canonicalize().unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("/usr/bin/git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(&repo)
+            .env("HOME", t.0.join("home"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "t1"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    // Green verify-work evidence, signed as the engine signs it: HMAC over the sorted-key compact JSON.
+    let body = format!(r#"{{"allPassed":true,"commands":[{{"cmd":"cargo test","exit":0,"passed":true}}],"commandsFailed":0,"commandsTotal":1,"git":{{"head":"{head}","treeStable":true}}}}"#);
+    let sig = hmac_sha256(&[0u8; 32], body.as_bytes());
+    let evidence = repo.join("data/walkthroughs/t1/evidence.json");
+    std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+    std::fs::write(&evidence, format!("{},\"hmac\":\"{sig}\"}}", &body[..body.len() - 1])).unwrap();
+    let close = Request::TasksClose {
+        slug: SLUG.into(),
+        id: format!("{RUN}.t1"),
+        evidence: evidence.clone(),
+        head: head.clone(),
+        commit: head.clone(),
+        branch: format!("vajra/{RUN}/task-t1-r1"),
+        base_commit: base,
+        changed: v(&["src/a.rs"]),
+        repo: repo.clone(),
+    };
+    r.write(&close).unwrap();
+    r.verify_record().unwrap();
+    // A second close finds it done: exit 0, "already done", and the record no longer reads as only the core's.
+    r.write(&close).unwrap();
+    assert!(r.verify_record().unwrap_err().contains("isn't the core's"), "{:?}", r.verify_record());
 }
 
 // ---------------------------------------------------------------- the core's ledger (bhishma H1)
