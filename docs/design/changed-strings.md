@@ -355,3 +355,4 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | Claude Code / Engine self-check / Safety hooks / OS sandbox / Git / Python 3 / OpenSSL / Run workflow | check names in the pre-flight list | a check with no plain name shows as the core sent it |
 | Ready / Question (were ready / question) | Review, task list status | task statuses the list had no wording for now use the shared status words, so every status has one casing |
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
+| Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
