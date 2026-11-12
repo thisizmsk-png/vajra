@@ -41,11 +41,14 @@ cleanup() { if [ -n "$STUB" ]; then kill "$STUB" 2>/dev/null; fi; }
 trap cleanup EXIT
 echo "spike dir: $SP"
 
-# The guard stand-in: records every call and blocks any command naming "forbidden".
+# The guard stand-in: records every call's whole hook input (one JSON object per line) and blocks any command naming
+# "forbidden". No truncation: the input leads with session_id and transcript_path, and a long temp path pushed
+# tool_input past a 300-character cut, so the check never saw the blocked call (S4 rerun, batch-3). printf, not echo:
+# a POSIX sh echo may expand the JSON's backslash escapes.
 cat > "$SP/guard.sh" <<EOF
 #!/bin/sh
 in=\$(cat)
-echo "\$in" | cut -c1-300 >> "$M/guard"
+printf '%s\n' "\$in" >> "$M/guard"
 case "\$in" in *forbidden*) echo "blocked by the S4 guard" >&2; exit 2;; esac
 exit 0
 EOF
