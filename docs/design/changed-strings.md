@@ -357,3 +357,4 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
 | A run cannot start until the checks below finish. | beside the disabled Start run button | shown when the checks could not run at all; the button points to it for screen readers |
 | Checked at 2:03:34 AM (was 02:03:34 AM) | "Checked at" and "Tried again at" lines | the hour is no longer padded; seconds stay so two checks in one minute read differently |
+| Back to NAME / Back | top of the Settings section list | the visible way out of Settings, which shows no view tabs; opens the project's Director-General view |
