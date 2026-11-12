@@ -974,6 +974,19 @@ fn the_core_gate_runs_a_real_verify_and_review_on_the_integration_and_the_pass_i
     let head = ugit(&r.home, &r.repo, &["rev-parse", "refs/heads/vajra/r1/integration"]);
     assert!(checks.iter().all(|t| t.dispatch_head.as_deref() == Some(head.as_str())), "each check starts at the integration commit");
     assert!(checks.iter().all(|t| t.worktree.as_ref().is_none_or(|w| !w.exists())), "the check worktrees are discarded");
+    assert!(!card.security, "a real integration's paths were read, and src/lib.rs names no security area");
+}
+
+#[test]
+fn a_real_integration_reports_the_paths_it_changed() {
+    let r = rig("diffpaths", Opts::default());
+    let t = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let commit = r.done(&t).commit.expect("the writer committed");
+    use crate::desktop::runproto::{CoreWorkers, Integration, Workers};
+    let w = CoreWorkers { rt: r.rt.clone(), gw: r.gw.clone() };
+    let at = Integration { repo: &r.repo, project: "p", run: "r1", round: 1, base: &r.base };
+    let got = w.integrate(&at, &[commit]).unwrap();
+    assert_eq!(got.paths, Some(vec!["src/lib.rs".to_string()]));
 }
 
 /// bhishma H1: a process the check runs can print on the session's terminal. A forged final event, printed before or

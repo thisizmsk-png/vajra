@@ -129,8 +129,16 @@ pub trait Workers: Send + Sync {
     fn await_any(&self, tickets: &[String], wait: Duration) -> Option<Tick>;
     fn cancel(&self, ticket: &str) -> bool;
     fn kill_run(&self, run: &str, reason: KillReason);
-    /// Merge `commits` in order into the round's integration branch; returns its head.
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError>;
+    /// Merge `commits` in order into the round's integration branch; returns its head and the paths it changed.
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError>;
+}
+
+/// A round's integration branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Integrated {
+    pub head: String,
+    /// The paths changed from the base; `None` when they couldn't be read, which flags the run (it fails closed).
+    pub paths: Option<Vec<String>>,
 }
 
 /// The 6c runtime and the core's git writer.
@@ -155,12 +163,13 @@ impl Workers for CoreWorkers {
     fn kill_run(&self, run: &str, reason: KillReason) {
         self.rt.kill_run_workers(run, reason);
     }
-    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<String, GitwError> {
+    fn integrate(&self, at: &Integration<'_>, commits: &[String]) -> Result<Integrated, GitwError> {
         let it = self.gw.integration_tree(at.repo, at.project, at.run, at.round, at.base)?;
         let head = self.gw.integrate(&it, at.base, commits)?;
+        let paths = self.gw.diff_paths(&it, at.base, &head).ok();
         // Retention: the merged tickets' trees go once their capture check passes (16.6).
         self.rt.integrated(at.run, commits, &Gitw::integration_ref(&it));
-        Ok(head)
+        Ok(Integrated { head, paths })
     }
 }
 
@@ -429,6 +438,8 @@ struct St {
     round: u32,
     rounds: BTreeMap<u32, Round>,
     security: bool,
+    /// SEC_RE matched a criterion's text or check as the lead wrote it, before sanitising or redaction (owner, M2).
+    criteria_named: bool,
     status: Option<(RunStatus, String)>,
     finish_called: bool,
     /// The clock when the run started: run time counts from here, not from the clock's origin.
@@ -736,6 +747,7 @@ impl RunProtocol {
         let r = p.round;
         let clean = |t: &PlanTask| PlanTask { title: self.text(&t.title), brief: self.text(&t.brief), ..t.clone() };
         if r == 1 {
+            st.criteria_named = p.criteria.iter().flatten().any(|c| security::matches(&c.criterion) || security::matches(&c.check));
             st.criteria = p.criteria.as_deref().map(|c| self.criteria(c)).and_then(Result::ok).unwrap_or_default();
             st.decisions = p.decisions.iter().map(|d| Decision { title: self.text(&d.title), rationale: self.text(&d.rationale) }).collect();
         }
@@ -770,7 +782,7 @@ impl RunProtocol {
             None => merged.iter().map(|t| t.id.clone()).collect(),
             Some(c) => c.rework.clone(),
         };
-        let ask_named = security::matches(&self.0.cfg.ask) || st.criteria.iter().any(|c| security::matches(&c.criterion));
+        let ask_named = security::matches(&self.0.cfg.ask) || st.criteria_named;
         st.security |= ask_named || st.tasks.iter().any(|t| t.security);
         // A security flag that only the plan raised was never on the proposal card: ask the human now, not at dispatch.
         let mut held = Vec::new();
@@ -1015,7 +1027,9 @@ impl RunProtocol {
         let merged = self.0.workers.integrate(&at, &commits);
         let mut st = self.lock();
         match merged {
-            Ok(head) => {
+            Ok(Integrated { head, paths }) => {
+                // The owner's M2 rule: the diff flags the run whatever the plan's words. Sticky; unreadable paths flag.
+                st.security |= paths.is_none_or(|p| p.iter().any(|f| security::matches(f)));
                 let input = self.round_input(&st, r, head);
                 drop(st);
                 let p = self.clone();
