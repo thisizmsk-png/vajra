@@ -61,6 +61,29 @@ describe.each(["dark", "light"] as const)("%s theme contrast", (theme) => {
   });
 });
 
+describe("a disabled ghost button stays legible", () => {
+  // Disabled text is exempt from WCAG 1.4.3, so this is our own floor: 3:1, the level asked of large text and icons.
+  const base = readFileSync(join(HERE, "../components/ui/base/base.css"), "utf8");
+  const opacity = Number(/\.v-button--ghost\[aria-disabled="true"\]\s*\{\s*opacity:\s*([\d.]+)/.exec(base)?.[1]);
+  const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const hex = (c: number[]) => `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+  /** The colour a label shows when its button is drawn at `o` opacity over `bg`. */
+  const faded = (fg: string, bg: string, o: number) => hex(rgb(fg).map((v, i) => v * o + rgb(bg)[i] * (1 - o)));
+
+  it("has its own opacity, and it dims the label", () => {
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+  });
+  it.each(["dark", "light"] as const)("%s: the label reaches 3:1 on every surface and stays under an enabled muted label", (theme) => {
+    const t = THEMES[theme];
+    for (const bg of ["background", "surface", "surface-elevated", "panel"]) {
+      const got = ratio(faded(t["c-text-secondary"], t[`c-${bg}`], opacity), t[`c-${bg}`]);
+      expect(got, `disabled ghost on ${bg}`).toBeGreaterThanOrEqual(3);
+      expect(got, `disabled ghost on ${bg}`).toBeLessThan(ratio(t["c-text-muted"], t[`c-${bg}`]));
+    }
+  });
+});
+
 describe("DESIGN.md contrast tables are reproduced", () => {
   // Rows look like "| text #e6edf3 | 16.02 | 14.64 | 13.70 | 12.88 |" under a "Dark fg on:" or "Light fg on:" header.
   for (const [theme, header] of [["dark", "| Dark fg on:"], ["light", "| Light fg on:"]] as const) {

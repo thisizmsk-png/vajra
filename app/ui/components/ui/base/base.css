@@ -39,6 +39,9 @@ body { margin: 0; background: var(--c-background); color: var(--c-text); font: 4
 .v-button:active:not([aria-disabled="true"]) { background: var(--c-accent); }
 .v-button--primary:active:not([aria-disabled="true"]) { background: color-mix(in srgb, var(--c-action) 76%, var(--c-background)); }
 .v-button[aria-disabled="true"] { opacity: 0.55; }
+/* A ghost label starts from the secondary text colour, so at 0.55 it fell to 2.75:1 in the light theme. At 0.6 it
+   stays above 3:1 on every surface in both themes and still reads as off. */
+.v-button--ghost[aria-disabled="true"] { opacity: 0.6; }
 
 .v-card { background: var(--c-surface); color: var(--c-text); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: var(--space-md); }
 .v-card--interactive { display: block; width: 100%; text-align: left; font: inherit; transition: background-color var(--t-fast) var(--ease-out); }
