@@ -21,10 +21,96 @@
 # Output: <base>/<slug>/  evidence.json, cmd-N.log, diff.patch, diff.stat, untracked.txt, WALKTHROUGH.md
 # Base dir: $VAJRA_WALKTHROUGH_DIR (default ./data/walkthroughs).
 # Exit codes: 0 all passed, 1 a command failed, 2 usage error.
+#
+# Vajra Desktop's evidence runner (ADR-16 16.5a, 6i-e) splits the run from the signing:
+#   vajra-verify-work.sh --run-only <slug> "<cmd>" ...
+#       Runs as above but never opens the key and writes no evidence.json. The unsigned evidence JSON
+#       goes only to fd 3, once, as one line; fd 3 is closed for every command. No fd 3 or no jq: exit 2.
+#   vajra-verify-work.sh --sign <slug> --expect-sha256 <sha>
+#       Signs <base>/<slug>/evidence.json in place, only if the sha256 of its bytes is <sha>, its shape
+#       is a verify-work bundle for <slug> with no hmac, and its git.head is this checkout's HEAD.
+#       Exit 0 signed, 2 usage, 3 refused (file untouched), 4 no usable key.
 
 set -uo pipefail
 
-usage() { echo "usage: vajra-verify-work.sh <slug> \"<cmd>\" [\"<cmd>\" ...]  (at least one command)" >&2; exit 2; }
+usage() {
+  echo "usage: vajra-verify-work.sh [--run-only] <slug> \"<cmd>\" [\"<cmd>\" ...]  (at least one command)" >&2
+  echo "       vajra-verify-work.sh --sign <slug> --expect-sha256 <sha256>" >&2
+  exit 2
+}
+
+KEY_FILE="${HOME}/.claude/vajra/.hmac-key"
+# NFR-SEC-2: the python that reads the key is /usr/bin/python3 on the system PATH, never the caller's (a planted
+# ~/.local/bin/python3 would get the key). The test commands keep the caller's PATH.
+PYTHON3="/usr/bin/python3"
+
+MODE=default
+case "${1:-}" in
+  --run-only) MODE=run_only; shift ;;
+  --sign) MODE=sign; shift ;;
+esac
+
+if [ "$MODE" = sign ]; then
+  [ $# -eq 3 ] && [ "$2" = "--expect-sha256" ] || usage
+  SLUG="$1"; WANT="$3"
+  # Strict: the slug the core recorded, exactly; no sanitizing here.
+  printf '%s' "$SLUG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$' || { echo "vajra-verify-work: invalid slug" >&2; exit 2; }
+  printf '%s' "$WANT" | grep -Eq '^[0-9a-f]{64}$' || { echo "vajra-verify-work: --expect-sha256 needs 64 lowercase hex" >&2; exit 2; }
+  [ -x "$PYTHON3" ] || { echo "vajra-verify-work: $PYTHON3 is required to sign" >&2; exit 4; }
+  EV="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}/${SLUG}/evidence.json"
+  HEAD_NOW="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
+  # Every check runs before the key is opened; the key is read last, only to sign.
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
+import hashlib, hmac, json, os, re, stat, sys
+path, want, slug, head, keyf = sys.argv[1:6]
+def refuse(why):
+    print("vajra-verify-work: refused to sign: " + why, file=sys.stderr); sys.exit(3)
+try:
+    st = os.lstat(path)
+except OSError:
+    refuse("no evidence.json")
+if not stat.S_ISREG(st.st_mode):
+    refuse("evidence.json is not a regular file")
+raw = open(path, "rb").read()
+if hashlib.sha256(raw).hexdigest() != want:
+    refuse("sha256 does not match the recorded one")
+try:
+    ev = json.loads(raw.decode("utf-8"))
+except (UnicodeDecodeError, ValueError):
+    refuse("not JSON")
+cmds = ev.get("commands") if isinstance(ev, dict) else None
+ok = (isinstance(ev, dict) and "hmac" not in ev and ev.get("slug") == slug
+      and isinstance(cmds, list) and len(cmds) > 0 and all(isinstance(c, dict) for c in cmds)
+      and type(ev.get("commandsTotal")) is int and ev["commandsTotal"] == len(cmds)
+      and type(ev.get("commandsFailed")) is int and ev["commandsFailed"] == sum(1 for c in cmds if c.get("exit") != 0)
+      and ev.get("allPassed") is (ev["commandsFailed"] == 0)
+      and isinstance(ev.get("git"), dict))
+if not ok:
+    refuse("not an unsigned verify-work bundle for " + slug)
+if not head or ev["git"].get("head") != head:
+    refuse("its head is not this checkout\x27s HEAD")
+try:
+    k = open(keyf, encoding="utf-8").read().strip()
+except OSError:
+    k = ""
+if not re.fullmatch(r"[0-9a-fA-F]{32,}", k) or len(k) % 2:
+    print("vajra-verify-work: no usable Vajra key", file=sys.stderr); sys.exit(4)
+msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+ev["hmac"] = hmac.new(bytes.fromhex(k), msg, hashlib.sha256).hexdigest()
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(ev, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print("signed " + path)
+' "$EV" "$WANT" "$SLUG" "$HEAD_NOW" "$KEY_FILE"
+  exit $?
+fi
+
+if [ "$MODE" = run_only ]; then
+  { : >&3; } 2>/dev/null || { echo "vajra-verify-work: --run-only needs fd 3 open for the evidence" >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || { echo "vajra-verify-work: --run-only needs jq" >&2; exit 2; }
+fi
 
 RAW_SLUG="${1:-}"
 [ -z "$RAW_SLUG" ] && usage
@@ -92,7 +178,8 @@ for cmd in "$@"; do
   n=$((n+1))
   log="${DIR}/cmd-${n}.log"
   echo "\$ ${cmd}" > "$log"
-  bash -c "$cmd" >> "$log" 2>&1
+  # fd 3 is closed for every command: in --run-only it carries the evidence, which no command may write.
+  bash -c "$cmd" >> "$log" 2>&1 3>&-
   ec=$?
   [ "$ec" -ne 0 ] && failed=$((failed+1))
   printf '  [%s] cmd %d (exit %d): %s\n' "$([ "$ec" -eq 0 ] && echo PASS || echo FAIL)" "$n" "$ec" "$cmd"
@@ -108,8 +195,11 @@ if [ "$IN_GIT" -eq 1 ]; then
   [ "$TREE" != "$TREE_AFTER" ] && STABLE="false"
 fi
 
+# --run-only: the evidence goes to fd 3 only, as one line; no evidence.json is left from an earlier run.
+EV_OUT="${DIR}/evidence.json"; JQ_FMT=""
+if [ "$MODE" = run_only ]; then rm -f "$EV_OUT"; EV_OUT="/dev/fd/3"; JQ_FMT="-c"; fi
 if [ "$have_jq" -eq 1 ]; then
-  jq -n --arg slug "$SLUG" --arg ts "$TS" --argjson total "$n" --argjson failed "$failed" \
+  jq -n $JQ_FMT --arg slug "$SLUG" --arg ts "$TS" --argjson total "$n" --argjson failed "$failed" \
         --argjson cmds "[${entries}]" --arg head "$HEAD_SHA" --arg tree "$TREE" --arg after "$TREE_AFTER" \
         --argjson git "$([ "$IN_GIT" -eq 1 ] && echo true || echo false)" --argjson dirty "$DIRTY" --argjson stable "$STABLE" \
         --argjson untracked "$(wc -l < "${DIR}/untracked.txt" | tr -d ' ')" \
@@ -117,18 +207,15 @@ if [ "$have_jq" -eq 1 ]; then
          {slug:$slug, generatedAt:$ts, commandsTotal:$total, commandsFailed:$failed, allPassed:($failed==0),
           git: (if $git then {head:($head|nz), worktreeTree:($tree|nz), worktreeTreeAfter:($after|nz), treeStable:$stable,
                 diffBase:"HEAD+untracked", uncommittedChanges:$dirty, untrackedFiles:$untracked} else null end),
-          commands:$cmds}' > "${DIR}/evidence.json"
+          commands:$cmds}' > "$EV_OUT"
 fi
 
 # Sign the evidence (contract: docs/roadmap/v0.6-review-fixes.md, "Signed evidence"):
 # hmac = HMAC-SHA256(Vajra key, canonical JSON of the object without "hmac":
 # sort_keys, separators (',', ':'), UTF-8). Without a key the file stays unsigned,
-# and vajra_kb.py / vajra_tasks.py do not count it as green.
-KEY_FILE="${HOME}/.claude/vajra/.hmac-key"
-# NFR-SEC-2: the python that reads the key is /usr/bin/python3 on the system PATH, never the caller's (a planted
-# ~/.local/bin/python3 would get the key). The test commands above keep the caller's PATH.
-PYTHON3="/usr/bin/python3"
-if [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && [ -x "$PYTHON3" ]; then
+# and vajra_kb.py / vajra_tasks.py do not count it as green. --run-only never gets here with a file, and never
+# opens the key: --sign signs later.
+if [ "$MODE" = default ] && [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && [ -x "$PYTHON3" ]; then
   PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
 import hashlib, hmac, json, os, re, sys
 path, keyf = sys.argv[1], sys.argv[2]

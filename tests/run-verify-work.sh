@@ -93,6 +93,61 @@ jq '.commandsFailed=0 | .commands[0].cmd="make test"' "$SEV" > "$WORK/t.json"
 bash "$SCRIPT" signedred "false" >/dev/null 2>&1
 verify_ev "$WORK/wt/signedred/evidence.json"; check "failing runs are signed too (green is decided by the reader)" $?
 
+# --- 6i-e: --run-only (never opens the key, evidence on fd 3 only) and --sign ---
+sha_of() { python3 -I -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+cd "$REPO_T"; git add -A >/dev/null 2>&1; git commit -qm two >/dev/null 2>&1
+export VAJRA_WALKTHROUGH_DIR="$REPO_T/data/walkthroughs"
+RO="$VAJRA_WALKTHROUGH_DIR/ro"; mkdir -p "$RO"; echo '{"stale":true}' > "$RO/evidence.json"
+bash "$SCRIPT" --run-only ro "echo hi" "if { : >&3; } 2>/dev/null; then echo FD3-OPEN; fi" 3> "$WORK/ro.fd3" >/dev/null 2>&1; ec=$?
+[ "$ec" -eq 0 ]; check "run-only: all-pass -> exit 0" $?
+[ ! -e "$RO/evidence.json" ]; check "run-only: no evidence.json on disk (a stale one is removed)" $?
+[ "$(wc -l < "$WORK/ro.fd3" | tr -d ' ')" = "1" ]; check "run-only: evidence is one line on fd 3" $?
+jq -e '.slug == "ro" and .commandsTotal == 2 and .allPassed and (has("hmac") | not) and .git.head != null' "$WORK/ro.fd3" >/dev/null
+check "run-only: fd 3 carries the unsigned bundle with its head" $?
+! grep -qx FD3-OPEN "$RO/cmd-2.log"; check "run-only: fd 3 is closed for every command" $?
+grep -q hi "$RO/cmd-1.log" && [ -f "$RO/WALKTHROUGH.md" ]; check "run-only: logs and walkthrough still written" $?
+bash "$SCRIPT" --run-only ro2 "true" >/dev/null 2>&1 3>&-; [ $? -eq 2 ] && [ ! -e "$VAJRA_WALKTHROUGH_DIR/ro2/cmd-1.log" ]
+check "run-only: no fd 3 -> exit 2, nothing runs" $?
+bash "$SCRIPT" --run-only rored "false" 3> "$WORK/rored.fd3" >/dev/null 2>&1; [ $? -eq 1 ] && jq -e '.allPassed == false' "$WORK/rored.fd3" >/dev/null
+check "run-only: a failing command -> exit 1, still on fd 3" $?
+# The key is never opened: a FIFO at the key path records any open (a writer unblocks only when a reader opens it).
+KP="$HOME/.claude/vajra/.hmac-key"; mv "$KP" "$WORK/key.saved"; mkfifo "$KP"
+( exec 4> "$KP"; echo opened > "$WORK/key.opened" ) & WPID=$!
+bash "$SCRIPT" --run-only rokey "true" 3> "$WORK/rokey.fd3" >/dev/null 2>&1; ec=$?
+sleep 1; kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null
+[ "$ec" -eq 0 ] && [ ! -e "$WORK/key.opened" ] && [ -s "$WORK/rokey.fd3" ]; check "run-only: the key is never opened" $?
+rm -f "$KP"; mv "$WORK/key.saved" "$KP"
+chmod 000 "$KP"
+bash "$SCRIPT" --run-only rounread "true" 3> "$WORK/rounread.fd3" >/dev/null 2>&1; [ $? -eq 0 ] && jq -e 'has("hmac") | not' "$WORK/rounread.fd3" >/dev/null
+check "run-only: the key unreadable -> still an unsigned bundle" $?
+chmod 600 "$KP"
+
+S="$VAJRA_WALKTHROUGH_DIR/ro/evidence.json"; cp "$WORK/ro.fd3" "$S"; H="$(sha_of "$S")"
+bash "$SCRIPT" --sign ro --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; [ $? -eq 3 ] && [ "$(sha_of "$S")" = "$H" ]
+check "sign: a sha mismatch is refused (exit 3), file untouched" $?
+bash "$SCRIPT" --sign ro --expect-sha256 "$H" >/dev/null 2>&1; [ $? -eq 0 ]; check "sign: the recorded sha -> exit 0" $?
+verify_ev "$S" && [ "$(jq -r '.commandsTotal' "$S")" = "2" ]; check "sign: the signed file verifies, same content" $?
+H2="$(sha_of "$S")"; bash "$SCRIPT" --sign ro --expect-sha256 "$H2" >/dev/null 2>&1; [ $? -eq 3 ]
+check "sign: an already signed file is refused" $?
+jq -c '.commandsFailed=0 | .allPassed=true | del(.hmac)' "$WORK/rored.fd3" > "$WORK/forged.json"
+mkdir -p "$VAJRA_WALKTHROUGH_DIR/rored"; cp "$WORK/forged.json" "$VAJRA_WALKTHROUGH_DIR/rored/evidence.json"
+bash "$SCRIPT" --sign rored --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rored/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
+check "sign: a bundle whose counts don't match its commands is refused" $?
+jq -c '.slug="other"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/rokey/evidence.json"
+bash "$SCRIPT" --sign rokey --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rokey/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
+check "sign: a bundle for another slug is refused" $?
+jq -c '.git.head="'"$(git rev-parse HEAD~1)"'"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json"
+bash "$SCRIPT" --sign rounread --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/rounread/evidence.json")" >/dev/null 2>&1; [ $? -eq 3 ]
+check "sign: a bundle from another head is refused" $?
+mkdir -p "$VAJRA_WALKTHROUGH_DIR/nokey"; jq -c '.slug="nokey"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/nokey/evidence.json"
+mv "$KP" "$WORK/key.saved"
+bash "$SCRIPT" --sign nokey --expect-sha256 "$(sha_of "$VAJRA_WALKTHROUGH_DIR/nokey/evidence.json")" >/dev/null 2>&1; [ $? -eq 4 ]
+check "sign: no key -> exit 4" $?
+mv "$WORK/key.saved" "$KP"
+bash "$SCRIPT" --sign "../x" --expect-sha256 "$H" >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: a traversal slug is a usage error" $?
+bash "$SCRIPT" --sign ro >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: no --expect-sha256 is a usage error" $?
+cd "$WORK"
+
 echo "----------------------------------------"
 echo "verify-work: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
