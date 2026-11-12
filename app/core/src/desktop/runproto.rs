@@ -700,17 +700,27 @@ impl RunProtocol {
                 st.protected.push(a);
             }
         }
+        let mut role_changed = Vec::new();
         for spec in merged.iter().map(clean) {
             // The lead can't clear a security flag: a re-planned task keeps it.
             let sec = Self::security_task(&spec);
             match st.tasks.iter_mut().find(|t| t.spec.id == spec.id) {
                 Some(t) => {
                     t.security |= sec;
+                    if t.spec.owner_role != spec.owner_role {
+                        role_changed.push(spec.id.clone());
+                        // The human picked a seat for the old role: it doesn't carry over to another role.
+                        if t.pick.as_ref().is_some_and(|slot| !self.writer_seats(&spec.owner_role).any(|s| &s.slot == slot)) {
+                            t.pick = None;
+                        }
+                    }
                     t.spec = spec;
                 }
                 None => st.tasks.push(TaskState { spec, security: sec, tickets: Vec::new(), pick: None }),
             }
         }
+        // A seat question asked for the old role is stale; it is asked again below or at dispatch.
+        self.answered(st, |q| matches!(q, Question::PickSeat { task, .. } if role_changed.contains(task)));
         let rework = match st.cur() {
             None => merged.iter().map(|t| t.id.clone()).collect(),
             Some(c) => c.rework.clone(),
@@ -834,8 +844,9 @@ impl RunProtocol {
     /// The task's role, a security task only on a marked seat (or the human's pick), then the seat with the fewest
     /// live tickets of this run (the first on a tie): a busy seat queues.
     fn choose_seat(&self, st: &St, t: &TaskState) -> Option<WorkerSeat> {
+        // The human's pick, only while that seat still has the task's role (a re-plan may change the role).
         if let Some(slot) = &t.pick {
-            return self.0.cfg.seats.iter().find(|s| &s.slot == slot).cloned().map(|mut s| {
+            return self.writer_seats(&t.spec.owner_role).find(|s| &s.slot == slot).cloned().map(|mut s| {
                 s.source = "user".into();
                 s
             });

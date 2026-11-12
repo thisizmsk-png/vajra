@@ -678,3 +678,27 @@ fn criteria_are_capped_and_stored_sanitised_and_an_identical_list_is_still_accep
     // The lead resends the exact list it sent in round 1: the same sanitised form, so it is not a change.
     r.p.plan_tasks(PlanInput { round: 2, criteria: Some(raw), ..PlanInput::default() }).expect("an identical resubmitted list is accepted");
 }
+
+#[test]
+fn a_seat_pick_is_dropped_when_a_replan_changes_the_tasks_role() {
+    // The ask names security work, so a security task with no marked seat is held at dispatch.
+    let r = rig_with("rotate the session tokens", default_seats(), Limits::default(), true);
+    let mut p = plan1();
+    p.tasks[0].title = "rotate tokens".into();
+    r.p.plan_tasks(p).unwrap();
+    assert_eq!(r.p.dispatch_worker("t1").unwrap(), Dispatched::Held { task: "t1".into() });
+    r.p.pick_seat("t1", "w1").unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    assert_eq!(r.await_round(1).outcome.as_deref(), Some("failed"));
+    // Round 2 moves t1 from backend to frontend: the backend pick no longer fits it.
+    let mut t1 = task("t1", "frontend", &["src/a/"], &[], &["ac-1"]);
+    t1.title = "rotate tokens".into();
+    r.p.plan_tasks(PlanInput { round: 2, tasks: vec![t1], ..PlanInput::default() }).unwrap();
+    assert_eq!(r.p.dispatch_worker("t1").unwrap(), Dispatched::Held { task: "t1".into() }, "never run on the old backend seat");
+    assert_eq!(r.p.card().questions, [Question::PickSeat { task: "t1".into(), role: "frontend".into() }]);
+    assert_eq!(code(r.p.pick_seat("t1", "w1")).0, INVALID, "a backend seat can't take a frontend task");
+    r.p.pick_seat("t1", "w3").unwrap();
+    let (_, w) = r.w.spec(&r.dispatch("t1"));
+    assert_eq!((w.slot.as_str(), w.role.as_str(), w.source.as_str()), ("w3", "frontend", "user"));
+}
