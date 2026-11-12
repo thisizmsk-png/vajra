@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use super::identity::{self, Guard};
 
-/// Folders under home where code usually lives.
-pub const COMMON_FOLDERS: &[&str] =
-    &["Development", "Developer", "Projects", "Code", "code", "src", "repos", "dev", "work", "workspace", "GitHub", "Documents/GitHub", "Documents/Projects", "Documents/Code"];
+/// Folders under home where code usually lives. Never Documents, Desktop or Downloads: macOS protects them (TCC) and an
+/// automatic scan there would show a privacy prompt before the person has clicked anything. Those are scanned only when
+/// the person names them (`extra`).
+pub const COMMON_FOLDERS: &[&str] = &["Development", "Developer", "Projects", "Code", "code", "src", "repos", "dev", "work", "workspace", "GitHub"];
 
 const MAX_DEPTH: usize = 3;
 const MAX_VISITED: usize = 20_000;

@@ -103,3 +103,14 @@ fn stops_at_the_repository_cap() {
     assert_eq!(d.found.len(), MAX_FOUND);
     assert!(d.truncated);
 }
+
+#[test]
+fn the_automatic_set_never_touches_macos_protected_folders() {
+    for f in COMMON_FOLDERS {
+        let first = f.split('/').next().unwrap();
+        assert!(!["Documents", "Desktop", "Downloads"].contains(&first), "{f}");
+    }
+    let t = Tmp::new("tcc");
+    t.repo("Documents/GitHub/hidden");
+    assert!(discover(&t.guard(), &[], &none).found.is_empty());
+}
