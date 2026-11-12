@@ -108,16 +108,39 @@ pub const S4_UNVERIFIED: Unsupported = Unsupported {
     reason: "s4_unverified",
     detail: "Vajra hasn't verified its Claude Code worker settings with this build yet.",
 };
-const LEAD_LATER: Unsupported = Unsupported { reason: "profile_missing", detail: "Vajra can't run this harness as a run lead yet." };
+
+const CODEX_LEAD_ALWAYS: &[Always] = &[
+    Always { setting: "mode", how: "`codex exec --json --skip-git-repo-check`, stdin /dev/null" },
+    Always { setting: "sandbox", how: "`--sandbox read-only`" },
+    Always { setting: "working_dir", how: "`-C <data>/runs/<run>/lead`" },
+    Always { setting: "approval", how: "`-c approval_policy=\"never\"`" },
+    Always { setting: "user_config", how: "login: `--ignore-user-config` (N3; spike S2); gateway: a Vajra-owned CODEX_HOME" },
+    Always { setting: "add_ons", how: "`-c notify=[]`, `web_search=\"disabled\"`, `features.multi_agent=false`, `features.goals=false`" },
+    Always { setting: "vajra_tools", how: "`-c mcp_servers={vajra_run=...}`: the only server, its tools pre-approved, `tool_timeout_sec=130`" },
+    Always { setting: "model_and_effort", how: "`-m`, `-c model_reasoning_effort` from the seat" },
+];
+
+const CLAUDE_LEAD_ALWAYS: &[Always] = &[
+    Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, cwd <data>/runs/<run>/lead" },
+    Always { setting: "setting sources", how: "`--setting-sources \"\"` plus the lead flag file (deny rules, guard hooks)" },
+    Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
+    Always { setting: "tools", how: "`--tools` and `--allowedTools`: Read, Grep, Glob and the vajra-run tools" },
+    Always { setting: "vajra_tools", how: "`--mcp-config <run>/lead/vajra-run.json --strict-mcp-config`, `MCP_TOOL_TIMEOUT`" },
+    Always { setting: "model", how: "`--model` when the seat names one" },
+];
+
+/// A lead keeps only the user's login: no MCP servers, notify, settings or config of theirs (N3).
+const LEAD_USER: &[&str] = &["login"];
 const DG_OWN: Unsupported = Unsupported { reason: "profile_missing", detail: "The Director-General runs through its own launch (ADR-13)." };
 
-/// The profile for a (harness, role kind). Leads and the Director-General are completed in 6d and 6f.
+/// The profile for a (harness, role kind). The Director-General's own profile is completed in 6f.
 pub fn profile(engine: Engine, kind: RoleKind) -> Profile {
     let claude_worker = if CLAUDE_WORKER_S4_PASSED { Ok(()) } else { Err(S4_UNVERIFIED) };
     let (always, user, supported): (&'static [Always], &'static [&'static str], Result<(), Unsupported>) = match (engine, kind) {
         (Engine::Codex, RoleKind::Worker | RoleKind::Verifier) => (CODEX_WORKER_ALWAYS, CODEX_WORKER_USER, Ok(())),
         (Engine::Claude, RoleKind::Worker | RoleKind::Verifier) => (CLAUDE_WORKER_ALWAYS, CLAUDE_WORKER_USER, claude_worker),
-        (_, RoleKind::Lead) => (&[], &[], Err(LEAD_LATER)),
+        (Engine::Codex, RoleKind::Lead) => (CODEX_LEAD_ALWAYS, LEAD_USER, Ok(())),
+        (Engine::Claude, RoleKind::Lead) => (CLAUDE_LEAD_ALWAYS, LEAD_USER, Ok(())),
         (_, RoleKind::DirectorGeneral) => (&[], &[], Err(DG_OWN)),
     };
     Profile { engine, kind, always, user, supported }
@@ -239,13 +262,190 @@ pub fn worker_env(engine: Engine, l: &WorkerLaunch<'_>, vajra_home: Option<&Path
     env
 }
 
-/// Stubs completed in 6d: the lead profiles are refused by `profile()` until then.
-pub fn codex_lead_argv() -> Result<Vec<String>, InvalidInput> {
-    Err(bad("kind", "the Codex lead profile lands in 6d"))
+// ------------------------------------------------------------ run leads (16.4, 16.5; 6d2)
+
+/// The `vajra_run` MCP server a run lead gets: the app's own binary in `--mcp-run` mode. Its env holds the run id, the
+/// **path** of the 0600 token file and the app socket, never the token itself (`-c` values and argv show in `ps`).
+#[derive(Clone, Copy, Debug)]
+pub struct RunServer<'a> {
+    /// The absolute `vajra-desktop` binary the app runs as.
+    pub exe: &'a Path,
+    pub run: &'a str,
+    pub token_file: &'a Path,
+    pub socket: &'a Path,
 }
 
-pub fn claude_lead_argv() -> Result<Vec<String>, InvalidInput> {
-    Err(bad("kind", "the Claude lead profile lands in 6d"))
+/// One run lead launch, as the core built it. The prompt is the run charter (`desktop::charter`).
+#[derive(Clone, Copy, Debug)]
+pub struct LeadLaunch<'a> {
+    pub prompt: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    /// `<data>/runs/<run>/lead/`: the lead's working dir. Read-only to a Codex lead; a Claude lead has no edit tools.
+    pub lead_dir: &'a Path,
+    pub server: RunServer<'a>,
+}
+
+/// The `tool_timeout_sec` a Codex lead's `vajra_run` server gets. Above the run client's longest wait
+/// (`runreg::MAX_CLIENT_TIMEOUT`, 120 s), so the client always answers first (spike S5: 0.166 honours the key).
+pub const LEAD_TOOL_TIMEOUT_SEC: u64 = 130;
+
+/// The same bound for a Claude lead, in ms, through `MCP_TOOL_TIMEOUT` (S5 passed on the default; this pins it).
+pub const CLAUDE_LEAD_TOOL_TIMEOUT_MS: u64 = LEAD_TOOL_TIMEOUT_SEC * 1000;
+
+/// A Claude lead's whole tool surface: three read tools and the `vajra-run` tools. `--tools` sets it, `--allowedTools`
+/// pre-approves it, and the read-back refuses any other tool, an MCP tool from another server included (N3).
+pub fn claude_lead_tools() -> String {
+    let run = crate::control::runreg::TOOL_NAMES.iter().map(|t| format!("mcp__{}__{t}", crate::control::mcp::RUN_SERVER_NAME));
+    ["Read", "Grep", "Glob"].into_iter().map(String::from).chain(run).collect::<Vec<_>>().join(",")
+}
+
+fn check_server(s: &RunServer<'_>) -> Result<(String, String, String, String), InvalidInput> {
+    if !crate::ids::valid_run_id(s.run) {
+        return Err(bad("run", "must be a run id"));
+    }
+    Ok((toml_path(s.exe, "exe")?, s.run.to_string(), toml_path(s.token_file, "token_file")?, toml_path(s.socket, "socket")?))
+}
+
+/// Which provider route a Codex lead runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexRoute {
+    /// The user's own Codex login (`~/.codex`): the auth stays theirs, their `config.toml` is ignored.
+    Login,
+    /// A gateway account: the Vajra-owned `CODEX_HOME` of `providers::codex_home`, which the caller sets.
+    Gateway,
+}
+
+/// The Codex lead launch, both routes, built in this one function (16.4 as amended for Codex leads by spike S2):
+/// - `codex exec --json --skip-git-repo-check --sandbox read-only -C <lead dir>`, stdin `/dev/null`;
+/// - `approval_policy="never"`, `notify=[]`, `web_search="disabled"`, and `features.multi_agent=false` and
+///   `features.goals=false`, so the lead spawns no sub-agents of its own;
+/// - **login route: `--ignore-user-config`.** On 0.166 a `-c mcp_servers={...}` table is merged with the user's
+///   `config.toml`, so their own servers still start (S2), and N3 holds only when the user's config is not loaded at
+///   all. Auth still comes from `CODEX_HOME`. Vajra never reads the user's config: the model and effort come from the
+///   seat, and the provider is Codex's built-in login provider, its default once the user's config is ignored (S3: the
+///   built-in provider's keys can't be overridden, so none are passed);
+/// - **gateway route:** Vajra's own home (its config holds only the gateway provider), with zero retries (H9);
+/// - the `vajra_run` server as the only MCP server: `default_tools_approval_mode="approve"` and `enabled_tools` on
+///   that entry only (read-only plus `approval_policy=never` refuses every MCP call needing approval, S2), and
+///   `tool_timeout_sec`.
+pub fn codex_lead_argv(l: &LeadLaunch<'_>, route: CodexRoute) -> Result<Vec<String>, InvalidInput> {
+    argv::check_ask(l.prompt)?;
+    let dir = toml_path(l.lead_dir, "lead_dir")?;
+    let (exe, run, token, socket) = check_server(&l.server)?;
+    let mut a: Vec<String> = ["/bin/sh", "-c", argv::NULL_STDIN, "sh", "codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "-C"]
+        .map(String::from)
+        .into();
+    a.push(dir);
+    if route == CodexRoute::Login {
+        a.push("--ignore-user-config".into());
+    }
+    match (l.model, route) {
+        (None, CodexRoute::Gateway) => return Err(bad("model", "a gateway seat names a model")),
+        (Some(m), _) if !crate::providers::contract::valid_model_id(m) || m.starts_with('-') => return Err(bad("model", "must be a model id")),
+        (Some(m), _) => a.extend(["-m".into(), m.into()]),
+        (None, CodexRoute::Login) => {}
+    }
+    let mut kv: Vec<String> = vec![
+        "approval_policy=\"never\"".into(),
+        "notify=[]".into(),
+        "web_search=\"disabled\"".into(),
+        "features.multi_agent=false".into(),
+        "features.goals=false".into(),
+    ];
+    if let Some(e) = l.effort {
+        if !valid_effort(e) {
+            return Err(bad("effort", "must be 1 to 16 of [a-z0-9-]"));
+        }
+        kv.push(format!("model_reasoning_effort=\"{e}\""));
+    }
+    if route == CodexRoute::Gateway {
+        let id = crate::providers::codex_home::PROVIDER_ID;
+        kv.extend([format!("model_providers.{id}.request_max_retries=0"), format!("model_providers.{id}.stream_max_retries=0")]);
+    }
+    let tools = crate::control::runreg::TOOL_NAMES.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(",");
+    let name = crate::control::mcp::RUN_SERVER_NAME;
+    kv.push(format!(
+        "mcp_servers={{{name}={{command=\"{exe}\",args=[\"--mcp-run\"],env={{{}=\"{run}\",{}=\"{token}\",{}=\"{socket}\"}},\
+         default_tools_approval_mode=\"approve\",enabled_tools=[{tools}],tool_timeout_sec={LEAD_TOOL_TIMEOUT_SEC}}}}}",
+        crate::control::runreg::RUN_ENV,
+        crate::control::runreg::TOKEN_FILE_ENV,
+        crate::control::runreg::SOCKET_ENV,
+    ));
+    a.extend(kv.into_iter().flat_map(|v| ["-c".to_string(), v]));
+    a.extend(["--".into(), l.prompt.into()]);
+    Ok(a)
+}
+
+/// The bytes of a Claude lead's `--mcp-config` file: the `vajra_run` server only (with `--strict-mcp-config`, the
+/// user's servers never load, N3).
+pub fn claude_lead_mcp_config(s: &RunServer<'_>) -> Result<String, InvalidInput> {
+    let (exe, run, token, socket) = check_server(s)?;
+    let env = json!({ crate::control::runreg::RUN_ENV: run, crate::control::runreg::TOKEN_FILE_ENV: token, crate::control::runreg::SOCKET_ENV: socket });
+    let v = json!({"mcpServers": {crate::control::mcp::RUN_SERVER_NAME: {"type": "stdio", "command": exe, "args": ["--mcp-run"], "env": env}}});
+    let mut out = serde_json::to_string_pretty(&v).map_err(|_| bad("server", "does not serialise"))?;
+    out.push('\n');
+    Ok(out)
+}
+
+/// What a Claude lead launch needs beyond `LeadLaunch`.
+#[derive(Clone, Copy, Debug)]
+pub struct ClaudeLead<'a> {
+    pub claude: &'a Path,
+    pub session_id: &'a str,
+    /// The lead flag file (`claude_lead_flag`), written through `write_claude_worker_flag`'s writer.
+    pub settings: &'a Path,
+    /// The file holding `claude_lead_mcp_config`'s bytes.
+    pub mcp_config: &'a Path,
+}
+
+/// A Claude Code run lead: no setting source loads (`--setting-sources ""`, N3), the flag file sets the deny rules and
+/// the guard hooks, `--tools` and `--allowedTools` are `claude_lead_tools()`, and `--mcp-config` with
+/// `--strict-mcp-config` gives the `vajra_run` server only. The charter comes after `--`. No bypass flag.
+pub fn claude_lead_argv(l: &LeadLaunch<'_>, c: &ClaudeLead<'_>) -> Result<Vec<String>, InvalidInput> {
+    argv::check_ask(l.prompt)?;
+    if l.effort.is_some() {
+        return Err(bad("effort", "a Claude seat has no effort"));
+    }
+    check_server(&l.server)?;
+    let abs = |p: &Path, f: &'static str| match p.to_str() {
+        Some(s) if p.is_absolute() => Ok(s.to_string()),
+        _ => Err(bad(f, "must be an absolute path")),
+    };
+    if !crate::ids::valid_session_id(c.session_id) {
+        return Err(bad("session_id", "must be a canonical uuid"));
+    }
+    abs(l.lead_dir, "lead_dir")?;
+    let tools = claude_lead_tools();
+    let mut a = vec![
+        abs(c.claude, "claude")?, "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(),
+        "--session-id".into(), c.session_id.into(), "--setting-sources".into(), String::new(), "--settings".into(), abs(c.settings, "settings")?,
+        "--permission-mode".into(), "dontAsk".into(), "--tools".into(), tools.clone(), "--allowedTools".into(), tools,
+        "--mcp-config".into(), abs(c.mcp_config, "mcp_config")?, "--strict-mcp-config".into(),
+    ];
+    if let Some(m) = l.model {
+        if !crate::providers::contract::valid_model_id(m) || m.starts_with('-') {
+            return Err(bad("model", "must be a model id"));
+        }
+        a.extend(["--model".into(), m.into()]);
+    }
+    a.extend(["--".into(), l.prompt.into()]);
+    Ok(a)
+}
+
+/// The variables a lead launch adds to `ENV_ALLOW`: a Codex gateway lead's Vajra-owned `CODEX_HOME`, or a Claude
+/// lead's pinned MCP tool timeout.
+pub fn lead_env(engine: Engine, vajra_home: Option<&Path>) -> Vec<(&'static str, OsString)> {
+    match engine {
+        Engine::Codex => vajra_home.map(|h| ("CODEX_HOME", h.as_os_str().to_owned())).into_iter().collect(),
+        Engine::Claude => vec![("MCP_TOOL_TIMEOUT", CLAUDE_LEAD_TOOL_TIMEOUT_MS.to_string().into())],
+    }
+}
+
+/// A Claude lead's flag file: `lead_settings`' generated deny rules over HOME, the project's folders and the data dir,
+/// `dontAsk`, bypass disabled, the Vajra guard hooks, and an allow list of exactly `claude_lead_tools()`.
+pub fn claude_lead_flag(home: &Path, repos: &[PathBuf], data: &Path, others: &[PathBuf]) -> Result<String, String> {
+    crate::control::lead_settings::run_lead_settings(home, repos, data, others, &claude_lead_tools()).map_err(|e| e.to_string())
 }
 
 /// What a Claude worker launch needs beyond the shared fields.
@@ -627,6 +827,39 @@ pub fn check_claude_applied(events: &str, tools: &str) -> Result<(), NotApplied>
         if !t.starts_with("mcp__") && !want.contains(&t) {
             return Err(NotApplied(format!("tool {t} is outside the role's list")));
         }
+    }
+    Ok(())
+}
+
+/// Check a Codex run lead's first `turn_context`: the sandbox exactly `read-only`, then `check_codex_applied` with the
+/// lead dir as the cwd and no network (on read-only it also refuses any file-system write entry).
+pub fn check_codex_lead_applied(rollout: &str, lead_dir: &Path) -> Result<(), NotApplied> {
+    let Some(tc) = rollout.lines().take(10_000).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|r| r["type"] == "turn_context") else {
+        return Err(NotApplied("no turn_context in the session file".into()));
+    };
+    if tc["payload"]["sandbox_policy"]["type"] != "read-only" {
+        return Err(NotApplied("the lead's sandbox is not read-only".into()));
+    }
+    check_codex_applied(rollout, &CodexWant { cwd: lead_dir.to_path_buf(), ticket_tmp: lead_dir.to_path_buf(), network: false })
+}
+
+/// Check a Claude run lead's `system`/`init` event: `dontAsk`, every tool in `claude_lead_tools()` (an MCP tool of any
+/// other server fails, N3), and `vajra_run` the only MCP server.
+pub fn check_claude_lead_applied(events: &str) -> Result<(), NotApplied> {
+    let init = events.lines().take(1000).filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "system" && e["subtype"] == "init");
+    let Some(init) = init else { return Err(NotApplied("no init event".into())) };
+    if init["permissionMode"] != "dontAsk" {
+        return Err(NotApplied("permission mode is not dontAsk".into()));
+    }
+    let want = claude_lead_tools();
+    let want: Vec<&str> = want.split(',').collect();
+    let Some(got) = init["tools"].as_array() else { return Err(NotApplied("no tool list".into())) };
+    if let Some(t) = got.iter().map(|t| t.as_str().unwrap_or("")).find(|t| !want.contains(t)) {
+        return Err(NotApplied(format!("tool {t} is outside the lead's list")));
+    }
+    let servers: Vec<&str> = init["mcp_servers"].as_array().map(|v| v.iter().map(|s| s["name"].as_str().unwrap_or("")).collect()).unwrap_or_default();
+    if servers != [crate::control::mcp::RUN_SERVER_NAME] {
+        return Err(NotApplied("an MCP server other than vajra_run is loaded".into()));
     }
     Ok(())
 }

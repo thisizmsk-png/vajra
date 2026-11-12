@@ -179,7 +179,11 @@ pub fn deny_rules_for_iso(home: &Path, repos: &[std::path::PathBuf], data: &Path
 }
 
 fn render(rules: &[String], hooks: bool) -> String {
-    let allow: Vec<&str> = LEAD_TOOLS.split(',').collect();
+    render_allow(rules, hooks, LEAD_TOOLS)
+}
+
+fn render_allow(rules: &[String], hooks: bool, tools: &str) -> String {
+    let allow: Vec<&str> = tools.split(',').collect();
     let mut v = json!({
         "permissions": {
             "defaultMode": "dontAsk",
@@ -203,6 +207,12 @@ fn render(rules: &[String], hooks: bool) -> String {
     let mut s = serde_json::to_string_pretty(&v).expect("a json! value serialises");
     s.push('\n');
     s
+}
+
+/// A run lead's flag file (ADR-16 16.4, 6d2): the same deny table and guard hooks as the Director-General's, with the
+/// run lead's own tool list as the allow list.
+pub fn run_lead_settings(home: &Path, repos: &[std::path::PathBuf], data: &Path, others: &[std::path::PathBuf], tools: &str) -> Result<String, LeadError> {
+    Ok(render_allow(&deny_rules_for(home, repos, data, others)?, true, tools))
 }
 
 /// The Lead's settings file, as the bytes the core writes: the guard hooks and the generated deny rules.

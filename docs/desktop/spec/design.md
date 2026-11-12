@@ -1123,6 +1123,7 @@ The call becomes `start_proposal(id, sha, overrides?)`, with `overrides = [{seat
 Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one per (harness, role kind). The role kinds are `lead`, `worker`, `verifier` and `director_general`. The `reviewer` and `security_reviewer` seats use the `verifier` kind: Bash but no edit tools, and never committed. The rule is the same for every harness:
 
 1. **The user's own install, login and settings load as they normally would.** Vajra never edits their files.
+   - **Amended for Codex run leads (6d2, spike S2, owner decision 2026-11-12).** On the login route a Codex lead runs with `--ignore-user-config`: the user's `config.toml` does not load, so none of their MCP servers, `notify` or profiles run in the lead (N3). Its auth still comes from `CODEX_HOME`. Its model and effort come from the Vajra seat (6a) with `-m` and `-c`, and its provider is Codex's built-in login provider. Vajra never reads the user's config. The gateway route keeps Vajra's own home. The evidence: on codex 0.166, `-c mcp_servers={…only vajra_run…}` is **merged** with the user's table, so the user's servers still start; `-c mcp_servers.<name>.enabled=false` does not stop them either; only `--ignore-user-config` does (`app/bench/spikes/s2s5-lead-mcp.sh`, variants `table`, `disable` and `ignore`). The whole Codex lead config is built in one function, `profiles::codex_lead_argv`.
 2. **Vajra layers its orchestration settings on top, for that one launch only.** It uses the harness's own highest-precedence per-invocation mechanism: CLI flags, `-c` overrides, a flag settings file. Each such setting is in one of two classes:
    - **Always set by Vajra.** Anything that decides confinement, where the process runs, how it is driven, and how it reaches the core. A user setting for these is overridden.
    - **Left to the user.** Everything else: login, their own MCP servers and tools (Q4, except for leads under N3), instructions files, theme and history, and the default model when the seat's model is `null`.
@@ -1146,14 +1147,15 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Setting | Worker / verifier | Lead / Director-General | Class |
 |---|---|---|---|
 | Mode | `codex exec --json`, stdin `/dev/null` | the same | always |
-| Sandbox | `--sandbox workspace-write`; `-c sandbox_workspace_write.network_access=<seat.network>`; `writable_roots=["<ticket tmp>"]` (a per-ticket temp dir under `<work>`, 16.6, also passed as `TMPDIR`); `exclude_slash_tmp=true`; `exclude_tmpdir_env_var=true`; and `-c tools.web_search=false` unless `network` is on | `--sandbox read-only` | always |
+| Sandbox | `--sandbox workspace-write`; `-c sandbox_workspace_write.network_access=<seat.network>`; `writable_roots=["<ticket tmp>"]` (a per-ticket temp dir under `<work>`, 16.6, also passed as `TMPDIR`); `exclude_slash_tmp=true`; `exclude_tmpdir_env_var=true`; and `-c tools.web_search=false` unless `network` is on | `--sandbox read-only`, `--skip-git-repo-check`, `-c web_search="disabled"`. S2: the lead reads the project and cannot write the lead dir or the project; no `workspace-write` fallback | always |
 | Approval | `-c approval_policy="never"` (headless; nothing can be approved mid-run) | the same | always |
 | Working dir | the core's worktree (16.6) | the run's read-only lead dir, or the project root read-only | always |
 | Model and effort | `-m <model>` and `-c model_reasoning_effort=…` when the seat names them | the same | always, when set |
 | Provider route | Gateway: `CODEX_HOME=<data>/codex-home/<account>` (PR 3), and `-c model_providers.vajra-openrouter.{request,stream}_max_retries=0`. Login: the user's `~/.codex`, plus `-c model_providers.openai.*_max_retries=0` if S3 shows it applies | the same | always |
-| Vajra tools | none (a worker needs no core tools) | `-c mcp_servers.vajra_run.{command,args,env}`. The env holds only `VAJRA_RUN` and the **path** of a 0600 token file, **never the token itself**, because `-c` values appear in `ps`. The name `vajra_run` is reserved: a user server with that name is overridden. Also `-c mcp_servers.vajra_run.tool_timeout_sec=130` | always |
-| The user's MCP servers and `notify` | **kept** (Q4), and disclosed | **switched off** under N3: `-c mcp_servers={…only vajra_run…}`, `-c notify=[]`; S3 verifies | worker: theirs; lead: always |
-| Instructions (`AGENTS.md`), profiles, history | theirs | theirs | user |
+| Vajra tools | none (a worker needs no core tools) | `-c mcp_servers={vajra_run={command,args,env,…}}`. The env holds only `VAJRA_RUN`, the app socket and the **path** of a 0600 token file, **never the token itself**, because `-c` values appear in `ps`. The name `vajra_run` is reserved. Also, on that entry only: `tool_timeout_sec=130` (S5: honoured; above the client's 120 s), `default_tools_approval_mode="approve"` and `enabled_tools=[the vajra-run tools]` (S2: read-only plus `approval_policy=never` refuses every MCP call needing approval) | always |
+| The user's MCP servers and `notify` | **kept** (Q4), and disclosed | **switched off** under N3: login route `--ignore-user-config` (rule 1 amendment; S2 showed the `-c mcp_servers` table alone is merged), gateway route Vajra's own home; `-c notify=[]` | worker: theirs; lead: always |
+| Sub-agents and goals | theirs | `-c features.multi_agent=false`, `-c features.goals=false` (S2), so a lead spawns nothing of its own | worker: theirs; lead: always |
+| Instructions (`AGENTS.md`), profiles, history | theirs | login route: `config.toml` and its profiles do not load; `AGENTS.md` and history are Codex's own | user |
 
 **Claude Code profiles.**
 
@@ -1162,7 +1164,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Mode | `claude -p --output-format stream-json --verbose --session-id <id>`, stdin closed | the same | ADR-13, unchanged | always |
 | Settings | the user's sources load (no `--setting-sources ""`), **plus** `--settings <data>/profiles/claude-worker.json`. As a flag file it outranks user and project settings. It holds Vajra's deny rules; hooks merge, so the guard runs. | `--setting-sources ""` plus `--settings claude-lead.json` (N3) | ADR-13 | always |
 | Permissions | `--permission-mode dontAsk`; **`--tools`** and `--allowedTools`, both the role's tool list from `bundled-agents/<writer>.md` (Read, Grep, Glob and Bash for the verifier and both reviewers; no Edit or Write). **No bypass flag.** | `--tools` / `--allowedTools` = Read, Grep, Glob and the `vajra-run` tools | ADR-13 | always |
-| Vajra tools | none | `--mcp-config <run>/vajra-run.json --strict-mcp-config` | ADR-13 | always |
+| Vajra tools | none | `--mcp-config <run>/lead/vajra-run.json --strict-mcp-config`, and `MCP_TOOL_TIMEOUT=130000` (S5 passed on the default; this pins it above the client's 120 s). The read-back refuses any tool outside the list and any MCP server but `vajra_run` | ADR-13 | always |
 | The user's MCP servers | **kept** (no `--strict-mcp-config`), and disclosed | off (N3) | off (ADR-13) | worker: theirs |
 | Model | `--model <model>` when the seat names one | the same | — | always, when set |
 
