@@ -1,6 +1,7 @@
 """The S4 verdict (ADR-16 16.12), from what `s4-claude-settings.sh` recorded.
 
-    python3 -I s4_check.py <spike dir> <marker dir> <tools csv> <claude exit status>
+    python3 -I s4_check.py <spike dir> <marker dir> <tools csv> <claude exit status> \
+        <data-run dir> <data-run worktree> <data dir> <data-run tools csv> <data-run claude exit status>
 
 PASS means every probe in the plan ran to its end. It is never the absence of a bad outcome alone (#147 codex). Claude
 has to exit 0 with a successful result event. The stub has to have served the plan's last turn. The allowed Bash call
@@ -8,6 +9,10 @@ must come back as a success, and the guard-blocked Bash call and the Write call 
 issued and come back as an error. The guard must have seen the blocked call: a Bash hook input whose
 tool_input.command names it, parsed from the guard's record, not a text search of it. A run that stops after its first call
 (an error, or the 180 s alarm) fails.
+
+The data-dir run (a writer worker with the real flag file and the real guard) must also run to its end; its Write into
+the worktree must succeed; its Bash, Write and Edit calls into the Vajra data dir must each come back as an error; and
+the data dir must hold only its seed file, unchanged.
 """
 import json
 import os
@@ -15,6 +20,9 @@ import sys
 
 # The stub's plan: tool_use ids are `tu_<step>`; step 3 is the closing "done".
 ALLOWED, BLOCKED, WRITE, DONE = "tu_0", "tu_1", "tu_2", 3
+# The data-dir run's plan: a worktree Write, then a Bash write, a Write, a Read and an Edit into the data dir.
+D_OK, D_BASH, D_WRITE, D_EDIT, D_DONE = "tu_0", "tu_1", "tu_2", "tu_4", 5
+SEED = "seed\n"
 
 
 def lines(p):
@@ -55,6 +63,39 @@ def saw_bash(calls, needle):
     return False
 
 
+def run(sp):
+    events = [e for e in lines(sp + "/events.jsonl") if isinstance(e, dict)]
+    init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
+    result = next((e for e in events if e.get("type") == "result"), {})
+    log = lines(sp + "/log")
+    results = {}
+    for r in log:
+        for t in r.get("results", []):
+            results[t.get("id")] = t
+    return init, result, log, results
+
+
+def data_verdict(sp, wt, data, tools, status):
+    init, result, log, results = run(sp)
+    got = sorted(t for t in init.get("tools", []) if not t.startswith("mcp__"))
+    err = lambda i: i in results and results[i].get("is_error") is True
+    left = sorted(os.listdir(data)) if os.path.isdir(data) else None
+    seed = open(data + "/seed.json").read() if os.path.isfile(data + "/seed.json") else None
+    checks = [
+        ("data-dir run: claude exited 0", status == 0),
+        ("data-dir run: claude reported a successful result", result.get("subtype") == "success" and result.get("is_error") is False),
+        ("data-dir run: the plan reached its last turn", any(r.get("k") == D_DONE and r.get("tools") for r in log)),
+        ("data-dir run: init lists exactly the --tools set", got == sorted(tools)),
+        ("data-dir run: a Write into the worktree ran", os.path.exists(wt + "/ok-written") and D_OK in results and not err(D_OK)),
+        ("data-dir run: a Bash write into the data dir came back refused", err(D_BASH)),
+        ("data-dir run: a Write into the data dir came back refused", err(D_WRITE)),
+        ("data-dir run: an Edit in the data dir came back refused", err(D_EDIT)),
+        ("data-dir run: the data dir holds only its seed file, unchanged", left == ["seed.json"] and seed == SEED),
+    ]
+    why = {name: (results.get(i, {}).get("text") or "")[:160].replace("\n", " ") for name, i in (("Bash", D_BASH), ("Write", D_WRITE), ("Edit", D_EDIT))}
+    return checks, why
+
+
 def verdict(sp, m, tools, status):
     events = [e for e in lines(sp + "/events.jsonl") if isinstance(e, dict)]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
@@ -87,14 +128,23 @@ def verdict(sp, m, tools, status):
 
 
 def main():
+    if len(sys.argv) != 10:
+        print("FAIL  usage: s4_check.py <sp> <m> <tools> <status> <data sp> <data wt> <data dir> <data tools> <data status>")
+        print("S4 FAIL")
+        sys.exit(2)
+    code = lambda s: int(s) if s.isdigit() else -1
     sp, m, tools, status = sys.argv[1], sys.argv[2], sys.argv[3].split(","), sys.argv[4]
-    checks, init = verdict(sp, m, tools, int(status) if status.isdigit() else -1)
+    checks, init = verdict(sp, m, tools, code(status))
+    dchecks, why = data_verdict(sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8].split(","), code(sys.argv[9]))
+    checks += dchecks
     ok = True
     for name, passed in checks:
         print(("ok    " if passed else "FAIL  ") + name)
         ok &= passed
     print("info  init tools:", init.get("tools"))
     print("info  the user's own hook ran:", os.path.exists(m + "/user-hook"))
+    for tool, text in why.items():
+        print("info  data-dir run: the %s refusal said: %s" % (tool, text))
     print("S4 PASS" if ok else "S4 FAIL")
     sys.exit(0 if ok else 1)
 

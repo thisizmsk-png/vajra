@@ -416,6 +416,12 @@ const S4_CHECK: &str = include_str!("../../../bench/spikes/s4_check.py");
 /// the k calls before it), Claude exited with `status`, and `result` says whether it emitted a successful result event.
 /// Returns the checker's exit code and output.
 fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i32>, String) {
+    s4_verdict_with(tag, served, status, result, false)
+}
+
+/// `s4_verdict`, plus the data-dir run: a full writer run whose data-dir calls were all refused, unless `leak`, when
+/// the Edit went through and changed the seed file.
+fn s4_verdict_with(tag: &str, served: usize, status: &str, result: bool, leak: bool) -> (Option<i32>, String) {
     use serde_json::json;
     let sp = tmpdir(tag);
     let m = sp.join("m");
@@ -437,8 +443,22 @@ fn s4_verdict(tag: &str, served: usize, status: &str, result: bool) -> (Option<i
         std::fs::write(m.join("guard"), guard).unwrap();
         std::fs::write(m.join("allowed-ran"), "allowed\n").unwrap();
     }
+    // The data-dir run: tu_0 (a worktree Write) succeeds; tu_1..tu_4 (Bash, Write, Read, Edit into the data dir) are
+    // refused, or with `leak` the Edit (tu_4) went through and changed the seed.
+    let (d, wt, data) = (sp.join("data-run"), sp.join("wt2"), sp.join("data"));
+    for dir in [&d, &wt, &data] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(wt.join("ok-written"), "x").unwrap();
+    std::fs::write(data.join("seed.json"), if leak { "edited\n" } else { "seed\n" }).unwrap();
+    let dev = [json!({"type": "system", "subtype": "init", "tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"], "permissionMode": "dontAsk"}), json!({"type": "result", "subtype": "success", "is_error": false})];
+    std::fs::write(d.join("events.jsonl"), dev.iter().map(|e| e.to_string() + "\n").collect::<String>()).unwrap();
+    let dres: Vec<_> = (0..5).map(|i| json!({"id": format!("tu_{i}"), "is_error": i != 0 && !(leak && i == 4), "text": if i == 0 { "" } else { "denied" }})).collect();
+    let dlog: String = (0..6).map(|k| json!({"path": "/v1/messages", "tools": ["Bash"], "k": k, "results": dres[..k], "body": "Run the S4 plan"}).to_string() + "\n").collect();
+    std::fs::write(d.join("log"), dlog).unwrap();
     let o = std::process::Command::new("/usr/bin/python3").arg("-I").arg("-c").arg(S4_CHECK.replace("if __name__ == \"__main__\":\n    main()", "main()"))
-        .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status]).output().unwrap();
+        .args([sp.to_str().unwrap(), m.to_str().unwrap(), "Read,Grep,Glob,Bash", status])
+        .args([d.to_str().unwrap(), wt.to_str().unwrap(), data.to_str().unwrap(), "Read,Grep,Glob,Bash,Edit,Write", "0"]).output().unwrap();
     (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
@@ -506,6 +526,13 @@ fn s4_passes_only_when_every_probe_ran_and_was_refused() {
     let (code, out) = s4_verdict("s4-short", 3, "0", true);
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("FAIL  the Write call came back refused") && out.contains("FAIL  the plan reached its last turn"), "{out}");
+    // The owner's condition for the flip: an Edit that got into the data dir fails S4, though every other probe held.
+    let (code, out) = s4_verdict_with("s4-leak", 4, "0", true, true);
+    assert_eq!(code, Some(1), "{out}");
+    for line in ["FAIL  data-dir run: an Edit in the data dir came back refused", "FAIL  data-dir run: the data dir holds only its seed file, unchanged", "S4 FAIL"] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    assert!(!out.contains("FAIL  the "), "only the data-dir run failed: {out}");
 }
 
 /// 16.7: the harness profile decides Message, Redirect and Stop for a core worker.
