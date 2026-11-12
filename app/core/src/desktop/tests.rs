@@ -5306,6 +5306,9 @@ fn close_anyway_refuses_when_only_the_upstream_changed_since_it_was_confirmed() 
 #[path = "board_tests.rs"]
 mod board_cards;
 
+#[path = "proof_app_tests.rs"]
+mod proof_app;
+
 /// #80 optional: a finished run's worker count is forgotten when it is reaped, not only on the next start, so a long
 /// session of runs that start and finish keeps the map bounded by the runs still going.
 #[test]

@@ -237,6 +237,9 @@ pub struct App {
     claude: PathBuf,
     /// Where provider CLIs are looked for; `None` is the user's resolved PATH. Tests point it at a temp dir.
     provider_dirs: Option<Vec<PathBuf>>,
+    /// Tests only: the write-ledger answer for the proof label, until 6h's ledger is wired (`proof_app::ledger_of`).
+    #[cfg(test)]
+    proof_ledger: Option<proof::Ledger>,
     /// The last `provider_list` answer. `project_state` reads this and never runs a CLI: the status commands run only
     /// when `provider_list` is called (Settings > Providers open, Recheck, before a Start).
     provider_cache: Mutex<Option<crate::providers::contract::ProviderList>>,
@@ -381,6 +384,8 @@ impl App {
             reader: Mutex::new(None),
             claude,
             provider_dirs: None,
+            #[cfg(test)]
+            proof_ledger: None,
             provider_cache: Mutex::new(None),
             keys: crate::providers::keychain::Keys::cli(security, home),
             usage: Default::default(),
@@ -2142,7 +2147,7 @@ impl App {
         if bridge.find_jq().is_none() {
             return unknown(reason("jq_missing", None, None));
         }
-        let o = match bridge.run(&Request::VerifyDigest { input: input.into_bytes() }) {
+        let o = match bridge.run(&Request::VerifyDigest { input: input.as_bytes().to_vec() }) {
             Ok(o) => o,
             Err(e) => return unknown(reason(bridge_failure(&e), None, None)),
         };
@@ -2167,20 +2172,23 @@ impl App {
         // "ok" is published once, only after every check that applies has passed (plain `verify` also fails a
         // recorded report that is missing or edited), so a concurrent listing can never see a partial success.
         seam("check:report");
+        // The record hash (6i export): the sha256 of the exact digest lines the script just accepted, so a reader on this
+        // Mac can match an export to the record it came from. It carries no key material.
+        let record = |v: Res| v.map(|mut v| { v["record_sha256"] = json!(hex_digest(input.as_bytes())); v });
         let want = campaign.get("reportSha256").and_then(Value::as_str).unwrap_or("");
         if want.is_empty() {
             self.settle(slug, "ok", ticket);
-            return verdict("no_report", None);
+            return record(verdict("no_report", None));
         }
         let Some(report) = h.report else { return bad(self) };
         if hex_digest(&report) != want {
             return bad(self);
         }
         self.settle(slug, "ok", ticket);
-        match String::from_utf8(report) {
+        record(match String::from_utf8(report) {
             Ok(t) => verdict("ok", Some(t)),
             Err(_) => verdict("not_text", None),
-        }
+        })
     }
 
     pub fn take_over(&self, stream: &str, on: bool) -> Res {
@@ -2392,6 +2400,8 @@ mod board;
 mod lead_acts;
 mod runindex;
 mod runview;
+pub mod proof;
+mod proof_app;
 mod state;
 pub use state::Envelope;
 

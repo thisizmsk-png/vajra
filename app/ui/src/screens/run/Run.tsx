@@ -10,6 +10,7 @@ import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
 import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
 import { Problem } from "../states";
+import { Proof } from "./Proof";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
@@ -122,6 +123,7 @@ export function Run() {
     <div className="v-home">
       <Text as="h1" variant="headline-lg">{S.run.title}</Text>
       <RunProvider slug={slug} />
+      <Proof slug={slug} />
       <Section title={S.run.timeline}>
         {overviewErr && <div role="alert"><Text variant="body-sm">{S.run.overviewFailed}</Text></div>}
         {overview && (

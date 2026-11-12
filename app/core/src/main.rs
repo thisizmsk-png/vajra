@@ -306,6 +306,21 @@ fn read_report(app: State<'_, App>, slug: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn run_proof(app: State<'_, App>, slug: String) -> Res {
+    app.run_proof(&slug)
+}
+
+#[tauri::command(async)]
+fn export_proof_page(app: State<'_, App>, slug: String) -> Res {
+    app.export_proof_page(&slug)
+}
+
+#[tauri::command(async)]
+fn act_post_proof_comment(app: State<'_, App>, envelope: Envelope, slug: String, pr_url: String) -> Value {
+    app.act_post_proof_comment(&envelope, &slug, &pr_url)
+}
+
+#[tauri::command(async)]
 fn verify_campaign(app: State<'_, App>, slug: String) -> Res {
     app.verify_campaign(&slug)
 }
@@ -764,6 +779,9 @@ fn main() {
             provider_usage,
             verify_campaign,
             read_report,
+            run_proof,
+            export_proof_page,
+            act_post_proof_comment,
             resume_targets,
             crew,
             tail,

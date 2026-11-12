@@ -1,0 +1,190 @@
+//! The App side of a run's proof (6i, D6): gather it from the core's own reads, save the page, post the PR comment.
+//!
+//! Every text that leaves here has been cleaned and redacted twice: the campaign's nonce set, then the key-shaped and
+//! secret-field pass. Raw ledger lines, env values and the key never reach it: only the goal, the criteria, the row
+//! statuses, the commits, the seat that checked, the report text and the record hash do.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::proof::{self, Input, Label, Proof, Row};
+use super::{bus, fail, invalid, App, Envelope, Res};
+use crate::lock;
+use crate::crew::redact::{redact_provider_text, Redactor};
+
+/// `gh pr comment` gets this long.
+const POST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The largest comment GitHub takes is 65536 characters; the proof stays well under it.
+const COMMENT_MAX: usize = 60 * 1024;
+
+impl App {
+    /// The run's proof for the Run view: its label (the worse of the signed marker and `seats.json`), the record check
+    /// and hash, and the PR comment text. Read-only; nothing here is a network call.
+    pub fn run_proof(&self, slug: &str) -> Res {
+        let p = self.gather_proof(slug)?;
+        let md = proof::markdown(&p);
+        Ok(proof::proof_json(&p, &md))
+    }
+
+    fn gather_proof(&self, slug: &str) -> Result<Proof, Value> {
+        if !bus::valid_stream_id(slug) {
+            return Err(invalid("slug", "not a campaign slug"));
+        }
+        let summary = self.with_reader(|r| r.campaign(slug).map_err(|e| fail("not_found", e)))?;
+        let (snap, progress) = self.with_reader(|r| Ok((r.tasks(slug), r.progress(slug).unwrap_or_default())))?;
+        let tasks: Option<&[Value]> = snap.value.as_ref().and_then(|v| v.get("tasks")).and_then(Value::as_array).map(Vec::as_slice);
+        let rejected = super::runview::timeline(&progress, tasks).outcome == super::runview::Outcome::Rejected;
+        // The record check reads the held bytes and asks the script only about their digest (it holds the key).
+        let report = self.read_report(slug)?;
+        let integrity = report["integrity"].as_str().unwrap_or("unknown").to_string();
+        // The same bounded check the Run view runs (cached verdicts are reused). A row it couldn't check reads
+        // `checking`, which is not a pass, so the label can only come out weaker, never stronger.
+        let list = self.evidence_list(slug).unwrap_or_else(|_| json!({"rows": []}));
+        let rows_json = list["rows"].as_array().cloned().unwrap_or_default();
+        let (trust, checker, approval) = self.trust_of(slug);
+        let statuses: Vec<&str> = rows_json.iter().map(|r| r["status"].as_str().unwrap_or("not_run")).collect();
+        let (label, reason) = proof::label(&Input {
+            slug,
+            goal: &summary.goal,
+            status: &summary.status,
+            integrity: &integrity,
+            rows: statuses,
+            trust: trust.as_deref(),
+            approval_consumed: approval,
+            rejected,
+            slug_field: &summary.slug,
+            ledger: self.ledger_of(slug),
+        });
+        let red = self.campaign_redactor(slug);
+        // Text only: the nonce set, secret fields, then key-shaped words and home paths. Commits and the record hash are
+        // checked hex and kept as they are (the key-shape pass would hide a 40-hex commit).
+        let home = self.home.to_string_lossy().into_owned();
+        let clean = &|s: &str| crate::diagnostics::redact(&redact_provider_text(&red.clean(s)), &home);
+        let rows = rows_json
+            .iter()
+            .map(|r| Row {
+                criterion: clean(r["criterion"].as_str().unwrap_or("")),
+                task: clean(r["task"].as_str().unwrap_or("")),
+                status: r["status"].as_str().unwrap_or("not_run").to_string(),
+                commit: r["head"].as_str().filter(|h| is_hex(h, 7..=64)).map(str::to_string),
+                ran_by: checker.as_deref().or_else(|| r["owner"].as_str()).map(clean),
+            })
+            .collect();
+        let report_text = report["text"].as_str().map(|t| t.lines().map(&clean).collect::<Vec<_>>().join("\n"));
+        Ok(Proof {
+            slug: slug.to_string(),
+            goal: clean(summary.goal.trim_start().strip_prefix(proof::MARKER).unwrap_or(&summary.goal).trim()),
+            label,
+            reason,
+            integrity,
+            record_sha256: report["record_sha256"].as_str().filter(|h| is_hex(h, 64..=64)).map(str::to_string),
+            rows,
+            report: report_text,
+        })
+    }
+
+    /// The core's own trust record for the campaign's run: `seats.json`'s trust, who checked (harness and account of the
+    /// evidence seat) and whether a single-use approval was consumed. A campaign no run of this app started has none; one
+    /// whose record can't be read answers `"?"`, so the label fails closed.
+    fn trust_of(&self, slug: &str) -> (Option<String>, Option<String>, bool) {
+        let run = slug.strip_prefix("deliver-").map(|r| r.strip_suffix("-og").unwrap_or(r));
+        let Some(run) = run.filter(|r| crate::ids::valid_run_id(r)) else { return (None, None, false) };
+        let seats = match self.read_run_seats(run) {
+            Ok(Some(s)) => s,
+            Ok(None) => return (None, None, false),
+            Err(_) => return (Some("?".into()), None, false),
+        };
+        // The record must name this campaign; one that names another is not this run's.
+        if seats["campaign_slug"].as_str() != Some(slug) {
+            return (Some("?".into()), None, false);
+        }
+        let trust = seats["evidence_trust"].as_str().unwrap_or("?").to_string();
+        let seat = seats["evidence_seat"].as_str();
+        let checker = seats["seats"].as_array().and_then(|all| all.iter().find(|s| s["seat"].as_str() == seat)).map(|s| {
+            let harness = s["harness"].as_str().unwrap_or("unknown harness");
+            format!("{harness} ({})", s["account"].as_str().unwrap_or(""))
+        });
+        (Some(trust), checker, seats["evidence_approval"]["consumed"] == true)
+    }
+
+    /// The read-back record against the core's own write ledger. The ledger comes with the signed record (6h, #190);
+    /// until it is wired here every record is `Missing`, so no run reads Verified (the Codex H1 follow-up and the
+    /// evidence runner gate it too, in PR B).
+    fn ledger_of(&self, _slug: &str) -> proof::Ledger {
+        #[cfg(test)]
+        if let Some(l) = self.proof_ledger {
+            return l;
+        }
+        proof::Ledger::Missing
+    }
+
+    fn campaign_redactor(&self, slug: &str) -> Redactor {
+        let mut red = Redactor::default();
+        for r in lock(&self.runs).values().filter(|r| r.campaign == slug) {
+            red.absorb(&r.nonces);
+        }
+        red
+    }
+
+    /// The self-contained page, written under the app data dir's `exports/` and returned with its path. Behind the one
+    /// export capability check.
+    pub fn export_proof_page(&self, slug: &str) -> Res {
+        if !proof::export_allowed() {
+            return Err(fail("export_unavailable", "exporting the proof is not available in this build"));
+        }
+        let p = self.gather_proof(slug)?;
+        let dir = self.data.join("exports");
+        crate::paths::ensure_private_dir(&dir).map_err(|e| fail("io_error", e))?;
+        let name = format!("{slug}-proof.html");
+        crate::control::fsx::write_atomic(&dir, &name, proof::page(&p).as_bytes()).map_err(|e| fail("io_error", e))?;
+        Ok(json!({"slug": slug, "path": dir.join(name).to_string_lossy(), "label": p.label.id()}))
+    }
+
+    /// Post the PR comment: a human click only, confirmed per run with the repo and PR named. The text is rebuilt here
+    /// from the record, never taken from the UI, so what is posted is exactly what the app shows.
+    pub fn act_post_proof_comment(&self, env: &Envelope, slug: &str, pr_url: &str) -> Value {
+        let target = format!("proof:{slug}");
+        self.act(env, crate::control::receipt::Caller::Ui, true, "post_proof_comment", &target, None::<u64>, || self.post_proof_comment(slug, pr_url))
+    }
+
+    fn post_proof_comment(&self, slug: &str, pr_url: &str) -> Res {
+        if !proof::export_allowed() {
+            return Err(fail("export_unavailable", "exporting the proof is not available in this build"));
+        }
+        let pr = proof::parse_pr(pr_url).ok_or_else(|| invalid("pr", "use a GitHub pull request link: https://github.com/<owner>/<repo>/pull/<number>"))?;
+        let p = self.gather_proof(slug)?;
+        if p.label == Label::InProgress {
+            return Err(fail("run_not_finished", "the run has not finished, so there is no proof to post yet"));
+        }
+        let body = proof::markdown(&p);
+        if body.len() > COMMENT_MAX {
+            return Err(fail("comment_too_long", "the proof is too long for one comment; export the page instead"));
+        }
+        let gh = self.find_gh().ok_or_else(|| fail("gh_missing", "GitHub CLI (gh) was not found. Install it and sign in, then try again."))?;
+        let argv: Vec<String> = ["pr", "comment", &pr.number.to_string(), "-R", &pr.repo, "--body-file", "-"].map(String::from).to_vec();
+        let o = crate::vajra::bridge::run_process_full(&gh, &argv, None, POST_TIMEOUT, Some(&self.home), Some(body.as_bytes())).map_err(|e| fail("post_failed", e))?;
+        if o.exit() != Some(0) {
+            let home = self.home.to_string_lossy();
+            let why = o.stderr.lines().find(|l| !l.trim().is_empty()).map(|l| crate::diagnostics::redact(&redact_provider_text(l.trim()), &home))
+                .unwrap_or_else(|| "gh exited with an error".into());
+            return Err(fail("post_failed", why));
+        }
+        Ok(json!({"slug": slug, "repo": pr.repo, "pr": pr.number, "label": p.label.id(), "url": o.stdout.trim().lines().last().map(redact_provider_text)}))
+    }
+
+    fn find_gh(&self) -> Option<PathBuf> {
+        let dirs = self.provider_dirs.clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+        dirs.iter().map(|d| d.join("gh")).find(|p| is_exec(p))
+    }
+}
+
+fn is_hex(s: &str, len: std::ops::RangeInclusive<usize>) -> bool {
+    len.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_exec(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
