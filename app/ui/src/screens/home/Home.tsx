@@ -157,6 +157,7 @@ export function Home() {
   useCommands([{ id: "recheck", label: S.home.preflightRetry, run: recheck }]);
 
   const failing = pre.state === "ok" ? pre.data.rows.filter((r) => !r.ok).length : 0;
+  const checksBlock = pre.state === "ok" && !pre.data.start_enabled;
   const repoName = basename(d.repo);
 
   return (
@@ -196,7 +197,10 @@ export function Home() {
                 <summary>{S.home.advanced}</summary>
                 <Input type="number" label={S.home.maxInFlight} value={d.maxInFlight} onChange={set("maxInFlight")} error={err("maxInFlight")} />
               </details>
-              <Button variant="primary" onClick={start} disabled={!ready} busy={busy === "start"} aria-keyshortcuts={ariaShortcut(START_KEYS)}>
+              {/* A disabled button with no reason is a dead end: the checks that block it are further down the page. */}
+              {checksBlock && <p id="v-launch-why" className="v-launch__why">{S.home.startNeedsChecks(failing)}</p>}
+              <Button variant="primary" onClick={start} disabled={!ready} busy={busy === "start"} aria-keyshortcuts={ariaShortcut(START_KEYS)}
+                aria-describedby={checksBlock ? "v-launch-why" : undefined}>
                 {busy === "start" ? S.home.starting : S.home.startButton}
                 <Kbd keys={START_KEYS} decorative />
               </Button>
