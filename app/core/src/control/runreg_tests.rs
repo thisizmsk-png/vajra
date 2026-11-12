@@ -154,6 +154,7 @@ fn an_await_waits_wait_s_plus_ten_and_other_calls_keep_the_default() {
     assert_eq!(client_timeout("await_worker", &json!({"wait_s": 5}), d), Duration::from_secs(15));
     assert_eq!(client_timeout("await_any", &json!({"wait_s": 9999}), d), Duration::from_secs(120), "never past 110 + 10");
     assert_eq!(client_timeout("plan_tasks", &json!({}), d), d);
+    assert_eq!(client_timeout("integrate", &json!({"round": 1}), d), INTEGRATE_TIMEOUT, "a merge outlasts the default");
 }
 
 #[test]
@@ -353,4 +354,20 @@ fn a_service_request_still_works_beside_the_run_route() {
     let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
     assert!(out.get("ok").is_some() || out.get("error").is_some(), "{out}");
     assert_ne!(out["error"], "run_unknown", "a request without vajra_run never reaches the registry");
+}
+
+#[test]
+fn an_app_that_takes_the_call_and_never_answers_is_a_timeout_not_a_refusal() {
+    let t = Tmp::new("silent");
+    let sock = t.0.join("app.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    // Accept and hold the connection without answering.
+    let hold = std::thread::spawn(move || {
+        let held = listener.accept();
+        std::thread::sleep(Duration::from_millis(600));
+        drop(held);
+    });
+    let e = super::super::socket::request_run(&sock, RUN, "t", "integrate", &json!({"round": 1}), Duration::from_millis(200)).unwrap_err();
+    assert!(matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut), "{e:?}: the client maps this to no_answer");
+    let _ = hold.join();
 }

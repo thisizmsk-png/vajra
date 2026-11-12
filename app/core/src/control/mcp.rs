@@ -297,6 +297,10 @@ impl RunForward for RunClient {
                 }
                 Err(v.get_mut("tool_error").map(Value::take).unwrap_or(v))
             }
+            // Timed out after sending: the call may have run. The lead checks with await_any or list_workers.
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                Err(json!({"error": "no_answer", "reason": "the app did not answer in time; the call may have run, so check before calling again"}))
+            }
             Err(_) => Err(json!({"error": "app_unavailable"})),
         }
     }

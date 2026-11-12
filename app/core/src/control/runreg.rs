@@ -96,10 +96,15 @@ pub fn tools() -> Value {
     ])
 }
 
-/// How long the `--mcp-run` client waits for the app's answer to one call: `wait_s + 10` for an await.
+/// `integrate` merges in git before it answers: it gets this long, not the default.
+pub const INTEGRATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the `--mcp-run` client waits for the app's answer to one call: `wait_s + 10` for an await, longer for
+/// `integrate`. A call that times out may still have run, so the client answers `no_answer`, never "unavailable".
 pub fn client_timeout(tool: &str, args: &Value, default: Duration) -> Duration {
     match tool {
         "await_any" | "await_worker" => Duration::from_secs(args.get("wait_s").and_then(Value::as_u64).unwrap_or(0).min(110)) + AWAIT_SLACK,
+        "integrate" => INTEGRATE_TIMEOUT,
         _ => default,
     }
 }
