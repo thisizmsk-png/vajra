@@ -327,6 +327,12 @@ fn profiles_refuse_what_is_not_proven() {
     assert_eq!(disclosures(&p, false), vec![crate::desktop::seat_start::CODEX_WARNING]);
     assert_eq!(disclosures(&p, true).len(), 2);
     assert_eq!(disclosures(&profile(Engine::Claude, RoleKind::Worker), false), vec![crate::desktop::seat_start::CLAUDE_NOTE]);
+    // #212 review: a Claude worker's sandbox is loopback only, so network on never says "Internet on".
+    use crate::desktop::seat_start::{CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE, NETWORK_NOTE};
+    for kind in [RoleKind::Worker, RoleKind::Verifier] {
+        assert_eq!(disclosures(&profile(Engine::Claude, kind), true), vec![CLAUDE_NOTE, CLAUDE_NO_NETWORK_NOTE]);
+    }
+    assert_eq!(disclosures(&p, true)[1], NETWORK_NOTE, "Codex keeps its internet note");
 }
 
 /// The `turn_context` shape codex 0.166 wrote in spike S3 (paths shortened).

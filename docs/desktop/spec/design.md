@@ -1110,7 +1110,7 @@ The call becomes `start_proposal(id, sha, overrides?)`, with `overrides = [{seat
 
 - **Fields.** Each field is optional, and a missing field keeps the proposal's value. `network` is accepted only on `w<n>` seats. On `lead` it is refused with `override_invalid`, because a lead is always read-only with no network. An override never carries `role` or `security`.
 - **Checks.** `launchable` checks the seat again **with the override applied**, so an override can't pick a harness, version or account the proposal check would refuse. Each override is recorded as `source: "user"`.
-- **Where `network` is recorded.** The value in effect after overrides goes into `seats.json`, the start receipt and the worker's card ("Internet on for this worker").
+- **Where `network` is recorded.** The value in effect after overrides goes into `seats.json`, the start receipt and the worker's card ("Internet on for this worker"). A Claude worker's sandbox allows loopback only for now (no `allowedDomains`), so a Claude seat with network on says so instead: "No internet for this worker yet: Claude workers reach only this Mac (localhost). Use a Codex worker if it needs to download packages." A registry domain list is a follow-up.
 - Overrides sit outside `proposal_sha256`.
 - Before anything spawns, the start writes:
   - `seats` and `seats_sha256` on the `requested` line;

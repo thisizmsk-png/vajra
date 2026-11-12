@@ -220,15 +220,16 @@ pub fn profile(engine: Engine, kind: RoleKind) -> Profile {
     Profile { engine, kind, always, user, supported }
 }
 
-/// The card strings for a profile (16.4 "What the cards say"), plus the network note when the seat has internet.
+/// The card strings for a profile (16.4 "What the cards say"), plus the network line when the seat has network on: the
+/// internet note for Codex, the no-internet note for Claude, whose sandbox allows loopback only (#212 review).
 pub fn disclosures(p: &Profile, network: bool) -> Vec<&'static str> {
-    use crate::desktop::seat_start::{CLAUDE_NOTE, CODEX_WARNING, NETWORK_NOTE};
+    use crate::desktop::seat_start::{network_note, CLAUDE_NOTE, CODEX_WARNING};
     let mut out = vec![match p.engine {
         Engine::Codex => CODEX_WARNING,
         Engine::Claude => CLAUDE_NOTE,
     }];
-    if network && matches!(p.kind, RoleKind::Worker | RoleKind::Verifier) {
-        out.push(NETWORK_NOTE);
+    if matches!(p.kind, RoleKind::Worker | RoleKind::Verifier) {
+        out.extend(network_note(Some(p.engine), network));
     }
     out
 }
