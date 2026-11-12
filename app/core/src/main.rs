@@ -184,6 +184,11 @@ fn project_for_folder(app: State<'_, App>, path: String) -> Res {
 }
 
 #[tauri::command(async)]
+fn project_discover(app: State<'_, App>, extra: Option<Vec<String>>) -> Res {
+    app.project_discover(&extra.unwrap_or_default())
+}
+
+#[tauri::command(async)]
 fn project_list(app: State<'_, App>, include_archived: Option<bool>) -> Res {
     app.project_list(include_archived.unwrap_or(false))
 }
@@ -798,6 +803,7 @@ fn main() {
             app_info,
             project_list,
             project_for_folder,
+            project_discover,
             project_add,
             project_rename,
             project_archive,
