@@ -70,7 +70,6 @@ export const S = {
       return `${name} ${pct}% used${what}.${reset}`;
     },
     runs: (n: number) => (n === 0 ? "No runs active" : n === 1 ? "1 run active" : `${n} runs active`),
-    phone: "Phone not connected",
     loadFailed: "Could not read your projects.",
     noProjects: "No projects yet",
     welcome: {
@@ -731,7 +730,6 @@ export const S = {
     lede: "Choose global defaults or override them for this project.",
     barLabel: "Actions on Settings",
     sectionsLabel: "Settings sections",
-    later: "Not built yet",
     sections: {
       general: { title: "General", lede: "Behaviour that applies across your work." },
       providers: { title: "Providers", lede: "Vajra runs the agent CLIs you already use and pay for. These checks decide whether a run can start." },

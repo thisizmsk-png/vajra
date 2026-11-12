@@ -196,12 +196,11 @@ describe("Shell B frame (FG-03)", () => {
     expect(within(screen.getByRole("navigation", { name: S.frame.views })).getByRole("link", { name: S.views.review }).getAttribute("aria-current")).toBe("page");
   });
 
-  it("has a status bar with the live runs, the phone and Settings; the phone goes to Settings > Mobile", async () => {
+  it("has a status bar with the live runs and Settings, and no phone button while pairing is not built", async () => {
     boot();
     const bar = screen.getByRole("contentinfo", { name: S.frame.status });
     await waitFor(() => expect(within(bar).getByText(S.frame.runs(1))).toBeTruthy());
-    fireEvent.click(within(bar).getByRole("button", { name: S.frame.phone }));
-    expect(window.location.hash).toContain("settings?section=mobile");
+    expect(within(bar).queryByRole("button", { name: /phone/i })).toBeNull();
     fireEvent.click(within(bar).getByRole("button", { name: S.views.settings }));
     expect(window.location.hash).toMatch(/\/settings$/);
   });
