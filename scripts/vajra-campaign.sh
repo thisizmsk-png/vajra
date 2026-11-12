@@ -132,7 +132,7 @@ verify_state() {
   return 0
 }
 
-LOCK=""
+LOCK=""; LOCK_PID=""; LOCK_START=""
 # The process start time, the second half of the owner's identity: a recycled pid has a different start time.
 proc_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
 # owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
@@ -142,7 +142,7 @@ release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/nul
 # or crash frees it), so no stale mutex can strand a campaign. The helper takes the flock; in "release" mode it removes
 # the lock (owner.json first, then the dir), in "unlock" mode it execs the given command with the flock still held.
 RECLAIM_PY='
-import fcntl, os, sys, time
+import fcntl, json, os, sys, time
 d, wait, mode = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 try:
     fd = os.open(d + "/.lock.reclaim", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -159,12 +159,19 @@ while True:
             sys.exit(1)
         time.sleep(0.05)
 if mode == "release":
+    # Only the generation this writer took: the helper can outlive a killed writer and wake after the lock was
+    # reclaimed and retaken, and it must then leave the new holder lock alone.
     lk = d + "/.lock"
-    for f in (lk + "/owner.json", ):
-        try:
-            os.unlink(f)
-        except OSError:
-            pass
+    try:
+        o = json.load(open(lk + "/owner.json"))
+    except (OSError, ValueError):
+        sys.exit(0)
+    if str(o.get("pid")) != sys.argv[4] or o.get("start") != sys.argv[5]:
+        sys.exit(0)
+    try:
+        os.unlink(lk + "/owner.json")
+    except OSError:
+        pass
     try:
         os.rmdir(lk)
     except OSError:
@@ -179,7 +186,7 @@ os.execv(sys.argv[4], sys.argv[4:])
 release_lock_serialized() {
   [ -n "$LOCK" ] || return 0
   [ -x "$PYTHON3" ] || { release_lock; return 0; }
-  "$PYTHON3" -I -c "$RECLAIM_PY" "${LOCK%/.lock}" 5 release 2>/dev/null
+  "$PYTHON3" -I -c "$RECLAIM_PY" "${LOCK%/.lock}" 5 release "$LOCK_PID" "$LOCK_START" 2>/dev/null
   return 0
 }
 lock() {
@@ -190,7 +197,8 @@ lock() {
     sleep 0.1
   done
   trap release_lock_serialized EXIT
-  jq -n --argjson pid "$$" --arg start "$(proc_start $$)" '{pid: $pid, start: $start}' > "$LOCK/owner.json" 2>/dev/null || true
+  LOCK_PID="$$"; LOCK_START="$(proc_start $$)"
+  jq -n --argjson pid "$LOCK_PID" --arg start "$LOCK_START" '{pid: $pid, start: $start}' > "$LOCK/owner.json" 2>/dev/null || true
 }
 
 # unlock <slug> --if-stale: remove a lock whose recorded owner is gone. A lock with no readable owner.json is never

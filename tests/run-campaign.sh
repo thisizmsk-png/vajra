@@ -476,6 +476,24 @@ kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
 C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "mutex: unlock recovers after the holder was SIGKILLed, no manual cleanup" $?
 C pass f1 --campaign lk >/dev/null 2>&1 && [ ! -e "$LD/.lock" ]; check "mutex: a later writer still releases its lock normally" $?
 
+# a killed writer's release helper survives it (only the shell is killed) and must not delete a later writer's lock
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ -z "$(pgrep -P "$AP" 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+# A's owner record is written and it sleeps; wait for its release helper (a child python) to be waiting on the flock
+i=0; while [ -z "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+[ -n "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ]; check "release helper: A's helper is waiting on the flock" $?
+kill -9 "$AP" 2>/dev/null; wait "$AP" 2>/dev/null
+# U removes dead A's lock and writer B takes it, all while A's helper still waits
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"; mkdir "$LD/.lock"
+jq -n '{pid: 424242, start: "B start"}' > "$LD/.lock/owner.json"
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+sleep 1.5
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" = "424242" ]; check "release helper: the surviving helper leaves writer B's lock alone" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock" 2>/dev/null
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]
