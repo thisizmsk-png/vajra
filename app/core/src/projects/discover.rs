@@ -39,7 +39,13 @@ pub struct Discovery {
 /// Repositories under the common folders and `extra` that `owned` does not already hold. `owned` answers "is this
 /// root (or a worktree of it) already a project?".
 pub fn discover(guard: &Guard, extra: &[PathBuf], owned: &dyn Fn(&Path) -> bool) -> Discovery {
-    let mut roots: Vec<PathBuf> = COMMON_FOLDERS.iter().map(|f| guard.home.join(f)).collect();
+    // An automatic root must itself be a real folder: `~/Code -> ~/Documents` would otherwise walk a protected folder
+    // with no user action. Folders the person names (`extra`) may be symlinks; they chose them.
+    let mut roots: Vec<PathBuf> = COMMON_FOLDERS
+        .iter()
+        .map(|f| guard.home.join(f))
+        .filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir()))
+        .collect();
     roots.extend(extra.iter().cloned());
     let mut out = Discovery::default();
     let mut seen_dirs = std::collections::HashSet::new();

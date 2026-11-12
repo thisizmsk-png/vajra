@@ -114,3 +114,13 @@ fn the_automatic_set_never_touches_macos_protected_folders() {
     t.repo("Documents/GitHub/hidden");
     assert!(discover(&t.guard(), &[], &none).found.is_empty());
 }
+
+#[test]
+fn a_common_folder_that_is_a_symlink_into_a_protected_folder_is_not_scanned() {
+    let t = Tmp::new("rootlink");
+    t.repo("Documents/secret");
+    symlink(t.0.join("home/Documents"), t.0.join("home/Code")).unwrap();
+    assert!(discover(&t.guard(), &[], &none).found.is_empty());
+    // the person naming that same folder is an explicit choice, so it is scanned
+    assert_eq!(discover(&t.guard(), &[t.0.join("home/Code")], &none).found.len(), 1);
+}
