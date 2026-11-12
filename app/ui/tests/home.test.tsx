@@ -101,10 +101,49 @@ describe("Home start envelope: the core's identity", () => {
 });
 
 describe("Home", () => {
+  it("names the checks in plain words, and shows a check it has no name for as the core sent it", async () => {
+    const pre = { rows: [
+      { name: "vajra doctor", ok: true, detail: "PASS", fix: "" },
+      { name: "hooks registered", ok: true, detail: "yes (6 events)", fix: "" },
+      { name: "workflow", ok: true, detail: "installed", fix: "" },
+      { name: "jq", ok: true, detail: "/usr/bin/jq", fix: "" },
+      { name: "constructor", ok: true, detail: "an odd id", fix: "" },
+    ], start_enabled: true };
+    const f = fakeIpc({ preflight: pre, list_campaigns: { campaigns: [] }, resume_targets: { targets: {} } });
+    setTransport(f.transport);
+    render(<Home />);
+    expect(await screen.findByText("Engine self-check")).toBeTruthy();
+    expect(screen.getByText("Safety hooks")).toBeTruthy();
+    expect(screen.getByText("Run workflow")).toBeTruthy();
+    expect(screen.getByText("jq")).toBeTruthy();
+    expect(screen.getByText("constructor")).toBeTruthy();
+    expect(screen.queryByText("vajra doctor")).toBeNull();
+    expect(screen.queryByText("hooks registered")).toBeNull();
+  });
+
   it("shows every check, and a failing one with its fix command; Start is disabled (AC-1.3.2)", async () => {
     await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
     expect(await screen.findByText("bash install.sh")).toBeTruthy();
     expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("says next to the disabled Start button that the failing check blocks it, and the button points at that reason", async () => {
+    await open({ preflight: rows(false), list_campaigns: { campaigns: [] } });
+    const why = await screen.findByText(S.home.startNeedsChecks(1));
+    const start = screen.getByRole("button", { name: S.home.startButton });
+    expect(start.getAttribute("aria-describedby")).toBe(why.id);
+    expect(why.closest("form")).toBe(start.closest("form"));
+  });
+
+  it("gives no such reason when the checks pass, or when a failing check does not block a start", async () => {
+    await open({ preflight: rows(true), list_campaigns: { campaigns: [] } });
+    await screen.findByText(S.home.checksSummary(2, 2));
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
+    expect(screen.getByRole("button", { name: S.home.startButton }).getAttribute("aria-describedby")).toBeNull();
+    cleanup();
+    await open({ preflight: { ...rows(false), start_enabled: true }, list_campaigns: { campaigns: [] } });
+    await screen.findByText("bash install.sh");
+    expect(screen.queryByText(S.home.startNeedsChecks(1))).toBeNull();
   });
 
   it("does not start with an empty ask: names the field, calls nothing (AC-1.1.2)", async () => {

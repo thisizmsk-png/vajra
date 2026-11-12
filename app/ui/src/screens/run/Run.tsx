@@ -7,12 +7,18 @@ import { parseWorkerProvider } from "../../workerProvider";
 import { S } from "../../../strings";
 import { api, errorText, onChanged } from "../../ipc";
 import type { EvidenceDetail, EvidenceRow, RunOverview } from "../../ipc";
+import { useProjects } from "../../projects/store";
 import { useRoute } from "../../router";
+import { Problem } from "../states";
 
 const ORDER: Record<string, number> = { fail: 0, unverified: 1, checking: 2, not_run: 3, stale: 4, pass: 5 };
 const BADGE: Record<string, "success" | "warning" | "danger" | "info" | undefined> = { pass: "success", fail: "danger", unverified: "danger", checking: "info", not_run: undefined, stale: "warning" };
 const keyOf = (r: { task: string; criterion: string }) => `${r.task}\u0000${r.criterion}`;
 const ROW_H = 36;
+/** A task row is taller: its provider cell can carry a second line (a retry, or the provider it really ran on). */
+const TASK_H = 48;
+/** A task status in the one casing the rest of the app uses; a status with no wording of its own shows as the core sent it. */
+const taskStatus = (s: string) => S.run.taskStatus[s] ?? (S.status as Record<string, string>)[s] ?? s;
 /** One line: the provider the task ran on (icon, "Model · provider", errors), when the core says. */
 const provider = (t: { provider?: unknown }) => { const p = parseWorkerProvider(t.provider); return p ? <ProviderLine p={p} compact /> : null; };
 const GRAPH_H = 288;
@@ -24,6 +30,7 @@ const label = (s: string) => (S.run.status as Record<string, string>)[s] ?? S.ru
 export function Run() {
   const [route, go] = useRoute();
   const slug = route.params.slug ?? "";
+  const P = useProjects();
   const [rows, setRows] = useState<EvidenceRow[] | null>(null);
   const [err, setErr] = useState("");
   /** Rows whose check has not run yet: the core checks a bounded amount per call, so ask again until none are left. */
@@ -93,6 +100,16 @@ export function Run() {
     return () => { live = false; };
   }, [slug, pickedTask]);
 
+  // With no project list there is nothing to choose from: "choose one in History" would send the person to an empty
+  // screen, so say what failed and offer the retry.
+  if (!slug && P.state === "error") {
+    return (
+      <div className="v-home">
+        <Text as="h1" variant="headline-lg">{S.run.title}</Text>
+        <Problem title={S.frame.loadFailed} detail={P.error} retry={P.reload} />
+      </div>
+    );
+  }
   if (!slug) {
     return (
       <div className="v-home">
@@ -128,18 +145,20 @@ export function Run() {
             role="list"
             aria-label={S.run.graph}
             count={overview.graph.tasks.length}
-            rowHeight={ROW_H}
+            rowHeight={TASK_H}
             height={GRAPH_H}
             renderRow={(i) => {
               const t = overview.graph.tasks[i];
               const open = () => go("crew", { slug, id: overview.run_id, focus: `task:${t.local}` });
+              const waits = t.deps.length > 0 ? `${S.run.waitsFor} ${t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}` : "";
               return (
-                <div role="listitem" className="v-run__row" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
+                <div role="listitem" className="v-run__row v-run__task" onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(); }} tabIndex={0}>
                   <Text as="span" variant="body-sm" muted>{S.run.wave(t.wave)}</Text>
-                  <span>{t.local} {t.title ?? ""}</span>
-                  <span>{provider(t) ?? t.owner ?? ""}</span>
-                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{S.run.taskStatus[t.status] ?? t.status}</Badge>
-                  {t.deps.length > 0 && <Text as="span" variant="body-sm" muted>{S.run.waitsFor} {t.deps.map((d) => d.slice(d.indexOf(".") + 1)).join(", ")}</Text>}
+                  <span className="v-run__title" title={t.title ?? undefined}>{t.local} {t.title ?? ""}</span>
+                  <span className="v-run__who">{provider(t) ?? t.owner ?? ""}</span>
+                  <Badge status={t.status === "closed" || t.status === "done" ? "success" : t.status === "failed" ? "danger" : undefined}>{taskStatus(t.status)}</Badge>
+                  {/* Always present, so the columns line up down the list. A long list is cut with an ellipsis; the tooltip has all of it. */}
+                  <span className="v-run__deps" title={waits || undefined}><Text as="span" variant="body-sm" muted>{waits}</Text></span>
                   <Button size="sm" variant="ghost" onClick={open}>{S.run.openWorker}</Button>
                 </div>
               );

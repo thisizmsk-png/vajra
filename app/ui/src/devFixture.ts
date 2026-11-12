@@ -198,21 +198,21 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
     slug: SLUG, run_id: RUN, stale: false,
     timeline: { phases: [{ name: "Plan", state: "done" }, { name: "Execute", state: "current", round: 1, max_rounds: 3 }, { name: "Verify", state: "pending" }], current: "Execute", status: "active" },
     graph: { waves: 3, tasks: [
-      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "arjuna", status: "done", deps: [], wave: 1, provider: onClaude },
-      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "bhima", status: "in_progress", deps: ["t1"], wave: 2, provider: onClaude },
-      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "nakula", status: "in_progress", deps: ["t1"], wave: 2, provider: onGateway },
-      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "sepoy-backend-1", status: "question", deps: ["t2"], wave: 2, provider: onHarnessB },
-      { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "vidura", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
-      { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "bhima", status: "pending", deps: ["t2"], wave: 3 },
-      { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "bhima", status: "done", deps: ["t1"], wave: 2 },
+      { id: `${RUN}.t1`, local: "t1", title: "Design the limiter", owner: "Architect", status: "done", deps: [], wave: 1, provider: onClaude },
+      { id: `${RUN}.t2`, local: "t2", title: "Token bucket middleware", owner: "Backend", status: "in_progress", deps: ["t1"], wave: 2, provider: onClaude },
+      { id: `${RUN}.t3`, local: "t3", title: "Show limits on the API keys page", owner: "Frontend", status: "in_progress", deps: ["t1"], wave: 2, provider: onGateway },
+      { id: `${RUN}.t4`, local: "t4", title: "429 body and Retry-After header", owner: "Backend worker 1", status: "question", deps: ["t2"], wave: 2, provider: onHarnessB },
+      { id: `${RUN}.t5`, local: "t5", title: "Check AC-1 to AC-5", owner: "Verifier", status: "ready", deps: ["t2", "t3", "t4"], wave: 3 },
+      { id: `${RUN}.t6`, local: "t6", title: "Document the limits", owner: "Backend", status: "pending", deps: ["t2"], wave: 3 },
+      { id: `${RUN}.t7`, local: "t7", title: "Redis store adapter", owner: "Backend", status: "done", deps: ["t1"], wave: 2 },
     ] },
   }),
   evidence_list: () => ({ slug: SLUG, stale: false, rows: [
-    { task: `${RUN}.t1`, title: "Design the limiter", owner: "arjuna", criterion: "AC-2", status: "pass", head: "4e1c9a2", path: null, commands: 1, report: null },
-    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-4", status: "pass", head: "4e1c9a2", path: null, commands: 2, report: null },
-    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "bhima", criterion: "AC-5", status: "not_run", head: null, path: null, commands: null, report: null },
-    { task: `${RUN}.t2`, title: "Token bucket middleware", owner: "bhima", criterion: "AC-1", status: "not_run", head: null, path: null, commands: null, report: null },
-    { task: `${RUN}.t3`, title: "Show limits on the API keys page", owner: "nakula", criterion: "AC-3", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t1`, title: "Design the limiter", owner: "Architect", criterion: "AC-2", status: "pass", head: "4e1c9a2", path: null, commands: 1, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "Backend", criterion: "AC-4", status: "pass", head: "4e1c9a2", path: null, commands: 2, report: null },
+    { task: `${RUN}.t7`, title: "Redis store adapter", owner: "Backend", criterion: "AC-5", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t2`, title: "Token bucket middleware", owner: "Backend", criterion: "AC-1", status: "not_run", head: null, path: null, commands: null, report: null },
+    { task: `${RUN}.t3`, title: "Show limits on the API keys page", owner: "Frontend", criterion: "AC-3", status: "not_run", head: null, path: null, commands: null, report: null },
   ] }),
   active_runs: () => ({ count: 1, runs: [{ run_id: RUN, campaign: SLUG }] }),
   crew: () => crew,
@@ -238,9 +238,13 @@ const replies: Record<string, (a?: Record<string, unknown>) => unknown> = {
   diff: () => ({ code: 0, diff, truncated: false, timed_out: false, untracked: ["test/rateLimit.redis.test.ts"] }),
 };
 
-/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "down" is a core that does not answer. */
+/** `mode`: "" is a busy day; "empty" is a first run (no campaigns, no run); "blocked" is a first run whose checks stop a start; "down" is a core that does not answer. */
 export function installFixture(mode = "") {
   const empty: typeof replies = { list_campaigns: () => ({ campaigns: [] }), resume_targets: () => ({ targets: {} }), active_runs: () => ({ count: 0, runs: [] }), inbox: () => ({ count: 0, items: [] }) };
+  const blocked: typeof replies = { ...empty, preflight: () => ({ rows: [
+    { name: "Git", ok: true, detail: "2.46.0", fix: "" },
+    { name: "Vajra engine", ok: false, detail: "not installed", fix: "bash scripts/install.sh" },
+  ], start_enabled: false }) };
   let revision = 0;
   let global = { ...DEFAULT_PREFERENCES };
   const projects = new Map<string, Record<string, unknown>>();
@@ -282,7 +286,7 @@ export function installFixture(mode = "") {
       if (cmd === "provider_base_url_save") { accounts = { ...accounts, accounts: accounts.accounts.map((a) => a.id === args?.accountId ? { ...a, base_url: String(args?.baseUrl) } : a) }; return null; }
       if (cmd === "provider_agents") return agents;
       if (cmd === "provider_agents_save") { agents = { schema: AGENTS.schema, ...(args?.agents as object) }; return agents; }
-      const r = (mode === "empty" ? empty[cmd] : undefined) ?? replies[cmd];
+      const r = (mode === "empty" ? empty[cmd] : mode === "blocked" ? blocked[cmd] : undefined) ?? replies[cmd];
       if (!r) throw { error: "not_in_fixture", detail: cmd };
       return r(args);
     },
