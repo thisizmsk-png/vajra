@@ -76,7 +76,11 @@ export function ProjectsProvider({ children }: { children: ReactNode }) {
       if (mine !== seq.current) return;
       if (camps.status === "rejected" || targets.status === "rejected") {
         const e = camps.status === "rejected" ? camps.reason : (targets as PromiseRejectedResult).reason;
-        setData((d) => ({ ...d, state: "error", error: problemDetail(e) }));
+        // A successful inbox read is still the newest answer: the Board shares it, so it must not keep an older one.
+        const fresh = inbox.status === "fulfilled" && Array.isArray(inbox.value?.items)
+          ? { inbox: inbox.value.items, inboxFailed: false, inboxCount: Number.isSafeInteger(inbox.value.count) && inbox.value.count >= inbox.value.items.length ? inbox.value.count : inbox.value.items.length }
+          : {};
+        setData((d) => ({ ...d, ...fresh, state: "error", error: problemDetail(e) }));
         return;
       }
       const campaigns = Array.isArray(camps.value?.campaigns) ? camps.value.campaigns : [];
