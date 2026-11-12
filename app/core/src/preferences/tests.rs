@@ -25,6 +25,40 @@ impl Drop for Home {
 fn patch(v: serde_json::Value) -> Patch {
     serde_json::from_value(v).unwrap()
 }
+/// The app spawns processes all the time (git, workers, the Lead). A child forked while a store call holds the lock
+/// gets a copy of the directory descriptor until it execs, and a flock lives on until every copy is closed. So the
+/// store must release its lock itself, not leave it to closing its own copy, or the next call is `preferences_busy`
+/// for as long as some unrelated child sits between fork and exec (seen as random failures in the parallel suite).
+#[test]
+fn a_child_forked_while_the_lock_is_held_does_not_keep_the_store_busy() {
+    use std::os::unix::process::CommandExt;
+    let h = Home::new();
+    let s = h.store();
+    s.read(None).unwrap();
+    let dir = s.directory().unwrap();
+    let held = lock_file(&dir, true).unwrap();
+    // Another thread spawns a child that waits between fork and exec while the lock is held.
+    let child = std::thread::spawn(|| {
+        let mut c = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the hook only sleeps; it touches no lock or allocator state shared with the parent.
+        unsafe {
+            c.pre_exec(|| {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                Ok(())
+            })
+        };
+        c.status().unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The call ends, as read() and update() end: the lock and then the descriptor go.
+    drop(held);
+    drop(dir);
+    let read = s.read(None);
+    let wrote = s.update(None, 0, patch(json!({"theme": "light"})), false);
+    assert!(child.join().unwrap().success());
+    assert!(read.is_ok(), "{:?}", read.err());
+    assert!(wrote.is_ok(), "{:?}", wrote.err());
+}
 #[test]
 fn fg08_global_defaults_and_project_overrides_survive_reopen_without_touching_other_scopes() {
     let h = Home::new();

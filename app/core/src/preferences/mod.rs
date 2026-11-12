@@ -418,7 +418,7 @@ impl Store {
     pub fn read(&self, project: Option<&str>) -> Result<View, Error> {
         Self::scope(project)?;
         let dir = self.directory()?;
-        lock_file(&dir, false)?;
+        let _held = lock_file(&dir, false)?;
         Ok(Self::load(&dir)?.view(project))
     }
     pub fn update(
@@ -434,7 +434,7 @@ impl Store {
             a.check_role_keys()?;
         }
         let dir = self.directory()?;
-        lock_file(&dir, true)?;
+        let _held = lock_file(&dir, true)?;
         let mut doc = Self::load(&dir)?;
         if doc.rev != expect_rev {
             return Err(Error("revision_conflict"));
@@ -589,7 +589,19 @@ impl Store {
         dir.sync_all().map_err(|_| Error("outcome_unknown"))
     }
 }
-fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
+/// A held preferences lock, released by `LOCK_UN` when dropped. Closing our descriptor is not enough: a flock belongs
+/// to the open file, and a child the app forks meanwhile (git, a worker, the Lead) holds a copy of the descriptor
+/// until it execs, so the lock would outlive the call and the next one would see `preferences_busy`. `LOCK_UN`
+/// releases it for every copy at once.
+#[must_use]
+struct Held<'a>(&'a File);
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor is borrowed for the guard's whole life; LOCK_UN never blocks.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+fn lock_file(dir: &File, exclusive: bool) -> Result<Held<'_>, Error> {
     // SAFETY: descriptor stays alive until the operation finishes; LOCK_NB prevents an unbounded UI wait.
     if unsafe {
         libc::flock(
@@ -602,7 +614,7 @@ fn lock_file(dir: &File, exclusive: bool) -> Result<(), Error> {
         )
     } == 0
     {
-        Ok(())
+        Ok(Held(dir))
     } else {
         Err(Error("preferences_busy"))
     }
