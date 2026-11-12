@@ -57,23 +57,51 @@ if [ "$MODE" = sign ]; then
   printf '%s' "$SLUG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$' || { echo "vajra-verify-work: invalid slug" >&2; exit 2; }
   printf '%s' "$WANT" | grep -Eq '^[0-9a-f]{64}$' || { echo "vajra-verify-work: --expect-sha256 needs 64 lowercase hex" >&2; exit 2; }
   [ -x "$PYTHON3" ] || { echo "sign refused: no usable key" >&2; echo "vajra-verify-work: /usr/bin/python3 is required to sign" >&2; exit 4; }
-  EV="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}/${SLUG}/evidence.json"
+  EVDIR="${VAJRA_WALKTHROUGH_DIR:-data/walkthroughs}/${SLUG}"
   HEAD_NOW="$(git rev-parse --verify -q HEAD 2>/dev/null || true)"
   # Every check runs before the key is opened; the key is read last, only to sign.
+  # The bundle folder is in the agent's worktree and the core runs sign outside the sandbox (bhishma #214 H1, M1):
+  # every file operation is relative to a folder fd reached without following a symlink the agent could plant, the
+  # temp file has a random name and is created exclusively, and evidence.json must still be the file that was read.
   PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
-import hashlib, hmac, json, os, re, stat, sys
-path, want, slug, head, keyf = sys.argv[1:6]
+import hashlib, hmac, json, os, re, secrets, stat, sys
+evdir, want, slug, head, keyf = sys.argv[1:6]
 # The first stderr line is one fixed "sign refused: <reason>" (the core shows it on the card). No reason holds a path
 # or key material; the slug is already checked to be a plain word.
 def refuse(why, code=3):
     print("sign refused: " + why, file=sys.stderr); sys.exit(code)
+D = os.O_RDONLY | os.O_DIRECTORY
+def open_folder(p):
+    # Walk one part at a time. A symlinked part is refused unless root owns it (/var, /tmp on macOS): an agent
+    # can make links, but never root-owned ones.
+    fd = os.open("/" if p.startswith("/") else ".", D)
+    for part in p.split("/"):
+        if part in ("", "."):
+            continue
+        try:
+            st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISLNK(st.st_mode):
+                if st.st_uid != 0:
+                    refuse("a symlinked path")
+                nfd = os.open(part, D, dir_fd=fd)
+            elif stat.S_ISDIR(st.st_mode):
+                nfd = os.open(part, D | os.O_NOFOLLOW, dir_fd=fd)
+            else:
+                refuse("no evidence.json")
+        except OSError:
+            refuse("no evidence.json")
+        os.close(fd); fd = nfd
+    return fd
+dfd = open_folder(evdir)
 try:
-    st = os.lstat(path)
+    efd = os.open("evidence.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
 except OSError:
     refuse("no evidence.json")
+st = os.fstat(efd)
 if not stat.S_ISREG(st.st_mode):
     refuse("no evidence.json")
-raw = open(path, "rb").read()
+with os.fdopen(efd, "rb") as f:
+    raw = f.read()
 if hashlib.sha256(raw).hexdigest() != want:
     refuse("sha256 mismatch")
 try:
@@ -101,13 +129,28 @@ if not re.fullmatch(r"[0-9a-fA-F]{32,}", k) or len(k) % 2:
     refuse("no usable key", 4)
 msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 ev["hmac"] = hmac.new(bytes.fromhex(k), msg, hashlib.sha256).hexdigest()
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(ev, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-os.replace(tmp, path)
-print("signed " + path)
-' "$EV" "$WANT" "$SLUG" "$HEAD_NOW" "$KEY_FILE"
+out = (json.dumps(ev, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+tmp = ".evidence.json." + secrets.token_hex(8) + ".tmp"
+try:
+    tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
+except OSError:
+    refuse("cannot write")
+try:
+    with os.fdopen(tfd, "wb") as f:
+        f.write(out); f.flush(); os.fsync(f.fileno())
+    now = os.stat("evidence.json", dir_fd=dfd, follow_symlinks=False)
+    if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+        os.unlink(tmp, dir_fd=dfd)
+        refuse("evidence changed")
+    os.replace(tmp, "evidence.json", src_dir_fd=dfd, dst_dir_fd=dfd)
+except OSError:
+    try:
+        os.unlink(tmp, dir_fd=dfd)
+    except OSError:
+        pass
+    refuse("cannot write")
+print("signed " + os.path.join(evdir, "evidence.json"))
+' "$EVDIR" "$WANT" "$SLUG" "$HEAD_NOW" "$KEY_FILE"
   exit $?
 fi
 
@@ -231,7 +274,7 @@ fi
 # opens the key: --sign signs later.
 if [ "$MODE" = default ] && [ -f "${DIR}/evidence.json" ] && [ -r "$KEY_FILE" ] && [ -x "$PYTHON3" ]; then
   PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$PYTHON3" -I -c '
-import hashlib, hmac, json, os, re, sys
+import hashlib, hmac, json, os, re, sys, tempfile
 path, keyf = sys.argv[1], sys.argv[2]
 k = open(keyf, encoding="utf-8").read().strip()
 if not re.fullmatch(r"[0-9a-fA-F]{32,}", k) or len(k) % 2:
@@ -240,11 +283,17 @@ ev = json.load(open(path, encoding="utf-8"))
 ev.pop("hmac", None)
 msg = json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 ev["hmac"] = hmac.new(bytes.fromhex(k), msg, hashlib.sha256).hexdigest()
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(ev, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-os.replace(tmp, path)
+# A random, exclusive temp file: a planted fixed-name link never redirects the write (bhishma #214).
+tfd, tmp = tempfile.mkstemp(prefix=".evidence.json.", suffix=".tmp", dir=os.path.dirname(path) or ".")
+try:
+    with os.fdopen(tfd, "w", encoding="utf-8") as f:
+        json.dump(ev, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+except OSError:
+    os.unlink(tmp)
+    raise
 ' "${DIR}/evidence.json" "$KEY_FILE" || echo "warning: could not sign ${DIR}/evidence.json" >&2
 fi
 

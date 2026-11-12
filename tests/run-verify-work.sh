@@ -168,7 +168,35 @@ for s in ro rored rokey rounread nojson noev; do bash "$SCRIPT" --sign "$s" --ex
 ! grep -qE '/|hmac|key-' "$WORK/reasons.txt"; check "sign: no refusal line holds a path or key material" $?
 bash "$SCRIPT" --sign "../x" --expect-sha256 "$H" >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: a traversal slug is a usage error" $?
 bash "$SCRIPT" --sign ro >/dev/null 2>&1; [ $? -eq 2 ]; check "sign: no --expect-sha256 is a usage error" $?
+# bhishma #214 H1: the core signs outside the sandbox, in a folder the agent can write. A planted link at the old fixed
+# temp name must not redirect the write.
+echo victim > "$WORK/victim.txt"
+PL="$VAJRA_WALKTHROUGH_DIR/plant"; mkdir -p "$PL"; jq -c '.slug="plant"' "$WORK/ro.fd3" > "$PL/evidence.json"
+ln -s "$WORK/victim.txt" "$PL/evidence.json.tmp"
+bash "$SCRIPT" --sign plant --expect-sha256 "$(sha_of "$PL/evidence.json")" >/dev/null 2>&1; ec=$?
+[ "$ec" -eq 0 ] && [ "$(cat "$WORK/victim.txt")" = victim ] && [ -f "$PL/evidence.json" ] && [ ! -L "$PL/evidence.json" ] && verify_ev "$PL/evidence.json"
+check "sign: a planted link at a temp name is never written through" $?
+# M1: a symlinked bundle folder, or a symlinked part above it, is refused; the folder it points at is untouched.
+mkdir -p "$WORK/elsewhere"; jq -c '.slug="linked"' "$WORK/ro.fd3" > "$WORK/elsewhere/evidence.json"; ESH="$(sha_of "$WORK/elsewhere/evidence.json")"
+ln -s "$WORK/elsewhere" "$VAJRA_WALKTHROUGH_DIR/linked"
+sign_as linked "$ESH" 3 "sign refused: a symlinked path" && [ "$(sha_of "$WORK/elsewhere/evidence.json")" = "$ESH" ]
+check "sign: a symlinked bundle folder is refused, its target untouched" $?
+mkdir -p "$VAJRA_WALKTHROUGH_DIR/up"; jq -c '.slug="up"' "$WORK/ro.fd3" > "$VAJRA_WALKTHROUGH_DIR/up/evidence.json"
+ln -s "$VAJRA_WALKTHROUGH_DIR" "$REPO_T/wlink"
+( export VAJRA_WALKTHROUGH_DIR="$REPO_T/wlink"; sign_as up "$(sha_of "$REPO_T/wlink/up/evidence.json")" 3 "sign refused: a symlinked path" )
+check "sign: a symlinked folder above the bundle is refused" $?
+# L1: a write error is a refusal (exit 3, fixed line), the file untouched, no temp file left.
+UW="$VAJRA_WALKTHROUGH_DIR/unwritable"; mkdir -p "$UW"; jq -c '.slug="unwritable"' "$WORK/ro.fd3" > "$UW/evidence.json"; UH="$(sha_of "$UW/evidence.json")"
+chmod 555 "$UW"
+sign_as unwritable "$UH" 3 "sign refused: cannot write" && [ "$(sha_of "$UW/evidence.json")" = "$UH" ] && [ -z "$(find "$UW" -name '*.tmp')" ]
+check "sign: an unwritable folder -> 'cannot write', exit 3, nothing changed" $?
+chmod 755 "$UW"
 cd "$WORK"
+# The default mode signs as the agent itself, but a planted fixed-name link still mustn't redirect its write.
+export VAJRA_WALKTHROUGH_DIR="$WORK/wt"; mkdir -p "$WORK/wt/dplant"; ln -s "$WORK/victim.txt" "$WORK/wt/dplant/evidence.json.tmp"
+bash "$SCRIPT" dplant "true" >/dev/null 2>&1
+[ "$(cat "$WORK/victim.txt")" = victim ] && [ ! -L "$WORK/wt/dplant/evidence.json" ] && verify_ev "$WORK/wt/dplant/evidence.json"
+check "default mode: a planted temp-name link is never written through" $?
 
 echo "----------------------------------------"
 echo "verify-work: ${PASS} passed, ${FAIL} failed"
