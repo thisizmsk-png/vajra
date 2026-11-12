@@ -673,12 +673,9 @@ fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_red
 }
 
 #[test]
-fn a_claude_worker_is_refused_until_s4_and_runs_through_its_profile_when_allowed() {
+fn a_claude_worker_runs_through_its_profile_now_that_s4_passed() {
+    // No test override: S4 passed, so the profile itself allows the Claude worker.
     let r = rig("claude", Opts::default());
-    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
-    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("s4_unverified")));
-    assert!(v.worktree.is_none() && !r.gw.work.join("p/r1/t1-r1").exists(), "refused before any worktree exists");
-    let r = rig("claude-ok", Opts { claude_ok: true, ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
     assert_eq!(v.receipt.unwrap()["effective"]["model"], "claude-fake-1");

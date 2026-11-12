@@ -380,16 +380,15 @@ fn a_read_back_mismatch_kills_the_session() {
     sup.kill("w-ok").unwrap();
 }
 
-/// Pins today's state: spike S4 has not run, so both Claude worker kinds are refused with `s4_unverified`. When the
-/// owner's S4 run prints PASS, flip `CLAUDE_WORKER_S4_PASSED` and change this test with it.
+/// Pins today's state: the owner's S4 run on batch-3 printed PASS, so both Claude worker kinds are supported. Setting
+/// `CLAUDE_WORKER_S4_PASSED` back to false (a new Claude Code build that fails S4) must change this test with it.
 #[test]
-fn the_claude_worker_profile_is_refused_until_s4_passes() {
-    const { assert!(!CLAUDE_WORKER_S4_PASSED) };
+fn the_claude_worker_profile_is_supported_once_s4_passed() {
+    const { assert!(CLAUDE_WORKER_S4_PASSED) };
     for kind in [RoleKind::Worker, RoleKind::Verifier] {
         let p = profile(Engine::Claude, kind);
-        assert_eq!(p.supported, Err(S4_UNVERIFIED));
-        assert_eq!(p.supported.unwrap_err().reason, "s4_unverified");
-        assert!(!p.always.is_empty(), "the profile data is complete; only the proof is missing");
+        assert_eq!(p.supported, Ok(()));
+        assert!(!p.always.is_empty(), "every override the profile applies is listed");
     }
 }
 
