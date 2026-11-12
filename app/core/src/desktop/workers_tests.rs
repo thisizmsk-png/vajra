@@ -1068,6 +1068,19 @@ fn a_codex_answer_is_read_from_the_last_task_complete_of_its_session_file() {
     let pad = format!("{}\n", r#"{"type":"event_msg","payload":{"type":"token_count"}}"#).repeat(30_000);
     std::fs::write(&file, format!("{}\n{pad}{}\n", tc("first"), tc("last"))).unwrap();
     assert_eq!(codex_last_message(&events, &home).as_deref(), Some("last"));
+    // A final line longer than the read window can't be read whole: no answer, never an earlier turn's (#185 L2).
+    let huge = tc(&"y".repeat(1_100_000));
+    std::fs::write(&file, format!("{}\n{huge}\n", tc("earlier"))).unwrap();
+    assert_eq!(codex_last_message(&events, &home), None, "fails closed");
+    // A file cut off mid-line (no final newline) is no answer either.
+    std::fs::write(&file, format!("{}\n{}", tc("earlier"), &tc("cut")[..40])).unwrap();
+    assert_eq!(codex_last_message(&events, &home), None, "the last line must be whole");
+    // A line after the last whole answer that doesn't parse could be the real one: none is taken.
+    std::fs::write(&file, format!("{}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_compl\n", tc("earlier"))).unwrap();
+    assert_eq!(codex_last_message(&events, &home), None, "no fallback to an earlier turn");
+    // Whole events after the answer (Codex writes token counts) are fine.
+    std::fs::write(&file, format!("{}\n{}\n", tc("answer"), r#"{"type":"event_msg","payload":{"type":"token_count"}}"#)).unwrap();
+    assert_eq!(codex_last_message(&events, &home).as_deref(), Some("answer"));
     let _ = std::fs::remove_dir_all(&home);
 }
 

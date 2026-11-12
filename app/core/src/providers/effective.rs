@@ -170,15 +170,12 @@ fn clean(v: Option<&Value>) -> Option<String> {
         .map(String::from)
 }
 
-/// The `thread_id` of the `thread.started` event in a Codex `--json` stream. Only a plain id is returned, since it is
-/// matched against file names.
+/// The `thread_id` of the first `thread.started` event in a Codex `--json` stream: the harness's own, printed before
+/// anything the session runs. A later one, or a valid one after an invalid first, is never taken (#185 bhishma L1).
+/// Only a plain id is returned, since it is matched against file names.
 pub fn codex_thread_id(events: &str) -> Option<String> {
-    events.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find_map(|e| {
-        (e["type"] == "thread.started")
-            .then(|| e["thread_id"].as_str().map(String::from))
-            .flatten()
-            .filter(|t| (8..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
-    })
+    let first = events.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).find(|e| e["type"] == "thread.started")?;
+    first["thread_id"].as_str().map(String::from).filter(|t| (8..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
 }
 
 /// Entries listed from one directory at most.
@@ -305,10 +302,21 @@ pub fn codex_last_message(events: &str, codex_home: &Path) -> Option<String> {
     let mut bytes = Vec::new();
     file.take(MAX_READ).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    // From the middle of the file, the first line may be cut: it is skipped.
-    let lines = text.lines().skip(usize::from(from > 0));
-    let done = lines.filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok()).filter(|e| e["type"] == "event_msg" && e["payload"]["type"] == "task_complete").last()?;
-    done["payload"]["last_agent_message"].as_str().map(String::from)
+    // A file Codex is still writing (no final newline) has no answer yet.
+    if !text.ends_with('\n') {
+        return None;
+    }
+    // From the middle of the file, the first line may be cut: it is skipped. Walking back from the end, every line
+    // up to the last `task_complete` must parse: one that doesn't (too long for the window, cut, or garbled) could be
+    // the real answer, so none is taken, never an earlier turn's (#185 bhishma L2).
+    let lines: Vec<&str> = text.lines().skip(usize::from(from > 0)).collect();
+    for l in lines.into_iter().rev().filter(|l| !l.trim().is_empty()) {
+        let e = serde_json::from_str::<Value>(l.trim()).ok()?;
+        if e["type"] == "event_msg" && e["payload"]["type"] == "task_complete" {
+            return e["payload"]["last_agent_message"].as_str().map(String::from);
+        }
+    }
+    None
 }
 
 /// What a Claude worker ran on, from the `system`/`init` event of its stream. Claude has no effort setting here, so the
