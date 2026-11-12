@@ -5503,3 +5503,19 @@ fn app_start_prunes_stale_control_dirs_and_keeps_every_indexed_session() {
     drop(t.app());
     assert!(control.join(stale).is_dir(), "an index that can't be read prunes nothing");
 }
+
+/// 6c-3 pruning with the instance lock: a second app on the same data folder prunes nothing, since the dir it can't
+/// place may be the first app's live session's. The first app's next start, alone, does prune it.
+#[test]
+fn a_second_app_prunes_no_control_dir() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let first = t.app();
+    let live = "44444444-4444-4444-8444-444444444444";
+    fs::create_dir_all(control.join(live).join("queue")).unwrap();
+    drop(t.app());
+    assert!(control.join(live).is_dir(), "a second app leaves the first app's session dir");
+    drop(first);
+    drop(t.app());
+    assert!(!control.join(live).exists(), "an app holding the folder prunes it");
+}

@@ -363,8 +363,9 @@ impl App {
         svc.set_core_workers(workers.clone());
         // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
         // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
-        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one.
-        if let Some(keep) = control_keep(data) {
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one. Only
+        // the app holding the instance locks prunes: a second one would remove the first app's live sessions' dirs.
+        if let Some(keep) = instance.as_ref().and_then(|_| control_keep(data)) {
             svc.prune_control_dirs(&keep);
         }
         let acts = Mutex::new(state::Hub::open(data)?);
