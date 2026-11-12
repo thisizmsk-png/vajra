@@ -178,7 +178,7 @@
 .v-inbox__group { padding: 0 var(--space-md); }
 .v-inbox__h { font: 600 13px/16px var(--font-ui); margin: var(--space-md) 0 var(--space-sm); }
 .v-inbox__more { border: 0; background: transparent; color: var(--c-text-secondary); font: 400 13px/16px var(--font-ui); padding: var(--space-sm) 0; text-decoration: underline; }
-.v-inbox__more:focus-visible, .v-ibx input:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
+.v-inbox__more:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 .v-ibx { border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface, transparent); padding: var(--space-md); margin-bottom: var(--space-sm); display: grid; gap: var(--space-sm); }
 .v-ibx__top { display: flex; gap: var(--space-sm); align-items: center; }
 .v-ibx__t { font: 600 13px/18px var(--font-ui); margin: 0; }
