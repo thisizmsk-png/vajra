@@ -59,6 +59,7 @@ const COMMANDS: &[&str] = &[
     "reject_plan",
     "app_info",
     "project_list",
+    "project_discover",
     "project_for_folder",
     "project_add",
     "project_rename",

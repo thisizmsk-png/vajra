@@ -60,6 +60,7 @@ permissions = [
   "allow-reject-plan",
   "allow-app-info",
   "allow-project-list",
+  "allow-project-discover",
   "allow-project-for-folder",
   "allow-project-add",
   "allow-project-rename",
