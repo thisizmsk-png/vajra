@@ -1,0 +1,21 @@
+# Core Rust tests that run in their own serial pass (ci/run-tests.sh), not alongside the other ~1,300 in parallel.
+# Each one has a time limit or a lock that other tests' processes can crowd out on a loaded machine. Running it alone
+# keeps every assertion and every limit as written: nothing here is skipped, retried or loosened.
+#
+# One exact test name per line, or a module path ending in "::" for every test under it. A name that no longer matches a
+# test fails the run, so the list cannot rot. Remove an entry once its test is fixed to hold under parallel load.
+
+# A slow `git` must not eat the evidence check's timeout; the check itself needs its timeout's worth of CPU.
+desktop::tests::a_slow_repo_does_not_eat_a_checks_full_timeout_and_is_not_asked_again_on_the_next_call
+# A 3 s wall-clock cap on reading a big untracked tree.
+desktop::tests::a_big_untracked_tree_does_not_blow_the_budget
+# Reads the killed group's pid from a file a child writes; under load the file is still empty when read.
+control::lead_run::tests::cancel_ask_kills_group
+# Two projects' Lead settings written at once.
+desktop::lead::tests::two_projects_asking_at_once_each_get_their_own_settings
+# A PTY redraw nudge observed within a short window.
+terminal::tests_hidden::a_program_still_on_the_alternate_screen_is_nudged_to_redraw_without_a_second_switch
+# The preferences store takes a non-blocking flock; a process another test spawns at that moment can hold it
+# (preferences_busy). The whole module, and the seat test that edits preferences.
+preferences::tests::
+desktop::seat_start::tests::editing_preferences_between_propose_and_start_keeps_the_hash_and_the_start_works
