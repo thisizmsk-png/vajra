@@ -839,6 +839,8 @@ impl RunProtocol {
             Ok(tk) => tk,
             Err(DispatchError::Exists) => return refuse(NOT_READY, format!("task {id} already ran in round {r}")),
             Err(DispatchError::Invalid(w)) => return refuse(INVALID, format!("the core can't dispatch this {w}")),
+            // The app is quitting: the run is ending, so nothing new starts.
+            Err(DispatchError::Closed) => return refuse(RUN_ENDED, "the app is quitting; nothing new starts"),
         };
         if let Some(t) = st.tasks.iter_mut().find(|t| t.spec.id == id) {
             t.tickets.push((r, ticket.clone(), slot.clone()));
