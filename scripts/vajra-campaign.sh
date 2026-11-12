@@ -134,7 +134,7 @@ verify_state() {
 
 LOCK=""
 # The process start time, the second half of the owner's identity: a recycled pid has a different start time.
-proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
+proc_start() { TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
 # owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
 release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; return 0; }
 # A writer's normal exit hands the lock off under the same mutex that unlock --if-stale holds while it checks and

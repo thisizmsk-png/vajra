@@ -404,10 +404,16 @@ C pass f1 --campaign lk >/dev/null 2>&1; check "lock: the campaign is usable aga
 mkdir "$LD/.lock"; jq -n --argjson pid "$$" '{pid: $pid, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
 C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "lock: a reused pid (different start time) is treated as dead" $?
 # the same pid with the matching start time is live
-mkdir "$LD/.lock"; SELF_START="$(LC_ALL=C ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //; s/ $//')"
+mkdir "$LD/.lock"; SELF_START="$(TZ=UTC LC_ALL=C ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //; s/ $//')"
 jq -n --argjson pid "$$" --arg s "$SELF_START" '{pid: $pid, start: $s}' > "$LD/.lock/owner.json"
 C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live pid with its real start time is kept" $?
 rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+# a live owner is kept whatever time zone the writer and the unlocker run in
+set -m; TZ=Asia/Kolkata "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+TZ=America/Los_Angeles C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept when the unlocker runs in another time zone" $?
+TZ=Pacific/Auckland C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept in a third time zone" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
 # no owner file: never removed
 mkdir "$LD/.lock"
 C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a lock with no owner file is kept" $?
