@@ -229,6 +229,24 @@ describe("Shell B frame (FG-03)", () => {
     expect(ipc.calls.find((c) => c.cmd === "project_add")?.args).toMatchObject({ path: "/src/alpha" });
   });
 
+  it("keeps the sheet and the failure notice when the reload fills the project list after a mixed batch", async () => {
+    const found = [{ root: "/src/alpha", name: "alpha", worktrees: 0 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
+    let listed = false;
+    boot("", {
+      list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
+      project_discover: { found, truncated: false },
+      project_list: () => ({ projects: listed ? [{ id: "p_alpha", name: "alpha", root: "/src/alpha", rev: 1 }] : [], skipped: 0, truncated: false }),
+      project_add: (a: { path: string }) => { if (a.path === "/src/beta") throw { error: "not_a_project" }; listed = true; return { outcome: "created", project: {} }; },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.offerShort(2) }));
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.add(2) }));
+    expect(await screen.findByText(S.frame.welcome.partial(1, 1))).toBeTruthy();
+    expect(screen.getByRole("button", { name: S.frame.welcome.add(1) })).toBeTruthy(); // retry stays available
+    expect(ipc.calls.filter((c) => c.cmd === "project_list")).toHaveLength(1); // no reload until dismissed
+    fireEvent.click(screen.getByRole("button", { name: S.frame.welcome.cancel }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "project_list").length).toBeGreaterThan(1));
+  });
+
   it("shows no offer when nothing is found", async () => {
     boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_discover: { found: [], truncated: false } });
     await screen.findByRole("heading", { name: S.home.start });

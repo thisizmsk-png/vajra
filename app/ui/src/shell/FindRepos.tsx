@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Sheet, Text } from "../../components/ui/base";
 import { api } from "../ipc";
 import { S } from "../../strings";
@@ -17,6 +17,7 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+  const added = useRef(0);
 
   useEffect(() => {
     let live = true;
@@ -47,6 +48,13 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
       else n.add(root);
       return n;
     });
+  const dismiss = () => {
+    setOpen(false);
+    if (added.current > 0) {
+      added.current = 0;
+      onAdded();
+    }
+  };
   const add = async () => {
     setBusy(true);
     let ok = 0;
@@ -67,11 +75,13 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
     }
     setBusy(false);
     setFound(left);
-    if (ok > 0) onAdded();
+    added.current += ok;
     if (bad > 0) {
+      // Keep the sheet up so the failures can be seen and retried; the project list reloads when it is dismissed
+      // (reloading now would fill the list and unmount this sheet, which only shows while there are no projects).
       setPicked(new Set(left.map((f) => f.root).filter((r) => picked.has(r))));
       setNote(W.partial(ok, bad));
-    } else setOpen(false);
+    } else dismiss();
   };
 
   return (
@@ -79,7 +89,7 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
       <button type="button" className="v-tb__add" onClick={show}>
         {W.offerShort(found.length)}
       </button>
-      <Sheet open={open} onClose={() => !busy && setOpen(false)} title={W.title}>
+      <Sheet open={open} onClose={() => !busy && dismiss()} title={W.title}>
         <Text>{W.offer(found.length)}</Text>
         <Text variant="body-sm" muted>
           {W.intro}
@@ -111,7 +121,7 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
         )}
         {note && <div role="status">{note}</div>}
         <div className="v-find__bar">
-          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
+          <Button variant="ghost" onClick={dismiss} disabled={busy}>
             {W.cancel}
           </Button>
           <Button variant="primary" onClick={() => void add()} disabled={busy || picked.size === 0}>

@@ -94,16 +94,25 @@ fn walk(dir: &Path, depth: usize, guard: &Guard, repos: &mut BTreeMap<PathBuf, u
         return;
     }
     let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut kids: Vec<PathBuf> = rd
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) // a symlink is not a dir here: not followed
-        .filter(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            !n.starts_with('.') && !SKIP.contains(&n.as_ref())
-        })
-        .map(|e| e.path())
-        .collect();
+    // Every entry read counts against the same budget as a visited folder, so a folder with hundreds of thousands of
+    // children is cut off while being listed, before anything is buffered or sorted.
+    let mut kids: Vec<PathBuf> = Vec::new();
+    for e in rd.flatten() {
+        *visited += 1;
+        if *visited > MAX_VISITED {
+            *truncated = true;
+            break;
+        }
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue; // a symlink is not a dir here: not followed
+        }
+        let n = e.file_name();
+        let n = n.to_string_lossy();
+        if n.starts_with('.') || SKIP.contains(&n.as_ref()) {
+            continue;
+        }
+        kids.push(e.path());
+    }
     kids.sort();
     for k in kids {
         if *truncated {

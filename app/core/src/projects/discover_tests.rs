@@ -124,3 +124,17 @@ fn a_common_folder_that_is_a_symlink_into_a_protected_folder_is_not_scanned() {
     // the person naming that same folder is an explicit choice, so it is scanned
     assert_eq!(discover(&t.guard(), &[t.0.join("home/Code")], &none).found.len(), 1);
 }
+
+#[test]
+fn a_very_wide_folder_is_cut_off_while_listing_and_marked_truncated() {
+    let t = Tmp::new("wide");
+    t.repo("Development/first"); // scanned before Projects, so it is found before the cut-off
+    let wide = t.0.join("home/Projects");
+    fs::create_dir_all(&wide).unwrap();
+    for i in 0..(MAX_VISITED + 50) {
+        fs::write(wide.join(format!("f{i}")), "").unwrap();
+    }
+    let d = discover(&t.guard(), &[], &none);
+    assert!(d.truncated);
+    assert_eq!(d.found.len(), 1); // what was found before the cut-off is still offered
+}
