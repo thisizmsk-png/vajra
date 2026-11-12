@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn given_a_huge_report_when_previewed_then_it_is_bounded_and_says_so() {
-        let terms: Vec<TermInfo> = (0..2000).map(|i| TermInfo { id: i, pid: 10 + i, cwd: format!("/Users/sam/{}", "d".repeat(50)).into(), root: "/Users/sam".into(), rows: 1, cols: 1, alive: true }).collect();
+        let terms: Vec<TermInfo> = (0..2000).map(|i| TermInfo { id: i, pid: 10 + i, cwd: format!("/Users/sam/{}", "d".repeat(50)).into(), root: "/Users/sam".into(), rows: 1, cols: 1, alive: true, sign_in: None }).collect();
         let p = preview(&report(&terms, &[]), &[], HOME);
         assert!(p.len() <= MAX_BYTES, "{}", p.len());
         assert!(p.ends_with("[truncated]"));
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn the_preview_has_the_facts_and_none_of_the_home_path() {
-        let terms = [TermInfo { id: 1, pid: 77, cwd: "/Users/sam/code/app/wt".into(), root: "/Users/sam/code/app".into(), rows: 1, cols: 1, alive: true }];
+        let terms = [TermInfo { id: 1, pid: 77, cwd: "/Users/sam/code/app/wt".into(), root: "/Users/sam/code/app".into(), rows: 1, cols: 1, alive: true, sign_in: None }];
         let runs = [RunDiag { stream: "s1".into(), pid: 900 }];
         let found = [Found { owner: Owner { pid: 55, stamp: 1, cwd: "/Users/sam/.ssh".into() }, verdict: Verdict::Reused }];
         let p = preview(&report(&terms, &runs), &found, HOME);

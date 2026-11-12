@@ -642,3 +642,230 @@ fn a_steady_project_state_read_emits_nothing() {
     assert_eq!(got.len(), after_first, "{got:?}");
     assert!(got.iter().all(|p| !p["projects"].as_array().unwrap().is_empty()), "{got:?}");
 }
+
+// ---------------------------------------------------------------- core workers (6c-2, 16.7)
+
+/// A runtime whose tickets stay queued: both accounts are capped at 0, so nothing is ever spawned or checked out.
+fn queued_runtime<'a>(t: &Tmp, app: &'a App) -> &'a crate::desktop::workers::WorkerRuntime {
+    let (home, data) = (t.0.join("home"), t.0.join("data"));
+    app.worker_runtime(|| crate::desktop::workers::Config {
+        home,
+        data,
+        codex: "/nonexistent/vajra-test/codex".into(),
+        claude: "/nonexistent/vajra-test/claude".into(),
+        codex_home: t.0.join("codex-home"),
+        tools: crate::adapter::profiles::WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
+        account_caps: [("codex".to_string(), 0), ("claude".to_string(), 0)].into_iter().collect(),
+        worker_timeout: Duration::from_secs(60),
+        poll: Duration::from_millis(20),
+        clock: None,
+        redact: Redactor::default(),
+        steer: None,
+        claude_unverified_ok: false,
+    })
+    .unwrap()
+}
+
+const CORE_RUN: &str = "20261111-0900";
+
+fn queue(rt: &crate::desktop::workers::WorkerRuntime, t: &Tmp, task: &str, account: &str) -> String {
+    let spec = crate::desktop::workers::TaskSpec {
+        project: "p".into(), run: CORE_RUN.into(), repo: t.0.join("repo"), task: task.into(), round: 1, from: "0".repeat(40), deps: Vec::new(),
+        globs: vec!["src/**".into()], named: Vec::new(), brief: "Do it.".into(),
+    };
+    let seat = crate::control::service::WorkerSeat {
+        slot: format!("w-{task}"), role: "backend".into(), task: task.into(), account: account.into(), model: None, effort: None, security: false,
+        network: false, why: String::new(), source: "user".into(),
+    };
+    rt.dispatch(spec, seat).unwrap()
+}
+
+/// #151: the app's crew view shows the runtime's tickets as `core:<ticket>` nodes with their controls, and an app with
+/// no runtime built shows none (and building one is never a side effect of looking).
+#[test]
+fn the_crew_view_shows_the_runtimes_tickets_as_core_nodes_with_controls() {
+    fn find<'a>(n: &'a Value, id: &str) -> Option<&'a Value> {
+        if n["id"] == id {
+            return Some(n);
+        }
+        n["children"].as_array()?.iter().find_map(|c| find(c, id))
+    }
+    let t = Tmp::new();
+    let app = t.app();
+    let before = app.crew("c", CORE_RUN).unwrap();
+    assert!(!before.to_string().contains("\"core:"), "{before}");
+    assert!(!app.workers.runtime_built(), "the crew view doesn't build the runtime");
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "codex");
+    let tree = app.crew("c", CORE_RUN).unwrap();
+    let node = find(&tree, &format!("core:{id}")).unwrap_or_else(|| panic!("no core node in {tree}"));
+    assert_eq!(node["controls"]["message"]["enabled"], false, "{node}");
+    assert!(node["controls"]["stop"].is_object(), "{node}");
+}
+
+#[test]
+fn a_core_worker_takes_no_message_with_its_profiles_reason_and_stops_through_a_guarded_receipt() {
+    use crate::desktop::workers::{Outcome, State as T};
+    let t = Tmp::new();
+    let app = t.app();
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    assert_eq!(app.control_message("core:x.t1.r1", "hi").unwrap_err()["error"], "worker_not_found", "no runtime, no ticket");
+    let rt = queued_runtime(&t, &app);
+    let (codex, claude) = (queue(rt, &t, "t1", "codex"), queue(rt, &t, "t2", "claude"));
+    let m = app.control_message(&format!("core:{codex}"), "hi").unwrap_err();
+    assert_eq!((m["error"].as_str(), m["detail"].as_str()), (Some("not_supported_by_harness"), Some("This worker can't take a message mid-run.")));
+    let r = app.control_redirect(&format!("core:{claude}"), "do x").unwrap_err();
+    // A queued Claude worker has no session yet, so nothing is queued that no session would take.
+    assert_eq!((r["error"].as_str(), r["detail"].as_str()), (Some("not_supported_by_harness"), Some("This worker hasn't started yet. Message it once it's running.")));
+
+    let stale = app.act_stop_worker(&env("stop-core-0001", Some(2)), &format!("core:{codex}"), None);
+    assert_eq!((state_of(&stale), stale["receipt"]["reason"].as_str()), ("rejected", Some("stale_generation")), "{stale}");
+    assert_eq!(rt.view(&codex).unwrap().state, T::Queued, "the effect never ran");
+    let ok = app.act_stop_worker(&env("stop-core-0002", Some(1)), &format!("core:{codex}"), None);
+    assert_eq!(state_of(&ok), "done", "{ok}");
+    let v = rt.view(&codex).unwrap();
+    assert_eq!((v.state, v.outcome), (T::Ended, Some(Outcome::Stopped)));
+    // The ticket's end (reported by the runtime) settles the stop: it doesn't stay queued in the ledger (#151 codex P2).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let l = app.ledger().unwrap();
+        let last = l["records"].as_array().unwrap().iter().rev().find(|r| r["kind"] == "stop" && r["worker"] == format!("core:{codex}")).cloned();
+        if last.as_ref().is_some_and(|r| r["state"] == "done") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the stop stays {last:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.control_stop(&format!("core:{codex}"), None).unwrap_err()["error"], "worker_finished");
+    assert_eq!(rt.view(&claude).unwrap().state, T::Queued, "the other ticket is untouched");
+    let l = app.ledger().unwrap();
+    assert!(l["records"].as_array().unwrap().iter().any(|r| r["kind"] == "stop" && r["worker"] == format!("core:{codex}")), "the stop has its ledger line: {l}");
+}
+
+#[test]
+fn a_lead_reaches_only_its_own_runs_core_workers_and_its_stop_waits_for_the_human() {
+    use crate::desktop::workers::State as T;
+    let t = Tmp::new();
+    let app = t.app();
+    let other = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    lock(&app.control).start_session(other, "20261111-0901").unwrap();
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "claude");
+    let w = json!({"worker": format!("core:{id}")});
+    let elsewhere = lock(&app.control).call_tool_for_run(Some("20261111-0901"), "stop_worker", &w).unwrap_err();
+    assert_eq!(elsewhere.code(), "worker_not_found", "another run's Lead can't see it");
+    let msg = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "message_worker", &json!({"worker": format!("core:{id}"), "text": "hi"})).unwrap_err();
+    assert_eq!(msg.code(), "not_supported_by_harness");
+    let asked = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &w).unwrap();
+    assert_eq!(asked["state"], "awaiting_human_confirm", "{asked}");
+    let again = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &w).unwrap();
+    assert_eq!(again["action_id"], asked["action_id"], "one pending request per worker");
+    assert_eq!(rt.view(&id).unwrap().state, T::Queued, "nothing stops before the human confirms");
+    let done = app.confirm_stop(asked["action_id"].as_str().unwrap()).unwrap();
+    assert_eq!(done["state"], "queued", "{done}");
+    assert_eq!(rt.view(&id).unwrap().state, T::Ended);
+}
+
+/// A Lead's stop still waiting for the human is refused once its ticket ends some other way, so the dialog never
+/// offers to stop a worker that is gone.
+#[test]
+fn a_pending_lead_stop_is_refused_when_its_ticket_ends() {
+    let t = Tmp::new();
+    let app = t.app();
+    lock(&app.control).start_session(SID, CORE_RUN).unwrap();
+    let rt = queued_runtime(&t, &app);
+    let id = queue(rt, &t, "t1", "claude");
+    let asked = lock(&app.control).call_tool_for_run(Some(CORE_RUN), "stop_worker", &json!({"worker": format!("core:{id}")})).unwrap();
+    let action = asked["action_id"].as_str().unwrap().to_string();
+    assert!(rt.cancel(&id), "the ticket ends without the human's confirm");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let refused = loop {
+        let l = app.ledger().unwrap();
+        if let Some(r) = l["records"].as_array().unwrap().iter().find(|r| r["action_id"] == action && r["state"] == "refused") {
+            break r.clone();
+        }
+        assert!(std::time::Instant::now() < deadline, "never refused: {l}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(refused["reason"], "worker_finished", "{refused}");
+    assert_eq!(app.confirm_stop(&action).unwrap_err()["error"], "action_not_found", "nothing left to confirm");
+}
+
+/// #151 codex P1: a running core worker is in its repo's pause set. It runs in a linked worktree outside the repo's
+/// folder and is not a run stream, yet the app's repo pause (the first step of every Gitw content call) stops it for as
+/// long as the pause is held, and it runs on once the pause drops.
+#[test]
+fn a_running_core_worker_is_paused_while_the_core_holds_its_repo_and_resumed_after() {
+    use crate::desktop::workers::State as T;
+    let t = Tmp::new();
+    let app = t.app();
+    let (home, repo) = (t.0.join("home"), t.0.join("repo"));
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new(GIT).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(&repo)
+            .env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &home).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    // A Claude worker that starts as one and then just runs.
+    let bin = t.0.join("claude-fake");
+    fs::write(&bin, "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake-1\",\"permissionMode\":\"dontAsk\",\"tools\":[\"Read\",\"Edit\",\"Write\",\"Bash\",\"Grep\",\"Glob\"]}'\nexec sleep 600\n").unwrap();
+    fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let rt = app
+        .worker_runtime(|| crate::desktop::workers::Config {
+            home: home.clone(),
+            data: t.0.join("data").canonicalize().unwrap(),
+            codex: "/nonexistent/vajra-test/codex".into(),
+            claude: bin.clone(),
+            codex_home: t.0.join("codex-home"),
+            tools: crate::adapter::profiles::WriterTools::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundled-agents")),
+            account_caps: Default::default(),
+            worker_timeout: Duration::from_secs(60),
+            poll: Duration::from_millis(20),
+            clock: None,
+            redact: Redactor::default(),
+            steer: None,
+            claude_unverified_ok: true,
+        })
+        .unwrap();
+    let gw = rt.gitw().clone();
+    let common = gw.common_of(&repo).unwrap();
+    gw.repos.acquire(&gw, &common, false).unwrap();
+    let spec = crate::desktop::workers::TaskSpec {
+        project: "p".into(), run: CORE_RUN.into(), repo: repo.canonicalize().unwrap(), task: "t1".into(), round: 1, from: base, deps: Vec::new(),
+        globs: vec!["src/**".into()], named: Vec::new(), brief: "Do it.".into(),
+    };
+    let seat = crate::control::service::WorkerSeat {
+        slot: "w-t1".into(), role: "backend".into(), task: "t1".into(), account: "claude".into(), model: None, effort: None, security: false,
+        network: false, why: String::new(), source: "user".into(),
+    };
+    let id = rt.dispatch(spec, seat).unwrap();
+    // The first ticket's first attempt is supervisor session `core-1-a1`.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let pid = loop {
+        if let (Some(T::Running), Ok(pid)) = (rt.view(&id).map(|v| v.state), app.sup.pid("core-1-a1")) {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ran: {:?}", rt.view(&id));
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stat = || String::from_utf8(std::process::Command::new("/bin/ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap().stdout).unwrap();
+    let held = gw.hold_repo(&common);
+    // Over the whole pause, not only at its start.
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(stat().trim_start().starts_with('T'), "the worker runs while the core holds its repo: {:?}", stat());
+    }
+    drop(held);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!stat().trim_start().starts_with('T'), "resumed once the pause dropped: {:?}", stat());
+    assert_eq!(rt.view(&id).unwrap().state, T::Running);
+    assert!(rt.cancel(&id));
+    rt.await_any(&[id], Duration::from_secs(10));
+}

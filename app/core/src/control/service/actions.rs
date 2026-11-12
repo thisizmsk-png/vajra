@@ -76,6 +76,10 @@ impl Service {
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
         }
+        // A core worker's profile decides (16.7): nothing is queued that no channel would deliver.
+        if let Some(t) = worker.strip_prefix(CORE_PREFIX) {
+            return self.enqueue_core(kind, actor, t, &text, expect);
+        }
         let (sid, w) = self.resolve(worker)?;
         if let Some(want) = expect {
             let have = u64::from(w.round.unwrap_or(0));
@@ -138,6 +142,43 @@ impl Service {
         Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
     }
 
+    /// Message or Redirect to `core:<ticket>` (16.7). Its profile decides: Codex has no channel. A Claude worker's
+    /// entry goes into its own control dir, matched exactly `{"session": <its session id>}`, the one match the control
+    /// hook serves to a top-level session. The action's `session_id` is that dir, so the ack watcher settles it there.
+    fn enqueue_core(&mut self, kind: Kind, actor: Actor, ticket: &str, text: &str, expect: Option<u64>) -> Result<Value> {
+        let c = self.core_ticket(ticket)?;
+        if expect.is_some_and(|want| want != u64::from(c.round)) {
+            return Err(ControlError::StaleGeneration(u64::from(c.round)));
+        }
+        let sid = c.core.message_to(ticket).map_err(ControlError::NotSupportedByHarness)?;
+        // `message_to` already refuses a worker that was never given a channel; this is one this service has no dir for.
+        if !self.core_dirs.contains_key(&sid) {
+            return Err(ControlError::NotSupportedByHarness(crate::adapter::profiles::NO_STEER_CHANNEL));
+        }
+        let now = SystemTime::now();
+        let mut a = self.new_action(kind, actor, None, now)?;
+        (a.session_id, a.run_id, a.worker) = (sid.clone(), c.run, format!("{CORE_PREFIX}{ticket}"));
+        let entry = json!({
+            "v": 1, "action_id": a.id, "kind": kind.as_str(),
+            "created": time::iso_secs(now), "expires": time::iso_secs(now + self.ttl),
+            "source": actor.source(), "match": {"session": sid}, "text": text,
+        });
+        let dir = SessionDir { root: self.control_root.join(&sid) }.dir("queue");
+        self.seq += 1;
+        let name = format!("{:06}-{}.json", self.seq, a.id);
+        a.state = State::Queued;
+        let extra = json!({"text": text, "text_sha256": sha256::hex_digest(text.as_bytes())});
+        // As for a hook worker: recorded first, published second.
+        self.record(&a, State::Queued, extra, now)?;
+        if let Err(e) = fsx::write_atomic(&dir, &name, entry.to_string().as_bytes()) {
+            let _ = self.record(&a, State::NotDelivered, json!({"reason": "publish_failed"}), now);
+            return Err(e.into());
+        }
+        self.pending.insert(a.id.clone(), a.clone());
+        self.log("control_queued", &[("seq", self.seq)]);
+        Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}))
+    }
+
     // ------------------------------------------------------------ stops
 
     /// Human: the stop file is written now. Lead: only a request that waits
@@ -153,6 +194,9 @@ impl Service {
         let reason = reason.map(|r| self.text_arg(r, MAX_REASON, "reason", true)).transpose()?;
         if self.in_scope().next().is_none() {
             return Err(ControlError::ControlDisabled);
+        }
+        if let Some(t) = worker.strip_prefix(CORE_PREFIX) {
+            return self.stop_core(actor, t, reason, expect);
         }
         let (sid, w) = self.resolve(worker)?;
         if let Some(want) = expect {
@@ -192,7 +236,57 @@ impl Service {
         }
     }
 
+    /// Stop on `core:<ticket>` (16.7): the human's stop runs the profile's stop; a Lead's waits for the human's confirm,
+    /// as every Lead stop does. One ledger line per step, like a hook stop.
+    fn stop_core(&mut self, actor: Actor, ticket: &str, reason: Option<String>, expect: Option<u64>) -> Result<Value> {
+        let c = self.core_ticket(ticket)?;
+        if expect.is_some_and(|want| want != u64::from(c.round)) {
+            return Err(ControlError::StaleGeneration(u64::from(c.round)));
+        }
+        let key = format!("{CORE_PREFIX}{ticket}");
+        let now = SystemTime::now();
+        if actor == Actor::Lead {
+            if let Some(p) = self.pending.values().find(|p| p.kind == Kind::Stop && p.state == State::AwaitingHumanConfirm && p.worker == key) {
+                return Ok(json!({"action_id": p.id, "state": p.state.as_str()}));
+            }
+        }
+        let mut a = self.new_action(Kind::Stop, actor, None, now)?;
+        (a.session_id, a.run_id, a.worker, a.reason) = (c.session, c.run, key, reason);
+        match actor {
+            Actor::Lead => {
+                a.state = State::AwaitingHumanConfirm;
+                self.record(&a, a.state, json!({}), now)?;
+                self.pending.insert(a.id.clone(), a.clone());
+                Ok(json!({"action_id": a.id, "state": a.state.as_str()}))
+            }
+            Actor::Human => self.write_stop(a, now),
+        }
+    }
+
     pub(super) fn write_stop(&mut self, mut a: Action, now: SystemTime) -> Result<Value> {
+        if let Some(t) = a.worker.strip_prefix(CORE_PREFIX).map(str::to_string) {
+            // Still live (a confirm may come after the ticket ended): recorded first, then stopped.
+            let c = self.core_ticket(&t)?;
+            self.pending.remove(&a.id);
+            a.actor = Actor::Human;
+            a.state = State::Queued;
+            self.record(&a, State::Queued, json!({}), now)?;
+            // Held until the ticket ends: `core_ticket_ended` settles it (the runtime reports that end on another
+            // thread once this lock is released, also for a queued ticket the kill ends at once).
+            self.core_stops.entry(t.clone()).or_default().push(a.clone());
+            if !c.core.stop(&t) {
+                // It ended on its own between the check and the kill: nothing was stopped by this one.
+                if let Some(v) = self.core_stops.get_mut(&t) {
+                    v.retain(|x| x.id != a.id);
+                    if v.is_empty() {
+                        self.core_stops.remove(&t);
+                    }
+                }
+                self.record(&a, State::Failed, json!({"reason": "worker_finished"}), now)?;
+                return Err(ControlError::WorkerFinished);
+            }
+            return Ok(json!({"action_id": a.id, "state": State::Queued.as_str()}));
+        }
         // Into the session the stop was asked for, never whichever session happens to be live now.
         let s = self.session(&a.session_id)?;
         let mut entry = json!({
@@ -257,6 +351,32 @@ impl Service {
         self.record(&a, State::Refused, json!({}), SystemTime::now())?;
         self.pending.remove(action_id);
         Ok(json!({"action_id": a.id, "state": State::Refused.as_str()}))
+    }
+
+    /// A `core:` ticket ended: a Lead's stop on it that still waits for the human is refused (`worker_finished`), so
+    /// the dialog never offers to stop a worker that is gone.
+    pub fn core_ticket_ended(&mut self, ticket: &str) {
+        let key = format!("{CORE_PREFIX}{ticket}");
+        let now = SystemTime::now();
+        // The human's stop that ended it is done (a group kill has no hook ack to wait for).
+        // Every stop accepted for it, not only the newest; one whose line can't be written is kept for a later call.
+        if let Some(stops) = self.core_stops.remove(ticket) {
+            let left: Vec<Action> = stops.into_iter().filter(|a| self.record(a, State::Done, json!({"outcome": "stopped"}), now).is_err()).collect();
+            if !left.is_empty() {
+                self.core_stops.insert(ticket.to_string(), left);
+            }
+        }
+        // Its undelivered messages expire too: no later session may take them.
+        let queued: Vec<String> = self.pending.values().filter(|a| a.worker == key && a.kind.queued_text() && a.state == State::Queued).map(|a| a.id.clone()).collect();
+        for id in queued {
+            self.expire(&id, now, "worker_finished");
+        }
+        let asks: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.state == State::AwaitingHumanConfirm && a.worker == key).cloned().collect();
+        for a in asks {
+            if self.record(&a, State::Refused, json!({"reason": "worker_finished"}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
     }
 
     /// The only way a stop is cleared. Appends a ledger line and the audit

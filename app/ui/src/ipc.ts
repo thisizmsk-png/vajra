@@ -12,7 +12,7 @@ import type { AppInfo, Project, Session } from "./projectContract";
 export type IpcError = { error: string; detail?: string; [k: string]: unknown };
 export const isIpcError = (e: unknown): e is IpcError => typeof e === "object" && e !== null && typeof (e as IpcError).error === "string";
 
-const PLAIN = new Set(["lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
+const PLAIN = new Set(["agents_off", "lead_guard_missing", "turns_full", "not_a_project", "project_archived", "project_missing"]);
 
 /** A short line safe to show: the code and detail from the core, or a plain fallback. Never a stack. */
 export function errorText(e: unknown): string {
@@ -78,7 +78,8 @@ function termStream(cmd: string, args: Record<string, unknown>, onMsg: (m: TermM
 }
 
 // ---- response shapes (the JSON the core returns) --------------------------------------------------------------------
-export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string };
+/** `action`: a one-click fix the core offers (today only `install_dev_tools`), with its label and what to do after. */
+export type PreflightRow = { name: string; ok: boolean; detail: string; fix: string; action?: "install_dev_tools"; action_label?: string; action_note?: string };
 export type Preflight = { rows: PreflightRow[]; start_enabled: boolean };
 export type Campaign = {
   slug: string; goal?: string; status?: string; created?: string; updated?: string; passing?: number; total?: number; error?: string;
@@ -90,9 +91,9 @@ export type ReportIntegrity = "ok" | "no_report" | "integrity_failed" | "not_tex
 export type Report = { slug: string; integrity: ReportIntegrity; text?: string };
 export type Verified = { slug: string; ok: boolean; restore?: string | null };
 export type RunHandle = { stream: string; session_id: string; run_id: string; campaign: string };
-export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
+export type CrewNodeDto = { id: string; kind: string; title: string; engine_id: string | null; role?: string | null; /** The provider this worker ran on (from the launch receipt's `effective`); parse with `parseWorkerProvider`. */ provider?: unknown; /** The worker's change set; parse with `parseWorkerDiff`. */ diff?: unknown; /** A `core:` worker's Message, Redirect and Stop as its harness allows them; parse with `parseCoreControls`. */ controls?: unknown; status: string; overlays: unknown[]; children: CrewNodeDto[] };
 /** What `term_open`, `term_attach` and `term_list` say about a user terminal. `alive` is false once the shell has ended. */
-export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean };
+export type TermInfo = { id: number; cwd: string; root: string; rows: number; cols: number; alive: boolean; /** Set only for a CLI's own sign-in (ADR-17). */ sign_in?: { id: string; name: string } };
 /** `lifecycle`: what keeps running after the window closes, after a quit and after an archive (the core computes it). */
 export type TermDiag = { id: number; pid: number; cwd: string; root: string; alive: boolean; in_worktree: boolean };
 export type RunDiag = { stream: string; pid: number };
@@ -213,6 +214,9 @@ export type ActResult<T = Json> = { receipt: Receipt | null; replayed?: boolean;
 export type CloseoutState = "closed" | "closable" | "working" | "waiting_on_you" | "unsaved_work" | "terminal_busy" | "no_worktree" | "git_unreadable";
 export type CloseoutRow = { worker: string; state: CloseoutState; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number };
 export type CloseFinishedResult = { closed: { worker: string; label: string }[]; skipped: { worker: string; label: string; reason: string; changed_files?: number; unpushed_commits?: number; no_upstream?: boolean; busy_terminals?: number }[] };
+/** Settings: the worker copies on disk (`worker_disk`). `bytes` is allocated space, so shared clones count in full. */
+export type WorkerDisk = { copies: number; bytes: number; partial?: boolean };
+export type CleanUpResult = { removed: string[]; disk: WorkerDisk };
 export type Envelope = { action_id: string; project_id: string; expect_generation: number | null };
 /** `vajra.project_state/1`: the one revisioned projection every surface reads. */
 export type ProjectState =
@@ -272,6 +276,10 @@ export const api = {
   actCloseWorker: (envelope: Envelope, worker: string, confirmed?: { changedFiles: number; unpushedCommits: number; busyTerminals: number; noUpstream: boolean }) => call<ActResult>("act_close_worker", { envelope, worker, changedFiles: confirmed?.changedFiles ?? null, unpushedCommits: confirmed?.unpushedCommits ?? null, busyTerminals: confirmed?.busyTerminals ?? null, noUpstream: confirmed?.noUpstream ?? null }),
   /** Close every finished worker that loses nothing; the result lists what was kept and why. */
   actCloseFinished: (envelope: Envelope) => call<ActResult<CloseFinishedResult>>("act_close_finished", { envelope }),
+  workerDisk: () => call<WorkerDisk>("worker_disk"),
+  /** Opens Apple's developer tools installer; the core refuses it once git is installed. */
+  installDevTools: () => call<{ started: boolean }>("install_dev_tools"),
+  actWorkerCleanUp: (envelope: Envelope) => call<ActResult<CleanUpResult>>("act_worker_clean_up", { envelope }),
   actStopWorker: (envelope: Envelope, worker: string, reason?: string) => call<ActResult>("act_stop_worker", { envelope, worker, reason: reason ?? null }),
   /** Reject plan `id` through a receipt. Pass the `plan_sha256` you read (REQUIRED: the core refuses a reject without it) as a STRING (never as `expect_generation`: a 64-bit hash prefix does not fit a JS number); a changed plan is refused as stale before anything runs. */
   actRejectPlan: (envelope: Envelope, id: string, reason: string, planSha256: string) => call<ActResult>("act_reject_plan", { envelope, id, reason, planSha256 }),
@@ -312,6 +320,10 @@ export const api = {
   // User terminals (core module `terminal`; never reachable by agents). Output arrives as raw bytes on the channel.
   termOpen: (cwd: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("term_open", { cwd, rows, cols }, onMsg),
   termAttach: (id: number, onMsg: (m: TermMsg) => void) => termStream("term_attach", { id }, onMsg),
+  /** A CLI's own sign-in in a terminal tab (ADR-17). Only a catalog harness id goes over; the core builds the argv. */
+  setupSignIn: (id: string, rows: number, cols: number, onMsg: (m: TermMsg) => void) => termStream("setup_sign_in", { id, rows, cols }, onMsg),
+  /** `vajra.harness_setup/1`: Settings > Providers > Set up. Parse with `parseSetupList`. */
+  setupList: () => call<unknown>("setup_list"),
   recoverOrphans: (pids: number[]) => call<{ results: { pid: number; result: string | { survived: { remaining: number } } }[] }>("recover_orphans", { pids }),
   diagnosticsPreview: () => call<{ text: string }>("diagnostics_preview"),
   lifecycle: () => call<Lifecycle>("lifecycle"),

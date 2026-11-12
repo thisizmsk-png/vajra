@@ -80,6 +80,9 @@ const EVIDENCE_LIVE_TTL: Duration = Duration::from_secs(5);
 const PTY_ROWS: u16 = 40;
 const PTY_COLS: u16 = 120;
 
+/// Every git call the core makes runs this binary (see `vajra::gitw`).
+const GIT: &str = "/usr/bin/git";
+
 fn fail(code: &str, detail: impl std::fmt::Display) -> Value {
     json!({"error": code, "detail": detail.to_string()})
 }
@@ -243,7 +246,7 @@ pub struct App {
     usage: crate::providers::usage::Meter,
     usage_source: Box<dyn crate::providers::usage::UsageSource>,
     pub bus: Arc<Bus>,
-    pub sup: Supervisor,
+    pub sup: Arc<Supervisor>,
     pub control: Arc<Mutex<Service>>,
     /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
     pub run_leads: Arc<crate::control::runreg::RunRegistry>,
@@ -263,7 +266,7 @@ pub struct App {
     /// `None` until `~/.claude` exists.
     reader: Mutex<Option<Reader>>,
     /// By bus stream id.
-    runs: Mutex<HashMap<String, Run>>,
+    runs: Arc<Mutex<HashMap<String, Run>>>,
     /// Worker transcripts by agent id, tailed into stream `w-<agent_id>`.
     transcripts: Mutex<HashMap<String, Transcript>>,
     /// Held from the caps check until the run is recorded, so two Start clicks
@@ -319,6 +322,8 @@ pub struct App {
     sink: Mutex<Option<ChangeSink>>,
     /// New-item notifications (`inbox_new`), coalesced over 5 s (see `arrivals`).
     events: Arc<arrivals::Hub>,
+    /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
+    workers: Arc<worker_host::WorkerHost>,
 }
 
 impl App {
@@ -328,6 +333,10 @@ impl App {
         // A test build never reaches the real Keychain: its default `security` path does not exist.
         let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
+        // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
+        // after `open` returns. A failure here turns agents off and still opens the app.
+        let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
+        let workers = Arc::new(worker_host::WorkerHost::open(Path::new(GIT), data, home, xdg.as_deref(), &worker_host::dev_roots()));
         let logs = paths::logs_dir(data);
         let log = Logger::open(&logs).ok().map(Arc::new);
         let control_log = Logger::open(&logs.join("control")).ok();
@@ -345,8 +354,10 @@ impl App {
         let seat_env = Arc::new(seat_env::SeatEnv::new(data, home, crate::providers::keychain::Keys::cli(security, home)));
         svc.set_seat_policy(seat_env.clone());
         svc.set_seats_enabled(seat_env.route());
+        svc.set_core_workers(workers.clone());
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
+            workers,
             seat_env,
             projects,
             preferences: Mutex::new(crate::preferences::Store::new(data.to_path_buf())),
@@ -378,11 +389,11 @@ impl App {
             // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
             // stdout pipe. With no key stored there is nothing to meter and no outbound call.
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
-            sup: Supervisor::new(bus.clone(), log.clone()),
+            sup: Arc::new(Supervisor::new(bus.clone(), log.clone())),
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
             evidence_cache: Mutex::new(HashMap::new()),
@@ -456,7 +467,77 @@ impl App {
     pub fn preflight(&self) -> Res {
         let allow = self.allow()?;
         let rows = preflight::run(&allow, &self.bridge, &preflight::path_dirs());
-        Ok(preflight_json(&rows, self.projects_row()))
+        let mut out = preflight_json(&rows, self.projects_row());
+        if let (Some(row), Some(list)) = (self.workers.preflight_row(), out["rows"].as_array_mut()) {
+            list.push(row);
+            out["start_enabled"] = json!(false);
+        }
+        Ok(out)
+    }
+
+    /// The worker runtime (6d dispatches through it), built the first time it is asked for. Refused while agents are off.
+    pub fn worker_runtime(&self, cfg: impl FnOnce() -> workers::Config) -> Result<&workers::WorkerRuntime, Value> {
+        let runs = self.runs.clone();
+        let on_repo = move |common: &Path| -> Vec<String> {
+            let Some(root) = common.parent().map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf())) else { return Vec::new() };
+            // Copied out first: no path is resolved under the runs lock.
+            let live: Vec<(String, PathBuf)> = lock(&runs).iter().map(|(stream, r)| (stream.clone(), r.cwd.clone())).collect();
+            live.into_iter().filter(|(_, cwd)| cwd.canonicalize().unwrap_or_else(|_| cwd.clone()).starts_with(&root)).map(|(s, _)| s).collect()
+        };
+        let control = self.control.clone();
+        let hooks = move || workers::Hooks {
+            on_dispatch: None,
+            // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
+            // thread, since a human Stop ends a queued ticket while it holds the control lock.
+            on_outcome: Some(Box::new(move |v: &workers::TicketView| {
+                let (control, id) = (control.clone(), v.id.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+            })),
+        };
+        // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
+        let steer_control = self.control.clone();
+        let cfg = move || {
+            let mut c = cfg();
+            c.steer.get_or_insert_with(|| Arc::new(move |sid: &str| lock(&steer_control).open_core_session(sid).ok()));
+            c
+        };
+        self.workers.runtime(&self.sup, &self.bus, on_repo, hooks, cfg)
+    }
+
+    /// The preflight row's "Install developer tools": Apple's installer, only while git is missing (the human's click).
+    pub fn install_dev_tools(&self) -> Res {
+        if self.workers.install_action().is_none() {
+            return Err(fail("not_needed", "git is already installed"));
+        }
+        let child = std::process::Command::new("/usr/bin/xcode-select")
+            .arg("--install")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| fail("spawn_failed", e))?;
+        // It returns once the dialog is up; reaped off the caller.
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        Ok(json!({"started": true}))
+    }
+
+    /// Settings: the disk the worker copies use (a walk; builds nothing).
+    pub fn worker_disk(&self) -> Res {
+        Ok(self.workers.disk_use())
+    }
+
+    /// Settings' Clean up: removes only copies that are clean now (see `WorkerRuntime::clean_up`).
+    pub fn worker_clean_up(&self) -> Res {
+        let done = self.workers.clean_up();
+        Ok(json!({"removed": done.removed, "disk": self.workers.disk_use()}))
+    }
+
+    /// Clean up through the receipt engine: the human's click only, deduped by its action id.
+    pub fn act_worker_clean_up(&self, env: &Envelope) -> Value {
+        self.act(env, crate::control::receipt::Caller::Ui, true, "worker_clean_up", "workers:clean_up", None::<u64>, || self.worker_clean_up())
     }
 
     pub fn list_campaigns(&self) -> Res {
@@ -635,6 +716,8 @@ impl App {
         engine: Engine,
         workers: u32,
     ) -> Res {
+        // ADR 16.6: no agent launches without the startup git baseline.
+        self.workers.refuse()?;
         let _one = lock(&self.launching);
         // A session whose process is already running is never launched again: `start_session` would replace its live control
         // session and `resume_session` would rotate its nonce before the spawn is refused, leaving the original run without
@@ -745,6 +828,25 @@ impl App {
         let v = serde_json::to_value(&l).map_err(|e| fail("internal", e))?;
         *lock(&self.provider_cache) = Some(l);
         Ok(v)
+    }
+
+    /// `setup_list` (`vajra.harness_setup/1`): Settings > Providers > Set up. Each catalog harness's state (installed,
+    /// installed but not runnable yet, broken, or the vendor's own install steps) and the engine-scripts row. Read-only:
+    /// it runs `--version` only, installs nothing, and stores no output.
+    pub fn setup_list(&self) -> Res {
+        // A folder created since the app started (a new Homebrew or npm bin) is found without a restart. Rate limited and
+        // single-flight in `userpath`; a test that pins `provider_dirs` never runs a login shell.
+        if self.provider_dirs.is_none() {
+            crate::userpath::refresh(&self.home);
+        }
+        let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
+        serde_json::to_value(crate::providers::setup::list(&self.provider_probe(), engine)).map_err(|e| fail("internal", e))
+    }
+
+    /// The CLI's own sign-in for `id`, for a user terminal: only for a catalog harness that is installed and reports a
+    /// version. Vajra never sees the token.
+    pub fn setup_sign_in_command(&self, id: &str) -> Result<crate::providers::setup::SignInCommand, Value> {
+        crate::providers::setup::sign_in(id, &self.provider_probe()).map_err(|e| fail(e.code(), e))
     }
 
     /// `provider_accounts` (`vajra.provider_accounts/1`): one record per way of running agents, each CLI under its own
@@ -1005,7 +1107,9 @@ impl App {
             (Some((_, r)), true) => lock(&self.control).signals(&r.session_id),
             _ => Signals::default(),
         };
-        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &signals)))?;
+        // The core's own workers come from the app's runtime, when one was built (#151).
+        let core = self.workers.core_workers(run_id);
+        let node = self.with_reader(|r| Ok(tree::snapshot(r, slug, run_id, lead, run_status, &workers, &core, &signals)))?;
         // The counts come from the cache; due workers are handed to a background thread, never counted here.
         if let (true, Some((_, r))) = (running, &run) {
             let targets = workers
@@ -2239,9 +2343,13 @@ fn node_json(n: &Node, diff_of: &dyn Fn(&str) -> Option<Value>) -> Value {
         "provider": n.provider,
         "children": n.children.iter().map(|c| node_json(c, diff_of)).collect::<Vec<_>>(),
     });
-    // A worker's change count, once counted; the field is left out (not null) while there is none.
-    if let Some(diff) = n.id.strip_prefix("agent:").and_then(diff_of) {
+    // A worker's change count, once counted; the field is left out (not null) while there is none. A core worker's
+    // count comes with its ticket.
+    if let Some(diff) = n.diff.clone().or_else(|| n.id.strip_prefix("agent:").and_then(diff_of)) {
         v["diff"] = diff;
+    }
+    if let Some(c) = &n.controls {
+        v["controls"] = c.clone();
     }
     v
 }
@@ -2270,6 +2378,7 @@ mod worker_diff;
 pub mod workers;
 pub mod plan;
 pub mod runproto;
+pub mod worker_host;
 mod arrivals;
 mod caps;
 mod closeout;

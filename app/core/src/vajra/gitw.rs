@@ -587,6 +587,27 @@ const RESTOP_MS: u64 = 3;
 /// The live session ids on the repo with this common dir.
 pub type SessionsOnRepo = Arc<dyn Fn(&Path) -> Vec<String> + Send + Sync>;
 
+/// The agent sessions the core started itself, each against the common dir its ticket pinned (#151 codex P1). A core
+/// worker runs in a linked worktree outside the repo's folder, so a cwd match would never name it: it is registered
+/// before its process starts and dropped when the attempt ends.
+#[derive(Debug, Default)]
+pub struct RepoSessions(Mutex<HashMap<String, PathBuf>>);
+
+impl RepoSessions {
+    pub fn register(&self, session: &str, common: &Path) {
+        crate::lock(&self.0).insert(session.to_string(), common.to_path_buf());
+    }
+
+    pub fn unregister(&self, session: &str) {
+        crate::lock(&self.0).remove(session);
+    }
+
+    /// The registered sessions on the repo with this common dir.
+    pub fn on(&self, common: &Path) -> Vec<String> {
+        crate::lock(&self.0).iter().filter(|(_, c)| c.as_path() == common).map(|(s, _)| s.clone()).collect()
+    }
+}
+
 /// The production `Quiesce`: `on_repo` names the live session ids on a repo (common dir), and the supervisor stops
 /// their process groups.
 ///
@@ -1183,6 +1204,12 @@ impl Gitw {
     }
 
     /// The repo's canonical common dir.
+    /// Tests: the repo pause every content call takes first, held until the `Pause` drops.
+    #[cfg(test)]
+    pub(crate) fn hold_repo(&self, common: &Path) -> Pause {
+        self.quiesce.pause(common)
+    }
+
     pub fn common_of(&self, repo: &Path) -> R<PathBuf> {
         let o = self.ok("rev-parse", Call::new(At::Repo(repo), &["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
         PathBuf::from(o.stdout.trim()).canonicalize().map_err(io)
