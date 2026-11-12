@@ -16,7 +16,10 @@ use super::identity::{self, Guard};
 pub const COMMON_FOLDERS: &[&str] = &["Development", "Developer", "Projects", "Code", "code", "src", "repos", "dev", "work", "workspace", "GitHub"];
 
 const MAX_DEPTH: usize = 3;
+/// Folders entered across the whole scan, and directory entries read from any one folder. Both are bounded, so the
+/// work and memory are too: at most MAX_VISITED folders, each listing at most MAX_LISTED entries.
 const MAX_VISITED: usize = 20_000;
+const MAX_LISTED: usize = 5_000;
 pub const MAX_FOUND: usize = 200;
 const SKIP: &[&str] = &["node_modules", "target", "build", "dist", "vendor", "Library"];
 
@@ -94,12 +97,12 @@ fn walk(dir: &Path, depth: usize, guard: &Guard, repos: &mut BTreeMap<PathBuf, u
         return;
     }
     let Ok(rd) = fs::read_dir(dir) else { return };
-    // Every entry read counts against the same budget as a visited folder, so a folder with hundreds of thousands of
-    // children is cut off while being listed, before anything is buffered or sorted.
+    // Listing has its own cap per folder, so a folder with hundreds of thousands of children is cut off while being
+    // listed, before anything more is buffered or sorted. The children collected before the cut are still inspected
+    // (against the separate folder budget), so a wide root keeps the repositories it did reach.
     let mut kids: Vec<PathBuf> = Vec::new();
-    for e in rd.flatten() {
-        *visited += 1;
-        if *visited > MAX_VISITED {
+    for (listed, e) in rd.flatten().enumerate() {
+        if listed >= MAX_LISTED {
             *truncated = true;
             break;
         }
@@ -115,7 +118,8 @@ fn walk(dir: &Path, depth: usize, guard: &Guard, repos: &mut BTreeMap<PathBuf, u
     }
     kids.sort();
     for k in kids {
-        if *truncated {
+        if *visited >= MAX_VISITED {
+            *truncated = true;
             return;
         }
         walk(&k, depth + 1, guard, repos, visited, truncated);

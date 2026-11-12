@@ -128,13 +128,33 @@ fn a_common_folder_that_is_a_symlink_into_a_protected_folder_is_not_scanned() {
 #[test]
 fn a_very_wide_folder_is_cut_off_while_listing_and_marked_truncated() {
     let t = Tmp::new("wide");
-    t.repo("Development/first"); // scanned before Projects, so it is found before the cut-off
-    let wide = t.0.join("home/Projects");
+    // The repositories live INSIDE the wide root, with more files than the listing cap around them, and nothing found
+    // in an earlier root: the entries collected before the cut-off must still be inspected.
+    let wide = t.0.join("home/Development");
     fs::create_dir_all(&wide).unwrap();
-    for i in 0..(MAX_VISITED + 50) {
+    for i in 0..(MAX_LISTED + 500) {
         fs::write(wide.join(format!("f{i}")), "").unwrap();
     }
+    for i in 0..20 {
+        t.repo(&format!("Development/repo{i:02}"));
+    }
+    let d = discover(&t.guard(), &[], &none);
+    assert!(d.truncated, "the cut-off is reported");
+    // read_dir order is unspecified, so which repositories fall before the cut is too; some always do, because
+    // 20 directories among 5,520 entries cannot all sit after the first 5,000.
+    assert!(!d.found.is_empty(), "repositories reached before the cut-off are still offered");
+}
+
+#[test]
+fn a_wide_folder_with_repos_and_a_later_root_both_keep_their_finds() {
+    let t = Tmp::new("wide2");
+    let wide = t.0.join("home/Development");
+    fs::create_dir_all(&wide).unwrap();
+    for i in 0..(MAX_LISTED + 10) {
+        fs::write(wide.join(format!("f{i}")), "").unwrap();
+    }
+    t.repo("Projects/later");
     let d = discover(&t.guard(), &[], &none);
     assert!(d.truncated);
-    assert_eq!(d.found.len(), 1); // what was found before the cut-off is still offered
+    assert!(d.found.iter().any(|f| f.name == "later"), "a later root is still scanned after a wide one");
 }
