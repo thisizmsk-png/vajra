@@ -521,3 +521,53 @@ fn the_schema_text_limits_are_the_protocols_and_a_plan_at_them_is_accepted() {
     let decision = &plan["decisions"]["items"]["properties"];
     assert_eq!((decision["title"]["maxLength"].as_u64(), decision["rationale"]["maxLength"].as_u64()), (Some(MAX_DECISION_TITLE as u64), Some(MAX_RATIONALE as u64)));
 }
+
+/// A peer connects (a lead-tree process here: the ancestry check is faked to pass) and makes one Service call, then
+/// forks a child that keeps the socket and exits. Once the test has reaped it, the child sends a Service request on
+/// the inherited connection and writes the reply to `<dir>/reply`.
+const HANDOFF: &str = r#"
+import json, os, socket, sys, time
+sock, d = sys.argv[1], sys.argv[2]
+c = socket.socket(socket.AF_UNIX)
+c.connect(sock)
+f = c.makefile("rw")
+f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+open(os.path.join(d, "first"), "w").write(f.readline())
+if os.fork() == 0:
+    while not os.path.exists(os.path.join(d, "go")):
+        time.sleep(0.02)
+    f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+    open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
+    os.rename(os.path.join(d, "reply.tmp"), os.path.join(d, "reply"))
+    os._exit(0)
+os._exit(0)
+"#;
+
+#[test]
+fn a_connection_handed_on_by_a_lead_tree_peer_that_exited_never_reaches_the_service() {
+    for lead_tree in [true, false] {
+        let t = Tmp::new(if lead_tree { "hand" } else { "hand2" });
+        // With no lead registered, the peer is an ordinary client: its gone identity is what refuses the call.
+        let reg = any_tree();
+        let (_k, lead) = lead_kid();
+        let _token = registered(&reg, proto(), lead_tree.then_some(lead));
+        let (sock, _svc) = serving(&t, Arc::new(reg));
+        let mut first = Command::new("/usr/bin/python3").args(["-I", "-c", HANDOFF, sock.to_str().unwrap(), t.0.to_str().unwrap()]).spawn().unwrap();
+        // Reap it: its pid and start stamp are gone before the child speaks.
+        assert!(first.wait().unwrap().success());
+        let seen: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("first")).unwrap()).unwrap();
+        if lead_tree {
+            assert_eq!(seen["error"], "run_lead_on_service");
+        } else {
+            assert_ne!(seen["error"], "peer_gone", "an ordinary live client is served: {seen}");
+        }
+        std::fs::write(t.0.join("go"), "").unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !t.0.join("reply").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("reply")).unwrap()).unwrap();
+        let want = if lead_tree { "run_lead_on_service" } else { "peer_gone" };
+        assert_eq!(out["error"], want, "lead_tree={lead_tree}: {out}");
+    }
+}
