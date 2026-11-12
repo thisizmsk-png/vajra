@@ -63,3 +63,34 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: app/core
         run: cargo clippy --all-targets -- -D warnings
+
+  # D7 (vajra-1 decision 2026-11-12): the REAL bundled engine installer runs only here, on a fresh runner with a temp
+  # HOME and no secrets: install, check the marks, roll back. Agent sessions and local tests only ever use a fake one.
+  engine-real-installer:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the UI (tauri::generate_context! needs app/ui/dist)
+        working-directory: app/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Real installer, temp HOME, no secrets
+        working-directory: app/core
+        env:
+          VAJRA_REAL_INSTALLER_CI: "1"
+        run: |
+          # The toolchain stays where the runner put it; only the tests see the empty temp HOME.
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export HOME="$RUNNER_TEMP/engine-home"
+          mkdir -p "$HOME" && chmod 700 "$HOME"
+          test -z "$(ls -A "$HOME")"
+          cargo test --lib real_installer -- --ignored --nocapture

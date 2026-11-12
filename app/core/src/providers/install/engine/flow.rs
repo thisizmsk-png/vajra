@@ -464,3 +464,7 @@ pub fn session_check(ctx_env: &crate::providers::install::env::SetupEnv) -> impl
 #[cfg(test)]
 #[path = "flow_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "real_installer_tests.rs"]
+mod real_installer_tests;
