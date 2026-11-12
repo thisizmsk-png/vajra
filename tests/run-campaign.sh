@@ -434,6 +434,24 @@ wait "$UA" 2>/dev/null
 [ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: the writer's lock and owner record are intact" $?
 kill_holder; C unlock lk --if-stale >/dev/null 2>&1
 [ ! -e "$LD/.lock.reclaim" ]; check "race: no reclaim mutex is left behind" $?
+# handoff: unlocker U reads writer A's record and pauses; A finishes; writer B wants the lock; U resumes. U must not
+# delete B's lock (A's release waits for U, so the lock generation U checked stays put until U is done).
+SHORT_A="$WORK/short-a.sh"; PAUSE_U="$WORK/pause-u.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 1"}' "$SCRIPT" > "$SHORT_A"
+awk '{print} /^  pid="\$\(jq -r/ {print "  sleep 3"}' "$SCRIPT" > "$PAUSE_U"
+grep -q '^  sleep 1' "$SHORT_A" && grep -q '^  sleep 3' "$PAUSE_U"; check "handoff: the test copies were built" $?
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$PAUSE_U" unlock lk --if-stale >/dev/null 2>&1 & UP=$!
+sleep 0.5
+set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+wait "$UP"; URC=$?
+wait "$AP" 2>/dev/null
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+[ "$URC" -ne 0 ]; check "handoff: the unlocker refused (it never saw A as gone)" $?
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "handoff: writer B holds an intact lock" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+[ ! -e "$LD/.lock" ] && [ ! -e "$LD/.lock.reclaim" ]; check "handoff: nothing is left behind" $?
 mkdir "$LD/.lock.reclaim"; mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
 C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "race: a held reclaim mutex blocks removal" $?
 rmdir "$LD/.lock.reclaim"; C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "race: removal works once the mutex is free" $?

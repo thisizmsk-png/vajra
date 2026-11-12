@@ -137,6 +137,17 @@ LOCK=""
 proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
 # owner.json lives inside the lock dir, so every release removes it first and only then the dir (rmdir alone would fail).
 release_lock() { [ -n "$LOCK" ] || return 0; rm -f "$LOCK/owner.json" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; return 0; }
+# A writer's normal exit hands the lock off under the same mutex that unlock --if-stale holds while it checks and
+# deletes, so the lock generation an unlocker checked cannot be released and retaken underneath it. If the mutex stays
+# busy the lock is left behind (its owner is gone, so unlock --if-stale can clear it) rather than released unguarded.
+release_lock_serialized() {
+  local rm i=0; rm="${LOCK%/.lock}/.lock.reclaim"
+  while ! mkdir "$rm" 2>/dev/null; do
+    i=$((i+1)); [ "$i" -ge 50 ] && return 0
+    sleep 0.1
+  done
+  release_lock; rmdir "$rm" 2>/dev/null; return 0
+}
 lock() {
   local i=0
   LOCK="$1/.lock"
@@ -144,7 +155,7 @@ lock() {
     i=$((i+1)); [ "$i" -ge 100 ] && die "campaign is locked ($LOCK); remove it if no other run is active"
     sleep 0.1
   done
-  trap release_lock EXIT
+  trap release_lock_serialized EXIT
   jq -n --argjson pid "$$" --arg start "$(proc_start $$)" '{pid: $pid, start: $start}' > "$LOCK/owner.json" 2>/dev/null || true
 }
 
