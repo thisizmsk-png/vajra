@@ -71,6 +71,8 @@ const LEAD_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_REPORT: usize = 8 * 1024;
 const MAX_TITLE: usize = 300;
 const MAX_BRIEF: usize = 20_000;
+const MAX_CRITERION: usize = 1000;
+const MAX_CHECK: usize = 2000;
 const MAX_FILES: usize = 64;
 const MAX_DECISIONS: usize = 8;
 const MAX_PROTECTED: usize = 8;
@@ -636,16 +638,20 @@ impl RunProtocol {
         }
         let (criteria, tasks) = if p.round == 1 {
             let Some(c) = &p.criteria else { return Err("round 1 needs the criteria, each with a check".into()) };
-            plan::validate_criteria(c)?;
+            let c = self.criteria(c)?;
+            plan::validate_criteria(&c)?;
             if p.decisions.len() > MAX_DECISIONS {
                 return Err(format!("plan may record at most {MAX_DECISIONS} decisions"));
             }
             if p.decisions.iter().any(|d| d.title.len() > 300 || d.rationale.len() > 2000 || self.text(&d.title).trim().is_empty() || self.text(&d.rationale).trim().is_empty()) {
                 return Err("every decision needs a title (300 bytes) and a rationale (2000 bytes)".into());
             }
-            (c.clone(), p.tasks.clone())
+            (c, p.tasks.clone())
         } else {
-            if p.criteria.as_ref().is_some_and(|c| *c != st.criteria) {
+            // Compared in the form stored: the same list sent again is no change.
+            if let Some(c) = &p.criteria
+                && self.criteria(c)? != st.criteria
+            {
                 return Err("the criteria are fixed after round 1".into());
             }
             if !p.decisions.is_empty() {
@@ -669,6 +675,14 @@ impl RunProtocol {
         Ok(tasks)
     }
 
+    /// The criteria as they are stored: each text within its byte cap, then sanitised and redacted.
+    fn criteria(&self, c: &[Criterion]) -> Result<Vec<Criterion>, String> {
+        if c.len() > 12 || c.iter().any(|x| x.criterion.len() > MAX_CRITERION || x.check.len() > MAX_CHECK) {
+            return Err(format!("at most 12 criteria, each a criterion of {MAX_CRITERION} bytes and a check of {MAX_CHECK}"));
+        }
+        Ok(c.iter().map(|x| Criterion { id: x.id.clone(), criterion: self.text(&x.criterion), check: self.text(&x.check) }).collect())
+    }
+
     fn text(&self, s: &str) -> String {
         sanitise(s, &self.0.cfg.redact)
     }
@@ -677,7 +691,7 @@ impl RunProtocol {
         let r = p.round;
         let clean = |t: &PlanTask| PlanTask { title: self.text(&t.title), brief: self.text(&t.brief), ..t.clone() };
         if r == 1 {
-            st.criteria = p.criteria.clone().unwrap_or_default();
+            st.criteria = p.criteria.as_deref().map(|c| self.criteria(c)).and_then(Result::ok).unwrap_or_default();
             st.decisions = p.decisions.iter().map(|d| Decision { title: self.text(&d.title), rationale: self.text(&d.rationale) }).collect();
         }
         for a in &p.protected_actions {
