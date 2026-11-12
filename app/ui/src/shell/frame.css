@@ -26,6 +26,11 @@
 .v-tb__empty { color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); }
 .v-tb__add { display: inline-flex; align-items: center; gap: 6px; height: var(--row-h); padding: 0 10px; border: 1px solid var(--c-border); border-radius: var(--radius-md); background: transparent; color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); }
 .v-tb__add:hover { background: var(--c-accent); color: var(--c-text); }
+.v-find__bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.v-find__list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 320px; overflow: auto; }
+.v-find__row { display: flex; align-items: center; gap: 8px; min-height: var(--row-h); padding: 0 4px; font: 400 13px/16px var(--font-ui); color: var(--c-text); }
+.v-find__path, .v-find__wt { color: var(--c-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-find__name { font-weight: 500; }
 .v-tb__add:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 /* The palette for the mouse: reads as a field. Its key hint is out of layout until hover or focus (idle memory). */
 .v-tb__search { display: flex; align-items: center; gap: var(--space-sm); flex: none; width: 240px; height: var(--row-h); margin-left: auto; padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
@@ -162,7 +167,6 @@
 .v-settings__link:hover, .v-settings__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-settings__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 .v-settings__col { max-width: 720px; padding: 40px var(--space-xl) var(--space-xl); display: flex; flex-direction: column; }
-.v-settings__later { margin: var(--space-sm) 0 0; color: var(--c-text-muted); font: 500 12px/16px var(--font-ui); }
 .v-settings__keys { margin: 0; padding: var(--space-xs) 0; list-style: none; }
 .v-settings__keys li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); min-height: 36px; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); font: 400 13px/16px var(--font-ui); }
 .v-settings__keys li:last-child { border-bottom: 0; }

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { setTransport } from "../src/ipc";
 import { fakeIpc } from "./fakeIpc";
@@ -65,10 +65,13 @@ describe("FG-08 preferences",()=>{
   // General holds only what the core reads (closing finished workers); editor and shell stay hidden.
   expect(await screen.findByRole("switch",{name:"Close finished workers automatically"})).toBeTruthy();
   expect(screen.queryByLabelText("Default editor")).toBeNull();expect(screen.queryByLabelText("Terminal shell")).toBeNull();expect(screen.queryByText("Not built yet")).toBeNull();
+  // Sections that do nothing yet are not listed, and an old link to one lands on Providers, not on an empty page.
+  const listed=within(screen.getByRole("navigation",{name:"Settings sections"})).getAllByRole("link").map(a=>a.textContent);
+  expect(listed).toEqual(["Providers","General","Models and capacity","Appearance","Keyboard"]);
   r.unmount();window.location.hash="#/settings?section=notifications";
   const n=render(<PreferencesProvider projectId={null}><Settings/></PreferencesProvider>);
-  expect(await screen.findByText("Not built yet")).toBeTruthy();
-  expect(screen.queryByRole("checkbox")).toBeNull();expect(screen.queryByRole("button",{name:"Save preferences"})).toBeNull();
+  expect((await screen.findByRole("link",{name:"Providers"})).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByText("Not built yet")).toBeNull();expect(screen.queryByRole("heading",{name:"Notifications"})).toBeNull();
   n.unmount();render(<PreferenceForm projectId={null} section="appearance"/>);
   fireEvent.change(await screen.findByLabelText("Theme"),{target:{value:"dark"}});fireEvent.click(screen.getByRole("button",{name:"Save preferences"}));await screen.findByText("Saved.");
   const write=f.calls.find(c=>c.cmd==="act_preferences_update");expect(write?.args?.patch).toEqual({theme:"dark"});
