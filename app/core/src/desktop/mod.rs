@@ -259,6 +259,8 @@ pub struct App {
     owned: Arc<crate::owned::Ledger>,
     /// What the start-up reconcile did.
     reconciled: recover::Reconciled,
+    /// Held for the app's life: this app owns the data folder's agents. `None` when another instance does.
+    _instance: Option<std::fs::File>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -345,7 +347,10 @@ impl App {
         // Before anything else (6d2d): the leads and workers an earlier life's crash left running are killed, each re-proved
         // by its recorded pid and start stamp, and their tickets and runs are written ended. Shells wait for the human.
         let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
-        let reconciled = recover::reconcile(data, &owned);
+        // Only the one app that holds the data folder reconciles, and only it starts agents: a second instance (a
+        // development build beside the installed app) would otherwise take the first one's live agents for a crash's.
+        let instance = recover::InstanceLock::take(data);
+        let reconciled = if instance.is_some() { recover::reconcile(data, &owned) } else { recover::Reconciled { other_instance: true, ..Default::default() } };
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
@@ -404,12 +409,17 @@ impl App {
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
             sup: {
                 let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
-                // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
-                sup.set_ledger(owned.clone());
+                if instance.is_some() {
+                    // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
+                    sup.set_ledger(owned.clone());
+                } else {
+                    sup.refuse_spawns(recover::OTHER_INSTANCE);
+                }
                 sup
             },
             owned,
             reconciled,
+            _instance: instance,
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),

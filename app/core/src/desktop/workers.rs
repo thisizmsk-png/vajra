@@ -1287,7 +1287,10 @@ pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) ->
     v.detail = Some("app_crashed".into());
     v.summary = Some(summary(v, &Redactor::default()));
     let line = json!({"v": 1, "event": "outcome", "ticket": v});
-    open_record(data, run).and_then(|mut f| f.write_all(format!("{line}\n").as_bytes())).is_ok()
+    // After a crash the last line may be torn: start a fresh one, so this line is not lost with it.
+    let torn = crate::control::fsx::ends_with_newline(&data.join("runs").join(run).join("tickets.jsonl")).is_ok_and(|nl| !nl);
+    let text = format!("{}{line}\n", if torn { "\n" } else { "" });
+    open_record(data, run).and_then(|mut f| f.write_all(text.as_bytes())).is_ok()
 }
 
 /// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.

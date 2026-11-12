@@ -177,6 +177,11 @@ fn sweep(mark: &Mark, w: Window) -> Swept {
     total
 }
 
+/// Does `pid` run as this user?
+pub(crate) fn is_same_user(pid: u32) -> bool {
+    same_user(pid)
+}
+
 fn same_user(pid: u32) -> bool {
     uid_of(pid) == Some(unsafe { libc::getuid() })
 }

@@ -171,7 +171,9 @@ impl App {
             // How it ended, so the next start does not take it for a run a crash cut short.
             let (status, why) = w.ended();
             let status = status.map(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default());
-            let _ = super::recover::record_ended(&data, &id, status.as_deref().unwrap_or("stopped"), why.as_deref().unwrap_or(""));
+            // The status is the code; the lead's own words stay in the log, never in the record the IPC reads.
+            let _ = why;
+            let _ = super::recover::record_ended(&data, &id, status.as_deref().unwrap_or("stopped"), "");
             reg.remove(&id);
             if let Some(r) = runs.upgrade() {
                 lock(&r.0).runs.remove(&id);

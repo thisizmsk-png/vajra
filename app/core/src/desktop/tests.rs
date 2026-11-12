@@ -5484,7 +5484,7 @@ fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
     }
     let mut lead = c.spawn().unwrap();
     let pid = lead.id();
-    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None };
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None , tries: 0 };
     crate::owned::Ledger::new(crate::owned::ledger_path(&data)).record(o).unwrap();
     let app = t.app();
     let gone = (0..150).any(|_| {
@@ -5497,4 +5497,34 @@ fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
     let _ = lead.wait();
     assert!(gone, "App::open killed it before returning");
     assert_eq!(app.swept_report()["crash_reconcile"]["killed"], 1);
+}
+
+#[test]
+fn a_second_app_on_the_same_data_folder_kills_nothing_and_starts_no_agent() {
+    use std::os::unix::process::CommandExt;
+    let t = Tmp::new();
+    let first = t.app();
+    let mut c = std::process::Command::new("/bin/sleep");
+    c.arg("60");
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut lead = c.spawn().unwrap();
+    let pid = lead.id();
+    // The first app's live lead, as its supervisor records it.
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None, tries: 0 };
+    first.owned_ledger().record(o).unwrap();
+    let second = t.app();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = lead.try_wait().unwrap().is_none();
+    let _ = lead.kill();
+    let _ = lead.wait();
+    assert!(alive, "the first app's live lead is not the second app's crash to clean up");
+    assert_eq!(second.swept_report()["crash_reconcile"]["other_instance"], true);
+    let spec = crate::sessions::SpawnSpec { argv: vec!["/bin/true".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    assert!(matches!(second.sup.spawn("lead-x", spec), Err(crate::sessions::SessionError::Ledger(_))), "and it starts no agent");
 }

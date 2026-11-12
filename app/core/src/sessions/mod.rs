@@ -282,6 +282,8 @@ pub struct Supervisor {
     errors: Mutex<Option<ErrorSink>>,
     /// The ownership ledger every spawn is recorded in (6d2d); none in tests that do not set one.
     owned: Mutex<Option<Arc<crate::owned::Ledger>>>,
+    /// Set when this app may start no agents at all (another instance holds the data folder): why.
+    refuse_all: Mutex<Option<String>>,
 }
 
 /// Receives the `provider_error` event of a worker that died. The app installs one that tells the lead and the DG.
@@ -326,7 +328,14 @@ impl Supervisor {
             closing: AtomicBool::new(false),
             errors: Mutex::new(None),
             owned: Mutex::new(None),
+            refuse_all: Mutex::new(None),
         }
+    }
+
+    /// From now on every spawn is refused with `why`: this app must start no agent (6d2d: another instance owns the
+    /// data folder, its ledger and its crash reconcile).
+    pub fn refuse_spawns(&self, why: &str) {
+        *lock(&self.refuse_all) = Some(why.to_string());
     }
 
     /// The ownership ledger every spawn is recorded in from now on (6d2d). Without one (tests), nothing is recorded.
@@ -374,6 +383,9 @@ impl Supervisor {
     /// the session id as its run) before this returns, and forgetting it when it is reaped. A record that cannot be
     /// written kills the process and refuses the spawn: no lead or worker runs that a crash would lose track of.
     pub fn spawn_owned(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>, who: OwnedAs) -> Result<(), SessionError> {
+        if let Some(why) = lock(&self.refuse_all).clone() {
+            return Err(SessionError::Ledger(why));
+        }
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -435,6 +447,11 @@ impl Supervisor {
         let owned = match ledger {
             Some(l) => {
                 let refuse = |mut child: Box<dyn Child + Send + Sync>, e: String| {
+                    // The whole group, in case it already forked. SAFETY: kill has no memory preconditions; the pid
+                    // is our unreaped child's, so it is not reused yet.
+                    if pid > 1 {
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     Err(SessionError::Ledger(e))
@@ -449,6 +466,7 @@ impl Supervisor {
                     kind: who.kind.unwrap_or(crate::owned::Kind::Lead),
                     run: Some(who.run.unwrap_or_else(|| id.to_string())),
                     ticket: who.ticket,
+                    tries: 0,
                 };
                 if let Err(e) = l.record(o) {
                     return refuse(child, e.to_string());

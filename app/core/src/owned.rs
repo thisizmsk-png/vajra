@@ -40,7 +40,17 @@ pub struct Owner {
     /// A worker's ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// Start-up reconciles that signalled it and could not end it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tries: u32,
 }
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// How many start-ups try to end a lead or worker that survives its kill before the record is dropped.
+pub const MAX_TRIES: u32 = 3;
 
 /// The kind of a recorded process.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -58,7 +68,7 @@ pub enum Kind {
 impl Owner {
     /// A shell record.
     pub fn shell(pid: u32, stamp: u64, cwd: PathBuf) -> Self {
-        Self { pid, stamp, cwd, kind: Kind::Shell, run: None, ticket: None }
+        Self { pid, stamp, cwd, kind: Kind::Shell, run: None, ticket: None, tries: 0 }
     }
 }
 
@@ -151,12 +161,16 @@ impl Ledger {
         let _g = lock(&self.guard);
         let mut all = self.read();
         all.retain(|x| !(x.pid == o.pid && x.stamp == o.stamp));
-        if o.kind != Kind::Shell && all.len() >= MAX_ENTRIES {
-            return Err(std::io::Error::other("the ownership ledger is full"));
-        }
         all.push(o);
-        if all.len() > MAX_ENTRIES {
-            all.drain(..all.len() - MAX_ENTRIES);
+        // Over the cap, the oldest shells go first; a lead or worker record is never dropped to make room, so a record
+        // that would need one is refused.
+        while all.len() > MAX_ENTRIES {
+            match all.iter().position(|x| x.kind == Kind::Shell) {
+                Some(i) => {
+                    all.remove(i);
+                }
+                None => return Err(std::io::Error::other("the ownership ledger is full")),
+            }
         }
         self.write(&all)
     }
@@ -205,13 +219,22 @@ impl Ledger {
         let entries: Vec<Owner> = self.load().into_iter().filter(|o| o.kind != Kind::Shell).collect();
         let mut out = Vec::new();
         for o in entries {
-            let ended = match judge(&o) {
+            let mut ended = match judge(&o) {
                 Verdict::Gone => Ended::Gone,
                 Verdict::Reused => Ended::Reused,
+                // The stamp proves the record names a live process, not that this app started it: one that could not
+                // be a supervisor child of ours is never signalled.
+                Verdict::Owned { .. } if !could_be_ours(o.pid) => Ended::Reused,
                 Verdict::Owned { .. } => end_session(&o),
             };
-            if ended != Ended::Survived {
-                let _ = self.forget(o.pid, o.stamp);
+            let _ = self.forget(o.pid, o.stamp);
+            if ended == Ended::Survived {
+                // Tried again at the next start, a few times at most: a record that never ends must not fill the ledger.
+                if o.tries + 1 >= MAX_TRIES {
+                    ended = Ended::GivenUp;
+                } else {
+                    let _ = self.record(Owner { tries: o.tries + 1, ..o.clone() });
+                }
             }
             out.push((o, ended));
         }
@@ -428,8 +451,18 @@ pub enum Ended {
     Survived,
     /// It had already exited.
     Gone,
-    /// Its pid belongs to another process now: left untouched.
+    /// Its pid belongs to another process now, or one that could not be ours: left untouched.
     Reused,
+    /// It survived `MAX_TRIES` start-ups' kills: the record is dropped.
+    GivenUp,
+}
+
+/// Could `pid` be a lead or worker this app's supervisor started? Each is its own session's leader (the PTY child),
+/// runs as this user, and is neither this app nor its parent.
+fn could_be_ours(pid: u32) -> bool {
+    // SAFETY: getppid and getsid have no preconditions.
+    let (ppid, sid) = unsafe { (libc::getppid(), libc::getsid(pid as i32)) };
+    pid > 1 && pid != std::process::id() && pid as i32 != ppid && sid == pid as i32 && crate::procsweep::is_same_user(pid)
 }
 
 /// SIGKILL a recorded agent's whole session through the 6c-3 sweep's proof (`procsweep::kill_proved`): the leader and

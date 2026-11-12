@@ -30,9 +30,31 @@ pub const LEAD_UNVERIFIED: &str = "lead_unverified";
 pub const SEATS_UNREADABLE: &str = "seats_unreadable";
 pub const PLAN_UNREADABLE: &str = "plan_unreadable";
 
+/// Why a second instance starts no agent.
+pub const OTHER_INSTANCE: &str = "another Vajra Desktop is open on this data folder; quit it to run agents here";
+
+/// The data folder's single-instance lock (`<data>/instance.lock`, 0600, never through a link): an exclusive `flock`
+/// held for the app's life. The kernel drops it when the process ends, however it ends, so a crash never leaves it held.
+pub struct InstanceLock;
+
+impl InstanceLock {
+    /// The held lock, or `None` when another process holds it (or it can't be opened: fail closed, no reconcile).
+    pub fn take(data: &Path) -> Option<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(data.join("instance.lock")).ok()?;
+        // SAFETY: the descriptor is open for this call; LOCK_NB never waits.
+        (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(f)
+    }
+}
+
 /// What the start-up reconcile did, for the lifecycle report.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Reconciled {
+    /// Another instance holds the data folder: nothing was reconciled, and this app starts no agent.
+    pub other_instance: bool,
+    /// Records given up on after `owned::MAX_TRIES` starts that could not end them.
+    pub given_up: usize,
     /// Leads and workers of an earlier life killed here.
     pub killed: usize,
     /// Signalled, but some of their session still runs (kept in the ledger, tried again at the next start).
@@ -96,6 +118,7 @@ pub fn reconcile(data: &Path, ledger: &Ledger) -> Reconciled {
             Ended::Survived => out.survived += 1,
             Ended::Reused => out.reused += 1,
             Ended::Gone => {}
+            Ended::GivenUp => out.given_up += 1,
         }
         if ended == Ended::Reused {
             continue;

@@ -3,7 +3,7 @@
 //! reused pid is never touched, and the core runs list says why a run can't be resumed. Temp dirs only.
 
 use super::*;
-use crate::owned::Owner;
+use crate::owned::{Owner, MAX_TRIES};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::Arc;
@@ -61,7 +61,7 @@ fn alive(k: &mut Kid) -> bool {
 
 fn agent(k: &Kid, kind: Kind, run: &str, ticket: Option<&str>) -> Owner {
     let pid = k.0.id();
-    Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind, run: Some(run.into()), ticket: ticket.map(String::from) }
+    Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind, run: Some(run.into()), ticket: ticket.map(String::from) , tries: 0 }
 }
 
 const RUN: &str = "20261112-0930";
@@ -157,15 +157,19 @@ fn a_spawn_whose_record_cannot_be_written_is_refused_and_its_process_killed() {
 }
 
 #[test]
-fn a_full_ledger_refuses_an_agent_record_but_still_takes_a_shell() {
+fn a_ledger_full_of_agent_records_refuses_one_more_and_a_shell_too() {
     let t = Tmp::new("full");
     let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let worker = |pid: u32| Owner { pid, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
     for i in 0..256u32 {
-        ledger.record(Owner::shell(10_000 + i, 1, "/tmp".into())).unwrap();
+        ledger.record(worker(10_000 + i)).unwrap();
     }
-    let o = Owner { pid: 9_999, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()) };
-    assert!(ledger.record(o).is_err(), "no agent runs without its record");
-    assert!(ledger.record(Owner::shell(9_998, 1, "/tmp".into())).is_ok(), "a shell drops the oldest, as before");
+    assert!(ledger.record(worker(9_999)).is_err(), "no agent runs without its record");
+    // A shell is best effort: with no shell to drop, the new one is the one that goes.
+    let _ = ledger.record(Owner::shell(9_998, 1, "/tmp".into()));
+    let all = ledger.load();
+    assert_eq!(all.len(), 256);
+    assert!(all.iter().all(|o| o.kind == Kind::Worker), "no agent record was dropped to make room");
 }
 
 fn env_with<'a>(seats: &'a dyn Fn(&str) -> std::io::Result<Option<Value>>, installed: &'a dyn Fn(&str) -> bool, lead_ok: &'a dyn Fn(&str) -> bool) -> ResumeEnv<'a> {
@@ -226,4 +230,72 @@ fn a_records_dir_that_is_a_link_is_not_read() {
     let (seats, installed, lead_ok) = (|_: &str| Ok(None), |_: &str| true, |_: &str| true);
     assert!(core_runs(&data, &env_with(&seats, &installed, &lead_ok)).is_empty());
     assert!(record_started(&data, RUN, "p", Path::new("/tmp"), "codex").is_err(), "nothing is written through the link");
+}
+
+#[test]
+fn a_second_holder_of_the_data_folder_gets_no_instance_lock_until_the_first_lets_go() {
+    let t = Tmp::new("lock");
+    let first = InstanceLock::take(&t.data()).expect("the first app holds the folder");
+    assert!(InstanceLock::take(&t.data()).is_none(), "a second one does not");
+    drop(first);
+    assert!(InstanceLock::take(&t.data()).is_some(), "the lock goes with its holder, however it ends");
+}
+
+#[test]
+fn a_record_naming_this_app_its_parent_or_a_non_leader_is_never_signalled() {
+    let t = Tmp::new("notours");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let me = std::process::id();
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() } as u32;
+    // A child in our own session: alive and stamped right, but not a session leader.
+    let mut plain = Kid(Command::new("/bin/sleep").arg("60").spawn().unwrap());
+    for pid in [me, parent, plain.0.id()] {
+        let o = Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: Kind::Lead, run: Some(RUN.into()), ticket: None, tries: 0 };
+        ledger.record(o).unwrap();
+    }
+    let ended: Vec<Ended> = ledger.end_agents().into_iter().map(|(_, e)| e).collect();
+    assert_eq!(ended, vec![Ended::Reused; 3]);
+    assert!(alive(&mut plain), "untouched");
+    assert!(ledger.load().is_empty(), "and forgotten");
+}
+
+#[test]
+fn a_record_that_survives_its_kill_is_tried_a_few_times_then_dropped() {
+    let t = Tmp::new("tries");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let o = Owner { pid: 4242, stamp: 7, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: MAX_TRIES - 1 };
+    ledger.record(o).unwrap();
+    // Gone (no such pid with that stamp): dropped at once whatever its count.
+    assert_eq!(ledger.end_agents()[0].1, Ended::Gone);
+    assert!(ledger.load().is_empty());
+}
+
+#[test]
+fn shells_at_the_cap_never_push_out_a_lead_or_worker_record() {
+    let t = Tmp::new("trim");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    let worker = Owner { pid: 9_000, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()), tries: 0 };
+    ledger.record(worker.clone()).unwrap();
+    for i in 0..300u32 {
+        ledger.record(Owner::shell(10_000 + i, 1, "/tmp".into())).unwrap();
+    }
+    let all = ledger.load();
+    assert_eq!(all.len(), 256);
+    assert!(all.contains(&worker), "the oldest shells went, the worker stayed");
+}
+
+#[test]
+fn a_crashed_ticket_after_a_torn_last_line_is_still_read() {
+    let t = Tmp::new("torn");
+    let data = t.data();
+    let ticket = format!("{RUN}.t1.r1");
+    crashed_run(&data, &ticket);
+    // The crash cut the next line short.
+    let f = data.join("runs").join(RUN).join("tickets.jsonl");
+    let mut text = std::fs::read_to_string(&f).unwrap();
+    text.push_str(r#"{"v":1,"event":"att"#);
+    std::fs::write(&f, text).unwrap();
+    assert!(crate::desktop::workers::record_crashed(&data, RUN, &ticket));
+    assert_eq!(last_line(&data)["ticket"]["detail"], "app_crashed");
 }
