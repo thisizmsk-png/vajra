@@ -350,3 +350,4 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
 | "Sign in: NAME" | terminal tab label | never saved in the tab layout |
 | Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+| A run cannot start until the failing check below passes. / ...the failing checks below pass. | beside the disabled Start run button | shown only when the checks are what blocks a start; the button points to it for screen readers |
