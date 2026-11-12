@@ -26,6 +26,14 @@ mod watcher; // the ack watcher and the thread that ticks it
 pub use proposals::{DEFAULT_PROPOSAL_BASE, DEFAULT_PROPOSAL_ROUNDS, MAX_OPEN_PROPOSALS, Proposal, ProposalDecision, proposal_sha, valid_proposal_item};
 pub use seats::{DEFAULT_MAX_IN_FLIGHT, LeadSeat, MAX_WORKERS, SeatCheck, SeatPolicy, Seats, WorkerSeat, proposal_sha_v2, security_warning};
 pub use types::*;
+
+/// What `core_ticket` found.
+struct CoreRef {
+    core: Arc<dyn CoreWorkers>,
+    session: String,
+    run: String,
+    round: u32,
+}
 pub use watcher::{Watcher, spawn_watcher};
 
 use std::collections::HashMap;
@@ -79,12 +87,22 @@ pub struct Service {
     project_gate: Option<ProjectGate>,
     /// Role defaults and the launch checks for proposal seats (ADR-16). `None`: no seat default exists and none is checked.
     seat_policy: Option<Arc<dyn SeatPolicy>>,
+    /// `core:<ticket>` workers (6c): `None` until the app hands over its runtime.
+    core: Option<Arc<dyn CoreWorkers>>,
+    /// The Claude core workers' own control dirs this app opened (by their session id), with their nonces: a message is
+    /// published only into one of these, where the control hook looks for that session.
+    core_dirs: HashMap<String, String>,
     /// Whether `propose_run` takes `lead`, `workers` and `max_in_flight`. Off until the core route ships (6d).
     seats_enabled: bool,
     /// While a Director-General's tool call runs: its (project, generation). Only such a call may propose a run.
     bound_project: Option<(String, u32)>,
     /// Actions not yet in a final state, by id.
     pending: HashMap<String, Action>,
+    /// A human's stop of a `core:` worker, by ticket, from the kill until the ticket ends (`core_ticket_ended` settles
+    /// it). Kept out of `pending`: a group kill leaves no stop file or hook ack for the watcher to wait on.
+    /// Every accepted stop is kept: a second one before the ticket ends (a double click, or a Lead's confirmed after
+    /// the human's) is its own action with its own receipt, and all of them settle together (#151 review).
+    core_stops: HashMap<String, Vec<Action>>,
     /// Latest stop action state per worker key, for `list_workers`.
     last_stop: HashMap<String, (String, State)>,
     seq: u64,
@@ -114,15 +132,19 @@ impl Service {
             generations: HashMap::new(),
             project_gate: None,
             seat_policy: None,
+            core: None,
+            core_dirs: HashMap::new(),
             seats_enabled: crate::providers::launch::CORE_ROUTE_AVAILABLE,
             bound_project: None,
             pending: HashMap::new(),
+            core_stops: HashMap::new(),
             last_stop: HashMap::new(),
             seq: 0,
             last_recorded: None,
             ttl: DEFAULT_TTL,
         };
         svc.rebuild(&records);
+        svc.settle_core_after_restart(SystemTime::now());
         Ok(svc)
     }
 
@@ -176,6 +198,19 @@ impl Service {
         self.seq = records.iter().filter(|r| Kind::parse(str_field(r, "kind")).is_some_and(Kind::queued_text)).count() as u64;
     }
 
+    /// The previous app's `core:` workers did not outlive it, and their tickets are gone with its runtime. A stop it
+    /// recorded but never saw end is settled now, as unknown (this app can't tell how it ended); a Lead's stop still
+    /// waiting for the human is refused. Neither is left for the watcher, which would wait for a stop file.
+    fn settle_core_after_restart(&mut self, now: SystemTime) {
+        let left: Vec<Action> = self.pending.values().filter(|a| a.kind == Kind::Stop && a.worker.starts_with(CORE_PREFIX)).cloned().collect();
+        for a in left {
+            let (state, reason) = if a.state == State::AwaitingHumanConfirm { (State::Refused, "worker_finished") } else { (State::DeliveryUnknown, "app_restarted") };
+            if self.record(&a, state, json!({"reason": reason}), now).is_ok() {
+                self.pending.remove(&a.id);
+            }
+        }
+    }
+
     // ------------------------------------------------------------ helpers
 
     fn log(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -200,6 +235,9 @@ impl Service {
     /// A worker's generation (its attempt number) for the action receipt guard. Read only: no ledger line. A name
     /// that is ambiguous across sessions has no generation (the caller must use the agent id).
     pub fn worker_generation(&self, arg: &str) -> Option<u64> {
+        if let Some(t) = arg.strip_prefix(CORE_PREFIX) {
+            return self.core_ticket(t).ok().map(|c| u64::from(c.round));
+        }
         self.resolve(arg).ok().map(|(_, w)| u64::from(w.round.unwrap_or(0)))
     }
 
@@ -273,6 +311,34 @@ impl Service {
     }
 
     /// The session an action without a worker is about: the bound one, or the only one.
+    /// A `core:<ticket>` ref: the runtime holding it, and the in-scope session of the ticket's run. A Lead bound to
+    /// another run, or a ticket of a run with no control session, finds nothing.
+    fn core_ticket(&self, ticket: &str) -> Result<CoreRef> {
+        let core = self.core.clone().ok_or(ControlError::WorkerNotFound)?;
+        let (run, round) = core.live(ticket)?;
+        let session = self.in_scope().find(|s| s.run_id == run).map(|s| s.id.clone()).ok_or(ControlError::WorkerNotFound)?;
+        Ok(CoreRef { core, session, run, round })
+    }
+
+    /// The app's worker runtime, for `core:<ticket>` workers.
+    pub fn set_core_workers(&mut self, core: Arc<dyn CoreWorkers>) {
+        self.core = Some(core);
+    }
+
+    /// Before a Claude core worker starts: its own control dir `<control>/<session_id>` (0700, as a run's) and its
+    /// steering nonce, which its brief carries and its output redacts. The hook delivers there by session id (16.7).
+    pub fn open_core_session(&mut self, session_id: &str) -> Result<String> {
+        if !queue::valid_session_id(session_id) {
+            return Err(ControlError::InvalidArgs("session_id".into()));
+        }
+        let dir = SessionDir::create(&self.control_root, session_id)?;
+        let n = nonce::rotate(&dir.root)?;
+        dir.sweep_temp();
+        self.seq = self.seq.max(dir.max_seq());
+        self.core_dirs.insert(session_id.to_string(), n.clone());
+        Ok(n)
+    }
+
     fn default_session(&self) -> Option<&Session> {
         let mut it = self.in_scope();
         match (it.next(), it.next()) {

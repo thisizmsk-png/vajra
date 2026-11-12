@@ -306,21 +306,34 @@ fn node_json_is_recursive() {
         status: Status::Done,
         overlays: vec!["stopped"],
         provider: None,
+        controls: None,
+        diff: None,
         children: vec![],
     };
-    let root = Node { id: "r".into(), kind: tree::NodeKind::Run, title: "Run".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None, children: vec![leaf] };
+    let root = Node { id: "r".into(), kind: tree::NodeKind::Run, title: "Run".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None, controls: None, diff: None, children: vec![leaf] };
     let v = node_json(&root, &|_| None);
     assert_eq!(v["kind"], "run");
     assert_eq!(v["children"][0]["kind"], "worker");
     assert_eq!(v["children"][0]["overlays"], json!(["stopped"]));
     assert_eq!(v["children"][0]["provider"], Value::Null, "a worker that has not reported a model has no provider tag");
+    assert!(v["children"][0].get("controls").is_none() && v["children"][0].get("diff").is_none(), "left out, not null");
+}
+
+#[test]
+fn a_core_node_carries_its_controls_and_its_own_diff() {
+    let leaf = Node {
+        id: "core:r1.t1.r1".into(), kind: tree::NodeKind::Round, title: "round 1".into(), engine_id: None, status: Status::InProgress, overlays: vec![], provider: None,
+        controls: Some(json!({"message": {"enabled": false}})), diff: Some(json!({"added": 2})), children: vec![],
+    };
+    let v = node_json(&leaf, &|_| Some(json!({"added": 99})));
+    assert_eq!((v["controls"]["message"]["enabled"].as_bool(), v["diff"]["added"].as_u64()), (Some(false), Some(2)));
 }
 
 #[test]
 fn a_node_carries_the_provider_the_worker_reported() {
     use crate::providers::effective::ProviderTag;
     let tag = ProviderTag::new("openrouter", "vendor/model-a", "gateway", None);
-    let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), children: vec![] };
+    let leaf = Node { id: "w".into(), kind: tree::NodeKind::Worker, title: "Bhima".into(), engine_id: Some("bhima".into()), status: Status::Done, overlays: vec![], provider: Some(tag), controls: None, diff: None, children: vec![] };
     assert_eq!(node_json(&leaf, &|_| None)["provider"], json!({"account": "openrouter", "label": "OpenRouter", "family": "vendor", "model": "vendor/model-a", "model_name": null, "billing": "gateway", "requested": null, "error": null}));
 }
 
@@ -2047,7 +2060,7 @@ fn evidence_outside_the_campaign_or_with_a_dotdot_path_is_unverified_without_run
 #[test]
 fn crew_nodes_carry_the_ui_role_name_next_to_the_engine_id() {
     use crate::crew::tree::{Node, NodeKind, Status};
-    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], provider: None, children: vec![] };
+    let n = Node { id: "agent:a1".into(), kind: NodeKind::Round, title: "round 1".into(), engine_id: Some("bhima".into()), status: Status::InProgress, overlays: vec![], provider: None, controls: None, diff: None, children: vec![] };
     let j = node_json(&n, &|_| None);
     assert_eq!(j["role"], "Backend", "{j}");
     assert_eq!(j["engine_id"], "bhima");
@@ -5383,4 +5396,80 @@ fn one_click_setup_offers_nothing_for_an_unverified_source_and_runs_nothing() {
     assert_eq!(code(&app.setup_run("codex", &token).unwrap_err()), "source_not_verified");
     assert!(!t.home().join(".claude/vajra/audit.log").exists() || !fs::read_to_string(t.home().join(".claude/vajra/audit.log")).unwrap().contains("setup id="), "nothing ran, nothing audited");
     assert!(!format!("{:?}", app.consents).contains(&token));
+}
+
+// ---------------------------------------------------------------- ADR 16.6 at startup
+
+/// A stored baseline copy with no anchor: `take_or_load` calls it tampered, so the app opens with agents off.
+pub(super) fn break_baseline(data: &Path) {
+    let d = data.join("control/git-baseline");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("global.config"), "[user]\n\tname = x\n").unwrap();
+}
+
+#[test]
+fn the_app_opens_holding_the_git_baseline_and_builds_no_worker_runtime_until_asked() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert_eq!(app.workers.agents_allowed(), Ok(()), "taken in open, before anything could launch");
+    assert!(!app.workers.runtime_built(), "an idle app holds no runtime");
+    drop(app);
+    // The next open loads the same baseline.
+    let again = t.app();
+    assert_eq!(again.workers.agents_allowed(), Ok(()));
+    assert_eq!(again.worker_disk().unwrap()["copies"], 0);
+    assert_eq!(again.worker_clean_up().unwrap()["removed"], json!([]));
+    assert!(!again.workers.runtime_built(), "Settings' disk line and Clean up build nothing");
+    let pf = again.preflight().unwrap();
+    assert!(!pf["rows"].as_array().unwrap().iter().any(|r| r["name"] == "Git settings for agents"), "{pf}");
+}
+
+#[test]
+fn a_broken_baseline_still_opens_the_app_but_refuses_every_launch_with_a_plain_line() {
+    let t = Tmp::new();
+    break_baseline(&t.0.join("data"));
+    let app = t.app();
+    let sid = "6ec0bd7f-11c0-43da-975e-2a8ad9ebae0b";
+    let e = app.launch(sid, "20261105-1230", "c", &t.0.join("repo"), |_| Ok(vec!["true".into()]), false).unwrap_err();
+    assert_eq!(code(&e), "agents_off", "{e}");
+    assert!(e["detail"].as_str().unwrap().starts_with("Agents are off: the saved copy of your git settings"), "{e}");
+    assert!(!app.sup.is_running(&format!("run-{sid}")).unwrap_or(false), "nothing spawned");
+    assert!(lock(&app.control).nonce(sid).is_none(), "no control session was opened");
+    assert_eq!(code(&app.worker_runtime(|| unreachable!("no runtime is built while agents are off")).err().unwrap()), "agents_off");
+    let pf = app.preflight().unwrap();
+    let row = pf["rows"].as_array().unwrap().iter().find(|r| r["name"] == "Git settings for agents").cloned().expect("the row");
+    assert_eq!((row["ok"].clone(), pf["start_enabled"].clone()), (json!(false), json!(false)), "{pf}");
+    assert_eq!(row["fix"], "", "a restart can't fix a tampered copy, so the row doesn't suggest one");
+}
+
+#[test]
+fn with_no_developer_tools_startup_never_runs_git_and_offers_the_installer() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tmp::new();
+    let (data, home) = (t.0.join("data"), t.home());
+    // A git that leaves a mark when it runs: on a Mac without the tools, `/usr/bin/git` would open Apple's dialog.
+    let git = t.0.join("fake-git");
+    fs::write(&git, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", t.0.join("git-ran").display())).unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let none = [t.0.join("no-tools")];
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &none);
+    assert!(!t.0.join("git-ran").exists(), "git was never run");
+    assert!(host.agents_allowed().unwrap_err().starts_with("Agents are off: git isn't installed."));
+    assert_eq!(host.install_action(), Some(worker_host::INSTALL_DEV_TOOLS));
+    let row = host.preflight_row().unwrap();
+    assert_eq!((row["action"].as_str(), row["action_label"].as_str()), (Some("install_dev_tools"), Some("Install developer tools")), "{row}");
+    // With the tools there, the same git is run for the take (so the check is what kept it from running above).
+    fs::create_dir_all(t.0.join("tools/usr/bin")).unwrap();
+    fs::write(t.0.join("tools/usr/bin/git"), "").unwrap();
+    let host = worker_host::WorkerHost::open(&git, &data, &home, None, &[t.0.join("tools")]);
+    assert!(t.0.join("git-ran").exists());
+    assert_eq!(host.install_action(), None, "a failed take is not a missing install");
+}
+
+#[test]
+fn install_dev_tools_is_refused_while_git_is_installed() {
+    let t = Tmp::new();
+    let app = t.app();
+    assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
+    assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
 }

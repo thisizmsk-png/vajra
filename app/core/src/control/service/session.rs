@@ -108,11 +108,13 @@ impl Service {
         self.sessions.get(session_id).map(|s| s.nonce.as_str())
     }
 
-    /// A redactor for every live session's nonce: text bound for one session never carries another's either.
+    /// A redactor for every live session's nonce, and every Claude core worker's steering nonce (#151 review): text
+    /// bound for one session never carries another's either, and no queue entry, ledger line or Director-General
+    /// reply carries a core worker's.
     pub fn redactor(&self) -> Redactor {
         let mut r = Redactor::default();
-        for s in self.sessions.values() {
-            r.add(Some(&s.nonce));
+        for n in self.sessions.values().map(|s| &s.nonce).chain(self.core_dirs.values()) {
+            r.add(Some(n));
         }
         r
     }

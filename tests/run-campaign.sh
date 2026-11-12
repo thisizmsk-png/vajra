@@ -372,6 +372,128 @@ OG
   ( cd "$RC" && OC close ) >/dev/null 2>&1
 fi
 
+# --- lock owner and unlock --if-stale (6h-e) ---
+C create lk --feature "f1|one" >/dev/null 2>&1; check "lock: create a campaign" $?
+LD="$CD/lk"
+[ ! -e "$LD/.lock" ]; check "lock: a normal create leaves no lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: a normal pass succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: a normal pass leaves no lock and no owner file" $?
+
+# A copy that holds the lock for a while, so a test can SIGKILL it with the lock held.
+HOLD_SCRIPT="$WORK/hold-campaign.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 30"}' "$SCRIPT" > "$HOLD_SCRIPT"
+grep -q '^  sleep 30' "$HOLD_SCRIPT"; check "lock: the hold copy was built" $?
+# hold_lock: start a holder in its own process group; sets HP (the script's pid) once the owner file is written.
+hold_lock() {
+  set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+  local i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+}
+kill_holder() { kill -9 -- "-$HP" 2>/dev/null; wait "$HP" 2>/dev/null; }
+
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "lock: owner.json records the holder's pid" $?
+[ -n "$(jq -r .start "$LD/.lock/owner.json")" ]; check "lock: owner.json records a start time" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner with the same start time is kept" $?
+kill_holder
+[ -d "$LD/.lock" ] && [ -f "$LD/.lock/owner.json" ]; check "lock: SIGKILL leaves the lock and its owner file" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock --if-stale on a killed owner succeeds" $?
+[ ! -e "$LD/.lock" ]; check "lock: --if-stale removed the owner file and the lock" $?
+C pass f1 --campaign lk >/dev/null 2>&1; check "lock: the campaign is usable again" $?
+
+# a reused pid: the pid is alive (this shell) but the recorded start time is not its start time
+mkdir "$LD/.lock"; jq -n --argjson pid "$$" '{pid: $pid, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "lock: a reused pid (different start time) is treated as dead" $?
+# the same pid with the matching start time is live
+mkdir "$LD/.lock"; SELF_START="$(TZ=UTC LC_ALL=C ps -o lstart= -p $$ | tr -s ' ' | sed 's/^ //; s/ $//')"
+jq -n --argjson pid "$$" --arg s "$SELF_START" '{pid: $pid, start: $s}' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live pid with its real start time is kept" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+# a live owner is kept whatever time zone the writer and the unlocker run in
+set -m; TZ=Asia/Kolkata "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+TZ=America/Los_Angeles C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept when the unlocker runs in another time zone" $?
+TZ=Pacific/Auckland C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a live owner is kept in a third time zone" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+# no owner file: never removed
+mkdir "$LD/.lock"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: a lock with no owner file is kept" $?
+printf 'not json' > "$LD/.lock/owner.json"
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ] && [ -d "$LD/.lock" ]; check "lock: an unreadable owner file keeps the lock" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"
+C unlock lk >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock without --if-stale is refused" $?
+C unlock "../x" --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "lock: unlock refuses an invalid slug" $?
+C unlock lk --if-stale >/dev/null 2>&1; check "lock: unlock with no lock held is a no-op success" $?
+
+# interleave: unlocker A deletes a dead owner's lock and pauses (still inside reclamation); a writer then takes the
+# lock; unlocker B, which saw the same dead owner, must not delete the writer's lock.
+SLOW_UNLOCK="$WORK/slow-unlock.sh"
+awk '{print} /^  release_lock \|\| true/ {print "  sleep 3"}' "$SCRIPT" > "$SLOW_UNLOCK"
+grep -q '^  sleep 3' "$SLOW_UNLOCK"; check "race: the slow-unlock copy was built" $?
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "Mon Jan  1 00:00:00 1990"}' > "$LD/.lock/owner.json"
+"$BASH_BIN" "$SLOW_UNLOCK" unlock lk --if-stale >/dev/null 2>&1 & UA=$!
+i=0; while [ -e "$LD/.lock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ ! -e "$LD/.lock" ]; check "race: unlocker A removed the dead owner's lock" $?
+hold_lock
+[ -f "$LD/.lock/owner.json" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: a writer took the released lock" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ $? -ne 0 ]; check "race: unlocker B refuses (the lock is a live writer's)" $?
+wait "$UA" 2>/dev/null
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "race: the writer's lock and owner record are intact" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+# handoff: unlocker U reads writer A's record and pauses; A finishes; writer B wants the lock; U resumes. U must not
+# delete B's lock (A's release waits for U, so the lock generation U checked stays put until U is done).
+SHORT_A="$WORK/short-a.sh"; PAUSE_U="$WORK/pause-u.sh"
+awk '{print} /^  jq -n --argjson pid/ {print "  sleep 1"}' "$SCRIPT" > "$SHORT_A"
+awk '{print} /^  pid="\$\(jq -r/ {print "  sleep 3"}' "$SCRIPT" > "$PAUSE_U"
+grep -q '^  sleep 1' "$SHORT_A" && grep -q '^  sleep 3' "$PAUSE_U"; check "handoff: the test copies were built" $?
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ ! -f "$LD/.lock/owner.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$PAUSE_U" unlock lk --if-stale >/dev/null 2>&1 & UP=$!
+sleep 0.5
+set -m; "$BASH_BIN" "$HOLD_SCRIPT" pass f1 --campaign lk --revoke >/dev/null 2>&1 & HP=$!; set +m
+wait "$UP"; URC=$?
+wait "$AP" 2>/dev/null
+i=0; while [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" != "$HP" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+[ "$URC" -ne 0 ]; check "handoff: the unlocker refused (it never saw A as gone)" $?
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json")" = "$HP" ]; check "handoff: writer B holds an intact lock" $?
+kill_holder; C unlock lk --if-stale >/dev/null 2>&1
+[ ! -e "$LD/.lock" ]; check "handoff: nothing is left behind" $?
+# a reclaim-flock holder killed with SIGKILL must not strand the campaign: the next unlock recovers on its own
+PYH="$WORK/flock-holder.py"
+cat > "$PYH" <<'PYEOF'
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1] + "/.lock.reclaim", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("held")
+time.sleep(60)
+PYEOF
+mkdir "$LD/.lock"; jq -n '{pid: 999999, start: "x"}' > "$LD/.lock/owner.json"
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+[ -f "$WORK/held" ]; check "mutex: a flock holder is running" $?
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+[ -e "$LD/.lock.reclaim" ]; check "mutex: the killed holder left its flock file behind" $?
+C unlock lk --if-stale >/dev/null 2>&1; [ ! -e "$LD/.lock" ]; check "mutex: unlock recovers after the holder was SIGKILLed, no manual cleanup" $?
+C pass f1 --campaign lk >/dev/null 2>&1 && [ ! -e "$LD/.lock" ]; check "mutex: a later writer still releases its lock normally" $?
+
+# a killed writer's release helper survives it (only the shell is killed) and must not delete a later writer's lock
+rm -f "$WORK/held"
+set -m; /usr/bin/python3 -I "$PYH" "$LD" "$WORK/held" >/dev/null 2>&1 & FH=$!; set +m
+i=0; while [ ! -f "$WORK/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+"$BASH_BIN" "$SHORT_A" pass f1 --campaign lk >/dev/null 2>&1 & AP=$!
+i=0; while [ -z "$(pgrep -P "$AP" 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+# A's owner record is written and it sleeps; wait for its release helper (a child python) to be waiting on the flock
+i=0; while [ -z "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+[ -n "$(pgrep -P "$AP" -f 'import fcntl' 2>/dev/null | head -1)" ]; check "release helper: A's helper is waiting on the flock" $?
+kill -9 "$AP" 2>/dev/null; wait "$AP" 2>/dev/null
+# U removes dead A's lock and writer B takes it, all while A's helper still waits
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock"; mkdir "$LD/.lock"
+jq -n '{pid: 424242, start: "B start"}' > "$LD/.lock/owner.json"
+kill -9 -- "-$FH" 2>/dev/null; wait "$FH" 2>/dev/null
+sleep 1.5
+[ -d "$LD/.lock" ] && [ "$(jq -r .pid "$LD/.lock/owner.json" 2>/dev/null)" = "424242" ]; check "release helper: the surviving helper leaves writer B's lock alone" $?
+rm -f "$LD/.lock/owner.json"; rmdir "$LD/.lock" 2>/dev/null
+
 echo "----------------------------------------"
 echo "campaign: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

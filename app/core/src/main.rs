@@ -103,6 +103,23 @@ fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State
     app.act_close_worker(&envelope, &worker, anyway, &WorktreeTerms(&terms, &own))
 }
 
+/// Preflight's "Install developer tools" (git is missing): opens Apple's installer.
+#[tauri::command(async)]
+fn install_dev_tools(app: State<'_, App>) -> Res {
+    app.install_dev_tools()
+}
+
+/// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
+#[tauri::command(async)]
+fn worker_disk(app: State<'_, App>) -> Res {
+    app.worker_disk()
+}
+
+#[tauri::command(async)]
+fn act_worker_clean_up(app: State<'_, App>, envelope: Envelope) -> Value {
+    app.act_worker_clean_up(&envelope)
+}
+
 #[tauri::command(async)]
 fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
     app.act_close_finished(&envelope, &WorktreeTerms(&terms, &own))
@@ -812,6 +829,9 @@ fn main() {
             act_stop_worker,
             act_close_worker,
             act_close_finished,
+            worker_disk,
+            install_dev_tools,
+            act_worker_clean_up,
             closeout_status,
             act_start_run,
             act_ask_lead,
