@@ -1160,10 +1160,11 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 | Setting | Worker / verifier | Lead | Director-General | Class |
 |---|---|---|---|---|
 | Mode | `claude -p --output-format stream-json --verbose --session-id <id>`, stdin closed | the same | ADR-13, unchanged | always |
-| Settings | the user's sources load (no `--setting-sources ""`), **plus** `--settings <data>/profiles/claude-worker.json`. As a flag file it outranks user and project settings. It holds Vajra's deny rules; hooks merge, so the guard runs. | `--setting-sources ""` plus `--settings claude-lead.json` (N3) | ADR-13 | always |
+| Settings | `--setting-sources ""` **plus** `--settings <data>/profiles/claude-worker-<session>.json`: no user, project or local settings file loads, since a user's `sandbox.filesystem.allowRead` or `sandbox.excludedCommands` merges into the flag's lists and reopens the key folder or the network (vajra-70 spike). The flag file holds Vajra's deny rules and the guard hooks. A strict carry-over of the user's default model and named model-routing env vars is a follow-up. | `--setting-sources ""` plus `--settings claude-lead.json` (N3) | ADR-13 | always |
+| OS sandbox | Claude Code's sandbox (Seatbelt on macOS) around every Bash call, set in the flag file: `enabled`, `failIfUnavailable`, no unsandboxed retry, no excluded commands; writes only in the worktree and the ticket tmp; the key folder and the data dir refused to read and write; loopback only (no `allowedDomains`). Build caches (`GOCACHE`, `GOTMPDIR`, `npm_config_cache`) point into the ticket tmp. A command that names no protected path still can't read the key. | n/a | ADR-13 | always |
 | Permissions | `--permission-mode dontAsk`; **`--tools`** and `--allowedTools`, both the role's tool list from `bundled-agents/<writer>.md` (Read, Grep, Glob and Bash for the verifier and both reviewers; no Edit or Write). **No bypass flag.** | `--tools` / `--allowedTools` = Read, Grep, Glob and the `vajra-run` tools | ADR-13 | always |
 | Vajra tools | none | `--mcp-config <run>/vajra-run.json --strict-mcp-config` | ADR-13 | always |
-| The user's MCP servers | **kept** (no `--strict-mcp-config`), and disclosed | off (N3) | off (ADR-13) | worker: theirs |
+| The user's MCP servers | **not loaded**: under `--setting-sources ""` the user's MCP servers don't start (vajra-70 spike); disclosed | off (N3) | off (ADR-13) | always |
 | Model | `--model <model>` when the seat names one | the same | — | always, when set |
 
 **Other harnesses.**
@@ -1172,7 +1173,7 @@ Every harness has a **profile**: data plus an argv builder in `adapter.rs`, one 
 
 **What the cards say.**
 - **A Codex worker (N23 a):** "Runs outside the Vajra guard. Can read your files, **including Vajra's signing key**. With that key it could fake Vajra's records and approvals, not only test results. It can write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox."
-- **A Claude worker:** "Runs with the Vajra guard. Your own Claude Code MCP servers run with it."
+- **A Claude worker:** "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker."
 
 ### 16.5 The run protocol: any lead, the rules in the core
 

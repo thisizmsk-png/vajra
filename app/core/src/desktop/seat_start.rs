@@ -22,7 +22,7 @@ pub struct StartOptions {
 }
 
 pub const CODEX_WARNING: &str = "Runs outside the Vajra guard. Can read your files, including Vajra's signing key. With that key it could fake Vajra's records and approvals, not only test results. It can write only in its worktree. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox.";
-pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard. Your own Claude Code MCP servers run with it.";
+pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard, in Claude Code's sandbox. Your own Claude Code settings and MCP servers don't load for this worker.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
 pub const OUTSIDE_GUARD_CARD: &str = "Final check runs outside the Vajra guard";
 pub const OUTSIDE_GUARD_WHY: &str = "A helper outside the Vajra guard wrote the final check. Vajra ran it with the signing key locked away, but the helper itself could read the key, so it could have copied it and used it to fake Vajra records and approvals. A coming update stops helpers reading the key. A key already copied stays valid.";

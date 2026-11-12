@@ -89,13 +89,17 @@ const CODEX_WORKER_USER: &[&str] = &["login", "mcp_servers", "notify", "AGENTS.m
 const CLAUDE_WORKER_ALWAYS: &[Always] = &[
     Always { setting: "mode", how: "`claude -p --output-format stream-json --verbose --session-id`, stdin closed" },
     Always { setting: "settings", how: "`--settings <data>/profiles/claude-worker-<session>.json`, fresh per launch and hash-checked before spawn (Read and Edit deny rules, guard hooks, disableAllHooks:false)" },
-    Always { setting: "setting sources", how: "`--setting-sources user`: the user's settings load; the worktree's project and local settings never do, so a hook a worker writes there never runs" },
+    Always { setting: "sandbox", how: "Claude Code's OS sandbox on every Bash call: writes only in the worktree and ticket tmp, the key folder and data dir unreadable, no unsandboxed retry, loopback only, the launch refused if the sandbox can't start" },
+    Always { setting: "setting sources", how: "`--setting-sources \"\"`: no user, project or local settings file loads, so none can widen the sandbox and a hook a worker writes in its worktree never runs" },
+    Always { setting: "caches", how: "`GOCACHE`, `GOTMPDIR` and `npm_config_cache` under the ticket tmp" },
     Always { setting: "permissions", how: "`--permission-mode dontAsk`, no bypass flag" },
     Always { setting: "tools", how: "`--tools` and `--allowedTools`, both the role's list" },
     Always { setting: "model", how: "`--model` when the seat names one" },
 ];
 
-const CLAUDE_WORKER_USER: &[&str] = &["login", "mcp_servers", "CLAUDE.md", "theme", "history", "default model"];
+/// Login and CLAUDE.md stay the user's: neither is a settings file. MCP servers and the default model don't carry
+/// over under `--setting-sources ""` (the spike: a user MCP server no longer loads); the carry-over allowlist follows.
+const CLAUDE_WORKER_USER: &[&str] = &["login", "CLAUDE.md", "history"];
 
 /// Spike S4 (does `-p` keep the flag file's hooks, does `--tools` hold against a user `Bash(*)` allow, is
 /// `disableAllHooks:false` honoured, does `--setting-sources user` keep the worktree's project-settings hook from
@@ -123,7 +127,7 @@ pub const CLAUDE_UNPROVEN: Unsupported = Unsupported {
 /// ticket, and changed by any change to the deny-rule tables, the hooks or the flag's own fields.
 pub fn claude_worker_flag_shape() -> Result<String, String> {
     let p = |s: &str| PathBuf::from(format!("/vajra-flag-shape/{s}"));
-    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"))?;
+    let body = claude_worker_flag(&p("home"), &p("work"), &[p("repo")], &p("data"), &p("tmp"))?;
     Ok(crate::control::sha256::hex_digest(body.as_bytes()))
 }
 
@@ -262,10 +266,22 @@ pub fn codex_login_worker_argv(l: &WorkerLaunch<'_>) -> Result<Vec<String>, Inva
     Ok(a)
 }
 
+/// Build caches a sandboxed Claude worker keeps in its ticket tmp, each as (variable, folder under the ticket tmp; ""
+/// is the ticket tmp itself). Claude Code's sandbox makes `$HOME` read-only and rewrites `TMPDIR` to a temp folder
+/// shared by the user's sandboxed sessions, so without these go can't start a build and npm's cache would land outside
+/// the ticket (vajra-70 spike). Cargo keeps its target in the worktree.
+pub const CLAUDE_CACHE_ENV: [(&str, &str); 3] = [("GOCACHE", "go-build"), ("GOTMPDIR", ""), ("npm_config_cache", "npm")];
+
 /// The variables a worker launch adds to `ENV_ALLOW` (all in `sessions::EXTRA_ENV_ALLOW`): `TMPDIR` always, plus a
-/// Vajra-owned harness home when the route has one.
+/// Vajra-owned harness home when the route has one, plus `CLAUDE_CACHE_ENV` for a Claude worker.
 pub fn worker_env(engine: Engine, l: &WorkerLaunch<'_>, vajra_home: Option<&Path>) -> Vec<(&'static str, OsString)> {
     let mut env = vec![("TMPDIR", l.ticket_tmp.as_os_str().to_owned())];
+    if engine == Engine::Claude {
+        for (k, sub) in CLAUDE_CACHE_ENV {
+            let p = if sub.is_empty() { l.ticket_tmp.to_path_buf() } else { l.ticket_tmp.join(sub) };
+            env.push((k, p.into_os_string()));
+        }
+    }
     if let Some(h) = vajra_home {
         env.push((if engine == Engine::Codex { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" }, h.as_os_str().to_owned()));
     }
@@ -293,8 +309,9 @@ pub struct ClaudeWorker<'a> {
     pub tools: &'a str,
 }
 
-/// A Claude Code worker or verifier: the user's settings load (`--setting-sources user`; the worktree's project and
-/// local settings never load, since the worker can write them and their hooks run outside the guard), the flag file outranks them, `--tools` sets the whole
+/// A Claude Code worker or verifier: only the flag file loads (`--setting-sources ""`: no user, project or local
+/// settings file, since a merged sandbox list from any of them reopens the sandbox, and the worker can write the
+/// worktree's own), `--tools` sets the whole
 /// tool set (a user allow rule can't widen it) and `--allowedTools` pre-approves the same list. The prompt comes after
 /// `--`, so a variadic flag never swallows it and a prompt starting with `-` is never read as a flag. No bypass flag.
 pub fn claude_worker_argv(l: &WorkerLaunch<'_>, c: &ClaudeWorker<'_>) -> Result<Vec<String>, InvalidInput> {
@@ -315,7 +332,7 @@ pub fn claude_worker_argv(l: &WorkerLaunch<'_>, c: &ClaudeWorker<'_>) -> Result<
     }
     let mut a = vec![
         abs(c.claude, "claude")?, "-p".into(), "--output-format".into(), "stream-json".into(), "--verbose".into(),
-        "--session-id".into(), c.session_id.into(), "--setting-sources".into(), "user".into(), "--settings".into(), abs(c.settings, "settings")?,
+        "--session-id".into(), c.session_id.into(), "--setting-sources".into(), "".into(), "--settings".into(), abs(c.settings, "settings")?,
         "--permission-mode".into(), "dontAsk".into(), "--tools".into(), c.tools.into(), "--allowedTools".into(), c.tools.into(),
     ];
     if let Some(m) = l.model {
@@ -420,10 +437,26 @@ const HOOKS_JSON: &str = include_str!("../../../../hooks/hooks.json");
 /// worktree root, every project repo and the data dir), `defaultMode: dontAsk`, `disableBypassPermissionsMode`,
 /// `disableAllHooks: false` and the Vajra hooks, so a user's `disableAllHooks` or bypass mode can't leave a card saying
 /// "with the guard" while no guard runs.
-pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Path) -> Result<String, String> {
+///
+/// Plus Claude Code's OS sandbox (Seatbelt on macOS) around every Bash call, so a command that never names a protected
+/// path still can't read the signing key or touch the data dir (the vajra-70 spike: a name-free read, write and symlink
+/// read were each refused). Writable: the worktree (Claude Code's own default) and the ticket tmp. Refused to read and
+/// write: the key folder and the data dir. No unsandboxed retry, no excluded commands, no network domains (loopback
+/// only), and `failIfUnavailable`, so a machine without the sandbox refuses the launch. The worker launches with
+/// `--setting-sources ""`, so no user or project file can merge an `allowRead`, `allowWrite` or `excludedCommands`
+/// entry into these lists (the spike showed both reopen it); the scalars are pinned as well.
+pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Path, ticket_tmp: &Path) -> Result<String, String> {
     let roots: Vec<PathBuf> = std::iter::once(work.to_path_buf()).chain(repos.iter().cloned()).collect();
     let mut deny = crate::control::lead_settings::deny_rules_for(home, &roots, data, &[]).map_err(|e| e.to_string())?;
     deny.extend(crate::control::lead_settings::worker_edit_rules(home, data).map_err(|e| e.to_string())?);
+    let locked = crate::control::lead_settings::sandbox_locked_dirs(home, data).map_err(|e| e.to_string())?;
+    let tmp = match ticket_tmp.to_str() {
+        Some(s) if ticket_tmp.is_absolute() && !s.contains(['\n', '\r', '\0']) => s.trim_end_matches('/').to_string(),
+        _ => return Err("the ticket tmp is not a plain absolute path".into()),
+    };
+    if locked.iter().any(|l| tmp == *l || tmp.starts_with(&format!("{l}/")) || l.starts_with(&format!("{tmp}/"))) {
+        return Err("the ticket tmp overlaps a locked folder".into());
+    }
     let hooks: Value = serde_json::from_str::<Value>(HOOKS_JSON).map_err(|e| e.to_string())?["hooks"].clone();
     if !hooks.is_object() {
         return Err("hooks/hooks.json has no hooks".into());
@@ -434,6 +467,22 @@ pub fn claude_worker_flag(home: &Path, work: &Path, repos: &[PathBuf], data: &Pa
             "defaultMode": "dontAsk",
             "disableBypassPermissionsMode": "disable",
             "deny": deny,
+        },
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "allowUnsandboxedCommands": false,
+            "autoAllowBashIfSandboxed": false,
+            "excludedCommands": [],
+            "ignoreViolations": {},
+            "network": { "allowLocalBinding": true },
+            "filesystem": {
+                "disabled": false,
+                "allowRead": [],
+                "allowWrite": [tmp],
+                "denyRead": locked,
+                "denyWrite": locked,
+            },
         },
         "hooks": hooks,
     });

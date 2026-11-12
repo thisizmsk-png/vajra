@@ -122,12 +122,13 @@ pub struct SpawnSpec {
     /// with the C5 redactor, before a line reaches the bus, spill or IPC.
     pub redact: Redactor,
     /// Variables added to `ENV_ALLOW` for this launch: only names in `EXTRA_ENV_ALLOW` (a Vajra-owned `CODEX_HOME` or
-    /// `CLAUDE_CONFIG_DIR`, and the per-ticket `TMPDIR`), never a key. Any other name refuses the spawn.
+    /// `CLAUDE_CONFIG_DIR`, the per-ticket `TMPDIR` and a Claude worker's build caches under it), never a key. Any
+    /// other name refuses the spawn.
     pub extra_env: Vec<(&'static str, OsString)>,
 }
 
-/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8).
-pub const EXTRA_ENV_ALLOW: [&str; 3] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"];
+/// The only names `SpawnSpec::extra_env` may set (ADR-16 16.8). The last three are `adapter::profiles::CLAUDE_CACHE_ENV`.
+pub const EXTRA_ENV_ALLOW: [&str; 6] = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "GOCACHE", "GOTMPDIR", "npm_config_cache"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {
