@@ -300,6 +300,29 @@ fn a_crashed_ticket_after_a_torn_last_line_is_still_read() {
     assert_eq!(last_line(&data)["ticket"]["detail"], "app_crashed");
 }
 
+/// A FIFO planted as a run's `tickets.jsonl` (no writer, no reader) never holds up the start-up: the crash reconcile's
+/// `record_crashed` and the runtime's replay both refuse it at once instead of waiting in `open`.
+#[test]
+fn a_fifo_planted_as_a_tickets_file_is_refused_without_blocking() {
+    let t = Tmp::new("fifo");
+    let data = t.data();
+    let dir = data.join("runs").join(RUN);
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = std::ffi::CString::new(dir.join("tickets.jsonl").into_os_string().into_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let d = data.clone();
+    std::thread::spawn(move || {
+        let wrote = crate::desktop::workers::record_crashed(&d, RUN, &format!("{RUN}.t1.r1"));
+        let _ = tx.send(wrote);
+    });
+    let wrote = rx.recv_timeout(Duration::from_secs(5)).expect("opening a planted FIFO blocked the reconcile");
+    assert!(!wrote, "nothing is written into a FIFO");
+    let meta = std::fs::symlink_metadata(dir.join("tickets.jsonl")).unwrap();
+    assert!(std::os::unix::fs::FileTypeExt::is_fifo(&meta.file_type()), "it is left as it was");
+}
+
 #[test]
 fn a_record_too_long_to_read_back_refuses_the_spawn_and_kills_its_process() {
     use crate::sessions::{SessionError, SpawnSpec, Supervisor};

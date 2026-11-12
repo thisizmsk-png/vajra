@@ -1197,7 +1197,18 @@ fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::Fi
             return Err(std::io::Error::last_os_error());
         }
     }
-    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
+    regular(crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0o600)?)
+}
+
+/// The ticket record, only when it is a regular file. Opened `O_NONBLOCK`, so a FIFO (or a device) planted in its place
+/// cannot hold the open, and so `App::open` or the runtime's replay, waiting for a writer or reader. It is refused
+/// here, before any byte is read or written. On a regular file `O_NONBLOCK` changes nothing.
+fn regular(f: std::fs::File) -> std::io::Result<std::fs::File> {
+    if f.metadata()?.is_file() {
+        Ok(f)
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "tickets.jsonl is not a regular file"))
+    }
 }
 
 /// `<data>/runs/<run>/tickets.jsonl` for reading, by the same no-follow descent as `open_record`, creating nothing.
@@ -1212,7 +1223,7 @@ fn open_record_read(data: &std::path::Path, run: &str) -> std::io::Result<std::f
         let c = std::ffi::CString::new(name).map_err(|_| bad())?;
         dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
     }
-    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW, 0)
+    regular(crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0)?)
 }
 
 /// The most of one run's `tickets.jsonl` that replay reads, and the longest line it takes.
