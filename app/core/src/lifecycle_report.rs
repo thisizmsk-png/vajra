@@ -76,7 +76,7 @@ mod tests {
     }
 
     fn term(id: u32, cwd: &str, alive: bool) -> TermInfo {
-        TermInfo { id, pid: 100 + id, cwd: cwd.into(), root: "/p".into(), rows: 24, cols: 80, alive }
+        TermInfo { id, pid: 100 + id, cwd: cwd.into(), root: "/p".into(), rows: 24, cols: 80, alive, sign_in: None }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // Multi-provider accounts in Settings > Providers and the project's agents, against fixtures (the core commands land later).
 // No real key is used: FAKE_KEY is a made-up string, and the only transport is a recording fake.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ACCOUNTS as FIXTURE_ACCOUNTS, AGENTS, USAGE } from "../src/accountsFixture";
 import { BASE_URL_SAVE_WIRED, allowedChoices, toggleAllowed, baseUrlProblem, isNewModel, modelLine, parseAccounts, parseAgents, parseUsage, warnWindow } from "../src/accountsContract";
@@ -12,6 +12,7 @@ import { CurrentProject } from "../src/projects/current";
 import { ProviderIcon } from "../src/screens/ProviderIcon";
 import { BaseUrl } from "../src/screens/Accounts";
 import { Settings } from "../src/screens/settings/Settings";
+import { signInEnded } from "../src/terminal/TerminalDock";
 import { S } from "../strings";
 import { fakeIpc } from "./fakeIpc";
 
@@ -114,6 +115,23 @@ describe("Settings > Providers > Accounts", () => {
     expect(within(or).getByText(C.billing.gateway("OpenRouter key"))).toBeTruthy();
     expect(within(or).getByText(C.runsOn("Codex CLI"))).toBeTruthy();
     expect(screen.getByText(C.count(3))).toBeTruthy();
+  });
+
+  it("re-reads Set up, the providers and the accounts when a sign-in tab's CLI exits, with no other user action (ADR-17 rule 6)", async () => {
+    let signedIn = false;
+    const accounts = () => {
+      const a = clone(FIXTURE_ACCOUNTS);
+      return signedIn ? a : { ...a, accounts: a.accounts.map((x) => (x.id === "claude" ? { ...x, state: "signed_out" } : x)) };
+    };
+    const f = settings({ provider_accounts: accounts, setup_list: { schema: "vajra.harness_setup/1", rows: [], engine: { installed: true, command: "engine setup command" } } });
+    expect(within(await account("Claude Code")).getByText(C.state.signed_out)).toBeTruthy();
+    const before = (cmd: string) => f.calls.filter((c) => c.cmd === cmd).length;
+    const setup = before("setup_list"), providers = before("provider_list");
+    signedIn = true;
+    act(() => signInEnded("claude"));
+    await waitFor(() => expect(within(screen.getByRole("listitem", { name: "Claude Code" })).getByText(C.state.signed_in)).toBeTruthy());
+    expect(before("setup_list")).toBeGreaterThan(setup);
+    expect(before("provider_list")).toBeGreaterThan(providers);
   });
 
   it("the override warning says the key bills instead of the plan", async () => {

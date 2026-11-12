@@ -22,6 +22,8 @@ export type ViewState =
 
 export type ViewProps = {
   cwd: string;
+  /** Run this catalog harness's own sign-in instead of a shell (the core builds the command from the id). */
+  signIn?: string;
   /** Re-bind a terminal that outlived the webview instead of opening a new one. */
   attachId?: number;
   active: boolean;
@@ -40,7 +42,7 @@ const theme = () => ({
   selectionBackground: token("--c-selection", "Highlight"),
 });
 
-export default function TerminalView({ cwd, attachId, active, focusToken, onState, onActivity }: ViewProps) {
+export default function TerminalView({ cwd, signIn, attachId, active, focusToken, onState, onActivity }: ViewProps) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
@@ -135,7 +137,7 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
         if (m.skipped > 0) put(`\x1b[0m\r\n${S.terminal.skipped(Math.max(1, Math.round(m.skipped / 1024)))}\r\n`);
       }
     };
-    const started = attachId !== undefined ? api.termAttach(attachId, onMsg) : api.termOpen(cwd, t.rows || 24, t.cols || 80, onMsg);
+    const started = attachId !== undefined ? api.termAttach(attachId, onMsg) : signIn !== undefined ? api.setupSignIn(signIn, t.rows || 24, t.cols || 80, onMsg) : api.termOpen(cwd, t.rows || 24, t.cols || 80, onMsg);
     started.then(
       (info) => {
         if (dead) {
@@ -195,7 +197,7 @@ export default function TerminalView({ cwd, attachId, active, focusToken, onStat
       term.current = null;
       fit.current = null;
     };
-  }, [cwd, attachId]);
+  }, [cwd, signIn, attachId]);
 
   useEffect(() => {
     queueRef.current?.setVisible(active);

@@ -44,6 +44,7 @@ fn resize_reaches_the_shell_and_is_listed() {
     t.write(info.id, b"stty size\n").unwrap();
     assert!(out.until("40 132", 5).contains("40 132"));
     assert_eq!((t.list()[0].rows, t.list()[0].cols), (40, 132));
+    assert_eq!(t.list()[0].sign_in, None, "a plain shell is not a sign-in");
     assert_eq!(t.resize(info.id, 0, 10), Err(TermError::InvalidSize));
     assert_eq!(t.resize(999, 10, 10), Err(TermError::NotFound));
 }
@@ -678,4 +679,78 @@ fn a_terminal_running_something_is_busy_and_an_idle_or_ended_one_is_not() {
     drop(out);
     t.close(info.id).unwrap();
     assert!(!t.is_busy(info.id), "a closed terminal is not busy");
+}
+
+#[test]
+fn a_sign_in_tab_runs_only_the_catalog_argv_on_the_detected_binary_with_the_terminal_env() {
+    use crate::providers::detect::{Out, Probe};
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("signin");
+    let bin = f.dir.join("claude");
+    std::fs::write(&bin, "#!/bin/sh\necho \"ARGS=[$*] PWD=$(pwd) CH=[$CODEX_HOME] CC=[$CLAUDE_CONFIG_DIR] S=[$CARGO_PKG_NAME] SIGNIN$((40+2))\"\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    struct At(PathBuf);
+    impl Probe for At {
+        fn find(&self, n: &str) -> Option<PathBuf> {
+            (n == "claude").then(|| self.0.clone())
+        }
+        fn run(&self, _: &Path, _: &[&str]) -> Option<Out> {
+            Some(Out { code: Some(0), stdout: "2.1.322 (Claude Code)".into(), stderr: String::new() })
+        }
+        fn env(&self, _: &str) -> Option<OsString> {
+            None
+        }
+    }
+    // cargo sets CARGO_PKG_NAME in this process, so the tab must drop it like any other inherited variable.
+    assert!(std::env::var_os("CARGO_PKG_NAME").is_some());
+    let cmd = crate::providers::setup::sign_in("claude", &At(bin)).unwrap();
+    let t = f.terminals();
+    let (s, out) = sink();
+    let info = t.open_sign_in(&cmd, 24, 80, s).unwrap();
+    assert_eq!(info.cwd, cmd.cwd());
+    // The terminal remembers which harness it signs in, so a reloaded webview rebuilds a sign-in tab, not a shell tab.
+    let tag = Some(SignInTag { id: "claude".into(), name: "Claude Code".into() });
+    assert_eq!(info.sign_in, tag);
+    assert_eq!(t.list().iter().find(|i| i.id == info.id).map(|i| i.sign_in.clone()), Some(tag));
+    let seen = out.until("SIGNIN42", 5);
+    assert!(seen.contains("ARGS=[auth login]"), "{seen}");
+    assert!(seen.contains(&format!("PWD={}", cmd.cwd().display())), "{seen}");
+    assert!(seen.contains("CH=[] CC=[] S=[]"), "no Vajra CLI home and nothing secret: {seen}");
+    t.shutdown();
+}
+
+#[test]
+fn a_sign_in_through_a_multicall_shim_reaches_the_cli_detection_ran() {
+    // Version managers install each CLI as a symlink to one binary that dispatches on argv[0]. Sign-in must invoke
+    // the shim by the name detection ran, not its symlink target (which would run the manager's own "auth login").
+    use crate::providers::detect::{Out, Probe};
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("signin-shim");
+    let manager = f.dir.join("manager");
+    std::fs::write(&manager, "#!/bin/sh\necho \"TOOL=$(basename \"$0\") ARGS=[$*] SHIM$((40+2))\"\n").unwrap();
+    std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shims = f.dir.join("shims");
+    std::fs::create_dir_all(&shims).unwrap();
+    let shim = shims.join("claude");
+    std::os::unix::fs::symlink(&manager, &shim).unwrap();
+    struct At(PathBuf);
+    impl Probe for At {
+        fn find(&self, n: &str) -> Option<PathBuf> {
+            (n == "claude").then(|| self.0.clone())
+        }
+        fn run(&self, _: &Path, _: &[&str]) -> Option<Out> {
+            Some(Out { code: Some(0), stdout: "2.1.322 (Claude Code)".into(), stderr: String::new() })
+        }
+        fn env(&self, _: &str) -> Option<OsString> {
+            None
+        }
+    }
+    let cmd = crate::providers::setup::sign_in("claude", &At(shim.clone())).unwrap();
+    assert_eq!(cmd.program(), shim, "the PATH entry detection ran, not its symlink target");
+    let t = f.terminals();
+    let (s, out) = sink();
+    t.open_sign_in(&cmd, 24, 80, s).unwrap();
+    let seen = out.until("SHIM42", 5);
+    assert!(seen.contains("TOOL=claude ARGS=[auth login]"), "{seen}");
+    t.shutdown();
 }
