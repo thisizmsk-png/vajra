@@ -1294,7 +1294,15 @@ fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::Fi
             return Err(std::io::Error::last_os_error());
         }
     }
-    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
+    // Non-blocking (#178 review): a FIFO with no reader planted in the file's place would block a plain open forever, and
+    // `add` records under the book lock, so every book user would hang with it. A writer opening a reader-less FIFO gets
+    // ENXIO instead (counted in `record_failures`), and anything opened that is not a regular file is refused before a
+    // byte is written. O_NONBLOCK changes nothing for a regular file's writes.
+    let f = crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0o600)?;
+    if !f.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "tickets.jsonl is not a regular file"));
+    }
+    Ok(f)
 }
 
 /// `<data>/runs/<run>/tickets.jsonl` for reading, by the same no-follow descent as `open_record`, creating nothing.

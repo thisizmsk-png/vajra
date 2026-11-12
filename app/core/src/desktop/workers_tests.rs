@@ -1101,6 +1101,27 @@ fn a_fifo_in_the_tickets_files_place_is_refused_without_blocking() {
     assert_eq!(t1, Some(Some(Outcome::Done)), "the good run still replays");
 }
 
+/// #178 review: the write side is FIFO-safe too. `add` records under the book lock, so a reader-less FIFO at a run's
+/// `tickets.jsonl` must not block the open: `dispatch` returns, the failed line is counted in `record_failures`, and
+/// the book stays usable (another run dispatches and finishes, and quit returns).
+#[test]
+fn a_fifo_in_the_tickets_files_place_does_not_block_dispatch() {
+    let r = rig("record-fifo", Opts::default());
+    std::fs::create_dir_all(r.gw.data.join("runs/r5")).unwrap();
+    let c = std::ffi::CString::new(r.gw.data.join("runs/r5/tickets.jsonl").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (rt, spec) = (r.rt.clone(), r.task("r5", "t1"));
+    std::thread::spawn(move || {
+        let _ = tx.send(rt.dispatch(spec, seat("w1", "codex")).is_ok());
+    });
+    assert!(rx.recv_timeout(Duration::from_secs(10)).expect("dispatch blocked on the FIFO"), "the ticket is still accepted");
+    assert!(r.rt.record_failures() >= 1, "the unwritable line is counted");
+    let other = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w2", "codex")).unwrap());
+    assert_eq!(other.outcome, Some(Outcome::Done), "the book is not held");
+    r.rt.quit(WAIT);
+}
+
 /// #178 codex P2: a crashed running ticket followed by a partial last line. The recovery outcome starts on a fresh
 /// line (not glued to the fragment), so the next start reads it ended and a third life appends nothing.
 #[test]
