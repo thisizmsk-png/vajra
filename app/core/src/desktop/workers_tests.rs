@@ -551,7 +551,13 @@ fn a_stopped_worker_that_never_exits_ends_after_a_bounded_wait() {
     assert!(r.rt.cancel(&id));
     let v = r.done(&id);
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Stopped), Some("stopped")), "{v:?}");
-    assert!(unsafe { libc::kill(-(pid as i32), 0) } != 0, "the worker's group is gone");
+    // The fallback SIGKILL returns at once; the supervisor's reaper may not have reaped the leader yet (a zombie still
+    // answers `kill(-pid, 0)`), so the group is waited for, boundedly (#160 codex).
+    let t0 = Instant::now();
+    while (unsafe { libc::kill(-(pid as i32), 0) }) == 0 {
+        assert!(t0.elapsed() < WAIT, "the worker's group is still there after {WAIT:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// 6c-1 follow-up: two checks of one kind in one round (a later commit, or a re-check) are two tickets with their own
