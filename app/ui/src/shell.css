@@ -44,6 +44,7 @@
 /* The fix hint uses the UI face on Home so the idle window loads no second typeface (idle memory); Settings keeps mono. */
 .v-home__fix { font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 .v-settings .v-home__fix { font-family: var(--font-mono); }
+.v-home__action { display: inline-flex; align-items: center; gap: var(--space-sm); font: 12px/16px var(--font-ui); color: var(--c-text-secondary); }
 /* Start run shows its key while you are in the form, which is where the key works. */
 .v-launch .v-button--primary .v-kbd-group { display: none; }
 .v-launch:focus-within .v-button--primary .v-kbd-group { display: inline-flex; }
@@ -97,6 +98,13 @@
 .v-crew__pane .v-tabpanel { padding: var(--space-md) var(--space-lg); }
 .v-crew__aside { min-height: 0; overflow: auto; padding: var(--space-md) 14px; border-left: 1px solid var(--c-border); background: var(--c-background); }
 .v-crew__aside .v-section__head { margin-bottom: var(--space-sm); }
+/* A core worker's pane (16.7): its changed files, and Message, Redirect and Stop with the harness's reason when off. */
+.v-crew__pane > .v-crew__changes { margin: 0; padding: var(--space-md) var(--space-lg); }
+.v-crew__files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--text-body-sm, 13px); }
+.v-crew__files code { overflow-wrap: anywhere; }
+.v-crew__controls { display: grid; gap: var(--space-sm); }
+.v-crew__controlrow { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.v-crew__reason { margin: 0; color: var(--c-text-muted); font-size: var(--text-body-sm, 13px); }
 .v-crew__facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
 .v-crew__facts dt { color: var(--c-text-muted); }
 .v-crew__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--c-text-secondary); }

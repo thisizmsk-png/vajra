@@ -72,6 +72,9 @@ pub struct Config {
     pub clock: Option<Arc<dyn Clock + Send + Sync>>,
     /// The nonce set: every nonce the app minted, replaced in summaries.
     pub redact: Redactor,
+    /// Opens a Claude worker's own control dir by its session id, before it starts, and returns its steering nonce
+    /// (the control service's `open_core_session`). `None`: the worker gets no steering channel.
+    pub steer: Option<Steer>,
     /// Tests only: run a Claude worker before spike S4 has passed.
     #[cfg(test)]
     pub claude_unverified_ok: bool,
@@ -85,6 +88,8 @@ pub struct Hooks {
 }
 
 pub type Hook = Box<dyn Fn(&TicketView) + Send + Sync>;
+/// See `Config::steer`.
+pub type Steer = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// One writer task to run.
 #[derive(Clone, Debug)]
@@ -196,6 +201,9 @@ pub struct TicketView {
     pub detail: Option<String>,
     /// The harness's own session id, where it has one (a Claude worker's message queue is keyed by it, 6c-2).
     pub harness_session: Option<String>,
+    /// Why a running Claude worker has no steering channel (a check, or its control dir didn't open). `None` when it
+    /// has one, or its harness never steers (see `message_off`).
+    pub steer_off: Option<&'static str>,
     pub commit: Option<String>,
     pub task_ref: Option<String>,
     pub files: Vec<String>,
@@ -204,6 +212,8 @@ pub struct TicketView {
     pub leftovers: Vec<String>,
     pub receipt: Option<Value>,
     pub mismatch: Option<Value>,
+    /// What the worker ran on, from its receipt, for every surface that draws it.
+    pub provider: Option<effective::ProviderTag>,
     /// Code-built, redacted, wrapped as data.
     pub summary: Option<Value>,
     /// Retention: `kept` with the paths that keep it, or `removed`.
@@ -220,6 +230,8 @@ struct Entry {
     kill: Option<KillReason>,
     session: Option<String>,
     tree: Option<gitw::Ticket>,
+    /// The integration ref the capture check last ran against (Clean up re-runs it there).
+    integration: Option<String>,
 }
 
 #[derive(Default)]
@@ -234,6 +246,8 @@ struct Shared {
     sup: Arc<Supervisor>,
     bus: Arc<Bus>,
     hooks: Hooks,
+    /// Every worker session against its ticket's common dir, for the repo pauses (see `with_sessions`).
+    sessions: Arc<gitw::RepoSessions>,
     book: Mutex<Book>,
     changed: Condvar,
 }
@@ -241,6 +255,99 @@ struct Shared {
 /// The runtime. Cheap to clone.
 #[derive(Clone)]
 pub struct WorkerRuntime(Arc<Shared>);
+
+/// What Clean up removed: the tickets whose copies are gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CleanUp {
+    pub removed: Vec<String>,
+}
+
+/// A ticket picked for the capture check, copied out of the lock.
+struct Pick {
+    id: String,
+    tree: gitw::Ticket,
+    commit: String,
+    integration: String,
+    repo: PathBuf,
+}
+
+fn pick(e: &Entry) -> Option<Pick> {
+    Some(Pick { id: e.view.id.clone(), tree: e.tree.clone()?, commit: e.view.commit.clone()?, integration: e.integration.clone()?, repo: e.job.spec().repo.clone() })
+}
+
+/// Allocated bytes under `root`, never following a symlink.
+pub(crate) fn allocated(root: &std::path::Path) -> (u64, bool) {
+    allocated_upto(root, DISK_WALK_ENTRIES)
+}
+
+/// Most entries Settings' disk walk visits; past it the size is a lower bound (`partial`), so a huge copy folder
+/// can't hold the Settings call for minutes.
+const DISK_WALK_ENTRIES: usize = 1_000_000;
+
+/// Allocated bytes under `root` and whether the walk stopped at `max` entries before the end.
+fn allocated_upto(root: &std::path::Path, max: usize) -> (u64, bool) {
+    let w = walk(root, max);
+    (w.bytes, w.partial)
+}
+
+/// What a disk walk found, and how many directory entries it read to find it (the work its budget bounds).
+#[derive(Debug, PartialEq, Eq)]
+struct Walk {
+    bytes: u64,
+    partial: bool,
+    read: usize,
+}
+
+/// Depth first over open directory iterators: each entry counts against `max` as it is read, so a wide directory is
+/// never listed past the budget (#151 review: listing a level whole first held every name in memory). The stack
+/// holds one open iterator per level of depth, not one path per entry.
+fn walk(root: &std::path::Path, max: usize) -> Walk {
+    use std::os::unix::fs::MetadataExt;
+    let mut w = Walk { bytes: 0, partial: false, read: 0 };
+    // The entry's size; its listing when it is a directory (never followed through a symlink).
+    let visit = |p: &std::path::Path, w: &mut Walk| -> Option<std::fs::ReadDir> {
+        let m = p.symlink_metadata().ok()?;
+        w.bytes += m.blocks() * 512;
+        if m.is_dir() { std::fs::read_dir(p).ok() } else { None }
+    };
+    if max == 0 {
+        w.partial = true;
+        return w;
+    }
+    w.read = 1;
+    let mut stack: Vec<std::fs::ReadDir> = visit(root, &mut w).into_iter().collect();
+    while let Some(level) = stack.last_mut() {
+        let Some(entry) = level.next() else {
+            stack.pop();
+            continue;
+        };
+        if w.read >= max {
+            w.partial = true;
+            return w;
+        }
+        w.read += 1;
+        if let Some(rd) = entry.ok().and_then(|d| visit(&d.path(), &mut w)) {
+            stack.push(rd);
+        }
+    }
+    w
+}
+
+/// A worker session's entry in the repo's pause set, for one attempt.
+struct OnRepo<'a>(&'a gitw::RepoSessions, &'a str);
+
+impl<'a> OnRepo<'a> {
+    fn new(sessions: &'a gitw::RepoSessions, sid: &'a str, common: &std::path::Path) -> Self {
+        sessions.register(sid, common);
+        OnRepo(sessions, sid)
+    }
+}
+
+impl Drop for OnRepo<'_> {
+    fn drop(&mut self) {
+        self.0.unregister(self.1);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchError {
@@ -252,7 +359,14 @@ pub enum DispatchError {
 
 impl WorkerRuntime {
     pub fn new(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks) -> Self {
-        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, book: Mutex::default(), changed: Condvar::new() }))
+        Self::with_sessions(cfg, gw, sup, bus, hooks, Arc::default())
+    }
+
+    /// As `new`, registering each worker's supervisor session in `sessions` (against its ticket's pinned common dir)
+    /// from before its process starts until its attempt ends: the production repo pause reads it, so a running
+    /// worker is stopped while the core's git works on its repo (#151 codex P1).
+    pub fn with_sessions(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks, sessions: Arc<gitw::RepoSessions>) -> Self {
+        WorkerRuntime(Arc::new(Shared { cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new() }))
     }
 
     /// Queue a writer task on a seat and return its ticket. It starts when its seat is free and the caps allow.
@@ -287,17 +401,22 @@ impl WorkerRuntime {
         let view = TicketView {
             id: id.clone(), run: s.run.clone(), task: s.task.clone(), round: s.round, kind, slot: seat.slot.clone(), account: seat.account.clone(),
             state: State::Queued, queue_position: None, wait: None, attempt: 0, elapsed_s: 0, dispatch_head: None, worktree: None, deps: Vec::new(),
-            outcome: None, reason: None, detail: None, harness_session: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
-            receipt: None, mismatch: None, summary: None, retention: None, started: None,
+            outcome: None, reason: None, detail: None, harness_session: None, steer_off: None, commit: None, task_ref: None, files: Vec::new(), added: 0, removed: 0, leftovers: Vec::new(),
+            receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
-        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None });
+        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
         drop(b);
         self.pump();
         Ok(id)
     }
 
     /// The ticket's current view.
+    #[cfg(test)]
+    pub(crate) fn gitw(&self) -> &Arc<Gitw> {
+        &self.0.gw
+    }
+
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
         b.tickets.get(id).map(live_view)
@@ -378,18 +497,43 @@ impl WorkerRuntime {
     /// among them gets the capture check (16.6 Retention). It passes: the worktree is removed and the task branch
     /// deleted. It fails: the tree is kept with the paths that differ. Returns the views after.
     pub fn integrated(&self, run: &str, commits: &[String], integration_ref: &str) -> Vec<TicketView> {
-        let picked: Vec<(String, gitw::Ticket, String, PathBuf)> = {
+        let picked: Vec<Pick> = {
+            let mut b = crate::lock(&self.0.book);
+            b.tickets
+                .values_mut()
+                .filter(|e| e.view.run == run && e.view.outcome == Some(Outcome::Done) && e.view.retention.is_none())
+                .filter(|e| e.view.commit.as_ref().is_some_and(|c| commits.contains(c)))
+                .filter_map(|e| {
+                    e.integration = Some(integration_ref.to_string());
+                    pick(&*e)
+                })
+                .collect()
+        };
+        self.retain(picked)
+    }
+
+    /// Settings' Clean up: removes only copies that are clean now. That is an integrated copy that was kept, whose
+    /// capture check passes on a fresh run (its leftover was deleted, say). A copy that never integrated, or still
+    /// differs, stays: nothing is removed on a guess. A discarded copy is already gone at `discard`.
+    pub fn clean_up(&self) -> CleanUp {
+        let picked: Vec<Pick> = {
             let b = crate::lock(&self.0.book);
             b.tickets
                 .values()
-                .filter(|e| e.view.run == run && e.view.outcome == Some(Outcome::Done) && e.view.retention.is_none())
-                .filter_map(|e| Some((e.view.id.clone(), e.tree.clone()?, e.view.commit.clone().filter(|c| commits.contains(c))?, e.job.spec().repo.clone())))
+                .filter(|e| e.integration.is_some() && e.view.retention.as_ref().is_some_and(|r| r["state"] == "kept"))
+                .filter_map(pick)
                 .collect()
         };
+        let removed = self.retain(picked).into_iter().filter(|v| v.retention.as_ref().is_some_and(|r| r["state"] == "removed")).map(|v| v.id).collect();
+        CleanUp { removed }
+    }
+
+    /// The capture check and the removal (16.6 Retention) for each pick, outside the lock. Returns the views after.
+    fn retain(&self, picked: Vec<Pick>) -> Vec<TicketView> {
         let mut out = Vec::new();
-        for (id, t, commit, repo) in picked {
-            let retention = match self.0.gw.worktree_remove(&t, &commit, integration_ref) {
-                Ok(()) => match self.0.gw.branch_delete(&repo, &t.task_ref()) {
+        for p in picked {
+            let retention = match self.0.gw.worktree_remove(&p.tree, &p.commit, &p.integration) {
+                Ok(()) => match self.0.gw.branch_delete(&p.repo, &p.tree.task_ref()) {
                     Ok(()) => json!({"state": "removed", "note": "The worktree and its task branch were removed. Ignored files such as dependency copies and build output went with it."}),
                     Err(e) => json!({"state": "removed", "branch_kept": e.code()}),
                 },
@@ -397,7 +541,7 @@ impl WorkerRuntime {
                 Err(e) => json!({"state": "kept", "reason": e.code()}),
             };
             let mut b = crate::lock(&self.0.book);
-            if let Some(e) = b.tickets.get_mut(&id) {
+            if let Some(e) = b.tickets.get_mut(&p.id) {
                 e.view.retention = Some(retention);
                 out.push(e.view.clone());
             }
@@ -625,7 +769,7 @@ impl WorkerRuntime {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         };
         let sid = format!("core-{seq}-a{n}");
-        let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: self.0.cfg.redact.clone(), extra_env: l.env.clone() };
+        let spec = SpawnSpec { argv: l.argv.clone(), cwd: t.wt.clone(), rows: 40, cols: 160, redact: l.redact.clone(), extra_env: l.env.clone() };
         if let Some(f) = &l.flag {
             if profiles::verify_claude_worker_flag(f).is_err() {
                 return Attempt::End(Outcome::Failed, profiles::PROFILE_NOT_APPLIED.into(), None);
@@ -634,6 +778,8 @@ impl WorkerRuntime {
         let session = l.session_id.clone().unwrap_or_else(|| sid.clone());
         // The core is the only one that reports a failure here: it knows whether it will retry (see `attempts`).
         let tag = ProviderTag { slot: seat.slot.clone(), session_id: session.clone(), account: seat.account.clone(), attempt: n, core_reports: true };
+        // Registered before it starts, so a repo pause held now stops it as soon as it exists; dropped on every return.
+        let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
         if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
@@ -641,6 +787,7 @@ impl WorkerRuntime {
             e.session = Some(sid.clone());
             e.view.attempt = n;
             e.view.harness_session = l.session_id.clone();
+            e.view.steer_off = l.steer_off;
         }
         // A kill that landed between the check above and `session` being set.
         if self.killed(id).is_some() {
@@ -744,6 +891,7 @@ impl WorkerRuntime {
             if let Some(r) = &receipt {
                 e.view.receipt = serde_json::to_value(r).ok();
                 e.view.mismatch = r.mismatch_event();
+                e.view.provider = r.provider();
             }
             // A kill recorded before this point decides the outcome, whatever the snapshot or diff found meanwhile:
             // a Stop accepted during `finish` never ends `done` with an integratable commit (#149 codex P2).
@@ -845,6 +993,57 @@ impl Clock for TicketClock<'_> {
                 return;
             }
             b = self.rt.0.changed.wait_timeout(b, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+}
+
+impl TicketView {
+    /// Why Message and Redirect are off for this ticket, `None` when it takes them. The one answer both the crew
+    /// node and the control service (`CoreWorkers::message_to`) use: the harness profile's reason, then "not
+    /// started" until a Claude worker's session exists, then why it has no steering channel.
+    pub fn message_off(&self) -> Option<&'static str> {
+        let Some(e) = launch::harness_of(&self.account) else { return Some(profiles::NO_MESSAGE) };
+        if self.state == State::Ended {
+            return Some(profiles::FINISHED);
+        }
+        profiles::controls(e).message.or_else(|| self.harness_session.is_none().then_some(profiles::NOT_STARTED)).or(self.steer_off)
+    }
+
+    /// The crew tree's `core:<ticket>` node input (16.7): status from the state and outcome, the controls from the
+    /// seat's harness profile, the diff once there is a commit.
+    pub fn core_worker(&self) -> crate::crew::tree::CoreWorker {
+        use crate::crew::tree::Status;
+        let (status, overlay) = match (self.state, self.outcome) {
+            (State::Queued, _) => (Status::Pending, Some("queued")),
+            (State::Running, _) => (Status::InProgress, None),
+            (State::Ended, Some(Outcome::Done)) => (Status::Done, None),
+            (State::Ended, Some(Outcome::Progress)) => (Status::Blocked, Some("partly done")),
+            (State::Ended, Some(Outcome::NeedsUser)) => (Status::Question, None),
+            (State::Ended, Some(Outcome::Stopped)) => (Status::Failed, Some("stopped by the human")),
+            (State::Ended, _) => (Status::Failed, None),
+        };
+        let controls = match launch::harness_of(&self.account) {
+            // An ended ticket offers nothing: the control service refuses it as `worker_finished` (#151 review).
+            Some(e) => {
+                let stop_off = (self.state == State::Ended).then_some(profiles::FINISHED);
+                profiles::Controls { message: self.message_off(), stop_off, ..profiles::controls(e) }.to_json()
+            }
+            None => json!({}),
+        };
+        let diff = self.commit.as_ref().map(|_| {
+            let files: Vec<&String> = self.files.iter().take(200).collect();
+            json!({"files_total": self.files.len(), "files": files, "added": self.added, "removed": self.removed, "partial": false, "uncounted": 0})
+        });
+        crate::crew::tree::CoreWorker {
+            ticket: self.id.clone(),
+            task: self.task.clone(),
+            round: self.round,
+            check: self.kind != "writer",
+            status,
+            overlays: overlay.into_iter().collect(),
+            provider: self.provider.clone(),
+            controls,
+            diff,
         }
     }
 }
@@ -968,6 +1167,10 @@ struct Launch {
     ticket_tmp: PathBuf,
     /// Where the Codex rollout file is read from.
     codex_home: PathBuf,
+    /// The app's nonce set, plus this worker's steering nonce: never shown in its output.
+    redact: Redactor,
+    /// See `TicketView::steer_off`.
+    steer_off: Option<&'static str>,
 }
 
 impl Launch {
@@ -988,14 +1191,36 @@ impl Launch {
 
     fn build(cfg: &Config, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket) -> Result<Launch, &'static str> {
         let (engine, kind) = Self::supported(cfg, job, seat)?;
-        let brief = match job {
+        // A Claude worker's own session id, chosen here: its control dir and the hook's delivery are keyed by it.
+        let claude_sid = match engine {
+            Engine::Claude => Some(crate::ids::uuid_v4().map_err(|_| "spawn_failed")?),
+            Engine::Codex => None,
+        };
+        // Only a task worker is steered, as in a workflow (a check is the independent gate). Its control dir exists
+        // before it starts, so the first tool call can already take a message.
+        // A Claude worker that isn't steered records why, so it is never offered Message (#151).
+        let (nonce, steer_off) = match (job, &claude_sid, &cfg.steer) {
+            (_, None, _) => (None, None),
+            (Job::Check(..), Some(_), _) => (None, Some(profiles::CHECK_NOT_STEERED)),
+            (Job::Task(_), Some(sid), Some(open)) => match open(sid) {
+                Some(n) => (Some(n), None),
+                None => (None, Some(profiles::NO_STEER_CHANNEL)),
+            },
+            (Job::Task(_), Some(_), None) => (None, Some(profiles::NO_STEER_CHANNEL)),
+        };
+        let mut brief = match job {
             Job::Task(s) => format!("{}\n\n{LEAVE_CHANGES}", s.brief),
             Job::Check(_, s) => s.brief.clone(),
         };
+        let mut redact = cfg.redact.clone();
+        if let Some(n) = &nonce {
+            brief = format!("{brief}\n\n{}", profiles::steer_brief(n));
+            redact.add(Some(n));
+        }
         let wl = WorkerLaunch { kind, prompt: &brief, model: seat.model.as_deref(), effort: seat.effort.as_deref(), network: seat.network, ticket_tmp: &t.tmp };
         let mut l = Launch {
             engine, argv: Vec::new(), env: Vec::new(), flag: None, session_id: None, tools: String::new(), network: seat.network,
-            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(),
+            ticket_tmp: t.tmp.clone(), codex_home: cfg.codex_home.clone(), redact, steer_off,
         };
         match engine {
             Engine::Codex => {
@@ -1025,7 +1250,7 @@ impl Launch {
             }
             Engine::Claude => {
                 let tools = cfg.tools.list(&seat.role).ok_or("harness_unsupported")?.to_string();
-                let sid = crate::ids::uuid_v4().map_err(|_| "spawn_failed")?;
+                let sid = claude_sid.ok_or("spawn_failed")?;
                 let body = profiles::claude_worker_flag(&cfg.home, &t.wt, std::slice::from_ref(&t.repo), &cfg.data).map_err(|_| "profile_not_applied")?;
                 let flag = profiles::write_claude_worker_flag(&cfg.data, &sid, &body).map_err(|_| "profile_not_applied")?;
                 let c = ClaudeWorker { claude: &cfg.claude, session_id: &sid, settings: &flag.path, tools: &tools };
