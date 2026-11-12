@@ -1,0 +1,300 @@
+//! The `vajra-run` tools on the app side (ADR-16 16.5 "Transport", PR 6d2): the tool table the `--mcp-run` server
+//! lists, the per-run registry the socket routes those calls to, and the gate in front of it.
+//!
+//! - **Outside the Service lock.** A `vajra-run` request never takes the control `Service` mutex: it goes to the run's
+//!   `RunProtocol`, whose `await_any` parks without any lock held, so two awaits run side by side.
+//! - **The gate, in order.** The run is registered; the request's token hashes to the one the registry holds (only
+//!   the hash is kept); the lead has started; and the socket peer descends from that lead process (pid and start
+//!   stamp, at most 64 parent links: `procid::descends_from`). The token is not a boundary against the run's own
+//!   workers (they can read files, T1): it keeps another run's client from calling by mistake. The peer check is
+//!   the real gate.
+//! - **Rotation.** Resume writes a new token file and the registry keeps only the new hash; the old token is refused.
+
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::{Value, json};
+
+use super::{fsx, nonce, sha256};
+use crate::desktop::runproto::{PlanInput, Refusal, RunProtocol};
+
+/// The token file's name inside a run's data dir (`<data>/runs/<run>/`).
+pub const TOKEN_FILE: &str = "vajra-run.token";
+/// The env the `--mcp-run` server reads: its run, and the token file's path (never the token).
+pub const RUN_ENV: &str = "VAJRA_RUN";
+pub const TOKEN_FILE_ENV: &str = "VAJRA_RUN_TOKEN_FILE";
+/// The request cap for `plan_tasks` (16.5); every other request keeps `socket::MAX_REQUEST`.
+pub const MAX_PLAN_REQUEST: usize = 256 * 1024;
+/// A long wait gets `wait_s` plus this much before the client gives up.
+pub const AWAIT_SLACK: Duration = Duration::from_secs(10);
+
+pub const TOOL_NAMES: [&str; 9] =
+    ["plan_tasks", "dispatch_worker", "await_any", "await_worker", "cancel_worker", "integrate", "finish_run", "list_workers", "inspect_worker"];
+
+pub fn is_run_tool(name: &str) -> bool {
+    TOOL_NAMES.contains(&name)
+}
+
+fn ticket_prop() -> Value {
+    json!({"type": "string", "minLength": 1, "maxLength": 200})
+}
+
+fn wait_prop() -> Value {
+    json!({"type": "integer", "minimum": 0, "maximum": 110})
+}
+
+/// The `vajra-run` tools, exactly: what `tools/list` returns.
+pub fn tools() -> Value {
+    let id = json!({"type": "string", "pattern": "^t[0-9]{1,2}$"});
+    let short = |n: u32| json!({"type": "string", "maxLength": n});
+    let criterion = json!({"type": "object", "additionalProperties": false, "required": ["id", "criterion", "check"],
+        "properties": {"id": short(32), "criterion": short(1000), "check": short(2000)}});
+    let task = json!({"type": "object", "additionalProperties": false, "required": ["id", "title", "owner_role", "files", "brief"],
+        "properties": {"id": id, "title": short(300), "owner_role": short(32),
+            "files": {"type": "array", "maxItems": 64, "items": short(300)},
+            "deps": {"type": "array", "maxItems": 8, "items": id},
+            "criteria": {"type": "array", "maxItems": 32, "items": short(32)},
+            "brief": short(20_000), "touches_security": {"type": "boolean"}}});
+    let pair = |a: &str, b: &str| json!({"type": "object", "additionalProperties": false, "required": [a, b],
+        "properties": {a: short(300), b: short(1000)}});
+    let obj = |required: Value, props: Value| json!({"type": "object", "additionalProperties": false, "required": required, "properties": props});
+    json!([
+        {"name": "plan_tasks",
+         "description": "Submit the round's plan. Round 1 defines the criteria (each with a check); later rounds re-plan only the failed tasks.",
+         "inputSchema": obj(json!(["round", "tasks"]), json!({"round": {"type": "integer", "minimum": 1, "maximum": 3},
+            "criteria": {"type": "array", "minItems": 1, "maxItems": 32, "items": criterion},
+            "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": task},
+            "decisions": {"type": "array", "maxItems": 8, "items": pair("title", "rationale")},
+            "protected_actions": {"type": "array", "maxItems": 8, "items": pair("action", "why")}}))},
+        {"name": "dispatch_worker",
+         "description": "Start a worker on one planned task. Returns a ticket, or not_ready with the reason.",
+         "inputSchema": obj(json!(["task_id"]), json!({"task_id": {"type": "string", "pattern": "^t[0-9]{1,2}$"}}))},
+        {"name": "await_any",
+         "description": "Wait up to wait_s seconds (at most 110) for the first of these tickets to end; call it again until every ticket has ended.",
+         "inputSchema": obj(json!(["tickets", "wait_s"]), json!({"tickets": {"type": "array", "minItems": 1, "maxItems": 64, "items": ticket_prop()}, "wait_s": wait_prop()}))},
+        {"name": "await_worker",
+         "description": "Wait up to wait_s seconds (at most 110) for one ticket to end.",
+         "inputSchema": obj(json!(["ticket", "wait_s"]), json!({"ticket": ticket_prop(), "wait_s": wait_prop()}))},
+        {"name": "cancel_worker",
+         "description": "Stop one of this run's workers.",
+         "inputSchema": obj(json!(["ticket"]), json!({"ticket": ticket_prop()}))},
+        {"name": "integrate",
+         "description": "Merge the round's done tasks. Returns a round ticket; Vajra then runs the round's checks and reviews. Await the round ticket.",
+         "inputSchema": obj(json!(["round"]), json!({"round": {"type": "integer", "minimum": 1, "maximum": 3}}))},
+        {"name": "finish_run",
+         "description": "End the run with your notes for the human. Vajra computes the run's status; you do not choose it.",
+         "inputSchema": obj(json!(["report"]), json!({"report": short(8192)}))},
+        {"name": "list_workers",
+         "description": "This run's worker tickets with their task, round, seat and status.",
+         "inputSchema": obj(json!([]), json!({}))},
+        {"name": "inspect_worker",
+         "description": "One worker ticket of this run, with its task, round, seat and status.",
+         "inputSchema": obj(json!(["ticket"]), json!({"ticket": ticket_prop()}))}
+    ])
+}
+
+/// How long the `--mcp-run` client waits for the app's answer to one call: `wait_s + 10` for an await.
+pub fn client_timeout(tool: &str, args: &Value, default: Duration) -> Duration {
+    match tool {
+        "await_any" | "await_worker" => Duration::from_secs(args.get("wait_s").and_then(Value::as_u64).unwrap_or(0).min(110)) + AWAIT_SLACK,
+        _ => default,
+    }
+}
+
+fn refusal(r: Refusal) -> Value {
+    json!({"error": r.code, "reason": r.reason})
+}
+
+fn bad_args(what: &str) -> Value {
+    json!({"error": "invalid_args", "reason": what})
+}
+
+fn field<'a>(args: &'a Value, k: &str) -> Result<&'a Value, Value> {
+    args.get(k).ok_or_else(|| bad_args(&format!("{k} is required")))
+}
+
+fn text<'a>(args: &'a Value, k: &str) -> Result<&'a str, Value> {
+    field(args, k)?.as_str().ok_or_else(|| bad_args(&format!("{k} must be a string")))
+}
+
+fn round(args: &Value) -> Result<u32, Value> {
+    field(args, "round")?.as_u64().and_then(|r| u32::try_from(r).ok()).ok_or_else(|| bad_args("round must be a number"))
+}
+
+fn wait(args: &Value) -> Result<Duration, Value> {
+    field(args, "wait_s")?.as_u64().map(Duration::from_secs).ok_or_else(|| bad_args("wait_s must be a number"))
+}
+
+fn ok<T: serde::Serialize>(r: Result<T, Refusal>) -> Result<Value, Value> {
+    r.map(|v| json!(v)).map_err(refusal)
+}
+
+/// One `vajra-run` tool call on the run's protocol. `Ok` is the tool result, `Err` a tool error.
+pub fn call(p: &RunProtocol, tool: &str, args: &Value) -> Result<Value, Value> {
+    if !args.is_object() {
+        return Err(bad_args("arguments must be an object"));
+    }
+    match tool {
+        "plan_tasks" => {
+            let input: PlanInput = serde_json::from_value(args.clone()).map_err(|e| bad_args(&format!("plan_tasks: {e}")))?;
+            ok(p.plan_tasks(input))
+        }
+        "dispatch_worker" => ok(p.dispatch_worker(text(args, "task_id")?)),
+        "await_any" => {
+            let tickets: Vec<String> = serde_json::from_value(field(args, "tickets")?.clone()).map_err(|_| bad_args("tickets must be strings"))?;
+            ok(p.await_any(&tickets, wait(args)?))
+        }
+        "await_worker" => ok(p.await_any(&[text(args, "ticket")?.to_string()], wait(args)?)),
+        "cancel_worker" => ok(p.cancel_worker(text(args, "ticket")?).map(|c| json!({"cancelled": c}))),
+        "integrate" => ok(p.integrate(round(args)?).map(|t| json!({"round_ticket": t}))),
+        "finish_run" => ok(p.finish_run(text(args, "report")?).map(|s| json!({"status": s}))),
+        "list_workers" => Ok(json!({"workers": p.workers(None)})),
+        "inspect_worker" => {
+            let t = text(args, "ticket")?;
+            p.workers(Some(t)).pop().ok_or_else(|| json!({"error": "invalid", "reason": "not a worker ticket of this run"}))
+        }
+        _ => Err(json!({"error": "unknown_tool"})),
+    }
+}
+
+// ---------------------------------------------------------------- tokens
+
+/// A fresh token, written to `<run_dir>/vajra-run.token` at 0600 (replacing any earlier one atomically). Returns the
+/// file's path and the token's hash; the token itself is not kept.
+pub fn write_token(run_dir: &Path) -> io::Result<(PathBuf, [u8; 32])> {
+    fsx::private_dir(run_dir)?;
+    let token = nonce::random_hex(32)?;
+    let path = fsx::write_atomic(run_dir, TOKEN_FILE, token.as_bytes())?;
+    Ok((path, sha256::digest(token.as_bytes())))
+}
+
+/// Read the token the `--mcp-run` server was pointed at: a regular file, not a link, owned by us, 0600 or tighter.
+pub fn read_token(path: &Path) -> io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(path)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    if !m.file_type().is_file() || m.uid() != me || m.mode() & 0o077 != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the run token file must be ours and 0600"));
+    }
+    let b = fsx::read_nofollow_capped(path, 256)?;
+    let t = String::from_utf8(b).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the run token is not text"))?;
+    let t = t.trim().to_string();
+    if t.len() != 64 || !t.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "the run token is malformed"));
+    }
+    Ok(t)
+}
+
+fn same_hash(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+// ---------------------------------------------------------------- the registry
+
+/// The lead process the peer check walks to: the same pid and start stamp the 6d1 liveness lease watches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeadProc {
+    pub pid: u32,
+    pub stamp: u64,
+}
+
+struct Entry {
+    proto: RunProtocol,
+    token: [u8; 32],
+    lead: Option<LeadProc>,
+}
+
+/// The live runs the socket serves `vajra-run` calls for.
+pub struct RunRegistry {
+    runs: Mutex<HashMap<String, Entry>>,
+    /// The peer check; `procid::descends_from` outside tests.
+    descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>,
+}
+
+impl Default for RunRegistry {
+    fn default() -> Self {
+        Self::with_peer_check(Box::new(|peer, lead| crate::procid::descends_from(peer, lead.pid, lead.stamp)))
+    }
+}
+
+impl RunRegistry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn with_peer_check(descends: Box<dyn Fn(u32, LeadProc) -> bool + Send + Sync>) -> Self {
+        RunRegistry { runs: Mutex::new(HashMap::new()), descends }
+    }
+
+    /// Serve `run` with `proto` behind the token whose hash is `token`. No call passes until `set_lead`.
+    pub fn register(&self, run: &str, proto: RunProtocol, token: [u8; 32]) {
+        crate::lock(&self.runs).insert(run.to_string(), Entry { proto, token, lead: None });
+    }
+
+    /// The lead process that started (or restarted) for `run`; calls must come from its tree.
+    pub fn set_lead(&self, run: &str, lead: LeadProc) -> bool {
+        crate::lock(&self.runs).get_mut(run).map(|e| e.lead = Some(lead)).is_some()
+    }
+
+    /// The lead process exited: nothing passes until the next `set_lead`.
+    pub fn clear_lead(&self, run: &str) {
+        if let Some(e) = crate::lock(&self.runs).get_mut(run) {
+            e.lead = None;
+        }
+    }
+
+    /// Resume: only the new token's hash is kept.
+    pub fn rotate_token(&self, run: &str, token: [u8; 32]) -> bool {
+        crate::lock(&self.runs).get_mut(run).map(|e| e.token = token).is_some()
+    }
+
+    pub fn remove(&self, run: &str) {
+        crate::lock(&self.runs).remove(run);
+    }
+
+    /// Gate one request and find its protocol. The registry lock is released before the call runs.
+    fn admit(&self, run: &str, token: &str, peer: Option<u32>) -> Result<RunProtocol, Value> {
+        let runs = crate::lock(&self.runs);
+        let e = runs.get(run).ok_or_else(|| json!({"error": "run_unknown"}))?;
+        if !same_hash(&sha256::digest(token.as_bytes()), &e.token) {
+            return Err(json!({"error": "run_token"}));
+        }
+        let lead = e.lead.ok_or_else(|| json!({"error": "lead_not_running"}))?;
+        let proto = e.proto.clone();
+        drop(runs);
+        match peer {
+            Some(pid) if (self.descends)(pid, lead) => Ok(proto),
+            _ => Err(json!({"error": "peer_not_lead"})),
+        }
+    }
+
+    /// One `vajra-run` request from the socket: `{"vajra_run": run, "token": t, "tool": name, "args": {...}}`, from the
+    /// peer process `peer`. The reply is `{"ok": result}` or an error object.
+    pub fn serve(&self, req: &Value, peer: Option<u32>) -> Value {
+        let (Some(run), Some(token), Some(tool)) =
+            (req.get("vajra_run").and_then(Value::as_str), req.get("token").and_then(Value::as_str), req.get("tool").and_then(Value::as_str))
+        else {
+            return json!({"error": "bad_request"});
+        };
+        if !is_run_tool(tool) {
+            return json!({"error": "unknown_tool"});
+        }
+        let proto = match self.admit(run, token, peer) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
+        match call(&proto, tool, &args) {
+            Ok(v) => json!({"ok": v}),
+            Err(e) => json!({"tool_error": e}),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "runreg_tests.rs"]
+mod tests;

@@ -14,6 +14,7 @@ pub mod nonce;
 pub mod queue;
 pub mod receipt;
 pub mod reconcile;
+pub mod runreg;
 pub mod service;
 pub mod sha256;
 pub mod socket;

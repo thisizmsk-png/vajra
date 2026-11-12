@@ -272,7 +272,7 @@ fn nonce_absent_everywhere() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input = [
         json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inspect_worker","arguments":{"worker":AID}}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_workers","arguments":{}}}),
@@ -405,7 +405,7 @@ fn socket_peer_uid_rejects_other_uid() {
     assert_eq!(socket::peer_uid(&a).unwrap(), me);
     drop(b);
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me));
     let reply: Value = serde_json::from_str(&sock_request(&ok_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert!(reply["ok"]["workers"].is_array(), "{reply}");
 
@@ -413,7 +413,7 @@ fn socket_peer_uid_rejects_other_uid() {
     let other_path = short_sock();
     let listener = socket::bind(&other_path).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, me + 1));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), me + 1));
     let reply: Value = serde_json::from_str(&sock_request(&other_path, br#"{"tool":"list_workers","args":{}}"#)).unwrap();
     assert_eq!(reply["error"], "peer_uid", "{reply}");
 
@@ -810,7 +810,7 @@ fn mcp_session(h: &Home, lines: &[Value]) -> Vec<Value> {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let input: String = lines.iter().map(|v| format!("{v}\n")).collect();
     let mut out = Vec::new();
     mcp::serve(Cursor::new(input), &mut out, &mut SocketClient::new(&sock)).unwrap();
@@ -982,7 +982,7 @@ fn lead_mcp_calls_are_bound_to_the_run_being_asked_about() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let finished_run = "20261104-0900";
     let call = |bound: Option<&str>, tool: &str, args: Value| -> Value {
         let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}));
@@ -1033,7 +1033,7 @@ fn director_general_mcp_calls_are_bound_to_project_and_generation() {
     let sock = short_sock();
     let listener = socket::bind(&sock).unwrap();
     let srv = svc.clone();
-    std::thread::spawn(move || socket::serve(listener, srv, unsafe { libc::getuid() }));
+    std::thread::spawn(move || socket::serve(listener, srv, vajra_desktop::control::runreg::RunRegistry::new(), unsafe { libc::getuid() }));
     let call = |c: &mut SocketClient, tool: &str| -> Value {
         let input = format!("{}\n", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{}}}));
         let mut out = Vec::new();

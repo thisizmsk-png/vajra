@@ -8,6 +8,8 @@
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
@@ -187,11 +189,31 @@ pub fn handle(msg: &Value, fwd: &mut impl Forward) -> Option<Value> {
     })
 }
 
-fn write_line(out: &mut impl Write, v: &Value) -> io::Result<()> {
+fn write_line(out: &mut (impl Write + ?Sized), v: &Value) -> io::Result<()> {
     let mut s = v.to_string();
     s.push('\n');
     out.write_all(s.as_bytes())?;
     out.flush()
+}
+
+/// Drain the rest of an oversized line in bounded reads.
+fn drain_line(input: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                input.consume(i + 1);
+                return Ok(());
+            }
+            None => {
+                let n = chunk.len();
+                input.consume(n);
+            }
+        }
+    }
 }
 
 /// Serve JSON-RPC lines from `input` until EOF.
@@ -204,23 +226,7 @@ pub fn serve(mut input: impl BufRead, mut out: impl Write, fwd: &mut impl Forwar
             return Ok(());
         }
         if buf.last() != Some(&b'\n') && buf.len() > MAX_REQUEST {
-            // Drain the rest of the oversized line in bounded reads.
-            loop {
-                let chunk = input.fill_buf()?;
-                if chunk.is_empty() {
-                    break;
-                }
-                match chunk.iter().position(|&b| b == b'\n') {
-                    Some(i) => {
-                        input.consume(i + 1);
-                        break;
-                    }
-                    None => {
-                        let n = chunk.len();
-                        input.consume(n);
-                    }
-                }
-            }
+            drain_line(&mut input)?;
             write_line(&mut out, &err(&Value::Null, -32600, "request too large"))?;
             continue;
         }
@@ -248,6 +254,140 @@ pub fn run_stdio(socket_path: &Path) -> io::Result<()> {
     let mut client = SocketClient::from_env(socket_path, |k| std::env::var_os(k))?;
     serve(stdin.lock(), io::stdout().lock(), &mut client)
 }
+
+// ---------------------------------------------------------------- `--mcp-run`: a run lead's `vajra-run` server
+
+/// The `vajra-run` server's name: the lead profiles reserve it (`mcp_servers.vajra_run`, `mcp__vajra_run__*`).
+pub const RUN_SERVER_NAME: &str = "vajra_run";
+/// The most calls one lead may have in flight; past it a call is answered with a tool error at once.
+pub const MAX_IN_FLIGHT: usize = 16;
+
+/// Where a run lead's tool calls go. `Sync`: calls run on their own threads.
+pub trait RunForward: Send + Sync {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, Value>;
+}
+
+/// Forwards to the app socket for one run, with the token the token file held. One connection per call.
+pub struct RunClient {
+    path: PathBuf,
+    run: String,
+    token: String,
+}
+
+impl RunClient {
+    /// From the environment the core set: `VAJRA_RUN` and `VAJRA_RUN_TOKEN_FILE` (the token is read from the file,
+    /// never from argv or env). Anything missing or malformed is a refusal to start.
+    pub fn from_env(path: &Path, get: impl Fn(&str) -> Option<std::ffi::OsString>) -> io::Result<Self> {
+        use super::runreg::{RUN_ENV, TOKEN_FILE_ENV};
+        let bad = |what: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{what} is not valid"));
+        let run = get(RUN_ENV).and_then(|v| v.into_string().ok()).filter(|r| crate::ids::valid_run_id(r)).ok_or_else(|| bad(RUN_ENV))?;
+        let file = get(TOKEN_FILE_ENV).map(PathBuf::from).filter(|p| p.is_absolute()).ok_or_else(|| bad(TOKEN_FILE_ENV))?;
+        let token = super::runreg::read_token(&file)?;
+        Ok(Self { path: path.to_path_buf(), run, token })
+    }
+}
+
+impl RunForward for RunClient {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, Value> {
+        let timeout = super::runreg::client_timeout(tool, args, socket::READ_TIMEOUT);
+        match socket::request_run(&self.path, &self.run, &self.token, tool, args, timeout) {
+            Ok(mut v) => {
+                if let Some(ok) = v.get_mut("ok") {
+                    return Ok(ok.take());
+                }
+                Err(v.get_mut("tool_error").map(Value::take).unwrap_or(v))
+            }
+            Err(_) => Err(json!({"error": "app_unavailable"})),
+        }
+    }
+}
+
+/// One message for the run server. `None`: a notification, or a `tools/call` that answers on its own thread.
+fn handle_run(msg: &Value, fwd: &Arc<dyn RunForward>, out: &Arc<Mutex<dyn Write + Send>>, in_flight: &Arc<AtomicUsize>) -> Option<Value> {
+    let id = msg.get("id")?.clone();
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    Some(match method {
+        "initialize" => {
+            let pv = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(DEFAULT_PROTOCOL);
+            ok(&id, json!({"protocolVersion": pv, "capabilities": {"tools": {"listChanged": false}},
+                           "serverInfo": {"name": RUN_SERVER_NAME, "version": env!("CARGO_PKG_VERSION")}}))
+        }
+        "ping" => ok(&id, json!({})),
+        "tools/list" => ok(&id, json!({"tools": super::runreg::tools()})),
+        "tools/call" => {
+            let Some(name) = params.get("name").and_then(Value::as_str).map(str::to_string) else {
+                return Some(err(&id, -32602, "params.name is required"));
+            };
+            if !super::runreg::is_run_tool(&name) {
+                return Some(ok(&id, tool_result(json!({"error": "unknown_tool"}), true)));
+            }
+            if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                return Some(ok(&id, tool_result(json!({"error": "busy", "reason": "too many calls in flight"}), true)));
+            }
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let (fwd, out, in_flight) = (fwd.clone(), out.clone(), in_flight.clone());
+            std::thread::spawn(move || {
+                let r = match fwd.call(&name, &args) {
+                    Ok(v) => ok(&id, tool_result(v, false)),
+                    Err(e) => ok(&id, tool_result(e, true)),
+                };
+                let _ = write_line(&mut *out.lock().unwrap_or_else(|e| e.into_inner()), &r);
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            });
+            return None;
+        }
+        _ => err(&id, -32601, "method not found"),
+    })
+}
+
+/// Serve a run lead's JSON-RPC lines from `input` until EOF. Each `tools/call` runs on its own thread; every reply is
+/// written whole under one lock. Returns once input ends and every call in flight has answered.
+pub fn serve_run(mut input: impl BufRead, out: Arc<Mutex<dyn Write + Send>>, fwd: Arc<dyn RunForward>) -> io::Result<()> {
+    let cap = super::runreg::MAX_PLAN_REQUEST + 4096;
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if Read::by_ref(&mut input).take(cap as u64 + 1).read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        let reply = if buf.last() != Some(&b'\n') && buf.len() > cap {
+            drain_line(&mut input)?;
+            Some(err(&Value::Null, -32600, "request too large"))
+        } else {
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Value>(line) {
+                Ok(msg) if msg.is_object() => handle_run(&msg, &fwd, &out, &in_flight),
+                Ok(_) => Some(err(&Value::Null, -32600, "invalid request")),
+                Err(_) => Some(err(&Value::Null, -32700, "parse error")),
+            }
+        };
+        if let Some(r) = reply {
+            write_line(&mut *out.lock().unwrap_or_else(|e| e.into_inner()), &r)?;
+        }
+    }
+    while in_flight.load(Ordering::SeqCst) > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+/// The `--mcp-run` entry point: stdin/stdout, forwarding to `socket_path` for the run the environment names.
+pub fn run_stdio_run(socket_path: &Path) -> io::Result<()> {
+    let client = RunClient::from_env(socket_path, |k| std::env::var_os(k))?;
+    let out: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(io::stdout()));
+    serve_run(io::stdin().lock(), out, Arc::new(client))
+}
+
+#[cfg(test)]
+#[path = "mcp_run_tests.rs"]
+mod run_tests;
 
 #[cfg(test)]
 mod seat_schema_tests {

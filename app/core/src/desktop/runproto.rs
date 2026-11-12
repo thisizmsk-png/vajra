@@ -1190,6 +1190,21 @@ impl RunProtocol {
         }
     }
 
+    /// `list_workers` and `inspect_worker` (read-only, this run only): each worker ticket with its task, round, seat
+    /// and status, in dispatch order; `only` keeps one ticket.
+    pub fn workers(&self, only: Option<&str>) -> Vec<Value> {
+        let st = self.lock();
+        st.tasks
+            .iter()
+            .flat_map(|t| t.tickets.iter().map(move |tk| (t, tk)))
+            .filter(|(_, (_, id, _))| only.is_none_or(|o| o == id))
+            .filter_map(|(t, (round, id, slot))| {
+                let s = self.status_of(&st, id)?;
+                Some(json!({"task": t.spec.id, "round": round, "slot": slot, "status": s}))
+            })
+            .collect()
+    }
+
     /// The accepted plan, as the guarded `plan.json` keeps it for the resume charter (6d2) and memory (6j).
     pub fn plan_record(&self) -> Value {
         let st = self.lock();

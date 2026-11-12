@@ -34,6 +34,11 @@ fn is_mcp(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--mcp")
 }
 
+/// `--mcp-run`: a run lead's `vajra-run` server (ADR-16 16.5).
+fn is_mcp_run(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--mcp-run")
+}
+
 // -------------------------------------------------------------------- commands
 
 #[tauri::command(async)]
@@ -595,6 +600,17 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if is_mcp_run(&args) {
+        // Before Tauri: stdout belongs to the MCP protocol.
+        let code = match mcp::run_stdio_run(&control::socket_path(&data)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vajra-desktop --mcp-run: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     if is_mcp(&args) {
         // Before Tauri: stdout belongs to the MCP protocol.
         let code = match mcp::run_stdio(&control::socket_path(&data)) {
@@ -623,9 +639,10 @@ fn main() {
     match socket::bind(&control::socket_path(&data)) {
         Ok(listener) => {
             let svc = app.control.clone();
+            let runs = app.run_leads.clone();
             // SAFETY: getuid has no preconditions and cannot fail.
             let uid = unsafe { libc::getuid() };
-            std::thread::spawn(move || socket::serve(listener, svc, uid));
+            std::thread::spawn(move || socket::serve(listener, svc, runs, uid));
         }
         Err(e) => {
             eprintln!("vajra-desktop: control socket: {e}");
@@ -821,5 +838,8 @@ mod tests {
         assert!(is_mcp(&a(&["vajra-desktop", "-x", "--mcp"])));
         assert!(!is_mcp(&a(&["--mcp"])));
         assert!(!is_mcp(&a(&["vajra-desktop", "--mcpx"])));
+        assert!(is_mcp_run(&a(&["vajra-desktop", "--mcp-run"])));
+        assert!(!is_mcp_run(&a(&["vajra-desktop", "--mcp"])), "--mcp is the Lead chat server, never the run server");
+        assert!(!is_mcp(&a(&["vajra-desktop", "--mcp-run"])));
     }
 }

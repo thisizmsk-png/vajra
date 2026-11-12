@@ -245,6 +245,8 @@ pub struct App {
     pub bus: Arc<Bus>,
     pub sup: Supervisor,
     pub control: Arc<Mutex<Service>>,
+    /// The live runs whose leads call `vajra-run` tools over the socket (ADR-16 16.5); never behind `control`.
+    pub run_leads: Arc<crate::control::runreg::RunRegistry>,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -379,6 +381,7 @@ impl App {
             sup: Supervisor::new(bus.clone(), log.clone()),
             bus,
             control: Arc::new(Mutex::new(svc)),
+            run_leads: crate::control::runreg::RunRegistry::new(),
             runs: Mutex::new(HashMap::new()),
             evidence_timeout: EVIDENCE_TIMEOUT,
             evidence_budget: EVIDENCE_BUDGET,
