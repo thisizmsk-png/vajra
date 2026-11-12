@@ -120,6 +120,11 @@ export function FindRepos({ onAdded }: { onAdded: () => void }) {
           </Text>
         )}
         {note && <div role="status">{note}</div>}
+        {picked.size === 0 && !busy && (
+          <Text variant="body-sm" muted>
+            {W.pickOne}
+          </Text>
+        )}
         <div className="v-find__bar">
           <Button variant="ghost" onClick={dismiss} disabled={busy}>
             {W.cancel}
