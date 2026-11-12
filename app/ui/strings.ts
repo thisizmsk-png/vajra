@@ -706,6 +706,8 @@ export const S = {
     lede: "Choose global defaults or override them for this project.",
     barLabel: "Actions on Settings",
     sectionsLabel: "Settings sections",
+    back: "Back",
+    backTo: (project: string) => `Back to ${project}`,
     later: "Not built yet",
     sections: {
       general: { title: "General", lede: "Behaviour that applies across your work." },
