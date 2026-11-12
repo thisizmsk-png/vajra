@@ -384,6 +384,50 @@ fn a_run_left_waiting_on_a_seat_pick_ends_needs_user() {
     assert_eq!(r.p.lead_exited(LeadExit::Exited), LeadAction::Ended(RunStatus::NeedsUser));
 }
 
+#[test]
+fn a_lone_held_task_cannot_be_integrated_past_and_finish_run_ends_needs_user() {
+    // The charter's path when the only task is held: nothing to await, so the lead finishes with notes.
+    let r = rig_with("rotate the session tokens", default_seats(), Limits::default(), false);
+    let mut t1 = task("t1", "backend", &["src/a/"], &[], &["ac-1"]);
+    t1.title = "rotate tokens".into();
+    r.p.plan_tasks(PlanInput { round: 1, criteria: Some(criteria()), tasks: vec![t1], ..PlanInput::default() }).unwrap();
+    assert_eq!(r.p.dispatch_worker("t1").unwrap(), Dispatched::Held { task: "t1".into() });
+    let (c, why) = code(r.p.integrate(1));
+    assert_eq!(c, NOT_READY);
+    assert!(why.contains("task t1 waits for the human to pick its seat") && why.contains("finish_run"), "{why}");
+    assert_eq!(r.p.finish_run("t1 waits for a seat").unwrap(), RunStatus::NeedsUser);
+}
+
+#[test]
+fn a_hold_left_after_the_last_worker_ends_is_not_integrated_and_finish_run_ends_needs_user() {
+    let r = rig_with("rotate the session tokens", default_seats(), Limits::default(), false);
+    let mut p = plan1();
+    p.tasks[0].title = "rotate tokens".into();
+    r.p.plan_tasks(p).unwrap();
+    assert_eq!(r.p.dispatch_worker("t1").unwrap(), Dispatched::Held { task: "t1".into() });
+    r.round_done(&["t3"]);
+    assert!(code(r.p.dispatch_worker("t2")).1.contains("dependency t1 is not done"));
+    assert!(code(r.p.integrate(1)).1.contains("task t1 waits for the human to pick its seat"), "a hold is not a failure");
+    assert_eq!(r.p.finish_run("t1 waits for a seat; t2 needs it").unwrap(), RunStatus::NeedsUser);
+}
+
+#[test]
+fn a_task_blocked_by_a_failed_dependency_does_not_hold_integrate_back_and_both_are_reworked() {
+    // The charter's path for t2 -> t1 with t1 failed: t2 can never start this round, so the lead integrates.
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.w.end(&r.dispatch("t1"), Outcome::Failed);
+    r.round_done(&["t3"]);
+    assert!(code(r.p.dispatch_worker("t2")).1.contains("dependency t1 is not done"));
+    r.p.integrate(1).unwrap();
+    r.await_round(1);
+    assert_eq!(r.status(), None, "rounds are left, so the run goes on");
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    assert!(code(r.p.dispatch_worker("t3")).1.contains("reworks only t1, t2"), "the undispatched task is reworked with its failed dependency");
+    r.round_done(&["t1", "t2"]);
+    r.p.integrate(2).unwrap();
+}
+
 // ---------------------------------------------------------------- dispatch refusals
 
 #[test]
