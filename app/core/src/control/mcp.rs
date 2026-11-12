@@ -306,6 +306,15 @@ impl RunForward for RunClient {
     }
 }
 
+/// One call in flight; released on drop.
+struct InFlight(Arc<AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// One message for the run server. `None`: a notification, or a `tools/call` that answers on its own thread.
 fn handle_run(msg: &Value, fwd: &Arc<dyn RunForward>, out: &Arc<Mutex<dyn Write + Send>>, in_flight: &Arc<AtomicUsize>) -> Option<Value> {
     let id = msg.get("id")?.clone();
@@ -332,14 +341,19 @@ fn handle_run(msg: &Value, fwd: &Arc<dyn RunForward>, out: &Arc<Mutex<dyn Write 
             }
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             let (fwd, out, in_flight) = (fwd.clone(), out.clone(), in_flight.clone());
-            std::thread::spawn(move || {
+            // The slot is released by a guard, so a call that panics still frees it.
+            let slot = InFlight(in_flight);
+            let spawned = std::thread::Builder::new().name("vajra-run-call".into()).spawn(move || {
+                let _slot = slot;
                 let r = match fwd.call(&name, &args) {
                     Ok(v) => ok(&id, tool_result(v, false)),
                     Err(e) => ok(&id, tool_result(e, true)),
                 };
                 let _ = write_line(&mut *out.lock().unwrap_or_else(|e| e.into_inner()), &r);
-                in_flight.fetch_sub(1, Ordering::SeqCst);
             });
+            if spawned.is_err() {
+                return Some(ok(&msg["id"], tool_result(json!({"error": "busy", "reason": "no thread for the call"}), true)));
+            }
             return None;
         }
         _ => err(&id, -32601, "method not found"),

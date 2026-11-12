@@ -5,10 +5,15 @@
 //!   `RunProtocol`, whose `await_any` parks without any lock held, so two awaits run side by side.
 //! - **The gate, in order.** The run is registered; the request's token hashes to the one the registry holds (only
 //!   the hash is kept); the lead has started; and the socket peer descends from that lead process (pid and start
-//!   stamp, at most 64 parent links: `procid::descends_from`). The token is not a boundary against the run's own
+//!   stamp, at most 64 parent links: `procid::descends_from`). The peer is the process as it was at accept (pid and
+//!   start stamp) and must still be that process when it is admitted. The token is not a boundary against the run's own
 //!   workers (they can read files, T1): it keeps another run's client from calling by mistake. The peer check is
 //!   the real gate.
 //! - **Rotation.** Resume writes a new token file and the registry keeps only the new hash; the old token is refused.
+//! - **The lead pid** is the harness process itself. `set_lead` refuses the app's own pid and any process the app
+//!   descends from: everything would descend from those. The caller must also never start a worker under the lead's
+//!   tree (the core spawns workers itself, 6c).
+//! - **Bounds.** At most `MAX_RUN_CALLS` calls of one run are served at once; past it a call is answered `busy`.
 
 use std::collections::HashMap;
 use std::io;
@@ -30,6 +35,8 @@ pub const TOKEN_FILE_ENV: &str = "VAJRA_RUN_TOKEN_FILE";
 pub const MAX_PLAN_REQUEST: usize = 256 * 1024;
 /// A long wait gets `wait_s` plus this much before the client gives up.
 pub const AWAIT_SLACK: Duration = Duration::from_secs(10);
+/// Calls of one run served at once.
+pub const MAX_RUN_CALLS: usize = 16;
 
 pub const TOOL_NAMES: [&str; 9] =
     ["plan_tasks", "dispatch_worker", "await_any", "await_worker", "cancel_worker", "integrate", "finish_run", "list_workers", "inspect_worker"];
@@ -177,15 +184,19 @@ pub fn write_token(run_dir: &Path) -> io::Result<(PathBuf, [u8; 32])> {
 }
 
 /// Read the token the `--mcp-run` server was pointed at: a regular file, not a link, owned by us, 0600 or tighter.
+/// One open (`O_NOFOLLOW`), and the checks are on that descriptor, so the file read is the file checked.
 pub fn read_token(path: &Path) -> io::Result<String> {
-    use std::os::unix::fs::MetadataExt;
-    let m = std::fs::symlink_metadata(path)?;
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let m = f.metadata()?;
     // SAFETY: getuid has no preconditions and cannot fail.
     let me = unsafe { libc::getuid() };
     if !m.file_type().is_file() || m.uid() != me || m.mode() & 0o077 != 0 {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the run token file must be ours and 0600"));
     }
-    let b = fsx::read_nofollow_capped(path, 256)?;
+    let mut b = Vec::new();
+    f.take(256).read_to_end(&mut b)?;
     let t = String::from_utf8(b).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the run token is not text"))?;
     let t = t.trim().to_string();
     if t.len() != 64 || !t.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -207,10 +218,42 @@ pub struct LeadProc {
     pub stamp: u64,
 }
 
+/// The socket peer as it was when it connected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peer {
+    pub pid: u32,
+    pub stamp: u64,
+}
+
+impl Peer {
+    /// `pid` as it is now; `None` when it can't be read.
+    pub fn now(pid: u32) -> Option<Peer> {
+        Some(Peer { pid, stamp: crate::procid::start_stamp(pid)? })
+    }
+}
+
+/// Why `set_lead` refused a pid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeadRefused {
+    UnknownRun,
+    /// The app itself, or a process the app descends from: every process would pass the peer check.
+    TooWide,
+}
+
 struct Entry {
     proto: RunProtocol,
     token: [u8; 32],
     lead: Option<LeadProc>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Holds one of a run's call slots until the call returns.
+struct CallSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for CallSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The live runs the socket serves `vajra-run` calls for.
@@ -237,12 +280,25 @@ impl RunRegistry {
 
     /// Serve `run` with `proto` behind the token whose hash is `token`. No call passes until `set_lead`.
     pub fn register(&self, run: &str, proto: RunProtocol, token: [u8; 32]) {
-        crate::lock(&self.runs).insert(run.to_string(), Entry { proto, token, lead: None });
+        crate::lock(&self.runs).insert(run.to_string(), Entry { proto, token, lead: None, calls: Default::default() });
     }
 
-    /// The lead process that started (or restarted) for `run`; calls must come from its tree.
-    pub fn set_lead(&self, run: &str, lead: LeadProc) -> bool {
-        crate::lock(&self.runs).get_mut(run).map(|e| e.lead = Some(lead)).is_some()
+    /// The lead process that started (or restarted) for `run`: the harness process itself. Calls must come from its
+    /// tree. The app's own pid, or one of its ancestors, is refused.
+    pub fn set_lead(&self, run: &str, lead: LeadProc) -> Result<(), LeadRefused> {
+        let me = std::process::id();
+        if lead.pid == me || crate::procid::descends_from(me, lead.pid, lead.stamp) {
+            return Err(LeadRefused::TooWide);
+        }
+        crate::lock(&self.runs).get_mut(run).map(|e| e.lead = Some(lead)).ok_or(LeadRefused::UnknownRun)
+    }
+
+    /// Is `peer` (still the same process) in the tree of any registered lead? Such a process may call only
+    /// `vajra-run` tools, and only it may send a request past `socket::MAX_REQUEST`.
+    pub fn in_lead_tree(&self, peer: Option<Peer>) -> bool {
+        let Some(p) = peer else { return false };
+        let leads: Vec<LeadProc> = crate::lock(&self.runs).values().filter_map(|e| e.lead).collect();
+        !leads.is_empty() && crate::procid::same_process(p.pid, p.stamp) && leads.into_iter().any(|l| (self.descends)(p.pid, l))
     }
 
     /// The lead process exited: nothing passes until the next `set_lead`.
@@ -262,24 +318,31 @@ impl RunRegistry {
     }
 
     /// Gate one request and find its protocol. The registry lock is released before the call runs.
-    fn admit(&self, run: &str, token: &str, peer: Option<u32>) -> Result<RunProtocol, Value> {
+    fn admit(&self, run: &str, token: &str, peer: Option<Peer>) -> Result<(RunProtocol, CallSlot), Value> {
+        use std::sync::atomic::Ordering;
         let runs = crate::lock(&self.runs);
         let e = runs.get(run).ok_or_else(|| json!({"error": "run_unknown"}))?;
         if !same_hash(&sha256::digest(token.as_bytes()), &e.token) {
             return Err(json!({"error": "run_token"}));
         }
         let lead = e.lead.ok_or_else(|| json!({"error": "lead_not_running"}))?;
-        let proto = e.proto.clone();
+        let (proto, calls) = (e.proto.clone(), e.calls.clone());
         drop(runs);
+        // The peer must still be the process that connected (a reused pid has another stamp), and descend from the lead.
         match peer {
-            Some(pid) if (self.descends)(pid, lead) => Ok(proto),
-            _ => Err(json!({"error": "peer_not_lead"})),
+            Some(p) if crate::procid::same_process(p.pid, p.stamp) && (self.descends)(p.pid, lead) => {}
+            _ => return Err(json!({"error": "peer_not_lead"})),
         }
+        if calls.fetch_add(1, Ordering::SeqCst) >= MAX_RUN_CALLS {
+            calls.fetch_sub(1, Ordering::SeqCst);
+            return Err(json!({"error": "busy", "reason": "too many calls of this run in flight"}));
+        }
+        Ok((proto, CallSlot(calls)))
     }
 
     /// One `vajra-run` request from the socket: `{"vajra_run": run, "token": t, "tool": name, "args": {...}}`, from the
     /// peer process `peer`. The reply is `{"ok": result}` or an error object.
-    pub fn serve(&self, req: &Value, peer: Option<u32>) -> Value {
+    pub fn serve(&self, req: &Value, peer: Option<Peer>) -> Value {
         let (Some(run), Some(token), Some(tool)) =
             (req.get("vajra_run").and_then(Value::as_str), req.get("token").and_then(Value::as_str), req.get("tool").and_then(Value::as_str))
         else {
@@ -288,7 +351,7 @@ impl RunRegistry {
         if !is_run_tool(tool) {
             return json!({"error": "unknown_tool"});
         }
-        let proto = match self.admit(run, token, peer) {
+        let (proto, _slot) = match self.admit(run, token, peer) {
             Ok(p) => p,
             Err(e) => return e,
         };

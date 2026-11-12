@@ -11,7 +11,13 @@
 //!   run is the current control session (ADR-13: a Lead is bound to the run it was asked about).
 //! - A `vajra-run` request (ADR-16 16.5, from a run lead's `--mcp-run` server) carries `"vajra_run"` and `"token"`. It
 //!   goes to the `RunRegistry` with the peer's pid and never takes the `Service` lock, so an `await_any` that parks
-//!   does not hold up any other call. Only a `plan_tasks` request may use the larger cap, `runreg::MAX_PLAN_REQUEST`.
+//!   does not hold up any other call. Only a `plan_tasks` request may use the larger cap, `runreg::MAX_PLAN_REQUEST`,
+//!   and a line past `MAX_REQUEST` is read on only for a peer in a registered lead's tree.
+//! - The peer is the process as it was at accept: its pid and start stamp. A `vajra-run` connection serves one request
+//!   and closes, so a connection can't be handed to a younger process that later reuses the peer's pid.
+//! - A process in a run lead's tree may call only `vajra-run` tools: its Service calls are refused
+//!   (`run_lead_on_service`), so a lead or its shell can't steer another session's workers.
+//! - At most `MAX_CONNECTIONS` connections are served at once; past it a connection is refused at once.
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -19,17 +25,20 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::fsx;
-use super::runreg::{self, RunRegistry};
+use super::runreg::{self, Peer, RunRegistry};
 use super::service::Service;
 
 /// Request cap: 64 KiB.
 pub const MAX_REQUEST: usize = 64 * 1024;
+/// Connections served at once.
+pub const MAX_CONNECTIONS: usize = 64;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The uid of the process on the other end, via getpeereid (LOCAL_PEERCRED).
@@ -106,13 +115,31 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     Ok(l)
 }
 
-/// Accept forever, one thread per connection. Only `allowed_uid` is served.
+/// Releases a connection slot when its thread ends, however it ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Accept forever, one thread per connection, at most `MAX_CONNECTIONS` at once. Only `allowed_uid` is served.
 pub fn serve(listener: UnixListener, svc: Arc<Mutex<Service>>, runs: Arc<RunRegistry>, allowed_uid: u32) {
+    let open = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
-        let Ok(conn) = conn else { continue };
-        let svc = svc.clone();
-        let runs = runs.clone();
-        std::thread::spawn(move || {
+        let Ok(mut conn) = conn else { continue };
+        if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            open.fetch_sub(1, Ordering::SeqCst);
+            let _ = conn.set_write_timeout(Some(Duration::from_millis(100)));
+            let _ = reply(&mut conn, &json!({"error": "busy"}));
+            continue;
+        }
+        let slot = Slot(open.clone());
+        let (svc, runs) = (svc.clone(), runs.clone());
+        // A refused thread drops the connection (and its slot) instead of panicking the accept loop.
+        let _ = std::thread::Builder::new().name("vajra-socket".into()).spawn(move || {
+            let _slot = slot;
             let _ = handle(conn, &svc, &runs, allowed_uid);
         });
     }
@@ -124,17 +151,24 @@ fn reply(w: &mut UnixStream, v: &Value) -> io::Result<()> {
     w.write_all(line.as_bytes())
 }
 
-/// Read one line of at most `cap` bytes. `Ok(None)` at EOF,
-/// `Err(InvalidData)` if the line is longer than the cap.
-fn read_request(r: &mut impl BufRead, cap: usize) -> io::Result<Option<Vec<u8>>> {
+/// Read one line of at most `MAX_REQUEST` bytes, or of at most `big` bytes when `allow_big()` says the peer may send a
+/// longer one (asked only once the line has passed `MAX_REQUEST`). `Ok(None)` at EOF, `Err(InvalidData)` if the
+/// line is longer than the cap that applies.
+fn read_request(r: &mut impl BufRead, big: usize, allow_big: impl FnOnce() -> bool) -> io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
-    r.take(cap as u64 + 1).read_until(b'\n', &mut buf)?;
+    r.take(MAX_REQUEST as u64 + 1).read_until(b'\n', &mut buf)?;
     if buf.is_empty() {
         return Ok(None);
     }
+    if buf.last() != Some(&b'\n') && buf.len() > MAX_REQUEST {
+        if !allow_big() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "request_too_large"));
+        }
+        r.take((big + 1 - buf.len()) as u64).read_until(b'\n', &mut buf)?;
+    }
     if buf.last() == Some(&b'\n') {
         buf.pop();
-    } else if buf.len() > cap {
+    } else if buf.len() > big.max(MAX_REQUEST) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "request_too_large"));
     }
     Ok(Some(buf))
@@ -150,11 +184,12 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
         Ok(uid) if uid == allowed_uid => {}
         _ => return reply(&mut conn, &json!({"error": "peer_uid"})),
     }
-    let peer = peer_pid(&conn).ok();
+    // The peer as it is now, at accept: pid and start stamp. Every later check is against this very process.
+    let peer = peer_pid(&conn).ok().and_then(|pid| Some(Peer { pid, stamp: crate::procid::start_stamp(pid)? }));
     conn.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(conn.try_clone()?);
     loop {
-        let req = match read_request(&mut reader, runreg::MAX_PLAN_REQUEST) {
+        let req = match read_request(&mut reader, runreg::MAX_PLAN_REQUEST, || runs.in_lead_tree(peer)) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
@@ -164,8 +199,9 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
         };
         let out = match serde_json::from_slice::<Value>(&req) {
             Ok(v) if !within_cap(&v, req.len()) => json!({"error": "request_too_large"}),
-            // A run lead's call: never into the Service lock.
-            Ok(v) if v.get("vajra_run").is_some() => runs.serve(&v, peer),
+            // A run lead's call: never into the Service lock, and one per connection.
+            Ok(v) if v.get("vajra_run").is_some() => return reply(&mut conn, &runs.serve(&v, peer)),
+            Ok(_) if runs.in_lead_tree(peer) => json!({"error": "run_lead_on_service"}),
             Ok(v) => match v.get("tool").and_then(Value::as_str) {
                 Some(tool) => {
                     let args = v.get("args").cloned().unwrap_or(Value::Null);
@@ -200,6 +236,7 @@ pub fn request_run(path: &Path, run: &str, token: &str, tool: &str, args: &Value
     }
     let mut s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(READ_TIMEOUT))?;
     s.write_all(line.as_bytes())?;
     let mut r = BufReader::new(s);
     let mut out = String::new();

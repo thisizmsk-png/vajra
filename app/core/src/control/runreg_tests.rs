@@ -113,23 +113,35 @@ impl Drop for Kid {
     }
 }
 
-fn me() -> LeadProc {
-    let pid = std::process::id();
-    LeadProc { pid, stamp: crate::procid::start_stamp(pid).unwrap() }
+/// A lead process: a child of this test (so never the app or its ancestor), killed on drop.
+fn lead_kid() -> (Kid, LeadProc) {
+    let k = Kid(Command::new("sleep").arg("30").spawn().unwrap());
+    let l = LeadProc { pid: k.0.id(), stamp: crate::procid::start_stamp(k.0.id()).unwrap() };
+    (k, l)
+}
+
+/// This test process as a socket peer.
+fn me() -> Option<Peer> {
+    Peer::now(std::process::id())
 }
 
 fn req(run: &str, token: &str, tool: &str, args: Value) -> Value {
     json!({"vajra_run": run, "token": token, "tool": tool, "args": args})
 }
 
-/// A registry serving `proto()` for RUN behind a fresh token; returns the token.
+/// A registry serving `proto` for RUN behind a fresh token; returns the token.
 fn registered(reg: &RunRegistry, p: RunProtocol, lead: Option<LeadProc>) -> String {
     let token = nonce::random_hex(32).unwrap();
     reg.register(RUN, p, sha256::digest(token.as_bytes()));
     if let Some(l) = lead {
-        reg.set_lead(RUN, l);
+        reg.set_lead(RUN, l).unwrap();
     }
     token
+}
+
+/// A registry whose ancestry check always passes: the same-process check stays real.
+fn any_tree() -> RunRegistry {
+    RunRegistry::with_peer_check(Box::new(|_, _| true))
 }
 
 // ---------------------------------------------------------------- the tool table
@@ -214,59 +226,109 @@ fn a_token_file_that_is_readable_by_others_or_a_link_is_refused() {
 
 #[test]
 fn the_gate_refuses_an_unknown_run_a_wrong_token_and_a_run_with_no_lead() {
-    let reg = RunRegistry::with_peer_check(Box::new(|_, _| true));
+    let reg = any_tree();
     let token = registered(&reg, proto(), None);
-    let peer = Some(std::process::id());
-    assert_eq!(reg.serve(&req("20990101-0000", &token, "list_workers", json!({})), peer)["error"], "run_unknown");
-    assert_eq!(reg.serve(&req(RUN, &"0".repeat(64), "list_workers", json!({})), peer)["error"], "run_token");
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), peer)["error"], "lead_not_running");
-    reg.set_lead(RUN, me());
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), peer), json!({"ok": {"workers": []}}));
-    assert_eq!(reg.serve(&req(RUN, &token, "propose_run", json!({})), peer)["error"], "unknown_tool");
-    assert_eq!(reg.serve(&json!({"vajra_run": RUN, "tool": "list_workers"}), peer)["error"], "bad_request");
+    assert_eq!(reg.serve(&req("20990101-0000", &token, "list_workers", json!({})), me())["error"], "run_unknown");
+    assert_eq!(reg.serve(&req(RUN, &"0".repeat(64), "list_workers", json!({})), me())["error"], "run_token");
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running");
+    let (_k, lead) = lead_kid();
+    reg.set_lead(RUN, lead).unwrap();
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()), json!({"ok": {"workers": []}}));
+    assert_eq!(reg.serve(&req(RUN, &token, "propose_run", json!({})), me())["error"], "unknown_tool");
+    assert_eq!(reg.serve(&json!({"vajra_run": RUN, "tool": "list_workers"}), me())["error"], "bad_request");
     reg.clear_lead(RUN);
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), peer)["error"], "lead_not_running", "a lead that exited calls nothing");
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running", "a lead that exited calls nothing");
+}
+
+#[test]
+fn the_app_itself_or_its_ancestor_is_never_a_lead() {
+    let reg = RunRegistry::default();
+    registered(&reg, proto(), None);
+    let pid = std::process::id();
+    let mine = LeadProc { pid, stamp: crate::procid::start_stamp(pid).unwrap() };
+    assert_eq!(reg.set_lead(RUN, mine), Err(LeadRefused::TooWide));
+    let (ppid, _) = crate::procid::parent_and_stamp(pid).unwrap();
+    if let Some(stamp) = crate::procid::start_stamp(ppid) {
+        assert_eq!(reg.set_lead(RUN, LeadProc { pid: ppid, stamp }), Err(LeadRefused::TooWide), "every process of ours descends from it");
+    }
+    let (_k, lead) = lead_kid();
+    assert_eq!(reg.set_lead("20990101-0000", lead), Err(LeadRefused::UnknownRun));
+    assert_eq!(reg.set_lead(RUN, lead), Ok(()));
 }
 
 #[test]
 fn a_peer_that_does_not_descend_from_the_lead_is_refused() {
     let reg = RunRegistry::default();
-    // The lead is a process this test spawned; this test process is its parent, never its descendant.
-    let lead = Kid(Command::new("sleep").arg("30").spawn().unwrap());
-    let lead_proc = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
-    let token = registered(&reg, proto(), Some(lead_proc));
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(std::process::id()))["error"], "peer_not_lead");
+    let (lead_kid, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    // This test process is the lead's parent, never its descendant (as a core-spawned worker is never in its tree).
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "peer_not_lead");
     assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), None)["error"], "peer_not_lead", "no peer pid, no call");
+    assert!(!reg.in_lead_tree(me()));
     // The lead itself passes.
-    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(lead.0.id())).get("ok").is_some());
+    let p = Peer::now(lead_kid.0.id());
+    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), p).get("ok").is_some());
+    assert!(reg.in_lead_tree(p));
 }
 
 #[test]
 fn a_reused_lead_pid_with_another_start_time_is_refused() {
     let reg = RunRegistry::default();
-    let real = me();
-    // The recorded lead has this process's number but another start time: what a reused pid looks like.
+    let (k, real) = lead_kid();
+    // The recorded lead has the process's number but another start time: what a reused pid looks like.
     let token = registered(&reg, proto(), Some(LeadProc { pid: real.pid, stamp: real.stamp + 1 }));
-    let child = Kid(Command::new("sleep").arg("30").spawn().unwrap());
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(child.0.id()))["error"], "peer_not_lead");
-    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(real.pid))["error"], "peer_not_lead");
-    reg.set_lead(RUN, real);
-    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(child.0.id())).get("ok").is_some(), "a child of the true lead passes");
+    let p = Peer::now(k.0.id());
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), p)["error"], "peer_not_lead");
+    reg.set_lead(RUN, real).unwrap();
+    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), p).get("ok").is_some());
+}
+
+#[test]
+fn a_peer_whose_pid_now_names_another_process_is_refused() {
+    // What a connection handed to a process that later reused the peer's pid looks like: same pid, newer stamp.
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    let then = Peer { pid: std::process::id(), stamp: me().unwrap().stamp - 1 };
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), Some(then))["error"], "peer_not_lead");
+    assert!(!reg.in_lead_tree(Some(then)));
+    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()).get("ok").is_some());
 }
 
 #[test]
 fn a_rotated_token_refuses_the_old_one() {
-    let reg = RunRegistry::with_peer_check(Box::new(|_, _| true));
-    let old = registered(&reg, proto(), Some(me()));
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let old = registered(&reg, proto(), Some(lead));
     let t = Tmp::new("rot");
     let (path, hash) = write_token(&t.0).unwrap();
     assert!(reg.rotate_token(RUN, hash));
     let new = read_token(&path).unwrap();
-    let peer = Some(std::process::id());
-    assert_eq!(reg.serve(&req(RUN, &old, "list_workers", json!({})), peer)["error"], "run_token");
-    assert!(reg.serve(&req(RUN, &new, "list_workers", json!({})), peer).get("ok").is_some());
+    assert_eq!(reg.serve(&req(RUN, &old, "list_workers", json!({})), me())["error"], "run_token");
+    assert!(reg.serve(&req(RUN, &new, "list_workers", json!({})), me()).get("ok").is_some());
     reg.remove(RUN);
-    assert_eq!(reg.serve(&req(RUN, &new, "list_workers", json!({})), peer)["error"], "run_unknown");
+    assert_eq!(reg.serve(&req(RUN, &new, "list_workers", json!({})), me())["error"], "run_unknown");
+}
+
+#[test]
+fn past_the_per_run_bound_a_call_is_answered_busy() {
+    let reg = Arc::new(any_tree());
+    let (_k, lead) = lead_kid();
+    let p = proto();
+    let (a, _) = two_tickets(&p);
+    let token = registered(&reg, p, Some(lead));
+    let parked: Vec<_> = (0..MAX_RUN_CALLS)
+        .map(|_| {
+            let (reg, token, a) = (reg.clone(), token.clone(), a.clone());
+            std::thread::spawn(move || reg.serve(&req(RUN, &token, "await_any", json!({"tickets": [a], "wait_s": 2})), me()))
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "busy");
+    for t in parked {
+        assert!(t.join().unwrap().get("ok").is_some());
+    }
+    assert!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me()).get("ok").is_some(), "the slots are freed");
 }
 
 // ---------------------------------------------------------------- the socket
@@ -288,14 +350,23 @@ fn serving(t: &Tmp, reg: Arc<RunRegistry>) -> (PathBuf, Arc<Mutex<super::super::
     (sock, svc)
 }
 
+/// Send `lines` raw on one connection; every reply line until the app closes it.
+fn raw(sock: &Path, lines: &str) -> Vec<Value> {
+    let mut c = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    // The app may answer and close before it has read everything (a refused oversized line): a broken pipe is fine.
+    let _ = std::io::Write::write_all(&mut c, lines.as_bytes());
+    let _ = c.shutdown(std::net::Shutdown::Write);
+    std::io::BufRead::lines(std::io::BufReader::new(c)).map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect()
+}
+
 #[test]
 fn two_concurrent_awaits_both_return_within_wait_s_plus_one_while_the_service_lock_is_held() {
     let t = Tmp::new("conc");
-    // The peer is this test process: it is the lead.
-    let reg = RunRegistry::default();
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
     let p = proto();
     let (a, b) = two_tickets(&p);
-    let token = registered(&reg, p, Some(me()));
+    let token = registered(&reg, p, Some(lead));
     let (sock, svc) = serving(&t, Arc::new(reg));
     // Hold the control Service lock for the whole test: a vajra-run call must never need it.
     let _held = crate::lock(&svc);
@@ -322,10 +393,27 @@ fn two_concurrent_awaits_both_return_within_wait_s_plus_one_while_the_service_lo
 }
 
 #[test]
-fn only_plan_tasks_may_use_the_larger_request_cap() {
+fn a_vajra_run_connection_serves_one_request_and_a_lead_tree_peer_gets_no_service_calls() {
+    let t = Tmp::new("one");
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    let (sock, _svc) = serving(&t, Arc::new(reg));
+    let two = format!("{}\n{}\n", req(RUN, &token, "list_workers", json!({})), req(RUN, &token, "list_workers", json!({})));
+    let got = raw(&sock, &two);
+    assert_eq!(got.len(), 1, "the connection closes after one vajra-run reply: {got:?}");
+    assert!(got[0].get("ok").is_some());
+    // Every peer passes the (faked) ancestry check here, so this test process is "in a lead's tree".
+    let svc_call = format!("{}\n", json!({"tool": "list_workers", "args": {}}));
+    assert_eq!(raw(&sock, &svc_call)[0]["error"], "run_lead_on_service");
+}
+
+#[test]
+fn only_plan_tasks_from_a_lead_tree_may_use_the_larger_request_cap() {
     let t = Tmp::new("cap");
-    let reg = RunRegistry::with_peer_check(Box::new(|_, _| true));
-    let token = registered(&reg, proto(), Some(me()));
+    let reg = any_tree();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
     let (sock, _svc) = serving(&t, Arc::new(reg));
     let big = "x".repeat(100 * 1024);
     let to = Duration::from_secs(10);
@@ -336,15 +424,21 @@ fn only_plan_tasks_may_use_the_larger_request_cap() {
     assert_ne!(out["error"], "request_too_large", "{out}");
     assert!(out.get("tool_error").is_some(), "{out}");
     // Any other tool with 100 KiB is refused by the socket itself (sent raw: the client would not even send it).
-    let raw = format!("{}\n", req(RUN, &token, "finish_run", json!({"report": big})));
-    let mut c = std::os::unix::net::UnixStream::connect(&sock).unwrap();
-    std::io::Write::write_all(&mut c, raw.as_bytes()).unwrap();
-    let mut line = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(c), &mut line).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["error"], "request_too_large");
+    assert_eq!(raw(&sock, &format!("{}\n", req(RUN, &token, "finish_run", json!({"report": big}))))[0]["error"], "request_too_large");
     assert_eq!(super::super::socket::request_run(&sock, RUN, &token, "finish_run", &json!({"report": big}), to).unwrap()["error"], "request_too_large");
     let huge = json!({"round": 1, "tasks": [], "x": "y".repeat(MAX_PLAN_REQUEST)});
     assert_eq!(super::super::socket::request_run(&sock, RUN, &token, "plan_tasks", &huge, to).unwrap()["error"], "request_too_large");
+}
+
+#[test]
+fn a_peer_outside_every_lead_tree_reads_no_more_than_the_small_cap() {
+    let t = Tmp::new("small");
+    let reg = RunRegistry::default();
+    let (_k, lead) = lead_kid();
+    let token = registered(&reg, proto(), Some(lead));
+    let (sock, _svc) = serving(&t, Arc::new(reg));
+    let plan = json!({"round": 1, "tasks": [], "pad": "x".repeat(100 * 1024)});
+    assert_eq!(raw(&sock, &format!("{}\n", req(RUN, &token, "plan_tasks", plan)))[0]["error"], "request_too_large");
 }
 
 #[test]
@@ -354,6 +448,7 @@ fn a_service_request_still_works_beside_the_run_route() {
     let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
     assert!(out.get("ok").is_some() || out.get("error").is_some(), "{out}");
     assert_ne!(out["error"], "run_unknown", "a request without vajra_run never reaches the registry");
+    assert_ne!(out["error"], "run_lead_on_service", "no lead is registered");
 }
 
 #[test]

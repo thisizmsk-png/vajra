@@ -1,10 +1,11 @@
 //! The real `vajra-desktop --mcp-run` binary (ADR-16 16.5, 6d2): the token is read from its 0600 file and never shows
 //! in the process's argv or environment, and a call goes stdio -> socket -> registry -> protocol. The peer check
-//! passes for the server when it descends from the lead (this test process) and refuses it when the lead is another
-//! process. Temp HOME and data dir only; every child is killed in a `Drop` guard.
+//! passes for the server when it descends from the lead (a `/bin/sh` the test starts, the server's parent) and refuses
+//! it when the lead is another process. Temp HOME and data dir only; every child is killed in a `Drop` guard.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -61,8 +62,11 @@ impl Drop for Tmp {
 
 struct Kid(Child);
 
+/// Kills the child's whole process group (each `Kid` leads its own), then reaps the child.
 impl Drop for Kid {
     fn drop(&mut self) {
+        // SAFETY: a negative pid signals the group this test created for the child.
+        unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) };
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -98,9 +102,10 @@ fn rig() -> Rig {
 }
 
 impl Rig {
+    /// The server under a `/bin/sh` parent that stays alive (no exec): the shell plays the lead's harness process.
     fn spawn(&self) -> (Kid, ChildStdin, BufReader<ChildStdout>) {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_vajra-desktop"))
-            .arg("--mcp-run")
+        let mut c = Command::new("/bin/sh")
+            .args(["-c", "\"$0\" --mcp-run; exit $?", env!("CARGO_BIN_EXE_vajra-desktop")])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.tmp.0.join("h"))
@@ -110,6 +115,7 @@ impl Rig {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .process_group(0)
             .spawn()
             .unwrap();
         let (stdin, stdout) = (c.stdin.take().unwrap(), c.stdout.take().unwrap());
@@ -124,9 +130,14 @@ fn ask(stdin: &mut ChildStdin, out: &mut BufReader<ChildStdout>, msg: Value) -> 
     serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?}: {e}"))
 }
 
-fn me() -> LeadProc {
-    let pid = std::process::id();
+fn lead_of(pid: u32) -> LeadProc {
     LeadProc { pid, stamp: vajra_desktop::procid::start_stamp(pid).unwrap() }
+}
+
+/// The server process: the shell's only child.
+fn server_pid(shell: u32) -> u32 {
+    let o = Command::new("pgrep").args(["-P", &shell.to_string()]).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).split_whitespace().next().and_then(|p| p.parse().ok()).expect("the server runs under the shell")
 }
 
 /// The process's argv and environment as the OS shows them to other processes.
@@ -142,11 +153,11 @@ fn visible(pid: u32) -> String {
 #[test]
 fn the_token_never_shows_in_ps_or_argv_and_a_descendant_of_the_lead_is_served() {
     let r = rig();
-    r.reg.set_lead(RUN, me());
     let (kid, mut stdin, mut out) = r.spawn();
+    r.reg.set_lead(RUN, lead_of(kid.0.id())).unwrap();
     let init = ask(&mut stdin, &mut out, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}));
     assert_eq!(init["result"]["serverInfo"]["name"], "vajra_run");
-    let shown = visible(kid.0.id());
+    let shown = visible(server_pid(kid.0.id()));
     assert!(shown.contains("--mcp-run"), "ps shows the process: {shown}");
     assert!(shown.contains(runreg::TOKEN_FILE), "ps shows the token file's path, which is fine: {shown}");
     assert!(!shown.contains(&r.token), "the token is in ps: {shown}");
@@ -161,8 +172,8 @@ fn the_token_never_shows_in_ps_or_argv_and_a_descendant_of_the_lead_is_served() 
 fn a_server_outside_the_leads_tree_is_refused() {
     let r = rig();
     // The lead is another process: the server, a child of this test, is not in its tree.
-    let other = Kid(Command::new("sleep").arg("30").spawn().unwrap());
-    r.reg.set_lead(RUN, LeadProc { pid: other.0.id(), stamp: vajra_desktop::procid::start_stamp(other.0.id()).unwrap() });
+    let other = Kid(Command::new("sleep").arg("30").process_group(0).spawn().unwrap());
+    r.reg.set_lead(RUN, lead_of(other.0.id())).unwrap();
     let (_kid, mut stdin, mut out) = r.spawn();
     let called = ask(&mut stdin, &mut out, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_workers", "arguments": {}}}));
     assert_eq!(called["result"]["isError"], true);
