@@ -10,7 +10,7 @@ const list = (...usage: UsageList["usage"]): UsageList => ({ schema: "vajra.prov
 const acct = (account: string, windows: ReturnType<typeof win>[]) => ({ account, read_at: "2026-11-09T12:00:00Z", source: "cli", windows, amounts: null });
 
 const bar = (usage?: UsageList | null) => render(
-  <PreferencesProvider projectId={null}><StatusBar runs={0} usage={usage} compact={null} onColumn={() => {}} onPhone={() => {}} onSettings={() => {}} /></PreferencesProvider>,
+  <PreferencesProvider projectId={null}><StatusBar runs={0} usage={usage} compact={null} onColumn={() => {}} onSettings={() => {}} /></PreferencesProvider>,
 );
 
 describe("usage warning chip", () => {
