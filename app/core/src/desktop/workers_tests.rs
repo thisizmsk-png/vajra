@@ -261,7 +261,11 @@ impl Rig {
     }
 
     fn done(&self, id: &str) -> TicketView {
-        self.rt.await_any(&[id.to_string()], WAIT).unwrap_or_else(|| panic!("{id} never ended: {:?}", self.rt.view(id)))
+        self.done_on(&self.rt, id)
+    }
+
+    fn done_on(&self, rt: &WorkerRuntime, id: &str) -> TicketView {
+        rt.await_any(&[id.to_string()], WAIT).unwrap_or_else(|| panic!("{id} never ended: {:?}", rt.view(id)))
     }
 
     fn log(&self) -> Vec<(String, String, f64)> {
@@ -593,7 +597,7 @@ fn a_stopped_worker_that_never_exits_ends_after_a_bounded_wait() {
         assert!(t0.elapsed() < WAIT, "never started");
         std::thread::sleep(Duration::from_millis(10));
     }
-    let pid = r.sup.pid("core-1-a1").unwrap();
+    let pid = r.sup.pid(&r.rt.session_of(&id).unwrap()).unwrap();
     assert!(r.rt.cancel(&id));
     let v = r.done(&id);
     assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Stopped), Some("stopped")), "{v:?}");
@@ -923,6 +927,108 @@ fn a_check_ticket_starts_fresh_at_its_commit_and_is_not_judged_by_files() {
     let v = r.done(&r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap());
     assert_eq!((v.kind, v.outcome, v.dispatch_head.as_deref()), ("verify", Some(Outcome::Done), Some(r.base.as_str())));
     assert!(v.commit.is_none());
+}
+
+/// The next app life on the same data dir: a new runtime (it replays `tickets.jsonl` as it starts).
+fn next_life(r: &Rig) -> WorkerRuntime {
+    let s = &r.rt.0;
+    let cfg = Config {
+        home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
+        tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
+        redact: Redactor::default(), steer: None, claude_unverified_ok: false,
+    };
+    WorkerRuntime::new(cfg, r.gw.clone(), r.sup.clone(), s.bus.clone(), Hooks::default())
+}
+
+fn tickets_file(r: &Rig, run: &str) -> PathBuf {
+    r.gw.data.join(format!("runs/{run}/tickets.jsonl"))
+}
+
+/// 6c-3 (d): after a restart, the next life reads back every ticket an earlier one recorded. An ended ticket keeps its
+/// outcome and commit; one left running by a crash ends `failed`/`abandoned` (`app_restarted`), with that outcome written,
+/// so a third life reads it ended and writes nothing more. Its worktree stays on disk.
+#[test]
+fn a_restart_replays_every_ticket_and_a_crashed_running_one_ends_abandoned() {
+    let r = rig("replay", Opts { mode: "hang", ..Opts::default() });
+    let done = {
+        let ok = rig("replay-done", Opts::default());
+        let v = ok.done(&ok.rt.dispatch(ok.task("r1", "t1"), seat("w1", "codex")).unwrap());
+        assert_eq!(v.outcome, Some(Outcome::Done));
+        // Its lines, appended to the hanging rig's data dir as if the same earlier life wrote them.
+        std::fs::create_dir_all(tickets_file(&r, "r1").parent().unwrap()).unwrap();
+        std::fs::write(tickets_file(&r, "r1"), std::fs::read(tickets_file(&ok, "r1")).unwrap()).unwrap();
+        v
+    };
+    let id = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&id).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let wt = r.rt.view(&id).unwrap().worktree.unwrap();
+    // The crash: the first life just stops (no quit, no outcome line for t2).
+    let life2 = next_life(&r);
+    assert_eq!(life2.replay_gaps(), 0);
+    let ids: Vec<String> = life2.list("r1").into_iter().map(|v| v.id).collect();
+    assert_eq!(ids, vec![done.id.clone(), id.clone()]);
+    let d = life2.view(&done.id).unwrap();
+    assert_eq!((d.state, d.outcome, d.commit.as_deref()), (State::Ended, Some(Outcome::Done), done.commit.as_deref()));
+    let c = life2.view(&id).unwrap();
+    assert_eq!((c.state, c.outcome, c.reason.as_deref(), c.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("abandoned"), Some("app_restarted")), "{c:?}");
+    assert!(wt.is_dir(), "its worktree is kept for the user to look at");
+    let lines = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
+    assert_eq!(lines.matches("app_restarted").count(), 1, "{lines}");
+    let life3 = next_life(&r);
+    assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
+    assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), lines, "nothing more is written");
+    r.rt.quit(WAIT);
+}
+
+/// 6c-3 (d): an id an earlier life used stays taken (its worktree and task ref would collide): the same round is
+/// refused, the next round is dispatched, and a check of a kind already used in the round takes the next number.
+#[test]
+fn a_replayed_id_stays_taken_and_the_next_round_dispatches() {
+    let r = rig("replay-ids", Opts::default());
+    r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    r.done(&r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap());
+    let life2 = next_life(&r);
+    assert!(matches!(life2.dispatch(r.task("r1", "t1"), seat("w1", "codex")), Err(DispatchError::Exists)));
+    let next = TaskSpec { round: 2, ..r.task("r1", "t1") };
+    let v = r.done_on(&life2, &life2.dispatch(next, seat("w1", "codex")).unwrap());
+    assert_eq!((v.id.as_str(), v.outcome), ("r1.t1.r2", Some(Outcome::Done)), "{:?} {:?}", v.reason, v.mismatch);
+    let c = life2.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), seat("v1", "codex"), &r.base).unwrap();
+    assert_eq!(c, "r1.verify-2.r1");
+    r.done_on(&life2, &c);
+}
+
+/// 6c-3 (d): replay reads the file as untrusted. A partial last line (a crash mid-write), a damaged line, an oversized
+/// line, a line for another run and an unknown version are each skipped and counted; a planted link at the file or the
+/// run folder is not followed. Good lines around them still replay.
+#[test]
+fn replay_skips_and_counts_bad_lines_and_follows_no_link() {
+    let r = rig("replay-bad", Opts::default());
+    r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let good = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
+    let first = good.lines().next().unwrap().to_string();
+    let other_run = first.replace(r#""run":"r1""#, r#""run":"r9""#);
+    let v2 = first.replacen(r#""v":1"#, r#""v":2"#, 1);
+    let big = format!(r#"{{"v":1,"event":"x","ticket":{{"pad":"{}"}}}}"#, "x".repeat(300 << 10));
+    let mut f = std::fs::OpenOptions::new().append(true).open(tickets_file(&r, "r1")).unwrap();
+    use std::io::Write as _;
+    write!(f, "not json\n{other_run}\n{v2}\n{big}\n{}", &first[..first.len() / 2]).unwrap();
+    drop(f);
+    let life2 = next_life(&r);
+    assert_eq!(life2.replay_gaps(), 5, "damaged, other run, v2, oversized, partial");
+    assert_eq!(life2.view("r1.t1.r1").unwrap().outcome, Some(Outcome::Done));
+    // A link planted at a run's folder, and one at a run's file: neither is read.
+    let elsewhere = r.d.join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("r7")).unwrap();
+    std::fs::write(elsewhere.join("r7/tickets.jsonl"), good.replace("r1", "r7")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("r7"), r.gw.data.join("runs/r7")).unwrap();
+    std::fs::create_dir_all(r.gw.data.join("runs/r8")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("r7/tickets.jsonl"), r.gw.data.join("runs/r8/tickets.jsonl")).unwrap();
+    let life3 = next_life(&r);
+    assert!(life3.list("r7").is_empty() && life3.list("r8").is_empty());
 }
 
 /// A Stop during a retry's backoff (a real wait, no fake clock) ends the ticket at once, not after the wait.

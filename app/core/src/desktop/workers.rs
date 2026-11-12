@@ -156,7 +156,7 @@ impl Job {
 }
 
 /// The 16.5 outcomes. A check ticket ends `done` (its typed result is 6g's) or `failed`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Done,
@@ -175,7 +175,7 @@ pub enum KillReason {
     Abandoned,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
     Queued,
@@ -250,6 +250,15 @@ struct Book {
     seq: u64,
     /// The app is quitting (`quit`): nothing new is queued or started.
     closed: bool,
+    /// Earlier app lives' tickets, read back at start (`replay`): ended, shown, never acted on.
+    past: BTreeMap<String, TicketView>,
+}
+
+impl Book {
+    /// Is this ticket id used, by this life or an earlier one (its worktree path and task ref would collide)?
+    fn taken(&self, id: &str) -> bool {
+        self.tickets.contains_key(id) || self.past.contains_key(id)
+    }
 }
 
 struct Shared {
@@ -264,6 +273,8 @@ struct Shared {
     changed: Condvar,
     /// How many `tickets.jsonl` lines could not be written (see `record_failures`).
     record_failures: AtomicU64,
+    /// Lines the start-up replay could not use (`replay_gaps`).
+    replay_gaps: AtomicU64,
     /// Descendants the sweep killed after their attempt ended, and ones still running after it (`swept`).
     swept: AtomicU64,
     sweep_survived: AtomicU64,
@@ -389,12 +400,64 @@ impl WorkerRuntime {
     /// from before its process starts until its attempt ends: the production repo pause reads it, so a running
     /// worker is stopped while the core's git works on its repo (#151 codex P1).
     pub fn with_sessions(cfg: Config, gw: Arc<Gitw>, sup: Arc<Supervisor>, bus: Arc<Bus>, hooks: Hooks, sessions: Arc<gitw::RepoSessions>) -> Self {
-        WorkerRuntime(Arc::new(Shared {
+        let rt = WorkerRuntime(Arc::new(Shared {
             cfg, gw, sup, bus, hooks, sessions, book: Mutex::default(), changed: Condvar::new(), record_failures: AtomicU64::new(0),
-            swept: AtomicU64::new(0), sweep_survived: AtomicU64::new(0),
+            swept: AtomicU64::new(0), sweep_survived: AtomicU64::new(0), replay_gaps: AtomicU64::new(0),
             #[cfg(test)]
             kill_test: Mutex::default(),
-        }))
+        }));
+        rt.replay();
+        rt
+    }
+
+    /// Read back what earlier app lives recorded (`<data>/runs/*/tickets.jsonl`), before any ticket of this life. Each
+    /// ticket takes its last line. One an earlier life left queued or running (a crash) ends here `failed`/`abandoned`
+    /// with detail `app_restarted`, and that outcome is written, so the next replay reads it ended. Replayed tickets
+    /// are shown and keep their ids taken (a re-dispatch is the next round), but are never started, integrated or
+    /// cleaned up by this life: it holds no worktree handle for them. Their worktrees stay on disk.
+    fn replay(&self) {
+        let data = &self.0.cfg.data;
+        let runs_dir = data.join("runs");
+        // The listing gives names only; each file is then opened by the no-follow descent (`open_record_read`).
+        let real_dir = std::fs::symlink_metadata(&runs_dir).is_ok_and(|m| m.is_dir());
+        let mut runs: Vec<String> = if real_dir {
+            std::fs::read_dir(&runs_dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect()
+        } else {
+            Vec::new()
+        };
+        runs.sort();
+        runs.truncate(REPLAY_MAX_RUNS);
+        let mut gaps = 0;
+        let mut past = BTreeMap::new();
+        for run in &runs {
+            let (views, g) = replay_run(data, run);
+            gaps += g;
+            past.extend(views);
+        }
+        let mut ended = Vec::new();
+        for v in past.values_mut().filter(|v| v.state != State::Ended) {
+            finish_view(v, Outcome::Failed, "abandoned");
+            v.detail = Some("app_restarted".into());
+            v.summary = Some(summary(v, &self.0.cfg.redact));
+            ended.push(v.clone());
+        }
+        for v in &ended {
+            self.record(v, "outcome");
+        }
+        self.0.replay_gaps.store(gaps, AtomicOrdering::Relaxed);
+        let mut b = crate::lock(&self.0.book);
+        b.past = past;
+        // A ticket's `seq` names its supervisor session (`core-<seq>-a<n>`), and the bus keeps a session's output on
+        // disk (`<data>/spill`) across app lives: each life numbers from its start time in milliseconds, so no later
+        // life's worker reads an earlier one's output under the same name.
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        b.seq = b.seq.max(ms.saturating_mul(1000));
+    }
+
+    /// How many `tickets.jsonl` lines the replay at start could not use (a partial last line, a damaged or oversized
+    /// line, a line for another run, or a file over the size cap). Non-zero means an earlier life's view has gaps.
+    pub fn replay_gaps(&self) -> u64 {
+        self.0.replay_gaps.load(AtomicOrdering::Relaxed)
     }
 
     /// How many `tickets.jsonl` lines this runtime failed to write (the file or a folder on its way could not be
@@ -456,13 +519,13 @@ impl WorkerRuntime {
             return Err(DispatchError::Closed);
         }
         let id = match &mut job {
-            Job::Task(s) if b.tickets.contains_key(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
+            Job::Task(s) if b.taken(&id_of(s, &s.task)) => return Err(DispatchError::Exists),
             Job::Task(s) => id_of(s, &s.task),
             // Checks of one kind in one round are numbered, chosen under the book lock: a second Verify of the round
             // (a later commit, or a re-check) is its own ticket and worktree, `verify-2`, never a refused duplicate.
             Job::Check(_, s) => {
                 let kind = s.task.clone();
-                let free = (1..=99).map(|n| if n == 1 { kind.clone() } else { format!("{kind}-{n}") }).find(|t| !b.tickets.contains_key(&id_of(s, t)));
+                let free = (1..=99).map(|n| if n == 1 { kind.clone() } else { format!("{kind}-{n}") }).find(|t| !b.taken(&id_of(s, t)));
                 s.task = free.ok_or(DispatchError::Exists)?;
                 id_of(s, &s.task)
             }
@@ -494,15 +557,21 @@ impl WorkerRuntime {
 
     pub fn view(&self, id: &str) -> Option<TicketView> {
         let b = crate::lock(&self.0.book);
-        b.tickets.get(id).map(live_view)
+        b.tickets.get(id).map(live_view).or_else(|| b.past.get(id).cloned())
     }
 
-    /// Every ticket of a run, in dispatch order.
+    /// The supervisor session of the ticket's running attempt, if one is running now.
+    pub fn session_of(&self, id: &str) -> Option<String> {
+        crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone())
+    }
+
+    /// Every ticket of a run: an earlier life's first (by id), then this life's in dispatch order.
     pub fn list(&self, run: &str) -> Vec<TicketView> {
         let b = crate::lock(&self.0.book);
         let mut v: Vec<&Entry> = b.tickets.values().filter(|e| e.view.run == run).collect();
         v.sort_by_key(|e| e.seq);
-        v.into_iter().map(live_view).collect()
+        let past = b.past.values().filter(|p| p.run == run && !b.tickets.contains_key(&p.id)).cloned();
+        past.chain(v.into_iter().map(live_view)).collect()
     }
 
     /// Park until one of `tickets` has ended, or `wait` passes. Returns the first ended one, else `None` (the caller
@@ -513,6 +582,10 @@ impl WorkerRuntime {
         loop {
             if let Some(e) = tickets.iter().filter_map(|t| b.tickets.get(t)).find(|e| e.view.state == State::Ended) {
                 return Some(e.view.clone());
+            }
+            // An earlier life's ticket is always ended: asking about it after a restart answers at once.
+            if let Some(p) = tickets.iter().find_map(|t| b.past.get(t).filter(|_| !b.tickets.contains_key(t))) {
+                return Some(p.clone());
             }
             let now = Instant::now();
             if now >= deadline {
@@ -1116,6 +1189,126 @@ fn open_record(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::Fi
         }
     }
     crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW, 0o600)
+}
+
+/// `<data>/runs/<run>/tickets.jsonl` for reading, by the same no-follow descent as `open_record`, creating nothing.
+fn open_record_read(data: &std::path::Path, run: &str) -> std::io::Result<std::fs::File> {
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "run id");
+    if run.is_empty() || run == "." || run == ".." || run.contains('/') {
+        return Err(bad());
+    }
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+    let mut dir = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(data)?;
+    for name in ["runs", run] {
+        let c = std::ffi::CString::new(name).map_err(|_| bad())?;
+        dir = crate::preferences::open_at(&dir, &c, dir_flags, 0)?;
+    }
+    crate::preferences::open_at(&dir, c"tickets.jsonl", libc::O_RDONLY | libc::O_NOFOLLOW, 0)
+}
+
+/// The most of one run's `tickets.jsonl` that replay reads, and the longest line it takes.
+const REPLAY_MAX_FILE: u64 = 16 << 20;
+const REPLAY_MAX_LINE: usize = 256 << 10;
+/// The most runs replay looks at.
+const REPLAY_MAX_RUNS: usize = 4096;
+
+/// One `tickets.jsonl` line as written by `record`. Unknown fields are ignored; a missing one takes its default.
+#[derive(serde::Deserialize)]
+struct StoredLine {
+    v: u32,
+    ticket: StoredTicket,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct StoredTicket {
+    id: String,
+    run: String,
+    task: String,
+    round: u32,
+    kind: String,
+    slot: String,
+    account: String,
+    state: Option<State>,
+    attempt: u32,
+    elapsed_s: u64,
+    dispatch_head: Option<String>,
+    worktree: Option<PathBuf>,
+    deps: Vec<Value>,
+    outcome: Option<Outcome>,
+    reason: Option<String>,
+    detail: Option<String>,
+    harness_session: Option<String>,
+    commit: Option<String>,
+    task_ref: Option<String>,
+    files: Vec<String>,
+    added: u64,
+    removed: u64,
+    leftovers: Vec<String>,
+    receipt: Option<Value>,
+    mismatch: Option<Value>,
+    provider: Option<effective::ProviderTag>,
+    summary: Option<Value>,
+    retention: Option<Value>,
+}
+
+/// The `&'static` kind a stored kind names, or `None` (a line this build does not know is not replayed).
+fn known_kind(k: &str) -> Option<&'static str> {
+    ["writer", "verify", "review", "security_review", "evidence"].into_iter().find(|&x| x == k)
+}
+
+impl StoredTicket {
+    /// The view, if the line is one `record` could have written for `run`: its id is `<run>.<task>.r<round>`.
+    fn into_view(self, run: &str) -> Option<TicketView> {
+        let kind = known_kind(&self.kind)?;
+        let name_ok = |n: &str| !n.is_empty() && n.len() <= 64 && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if self.run != run || !name_ok(&self.task) || !(1..=99).contains(&self.round) || self.id != format!("{run}.{}.r{}", self.task, self.round) {
+            return None;
+        }
+        Some(TicketView {
+            id: self.id, run: self.run, task: self.task, round: self.round, kind, slot: self.slot, account: self.account,
+            state: self.state?, queue_position: None, wait: None, attempt: self.attempt, elapsed_s: self.elapsed_s,
+            dispatch_head: self.dispatch_head, worktree: self.worktree, deps: self.deps, outcome: self.outcome, reason: self.reason,
+            detail: self.detail, harness_session: self.harness_session, steer_off: None, commit: self.commit, task_ref: self.task_ref,
+            files: self.files, added: self.added, removed: self.removed, leftovers: self.leftovers, receipt: self.receipt,
+            mismatch: self.mismatch, provider: self.provider, summary: self.summary, retention: self.retention, started: None,
+        })
+    }
+}
+
+/// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.
+fn replay_run(data: &std::path::Path, run: &str) -> (BTreeMap<String, TicketView>, u64) {
+    use std::io::Read;
+    let mut out = BTreeMap::new();
+    let Ok(f) = open_record_read(data, run) else { return (out, 0) };
+    let mut raw = Vec::new();
+    if f.take(REPLAY_MAX_FILE + 1).read_to_end(&mut raw).is_err() {
+        return (out, 1);
+    }
+    let mut gaps = 0;
+    if raw.len() as u64 > REPLAY_MAX_FILE {
+        raw.truncate(REPLAY_MAX_FILE as usize);
+        gaps += 1;
+    }
+    // Only newline-terminated lines are whole: a crash mid-write leaves a partial last line, which is dropped.
+    let whole = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    if whole < raw.len() {
+        gaps += 1;
+    }
+    for line in raw[..whole].split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let parsed = (line.len() <= REPLAY_MAX_LINE)
+            .then(|| serde_json::from_slice::<StoredLine>(line).ok())
+            .flatten()
+            .filter(|l| l.v == 1)
+            .and_then(|l| l.ticket.into_view(run));
+        match parsed {
+            Some(v) => {
+                out.insert(v.id.clone(), v);
+            }
+            None => gaps += 1,
+        }
+    }
+    (out, gaps)
 }
 
 /// The retry policy's waits for one ticket: the configured clock, or a real wait that ends early when the ticket is

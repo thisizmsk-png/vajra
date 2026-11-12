@@ -875,10 +875,11 @@ fn a_running_core_worker_is_paused_while_the_core_holds_its_repo_and_resumed_aft
         network: false, why: String::new(), source: "user".into(),
     };
     let id = rt.dispatch(spec, seat).unwrap();
-    // The first ticket's first attempt is supervisor session `core-1-a1`.
+    // The ticket's running attempt's supervisor session.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let pid = loop {
-        if let (Some(T::Running), Ok(pid)) = (rt.view(&id).map(|v| v.state), app.sup.pid("core-1-a1")) {
+        let sid = rt.session_of(&id).unwrap_or_default();
+        if let (Some(T::Running), Ok(pid)) = (rt.view(&id).map(|v| v.state), app.sup.pid(&sid)) {
             break pid;
         }
         assert!(std::time::Instant::now() < deadline, "never ran: {:?}", rt.view(&id));
