@@ -790,6 +790,10 @@ impl App {
             lock(&self.control).end_session(session_id);
             return Err(e);
         }
+        // A classic run's harness drives its campaign through its `--mcp` server, a Service client: a recorded root.
+        if let Ok(pid) = self.sup.pid(&stream) {
+            self.run_leads.allow_service(pid);
+        }
         lock(&self.run_workers).insert(stream.clone(), workers);
         lock(&self.runs).insert(
             stream.clone(),
