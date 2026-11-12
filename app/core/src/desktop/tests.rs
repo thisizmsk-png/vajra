@@ -1512,9 +1512,11 @@ fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_
         ev_task(&d, "g2", "done", &["ac"], "green"),
     ];
     let (mut app, slug) = campaign_with_tasks(&t, tasks);
-    // The shipped relation: a check's own timeout fits inside the call's budget.
-    app.evidence_timeout = Duration::from_millis(400);
-    app.evidence_budget = Duration::from_millis(500);
+    // The shipped relation: a check's own timeout fits inside the call's budget. All three checks run in one parallel
+    // batch, so the green ones only need their own spawn to finish inside the timeout: a fixed-PATH `python3` (the macOS
+    // shim) takes ~60 ms idle but went past a 400 ms timeout under a loaded machine, so give it real headroom (flake fix).
+    app.evidence_timeout = Duration::from_secs(2);
+    app.evidence_budget = Duration::from_millis(2500);
     let ev_dir = t.home().join(".claude/vajra/campaigns").join(&slug).join("evidence");
     fs::write(ev_dir.join("slow.json"), b"{}").unwrap();
     fs::write(ev_dir.join("green.json"), b"{}").unwrap();
@@ -1522,11 +1524,11 @@ fn a_hanging_check_ends_unverified_with_nothing_pending_and_is_not_re_run_every_
     assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
     assert_eq!(row(&r, "g1", "ac")["status"], "pass", "{r}");
     assert_eq!(r["pending"], 0, "{r}");
-    // Remembered briefly: the next call does not spend 400 ms on it again.
+    // Remembered briefly: the next call does not spend the 2 s timeout on it again (half of it is a wide margin).
     let start = std::time::Instant::now();
     let r = app.evidence_list(&slug).unwrap();
     assert_eq!(row(&r, "h", "ac")["status"], "unverified", "{r}");
-    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+    assert!(start.elapsed() < Duration::from_secs(1), "{:?}", start.elapsed());
 }
 
 #[test]

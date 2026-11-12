@@ -390,6 +390,8 @@ export const api = {
   chooseFolder: (title: string, defaultPath?: string) =>
     call<string | null>("plugin:dialog|open", { options: { directory: true, multiple: false, title, ...(defaultPath ? { defaultPath } : {}) } }),
   projectList: (includeArchived = false) => call<{ projects: Project[]; skipped: number; truncated: boolean }>("project_list", { includeArchived }),
+  /** Git repositories on this Mac that are not projects yet, from the common code folders and any `extra` absolute folders. Read only; `truncated` means the scan stopped early. */
+  projectDiscover: (extra: string[] = []) => call<{ found: { root: string; name: string; worktrees: number }[]; truncated: boolean }>("project_discover", { extra }),
   /** Add a folder. Fails `nested` (with `with: {id, name}`) when it overlaps a project unless `confirmNested`; `refused_folder` for home, the Claude folder or Vajra's data. */
   projectAdd: (path: string, confirmNested = false) =>
     call<{ outcome: "created" | "existing" | "restored"; project: Project }>("project_add", { path, confirmNested }),

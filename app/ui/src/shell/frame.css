@@ -26,6 +26,11 @@
 .v-tb__empty { color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); }
 .v-tb__add { display: inline-flex; align-items: center; gap: 6px; height: var(--row-h); padding: 0 10px; border: 1px solid var(--c-border); border-radius: var(--radius-md); background: transparent; color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); }
 .v-tb__add:hover { background: var(--c-accent); color: var(--c-text); }
+.v-find__bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.v-find__list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 320px; overflow: auto; }
+.v-find__row { display: flex; align-items: center; gap: 8px; min-height: var(--row-h); padding: 0 4px; font: 400 13px/16px var(--font-ui); color: var(--c-text); }
+.v-find__path, .v-find__wt { color: var(--c-text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-find__name { font-weight: 500; }
 .v-tb__add:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 /* The palette for the mouse: reads as a field. Its key hint is out of layout until hover or focus (idle memory). */
 .v-tb__search { display: flex; align-items: center; gap: var(--space-sm); flex: none; width: 240px; height: var(--row-h); margin-left: auto; padding: 0 6px 0 var(--space-sm); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-background); color: var(--c-text-muted); font: 400 13px/16px var(--font-ui); transition: border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out); }
@@ -155,12 +160,13 @@
 
 /* Settings: the section list beside the section. */
 .v-settings__grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
-.v-settings__nav { display: flex; flex-direction: column; gap: 2px; padding: var(--space-lg) var(--space-sm); border-right: 1px solid var(--c-border); }
+.v-settings__side { display: flex; flex-direction: column; gap: var(--space-md); padding: var(--space-lg) var(--space-sm); border-right: 1px solid var(--c-border); }
+.v-settings__nav { display: flex; flex-direction: column; gap: 2px; }
+.v-settings__back { color: var(--c-text-muted); }
 .v-settings__link { display: flex; align-items: center; height: var(--row-h); padding: 0 10px; border-radius: var(--radius-md); color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); text-decoration: none; }
 .v-settings__link:hover, .v-settings__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-settings__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 .v-settings__col { max-width: 720px; padding: 40px var(--space-xl) var(--space-xl); display: flex; flex-direction: column; }
-.v-settings__later { margin: var(--space-sm) 0 0; color: var(--c-text-muted); font: 500 12px/16px var(--font-ui); }
 .v-settings__keys { margin: 0; padding: var(--space-xs) 0; list-style: none; }
 .v-settings__keys li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); min-height: 36px; padding: 0 var(--space-lg); border-bottom: 1px solid var(--c-border); font: 400 13px/16px var(--font-ui); }
 .v-settings__keys li:last-child { border-bottom: 0; }
@@ -176,7 +182,7 @@
 .v-inbox__group { padding: 0 var(--space-md); }
 .v-inbox__h { font: 600 13px/16px var(--font-ui); margin: var(--space-md) 0 var(--space-sm); }
 .v-inbox__more { border: 0; background: transparent; color: var(--c-text-secondary); font: 400 13px/16px var(--font-ui); padding: var(--space-sm) 0; text-decoration: underline; }
-.v-inbox__more:focus-visible, .v-ibx input:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
+.v-inbox__more:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
 .v-ibx { border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface, transparent); padding: var(--space-md); margin-bottom: var(--space-sm); display: grid; gap: var(--space-sm); }
 .v-ibx__top { display: flex; gap: var(--space-sm); align-items: center; }
 .v-ibx__t { font: 600 13px/18px var(--font-ui); margin: 0; }
