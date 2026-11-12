@@ -11,8 +11,9 @@ tool_input.command names it, parsed from the guard's record, not a text search o
 (an error, or the 180 s alarm) fails.
 
 The data-dir run (a writer worker with the real flag file and the real guard) must also run to its end; its Write into
-the worktree must succeed; its Bash, Write and Edit calls into the Vajra data dir must each come back as an error; and
-the data dir must hold only its seed file, unchanged.
+the worktree must succeed; its Bash call into the Vajra data dir must come back refused by the Vajra guard, and its
+Write and Edit calls refused by the flag file's deny rules (each result's text names its source; any other error fails);
+and the data dir must hold only its seed file, unchanged.
 """
 import json
 import os
@@ -23,6 +24,9 @@ ALLOWED, BLOCKED, WRITE, DONE = "tu_0", "tu_1", "tu_2", 3
 # The data-dir run's plan: a worktree Write, then a Bash write, a Write, a Read and an Edit into the data dir.
 D_OK, D_BASH, D_WRITE, D_EDIT, D_DONE = "tu_0", "tu_1", "tu_2", "tu_4", 5
 SEED = "seed\n"
+# What each refusal's tool result must say: the guard's block, and Claude Code's permission deny.
+GUARD_REFUSAL = "Vajra guard blocked"
+DENY_REFUSAL = "denied by your permission settings"
 
 
 def lines(p):
@@ -79,6 +83,8 @@ def data_verdict(sp, wt, data, tools, status):
     init, result, log, results = run(sp)
     got = sorted(t for t in init.get("tools", []) if not t.startswith("mcp__"))
     err = lambda i: i in results and results[i].get("is_error") is True
+    # Refused by the guard or the deny rules, not any error: a shell error or "read the file first" is not proof (#163).
+    refused_by = lambda i, source: err(i) and source in (results[i].get("text") or "")
     left = sorted(os.listdir(data)) if os.path.isdir(data) else None
     seed = open(data + "/seed.json").read() if os.path.isfile(data + "/seed.json") else None
     checks = [
@@ -87,9 +93,9 @@ def data_verdict(sp, wt, data, tools, status):
         ("data-dir run: the plan reached its last turn", any(r.get("k") == D_DONE and r.get("tools") for r in log)),
         ("data-dir run: init lists exactly the --tools set", got == sorted(tools)),
         ("data-dir run: a Write into the worktree ran", os.path.exists(wt + "/ok-written") and D_OK in results and not err(D_OK)),
-        ("data-dir run: a Bash write into the data dir came back refused", err(D_BASH)),
-        ("data-dir run: a Write into the data dir came back refused", err(D_WRITE)),
-        ("data-dir run: an Edit in the data dir came back refused", err(D_EDIT)),
+        ("data-dir run: the Vajra guard refused a Bash write into the data dir", refused_by(D_BASH, GUARD_REFUSAL)),
+        ("data-dir run: the deny rules refused a Write into the data dir", refused_by(D_WRITE, DENY_REFUSAL)),
+        ("data-dir run: the deny rules refused an Edit in the data dir", refused_by(D_EDIT, DENY_REFUSAL)),
         ("data-dir run: the data dir holds only its seed file, unchanged", left == ["seed.json"] and seed == SEED),
     ]
     why = {name: (results.get(i, {}).get("text") or "")[:160].replace("\n", " ") for name, i in (("Bash", D_BASH), ("Write", D_WRITE), ("Edit", D_EDIT))}
