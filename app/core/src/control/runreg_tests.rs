@@ -521,3 +521,26 @@ fn the_schema_text_limits_are_the_protocols_and_a_plan_at_them_is_accepted() {
     let decision = &plan["decisions"]["items"]["properties"];
     assert_eq!((decision["title"]["maxLength"].as_u64(), decision["rationale"]["maxLength"].as_u64()), (Some(MAX_DECISION_TITLE as u64), Some(MAX_RATIONALE as u64)));
 }
+
+#[test]
+fn a_starting_leads_call_waits_for_its_read_back_and_passes_only_once_confirmed() {
+    let reg = Arc::new(any_tree());
+    let token = registered(&reg, proto(), None);
+    let (_k, lead) = lead_kid();
+    reg.start_lead(RUN, lead).unwrap();
+    assert!(reg.in_lead_tree(me()), "a starting lead's tree is held to vajra-run tools from its first call");
+    let (r2, t2) = (reg.clone(), token.clone());
+    let started = std::time::Instant::now();
+    let call = std::thread::spawn(move || r2.serve(&req(RUN, &t2, "list_workers", json!({})), me()));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!call.is_finished(), "nothing passes before the read-back");
+    assert!(reg.confirm_lead(RUN, lead));
+    assert_eq!(call.join().unwrap(), json!({"ok": {"workers": [], "rounds": []}}));
+    assert!(started.elapsed() < CONFIRM_WAIT);
+    // A lead cleared while starting (its read-back failed) is refused at once, and confirming it later does nothing.
+    let (_k2, next) = lead_kid();
+    reg.start_lead(RUN, next).unwrap();
+    assert!(reg.clear_lead(RUN, next));
+    assert!(!reg.confirm_lead(RUN, next));
+    assert_eq!(reg.serve(&req(RUN, &token, "list_workers", json!({})), me())["error"], "lead_not_running");
+}

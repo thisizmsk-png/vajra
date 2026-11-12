@@ -198,12 +198,26 @@ impl RunLead {
         Ok((sid, LeadProc { pid, stamp }))
     }
 
+    /// Record the new lead as the current one and as starting in the registry (its calls pass once its read-back
+    /// does). Under the state lock, so a shutdown either finds it to kill or this finds the shutdown: never a lead
+    /// started after the quit step reported every lead gone, nor one spawned into a run that already ended.
     fn set_current(&self, sid: String, lead: LeadProc) -> Result<(), LaunchFailed> {
-        if let Err(e) = self.0.reg.set_lead(&self.0.run, lead) {
+        let mut s = crate::lock(&self.0.state);
+        let refused = if s.stopping {
+            Some("the lead is shutting down".to_string())
+        } else if self.0.proto.card().status.is_some() {
+            Some("the run has ended".to_string())
+        } else {
+            self.0.reg.start_lead(&self.0.run, lead).err().map(|e| format!("{e:?}"))
+        };
+        if let Some(why) = refused {
+            drop(s);
             let _ = self.0.sup.kill(&sid);
-            return Err(LaunchFailed(format!("{e:?}")));
+            let _ = self.0.sup.wait(&sid, SHUTDOWN_WAIT);
+            kill_group(lead);
+            return Err(LaunchFailed(why));
         }
-        crate::lock(&self.0.state).current = Some((sid, lead));
+        s.current = Some((sid, lead));
         Ok(())
     }
 
@@ -257,7 +271,7 @@ impl RunLead {
     pub fn watch(&self) {
         loop {
             let Some((sid, lead)) = crate::lock(&self.0.state).current.clone() else { return };
-            match self.watch_one(&sid) {
+            match self.watch_one(&sid, lead) {
                 Watched::Stopped => {
                     self.forget(lead);
                     return;
@@ -291,6 +305,7 @@ impl RunLead {
     /// The lead `lead` is gone: out of the registry, and no longer the current one (unless a successor already is).
     fn forget(&self, lead: LeadProc) {
         self.0.reg.clear_lead(&self.0.run, lead);
+        kill_group(lead);
         let mut s = crate::lock(&self.0.state);
         if s.current.as_ref().is_some_and(|(_, l)| *l == lead) {
             s.current = None;
@@ -306,19 +321,26 @@ impl RunLead {
             }
             std::thread::sleep(POLL.min(until.saturating_duration_since(Instant::now())));
         }
-        !crate::lock(&self.0.state).stopping
+        !crate::lock(&self.0.state).stopping && self.0.proto.card().status.is_none()
     }
 
-    fn watch_one(&self, sid: &str) -> Watched {
+    fn watch_one(&self, sid: &str, lead: LeadProc) -> Watched {
         let start = Instant::now();
         let mut applied = false;
         loop {
             if let Ok(Some(x)) = self.0.sup.wait(sid, POLL) {
+                // A lead the shutdown killed is stopped, not an exit the run decides on.
+                if crate::lock(&self.0.state).stopping {
+                    return Watched::Stopped;
+                }
                 let tail = self.0.sup.last_lines(sid).unwrap_or_default();
-                // A lead that ran but never showed a read-back ends as not applied: it was never confirmed confined.
+                // A lead that exits before its read-back passed ends as not applied, never restarted: it was never
+                // confirmed confined.
                 if !applied {
-                    if let Some(Err(why)) = self.read_back(sid) {
-                        return Watched::NotApplied(why);
+                    match self.read_back(sid) {
+                        Some(Ok(())) => {}
+                        Some(Err(why)) => return Watched::NotApplied(why),
+                        None => return Watched::NotApplied("it exited before its read-back".into()),
                     }
                 }
                 let (c, _) = crate::providers::errors::classify_exit(Some(x.code), x.signal.as_deref(), &tail);
@@ -337,7 +359,11 @@ impl RunLead {
             }
             if !applied {
                 match self.read_back(sid) {
-                    Some(Ok(())) => applied = true,
+                    Some(Ok(())) => {
+                        applied = true;
+                        // Confirmed confined: from now on its calls pass.
+                        self.0.reg.confirm_lead(&self.0.run, lead);
+                    }
                     Some(Err(why)) => {
                         let _ = self.0.sup.kill(sid);
                         let _ = self.0.sup.wait(sid, SHUTDOWN_WAIT);
@@ -377,6 +403,20 @@ impl RunLead {
 
     pub fn launches(&self) -> u32 {
         crate::lock(&self.0.state).launches
+    }
+}
+
+/// Kill whatever is left of a gone lead's process group (a child that outlived it). The group id is the leader's pid
+/// (it is a session leader); a pid is not reused while its group has members, and a live process with that pid but
+/// another start stamp is someone else, so it is left alone.
+fn kill_group(lead: LeadProc) {
+    let Ok(pgid) = i32::try_from(lead.pid) else { return };
+    if pgid <= 1 || crate::procid::start_stamp(lead.pid).is_some_and(|s| s != lead.stamp) {
+        return;
+    }
+    // SAFETY: kill has no memory preconditions; a negative pid names the process group, and ESRCH is fine.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
     }
 }
 

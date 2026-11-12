@@ -67,7 +67,8 @@ impl Drop for Rig {
 }
 
 /// The fake reads `<dir>/mode` at each launch: `exit` (init, then exit 0), `hang` (init, then sleep), `wide` (an init
-/// with Bash, which the read-back refuses, then sleep), `silent` (no init, sleep). Each launch appends its argv's
+/// with Bash, which the read-back refuses, then sleep), `silent` (no init, sleep), `early` (no init, exit 0), `orphan`
+/// (init, a background child that ignores the hangup, its fds away from the terminal, its pid in `<dir>/orphan`, then exit 0). Each launch appends its argv's
 /// token-file path to `<dir>/launches`.
 fn fake_claude(dir: &Path) -> PathBuf {
     let tools = profiles::claude_lead_tools().split(',').map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(",");
@@ -81,11 +82,13 @@ printf '%s\n' "$LAST" | head -n 1 >> '{dir}/prompts'
 case "$MODE" in
   wide) echo '{{"type":"system","subtype":"init","permissionMode":"dontAsk","tools":["Bash",{tools}],"mcp_servers":[{{"name":"vajra_run","status":"connected"}}]}}'; exec sleep 600 ;;
   silent) exec sleep 600 ;;
+  early) exit 0 ;;
 esac
 echo '{{"type":"system","subtype":"init","permissionMode":"dontAsk","tools":[{tools}],"mcp_servers":[{{"name":"vajra_run","status":"connected"}}]}}'
 case "$MODE" in
   exit) exit 0 ;;
   hang) exec sleep 600 ;;
+  orphan) nohup sleep 600 < /dev/null > /dev/null 2>&1 & echo $! > '{dir}/orphan'; sleep 1; exit 0 ;;
 esac
 "#,
         dir = dir.display()
@@ -232,4 +235,45 @@ fn a_run_that_ends_stops_its_lead() {
     watch.join().unwrap();
     assert_eq!(launches(&r), 1);
     assert_eq!(r.lead.shutdown(SHUTDOWN_WAIT), Shutdown::NotRunning, "the watch already ended it");
+}
+
+#[test]
+fn a_lead_that_exits_before_its_read_back_is_not_applied_and_never_restarted() {
+    let r = rig("early", "early", Duration::from_secs(10));
+    plan(r.lead.proto());
+    r.lead.start().unwrap();
+    r.lead.watch();
+    assert_eq!(launches(&r), 1, "a live worker would earn a restart, but this lead was never confirmed confined");
+    let (status, why) = r.lead.ended();
+    assert_eq!(status, Some(RunStatus::LeadLost));
+    assert!(why.unwrap().contains("before its read-back"));
+}
+
+#[test]
+fn a_lead_that_exits_leaves_no_child_of_its_group_behind() {
+    let r = rig("orphan", "orphan", Duration::from_secs(10));
+    r.lead.start().unwrap();
+    r.lead.watch();
+    let pid: i32 = std::fs::read_to_string(r.d.join("orphan")).unwrap().trim().parse().unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    // SAFETY: signal 0 only asks whether the pid exists.
+    while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if alive {
+        // SAFETY: the pid is this test's own leftover child, still alive a moment ago.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(!alive, "the lead's background child was killed with its group");
+}
+
+#[test]
+fn a_lead_launched_after_the_shutdown_began_is_killed_and_never_admitted() {
+    let r = rig("late", "hang", Duration::from_secs(10));
+    plan(r.lead.proto());
+    assert_eq!(r.lead.shutdown(SHUTDOWN_WAIT), Shutdown::NotRunning);
+    assert!(r.lead.start().is_err(), "a launch that finds the shutdown is refused");
+    assert_eq!(r.lead.shutdown(SHUTDOWN_WAIT), Shutdown::NotRunning, "and it never became the current lead");
+    assert_eq!(r.reg.serve(&json!({"vajra_run": RUN, "token": token(&r), "tool": "list_workers", "args": {}}), None)["error"], "lead_not_running");
 }

@@ -96,7 +96,7 @@ else:
     g = lambda k: re.search(k + '="([^"]+)"', srv).group(1)
     cmd = [g("command"), "--mcp-run"]
     env = {k: g(k) for k in ("VAJRA_RUN", "VAJRA_RUN_TOKEN_FILE", "VAJRA_RUN_SOCKET")}
-env = dict(env, PATH="/usr/bin:/bin", HOME=os.environ.get("HOME", "/tmp"))
+env = dict(env, PATH="/usr/bin:/bin", HOME=TEST_HOME)
 p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
 n = [0]
 def rpc(method, params):
@@ -201,7 +201,8 @@ fn rig(lead_account: &str) -> Rig {
     let fake = d.join("lead");
     // The shebang stays the first line; the constants go right after it.
     let (shebang, rest) = FAKE_LEAD.split_once('\n').unwrap();
-    let script = format!("{shebang}\nTOOLS = {:?}\nCODEX_HOME = {:?}\n{rest}", profiles::claude_lead_tools(), codex_home.to_str().unwrap());
+    // The fake and the server it starts see only the temp HOME, never the runner's.
+    let script = format!("{shebang}\nTOOLS = {:?}\nCODEX_HOME = {:?}\nTEST_HOME = {:?}\n{rest}", profiles::claude_lead_tools(), codex_home.to_str().unwrap(), home.to_str().unwrap());
     exe(&fake, &script);
     let env = LeadEnv {
         data: data.clone(), home: home.clone(), exe: PathBuf::from(env!("CARGO_BIN_EXE_vajra-desktop")), socket: sock, codex: fake.clone(), claude: fake,

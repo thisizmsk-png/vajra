@@ -163,17 +163,21 @@ impl App {
             }
             l.runs.insert(run.to_string(), lead.clone());
         }
-        let (reg, id, runs) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle());
-        std::thread::Builder::new()
-            .name(format!("lead-{run}"))
-            .spawn(move || {
-                lead.watch();
-                reg.remove(&id);
-                if let Some(r) = runs.upgrade() {
-                    lock(&r.0).runs.remove(&id);
-                }
-            })
-            .map_err(|e| fail("io", e))?;
+        let (reg, id, runs, w) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle(), lead.clone());
+        let watching = std::thread::Builder::new().name(format!("lead-{run}")).spawn(move || {
+            w.watch();
+            reg.remove(&id);
+            if let Some(r) = runs.upgrade() {
+                lock(&r.0).runs.remove(&id);
+            }
+        });
+        if let Err(e) = watching {
+            // No watch means no read-back and no N9: the lead does not run unwatched.
+            lead.shutdown(SHUTDOWN_WAIT);
+            lock(&self.lead_runs.0).runs.remove(run);
+            self.run_leads.remove(run);
+            return Err(fail("io", e));
+        }
         Ok(json!({"run_id": run, "core": true}))
     }
 
