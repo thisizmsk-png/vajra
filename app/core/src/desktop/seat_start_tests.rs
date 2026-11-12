@@ -234,23 +234,26 @@ fn overrides_change_only_account_model_effort_and_network_and_are_checked_again(
 
 #[test]
 fn the_evidence_seat_is_always_the_verifier_and_the_trust_and_slug_follow_its_harness() {
-    for (verifier, others, approve, trust, og) in [
-        ("claude", "codex", false, "guarded", false),
-        ("codex", "claude", false, "outside_guard", true),
-        ("codex", "codex", false, "outside_guard", true),
-        ("codex", "claude", true, "guarded_by_approval", false),
-        ("claude", "claude", true, "guarded", false),
+    for (lead, verifier, others, approve, trust, og) in [
+        ("claude", "claude", "codex", false, "guarded", false),
+        // bhishma #216 H1: a Codex Lead's run is never guarded, whatever the verifier.
+        ("codex", "claude", "codex", false, "outside_guard", true),
+        ("codex", "claude", "claude", true, "guarded_by_approval", false),
+        ("claude", "codex", "claude", false, "outside_guard", true),
+        ("codex", "codex", "codex", false, "outside_guard", true),
+        ("claude", "codex", "claude", true, "guarded_by_approval", false),
+        ("claude", "claude", "claude", true, "guarded", false),
     ] {
         let t = Tmp::new();
         let (app, pid) = app_for(&t, true);
-        propose(&app, &pid, json!({"lead": {"account": others}, "workers": [w("w1", "backend", others), w("w2", "verifier", verifier), w("w3", "reviewer", others)]})).unwrap();
+        propose(&app, &pid, json!({"lead": {"account": lead}, "workers": [w("w1", "backend", others), w("w2", "verifier", verifier), w("w3", "reviewer", others)]})).unwrap();
         let (id, sha) = open_one(&app);
         let seen = RefCell::new(Vec::new());
         let r = app.start_proposal_inner(&id, &sha, StartOptions { overrides: vec![], approve_checker: approve }, starter(&seen)).unwrap();
         let run = r["run"]["run_id"].as_str().unwrap();
         let slug = if og { format!("deliver-{run}-og") } else { format!("deliver-{run}") };
         for v in [&r, &seats_file(&t, run)] {
-            assert_eq!((v["evidence_seat"].as_str(), v["evidence_trust"].as_str(), v["campaign_slug"].as_str()), (Some("w2"), Some(trust), Some(slug.as_str())), "{verifier}/{others}/{approve}");
+            assert_eq!((v["evidence_seat"].as_str(), v["evidence_trust"].as_str(), v["campaign_slug"].as_str()), (Some("w2"), Some(trust), Some(slug.as_str())), "{lead}/{verifier}/{others}/{approve}");
         }
     }
 }
@@ -339,11 +342,41 @@ fn the_inbox_card_shows_the_seats_the_warnings_and_the_label_the_run_will_get() 
     assert_eq!(c["evidence"]["approval_offer"], APPROVAL_OFFER);
     let seats = c["seats"].as_array().unwrap();
     let by = |s: &str| seats.iter().find(|x| x["seat"] == s).unwrap();
-    assert_eq!(by("w1")["disclosures"][0], CODEX_WARNING);
+    // bhishma #216 L1: no codex here, so the launch-time check can't pass: the note makes no key claim and names why,
+    // and so does the evidence.
+    let not_proven = crate::adapter::profiles::CODEX_NOT_PROVEN;
+    assert_eq!(by("w1")["disclosures"][0], format!("{CODEX_WARNING_OPEN} {not_proven}"));
+    assert_eq!(c["evidence"]["cause"], not_proven);
     assert_eq!(by("lead")["disclosures"][0], CLAUDE_NOTE);
     assert_eq!((by("w1")["limits"]["message"].as_bool(), by("w1")["limits"]["stop"].as_str()), (Some(false), Some("terminate")));
     assert!(seats.iter().any(|s| s["role"] == "security_reviewer"), "added for the security ask");
     assert!(it["proposal_sha256"].as_str().is_some());
+}
+
+/// bhishma #216 H1, H2, L1: the trust and every Codex note follow each account's own launch-time answer, and the card
+/// names the cause.
+#[test]
+fn a_codex_verifier_is_guarded_only_when_its_lock_holds_and_the_card_names_the_cause() {
+    let p = |lead: &str| {
+        let seats: Seats = serde_json::from_value(json!({
+            "lead": {"account": lead, "model": null, "effort": null, "source": "role_default"},
+            "workers": [{"slot": "w1", "role": "verifier", "task": "t1", "account": "codex", "model": null, "effort": null, "network": false, "security": false, "why": "x", "source": "role_default"}],
+            "max_in_flight": 1
+        })).unwrap();
+        seats
+    };
+    let ok: &dyn Fn(&str) -> CodexLock = &|_| Ok(());
+    let mcp = "Your Codex config turns on the MCP server \"files\", which runs outside Codex's sandbox and could read Vajra's signing key.";
+    let open: &dyn Fn(&str) -> CodexLock = &|_| Err(mcp.to_string());
+    assert_eq!(evidence_of(&p("claude"), false, "r", ok)["evidence_trust"], "guarded");
+    assert_eq!(evidence_of(&p("claude"), false, "r", open)["evidence_trust"], "outside_guard");
+    assert_eq!(evidence_of(&p("codex"), false, "r", ok)["evidence_trust"], "outside_guard", "a Codex lead's run is never guarded");
+    assert_eq!(outside_cause(&p("claude"), open).as_deref(), Some(mcp));
+    assert_eq!(outside_cause(&p("codex"), ok).as_deref(), Some(CODEX_LEAD_CAUSE));
+    assert_eq!(outside_cause(&p("claude"), ok), None);
+    assert_eq!(codex_note(&Ok(())), CODEX_WARNING);
+    assert_eq!(codex_note(&Err(mcp.into())), format!("{CODEX_WARNING_OPEN} {mcp}"));
+    assert!(!codex_note(&Err(mcp.into())).contains("can't read Vajra's signing key"), "no key claim when the check failed");
 }
 
 #[test]

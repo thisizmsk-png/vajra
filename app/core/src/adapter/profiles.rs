@@ -191,6 +191,120 @@ pub fn codex_key_probe(probe: &dyn crate::providers::detect::Probe, home: &Path,
     probe.run(&codex, &args).is_some_and(|o| o.code.is_some_and(|c| c != 0) && o.stdout.trim().is_empty() && o.stderr.contains("Operation not permitted"))
 }
 
+/// Whether a Codex seat is kept from Vajra's key: `Ok` when it is, or the plain reason it isn't (shown on the card).
+pub type CodexLock = Result<(), String>;
+
+pub const CODEX_NOT_PROVEN: &str = "Vajra couldn't confirm on this Mac that Codex's sandbox keeps it away from Vajra's signing key.";
+const CODEX_NOTIFY_ON: &str = "Your Codex config runs a notify command, which runs outside Codex's sandbox and could read Vajra's signing key.";
+const CODEX_CONFIG_UNREAD: &str = "Vajra couldn't read your Codex config, so it can't tell which of your Codex tools would run outside Codex's sandbox.";
+
+fn codex_mcp_on(name: &str) -> String {
+    if !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        format!("Your Codex config turns on the MCP server \"{name}\", which runs outside Codex's sandbox and could read Vajra's signing key.")
+    } else {
+        "Your Codex config turns on an MCP server, which runs outside Codex's sandbox and could read Vajra's signing key.".into()
+    }
+}
+
+/// bhishma #216 H2: what in one Codex `config.toml` would run outside the session's sandbox: an MCP server that isn't
+/// switched off, or a notify command, anywhere in the file (a `[profiles.*]` table too). A file that can't be parsed
+/// counts too: Vajra can't tell what it would load.
+pub fn codex_config_outside(text: &str) -> Option<String> {
+    fn walk(t: &toml::Table) -> Option<String> {
+        for (k, v) in t {
+            match (k.as_str(), v) {
+                ("mcp_servers", toml::Value::Table(s)) => {
+                    if let Some((name, _)) = s.iter().find(|(_, c)| c.get("enabled").and_then(toml::Value::as_bool) != Some(false)) {
+                        return Some(codex_mcp_on(name));
+                    }
+                }
+                ("notify", toml::Value::Array(a)) if !a.is_empty() => return Some(CODEX_NOTIFY_ON.into()),
+                ("notify", toml::Value::String(s)) if !s.trim().is_empty() => return Some(CODEX_NOTIFY_ON.into()),
+                (_, toml::Value::Table(inner)) => {
+                    if let Some(c) = walk(inner) {
+                        return Some(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    match text.parse::<toml::Table>() {
+        Ok(t) => walk(&t),
+        Err(_) => Some(CODEX_CONFIG_UNREAD.into()),
+    }
+}
+
+/// The config files a Codex session on this route loads that could hold MCP servers or notify: the system one, and the
+/// route's own `CODEX_HOME/config.toml` (the user's for the login route, Vajra's per-account one for a gateway). The
+/// project's own `.codex` is checked at every launch instead (`codex_project_outside`).
+pub fn codex_config_files(codex_home: &Path) -> Vec<PathBuf> {
+    vec![PathBuf::from("/etc/codex/config.toml"), codex_home.join("config.toml")]
+}
+
+/// What runs outside a Codex session's sandbox, judged from what Codex itself would load: each config file, then (the
+/// login route) `codex mcp list --json`, which also counts servers from plugins. `None`: nothing does.
+pub fn codex_tools_outside(probe: &dyn crate::providers::detect::Probe, files: &[PathBuf], list_mcp: bool) -> Option<String> {
+    for f in files {
+        match std::fs::read_to_string(f) {
+            Ok(text) => {
+                if let Some(c) = codex_config_outside(&text) {
+                    return Some(c);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Some(CODEX_CONFIG_UNREAD.into()),
+        }
+    }
+    if !list_mcp {
+        return None;
+    }
+    let Some(codex) = probe.find("codex") else { return Some(CODEX_CONFIG_UNREAD.into()) };
+    let Some(out) = probe.run(&codex, &["mcp", "list", "--json"]).filter(|o| o.code == Some(0)) else { return Some(CODEX_CONFIG_UNREAD.into()) };
+    let Ok(Value::Array(servers)) = serde_json::from_str::<Value>(&out.stdout) else { return Some(CODEX_CONFIG_UNREAD.into()) };
+    servers.iter().find(|s| s["enabled"] != json!(false)).map(|s| codex_mcp_on(s["name"].as_str().unwrap_or("")))
+}
+
+/// bhishma #216 M1: a launch in a worktree whose own `.codex` config would load an MCP server or notify (written by an
+/// earlier session there, or committed) is refused: those run outside the sandbox. A `.codex` that can't be read or
+/// isn't a plain folder counts as one.
+pub fn codex_project_outside(worktree: &Path) -> Option<String> {
+    let dir = worktree.join(".codex");
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Ok(m) if m.is_dir() => {}
+        _ => return Some(CODEX_CONFIG_UNREAD.into()),
+    }
+    codex_tools_outside(&NoProbe, &[dir.join("config.toml")], false)
+}
+
+struct NoProbe;
+impl crate::providers::detect::Probe for NoProbe {
+    fn find(&self, _: &str) -> Option<PathBuf> {
+        None
+    }
+    fn run(&self, _: &Path, _: &[&str]) -> Option<crate::providers::detect::Out> {
+        None
+    }
+    fn env(&self, _: &str) -> Option<OsString> {
+        None
+    }
+}
+
+/// The whole launch-time answer for a Codex seat (6k, bhishma #216 H2): the OS keeps the session from the state dir,
+/// and nothing from the route's config runs outside the sandbox. Matches the Claude worker rule: judge what would
+/// load, and name the cause.
+pub fn codex_lock(probe: &dyn crate::providers::detect::Probe, home: &Path, data: &Path, codex_home: &Path, login: bool) -> CodexLock {
+    if !codex_key_probe(probe, home, data) {
+        return Err(CODEX_NOT_PROVEN.into());
+    }
+    match codex_tools_outside(probe, &codex_config_files(codex_home), login) {
+        Some(c) => Err(c),
+        None => Ok(()),
+    }
+}
+
 /// A fresh name for one launch's Codex permission profile: `vajra-` and 16 random hex digits. A user's `config.toml`
 /// table of the same name would merge into ours and could add write roots (S11 hostile-config check), so the name is
 /// one the user can't know in advance.
@@ -225,6 +339,20 @@ pub fn codex_profile_overrides(name: &str, deny: &[PathBuf], write: &[&Path], ne
         format!("permissions.{name}.network={{enabled={network}}}"),
         format!("default_permissions=\"{name}\""),
     ])
+}
+
+/// bhishma #216 H1: the plain Codex run Lead (`start_run` with provider `codex`), `codex -c ... -- <ask>`. It is the
+/// user's own interactive session, so approvals, network and their other settings stay theirs. But it runs under a
+/// fresh permission profile like a worker's: the Vajra dirs unreadable, writes only in the project folder and the
+/// system temp dir. A Codex Lead's run is never counted guarded (`evidence_of`).
+pub fn codex_run_lead_argv(ask: &str, profile: &str, deny: &[PathBuf], project: &Path, tmp: &Path) -> Result<Vec<String>, InvalidInput> {
+    argv::check_ask(ask)?;
+    let mut a = vec!["codex".to_string()];
+    for o in codex_profile_overrides(profile, deny, &[project, tmp], true)? {
+        a.extend(["-c".to_string(), o]);
+    }
+    a.extend(["--".to_string(), ask.to_string()]);
+    Ok(a)
 }
 
 fn bad(field: &'static str, reason: &'static str) -> InvalidInput {

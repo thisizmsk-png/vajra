@@ -990,7 +990,12 @@ impl App {
             if engine == Engine::Claude {
                 argv::build_run_argv_at(&input, n, now, &session_id).map_err(invalid_input)
             } else {
-                adapter_for(engine).run_argv(&input, n).map_err(invalid_input)
+                // bhishma #216 H1: a Codex Lead never runs without the Vajra dirs denied.
+                let deny = crate::adapter::profiles::vajra_deny_dirs(&self.home, &self.data);
+                let profile = crate::adapter::profiles::codex_profile_name().map_err(|e| fail("io_error", e))?;
+                let real = |p: &Path| p.canonicalize().map_err(|e| fail("io_error", e));
+                let (project, tmp) = (real(&cwd)?, real(&std::env::temp_dir())?);
+                crate::adapter::profiles::codex_run_lead_argv(&input.ask, &profile, &deny, &project, &tmp).map_err(invalid_input)
             }
         }, false, workers)?;
         self.note("run_started", &[]);

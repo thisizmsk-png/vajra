@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::{App, fail};
 use crate::adapter::Engine;
+use crate::adapter::profiles::CodexLock;
 use crate::control::service::{Proposal, Seats, security_warning};
 use crate::crew::roles::{self, Kind};
 use crate::providers::launch;
@@ -21,7 +22,21 @@ pub struct StartOptions {
     pub approve_checker: bool,
 }
 
-pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, in Codex's own sandbox. It can't read Vajra's signing key or records, and it can write only in its worktree. It can read your other files. Your own Codex tools (MCP servers, notify) run with it, outside its sandbox.";
+/// A Codex seat's card note when this Mac's launch-time check passed: the sandbox held and none of the user's Codex tools
+/// would run outside it (bhishma #216 H2, L1).
+pub const CODEX_WARNING: &str = "Runs outside the Vajra guard, in Codex's own sandbox. It can't read Vajra's signing key or records, and it can write only in its worktree. It can read your other files.";
+/// Otherwise: the same sandbox, no key claim, and the cause in the user's words after it.
+pub const CODEX_WARNING_OPEN: &str = "Runs outside the Vajra guard, in Codex's own sandbox. It can write only in its worktree, and it can read your other files.";
+
+/// The lock answer per Codex account (`SeatEnv::codex_lock` or its hint).
+pub type LockOf<'a> = &'a dyn Fn(&str) -> CodexLock;
+
+fn codex_note(lock: &CodexLock) -> String {
+    match lock {
+        Ok(()) => CODEX_WARNING.to_string(),
+        Err(why) => format!("{CODEX_WARNING_OPEN} {why}"),
+    }
+}
 pub const CLAUDE_NOTE: &str = "Runs with the Vajra guard. Your own Claude Code MCP servers run with it.";
 pub const NETWORK_NOTE: &str = "Internet on for this worker";
 pub const OUTSIDE_GUARD_CARD: &str = "Final check runs outside the Vajra guard";
@@ -93,13 +108,16 @@ pub(super) fn apply_overrides(seats: &Seats, overrides: &[Value]) -> Result<(Sea
 
 /// Who wrote the final check, and so how far its evidence can be trusted (ADR-16 16.5a). Always the verifier seat: no
 /// agent session runs the evidence, so it never moves to another seat. Fixed at Start, from the harness in effect.
-/// 6k: a Codex verifier counts as guarded when `codex_locked`, the launch-time check that a Codex session can't read
-/// the Vajra state dir, passed.
-pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str, codex_locked: bool) -> Value {
+/// 6k: a Codex verifier counts as guarded only when `lock` passes for its account: the OS keeps the session from the
+/// Vajra state dir, and none of the user's Codex tools (MCP servers, notify) would run outside its sandbox.
+pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str, lock: LockOf<'_>) -> Value {
     let verifier = seats.first_with_role(roles::VERIFIER);
-    let locked = verifier.is_some_and(|v| match harness(&v.account) {
+    // bhishma #216 H1: a Codex Lead is the user's own interactive session (approvals and escalation stay theirs), so
+    // its run is never counted guarded, whatever the verifier.
+    let codex_lead = harness(&seats.lead.account) == Some(Engine::Codex);
+    let locked = !codex_lead && verifier.is_some_and(|v| match harness(&v.account) {
         Some(Engine::Claude) => true,
-        Some(Engine::Codex) => codex_locked,
+        Some(Engine::Codex) => lock(&v.account).is_ok(),
         None => false,
     });
     let trust = match (locked, approve_checker) {
@@ -109,6 +127,21 @@ pub fn evidence_of(seats: &Seats, approve_checker: bool, run_id: &str, codex_loc
     };
     let slug = if trust == "outside_guard" { format!("deliver-{run_id}-og") } else { format!("deliver-{run_id}") };
     json!({"evidence_seat": verifier.map(|v| v.slot.as_str()), "evidence_trust": trust, "campaign_slug": slug})
+}
+
+pub const CODEX_LEAD_CAUSE: &str = "The lead runs on Codex, in your own interactive Codex session, so Vajra doesn't count its run as guarded.";
+
+/// Why a Codex part of the run keeps the evidence outside the guard, named for the card (bhishma #216 H2): the Codex
+/// lead, or the verifier's launch-time answer. `None` when the verifier simply isn't on a guarded harness.
+pub fn outside_cause(seats: &Seats, lock: LockOf<'_>) -> Option<String> {
+    if harness(&seats.lead.account) == Some(Engine::Codex) {
+        return Some(CODEX_LEAD_CAUSE.into());
+    }
+    let v = seats.first_with_role(roles::VERIFIER)?;
+    if harness(&v.account) != Some(Engine::Codex) {
+        return None;
+    }
+    lock(&v.account).err()
 }
 
 fn protection(h: Option<Engine>, kind: Kind) -> &'static str {
@@ -121,15 +154,15 @@ fn protection(h: Option<Engine>, kind: Kind) -> &'static str {
 }
 
 /// What the card says about one seat: its harness, protection, per-worker limits (16.7) and disclosures (16.4, 16.8).
-fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<String, Value>, network: bool) -> Value {
+fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<String, Value>, network: bool, lock: LockOf<'_>) -> Value {
     let h = harness(account);
     let (limits, mut disclosures) = match h {
-        Some(Engine::Claude) => (json!({"message": true, "redirect": true, "stop": "hook_block"}), vec![CLAUDE_NOTE]),
-        Some(Engine::Codex) => (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![CODEX_WARNING]),
+        Some(Engine::Claude) => (json!({"message": true, "redirect": true, "stop": "hook_block"}), vec![CLAUDE_NOTE.to_string()]),
+        Some(Engine::Codex) => (json!({"message": false, "redirect": false, "stop": "terminate", "note": "This worker can't take a message mid-run."}), vec![codex_note(&lock(account))]),
         None => (json!({}), vec![]),
     };
     if network {
-        disclosures.push(NETWORK_NOTE);
+        disclosures.push(NETWORK_NOTE.to_string());
     }
     let mut v = Map::new();
     v.insert("seat".into(), json!(seat));
@@ -144,13 +177,13 @@ fn seat_entry(seat: &str, role: &str, kind: Kind, account: &str, extra: Map<Stri
     Value::Object(v)
 }
 
-fn seat_entries(seats: &Seats, user: &BTreeSet<String>) -> Vec<Value> {
+fn seat_entries(seats: &Seats, user: &BTreeSet<String>, lock: LockOf<'_>) -> Vec<Value> {
     let src = |seat: &str, s: &str| if user.contains(seat) { "user".to_string() } else { s.to_string() };
     let mut lead = Map::new();
     lead.insert("model".into(), json!(seats.lead.model));
     lead.insert("effort".into(), json!(seats.lead.effort));
     lead.insert("source".into(), json!(src("lead", &seats.lead.source)));
-    let mut out = vec![seat_entry("lead", "lead", Kind::Lead, &seats.lead.account, lead, false)];
+    let mut out = vec![seat_entry("lead", "lead", Kind::Lead, &seats.lead.account, lead, false, lock)];
     for w in &seats.workers {
         let mut m = Map::new();
         m.insert("slot".into(), json!(w.slot));
@@ -160,15 +193,15 @@ fn seat_entries(seats: &Seats, user: &BTreeSet<String>) -> Vec<Value> {
         m.insert("security".into(), json!(w.security));
         m.insert("why".into(), json!(w.why));
         m.insert("source".into(), json!(src(&w.slot, &w.source)));
-        out.push(seat_entry(&w.slot, &w.role, roles::kind_of(&w.role).unwrap_or(Kind::Writer), &w.account, m, w.network));
+        out.push(seat_entry(&w.slot, &w.role, roles::kind_of(&w.role).unwrap_or(Kind::Writer), &w.account, m, w.network, lock));
     }
     out
 }
 
 /// The guarded `seats.json` document: the seats in effect after overrides, and the evidence seat, trust and campaign slug.
-pub(super) fn seats_doc(run_id: &str, proposal_sha: &str, seats: &Seats, user: &BTreeSet<String>, approve_checker: bool, codex_locked: bool) -> Value {
-    let mut doc = json!({"schema": "vajra.run_seats/1", "run_id": run_id, "proposal_sha256": proposal_sha, "max_in_flight": seats.max_in_flight, "seats": seat_entries(seats, user)});
-    if let (Value::Object(d), Value::Object(e)) = (&mut doc, evidence_of(seats, approve_checker, run_id, codex_locked)) {
+pub(super) fn seats_doc(run_id: &str, proposal_sha: &str, seats: &Seats, user: &BTreeSet<String>, approve_checker: bool, lock: LockOf<'_>) -> Value {
+    let mut doc = json!({"schema": "vajra.run_seats/1", "run_id": run_id, "proposal_sha256": proposal_sha, "max_in_flight": seats.max_in_flight, "seats": seat_entries(seats, user, lock)});
+    if let (Value::Object(d), Value::Object(e)) = (&mut doc, evidence_of(seats, approve_checker, run_id, lock)) {
         d.extend(e);
     }
     doc
@@ -180,14 +213,14 @@ pub(super) fn receipt_seats(doc: &Value) -> Vec<Value> {
 }
 
 /// The proposal card's seat section: the seats as proposed, the warnings, and what the run's final check will be called.
-/// `codex_locked` is the last launch-time check's answer (`SeatEnv::codex_key_locked_hint`); Start checks again.
-pub(super) fn card(p: &Proposal, codex_locked: bool) -> Option<Value> {
+/// `lock` gives the last launch-time check's answer per Codex account (`SeatEnv::codex_lock_hint`); Start checks again.
+pub(super) fn card(p: &Proposal, lock: LockOf<'_>) -> Option<Value> {
     let seats = p.seats.as_ref()?;
-    let ev = evidence_of(seats, false, "<run>", codex_locked);
+    let ev = evidence_of(seats, false, "<run>", lock);
     let outside = ev["evidence_trust"] == "outside_guard";
     let mut v = json!({
         "max_in_flight": seats.max_in_flight,
-        "seats": seat_entries(seats, &BTreeSet::new()),
+        "seats": seat_entries(seats, &BTreeSet::new(), lock),
         "evidence": {"seat": ev["evidence_seat"], "trust": ev["evidence_trust"]},
     });
     if outside {
@@ -195,6 +228,9 @@ pub(super) fn card(p: &Proposal, codex_locked: bool) -> Option<Value> {
         v["evidence"]["label"] = json!("Verified (evidence ran outside the guard)");
         v["evidence"]["why"] = json!(OUTSIDE_GUARD_WHY);
         v["evidence"]["approval_offer"] = json!(APPROVAL_OFFER);
+        if let Some(c) = outside_cause(seats, lock) {
+            v["evidence"]["cause"] = json!(c);
+        }
     }
     if let Some(w) = security_warning(&p.ask, seats) {
         v["security_warning"] = json!(w);
@@ -218,11 +254,17 @@ impl App {
         if !refusals.is_empty() {
             return Err(Self::worker_unavailable(refusals));
         }
-        // 6k: the launch-time check, run fresh at every Start whose verifier is a Codex seat.
-        let codex_verifier = seats.first_with_role(roles::VERIFIER).is_some_and(|v| harness(&v.account) == Some(Engine::Codex));
-        let codex_locked = codex_verifier && self.seat_env.codex_key_locked();
+        // 6k: the launch-time check, run fresh at every Start, once per Codex account on the seats. The verifier's
+        // answer decides the trust; every Codex seat's card note follows its own.
+        let mut answers: std::collections::HashMap<String, CodexLock> = std::collections::HashMap::new();
+        for a in std::iter::once(&seats.lead.account).chain(seats.workers.iter().map(|w| &w.account)) {
+            if harness(a) == Some(Engine::Codex) && !answers.contains_key(a.as_str()) {
+                answers.insert(a.clone(), self.seat_env.codex_lock(a));
+            }
+        }
+        let lock = |a: &str| answers.get(a).cloned().unwrap_or_else(|| Err(crate::adapter::profiles::CODEX_NOT_PROVEN.into()));
         let (now, run_id) = self.fresh_run_id(crate::ids::unix_now())?;
-        let doc = seats_doc(&run_id, &p.proposal_sha256, &seats, &user, opts.approve_checker, codex_locked);
+        let doc = seats_doc(&run_id, &p.proposal_sha256, &seats, &user, opts.approve_checker, &lock);
         let sha = self.record_run_seats(&run_id, &doc).map_err(|_| fail("io", "could not record the run's seats"))?;
         Ok((run_id, now, doc, sha))
     }

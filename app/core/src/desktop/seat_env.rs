@@ -21,13 +21,13 @@ pub struct SeatEnv {
     keys: Mutex<Arc<Keys>>,
     /// Check 5. This build's value is `launch::CORE_ROUTE_AVAILABLE`; tests turn it on to reach the later checks.
     route: AtomicBool,
-    /// 6k: the last launch-time check's answer, for the proposal card. Start always checks again.
-    locked: Mutex<Option<bool>>,
+    /// 6k: the last launch-time check's answer per Codex account, for the proposal card. Start always checks again.
+    locked: Mutex<HashMap<String, crate::adapter::profiles::CodexLock>>,
 }
 
 impl SeatEnv {
     pub fn new(data: &Path, home: &Path, keys: Keys) -> Self {
-        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE), locked: Mutex::new(None) }
+        Self { data: data.to_path_buf(), home: home.to_path_buf(), dirs: Mutex::new(None), keys: Mutex::new(Arc::new(keys)), route: AtomicBool::new(launch::CORE_ROUTE_AVAILABLE), locked: Mutex::new(HashMap::new()) }
     }
 
     #[cfg(test)]
@@ -41,19 +41,31 @@ impl SeatEnv {
         self.route.load(Ordering::SeqCst)
     }
 
-    /// 6k's launch-time check, run now: can a Codex session under Vajra's profile be kept from the Vajra state dir?
-    pub fn codex_key_locked(&self) -> bool {
+    /// 6k's launch-time check for a Codex seat on `account`, run now: is a session under Vajra's profile kept from the
+    /// Vajra state dir, with nothing from that route's config (MCP servers, notify) running outside its sandbox?
+    pub fn codex_lock(&self, account: &str) -> crate::adapter::profiles::CodexLock {
         let dirs = crate::lock(&self.dirs).clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
         let system = detect::System::new(dirs).with_home(self.home.clone());
-        let ok = crate::adapter::profiles::codex_key_probe(&system, &self.home, &self.data);
-        *crate::lock(&self.locked) = Some(ok);
-        ok
+        let login = account == "codex";
+        let codex_home = if login {
+            // The user's own: `CODEX_HOME` when the app was started with one, else `~/.codex`, as Codex picks it.
+            system.env("CODEX_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| self.home.join(".codex"))
+        } else {
+            match crate::providers::codex_home::home_for(&self.data, account) {
+                Ok(h) => h,
+                Err(_) => return Err(crate::adapter::profiles::CODEX_NOT_PROVEN.into()),
+            }
+        };
+        let r = crate::adapter::profiles::codex_lock(&system, &self.home, &self.data, &codex_home, login);
+        crate::lock(&self.locked).insert(account.to_string(), r.clone());
+        r
     }
 
-    /// The last check's answer, or a fresh check the first time. For the card only: it predicts what Start will find.
-    pub fn codex_key_locked_hint(&self) -> bool {
-        let last = *crate::lock(&self.locked);
-        last.unwrap_or_else(|| self.codex_key_locked())
+    /// The last check's answer for `account`, or a fresh check the first time. For the card only: it predicts what
+    /// Start will find.
+    pub fn codex_lock_hint(&self, account: &str) -> crate::adapter::profiles::CodexLock {
+        let last = crate::lock(&self.locked).get(account).cloned();
+        last.unwrap_or_else(|| self.codex_lock(account))
     }
 
     /// The checks of 16.2 for every seat, then the engine once. A project that is not a store id reads the global agents.

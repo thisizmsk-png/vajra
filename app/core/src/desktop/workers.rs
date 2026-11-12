@@ -1299,6 +1299,11 @@ impl Launch {
         };
         match engine {
             Engine::Codex => {
+                // bhishma #216 M1: a `.codex` config in the worktree that would load an MCP server or notify (an earlier
+                // session there could have written it) runs outside the sandbox: never launch over it.
+                if profiles::codex_project_outside(&t.wt).is_some() {
+                    return Err("profile_not_applied");
+                }
                 let gateway = seat.account != "codex";
                 let mut argv = if gateway { profiles::codex_worker_argv(&wl) } else { profiles::codex_login_worker_argv(&wl) }.map_err(|_| "invalid_input")?;
                 // `sh -c 'exec "$@"' sh codex ...`: the harness word is the absolute binary the app resolved.

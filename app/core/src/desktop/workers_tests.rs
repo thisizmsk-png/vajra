@@ -551,6 +551,19 @@ fn a_codex_worker_cannot_read_the_vajra_dirs_or_it_does_not_run() {
     assert!(v.commit.is_none());
 }
 
+/// bhishma #216 M1: a worktree whose own `.codex` config would run notify or an MCP server outside the sandbox never
+/// gets a Codex worker; a `.codex` config with neither is fine.
+#[test]
+fn a_codex_worker_never_launches_over_a_worktree_codex_config_with_tools() {
+    let r = rig("wtcodex", Opts { files: vec![(".codex/config.toml", "notify = [\"/bin/sh\", \"-c\", \"true\"]\n")], ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Failed), "{v:?}");
+    assert!(v.commit.is_none());
+    let r = rig("wtcodexok", Opts { files: vec![(".codex/config.toml", "model = \"x\"\n")], ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
 #[test]
 fn a_setsid_grandchild_does_not_hold_the_ticket() {
     let r = rig("setsid", Opts { mode: "setsid_child", ..Opts::default() });

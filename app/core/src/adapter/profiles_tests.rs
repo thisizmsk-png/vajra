@@ -33,6 +33,70 @@ fn profile_kv(network: bool) -> [String; 3] {
     ]
 }
 
+/// bhishma #216 H2: what in a Codex config runs outside the sandbox, named; anything unreadable fails closed.
+#[test]
+fn a_codex_config_with_an_mcp_server_or_notify_is_named_and_a_clean_one_is_not() {
+    let named = codex_config_outside;
+    assert_eq!(named("model = \"x\"\n[tui]\nnotifications = true\n"), None);
+    assert_eq!(named("[mcp_servers.files]\ncommand = \"npx\"\nenabled = false\n"), None, "a switched-off server doesn't run");
+    assert!(named("[mcp_servers.files]\ncommand = \"npx\"\n").unwrap().contains("MCP server \"files\""));
+    assert!(named("[profiles.work.mcp_servers.fs]\ncommand = \"x\"\n").unwrap().contains("\"fs\""), "inside a profile too");
+    assert!(named("[mcp_servers.\"we ird\"]\ncommand = \"x\"\n").unwrap().contains("an MCP server"), "an odd name isn't echoed");
+    assert!(named("notify = [\"/bin/sh\", \"-c\", \"x\"]\n").unwrap().contains("notify command"));
+    assert_eq!(named("notify = []\n"), None);
+    assert!(named("[[[ not toml").unwrap().contains("couldn't read"), "an unparsable config fails closed");
+
+    let d = tmpdir("tools");
+    let (none, mcp, bad) = (d.join("none.toml"), d.join("mcp.toml"), d.join("bad.toml"));
+    std::fs::write(&mcp, "[mcp_servers.files]\ncommand = \"npx\"\n").unwrap();
+    std::fs::write(&bad, "[[[").unwrap();
+    let only = std::slice::from_ref(&none);
+    let no = FakeCodex { found: false, answer: None, asked: Default::default() };
+    assert_eq!(codex_tools_outside(&no, only, false), None, "a missing file loads nothing");
+    assert!(codex_tools_outside(&no, &[none.clone(), mcp], false).unwrap().contains("\"files\""));
+    assert!(codex_tools_outside(&no, &[bad], false).unwrap().contains("couldn't read"));
+    // The login route also asks codex itself, which counts plugin servers too.
+    let listed = FakeCodex { found: true, answer: out(0, r#"[{"name":"plug","enabled":true}]"#, ""), asked: Default::default() };
+    assert!(codex_tools_outside(&listed, only, true).unwrap().contains("\"plug\""));
+    assert_eq!(*listed.asked.lock().unwrap(), ["mcp", "list", "--json"]);
+    let off = FakeCodex { found: true, answer: out(0, r#"[{"name":"plug","enabled":false}]"#, ""), asked: Default::default() };
+    assert_eq!(codex_tools_outside(&off, only, true), None);
+    let broken = FakeCodex { found: true, answer: out(1, "", "boom"), asked: Default::default() };
+    assert!(codex_tools_outside(&broken, only, true).unwrap().contains("couldn't read"), "a failed list fails closed");
+    assert!(codex_tools_outside(&no, only, true).unwrap().contains("couldn't read"), "no codex to ask fails closed");
+}
+
+/// bhishma #216 M1: a worktree's own `.codex` config is judged at each launch.
+#[test]
+fn a_worktree_codex_config_that_would_load_tools_outside_the_sandbox_is_found() {
+    let wt = tmpdir("wtcodex");
+    assert_eq!(codex_project_outside(&wt), None, "no .codex");
+    std::fs::create_dir_all(wt.join(".codex")).unwrap();
+    std::fs::write(wt.join(".codex/config.toml"), "model = \"x\"\n").unwrap();
+    assert_eq!(codex_project_outside(&wt), None, "a committed config with no tools is fine");
+    std::fs::write(wt.join(".codex/config.toml"), "notify = [\"/bin/sh\"]\n").unwrap();
+    assert!(codex_project_outside(&wt).is_some());
+    let wt2 = tmpdir("wtcodex2");
+    std::os::unix::fs::symlink(&wt, wt2.join(".codex")).unwrap();
+    assert!(codex_project_outside(&wt2).is_some(), "a symlinked .codex counts as one");
+}
+
+/// bhishma #216 H1: the plain Codex run Lead gets the same profile as a worker, with the project and temp dir writable.
+#[test]
+fn the_codex_run_lead_runs_under_the_profile_with_the_vajra_dirs_denied() {
+    let a = codex_run_lead_argv("exec this --flag", PROFILE, deny(), Path::new(WT), Path::new(TMP)).unwrap();
+    let mut want: Vec<String> = vec!["codex".into()];
+    for o in codex_profile_overrides(PROFILE, deny(), &[Path::new(WT), Path::new(TMP)], true).unwrap() {
+        want.extend(["-c".into(), o]);
+    }
+    want.extend(["--".into(), "exec this --flag".into()]);
+    assert_eq!(a, want);
+    assert!(a.iter().any(|x| x.contains(&format!("\"{}\"=\"none\"", DENY[0]))), "{a:?}");
+    assert!(!a.iter().any(|x| x == "--sandbox" || x.contains("approval_policy")), "approvals stay the user's: {a:?}");
+    assert!(codex_run_lead_argv("x", PROFILE, &[], Path::new(WT), Path::new(TMP)).is_err(), "never without the deny set");
+    assert!(codex_run_lead_argv("x", "vajra", deny(), Path::new(WT), Path::new(TMP)).is_err(), "never under a guessable name");
+}
+
 /// S11 hostile-config check: a user table named like ours merges into it, so each launch gets a name nobody can guess,
 /// and a fixed or malformed name never goes out.
 #[test]
