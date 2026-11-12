@@ -160,7 +160,9 @@
 
 /* Settings: the section list beside the section. */
 .v-settings__grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
-.v-settings__nav { display: flex; flex-direction: column; gap: 2px; padding: var(--space-lg) var(--space-sm); border-right: 1px solid var(--c-border); }
+.v-settings__side { display: flex; flex-direction: column; gap: var(--space-md); padding: var(--space-lg) var(--space-sm); border-right: 1px solid var(--c-border); }
+.v-settings__nav { display: flex; flex-direction: column; gap: 2px; }
+.v-settings__back { color: var(--c-text-muted); }
 .v-settings__link { display: flex; align-items: center; height: var(--row-h); padding: 0 10px; border-radius: var(--radius-md); color: var(--c-text-secondary); font: 500 13px/16px var(--font-ui); text-decoration: none; }
 .v-settings__link:hover, .v-settings__link[aria-current="page"] { background: var(--c-accent); color: var(--c-text); }
 .v-settings__link:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 1px; }
