@@ -114,7 +114,7 @@ pub fn sweep_ticket(seen: &[(u32, u64)], tmp: &Path, since: u64) -> Swept {
 }
 
 /// SIGKILL each `(pid, stamp)` that is still that process, then wait up to a second for them to go.
-fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
+pub(crate) fn kill_proved(hits: Vec<(u32, u64)>) -> Swept {
     let mut watch = ExitWatch::new();
     let hits: Vec<(u32, u64)> = hits.into_iter().filter(|&(p, s)| watch.add(p) && running(p, s)).collect();
     for &(p, s) in &hits {

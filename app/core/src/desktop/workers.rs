@@ -960,7 +960,9 @@ impl WorkerRuntime {
         let _on_repo = OnRepo::new(&self.0.sessions, &sid, t.common_dir());
         // Taken before the spawn: every process of this attempt starts at or after it (the sweep's window).
         let spawned_at = procsweep::now_stamp();
-        if self.0.sup.spawn_tagged(&sid, spec, Some(tag)).is_err() {
+        let run = crate::lock(&self.0.book).tickets.get(id).map(|e| e.view.run.clone());
+        let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Worker), run, ticket: Some(id.to_string()) };
+        if self.0.sup.spawn_owned(&sid, spec, Some(tag), who).is_err() {
             return Attempt::End(Outcome::Failed, "spawn_failed".into(), None);
         }
         let tty = self.0.sup.tty(&sid).ok().flatten();
@@ -1273,6 +1275,19 @@ impl StoredTicket {
             mismatch: self.mismatch, provider: self.provider, summary: self.summary, retention: self.retention, started: None,
         })
     }
+}
+
+/// A worker an earlier life left running that the start-up reconcile killed (6d2d): its ticket ends here
+/// `failed`/`abandoned` with detail `app_crashed`, in the run's own `tickets.jsonl`, before this life's replay reads it.
+/// A ticket the file has no line for, or one already ended, is left alone. Returns whether a line was written.
+pub(crate) fn record_crashed(data: &std::path::Path, run: &str, ticket: &str) -> bool {
+    let (mut views, _) = replay_run(data, run);
+    let Some(v) = views.get_mut(ticket).filter(|v| v.state != State::Ended) else { return false };
+    finish_view(v, Outcome::Failed, "abandoned");
+    v.detail = Some("app_crashed".into());
+    v.summary = Some(summary(v, &Redactor::default()));
+    let line = json!({"v": 1, "event": "outcome", "ticket": v});
+    open_record(data, run).and_then(|mut f| f.write_all(format!("{line}\n").as_bytes())).is_ok()
 }
 
 /// What replay read back from one run's file: the last view of each ticket, and how many lines it could not use.

@@ -62,6 +62,8 @@ pub enum SessionError {
     ShuttingDown,
     Spawn(String),
     Io(String),
+    /// The ownership ledger could not record the process: it was killed, and the spawn refused.
+    Ledger(String),
 }
 
 impl std::fmt::Display for SessionError {
@@ -80,6 +82,7 @@ impl std::fmt::Display for SessionError {
             Self::ShuttingDown => f.write_str("app is quitting"),
             Self::Spawn(e) => write!(f, "spawn failed: {e}"),
             Self::Io(e) => write!(f, "pty i/o failed: {e}"),
+            Self::Ledger(e) => write!(f, "the process could not be recorded, so it was not started: {e}"),
         }
     }
 }
@@ -277,6 +280,8 @@ pub struct Supervisor {
     closing: AtomicBool,
     /// Where a worker's failed exit is reported (H9). Unset: nothing is reported.
     errors: Mutex<Option<ErrorSink>>,
+    /// The ownership ledger every spawn is recorded in (6d2d); none in tests that do not set one.
+    owned: Mutex<Option<Arc<crate::owned::Ledger>>>,
 }
 
 /// Receives the `provider_error` event of a worker that died. The app installs one that tells the lead and the DG.
@@ -286,6 +291,16 @@ pub type ErrorSink = Arc<dyn Fn(&ProviderError) + Send + Sync>;
 struct ExitHooks {
     log: Option<Arc<Logger>>,
     report: Option<(ProviderTag, ErrorSink)>,
+    /// The ownership record to forget once the process is reaped.
+    owned: Option<(Arc<crate::owned::Ledger>, u32, u64)>,
+}
+
+/// What a spawned process is, for its ownership record (6d2d): its kind, and its run and ticket.
+#[derive(Debug, Clone, Default)]
+pub struct OwnedAs {
+    pub kind: Option<crate::owned::Kind>,
+    pub run: Option<String>,
+    pub ticket: Option<String>,
 }
 
 /// Who a spawned worker is, for its `provider_error` event. Owned by the session for its whole life: nothing here can be
@@ -310,7 +325,13 @@ impl Supervisor {
             sessions: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             errors: Mutex::new(None),
+            owned: Mutex::new(None),
         }
+    }
+
+    /// The ownership ledger every spawn is recorded in from now on (6d2d). Without one (tests), nothing is recorded.
+    pub fn set_ledger(&self, ledger: Arc<crate::owned::Ledger>) {
+        *lock(&self.owned) = Some(ledger);
     }
 
     pub fn set_error_sink(&self, sink: ErrorSink) {
@@ -346,6 +367,13 @@ impl Supervisor {
 
     /// `spawn` for a provider worker: a failed exit is reported as a `provider_error` against `tag`.
     pub fn spawn_tagged(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>) -> Result<(), SessionError> {
+        self.spawn_owned(id, spec, tag, OwnedAs::default())
+    }
+
+    /// `spawn_tagged`, recording the process in the ownership ledger as `who` (a lead unless it says otherwise, with
+    /// the session id as its run) before this returns, and forgetting it when it is reaped. A record that cannot be
+    /// written kills the process and refuses the spawn: no lead or worker runs that a crash would lose track of.
+    pub fn spawn_owned(&self, id: &str, spec: SpawnSpec, tag: Option<ProviderTag>, who: OwnedAs) -> Result<(), SessionError> {
         if self.closing.load(Ordering::SeqCst) {
             return Err(SessionError::ShuttingDown);
         }
@@ -403,6 +431,37 @@ impl Supervisor {
         // Drop our slave fd so the reader sees EOF when the child is gone.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or(0);
+        let ledger = lock(&self.owned).clone();
+        let owned = match ledger {
+            Some(l) => {
+                let refuse = |mut child: Box<dyn Child + Send + Sync>, e: String| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(SessionError::Ledger(e))
+                };
+                let Some(stamp) = crate::procid::start_stamp(pid).filter(|_| pid > 1) else {
+                    return refuse(child, "its start time could not be read".into());
+                };
+                let o = crate::owned::Owner {
+                    pid,
+                    stamp,
+                    cwd: spec.cwd.clone(),
+                    kind: who.kind.unwrap_or(crate::owned::Kind::Lead),
+                    run: Some(who.run.unwrap_or_else(|| id.to_string())),
+                    ticket: who.ticket,
+                };
+                if let Err(e) = l.record(o) {
+                    return refuse(child, e.to_string());
+                }
+                Some((l, pid, stamp))
+            }
+            None => None,
+        };
+        let forget = |o: &Option<(Arc<crate::owned::Ledger>, u32, u64)>| {
+            if let Some((l, p, s)) = o {
+                let _ = l.forget(*p, *s);
+            }
+        };
         let reader = pair
             .master
             .try_clone_reader()
@@ -417,6 +476,7 @@ impl Supervisor {
                 let mut child = child;
                 let _ = child.kill();
                 let _ = child.wait();
+                forget(&owned);
                 return Err(e);
             }
         };
@@ -439,10 +499,17 @@ impl Supervisor {
             let stream = id.to_string();
             let redact = spec.redact.clone();
             let report = tag.and_then(|t| lock(&self.errors).clone().map(|sink| (t, sink)));
-            std::thread::Builder::new()
-                .name(format!("pty-{id}"))
-                .spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, ExitHooks { log, report }))
-                .map_err(|e| SessionError::Io(e.to_string()))?
+            let hooks = ExitHooks { log, report, owned: owned.clone() };
+            match std::thread::Builder::new().name(format!("pty-{id}")).spawn(move || read_loop(&bus, &stream, &redact, reader, child, &session, hooks)) {
+                Ok(h) => h,
+                Err(e) => {
+                    // The child moved into the closure that never ran: end its group by its leader's pid.
+                    // SAFETY: kill has no memory preconditions; the pid is our unreaped child's.
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    forget(&owned);
+                    return Err(SessionError::Io(e.to_string()));
+                }
+            }
         };
         *lock(&session.reader) = Some(handle);
         sessions.insert(id.to_string(), session);
@@ -641,7 +708,7 @@ fn read_loop(
     session: &Session,
     exit: ExitHooks,
 ) {
-    let ExitHooks { log, report } = exit;
+    let ExitHooks { log, report, owned } = exit;
     let log = log.as_deref();
     let mut tail: VecDeque<String> = VecDeque::with_capacity(errors::TAIL_LINES);
     let mut pending: Vec<u8> = Vec::new();
@@ -692,6 +759,10 @@ fn read_loop(
                 let failed = (info.code != 0 || info.signal.is_some()) && !session.stop_asked.load(Ordering::SeqCst);
                 let (code, signal) = (info.code, info.signal.clone());
                 *lock(&session.tail) = tail.iter().cloned().collect();
+                // Reaped: the pid is free for reuse from here on, so its record goes now.
+                if let Some((l, p, s)) = &owned {
+                    let _ = l.forget(*p, *s);
+                }
                 *exit = Some(info);
                 session.exited.notify_all();
                 drop(exit);

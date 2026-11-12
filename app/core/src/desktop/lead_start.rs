@@ -131,6 +131,8 @@ impl App {
         }
         let rt = self.core_runtime(project)?;
         let gw = rt.gitw().clone();
+        // Before the lead exists: what it was started on, so a crash reconcile and the resume check can read it back.
+        super::recover::record_started(&self.data, run, project, &repo, &lead_seat.account).map_err(|e| fail("io", e))?;
         let roles = writer_roles(&seats);
         let cfg = RunConfig {
             project: project.into(), run: run.into(), repo: repo.clone(), base, ask: input.ask.clone(), seats, max_in_flight: input.max_in_flight,
@@ -163,9 +165,13 @@ impl App {
             }
             l.runs.insert(run.to_string(), lead.clone());
         }
-        let (reg, id, runs, w) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle(), lead.clone());
+        let (reg, id, runs, w, data) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle(), lead.clone(), self.data.clone());
         let watching = std::thread::Builder::new().name(format!("lead-{run}")).spawn(move || {
             w.watch();
+            // How it ended, so the next start does not take it for a run a crash cut short.
+            let (status, why) = w.ended();
+            let status = status.map(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default());
+            let _ = super::recover::record_ended(&data, &id, status.as_deref().unwrap_or("stopped"), why.as_deref().unwrap_or(""));
             reg.remove(&id);
             if let Some(r) = runs.upgrade() {
                 lock(&r.0).runs.remove(&id);
@@ -208,6 +214,19 @@ impl App {
         }
         out.left.sort();
         out
+    }
+
+    /// Every ended core run, newest first, each with whether it can be resumed and, if not, why (6d2d, item e2).
+    pub fn core_runs(&self) -> Result<Value, Value> {
+        let installed = |account: &str| match crate::providers::launch::harness_of(account) {
+            Some(crate::adapter::Engine::Codex) => self.codex_bin().is_absolute(),
+            Some(crate::adapter::Engine::Claude) => self.lead.claude_found(),
+            None => false,
+        };
+        let lead_ok = |account: &str| crate::providers::launch::harness_of(account).is_some_and(|e| profiles::profile(e, RoleKind::Lead).supported.is_ok());
+        let seats = |run: &str| self.read_run_seats(run);
+        let env = super::recover::ResumeEnv { seats: &seats, installed: &installed, lead_ok: &lead_ok };
+        Ok(json!({"runs": super::recover::core_runs(&self.data, &env)}))
     }
 
     /// The default wait for `shutdown_leads`.

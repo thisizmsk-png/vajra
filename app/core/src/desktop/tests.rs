@@ -5466,3 +5466,35 @@ fn the_lead_shutdown_with_no_leads_ends_nothing_and_after_it_no_run_lead_starts(
     let e = app.start_lead_run("p", input, t.0.to_str().unwrap(), "20261112-0930").unwrap_err();
     assert_eq!(e["error"], "quitting", "a quitting app refuses before it reads anything: {e}");
 }
+
+#[test]
+fn opening_the_app_after_a_crash_kills_the_earlier_lifes_recorded_lead_first() {
+    use std::os::unix::process::CommandExt;
+    let t = Tmp::new();
+    let data = t.0.join("data");
+    fs::create_dir_all(&data).unwrap();
+    let mut c = std::process::Command::new("/bin/sleep");
+    c.arg("60");
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut lead = c.spawn().unwrap();
+    let pid = lead.id();
+    let o = crate::owned::Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind: crate::owned::Kind::Lead, run: Some("20261112-0930".into()), ticket: None };
+    crate::owned::Ledger::new(crate::owned::ledger_path(&data)).record(o).unwrap();
+    let app = t.app();
+    let gone = (0..150).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        lead.try_wait().unwrap().is_some()
+    });
+    if !gone {
+        let _ = lead.kill();
+    }
+    let _ = lead.wait();
+    assert!(gone, "App::open killed it before returning");
+    assert_eq!(app.swept_report()["crash_reconcile"]["killed"], 1);
+}

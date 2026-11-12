@@ -138,6 +138,11 @@ impl LeadState {
         }
     }
 
+    /// Was a `claude` binary found (the resume check's "is the provider installed")?
+    pub(super) fn claude_found(&self) -> bool {
+        lock(&self.bin).is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn set_bin(&self, p: Option<PathBuf>) {
         *lock(&self.bin) = p;

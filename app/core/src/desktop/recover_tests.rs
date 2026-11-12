@@ -1,0 +1,229 @@
+//! After a crash (6d2d): the ledger records every spawn and refuses one it can't record, the start-up reconcile kills
+//! an earlier life's leads and workers (re-proved by pid and start stamp) and writes their tickets and runs ended, a
+//! reused pid is never touched, and the core runs list says why a run can't be resumed. Temp dirs only.
+
+use super::*;
+use crate::owned::Owner;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+struct Tmp(PathBuf);
+impl Tmp {
+    fn new(tag: &str) -> Self {
+        let p = std::env::temp_dir().join(format!("vajra-rc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(p.join("data")).unwrap();
+        Tmp(p.canonicalize().unwrap())
+    }
+    fn data(&self) -> PathBuf {
+        self.0.join("data")
+    }
+}
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A process in its own session, as the supervisor's PTY children are; killed and reaped on drop if it still runs.
+struct Kid(Child);
+impl Drop for Kid {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn kid() -> Kid {
+    let mut c = Command::new("/bin/sleep");
+    c.arg("60");
+    // SAFETY: setsid is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    Kid(c.spawn().unwrap())
+}
+
+fn alive(k: &mut Kid) -> bool {
+    let until = Instant::now() + Duration::from_secs(3);
+    loop {
+        match k.0.try_wait().unwrap() {
+            Some(_) => return false,
+            None if Instant::now() >= until => return true,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+fn agent(k: &Kid, kind: Kind, run: &str, ticket: Option<&str>) -> Owner {
+    let pid = k.0.id();
+    Owner { pid, stamp: crate::procid::start_stamp(pid).unwrap(), cwd: "/tmp".into(), kind, run: Some(run.into()), ticket: ticket.map(String::from) }
+}
+
+const RUN: &str = "20261112-0930";
+
+/// A run as an earlier life left it: started, one ticket line still running.
+fn crashed_run(data: &Path, ticket: &str) {
+    record_started(data, RUN, "p", Path::new("/tmp"), "codex").unwrap();
+    let line = json!({"v": 1, "event": "dispatch", "ticket": {"id": ticket, "run": RUN, "task": "t1", "round": 1, "kind": "writer", "slot": "w1", "account": "codex", "state": "running", "attempt": 1, "elapsed_s": 0}});
+    std::fs::write(data.join("runs").join(RUN).join("tickets.jsonl"), format!("{line}\n")).unwrap();
+}
+
+fn last_line(data: &Path) -> Value {
+    let t = std::fs::read_to_string(data.join("runs").join(RUN).join("tickets.jsonl")).unwrap();
+    serde_json::from_str(t.lines().last().unwrap()).unwrap()
+}
+
+#[test]
+fn a_crash_reconcile_kills_the_earlier_lifes_lead_and_worker_and_writes_them_ended() {
+    let t = Tmp::new("crash");
+    let data = t.data();
+    let ticket = format!("{RUN}.t1.r1");
+    crashed_run(&data, &ticket);
+    let (mut lead, mut worker, mut shell) = (kid(), kid(), kid());
+    let ledger = Ledger::new(crate::owned::ledger_path(&data));
+    ledger.record(agent(&lead, Kind::Lead, RUN, None)).unwrap();
+    ledger.record(agent(&worker, Kind::Worker, RUN, Some(&ticket))).unwrap();
+    ledger.record(Owner::shell(shell.0.id(), crate::procid::start_stamp(shell.0.id()).unwrap(), "/tmp".into())).unwrap();
+
+    // The new life, on the same data dir, before any agent of its own.
+    let ledger = Ledger::new(crate::owned::ledger_path(&data));
+    let r = reconcile(&data, &ledger);
+    assert_eq!((r.killed, r.survived, r.reused, r.tickets), (2, 0, 0, 1), "{r:?}");
+    assert_eq!(r.runs, vec![RUN.to_string()]);
+    assert!(!alive(&mut lead) && !alive(&mut worker), "both were ours and are gone before any agent starts");
+    assert!(alive(&mut shell), "a shell stays the human's choice");
+    assert_eq!(ledger.load().len(), 1, "only the shell's record is left");
+
+    let l = last_line(&data);
+    assert_eq!((l["ticket"]["state"].as_str(), l["ticket"]["outcome"].as_str()), (Some("ended"), Some("failed")));
+    assert_eq!((l["ticket"]["reason"].as_str(), l["ticket"]["detail"].as_str()), (Some("abandoned"), Some("app_crashed")));
+    let ended = read(&data.join("runs").join(RUN), ENDED_FILE).unwrap();
+    assert_eq!((ended["status"].as_str(), ended["reason"].as_str()), (Some("lead_lost"), Some("app_restarted")));
+
+    // A second start finds nothing more to do, and the run's end is not rewritten.
+    let again = reconcile(&data, &ledger);
+    assert_eq!((again.killed, again.tickets, again.runs.len()), (0, 0, 0));
+}
+
+#[test]
+fn a_record_whose_pid_another_process_holds_is_never_signalled_and_is_forgotten() {
+    let t = Tmp::new("reused");
+    let data = t.data();
+    let ticket = format!("{RUN}.t1.r1");
+    crashed_run(&data, &ticket);
+    let mut other = kid();
+    let ledger = Ledger::new(crate::owned::ledger_path(&data));
+    let mut o = agent(&other, Kind::Worker, RUN, Some(&ticket));
+    o.stamp += 1; // the pid is this live process, but the record's process started at another time
+    ledger.record(o).unwrap();
+    let r = reconcile(&data, &ledger);
+    assert_eq!((r.killed, r.reused, r.tickets), (0, 1, 0), "{r:?}");
+    assert!(alive(&mut other), "someone else's process is left alone");
+    assert!(ledger.load().is_empty(), "the stale record is dropped");
+    assert_eq!(last_line(&data)["ticket"]["state"], "running", "no ticket line is written for it; the replay ends it");
+}
+
+#[test]
+fn a_spawn_whose_record_cannot_be_written_is_refused_and_its_process_killed() {
+    use crate::sessions::{SessionError, SpawnSpec, Supervisor};
+    let t = Tmp::new("unwritable");
+    let bus = Arc::new(crate::bus::Bus::open(&t.0.join("spill"), crate::bus::Config::default()).unwrap());
+    let sup = Supervisor::new(bus, None);
+    // A ledger whose directory does not exist: nothing can be written there.
+    sup.set_ledger(Arc::new(Ledger::new(t.0.join("missing/owned.jsonl"))));
+    let marker = t.0.join("ran");
+    let script = format!("sleep 1; echo x > '{}'", marker.display());
+    let spec = SpawnSpec { argv: vec!["/bin/sh".into(), "-c".into(), script], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    let r = sup.spawn("lead-x", spec);
+    assert!(matches!(r, Err(SessionError::Ledger(_))), "{r:?}");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!marker.exists(), "the process was killed before it could do anything");
+
+    // With a writable ledger the spawn is recorded before it returns and forgotten once it is reaped.
+    let ledger = Arc::new(Ledger::new(t.0.join("owned.jsonl")));
+    sup.set_ledger(ledger.clone());
+    let spec = SpawnSpec { argv: vec!["/bin/sh".into(), "-c".into(), "sleep 1".into()], cwd: t.0.clone(), rows: 24, cols: 80, redact: Default::default(), extra_env: vec![] };
+    sup.spawn("lead-y", spec).unwrap();
+    let rec = ledger.load();
+    assert_eq!(rec.len(), 1);
+    assert_eq!((rec[0].kind, rec[0].run.as_deref()), (Kind::Lead, Some("lead-y")));
+    sup.wait("lead-y", Duration::from_secs(10)).unwrap();
+    assert!(ledger.load().is_empty(), "reaped, so forgotten");
+}
+
+#[test]
+fn a_full_ledger_refuses_an_agent_record_but_still_takes_a_shell() {
+    let t = Tmp::new("full");
+    let ledger = Ledger::new(t.0.join("owned.jsonl"));
+    for i in 0..256u32 {
+        ledger.record(Owner::shell(10_000 + i, 1, "/tmp".into())).unwrap();
+    }
+    let o = Owner { pid: 9_999, stamp: 1, cwd: "/tmp".into(), kind: Kind::Worker, run: Some(RUN.into()), ticket: Some("t".into()) };
+    assert!(ledger.record(o).is_err(), "no agent runs without its record");
+    assert!(ledger.record(Owner::shell(9_998, 1, "/tmp".into())).is_ok(), "a shell drops the oldest, as before");
+}
+
+fn env_with<'a>(seats: &'a dyn Fn(&str) -> std::io::Result<Option<Value>>, installed: &'a dyn Fn(&str) -> bool, lead_ok: &'a dyn Fn(&str) -> bool) -> ResumeEnv<'a> {
+    ResumeEnv { seats, installed, lead_ok }
+}
+
+#[test]
+fn an_ended_run_says_why_it_cannot_be_resumed() {
+    let t = Tmp::new("list");
+    let data = t.data();
+    let cwd = t.0.join("proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let ended = |run: &str, account: &str, folder: &Path, plan: bool| {
+        record_started(&data, run, "p", folder, account).unwrap();
+        if plan {
+            record_plan(&data, run, &json!({"v": 1, "round": 1})).unwrap();
+        }
+        record_ended(&data, run, "lead_lost", "app_restarted").unwrap();
+    };
+    ended("20261112-0901", "codex", &cwd, true);
+    ended("20261112-0902", "codex", &t.0.join("gone"), true);
+    ended("20261112-0903", "openrouter", &cwd, true);
+    ended("20261112-0904", "claude", &cwd, true);
+    ended("20261112-0905", "codex", &cwd, false);
+    ended("20261112-0906", "zai", &cwd, true);
+    // A run that never ended is not listed.
+    record_started(&data, "20261112-0907", "p", &cwd, "codex").unwrap();
+    let seats = |run: &str| if run == "20261112-0906" { Ok(None) } else { Ok(Some(json!({"seats": []}))) };
+    let installed = |a: &str| a != "openrouter";
+    let lead_ok = |a: &str| a != "claude";
+    let runs = core_runs(&data, &env_with(&seats, &installed, &lead_ok));
+    let why: Vec<(String, Option<String>)> = runs.iter().map(|r| (r["run"].as_str().unwrap().to_string(), r["why"].as_str().map(String::from))).collect();
+    let want = |r: &str, w: Option<&str>| (r.to_string(), w.map(String::from));
+    assert_eq!(
+        why,
+        vec![
+            want("20261112-0906", Some(SEATS_UNREADABLE)),
+            want("20261112-0905", Some(PLAN_UNREADABLE)),
+            want("20261112-0904", Some(LEAD_UNVERIFIED)),
+            want("20261112-0903", Some(PROVIDER_NOT_INSTALLED)),
+            want("20261112-0902", Some(CWD_MISSING)),
+            want("20261112-0901", None),
+        ]
+    );
+    assert_eq!(runs.last().unwrap()["resumable"], true);
+    assert!(runs.iter().take(5).all(|r| r["resumable"] == false));
+}
+
+#[test]
+fn a_records_dir_that_is_a_link_is_not_read() {
+    let t = Tmp::new("link");
+    let data = t.data();
+    let real = t.0.join("elsewhere");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(data.join("runs")).unwrap();
+    std::fs::write(real.join(ENDED_FILE), r#"{"v":1,"status":"verified","reason":""}"#).unwrap();
+    std::os::unix::fs::symlink(&real, data.join("runs").join(RUN)).unwrap();
+    let (seats, installed, lead_ok) = (|_: &str| Ok(None), |_: &str| true, |_: &str| true);
+    assert!(core_runs(&data, &env_with(&seats, &installed, &lead_ok)).is_empty());
+    assert!(record_started(&data, RUN, "p", Path::new("/tmp"), "codex").is_err(), "nothing is written through the link");
+}

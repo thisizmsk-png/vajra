@@ -254,6 +254,11 @@ pub struct App {
     pub run_leads: Arc<crate::control::runreg::RunRegistry>,
     /// The leads of the core runs (6d2c), each watched on its own thread.
     lead_runs: Arc<lead_start::LeadRuns>,
+    /// The ownership ledger: user shells, and every lead and worker the supervisor starts (6d2d). Shared with `main`'s
+    /// terminals, so there is one writer.
+    owned: Arc<crate::owned::Ledger>,
+    /// What the start-up reconcile did.
+    reconciled: recover::Reconciled,
     bridge: Bridge,
     /// Longest one campaign's integrity check may run while listing; a check that overruns reads "unknown".
     verify_timeout: Duration,
@@ -337,6 +342,10 @@ impl App {
         // A test build never reaches the real Keychain: its default `security` path does not exist.
         let security = Path::new(if cfg!(test) { "/nonexistent/vajra-test/security" } else { crate::providers::keychain::SECURITY });
         paths::ensure_private_dir(data)?;
+        // Before anything else (6d2d): the leads and workers an earlier life's crash left running are killed, each re-proved
+        // by its recorded pid and start stamp, and their tickets and runs are written ended. Shells wait for the human.
+        let owned = Arc::new(crate::owned::Ledger::new(crate::owned::ledger_path(data)));
+        let reconciled = recover::reconcile(data, &owned);
         // First, before anything that could launch an agent exists: `main` serves the socket and opens the window only
         // after `open` returns. A failure here turns agents off and still opens the app.
         let xdg = if cfg!(test) { None } else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) };
@@ -393,7 +402,14 @@ impl App {
             // Metered accounts are the ones with a stored key; the key reaches curl only through the `security` command's
             // stdout pipe. With no key stored there is nothing to meter and no outbound call.
             usage_source: Box::new(crate::providers::usage::CurlSource::new(Box::new(crate::providers::usage::KeychainKeys::new(security, home)))),
-            sup: Arc::new(Supervisor::new(bus.clone(), log.clone())),
+            sup: {
+                let sup = Arc::new(Supervisor::new(bus.clone(), log.clone()));
+                // Every lead and worker is recorded before its spawn returns; one that can't be is refused.
+                sup.set_ledger(owned.clone());
+                sup
+            },
+            owned,
+            reconciled,
             bus,
             control: Arc::new(Mutex::new(svc)),
             run_leads: crate::control::runreg::RunRegistry::new(),
@@ -419,6 +435,11 @@ impl App {
             issued: Mutex::new(Default::default()),
             log,
         })
+    }
+
+    /// The ownership ledger, shared with the terminals.
+    pub fn owned_ledger(&self) -> Arc<crate::owned::Ledger> {
+        self.owned.clone()
     }
 
     pub fn note(&self, event: &'static str, fields: &[(&'static str, u64)]) {
@@ -662,7 +683,7 @@ impl App {
     pub fn swept_report(&self) -> Value {
         let s = self.workers.startup_swept();
         let (killed, survived) = self.workers.runtime_swept();
-        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}})
+        json!({"at_startup": s, "after_attempts": {"killed": killed, "survived": survived}, "crash_reconcile": self.reconciled})
     }
 
     pub fn active_run_diags(&self) -> Vec<crate::lifecycle_report::RunDiag> {
@@ -2418,6 +2439,7 @@ pub mod runproto;
 pub mod charter;
 pub mod run_lead;
 mod lead_start;
+mod recover;
 pub mod labs;
 pub mod worker_host;
 mod arrivals;

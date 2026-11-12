@@ -350,3 +350,15 @@ Settings > Providers > Set up (ADR-17 step 1). Nothing installs in this step: a 
 | "Sign in to NAME" / Opens the CLI's own sign-in in a terminal tab. | sign-in button and hint | |
 | "Sign in: NAME" | terminal tab label | never saved in the tab layout |
 | Vajra engine scripts / Installed / Not installed / Run this in a terminal to install them. | engine-scripts row | detection only (ADR-16 N13) |
+
+6d2d: why an ended core run can't be resumed (the `why` codes from `core_runs`). Not shown yet: the core run card
+that shows them lands in its own PR, which runs the anti-slop gate. Proposed wording, for approval:
+
+| String | Where | Note |
+|---|---|---|
+| The project folder is gone, so this run can't continue. | run card, `cwd_missing` | |
+| The lead's agent CLI isn't installed any more. Install it, then try again. | run card, `provider_not_installed` | |
+| This provider can't lead a run yet. | run card, `lead_unverified` | the harness A lead stays off until it is spiked |
+| This run's seats can't be read, so it can't continue. | run card, `seats_unreadable` | |
+| This run's plan can't be read, so it can't continue. | run card, `plan_unreadable` | |
+| The app closed while this run was going. | run card, ended `lead_lost` with reason `app_restarted` | |

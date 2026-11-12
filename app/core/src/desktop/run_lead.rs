@@ -84,6 +84,8 @@ struct State {
     stopping: bool,
     /// Why the run ended on the lead's side, when it did.
     ended: Option<String>,
+    /// The plan last written to the run's `plan.json` (6d2d), so it is written again only when it changes.
+    plan_written: Option<Value>,
 }
 
 /// Why a lead launch failed before or as it started.
@@ -189,7 +191,8 @@ impl RunLead {
         };
         let sid = format!("lead-{}-{n}", i.run);
         let spec = SpawnSpec { argv, cwd: dir, rows: 40, cols: 160, redact: Redactor::default(), extra_env };
-        i.sup.spawn(&sid, spec).map_err(|e| LaunchFailed(format!("spawn_failed: {e}")))?;
+        let who = crate::sessions::OwnedAs { kind: Some(crate::owned::Kind::Lead), run: Some(i.run.clone()), ticket: None };
+        i.sup.spawn_owned(&sid, spec, None, who).map_err(|e| LaunchFailed(format!("spawn_failed: {e}")))?;
         let pid = i.sup.pid(&sid).map_err(|e| f(&e))?;
         let Some(stamp) = crate::procid::start_stamp(pid) else {
             let _ = i.sup.kill(&sid);
@@ -324,10 +327,23 @@ impl RunLead {
         !crate::lock(&self.0.state).stopping && self.0.proto.card().status.is_none()
     }
 
+    /// Keep the run's `plan.json` the accepted plan (the resume charter's source after a crash). Only an accepted plan
+    /// (round 1 or later) is written, and only when it changed since the last write.
+    fn keep_plan(&self) {
+        let plan = self.0.proto.plan_record();
+        if plan["round"].as_u64().unwrap_or(0) == 0 || crate::lock(&self.0.state).plan_written.as_ref() == Some(&plan) {
+            return;
+        }
+        if super::recover::record_plan(&self.0.env.data, &self.0.run, &plan).is_ok() {
+            crate::lock(&self.0.state).plan_written = Some(plan);
+        }
+    }
+
     fn watch_one(&self, sid: &str, lead: LeadProc) -> Watched {
         let start = Instant::now();
         let mut applied = false;
         loop {
+            self.keep_plan();
             if let Ok(Some(x)) = self.0.sup.wait(sid, POLL) {
                 // A lead the shutdown killed is stopped, not an exit the run decides on.
                 if crate::lock(&self.0.state).stopping {
