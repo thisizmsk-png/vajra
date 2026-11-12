@@ -1,0 +1,166 @@
+//! Start for a proposal with seats (ADR-16 16.5, 6d2c): the core run. The seats come from the guarded `seats.json`
+//! `prepare_seats` just wrote; the run gets its own `RunProtocol` over the worker runtime (with the 6d1 stub gate, so
+//! it ends at best `not_verified` until 6g), a registry entry, and a `RunLead` whose watch runs on its own thread. A
+//! proposal without seats never comes here: it starts exactly as before.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::run_lead::{LeadEnv, LeadSeat, RunLead, Shutdown, READ_BACK_TIMEOUT, SHUTDOWN_WAIT};
+use super::runproto::{CoreWorkers, Limits, RunConfig, RunProtocol, StubGate, SystemClock};
+use super::{fail, lock, workers, App};
+use crate::adapter::profiles::{self, RoleKind};
+use crate::control::service::WorkerSeat;
+use crate::crew::redact::Redactor;
+use crate::sessions::argv::RunInput;
+
+/// The live run leads, by run id.
+#[derive(Default)]
+pub struct LeadRuns(std::sync::Mutex<HashMap<String, RunLead>>);
+
+/// The recorded lead seat and worker seats of a run, as `seats.json` holds them.
+fn seats_of(doc: &Value) -> Result<(LeadSeat, Vec<WorkerSeat>), Value> {
+    let bad = || fail("io", "the run's recorded seats are not readable");
+    let text = |v: &Value, k: &str| v[k].as_str().map(String::from);
+    let mut lead = None;
+    let mut out = Vec::new();
+    for s in doc["seats"].as_array().ok_or_else(bad)? {
+        let account = text(s, "account").ok_or_else(bad)?;
+        if s["seat"] == "lead" {
+            lead = Some(LeadSeat { account, model: text(s, "model"), effort: text(s, "effort") });
+            continue;
+        }
+        out.push(WorkerSeat {
+            slot: text(s, "slot").ok_or_else(bad)?,
+            role: text(s, "role").ok_or_else(bad)?,
+            task: text(s, "task").unwrap_or_default(),
+            account,
+            model: text(s, "model"),
+            effort: text(s, "effort"),
+            security: s["security"].as_bool().unwrap_or(false),
+            network: s["network"].as_bool().unwrap_or(false),
+            why: text(s, "why").unwrap_or_default(),
+            source: text(s, "source").unwrap_or_default(),
+        });
+    }
+    Ok((lead.ok_or_else(bad)?, out))
+}
+
+/// The writer roles that have seats: the only owner roles a plan may name (the charter's roster).
+fn writer_roles(seats: &[WorkerSeat]) -> Vec<String> {
+    let mut r: Vec<String> = seats.iter().filter(|s| RoleKind::of_role(&s.role) == Some(RoleKind::Worker)).map(|s| s.role.clone()).collect();
+    r.sort();
+    r.dedup();
+    r
+}
+
+impl App {
+    /// The absolute codex binary on the user's PATH (or the test dirs).
+    fn codex_bin(&self) -> PathBuf {
+        let dirs = self.provider_dirs.clone().unwrap_or_else(crate::vajra::preflight::path_dirs);
+        crate::vajra::preflight::find_on_path("codex", &dirs).unwrap_or_else(|| PathBuf::from("codex"))
+    }
+
+    /// The worker runtime for core runs, built once (the first core run's project gives the account caps).
+    fn core_runtime(&self, project: &str) -> Result<workers::WorkerRuntime, Value> {
+        use crate::control::service::SeatPolicy;
+        let (data, home) = (self.data.clone(), self.home.clone());
+        let codex = self.codex_bin();
+        let claude = self.claude.clone();
+        let caps = self.seat_env.agents(project).map(|a| a.account_caps).unwrap_or_default();
+        let rt = self.worker_runtime(move || workers::Config {
+            tools: profiles::WriterTools::load(&home.join(".claude/skills/vajra/bundled-agents")),
+            codex_home: home.join(".codex"),
+            home,
+            data,
+            codex,
+            claude,
+            account_caps: caps,
+            worker_timeout: workers::WORKER_TIMEOUT,
+            poll: Duration::from_millis(500),
+            clock: None,
+            redact: Redactor::default(),
+            steer: None,
+            #[cfg(test)]
+            claude_unverified_ok: false,
+        })?;
+        Ok(rt.clone())
+    }
+
+    /// Every other project's folder, denied wholesale in a Claude lead's flag file.
+    fn other_roots(&self, own: &str) -> Vec<PathBuf> {
+        self.projects.list(true).map(|l| l.projects.into_iter().filter(|p| p.id != own).map(|p| PathBuf::from(p.root)).collect()).unwrap_or_default()
+    }
+
+    /// Start a seated proposal's run: `run` is the id `prepare_seats` took, its seats already recorded.
+    pub(super) fn start_lead_run(&self, project: &str, input: RunInput, cwd: &str, run: &str) -> Result<Value, Value> {
+        self.projects_usable()?;
+        let repo = super::repo_dir(cwd)?;
+        let base = self.resolve_base(&repo, &input.base)?;
+        let doc = self.read_run_seats(run).ok().flatten().ok_or_else(|| fail("io", "the run's seats were not recorded"))?;
+        let (lead_seat, seats) = seats_of(&doc)?;
+        let engine = crate::providers::launch::harness_of(&lead_seat.account).ok_or_else(|| fail("harness_unsupported", "the lead's account has no harness"))?;
+        if let Err(u) = profiles::profile(engine, RoleKind::Lead).supported {
+            return Err(json!({"error": "harness_unsupported", "reason": u.reason, "detail": u.detail}));
+        }
+        let rt = self.core_runtime(project)?;
+        let gw = rt.gitw().clone();
+        let roles = writer_roles(&seats);
+        let cfg = RunConfig {
+            project: project.into(), run: run.into(), repo: repo.clone(), base, ask: input.ask.clone(), seats, max_in_flight: input.max_in_flight,
+            limits: Limits { rounds: input.max_rounds, ..Limits::default() }, redact: Redactor::default(),
+        };
+        let proto = RunProtocol::new(cfg, Arc::new(CoreWorkers { rt, gw }), Arc::new(StubGate), Arc::new(SystemClock::default()));
+        // The first launch writes the run's token and rotates this placeholder, which no client holds.
+        self.run_leads.register(run, proto.clone(), crate::control::sha256::digest(crate::control::nonce::random_hex(32).map_err(|e| fail("io", e))?.as_bytes()));
+        let env = LeadEnv {
+            data: self.data.clone(), home: self.home.clone(), exe: std::env::current_exe().map_err(|e| fail("io", e))?,
+            socket: crate::control::socket_path(&self.data), codex: self.codex_bin(),
+            claude: self.claude.clone(), user_codex_home: self.home.join(".codex"), repos: vec![repo.clone()], others: self.other_roots(project),
+            read_back_timeout: READ_BACK_TIMEOUT,
+        };
+        let root = repo.to_str().ok_or_else(|| fail("not_found", "the project's folder is not a UTF-8 path"))?.to_string();
+        let lead = RunLead::new(run, &root, &input.ask, input.max_rounds, roles, lead_seat, env, proto, self.run_leads.clone(), self.sup.clone(), self.bus.clone())
+            .map_err(|e| fail("harness_unsupported", e.0))?;
+        if let Err(e) = lead.start() {
+            self.run_leads.remove(run);
+            return Err(fail("lead_failed", e.0));
+        }
+        lock(&self.lead_runs.0).insert(run.to_string(), lead.clone());
+        let (reg, id, runs) = (self.run_leads.clone(), run.to_string(), self.lead_runs_handle());
+        std::thread::Builder::new()
+            .name(format!("lead-{run}"))
+            .spawn(move || {
+                lead.watch();
+                reg.remove(&id);
+                if let Some(r) = runs.upgrade() {
+                    lock(&r.0).remove(&id);
+                }
+            })
+            .map_err(|e| fail("io", e))?;
+        Ok(json!({"run_id": run, "core": true}))
+    }
+
+    fn lead_runs_handle(&self) -> std::sync::Weak<LeadRuns> {
+        Arc::downgrade(&self.lead_runs)
+    }
+
+    /// The quit sequence's lead step (agreed with the quit owner): every run lead's process group is killed at once,
+    /// with at most `wait` in total for them to go. Each is cleared from the registry and never restarted. Workers are
+    /// not touched here; the worker runtime's own kill ends them.
+    pub fn shutdown_run_leads(&self, wait: Duration) -> Vec<(String, Shutdown)> {
+        let leads: Vec<(String, RunLead)> = lock(&self.lead_runs.0).iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        // Side by side, so the whole step takes at most `wait`, however many leads there are.
+        std::thread::scope(|s| {
+            let waits: Vec<_> = leads.iter().map(|(run, l)| (run.clone(), s.spawn(move || l.shutdown(wait)))).collect();
+            waits.into_iter().map(|(run, h)| (run, h.join().unwrap_or(Shutdown::StillRunning))).collect()
+        })
+    }
+
+    /// The default wait for `shutdown_run_leads`.
+    pub const LEAD_SHUTDOWN_WAIT: Duration = SHUTDOWN_WAIT;
+}
