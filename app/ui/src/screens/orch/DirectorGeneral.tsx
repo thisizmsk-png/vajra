@@ -69,6 +69,9 @@ export function DirectorGeneral() {
     epoch.current += 1;
     reads.current.applied = reads.current.asked;
     statusReads.current.applied = statusReads.current.asked;
+    // Another conversation opens at its end, wherever the reader was in the last one.
+    atEnd.current = true;
+    lastTop.current = 0;
     setStream(s);
   }, []);
 
@@ -129,7 +132,10 @@ export function DirectorGeneral() {
   const shown = turns(lines);
   const lastYou = [...shown].reverse().find((t) => t.role === "you");
   const showEcho = echo !== null && lastYou?.text !== echo;
-  useEffect(() => { end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
+  // New lines, the reader's own question and a new proposal bring the end into view, but only while the reader is at
+  // the end. Someone who scrolled up to read is left where they are; asking a question or scrolling back down pins
+  // them again.
+  useEffect(() => { if (atEnd.current) end.current?.scrollIntoView?.({ block: "end" }); }, [lines.length, showEcho, proposals.length]);
   // A proposal's worker table and a long answer arrive after that scroll and push the newest turn (and Start run) below
   // the fold. While the reader is at the end, growth keeps them there; once they scroll up, nothing moves them.
   // A callback ref, not a mount effect: the column only exists once there is a project with a run, which can be long
@@ -169,6 +175,8 @@ export function DirectorGeneral() {
     if (!still(run, at)) return;
     if (!r.ok) { setAskErr(r.outcome.text); return; }
     setAskId(r.value.ask_id);
+    // Their own question, and the answer to it, are what they want to see now.
+    atEnd.current = true;
     setEcho(text);
     setDraft("");
     if (typeof r.value.generation === "number") setGeneration(r.value.generation);

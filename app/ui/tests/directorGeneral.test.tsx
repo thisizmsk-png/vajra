@@ -312,6 +312,60 @@ describe("Director-General conversation", () => {
     }
   });
 
+  it("Given the reader scrolled up, When a new line arrives, Then nothing moves them; their own question, or scrolling back to the end, follows again", async () => {
+    const proto = Element.prototype as { scrollIntoView?: unknown };
+    const was = proto.scrollIntoView;
+    let scrolls = 0;
+    proto.scrollIntoView = () => { scrolls++; };
+    try {
+      let texts = ["you\tWhat is left?", "lead\tTwo tasks: the limiter and the docs."];
+      const { container, f } = mount({
+        stream_window: () => win(texts),
+        ask_lead: { ask_id: "k1", state: "running", stream: STREAM, lead_session_id: "s", project_id: "p_X", generation: 3, name: "Director-General" },
+      });
+      await screen.findByText("What is left?");
+      // Opening the conversation shows its end.
+      expect(scrolls).toBeGreaterThan(0);
+      const pane = container.querySelector(".v-dgv__scroll") as HTMLElement;
+      const at = (top: number, height = 1000) => { for (const [k, v] of Object.entries({ scrollHeight: height, clientHeight: 400, scrollTop: top })) Object.defineProperty(pane, k, { value: v, configurable: true }); fireEvent.scroll(pane); };
+      const arrives = async (line: string, shown: string) => {
+        texts = [...texts, line];
+        act(() => { f.emit("changed", { streams: [STREAM] }); });
+        // A turn's lines are joined, so the new line is part of a longer text.
+        await screen.findByText((text) => text.includes(shown));
+      };
+
+      // At the end: a new line is followed.
+      at(600);
+      let before = scrolls;
+      await arrives("lead\tThe limiter is merged.", "The limiter is merged.");
+      expect(scrolls).toBe(before + 1);
+
+      // Scrolled up to read: a new line arrives and the view stays put.
+      at(200);
+      before = scrolls;
+      await arrives("lead\tThe docs are next.", "The docs are next.");
+      expect(scrolls).toBe(before);
+
+      // Their own question pins them to the end again, still scrolled up.
+      fireEvent.change(composer(), { target: { value: "And the tests?" } });
+      fireEvent.click(screen.getByRole("button", { name: S.dg.send }));
+      await screen.findByText("And the tests?");
+      expect(scrolls).toBeGreaterThan(before);
+
+      // Scrolled up once more, then back down to the end: the next line is followed.
+      at(100);
+      before = scrolls;
+      await arrives("lead\tOne is failing.", "One is failing.");
+      expect(scrolls).toBe(before);
+      at(600);
+      await arrives("lead\tIt is fixed.", "It is fixed.");
+      expect(scrolls).toBe(before + 1);
+    } finally {
+      proto.scrollIntoView = was;
+    }
+  });
+
   it("Given the view opened before the project had a run, When a run starts and its conversation grows, Then the newest turn is brought into view", async () => {
     const proto = Element.prototype as { scrollIntoView?: unknown };
     const g = globalThis as { ResizeObserver?: unknown };
