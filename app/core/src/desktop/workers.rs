@@ -232,6 +232,8 @@ struct Entry {
     tree: Option<gitw::Ticket>,
     /// The integration ref the capture check last ran against (Clean up re-runs it there).
     integration: Option<String>,
+    /// A check's final message, read when it exits (6g parses it); never a writer's.
+    answer: Option<String>,
 }
 
 #[derive(Default)]
@@ -375,10 +377,19 @@ impl WorkerRuntime {
     }
 
     /// A check ticket (6g, 6i): a fresh worktree at `at_commit`, no deps merge; `dispatch_head = at_commit`.
-    pub fn dispatch_check(&self, kind: CheckKind, mut spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
+    pub fn dispatch_check(&self, kind: CheckKind, spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
+        self.dispatch_check_attempt(kind, 0, spec, seat, at_commit)
+    }
+
+    /// `dispatch_check` for a check's retry or redo in the same round: attempt `n > 0` is its own ticket and worktree
+    /// (`<kind>-a<n>`).
+    pub fn dispatch_check_attempt(&self, kind: CheckKind, n: u32, mut spec: TaskSpec, seat: WorkerSeat, at_commit: &str) -> Result<String, DispatchError> {
         spec.from = at_commit.to_string();
         spec.deps.clear();
         spec.task = kind.as_str().replace('_', "-");
+        if n > 0 {
+            spec.task = format!("{}-a{n}", spec.task);
+        }
         self.add(Job::Check(kind, spec), seat)
     }
 
@@ -405,7 +416,7 @@ impl WorkerRuntime {
             receipt: None, mismatch: None, provider: None, summary: None, retention: None, started: None,
         };
         let seq = b.seq;
-        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None });
+        b.tickets.insert(id.clone(), Entry { view, job, seat, seq, kill: None, session: None, tree: None, integration: None, answer: None });
         drop(b);
         self.pump();
         Ok(id)
@@ -415,6 +426,11 @@ impl WorkerRuntime {
     #[cfg(test)]
     pub(crate) fn gitw(&self) -> &Arc<Gitw> {
         &self.0.gw
+    }
+
+    /// An ended check's final message, as its harness printed it (redacted with the app's nonce set).
+    pub fn last_message(&self, id: &str) -> Option<String> {
+        crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.answer.clone())
     }
 
     pub fn view(&self, id: &str) -> Option<TicketView> {
@@ -844,7 +860,12 @@ impl WorkerRuntime {
     /// After a clean exit: snapshot, diff, outcome.
     fn finish(&self, id: &str, job: &Job, seat: &WorkerSeat, t: &gitw::Ticket, receipt: Option<LaunchReceipt>) {
         if let Job::Check(..) = job {
-            // A check is judged by its typed result (6g), never by changed files.
+            // A check is judged by its typed result (6g), never by changed files: keep its final message.
+            let sid = crate::lock(&self.0.book).tickets.get(id).and_then(|e| e.session.clone());
+            let answer = sid.and_then(|sid| final_message(&self.events(&sid)));
+            if let Some(e) = crate::lock(&self.0.book).tickets.get_mut(id) {
+                e.answer = answer;
+            }
             return self.end(id, Outcome::Done, "exited", receipt);
         }
         let s = job.spec();
@@ -1058,6 +1079,18 @@ enum Attempt {
 enum Ended {
     Clean { receipt: Option<LaunchReceipt> },
     Outcome(Outcome, String, Option<LaunchReceipt>),
+}
+
+/// The session's final message: the last `result` event (Claude `stream-json`) or `agent_message` item (Codex
+/// `exec --json`) in its output.
+fn final_message(events: &str) -> Option<String> {
+    events.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| match v.get("type").and_then(Value::as_str) {
+        Some("result") => v.get("result").and_then(Value::as_str).map(str::to_string),
+        Some("item.completed") if v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message") => {
+            v.pointer("/item/text").and_then(Value::as_str).map(str::to_string)
+        }
+        _ => None,
+    })
 }
 
 fn kill_outcome(r: KillReason) -> (Outcome, &'static str) {

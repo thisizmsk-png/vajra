@@ -94,6 +94,8 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> P
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
+HARNESS=codex
+[ "$1" = -p ] && HARNESS=claude
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
@@ -123,12 +125,22 @@ case "$MODE" in
   nonce) echo x > "src/NONCE-abcdef0123456789.rs" ;;
   setsid_child) edit; perl -MPOSIX=setsid -e 'if (fork() == 0) {{ setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 600; }}' '{pids}/setsid.pid' ;;
   nothing) : ;;
+  answer)
+    # A check's final message: <dir>/answer-<kind> holds it as a JSON string (the test writes it).
+    A="{dir}/answer-$(basename "$WT" | sed 's/-r[0-9]*$//')"
+    [ -f "$A" ] || A="{dir}/answer"
+    if [ "$HARNESS" = claude ]; then
+      printf '{{"type":"result","subtype":"success","is_error":false,"result":%s}}\n' "$(cat "$A")"
+    else
+      printf '{{"type":"item.completed","item":{{"id":"i9","type":"agent_message","text":%s}}}}\n' "$(cat "$A")"
+    fi ;;
 esac
 echo "end $(basename "$WT") $(perl -MTime::HiRes=time -e 'printf "%.3f", time')" >> '{log}'
 "#,
         codex_home = codex_home.display(),
         log = dir.join("log").display(),
         pids = pids.display(),
+        dir = dir.display(),
     );
     std::fs::write(&p, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -894,4 +906,21 @@ fn the_run_protocol_drives_a_real_worker_through_integration_to_the_stub_gate() 
     let lib = ugit(&r.home, &r.repo, &["show", &format!("{head}:src/lib.rs")]);
     assert!(lib.contains("worker line"), "the worker's change is on the integration branch: {lib}");
     assert!(!wt.exists(), "the merged ticket's worktree is cleaned up after integrate");
+}
+
+// ---------------------------------------------------------------- a check's final message (6g)
+
+#[test]
+fn a_checks_final_message_is_kept_after_it_ends_and_a_redo_gets_its_own_ticket() {
+    let r = rig("answer", Opts { mode: "answer", ..Opts::default() });
+    std::fs::write(r.d.join("answer"), serde_json::to_string("{\"ok\": true}\nsecond line").unwrap()).unwrap();
+    let a = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "x"), seat("v1", "codex"), &r.base).unwrap();
+    let v = r.done(&a);
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    assert_eq!(r.rt.last_message(&a).as_deref(), Some("{\"ok\": true}\nsecond line"));
+    let b = r.rt.dispatch_check_attempt(CheckKind::Verify, 1, r.task("r1", "x"), seat("v1", "codex"), &r.base).unwrap();
+    assert_eq!((a.as_str(), b.as_str()), ("r1.verify.r1", "r1.verify-a1.r1"));
+    r.done(&b);
+    let w = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(r.rt.last_message(&w.id), None, "only a check's answer is kept");
 }

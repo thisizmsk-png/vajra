@@ -115,6 +115,7 @@ impl Workers for FakeWorkers {
 struct FakeGate {
     verdicts: Mutex<Vec<RoundVerdict>>,
     changed: Condvar,
+    inputs: Mutex<Vec<RoundInput>>,
 }
 
 impl FakeGate {
@@ -125,7 +126,8 @@ impl FakeGate {
 }
 
 impl RoundGate for FakeGate {
-    fn check(&self, _: &str, _: u32, _: &str, _: &[String]) -> RoundVerdict {
+    fn check(&self, input: &RoundInput) -> RoundVerdict {
+        crate::lock(&self.inputs).push(input.clone());
         // A test that never answers leaves no thread behind for long.
         let v = crate::lock(&self.verdicts);
         let (mut v, _) = self.changed.wait_timeout_while(v, Duration::from_secs(20), |v| v.is_empty()).unwrap();
@@ -720,4 +722,82 @@ fn the_run_timeout_counts_from_the_runs_start_not_the_clocks_origin() {
     clock.advance(1);
     p.tick();
     assert_eq!(p.card().status, Some(RunStatus::TimedOut));
+}
+
+// ---------------------------------------------------------------- the round result (6g)
+
+fn result(passed: bool, rejected: bool) -> RoundResult {
+    RoundResult {
+        passed, rejected, failing: vec![], blocking: vec![], feedback: BTreeMap::new(), end: None,
+        checks: vec![json!({"kind": "security_review", "slot": "w9", "harness": "codex", "account": "codex", "shared_with_writer": false})],
+    }
+}
+
+#[test]
+fn the_gate_gets_the_round_with_its_criteria_tasks_flag_and_security_writers() {
+    let r = rig_with("tidy the export", vec![seat("w1", "backend", true), seat("w3", "frontend", false)], Limits::default(), false);
+    let mut p = plan1();
+    p.tasks[0].touches_security = true;
+    r.p.plan_tasks(p).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Failed { feedback: BTreeMap::new() });
+    r.await_round(1);
+    let i = r.gate.inputs.lock().unwrap()[0].clone();
+    assert_eq!((i.run.as_str(), i.round, i.base.as_str()), ("r1", 1, BASE));
+    assert_eq!(i.head, format!("{:f>40}", 1));
+    assert_eq!(i.criteria, criteria());
+    assert_eq!(i.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1", "t2", "t3"]);
+    assert!(i.security);
+    assert_eq!(i.security_writers.iter().map(|s| s.slot.as_str()).collect::<Vec<_>>(), ["w1"], "the seats that ran security tasks");
+}
+
+#[test]
+fn a_rejected_round_ends_the_run_rejected() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(result(false, true)));
+    let rt = r.await_round(1);
+    assert_eq!(rt.outcome.as_deref(), Some("rejected"));
+    assert_eq!(rt.result.unwrap()["rejected"], true);
+    assert_eq!(r.status(), Some(RunStatus::Rejected));
+}
+
+#[test]
+fn a_passed_gate_is_still_not_verified_until_the_delivery_phase() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    r.gate.answer(RoundVerdict::Checked(result(true, false)));
+    let rt = r.await_round(1);
+    assert_eq!(rt.outcome.as_deref(), Some("passed"));
+    assert_eq!(rt.result.as_ref().unwrap()["passed"], true);
+    assert_eq!(r.status(), Some(RunStatus::NotVerified));
+    assert!(r.p.card().reason.unwrap().contains("the gate passed"));
+    assert_eq!(r.p.card().checks[0]["harness"], "codex", "the card names who ran each check");
+}
+
+#[test]
+fn a_failed_result_reworks_its_feedback_tasks_and_an_end_finishes_the_run() {
+    let r = rig();
+    r.p.plan_tasks(plan1()).unwrap();
+    r.round_done(&["t1", "t2", "t3"]);
+    r.p.integrate(1).unwrap();
+    let mut f = result(false, false);
+    f.feedback = BTreeMap::from([("t3".to_string(), json!({"blocking_issues": ["x"]}))]);
+    r.gate.answer(RoundVerdict::Checked(f));
+    let rt = r.await_round(1);
+    assert_eq!((rt.outcome.as_deref(), rt.feedback.unwrap()["t3"]["blocking_issues"][0].as_str()), (Some("failed"), Some("x")));
+    r.p.plan_tasks(PlanInput { round: 2, ..PlanInput::default() }).unwrap();
+    assert!(code(r.p.dispatch_worker("t1")).1.contains("reworks only t3"));
+    r.round_done(&["t3"]);
+    r.p.integrate(2).unwrap();
+    let mut e = result(false, false);
+    e.end = Some("the run has no verifier seat".into());
+    r.gate.answer(RoundVerdict::Checked(e));
+    r.await_round(2);
+    assert_eq!((r.status(), r.p.card().reason.as_deref()), (Some(RunStatus::NotVerified), Some("the run has no verifier seat")));
 }
