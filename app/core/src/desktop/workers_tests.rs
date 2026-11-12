@@ -759,7 +759,8 @@ while True:
     elif name == "Write":
         open(inp["file_path"], "w").write(inp["content"])
     elif name == "Bash" and "python3 -c" in inp["command"]:
-        text = "PermissionError: [Errno 1] Operation not permitted: <locked>"  # the OS sandbox, as the command's output
+        # The OS sandbox, as the command's output, then the marker its `|| echo` prints on the non-zero exit.
+        text = "PermissionError: [Errno 1] Operation not permitted: <locked>\n" + inp["command"].rsplit("echo ", 1)[1]
     elif name == "Bash":
         r = subprocess.run(["/bin/sh", "-c", inp["command"]], capture_output=True, text=True)
         err, text = r.returncode != 0, r.stdout + r.stderr

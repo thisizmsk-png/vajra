@@ -4,7 +4,7 @@ use super::*;
 /// `good` refuses what the real guard, deny rules and OS sandbox refuse (a python Bash call answers with the sandbox's
 /// EPERM, as its own output); `leaky` lets an Edit into the data dir through; `wrong_reason` refuses the Edit for
 /// another reason; `unsandboxed` runs every Bash call that names no data-dir path, as a build without the sandbox
-/// would; `hang` never answers.
+/// would; `eperm_exit0` answers a probe with the EPERM text but no non-zero exit; `hang` never answers.
 fn fake_claude(dir: &Path, mode: &str) -> PathBuf {
     let p = dir.join(format!("fake-claude-{mode}"));
     let script = format!(
@@ -46,6 +46,8 @@ while True:
         open(inp["file_path"], "w").write(inp["content"])
     elif name == "Bash" and "python3 -c" in target and MODE != "unsandboxed":
         text = "Traceback (most recent call last):\n  File \"<string>\", line 1\nPermissionError: [Errno 1] Operation not permitted: <locked>"
+        if MODE != "eperm_exit0":
+            text += "\n" + target.rsplit("echo ", 1)[1]
     elif name == "Bash":
         r = subprocess.run(["/bin/sh", "-c", target], capture_output=True, text=True)
         err, text = r.returncode != 0, r.stdout + r.stderr
@@ -116,6 +118,15 @@ fn a_build_without_the_os_sandbox_fails_on_the_name_free_key_read() {
     let d = tmp("unsandboxed");
     let home = home_with_hooks(&d);
     let r = run(&fake_claude(&d, "unsandboxed"), &home, &shape(&home), Duration::from_secs(30));
+    assert_eq!(r, Err("failed: the OS sandbox refused a key read that names no locked path".into()));
+}
+
+/// #212 bhishma: the EPERM text alone is not a refusal; the probe must also have exited non-zero.
+#[test]
+fn a_sandbox_message_without_a_non_zero_exit_is_not_proof() {
+    let d = tmp("eperm-exit0");
+    let home = home_with_hooks(&d);
+    let r = run(&fake_claude(&d, "eperm_exit0"), &home, &shape(&home), Duration::from_secs(30));
     assert_eq!(r, Err("failed: the OS sandbox refused a key read that names no locked path".into()));
 }
 
