@@ -355,6 +355,12 @@ impl App {
         svc.set_seat_policy(seat_env.clone());
         svc.set_seats_enabled(seat_env.route());
         svc.set_core_workers(workers.clone());
+        // Before any agent: control dirs no session needs any more (an earlier life's core workers, finished runs) go.
+        // Every session an index line names is kept, whatever its harness or folder, so a run that may be resumed keeps
+        // its steering dir. The index is worker-writable, so a forged line can only keep a dir, never remove one.
+        if let Some(keep) = control_keep(data) {
+            svc.prune_control_dirs(&keep);
+        }
         let acts = Mutex::new(state::Hub::open(data)?);
         Ok(Self {
             workers,
@@ -489,8 +495,8 @@ impl App {
             // A ticket that ended can't be stopped: a Lead's stop still waiting for the human is refused. On its own
             // thread, since a human Stop ends a queued ticket while it holds the control lock.
             on_outcome: Some(Box::new(move |v: &workers::TicketView| {
-                let (control, id) = (control.clone(), v.id.clone());
-                std::thread::spawn(move || lock(&control).core_ticket_ended(&id));
+                let (control, id, sid) = (control.clone(), v.id.clone(), v.harness_session.clone());
+                std::thread::spawn(move || lock(&control).core_ticket_ended(&id, sid.as_deref()));
             })),
         };
         // A Claude task worker's steering channel: its own control dir and nonce, opened before it starts (16.7).
@@ -2340,6 +2346,34 @@ fn repo_dir(s: &str) -> Result<PathBuf, Value> {
 /// Claude Code's project dir name for a cwd: every non-alphanumeric is `-`.
 fn project_slug(cwd: &Path) -> String {
     cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// The largest run index the start-up prune reads whole; a bigger one skips the prune.
+const PRUNE_INDEX_CAP: u64 = 64 << 20;
+
+/// The control session dirs start-up pruning keeps besides the live ones: every session the whole run index names
+/// (launch and Lead sessions), and every Lead session recorded under `<control>/lead/<run>/lead_session`. `None` when
+/// the index can't be read whole: then nothing is pruned (a missed name would remove a dir a resume needs).
+fn control_keep(data: &Path) -> Option<std::collections::HashSet<String>> {
+    let mut keep = std::collections::HashSet::new();
+    for e in runindex::entries_all(&data.join("runs.jsonl"), PRUNE_INDEX_CAP).ok()? {
+        keep.insert(e.session_id);
+        keep.extend(e.lead_session_id);
+    }
+    let lead = data.join("control").join("lead");
+    match std::fs::read_dir(&lead) {
+        Ok(rd) => {
+            for d in rd.flatten() {
+                let p = d.path().join("lead_session");
+                if let Ok(b) = crate::control::fsx::read_nofollow_capped(&p, 256) {
+                    keep.insert(String::from_utf8_lossy(&b).trim().to_string());
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    Some(keep)
 }
 
 fn lines_json(lines: &[bus::Line]) -> Vec<Value> {

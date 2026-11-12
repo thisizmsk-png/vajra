@@ -5456,3 +5456,29 @@ fn install_dev_tools_is_refused_while_git_is_installed() {
     assert!(worker_host::git_installed(&worker_host::dev_roots()), "this machine has the tools");
     assert_eq!(code(&app.install_dev_tools().unwrap_err()), "not_needed");
 }
+
+/// 6c-3 pruning at app start: a stale control session dir goes; one the run index names (a run that may be resumed,
+/// whatever its harness or folder) and a Lead's recorded session stay. An index that can't be read whole prunes nothing.
+#[test]
+fn app_start_prunes_stale_control_dirs_and_keeps_every_indexed_session() {
+    let t = Tmp::new();
+    let control = t.0.join("data/control");
+    let (stale, run, lead) = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333");
+    for d in [stale, run, lead] {
+        fs::create_dir_all(control.join(d).join("queue")).unwrap();
+    }
+    fs::create_dir_all(control.join("lead/r1")).unwrap();
+    fs::write(control.join("lead/r1/lead_session"), lead).unwrap();
+    let line = json!({"campaign": "c1", "session_id": run, "run_id": "r1", "cwd": "/nonexistent/gone", "provider": "codex"});
+    fs::write(t.0.join("data/runs.jsonl"), format!("{line}\n")).unwrap();
+    drop(t.app());
+    assert!(!control.join(stale).exists(), "the stale dir went");
+    assert!(control.join(run).is_dir() && control.join(lead).is_dir(), "indexed and Lead sessions stay");
+
+    // An index over the cap (or unreadable) is not read in part: nothing is pruned.
+    fs::create_dir_all(control.join(stale)).unwrap();
+    fs::remove_file(t.0.join("data/runs.jsonl")).unwrap();
+    fs::create_dir_all(t.0.join("data/runs.jsonl")).unwrap();
+    drop(t.app());
+    assert!(control.join(stale).is_dir(), "an index that can't be read prunes nothing");
+}
