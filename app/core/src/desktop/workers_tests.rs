@@ -95,7 +95,7 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path) -> P
 MODE='{mode}'
 WT=$(pwd -P)
 case "$1" in
-  -p) echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
+  -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
     TID=$(printf '%08x-0000-4000-8000-%012d' $$ $(date +%s))
     D="${{CODEX_HOME:-{codex_home}}}/sessions/2026/11/11"
@@ -177,12 +177,13 @@ struct Opts {
     claude_ok: bool,
     hooks: Hooks,
     spoil: Option<&'static str>,
+    steer: Option<Steer>,
     gate: Option<Arc<Gate>>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None }
+        Opts { mode: "edit", timeout: WORKER_TIMEOUT, caps: BTreeMap::new(), files: Vec::new(), redact: Redactor::default(), claude_ok: false, hooks: Hooks::default(), spoil: None, gate: None, steer: None }
     }
 }
 
@@ -236,6 +237,7 @@ fn rig(tag: &str, o: Opts) -> Rig {
         poll: Duration::from_millis(20),
         clock: Some(clock.clone()),
         redact: o.redact,
+        steer: o.steer,
         claude_unverified_ok: o.claude_ok,
     };
     let rt = WorkerRuntime::new(cfg, gw.clone(), sup.clone(), bus, o.hooks);
@@ -365,6 +367,39 @@ fn a_startup_event_pushed_out_of_the_ring_still_validates_and_fills_the_receipt(
     let receipt = v.receipt.unwrap();
     assert_eq!(receipt["effective"]["model"], "model-fake-1", "{receipt}");
     assert_eq!(receipt["effective"]["read_from"], "harness_session_file", "{receipt}");
+}
+
+#[test]
+fn the_disk_walk_stops_at_its_entry_cap_and_says_the_size_is_partial() {
+    let d = tmpdir("diskcap");
+    for i in 0..10 {
+        std::fs::write(d.join(format!("f{i}")), vec![1u8; 8192]).unwrap();
+    }
+    let (all, partial) = allocated_upto(&d, 1000);
+    assert!(!partial && all >= 10 * 8192, "{all}");
+    let (some, partial) = allocated_upto(&d, 4);
+    assert!(partial && some < all, "{some} < {all}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// #151 review: the budget bounds the work, not only the bytes. A wide directory is read entry by entry and the walk
+/// stops at the cap; it never lists the whole level first.
+#[test]
+fn the_disk_walk_reads_no_more_entries_than_its_budget_in_a_wide_directory() {
+    let d = tmpdir("diskwide");
+    let wide = d.join("cache");
+    std::fs::create_dir_all(&wide).unwrap();
+    for i in 0..3000 {
+        std::fs::write(wide.join(format!("f{i}")), b"x").unwrap();
+    }
+    let w = walk(&d, 10);
+    assert_eq!((w.read, w.partial), (10, true), "{w:?}");
+    // Root, `cache` and its 3000 files: an exact budget reads them all and is not partial.
+    let all = walk(&d, 3002);
+    assert_eq!((all.read, all.partial), (3002, false), "{all:?}");
+    assert!(walk(&d, 3001).partial);
+    assert_eq!(walk(&d, 0), Walk { bytes: 0, partial: true, read: 0 });
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 // ---------------------------------------------------------------- controls
@@ -561,6 +596,30 @@ fn a_leftover_outside_the_task_globs_keeps_the_worktree() {
     assert!(a.worktree.unwrap().exists());
 }
 
+#[test]
+fn clean_up_removes_only_an_integrated_copy_that_is_now_clean() {
+    let r = rig("cleanup", Opts { mode: "scratch_file", ..Opts::default() });
+    let a = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let b = r.done(&r.rt.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap());
+    let (wa, wb) = (a.worktree.clone().unwrap(), b.worktree.clone().unwrap());
+    let it = r.gw.integration_tree(&r.repo, "p", "r1", 1, &r.base).unwrap();
+    let iref = Gitw::integration_ref(&it);
+    let commit = a.commit.clone().unwrap();
+    r.gw.integrate(&it, &r.base, std::slice::from_ref(&commit)).unwrap();
+    assert_eq!(r.rt.integrated("r1", std::slice::from_ref(&commit), &iref)[0].retention.as_ref().unwrap()["state"], "kept");
+
+    // The leftover is still there: nothing is removed on a guess.
+    assert!(r.rt.clean_up().removed.is_empty());
+    assert!(wa.exists() && wb.exists());
+
+    // The human deletes the leftover. Now the capture check passes; the never-integrated copy stays.
+    std::fs::remove_file(wa.join("other/scratch.txt")).unwrap();
+    let done = r.rt.clean_up();
+    assert_eq!(done.removed, vec![a.id.clone()], "{done:?}");
+    assert!(!wa.exists() && wb.exists());
+    assert_eq!(r.rt.view(&a.id).unwrap().retention.unwrap()["state"], "removed");
+}
+
 // ---------------------------------------------------------------- records, summary, hooks, harnesses
 
 #[test]
@@ -628,6 +687,107 @@ fn a_claude_worker_is_refused_until_s4_and_runs_through_its_profile_when_allowed
     assert!(flags.is_empty(), "the flag file is removed when the ticket ends");
 }
 
+/// A Claude task worker's steering channel is opened by its own session id before it starts, and its brief carries
+/// the nonce in the workflow's steering paragraph. A Codex worker gets none.
+#[test]
+fn a_claude_task_worker_gets_its_steering_channel_by_session_id_before_it_starts() {
+    const NONCE: &str = "00112233445566778899aabbccddeeff";
+    let opened: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
+    let (o2, log) = (opened.clone(), Arc::new(Mutex::new(PathBuf::new())));
+    let l2 = log.clone();
+    let steer: Steer = Arc::new(move |sid: &str| {
+        let ran = std::fs::read_to_string(&*crate::lock(&l2)).map(|t| t.lines().count()).unwrap_or(0);
+        crate::lock(&o2).push((sid.to_string(), ran));
+        Some(NONCE.to_string())
+    });
+    let r = rig("steer", Opts { claude_ok: true, steer: Some(steer), ..Opts::default() });
+    *crate::lock(&log) = r.d.join("log");
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+    let got = crate::lock(&opened).clone();
+    assert_eq!(got, vec![(v.harness_session.clone().unwrap(), 0)], "opened once, by the worker's own session id, before it ran");
+    let argv = std::fs::read_to_string(r.d.join("log.argv")).unwrap();
+    assert!(argv.contains(&format!("<vajra-steer nonce=\"{NONCE}\"")), "the brief carries the steering paragraph: {argv}");
+    let c = r.rt.dispatch(r.task("r1", "t2"), seat("w2", "codex")).unwrap();
+    r.done(&c);
+    assert_eq!(crate::lock(&opened).len(), 1, "a Codex worker has no steering channel");
+}
+
+/// Waits for a ticket's first attempt to be running, and returns its view then.
+fn running(r: &Rig, id: &str) -> TicketView {
+    let start = Instant::now();
+    loop {
+        let v = r.rt.view(id).unwrap();
+        // `attempt` and a Claude worker's `harness_session` are set together, once its process is spawned.
+        if v.state == State::Running && v.attempt > 0 {
+            return v;
+        }
+        assert!(start.elapsed() < WAIT, "never ran: {v:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #151: a running Claude check worker has no steering channel (a check is the independent gate), so its node offers
+/// no Message or Redirect, and a message is refused with that reason, never "hasn't started yet".
+#[test]
+fn a_running_claude_check_worker_shows_message_off_with_its_true_reason() {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let o2 = opened.clone();
+    let steer: Steer = Arc::new(move |_: &str| {
+        o2.fetch_add(1, Ordering::SeqCst);
+        Some("00112233445566778899aabbccddeeff".into())
+    });
+    let r = rig("claude-check", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let mut s = seat("v1", "claude");
+    s.role = crate::crew::roles::VERIFIER.into();
+    let id = r.rt.dispatch_check(CheckKind::Verify, r.task("r1", "ignored"), s, &r.base).unwrap();
+    let v = running(&r, &id);
+    assert_eq!(v.message_off(), Some(profiles::CHECK_NOT_STEERED), "{v:?}");
+    let c = v.core_worker().controls;
+    for k in ["message", "redirect"] {
+        assert_eq!((c[k]["enabled"].as_bool(), c[k]["reason"].as_str()), (Some(false), Some(profiles::CHECK_NOT_STEERED)), "{c}");
+    }
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "a check never gets a control dir");
+}
+
+/// #151 review: once its ticket ends, a worker's node offers nothing: Message, Redirect and Stop are off with the
+/// finished reason (the control service refuses them as `worker_finished`), for a steered Claude task and for Codex.
+#[test]
+fn an_ended_ticket_offers_no_message_redirect_or_stop() {
+    let steer: Steer = Arc::new(|_: &str| Some("00112233445566778899aabbccddeeff".to_string()));
+    let r = rig("ended-controls", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let claude = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    let codex = running(&r, &r.rt.dispatch(r.task("r2", "t1"), seat("w2", "codex")).unwrap());
+    let on = |v: &TicketView, k: &str| v.core_worker().controls[k]["enabled"].as_bool().unwrap();
+    assert!(on(&claude, "message") && on(&claude, "redirect") && on(&claude, "stop"), "a running steered worker takes all three");
+    assert!(!on(&codex, "message") && on(&codex, "stop"), "a running Codex worker can be stopped");
+    for v in [&claude, &codex] {
+        assert!(r.rt.cancel(&v.id));
+        let ended = r.done(&v.id);
+        assert_eq!(ended.message_off(), Some(profiles::FINISHED), "{ended:?}");
+        let c = ended.core_worker().controls;
+        for k in ["message", "redirect", "stop"] {
+            assert_eq!((c[k]["enabled"].as_bool(), c[k]["reason"].as_str()), (Some(false), Some(profiles::FINISHED)), "{k}: {c}");
+        }
+    }
+}
+
+/// #151: a running Claude task worker whose control dir couldn't be opened says so, and a steered one takes messages.
+#[test]
+fn a_claude_task_whose_steering_channel_failed_says_so_and_a_steered_one_is_open() {
+    let ok = Arc::new(AtomicUsize::new(0));
+    let o2 = ok.clone();
+    // The first open fails, the second succeeds.
+    let steer: Steer = Arc::new(move |_: &str| (o2.fetch_add(1, Ordering::SeqCst) > 0).then(|| "00112233445566778899aabbccddeeff".to_string()));
+    let r = rig("claude-nochan", Opts { mode: "hang", claude_ok: true, steer: Some(steer), ..Opts::default() });
+    let failed = running(&r, &r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!(failed.message_off(), Some(profiles::NO_STEER_CHANNEL), "{failed:?}");
+    assert_eq!(failed.core_worker().controls["message"]["enabled"], false);
+    let steered = running(&r, &r.rt.dispatch(r.task("r2", "t1"), seat("w2", "claude")).unwrap());
+    assert_eq!(steered.message_off(), None, "{steered:?}");
+    assert_eq!(steered.core_worker().controls["message"]["enabled"], true);
+}
+
 #[test]
 fn a_claude_launch_whose_argv_is_refused_leaves_no_flag_file() {
     let r = rig("claude-badargv", Opts { claude_ok: true, ..Opts::default() });
@@ -670,7 +830,7 @@ fn a_stop_during_a_retry_backoff_ends_the_ticket_at_once() {
         let cfg = Config {
             home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
             tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
-            redact: Redactor::default(), claude_unverified_ok: false,
+            redact: Redactor::default(), steer: None, claude_unverified_ok: false,
         };
         WorkerRuntime::new(cfg, r.gw.clone(), r.sup.clone(), s.bus.clone(), Hooks::default())
     };
@@ -686,6 +846,20 @@ fn a_stop_during_a_retry_backoff_ends_the_ticket_at_once() {
     let v = r.done(&id);
     assert_eq!(v.outcome, Some(Outcome::Stopped), "{v:?}");
     assert!(t0.elapsed() < Duration::from_secs(5), "not after the 30 s backoff: {:?}", t0.elapsed());
+}
+
+#[test]
+fn an_ended_ticket_becomes_a_core_node_with_its_profile_controls_diff_and_provider() {
+    let r = rig("corenode", Opts::default());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    let c = v.core_worker();
+    assert_eq!((c.ticket.as_str(), c.task.as_str(), c.round, c.check, c.status), ("r1.t1.r1", "t1", 1, false, crate::crew::tree::Status::Done));
+    // Ended: every control is off as finished (a running Codex worker's Message reason is its profile's, see
+    // `an_ended_ticket_offers_no_message_redirect_or_stop`).
+    assert_eq!(c.controls["message"]["reason"], profiles::FINISHED);
+    assert_eq!(c.controls["stop"]["enabled"], false);
+    assert_eq!(c.diff.unwrap()["added"], 1);
+    assert_eq!(c.provider.unwrap().model, "model-fake-1");
 }
 
 // ---------------------------------------------------------------- the run protocol over the real runtime (6d1)

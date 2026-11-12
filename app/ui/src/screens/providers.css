@@ -55,3 +55,15 @@
 
 /* A vendor file whose glyph is dark on a transparent ground sits on a light plate (the file is never recoloured). */
 .v-pt--plate { background: var(--c-mark-plate); }
+
+/* Settings > Providers > Set up (ADR-17). The state word carries the colour; commands are shown, never run. */
+.v-setup__state { font-weight: 600; color: var(--c-text-secondary); }
+.v-setup__state[data-state="installed"] { color: var(--c-success); }
+.v-setup__state[data-state="broken"] { color: var(--c-danger); }
+.v-setup__state[data-state="unsupported"], .v-setup__state[data-state="manual"] { color: var(--c-warning); }
+.v-setup__steps { display: flex; flex-direction: column; gap: 6px; }
+.v-setup__cmds { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.v-setup__cmds li, .v-setup__docs { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: var(--space-md); margin: 0; font-size: 12px; line-height: 17px; }
+.v-setup__tool { color: var(--c-text-muted); }
+.v-setup__cmds code, .v-setup__docs code { user-select: text; overflow-wrap: anywhere; }
+.v-setup__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }

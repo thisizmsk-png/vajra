@@ -103,6 +103,23 @@ fn act_close_worker(app: State<'_, App>, terms: State<'_, Terminals>, own: State
     app.act_close_worker(&envelope, &worker, anyway, &WorktreeTerms(&terms, &own))
 }
 
+/// Preflight's "Install developer tools" (git is missing): opens Apple's installer.
+#[tauri::command(async)]
+fn install_dev_tools(app: State<'_, App>) -> Res {
+    app.install_dev_tools()
+}
+
+/// Settings: the disk the worker copies use. A walk of the copies' folder, off the event thread.
+#[tauri::command(async)]
+fn worker_disk(app: State<'_, App>) -> Res {
+    app.worker_disk()
+}
+
+#[tauri::command(async)]
+fn act_worker_clean_up(app: State<'_, App>, envelope: Envelope) -> Value {
+    app.act_worker_clean_up(&envelope)
+}
+
 #[tauri::command(async)]
 fn act_close_finished(app: State<'_, App>, terms: State<'_, Terminals>, own: State<'_, Ownership>, envelope: Envelope) -> Value {
     app.act_close_finished(&envelope, &WorktreeTerms(&terms, &own))
@@ -387,6 +404,32 @@ fn term_open(
 ) -> Res {
     let i = terms.open(std::path::Path::new(&cwd), &app.terminal_roots(), rows, cols, term_sink(on_event)).map_err(term_err)?;
     // Record who we started, with its start stamp, so a crash can be reconciled without trusting a bare pid.
+    if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
+        let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
+    }
+    Ok(term_value(&i))
+}
+
+/// Settings > Providers > Set up: each catalog harness's state and the vendor's own install steps (ADR-17 step 1).
+#[tauri::command(async)]
+fn setup_list(app: State<'_, App>) -> Res {
+    app.setup_list()
+}
+
+/// A CLI's own sign-in in a user terminal tab. The UI names a catalog harness id, never a program; the core builds the
+/// argv from the compiled catalog and the binary detection found.
+#[tauri::command(async)]
+fn setup_sign_in(
+    app: State<'_, App>,
+    terms: State<'_, Terminals>,
+    own: State<'_, Ownership>,
+    id: String,
+    rows: u16,
+    cols: u16,
+    on_event: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Res {
+    let cmd = app.setup_sign_in_command(&id)?;
+    let i = terms.open_sign_in(&cmd, rows, cols, term_sink(on_event)).map_err(term_err)?;
     if let Some(stamp) = vajra_desktop::procid::start_stamp(i.pid) {
         let _ = own.ledger.record_for(i.id, Owner { pid: i.pid, stamp, cwd: i.cwd.clone() });
     }
@@ -707,6 +750,8 @@ fn main() {
             resume_run,
             provider_list,
             provider_accounts,
+            setup_list,
+            setup_sign_in,
             provider_key_saved,
             provider_key_save,
             provider_key_replace,
@@ -762,6 +807,9 @@ fn main() {
             act_stop_worker,
             act_close_worker,
             act_close_finished,
+            worker_disk,
+            install_dev_tools,
+            act_worker_clean_up,
             closeout_status,
             act_start_run,
             act_ask_lead,

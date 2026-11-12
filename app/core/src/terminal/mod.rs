@@ -143,11 +143,23 @@ pub struct TermInfo {
     pub cols: u16,
     /// False once the shell has ended (the tab can still be closed).
     pub alive: bool,
+    /// Set only for a CLI's own sign-in (ADR-17), so a reloaded webview rebuilds it as a sign-in tab, which is never
+    /// saved in the layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignInTag>,
+}
+
+/// Which harness a sign-in terminal runs: its catalog id and display name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SignInTag {
+    pub id: String,
+    pub name: String,
 }
 
 struct Term {
     pid: u32,
     place: Placement,
+    sign_in: Option<SignInTag>,
     size: Mutex<(u16, u16)>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// Typed bytes wait here for the writer thread, so a shell that is not reading never blocks the caller.
@@ -284,7 +296,7 @@ impl Term {
 
     fn info(&self, id: u32) -> TermInfo {
         let (rows, cols) = *lock(&self.size);
-        TermInfo { id, pid: self.pid, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst) }
+        TermInfo { id, pid: self.pid, cwd: self.place.cwd.clone(), root: self.place.root.clone(), rows, cols, alive: !self.exited.load(Ordering::SeqCst), sign_in: self.sign_in.clone() }
     }
 }
 
@@ -364,13 +376,35 @@ impl Terminals {
             return Err(TermError::InvalidSize);
         }
         let place = policy::place(cwd, roots)?;
-        let pair = native_pty_system()
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| TermError::Io(e.to_string()))?;
         let shell = policy::choose_shell(self.env.as_ref());
         // argv, never a command line: nothing from the UI is ever parsed by a shell. `-l` makes it a login shell, which
         // reads the user's profile and so sets the rest of the environment.
-        let mut cmd = CommandBuilder::from_argv(vec![shell.into_os_string(), OsString::from("-l")]);
+        self.spawn_in(place, vec![shell.into_os_string(), OsString::from("-l")], None, rows, cols, sink)
+    }
+
+    /// Open a tab running a CLI's own sign-in (ADR-17 rule 6): the program and args the catalog names, on the binary
+    /// detection found, in its own fresh private folder. The command is built outside this module, only from the
+    /// compiled catalog, so the UI can ask for a sign-in by harness id but never name a program. The env is the same as
+    /// any terminal's, so no Vajra-owned CLI home goes with it.
+    pub fn open_sign_in(&self, sign_in: &crate::providers::setup::SignInCommand, rows: u16, cols: u16, sink: Sink) -> Result<TermInfo, TermError> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(TermError::ShuttingDown);
+        }
+        if rows == 0 || cols == 0 {
+            return Err(TermError::InvalidSize);
+        }
+        let cwd = sign_in.cwd().to_path_buf();
+        let place = Placement { cwd: cwd.clone(), root: cwd };
+        let argv = std::iter::once(sign_in.program().as_os_str().to_owned()).chain(sign_in.args().iter().map(OsString::from)).collect();
+        let tag = SignInTag { id: sign_in.id().into(), name: sign_in.name().into() };
+        self.spawn_in(place, argv, Some(tag), rows, cols, sink)
+    }
+
+    fn spawn_in(&self, place: Placement, argv: Vec<OsString>, sign_in: Option<SignInTag>, rows: u16, cols: u16, sink: Sink) -> Result<TermInfo, TermError> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| TermError::Io(e.to_string()))?;
+        let mut cmd = CommandBuilder::from_argv(argv);
         cmd.env_clear();
         for k in policy::ENV_ALLOW {
             if let Some(v) = std::env::var_os(k) {
@@ -415,6 +449,7 @@ impl Terminals {
         let term = Arc::new(Term {
             pid,
             place,
+            sign_in,
             size: Mutex::new((rows, cols)),
             master: Mutex::new(pair.master),
             input: input.clone(),

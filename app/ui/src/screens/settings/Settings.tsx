@@ -1,6 +1,6 @@
 // Settings in the project shell: explicit global defaults and per-project overrides.
 // Provider availability remains a separate check; preferences never grant execution permissions.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Kbd, Text } from "../../../components/ui/base";
 import { ActionBar } from "../../../components/ui/desktop";
 import { S } from "../../../strings";
@@ -11,11 +11,14 @@ import { toHash, useRoute } from "../../router";
 import { CheckedAt, LoadingRows, Problem, problemDetail } from "../states";
 import { PreflightList } from "../PreflightList";
 import { PreferenceForm } from "./PreferenceForm";
+import { WorkerCopies } from "./WorkerCopies";
 import type { AgentChoice } from "./PreferenceForm";
 import { ProviderCard, useProviders } from "../ProviderControls";
 import { AccountsPanel } from "../Accounts";
 import { useAccounts } from "../../providerData";
 import { ProjectAgents } from "../ProjectAgents";
+import { SetupPanel, useSetup } from "./SetupPanel";
+import { onSignInEnded } from "../../terminal/TerminalDock";
 import type { ProviderInfo } from "../../providerContract";
 import { useCurrentProject } from "../../projects/current";
 import { DEFAULT_PREFERENCES, shortcutKeys } from "../../preferenceContract";
@@ -35,7 +38,7 @@ export const SHORTCUTS: ReadonlyArray<{ label: string; keys: string[] }> = [
   { label: S.settings.keys.start, keys: ["⌘", "↵"] },
 ];
 
-function useChecks(on: boolean, also?: () => void) {
+function useChecks(on: boolean, recheck: () => void) {
   const [pre, setPre] = useState<Preflight | null>(null);
   const [err, setErr] = useState("");
   const [at, setAt] = useState<Date | null>(null);
@@ -44,7 +47,7 @@ function useChecks(on: boolean, also?: () => void) {
     api.preflight().then((p) => { setPre(p); setErr(""); }, (e) => setErr(problemDetail(e))).finally(() => setAt(new Date()));
   }, []);
   useEffect(() => { if (on) run(); }, [on, run]);
-  useCommands(on ? [{ id: "recheck", label: S.settings.recheck, run: () => { run(); also?.(); } }] : []);
+  useCommands(on ? [{ id: "recheck", label: S.settings.recheck, run: recheck }] : []);
   return { pre, err, at, run };
 }
 
@@ -54,10 +57,18 @@ export function Settings() {
   const { project } = useCurrentProject();
   const section: Section = isSection(route.params.section) ? route.params.section : "providers";
   const meta = S.settings.sections[section];
-  const providers = useProviders(section === "providers");
-  const accounts = useAccounts(section === "providers");
-  const checks = useChecks(section === "providers", providers.reload);
-  const recheck = () => { checks.run(); providers.reload(); accounts.reload(); };
+  // Set up answers first: asking for it re-resolves the user PATH, so the reads below wait for it on entry too.
+  const setup = useSetup(section === "providers");
+  const ready = section === "providers" && setup.settled;
+  const providers = useProviders(ready);
+  const accounts = useAccounts(ready);
+  const checks = useChecks(ready, () => recheck());
+  // Set up first: asking for it re-resolves the user PATH, so a CLI installed into a new bin folder is found by the checks after it.
+  const recheck = () => { void setup.reload().then(() => { checks.run(); providers.reload(); accounts.reload(); }); };
+  // A finished sign-in changes what detection reports, so detect again without waiting for Check again (ADR-17 rule 6).
+  const recheckRef = useRef(recheck);
+  recheckRef.current = recheck;
+  useEffect(() => (section === "providers" ? onSignInEnded(() => recheckRef.current()) : undefined), [section]);
   return (
     <div className="v-screen v-settings">
       <div className="v-settings__grid">
@@ -73,8 +84,10 @@ export function Settings() {
             <Text as="h1" variant="headline-lg">{meta.title}</Text>
             <Text variant="body" muted className="v-home__lede">{meta.lede}</Text>
             {prefs.connected && ["providers", "general", "appearance", "models", "keyboard"].includes(section) && <ScopedPreferences key={project?.id ?? "global"} section={section} agents={agentChoices(providers.list)} />}
+            {section === "general" && <WorkerCopies />}
             {section === "providers" && <AccountsPanel accounts={accounts} />}
             {section === "providers" && accounts.list && project && preferenceScope(project) && <ProjectAgents key={`agents-${project.id}`} projectId={project.id} projectName={project.name} accounts={accounts.list} />}
+            {section === "providers" && <SetupPanel setup={setup} />}
             {section === "providers" && (
               <section aria-labelledby="v-settings-agents" className="v-panel v-settings__checks">
                 <div className="v-panel__bar">

@@ -1351,6 +1351,8 @@ impl App {
     /// fail closed and block every Lead tool).
     fn guard_preconditions(&self, env: &[(&'static str, OsString)]) -> Result<(), LeadError> {
         let miss = |why: &str| LeadError::GuardMissing(why.to_string());
+        // ADR 16.6: no Director-General without the startup git baseline (its self-test runs after this check too).
+        self.workers.agents_allowed().map_err(|why| miss(&why))?;
         self.data_dir_guarded()?;
         let script = self.home.join(GUARD_SCRIPT);
         if !std::fs::metadata(&script).is_ok_and(|m| m.is_file()) {
