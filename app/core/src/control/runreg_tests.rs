@@ -605,3 +605,84 @@ fn clients_that_stop_reading_replies_lose_their_slots_and_a_fresh_call_is_served
     assert_ne!(out["error"], "busy", "a stalled reader cannot hold a slot forever: {out}");
     drop(held);
 }
+
+/// A real lead (`python3 -I -c LEAD sock dir mode`) whose descendant `D` outlives the link to it, then opens a FRESH
+/// socket and asks the Service route, writing the reply to `<dir>/reply`. Modes: `orphan` (the lead forks an
+/// intermediate that forks `D` and exits: `D` is reparented, the lead lives on), `lead_exits` (`D` is the lead's own
+/// child and the lead exits), `cleared` (as `orphan`'s shape but `D` is a direct child of the lead, which stays alive
+/// while the test clears it). `D` waits for `<dir>/go` before it connects; the lead writes `D`'s pid to `<dir>/d`.
+const LEAD: &str = r#"
+import json, os, socket, sys, time
+sock, d, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+def descendant():
+    open(os.path.join(d, "d"), "w").write(str(os.getpid()))
+    while not os.path.exists(os.path.join(d, "go")):
+        time.sleep(0.02)
+    c = socket.socket(socket.AF_UNIX)
+    c.connect(sock)
+    f = c.makefile("rw")
+    f.write(json.dumps({"tool": "list_workers", "args": {}}) + "\n"); f.flush()
+    open(os.path.join(d, "reply.tmp"), "w").write(f.readline())
+    os.rename(os.path.join(d, "reply.tmp"), os.path.join(d, "reply"))
+    os._exit(0)
+if mode == "orphan":
+    if os.fork() == 0:
+        if os.fork() == 0:
+            descendant()
+        os._exit(0)
+    os.wait()
+    time.sleep(60)
+elif mode == "lead_exits":
+    if os.fork() == 0:
+        descendant()
+    time.sleep(0.3)
+    os._exit(0)
+else:
+    if os.fork() == 0:
+        descendant()
+    time.sleep(60)
+"#;
+
+#[test]
+fn a_lead_descendant_that_outlives_its_link_to_the_lead_never_reaches_the_service_on_a_fresh_socket() {
+    for mode in ["orphan", "lead_exits", "cleared"] {
+        let t = Tmp::new(mode);
+        let reg = Arc::new(RunRegistry::default());
+        let mut lead = Kid(Command::new("/usr/bin/python3").args(["-I", "-c", LEAD]).arg(t.0.join("s").join("app.sock")).arg(&t.0).arg(mode).spawn().unwrap());
+        let l = LeadProc { pid: lead.0.id(), stamp: crate::procid::start_stamp(lead.0.id()).unwrap() };
+        let _token = registered(&reg, proto(), Some(l));
+        let (_sock, _svc) = serving(&t, reg.clone());
+        let until = Instant::now() + Duration::from_secs(10);
+        while !t.0.join("d").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let d: i32 = std::fs::read_to_string(t.0.join("d")).unwrap().trim().parse().unwrap();
+        match mode {
+            "lead_exits" => {
+                let _ = lead.0.wait();
+                // As the lead's watcher does once it has exited.
+                assert!(reg.clear_lead(RUN, l));
+            }
+            "cleared" => assert!(reg.clear_lead(RUN, l), "cleared while its process still runs"),
+            _ => std::thread::sleep(Duration::from_millis(300)), // the intermediate has exited: D is reparented
+        }
+        std::fs::write(t.0.join("go"), "").unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while !t.0.join("reply").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: d is this test's own descendant; it has exited by now or this ends it.
+        unsafe { libc::kill(d, libc::SIGKILL) };
+        let out: Value = serde_json::from_str(&std::fs::read_to_string(t.0.join("reply")).unwrap()).unwrap();
+        assert!(out.get("ok").is_none(), "{mode}: a lead's descendant reached the Service: {out}");
+        assert!(["run_lead_on_service", "not_an_app_client"].contains(&out["error"].as_str().unwrap_or("")), "{mode}: {out}");
+    }
+}
+
+#[test]
+fn the_apps_own_client_still_reaches_the_service() {
+    let t = Tmp::new("own");
+    let (sock, _svc) = serving(&t, RunRegistry::new());
+    let out = super::super::socket::request(&sock, "list_workers", &json!({})).unwrap();
+    assert_ne!(out["error"], "not_an_app_client", "{out}");
+}

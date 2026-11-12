@@ -206,14 +206,16 @@ fn handle(mut conn: UnixStream, svc: &Mutex<Service>, runs: &RunRegistry, allowe
             Err(e) => return Err(e),
         };
         lead_conn = lead_conn || runs.in_lead_tree(peer);
-        // The Service route needs the very process that connected: not a lost identity, nor one that has gone.
+        // The Service route needs the very process that connected, still alive, proved to be the app's own client.
         let peer_live = peer.is_some_and(|p| crate::procid::same_process(p.pid, p.stamp));
+        let service_ok = peer_live && runs.service_allowed(peer);
         let out = match serde_json::from_slice::<Value>(&req) {
             Ok(v) if !within_cap(&v, req.len()) => json!({"error": "request_too_large"}),
             // A run lead's call: never into the Service lock, and one per connection.
             Ok(v) if v.get("vajra_run").is_some() => return reply(&mut conn, &runs.serve(&v, peer)),
             Ok(_) if lead_conn => json!({"error": "run_lead_on_service"}),
             Ok(_) if !peer_live => json!({"error": "peer_gone"}),
+            Ok(_) if !service_ok => json!({"error": "not_an_app_client"}),
             Ok(v) => match v.get("tool").and_then(Value::as_str) {
                 Some(tool) => {
                     let args = v.get("args").cloned().unwrap_or(Value::Null);
