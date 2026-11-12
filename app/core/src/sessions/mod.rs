@@ -552,6 +552,12 @@ impl Supervisor {
         Ok(lock(&self.get(id)?.exit).is_none())
     }
 
+    /// Whether any session other than a Setup install (`setup-*`) is still running: a run, a seat, a terminal. The
+    /// engine install refuses while one is (D7, bhishma C8), since each may be running the engine's hooks or scripts.
+    pub fn any_running_besides_setup(&self) -> bool {
+        lock(&self.sessions).iter().any(|(id, s)| !id.starts_with(SETUP_STREAM) && lock(&s.exit).is_none())
+    }
+
     /// The session's last lines, sanitized and redacted, once its process is gone (empty before).
     pub fn last_lines(&self, id: &str) -> Result<Vec<String>, SessionError> {
         Ok(lock(&self.get(id)?.tail).clone())

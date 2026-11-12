@@ -207,6 +207,35 @@ fn an_update_installs_the_new_version_and_a_changed_old_copy_is_backed_up() {
     assert_eq!(std::fs::read_to_string(w.home.join(".claude/.vajra-install").join(backup).join("scripts/vajra-campaign.sh")).unwrap(), "my edit");
 }
 
+/// The sheet's "Repair: N files differ" is counted in memory against the bundle and is part of the hash.
+#[test]
+fn a_repair_plan_counts_the_files_that_differ() {
+    let w = World::new("differs", GOOD, "0.6.2");
+    assert!(matches!(w.plan().plan.pin, Pin::Engine { differs: None, .. }), "a fresh install has nothing to compare");
+    assert_eq!(w.run(&w.plan()).report.outcome, Outcome::Installed);
+    let clean = w.plan();
+    assert!(matches!(clean.plan.pin, Pin::Engine { case: "repair", differs: Some(0), .. }), "{:?}", clean.plan.pin);
+    std::fs::write(w.skill().join("scripts/vajra-campaign.sh"), "my edit").unwrap();
+    std::fs::remove_file(w.skill().join("hooks/session-start.sh")).unwrap();
+    let changed = w.plan();
+    assert!(matches!(changed.plan.pin, Pin::Engine { case: "repair", differs: Some(2), .. }), "{:?}", changed.plan.pin);
+    assert_ne!(hash_of(&clean), hash_of(&changed), "the count is in the hash");
+}
+
+/// C8: an open campaign (any `.active*` pointer) counts as the engine being in use. Read only.
+#[test]
+fn an_open_campaign_is_seen_without_writing_anything() {
+    let w = World::new("campaign", GOOD, "0.6.2");
+    assert!(!campaign_open(&w.home));
+    assert!(!w.home.join(".claude").exists(), "the check creates nothing");
+    let c = w.home.join(".claude/vajra/campaigns");
+    std::fs::create_dir_all(&c).unwrap();
+    std::fs::write(c.join("notes.txt"), "x").unwrap();
+    assert!(!campaign_open(&w.home));
+    std::fs::write(c.join(".active-global"), "my-campaign\n").unwrap();
+    assert!(campaign_open(&w.home));
+}
+
 #[test]
 fn a_users_own_copy_is_never_touched() {
     let w = World::new("user", GOOD, "0.6.2");

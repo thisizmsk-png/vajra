@@ -146,6 +146,7 @@ pub fn plan(m: &Machine) -> Offer {
         old_root,
         workflows: workflows::changes(&snap, &want),
         home: m.home.display().to_string(),
+        differs: matches!(found, Found::Ours { .. }).then(|| place.skills.as_ref().and_then(|s| s.open_dir(SKILL).ok()).map_or(engine.files.len(), |root| differing(&root, &engine)) as u32),
     };
     let source = if m.pin.release { "Bundled with Vajra Desktop".to_string() } else { "Bundled with this development build of Vajra Desktop".to_string() };
     let mut plan = Plan::new(ID, "engine_bundle", command, Vec::new(), source, engine.version.clone(), skill.display().to_string(), pin);
@@ -248,6 +249,19 @@ pub fn tree_matches(root: &Dir, engine: &Engine) -> bool {
     true
 }
 
+/// How many of the bundle's files the installed tree lacks or has different bytes for (the sheet's "N files differ").
+fn differing(root: &Dir, engine: &Engine) -> usize {
+    engine
+        .files
+        .iter()
+        .filter(|f| {
+            let mut parts: Vec<&str> = f.name.split('/').collect();
+            let Some(file) = parts.pop() else { return true };
+            root.open_dir_path(&parts).ok().and_then(|d| d.read(file, 64 << 20).ok()).as_deref() != Some(f.bytes.as_slice())
+        })
+        .count()
+}
+
 fn extra(d: &Dir, prefix: &str, engine: &Engine) -> bool {
     let Ok(names) = d.list() else { return true };
     names.into_iter().any(|n| {
@@ -276,6 +290,22 @@ fn lock(place: &Place) -> Result<std::fs::File, &'static str> {
         return Err("setup_running");
     }
     Ok(f)
+}
+
+/// Whether an engine install holds the install lock right now (C8: check 6 refuses with `engine_installing`). Read
+/// only: the lock file is opened without `O_CREAT` and probed with a shared, non-blocking `flock`, so nothing is
+/// created and a run is never delayed.
+pub fn installing(home: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(home.join(".claude").join(place::WORK).join("lock")) else { return false };
+    // SAFETY: a valid fd; a shared lock taken here is released when `f` is closed at the end of this function.
+    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) != 0 }
+}
+
+/// Whether a campaign is open (C8): any `.active*` pointer in the campaigns folder. Read only.
+pub fn campaign_open(home: &Path) -> bool {
+    std::fs::read_dir(home.join(".claude/vajra/campaigns")).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with(".active")))
 }
 
 /// What `run` reports to the audit and the caller.

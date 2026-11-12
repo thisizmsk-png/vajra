@@ -34,6 +34,9 @@ pub enum Pin {
         old_root: Option<(u64, u64)>,
         workflows: Vec<String>,
         home: String,
+        /// For an update or Repair of the app's copy: how many of the bundle's files the installed copy lacks or has
+        /// different bytes for, read in memory (no script runs at plan time). `None` for a fresh install.
+        differs: Option<u32>,
     },
 }
 

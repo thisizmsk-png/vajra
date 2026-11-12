@@ -324,6 +324,9 @@ pub struct App {
     events: Arc<arrivals::Hub>,
     /// One-click install consents (ADR-17 rule 4): tokens in memory only, one run per harness at a time.
     consents: crate::providers::install::consent::Consents,
+    /// The app bundle's resources folder (Tauri's resource dir), where the packed engine is (D7). `None` until the
+    /// window sets it; the engine install is then not offered (`engine_not_bundled`).
+    resources: Mutex<Option<PathBuf>>,
     /// ADR 16.6: the global git baseline (taken first thing in `open`) and the worker runtime, built on first use.
     workers: Arc<worker_host::WorkerHost>,
 }
@@ -413,6 +416,7 @@ impl App {
             run_workers: Mutex::new(HashMap::new()),
             closeout: closeout::Store::open(data),
             consents: Default::default(),
+            resources: Mutex::new(None),
             issued: Mutex::new(Default::default()),
             log,
         })
@@ -843,7 +847,72 @@ impl App {
         }
         let engine = self.allow().ok().is_some_and(|a| a.resolve(&a.workflow_path()).is_ok()) && self.bridge.scripts_dir.join("vajra-doctor.sh").is_file();
         let marks = crate::providers::install::marks::Marks::at(&self.data);
-        serde_json::to_value(crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks)).map_err(|e| fail("internal", e))
+        let mut l = crate::providers::setup::list_marked(&self.provider_probe(), engine, &marks);
+        l.engine = crate::providers::setup::engine_row(engine, crate::providers::install::engine::flow::installing(&self.home), &marks);
+        serde_json::to_value(l).map_err(|e| fail("internal", e))
+    }
+
+    /// Set the app bundle's resources folder (where the packed engine is). The window does this once at start.
+    pub fn set_resources(&self, dir: PathBuf) {
+        *lock(&self.resources) = Some(dir);
+    }
+
+    /// D7, bhishma C7: the engine install is on only once the security review verified it in the catalog. Checked by
+    /// `setup_plan`, `setup_consent` and `setup_run` alike, in the core.
+    fn engine_gate() -> bool {
+        crate::providers::catalog::catalog().is_ok_and(|c| c.engine_scripts.verified())
+    }
+
+    /// Hand `f` the engine install's view of this app: the home, data and resources folders, the compiled-in pin, the
+    /// system tools and what counts as busy (C8: an active run, any live session but a Setup one, an open campaign).
+    fn with_engine<R>(&self, f: impl FnOnce(&crate::providers::install::engine::flow::Machine) -> R) -> Result<R, &'static str> {
+        use crate::providers::install::engine::{flow, Pin};
+        let resources = lock(&self.resources).clone().ok_or("engine_not_bundled")?;
+        let (pin, tools) = (Pin::built(), flow::Tools::system());
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let busy = || self.active_run_count() > 0 || self.sup.any_running_besides_setup() || flow::campaign_open(&self.home);
+        Ok(f(&flow::Machine { home: &self.home, data: &self.data, resources: &resources, pin: &pin, tools: &tools, uid, busy: &busy }))
+    }
+
+    /// `setup_plan` for the engine: the plan, or why it is Install it yourself. Read only.
+    fn engine_plan(&self) -> Res {
+        use crate::providers::install::engine::flow;
+        let manual = |code: &str| serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": flow::ID, "manual": code });
+        if !Self::engine_gate() {
+            return Ok(manual("source_not_verified"));
+        }
+        Ok(match self.with_engine(flow::plan) {
+            Ok(flow::Offer::Plan(p)) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": flow::ID, "plan": serde_json::to_value(&p.plan).map_err(|e| fail("internal", e))? }),
+            Ok(flow::Offer::Manual(code)) | Err(code) => manual(code),
+        })
+    }
+
+    /// `setup_run` for the engine: one run at a time, the plan recomputed and required to hash the same as the consent,
+    /// then the install under the engine env (HOME pinned, the four root PATH folders only), streamed on `setup-engine`.
+    fn engine_run(&self, token: &str) -> Res {
+        use crate::providers::install::{engine::flow, env, marks::Marks, run};
+        if !Self::engine_gate() {
+            return Err(fail("source_not_verified", "the engine install is Install it yourself"));
+        }
+        let _running = self.consents.begin(flow::ID).map_err(|e| fail(e.code(), "setup refused"))?;
+        let audit = self.claude.join("vajra/audit.log");
+        let done = self
+            .with_engine(|m| {
+                let prep = match flow::plan(m) {
+                    flow::Offer::Plan(p) => p,
+                    flow::Offer::Manual(code) => return Err(code),
+                };
+                self.consents.take(token, flow::ID, &prep.plan.hash, std::time::Instant::now()).map_err(|e| e.code())?;
+                let env = env::engine_env(m.home, |k| std::env::var_os(k));
+                let marks = Marks::at(m.data);
+                let ctx = run::Ctx { sup: &self.sup, env: &env, marks: &marks, audit: &audit, timeout: flow::TIMEOUT, current: &|| None };
+                let check = flow::session_check(&env);
+                Ok(flow::run(m, &ctx, &prep, &check))
+            })
+            .and_then(|r| r)
+            .map_err(|c| fail(c, "setup refused"))?;
+        Ok(serde_json::json!({ "stream": run::stream(flow::ID), "report": done.report, "case": done.case, "backup": done.backup }))
     }
 
     /// `setup_plan` (`vajra.setup_plan/1`): the one-click plan for catalog harness `id` (ADR-17 rule 3: the exact
@@ -851,6 +920,9 @@ impl App {
     /// why it is "Install it yourself". Installs nothing; npm's pack folder is private and removed before this answers.
     pub fn setup_plan(&self, id: &str) -> Res {
         use crate::providers::install::flow;
+        if id == crate::providers::install::engine::flow::ID {
+            return self.engine_plan();
+        }
         let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
         let answer = |r: Result<Value, &str>| match r {
             Ok(plan) => serde_json::json!({ "schema": SETUP_PLAN_SCHEMA, "id": id, "plan": plan }),
@@ -867,7 +939,13 @@ impl App {
     /// `setup_consent`: the user clicked Install on the plan whose hash is `hash`. A single-use token bound to {id,
     /// hash}, valid for two minutes; it is never logged or stored.
     pub fn setup_consent(&self, id: &str, hash: &str) -> Res {
-        crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        if id == crate::providers::install::engine::flow::ID {
+            if !Self::engine_gate() {
+                return Err(fail("source_not_verified", "the engine install is Install it yourself"));
+            }
+        } else {
+            crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
+        }
         if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(fail("bad_hash", "a plan hash is 64 hex digits"));
         }
@@ -878,6 +956,9 @@ impl App {
     /// streams on `setup-<id>`, is checked on every exit, rolled back or marked Broken, and audited. Blocks until done.
     pub fn setup_run(&self, id: &str, token: &str) -> Res {
         use crate::providers::install::{flow, run};
+        if id == crate::providers::install::engine::flow::ID {
+            return self.engine_run(token);
+        }
         let h = crate::providers::catalog::find(id).ok_or_else(|| fail("unknown_harness", "not a catalog harness"))?;
         if !h.verified() {
             return Err(fail("source_not_verified", "this harness is Install it yourself"));

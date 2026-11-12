@@ -53,5 +53,5 @@
       ]
     }
   ],
-  "engine_scripts": { "manual_command": "bash ~/.claude/skills/vajra/scripts/install.sh" }
+  "engine_scripts": { "manual_command": "bash ~/.claude/skills/vajra/scripts/install.sh", "source_verified_by": null, "source_verified_on": null, "verification_ref": null }
 }

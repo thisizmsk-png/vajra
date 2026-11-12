@@ -21,7 +21,7 @@ const SUPPORTED: [(Engine, &[Kind]); 2] = [(Engine::Claude, &[Kind::Lead, Kind::
 /// The engine's tested range (check 6): its `package.json` version, as (major, minor).
 const ENGINE_MIN: (u32, u32) = (0, 6);
 const ENGINE_MAX: (u32, u32) = (0, 999);
-pub const ENGINE_INSTALL: &str = "Install the Vajra skill: run install.sh from the Vajra repository.";
+pub const ENGINE_INSTALL: &str = "Set it up in Settings > Providers > Set up.";
 const ENGINE_FILES: [&str; 4] = ["scripts/vajra-campaign.sh", "scripts/vajra-verify-work.sh", "scripts/vajra_tasks.py", "scripts/vajra_kb.py"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,8 +100,17 @@ pub fn launchable_marked(route_available: bool, choice: &Choice, kind: Kind, age
     Ok(())
 }
 
-/// Check 6, once per proposal: the engine scripts are installed under `home`, at a version the core was tested with.
-pub fn engine_ready(home: &Path) -> Result<(), Refused> {
+/// Check 6, once per proposal: the engine scripts are installed under `home`, at a version the core was tested with,
+/// not marked Broken by a failed engine install, and not being installed right now (D7, bhishma C8, C9). The engine's
+/// mark is only read here, never cleared: it ends only with a passing engine install.
+pub fn engine_ready(home: &Path, marks: &crate::providers::install::marks::Marks) -> Result<(), Refused> {
+    use crate::providers::install::engine::flow;
+    if flow::installing(home) {
+        return refuse("engine_installing", "the engine is being installed. Start again when Set up finishes.");
+    }
+    if let Some(reason) = marks.any(flow::ID) {
+        return refuse("engine_broken", format!("the last engine install could not be undone cleanly ({reason}). {ENGINE_INSTALL}"));
+    }
     let root = home.join(".claude/skills/vajra");
     if let Some(f) = ENGINE_FILES.iter().find(|f| !root.join(f).is_file()) {
         return refuse("engine_missing", format!("the engine script {f} is not installed. {ENGINE_INSTALL}"));
