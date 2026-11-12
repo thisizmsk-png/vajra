@@ -57,6 +57,9 @@ function memoryStorage(): Storage {
   };
 }
 beforeEach(() => {
+  // jsdom has no modal dialog: model showModal/close the way browsers do.
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) { this.removeAttribute("open"); };
   Object.defineProperty(window, "localStorage", { configurable: true, value: memoryStorage() });
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
 });
@@ -208,6 +211,29 @@ describe("Shell B frame (FG-03)", () => {
     expect(await screen.findByRole("heading", { name: S.home.start })).toBeTruthy();
     expect(screen.getByRole("button", { name: S.frame.addProject })).toBeTruthy();
     expect(screen.queryByRole("complementary", { name: /project$/ })).toBeNull();
+  });
+
+  it("offers to add repositories found on this Mac, and adds only the ones picked", async () => {
+    const found = [{ root: "/src/alpha", name: "alpha", worktrees: 2 }, { root: "/src/beta", name: "beta", worktrees: 0 }];
+    boot("", {
+      list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] },
+      project_discover: { found, truncated: false },
+      project_add: { outcome: "created", project: {} },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: S.frame.welcome.offerShort(2) }));
+    expect(await screen.findByText(S.frame.welcome.offer(2))).toBeTruthy();
+    expect(screen.getByText(S.frame.welcome.worktrees(2))).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta/ })); // untick beta
+    fireEvent.click(screen.getByRole("button", { name: S.frame.welcome.add(1) }));
+    await waitFor(() => expect(ipc.calls.filter((c) => c.cmd === "project_add")).toHaveLength(1));
+    expect(ipc.calls.find((c) => c.cmd === "project_add")?.args).toMatchObject({ path: "/src/alpha" });
+  });
+
+  it("shows no offer when nothing is found", async () => {
+    boot("", { list_campaigns: { campaigns: [] }, resume_targets: { targets: {} }, active_runs: { count: 0, runs: [] }, inbox: { count: 0, items: [] }, project_discover: { found: [], truncated: false } });
+    await screen.findByRole("heading", { name: S.home.start });
+    await waitFor(() => expect(ipc.calls.some((c) => c.cmd === "project_discover")).toBe(true));
+    expect(screen.queryByRole("button", { name: /found here/ })).toBeNull();
   });
 
   it("does not poll while nothing runs (idle cost)", async () => {
