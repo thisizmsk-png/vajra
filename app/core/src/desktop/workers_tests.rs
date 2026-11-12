@@ -97,7 +97,7 @@ fn fake(dir: &Path, name: &str, mode: &str, codex_home: &Path, pids: &Path, vers
         r#"#!/bin/sh
 MODE='{mode}'
 WT=$(pwd -P)
-[ "$1" = --version ] && {{ echo '{version}'; exit 0; }}
+[ "$1" = --version ] && {{ if [ -f '{log}.upgraded' ]; then echo '9.9.9 (Claude Code)'; else echo '{version}'; fi; exit 0; }}
 case "$1" in
   -p) printf '%s\n' "$@" > '{log}.argv'; echo '{{"type":"system","subtype":"init","model":"claude-fake-1","permissionMode":"dontAsk","tools":["Read","Edit","Write","Bash","Grep","Glob"]}}' ;;
   *)
@@ -119,6 +119,7 @@ case "$MODE" in
   slow) edit; sleep 0.4 ;;
   edit_then_504) edit; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   504) echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
+  504_upgrade) touch '{log}.upgraded'; echo 'unexpected status 504 Gateway Timeout'; exit 1 ;;
   hang) exec sleep 600 ;;
   rewrite_dotgit) edit; echo 'gitdir: /tmp/elsewhere' > .git ;;
   commit) edit; git -c core.hooksPath=/dev/null -c user.name=W -c user.email=w@e commit -qam worker ;;
@@ -707,6 +708,18 @@ fn a_claude_worker_on_an_unproven_build_is_refused_before_any_worktree_exists() 
     let r = rig("codex-unaffected", Opts { claude_version: "9.9.9 (Claude Code)", ..Opts::default() });
     let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
     assert_eq!(v.outcome, Some(Outcome::Done), "{v:?}");
+}
+
+/// #186 codex: the CLI updates in place during the first attempt (proven 2.1.296, then 9.9.9). The retry, after its
+/// backoff, asks the binary again before it spawns, so the second process never launches.
+#[test]
+fn a_retry_asks_the_claude_binary_again_and_an_update_during_the_attempt_is_refused() {
+    let r = rig("claude-reprobe", Opts { mode: "504_upgrade", ..Opts::default() });
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "claude")).unwrap());
+    assert_eq!((v.outcome, v.reason.as_deref()), (Some(Outcome::Failed), Some("claude_unproven")), "{v:?}");
+    let starts = std::fs::read_to_string(r.d.join("log")).unwrap().lines().filter(|l| l.starts_with("start ")).count();
+    assert_eq!(starts, 1, "the second attempt never launched");
+    assert_eq!(r.clock.slept(), vec![errors::BACKOFF[0]], "it was a retry, after the first backoff");
 }
 
 /// A Claude task worker's steering channel is opened by its own session id before it starts, and its brief carries
