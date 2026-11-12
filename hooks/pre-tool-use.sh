@@ -1129,14 +1129,16 @@ print(v if isinstance(v, str) else "")' "$f" 2>/dev/null)" || s=""
 core_slug_block() { block "campaign $1 is run by Vajra Desktop: only the app writes it, so agents may read it (show, list, verify, status) but never change it"; }
 # 0 when the command has a shell expansion outside single quotes: $ (but $PWD and $HOME), a backtick, or (unquoted)
 # a brace or glob character. Single-quoted text is literal, which is how the CLI workflow quotes every value.
+# With $1 = strict (#194 H2: a nested shell or eval runs its quoted body as code), single quotes protect nothing.
 core_expands() {
-  printf '%s' "$SCAN" | LC_ALL=C awk '
+  printf '%s' "$SCAN" | LC_ALL=C awk -v strict="${1:-}" '
   function okvar(s, i) { return substr(s, i + 1, 7) ~ /^(PWD|HOME)([^A-Za-z0-9_]|$)/ || substr(s, i + 1, 7) ~ /^\{(PWD|HOME)\}/ }
   BEGIN { RS = "\001"; sq = sprintf("%c", 39) }
   {
     s = $0; n = length(s); q = 0
     for (i = 1; i <= n; i++) {
       c = substr(s, i, 1)
+      if (strict != "" && (c == sq || c == "\"")) continue
       if (q == 1) { if (c == sq) q = 0; continue }
       if (c == "\\") { i++; continue }
       if (c == "`") exit 0
@@ -1159,7 +1161,8 @@ core_campaign_guard() {
   # Fork-free first test (most calls stop here); any case, as APFS is case-insensitive.
   shopt -q nocasematch && was=1
   shopt -s nocasematch
-  [[ "$N" == *vajra-campaign.sh* || "$N" == *vajra_tasks.py* ]] && hit=1
+  # Wide on purpose (#194 H1): a name built by a glob or variable may not spell the script out.
+  [[ "$N" == *vajra* || "$N" == *campaign* || "$N" == *task* || "$N" == *scripts* || "$N" == *.claude* ]] && hit=1
   [ "$was" = 1 ] || shopt -u nocasematch
   [ "$hit" = 1 ] || return 0
   lc="$(printf '%s' "$N" | tr '[:upper:]' '[:lower:]')"
@@ -1168,11 +1171,32 @@ core_campaign_guard() {
   X="${lc//&>/ > }"; X="${X//>&/ > }"
   X="${X//;/ ; }"; X="${X//|/ ; }"; X="${X//&/ ; }"; X="${X//(/ ; }"; X="${X//)/ ; }"; X="${X//\`/ ; }"
   X="${X//>/ > }"; X="${X//</ < }"
-  local W=() i j nw t sub write=0 cwrite=0 name
+  local W=() i j nw t sub write=0 cwrite=0 name nested=0 feeder=0 lit
+  local why="a write through vajra-campaign.sh or vajra_tasks.py while Vajra Desktop runs a campaign"
   set -f; W=( $X ); set +f
   nw=${#W[@]}
   for ((i = 0; i < nw; i++)); do
     name="${W[$i]##*/}"
+    # H1: a word that may expand to either script's name is refused before any write is looked for.
+    case "$name" in
+      *[\$\{\}\*\?\[\]]*)
+        lit="${name//[\$\{\}\*\?\[\]]/}"
+        # As a pattern it matches a script's name; or its fixed letters hint at one and it looks like a script path or
+        # file name (a slash, or ending in py or sh, as $'..' leaves .py once its escape is dropped).
+        if [[ vajra-campaign.sh == $name || vajra_tasks.py == $name ]] \
+           || { [[ "$lit" == *vajra* || "$lit" == *campaign* || "$lit" == *task* || "${W[$i]}" == *scripts/* || "${W[$i]}" == *.claude/* ]] \
+                && [[ "${W[$i]}" == */* || "$lit" == *py || "$lit" == *sh ]]; }; then
+          block "while Vajra Desktop runs a campaign, name vajra-campaign.sh and vajra_tasks.py literally (no globs, variables or \$'...'): ${W[$i]}"
+        fi ;;
+    esac
+    # H2: a nested shell or eval runs its quoted body as code. H3: xargs, parallel and find -exec add arguments the
+    # command text never shows.
+    case "$name" in
+      sh|bash|zsh|dash|ksh) case "${W[$((i + 1))]:-}" in -*c*|"<") nested=1 ;; esac ;;
+      eval|source) nested=1 ;;
+      xargs|parallel) feeder=1 ;;
+      -exec|-execdir|-ok|-okdir) feeder=1 ;;
+    esac
     [ "$name" = vajra-campaign.sh ] || [ "$name" = vajra_tasks.py ] || continue
     sub=""
     for ((j = i + 1; j < nw; j++)); do
@@ -1192,8 +1216,11 @@ core_campaign_guard() {
     write=1
   done
   [ "$write" = 1 ] || return 0
-  local why="a write through vajra-campaign.sh or vajra_tasks.py while Vajra Desktop runs a campaign"
   [ "$RAW_FALLBACK" = 0 ] || block "$why must use plain quoting the guard can read (no \$( ), backticks, \$'...' or unclosed quotes)"
+  [ "$feeder" = 0 ] || block "$why must name its arguments in the command itself, not through xargs, parallel or find -exec"
+  if [ "$nested" = 1 ]; then
+    core_expands strict && block "$why inside bash -c, sh -c or eval must have no variables (only \$PWD and \$HOME), substitutions, braces or globs, even in quotes"
+  fi
   core_expands && block "$why must name everything literally: no variables (only \$PWD and \$HOME), substitutions, braces or globs outside single quotes"
   local NS s
   NS="$(printf '%s' "$lc" | tr -c 'a-z0-9-' '-' | tr -s '-')"

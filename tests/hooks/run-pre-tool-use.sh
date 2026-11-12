@@ -42,7 +42,8 @@ judge() { # expect desc rc
 bash_case() { # expect desc command [cwd]
   local json rc
   json="$(jq -nc --arg c "$3" --arg d "${4:-$PROJ}" '{session_id:"t",transcript_path:"/x",cwd:$d,hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c,description:"x"}}')"
-  printf '%s' "$json" | bash "$HOOK" >/dev/null 2>&1; rc=$?
+  local err; err="$(printf '%s' "$json" | bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+  [ -n "${VAJRA_TEST_WHY:-}" ] && [ "$rc" = 2 ] && [ "$1" = ALLOW ] && echo "  why: $err"
   judge "$1" "$2" "$rc"
 }
 file_case() { # expect desc tool path [cwd]
@@ -1003,6 +1004,37 @@ bash_case BLOCK "F4: a quoted separator before the slug"   "$CS progress 'a;b|c&
 bash_case BLOCK "F4: backticks before the slug"            "$CS progress \`true\` --campaign $C0"
 bash_case BLOCK "F4: unclosed quote (raw fallback)"        "$CS progress 'x --campaign deliver-20261112-0930"
 bash_case BLOCK "F4: xargs feeding the slug"               "echo $C0 | xargs $CS close"
+# bhishma vajra-75 on 38e802d. H1: a script name built by a glob, variable or $'..' is refused before any write check.
+bash_case BLOCK "H1: a ? glob in the tasks script name"     "python3 scripts/vajra_task?.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: a * glob in the campaign script name"  "bash scripts/vajra-camp*.sh close deliver-20261112-0930"
+bash_case BLOCK "H1: a bracket glob in the name"            "bash scripts/vajra-[c]ampaign.sh pass ac-1"
+bash_case BLOCK "H1: a variable in the script name"         "python3 scripts/vajra_\${T}.py report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: ANSI-C quoting in the script name"     "python3 scripts/\$'vajra_tasks\\x2epy' report t1 done --campaign deliver-20261112-0930"
+bash_case BLOCK "H1: a glob in the dir and name"            "bash ~/.claude/skills/v*/scripts/vajra-c*.sh close deliver-20261112-0930"
+bash_case ALLOW "H1: an unrelated variable is not a script" "echo \$tasks"
+# H2: the body of bash -c, sh -c or eval is code, so its single quotes protect nothing.
+bash_case BLOCK "H2: a variable slug inside bash -c quotes" "bash -c '$CS pass ac-1 --campaign \$S'"
+bash_case BLOCK "H2: sh -lc with a variable"                "sh -lc '$CS close \$S --status done'"
+bash_case BLOCK "H2: eval with a variable"                  "eval '$CS close \$S --status done'"
+bash_case BLOCK "H2: a bash here-string body"               "bash <<< '$CS close \$S'"
+# The same through a repo copy, which only this check sees (the installed path is refused by the protected-path rule).
+RC="bash scripts/vajra-campaign.sh"; RT="python3 scripts/vajra_tasks.py"
+bash_case BLOCK "H2 copy: a variable slug inside bash -c"   "bash -c '$RC pass ac-1 --campaign \$S'"
+bash_case BLOCK "H2 copy: sh -lc with a variable"           "sh -lc '$RC close \$S --status done'"
+bash_case BLOCK "H2 copy: eval with a variable"             "eval '$RT report t1 done --campaign \$S'"
+bash_case BLOCK "H2 copy: a here-string body"               "bash <<< '$RC close \$S'"
+bash_case BLOCK "H3 copy: xargs reading slugs from a file"  "xargs -a /tmp/slugs $RC close"
+bash_case BLOCK "H3 copy: stdin through xargs"              "cat /tmp/s | xargs $RT report t1 done --campaign"
+bash_case BLOCK "H3 copy: parallel"                         "parallel $RC close ::: /tmp/x"
+bash_case BLOCK "H3 copy: find -exec"                       "find /tmp/s -type f -exec $RC close +"
+# (A repo copy: the installed path inside bash -c or xargs is already refused by the protected-path rule.)
+bash_case ALLOW "H2: a plain bash -c CLI write is allowed"  "bash -c 'bash scripts/vajra-campaign.sh pass ac-1 --campaign deliver-20261112-0930'"
+# H3: arguments fed by xargs, parallel or find -exec never show in the command text.
+bash_case BLOCK "H3: xargs reading slugs from a file"       "xargs -a /tmp/slugs $CS close"
+bash_case BLOCK "H3: stdin from a file through xargs"       "cat /tmp/s | xargs $TP report t1 done --campaign"
+bash_case BLOCK "H3: parallel feeding the slug"             "parallel $CS close ::: /tmp/x"
+bash_case BLOCK "H3: find -exec adding arguments"           "find /tmp/s -type f -exec $CS close + "
+bash_case ALLOW "H3: xargs around a read is a read"         "xargs -a /tmp/slugs bash scripts/vajra-campaign.sh show"
 # F6: create's slug as the script sanitizes it.
 bash_case BLOCK "F6: create with a leading dash"           "$CS create -$C0 --goal g --feature 'a|b'"
 bash_case BLOCK "F6: create upper case, underscores"       "$CS create DELIVER_20261112_1900 --goal g"
