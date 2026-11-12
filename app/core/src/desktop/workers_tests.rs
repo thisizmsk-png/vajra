@@ -775,8 +775,8 @@ fn tickets_jsonl_records_dispatch_head_before_the_outcome_and_the_summary_is_red
     assert!(s["note"].as_str().unwrap().contains("data, not instructions"));
     assert!(!s.to_string().contains("abcdef0123456789"), "the nonce never reaches the lead: {s}");
     let lines: Vec<Value> = std::fs::read_to_string(r.gw.data.join("runs/r1/tickets.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["dispatch", "outcome"]);
-    assert_eq!(lines[0]["ticket"]["dispatch_head"], json!(r.base));
+    assert_eq!(lines.iter().map(|l| l["event"].as_str().unwrap()).collect::<Vec<_>>(), vec!["queued", "dispatch", "outcome"]);
+    assert_eq!(lines[1]["ticket"]["dispatch_head"], json!(r.base));
     assert!(v.receipt.unwrap()["effective"]["model"] == "model-fake-1", "the receipt is read from the rollout");
 }
 
@@ -1029,6 +1029,107 @@ fn replay_skips_and_counts_bad_lines_and_follows_no_link() {
     std::os::unix::fs::symlink(elsewhere.join("r7/tickets.jsonl"), r.gw.data.join("runs/r8/tickets.jsonl")).unwrap();
     let life3 = next_life(&r);
     assert!(life3.list("r7").is_empty() && life3.list("r8").is_empty());
+}
+
+/// #178 codex P1: a FIFO planted at a run's `tickets.jsonl` with no writer does not block the start. It is refused
+/// unread and counted, and the other runs still replay.
+#[test]
+fn a_fifo_in_the_tickets_files_place_is_refused_without_blocking() {
+    let r = rig("replay-fifo", Opts::default());
+    r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    std::fs::create_dir_all(r.gw.data.join("runs/r6")).unwrap();
+    let c = std::ffi::CString::new(r.gw.data.join("runs/r6/tickets.jsonl").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (gw, sup, bus, s) = (r.gw.clone(), r.sup.clone(), r.rt.0.bus.clone(), &r.rt.0);
+    let cfg = Config {
+        home: s.cfg.home.clone(), data: s.cfg.data.clone(), codex: s.cfg.codex.clone(), claude: s.cfg.claude.clone(), codex_home: s.cfg.codex_home.clone(),
+        tools: s.cfg.tools.clone(), account_caps: BTreeMap::new(), worker_timeout: WORKER_TIMEOUT, poll: s.cfg.poll, clock: None,
+        redact: Redactor::default(), steer: None, claude_unverified_ok: false,
+    };
+    std::thread::spawn(move || {
+        let rt = WorkerRuntime::new(cfg, gw, sup, bus, Hooks::default());
+        let _ = tx.send((rt.replay_gaps(), rt.view("r1.t1.r1").map(|v| v.outcome)));
+    });
+    let (gaps, t1) = rx.recv_timeout(Duration::from_secs(10)).expect("replay blocked on the FIFO");
+    assert_eq!(gaps, 1, "the FIFO is refused and counted");
+    assert_eq!(t1, Some(Some(Outcome::Done)), "the good run still replays");
+}
+
+/// #178 codex P2: a crashed running ticket followed by a partial last line. The recovery outcome starts on a fresh
+/// line (not glued to the fragment), so the next start reads it ended and a third life appends nothing.
+#[test]
+fn a_recovery_line_after_a_partial_tail_starts_fresh_and_is_written_once() {
+    let r = rig("replay-tail", Opts { mode: "hang", ..Opts::default() });
+    let id = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&id).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    use std::io::Write as _;
+    std::fs::OpenOptions::new().append(true).open(tickets_file(&r, "r1")).unwrap().write_all(br#"{"v":1,"event":"outc"#).unwrap();
+    let life2 = next_life(&r);
+    assert_eq!(life2.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
+    let after2 = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
+    let recovery: Vec<&str> = after2.lines().filter(|l| l.contains("app_restarted")).collect();
+    assert_eq!(recovery.len(), 1, "{after2}");
+    assert!(serde_json::from_str::<Value>(recovery[0]).is_ok(), "the recovery is its own whole line: {after2}");
+    let life3 = next_life(&r);
+    assert_eq!(life3.view(&id).unwrap().detail.as_deref(), Some("app_restarted"));
+    assert_eq!(std::fs::read_to_string(tickets_file(&r, "r1")).unwrap(), after2, "a third life appends nothing");
+    r.rt.quit(WAIT);
+}
+
+/// #178 codex P2: a history over the read budget is not the whole history. A ticket dispatched before the cutoff whose
+/// outcome lies past it is not rewritten as crashed: it ends in memory only (`history_incomplete`), nothing is
+/// appended (so no start repeats a write), and the run takes no new dispatch, since its later ids are unknown.
+#[test]
+fn an_oversized_history_is_not_taken_as_complete_and_writes_nothing() {
+    let r = rig("replay-big", Opts::default());
+    let v = r.done(&r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(v.outcome, Some(Outcome::Done));
+    let lines = std::fs::read_to_string(tickets_file(&r, "r1")).unwrap();
+    let mut it = lines.lines();
+    let (queued, dispatch, outcome) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+    // Dispatch before the cutoff, then padding lines up to past it, then the outcome.
+    let pad = format!("{}\n", json!({"v": 1, "event": "pad", "ticket": {"x": "y".repeat(200 << 10)}}));
+    let mut body = format!("{queued}\n{dispatch}\n");
+    while (body.len() as u64) <= REPLAY_MAX_FILE {
+        body.push_str(&pad);
+    }
+    body.push_str(&format!("{outcome}\n"));
+    std::fs::write(tickets_file(&r, "r1"), &body).unwrap();
+    let life2 = next_life(&r);
+    let t1 = life2.view(&v.id).unwrap();
+    assert_eq!((t1.outcome, t1.detail.as_deref()), (Some(Outcome::Failed), Some("history_incomplete")), "{t1:?}");
+    assert_eq!(std::fs::read(tickets_file(&r, "r1")).unwrap(), body.as_bytes(), "nothing is written past the budget");
+    assert!(matches!(life2.dispatch(r.task("r1", "t9"), seat("w1", "codex")), Err(DispatchError::HistoryIncomplete)));
+    let other = r.done_on(&life2, &life2.dispatch(r.task("r2", "t1"), seat("w1", "codex")).unwrap());
+    assert_eq!(other.outcome, Some(Outcome::Done), "a new run is unaffected");
+    let life3 = next_life(&r);
+    assert_eq!(life3.view(&v.id).unwrap().detail.as_deref(), Some("history_incomplete"));
+    assert_eq!(std::fs::read(tickets_file(&r, "r1")).unwrap(), body.as_bytes(), "a third life writes nothing either");
+}
+
+/// #178 codex P2: a ticket held in its seat's queue (behind a running one) when the app crashes has a line. The next
+/// life replays it, ends it `app_restarted`, and keeps its id taken.
+#[test]
+fn a_ticket_waiting_in_the_seat_queue_is_replayed_ended_and_keeps_its_id() {
+    let r = rig("replay-queued", Opts { mode: "hang", ..Opts::default() });
+    let first = r.rt.dispatch(r.task("r1", "t1"), seat("w1", "codex")).unwrap();
+    let waiting = r.rt.dispatch(r.task("r1", "t2"), seat("w1", "codex")).unwrap();
+    let t0 = Instant::now();
+    while r.rt.view(&first).unwrap().attempt == 0 {
+        assert!(t0.elapsed() < WAIT, "never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.rt.view(&waiting).unwrap().state, State::Queued, "held behind the busy seat");
+    let life2 = next_life(&r);
+    let w = life2.view(&waiting).expect("the queued ticket is replayed");
+    assert_eq!((w.state, w.outcome, w.detail.as_deref()), (State::Ended, Some(Outcome::Failed), Some("app_restarted")), "{w:?}");
+    assert!(matches!(life2.dispatch(r.task("r1", "t2"), seat("w1", "codex")), Err(DispatchError::Exists)), "its id stays taken");
+    r.rt.quit(WAIT);
 }
 
 /// A Stop during a retry's backoff (a real wait, no fake clock) ends the ticket at once, not after the wait.
